@@ -1,0 +1,12 @@
+# Build context / ClawTune checkout
+clawtune/
+clawtune-*/
+
+# Rendered / generated k8s artifacts
+*.rendered.yaml
+
+# Local secrets — never commit
+.env
+.env.*
+!*.example.yaml
+*.key
