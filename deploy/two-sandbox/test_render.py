@@ -127,6 +127,16 @@ def test_ssh_key_material_is_minimally_split() -> None:
     assert "ssh_host_ed25519_key.pub" in runtime_keys
 
 
+def test_tool_ssh_uses_read_only_secret_and_unlocked_account() -> None:
+    entrypoint = (ROOT / "scripts" / "two-sandbox" / "tool-entrypoint.sh").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "docker" / "Dockerfile.tool-sandbox").read_text(encoding="utf-8")
+    assert "AuthorizedKeysFile /var/run/secrets/tool-ssh/id_ed25519.pub" in entrypoint
+    assert "StrictModes yes" in entrypoint
+    assert "passwd -d executor" in dockerfile
+    assert "PasswordAuthentication no" in entrypoint
+    assert "PermitEmptyPasswords no" in entrypoint
+
+
 def test_no_unexpanded_template_variables() -> None:
     unresolved = re.findall(r"\$[A-Z][A-Z0-9_]*", render())
     assert unresolved == []

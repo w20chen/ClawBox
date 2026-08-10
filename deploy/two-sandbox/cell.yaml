@@ -50,7 +50,7 @@ spec:
               command:
                 - /bin/bash
                 - -ec
-                - test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && test -s /home/executor/.ssh/authorized_keys && test -s /run/tool-sshd/sshd.pid && kill -0 "$(cat /run/tool-sshd/sshd.pid)"
+                - test -s /var/run/secrets/tool-ssh/id_ed25519.pub && test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && test -s /run/tool-sshd/sshd.pid && kill -0 "$(cat /run/tool-sshd/sshd.pid)"
             initialDelaySeconds: 2
             periodSeconds: 2
             timeoutSeconds: 2

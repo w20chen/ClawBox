@@ -9,7 +9,7 @@ case "${TOOL_PIDS_LIMIT}" in (*[!0-9]*|'') echo "invalid TOOL_PIDS_LIMIT" >&2; e
 
 mkdir -p /run/tool-sshd /home/executor/.ssh /tmp/openclaw-sandboxes
 chmod 0700 /home/executor/.ssh /tmp/openclaw-sandboxes
-install -m 0600 /var/run/secrets/tool-ssh/id_ed25519.pub /home/executor/.ssh/authorized_keys
+test -s /var/run/secrets/tool-ssh/id_ed25519.pub
 
 test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key
 test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub
@@ -20,7 +20,7 @@ Port 2222
 ListenAddress 0.0.0.0
 HostKey /run/tool-sshd/ssh_host_ed25519_key
 PidFile /run/tool-sshd/sshd.pid
-AuthorizedKeysFile /home/executor/.ssh/authorized_keys
+AuthorizedKeysFile /var/run/secrets/tool-ssh/id_ed25519.pub
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no

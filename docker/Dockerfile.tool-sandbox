@@ -7,6 +7,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 executor \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash executor \
+ && passwd -d executor \
  && mkdir -p /workspace /tmp/openclaw-sandboxes /run/sshd /run/tool-sshd /home/executor/.ssh \
  && chmod 0755 /run/sshd \
  && chown -R 10001:10001 /workspace /tmp/openclaw-sandboxes /run/tool-sshd /home/executor
