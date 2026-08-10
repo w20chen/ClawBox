@@ -1,0 +1,37 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/workspace",
+      "sandbox": {
+        "mode": "all",
+        "backend": "ssh",
+        "scope": "agent",
+        "workspaceAccess": "none",
+        "ssh": {
+          "target": "executor@claw-tenant-a-tool:2222",
+          "workspaceRoot": "/tmp/openclaw-sandboxes",
+          "identityFile": "/var/run/secrets/tool-ssh/id_ed25519",
+          "knownHostsFile": "/state/tenant-a/ssh/known_hosts",
+          "strictHostKeyChecking": true,
+          "updateHostKeys": false
+        }
+      }
+    }
+  },
+  "tools": {
+    "exec": {
+      "host": "sandbox",
+      "security": "full",
+      "ask": "off"
+    },
+    "elevated": {
+      "enabled": false
+    },
+    "sandbox": {
+      "tools": {
+        "allow": ["exec", "process", "read", "write", "edit", "apply_patch"],
+        "deny": ["browser", "canvas", "nodes", "cron", "gateway"]
+      }
+    }
+  }
+}

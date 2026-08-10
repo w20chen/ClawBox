@@ -36,6 +36,7 @@ OPENCLAW_MODEL=<模型名> \
 
 ```
 deploy/kata-firecracker/   # RuntimeClass / Indexed Job / run.sh / check-host.sh / README
+deploy/two-sandbox/        # Per-tenant Runtime Pod + SSH-backed Tool Pod (see its README)
 docker/Dockerfile.runner   # ARM64 runner 镜像（OpenClaw + 插件 + sidecar + base KB）
 scripts/run-once.sh        # 容器入口：一个租户跑一次
 ```
