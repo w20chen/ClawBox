@@ -104,6 +104,15 @@ def test_tool_limits_and_readiness_are_declared() -> None:
     assert "ephemeral-storage" in container["resources"]["limits"]
     assert container["readinessProbe"]["exec"]["command"]
 
+    runtime = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-runtime")
+    )
+    runtime_container = runtime["spec"]["template"]["spec"]["containers"][0]
+    runtime_readiness = " ".join(runtime_container["readinessProbe"]["exec"]["command"])
+    assert "claw-tenant-a-tool/2222" in runtime_readiness
+
 
 def test_ssh_key_material_is_minimally_split() -> None:
     docs = load_docs(render())

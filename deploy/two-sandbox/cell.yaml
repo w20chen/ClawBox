@@ -187,7 +187,10 @@ spec:
                   key: openclaw-model
           readinessProbe:
             exec:
-              command: ["/bin/bash", "-ec", "test -f /state/$TENANT_ID/ready"]
+              command:
+                - /bin/bash
+                - -ec
+                - test -f /state/$TENANT_ID/ready && timeout 2 bash -c "</dev/tcp/claw-$TENANT_ID-tool/2222"
             initialDelaySeconds: 5
             periodSeconds: 3
             timeoutSeconds: 2
