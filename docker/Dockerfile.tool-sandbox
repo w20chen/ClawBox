@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates coreutils curl findutils git grep openssh-server patch sed \
+      bash ca-certificates coreutils curl findutils git grep openssh-server patch python3 sed \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 executor \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash executor \

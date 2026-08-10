@@ -6,7 +6,7 @@
         "mode": "all",
         "backend": "ssh",
         "scope": "agent",
-        "workspaceAccess": "none",
+        "workspaceAccess": "rw",
         "ssh": {
           "target": "executor@claw-tenant-a-tool:2222",
           "workspaceRoot": "/tmp/openclaw-sandboxes",

@@ -13,7 +13,10 @@ a Kubernetes service-account token.
 
 The installed OpenClaw schema and implementation route `exec` and `process`
 through SSH, and `read`, `write`, `edit`, `apply_patch`, and sandbox media reads
-through its remote filesystem bridge.
+through its remote filesystem bridge. The SSH sandbox uses a writable,
+Tool-Pod-local workspace (`workspaceAccess: rw`); it is not a shared mount with
+the Runtime Pod. The Tool image includes Python 3 and `patch`, which the remote
+filesystem bridge requires for these file operations.
 
 The first version intentionally denies `browser`: the installed OpenClaw SSH
 backend reports that sandbox browser containers are unsupported. `canvas`,

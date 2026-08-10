@@ -166,6 +166,7 @@ def test_existing_kata_mode_is_untouched() -> None:
 def test_openclaw_example_is_json() -> None:
     config = json.loads((HERE / "openclaw-sandbox.example.json").read_text(encoding="utf-8"))
     assert config["agents"]["defaults"]["sandbox"]["backend"] == "ssh"
+    assert config["agents"]["defaults"]["sandbox"]["workspaceAccess"] == "rw"
     assert config["tools"]["exec"]["host"] == "sandbox"
 
 
@@ -180,10 +181,17 @@ def test_runtime_entrypoint_emits_valid_openclaw_patch() -> None:
     )
     config = json.loads(rendered)
     assert config["agents"]["defaults"]["sandbox"]["backend"] == "ssh"
+    assert config["agents"]["defaults"]["sandbox"]["workspaceAccess"] == "rw"
     assert config["tools"]["sandbox"]["tools"]["allow"] == [
         "exec", "process", "read", "write", "edit", "apply_patch"
     ]
     assert config["plugins"]["entries"]["agent-scheduler"]["config"]["executionBackend"] == "hook-only"
+
+
+def test_tool_image_has_remote_file_bridge_dependencies() -> None:
+    dockerfile = (ROOT / "docker" / "Dockerfile.tool-sandbox").read_text(encoding="utf-8")
+    assert re.search(r"apt-get install.*?python3", dockerfile, re.S)
+    assert re.search(r"apt-get install.*?patch", dockerfile, re.S)
 
 
 if __name__ == "__main__":

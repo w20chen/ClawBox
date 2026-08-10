@@ -69,7 +69,7 @@ openclaw plugins enable agent-scheduler >>"${LOG_DIR}/plugin.log" 2>&1 || true
 cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
 {
   "agents": {"defaults": {"workspace": "/workspace", "sandbox": {
-    "mode": "all", "backend": "ssh", "scope": "agent", "workspaceAccess": "none",
+    "mode": "all", "backend": "ssh", "scope": "agent", "workspaceAccess": "rw",
     "ssh": {
       "target": "${TOOL_SSH_TARGET}",
       "workspaceRoot": "/tmp/openclaw-sandboxes",
