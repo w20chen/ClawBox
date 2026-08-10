@@ -7,9 +7,9 @@ set -euo pipefail
 case "${TOOL_EXEC_TIMEOUT_SECONDS}" in (*[!0-9]*|'') echo "invalid TOOL_EXEC_TIMEOUT_SECONDS" >&2; exit 64;; esac
 case "${TOOL_PIDS_LIMIT}" in (*[!0-9]*|'') echo "invalid TOOL_PIDS_LIMIT" >&2; exit 64;; esac
 
-mkdir -p /run/tool-sshd /home/executor/.ssh /tmp/openclaw-sandboxes
-chmod 0700 /home/executor/.ssh /tmp/openclaw-sandboxes
-test -s /var/run/secrets/tool-ssh/id_ed25519.pub
+mkdir -p /run/tool-sshd /tmp/openclaw-sandboxes
+chmod 0700 /tmp/openclaw-sandboxes
+test -s /home/executor/.ssh/authorized_keys
 
 test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key
 test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub
@@ -20,7 +20,7 @@ Port 2222
 ListenAddress 0.0.0.0
 HostKey /run/tool-sshd/ssh_host_ed25519_key
 PidFile /run/tool-sshd/sshd.pid
-AuthorizedKeysFile /var/run/secrets/tool-ssh/id_ed25519.pub
+AuthorizedKeysFile /home/executor/.ssh/authorized_keys
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no

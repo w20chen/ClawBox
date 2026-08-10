@@ -50,7 +50,7 @@ spec:
               command:
                 - /bin/bash
                 - -ec
-                - test -s /var/run/secrets/tool-ssh/id_ed25519.pub && test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && test -s /run/tool-sshd/sshd.pid && kill -0 "$(cat /run/tool-sshd/sshd.pid)"
+                - test -s /home/executor/.ssh/authorized_keys && test -s /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && test -s /run/tool-sshd/sshd.pid && kill -0 "$(cat /run/tool-sshd/sshd.pid)"
             initialDelaySeconds: 2
             periodSeconds: 2
             timeoutSeconds: 2
@@ -76,10 +76,12 @@ spec:
               mountPath: /tmp
             - name: run
               mountPath: /run/tool-sshd
-            - name: home
-              mountPath: /home/executor
             - name: ssh-public-key
               mountPath: /var/run/secrets/tool-ssh
+              readOnly: true
+            - name: ssh-public-key
+              mountPath: /home/executor/.ssh/authorized_keys
+              subPath: id_ed25519.pub
               readOnly: true
       volumes:
         - name: workspace
@@ -91,9 +93,6 @@ spec:
         - name: run
           emptyDir:
             medium: Memory
-            sizeLimit: 16Mi
-        - name: home
-          emptyDir:
             sizeLimit: 16Mi
         - name: ssh-public-key
           secret:

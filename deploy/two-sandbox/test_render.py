@@ -130,11 +130,19 @@ def test_ssh_key_material_is_minimally_split() -> None:
 def test_tool_ssh_uses_read_only_secret_and_unlocked_account() -> None:
     entrypoint = (ROOT / "scripts" / "two-sandbox" / "tool-entrypoint.sh").read_text(encoding="utf-8")
     dockerfile = (ROOT / "docker" / "Dockerfile.tool-sandbox").read_text(encoding="utf-8")
-    assert "AuthorizedKeysFile /var/run/secrets/tool-ssh/id_ed25519.pub" in entrypoint
+    assert "AuthorizedKeysFile /home/executor/.ssh/authorized_keys" in entrypoint
     assert "StrictModes yes" in entrypoint
     assert "passwd -d executor" in dockerfile
     assert "PasswordAuthentication no" in entrypoint
     assert "PermitEmptyPasswords no" in entrypoint
+
+    docs = load_docs(render())
+    tool = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-tool"))
+    mounts = tool["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    authorized_key = next(m for m in mounts if m["mountPath"] == "/home/executor/.ssh/authorized_keys")
+    assert authorized_key["subPath"] == "id_ed25519.pub"
+    assert authorized_key["readOnly"] is True
+    assert not any(m["mountPath"] == "/home/executor" for m in mounts)
 
 
 def test_no_unexpanded_template_variables() -> None:

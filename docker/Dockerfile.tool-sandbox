@@ -9,7 +9,10 @@ RUN apt-get update \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash executor \
  && passwd -d executor \
  && mkdir -p /workspace /tmp/openclaw-sandboxes /run/sshd /run/tool-sshd /home/executor/.ssh \
+ && touch /home/executor/.ssh/authorized_keys \
  && chmod 0755 /run/sshd \
+ && chmod 0700 /home/executor/.ssh \
+ && chmod 0600 /home/executor/.ssh/authorized_keys \
  && chown -R 10001:10001 /workspace /tmp/openclaw-sandboxes /run/tool-sshd /home/executor
 
 COPY scripts/two-sandbox/tool-entrypoint.sh /usr/local/bin/tool-entrypoint
