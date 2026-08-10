@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # docker/Dockerfile.runner
 # ARM64 runner image for the Kata/Firecracker multi-tenant OpenClaw prototype.
 # Contains: Node.js + OpenClaw CLI, the current project's OpenClaw plugin,
@@ -7,35 +8,27 @@
 # The image does NOT contain any LLM model. The LLM is reached over HTTP via
 # the sidecar's proxy (AGENT_SCHEDULER_LLM_UPSTREAM_*).
 #
-# Build context must contain the ClawTune checkout under ./clawtune
-# (ARG CLAWTUNE_SRC). Either symlink it in from the ClawTune repo, e.g.
-#   ln -s /path/to/ClawTune clawtune
-# or build with ClawTune as the context and --build-arg CLAWTUNE_SRC=.
-# The CLAWTUNE_SRC value is carried into an ENV because Docker only expands
-# ENV (not ARG) in COPY source paths.
+# Pass the ClawTune checkout as the named build context "clawtune", for example:
+#   docker build --build-context clawtune=../ClawTune \
+#     -f docker/Dockerfile.runner -t claw-runner .
 
 ARG OPENCLAW_VERSION=2026.7.1
-ARG CLAWTUNE_SRC=clawtune
 
 # ── stage 1: build the OpenClaw plugin (dist/) ────────────────────────
 FROM node:22-bookworm-slim AS plugin-build
-ARG CLAWTUNE_SRC
-ENV CLAWTUNE_SRC=${CLAWTUNE_SRC}
 WORKDIR /src/plugin
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/package.json ./
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/package-lock.json ./
+COPY --from=clawtune packages/openclaw-plugin/package.json ./
+COPY --from=clawtune packages/openclaw-plugin/package-lock.json ./
 RUN npm ci
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/tsconfig.json ./
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/src ./src
+COPY --from=clawtune packages/openclaw-plugin/tsconfig.json ./
+COPY --from=clawtune packages/openclaw-plugin/src ./src
 RUN npm run build
 
 # ── stage 2: runtime ──────────────────────────────────────────────────
 FROM node:22-bookworm-slim
 
 ARG OPENCLAW_VERSION
-ARG CLAWTUNE_SRC
 ENV OPENCLAW_VERSION=${OPENCLAW_VERSION} \
-    CLAWTUNE_SRC=${CLAWTUNE_SRC} \
     DEBIAN_FRONTEND=noninteractive \
     HOME=/root
 
@@ -53,11 +46,11 @@ RUN npm install -g "openclaw@${OPENCLAW_VERSION}" \
 
 # Current project code (ClawTune): scheduler sidecar + plugin + entrypoint.
 WORKDIR /opt/clawtune
-COPY ${CLAWTUNE_SRC}/services/scheduler ./services/scheduler
+COPY --from=clawtune services/scheduler ./services/scheduler
 COPY --from=plugin-build /src/plugin/dist ./packages/openclaw-plugin/dist
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/openclaw.plugin.json ./packages/openclaw-plugin/
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/package.json ./packages/openclaw-plugin/
-COPY ${CLAWTUNE_SRC}/packages/openclaw-plugin/README.md ./packages/openclaw-plugin/
+COPY --from=clawtune packages/openclaw-plugin/openclaw.plugin.json ./packages/openclaw-plugin/
+COPY --from=clawtune packages/openclaw-plugin/package.json ./packages/openclaw-plugin/
+COPY --from=clawtune packages/openclaw-plugin/README.md ./packages/openclaw-plugin/
 
 # Sidecar virtualenv (no BCC/eBPF: the base install does not need it).
 RUN python3 -m venv /opt/clawtune/venv \

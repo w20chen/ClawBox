@@ -50,11 +50,13 @@ sudo apt-get install -y gettext-base
 
 ## 2. 准备镜像构建上下文（一次性）
 
-镜像里要打进 ClawTune 源码，所以先把 ClawTune checkout 软链进来：
+让 `ClawTune` 和 `claw-k8s` 互为同级目录。不要创建指向 build context
+外部的软链接；使用 BuildKit named context 传入 ClawTune 源码：
 
 ```bash
 # 在 claw-k8s 仓库根目录执行
-ln -s /path/to/ClawTune clawtune
+test -f ../ClawTune/packages/openclaw-plugin/package.json
+test -f ../ClawTune/services/scheduler/pyproject.toml
 ```
 
 ---
@@ -63,6 +65,7 @@ ln -s /path/to/ClawTune clawtune
 
 ```bash
 docker build -f docker/Dockerfile.runner \
+  --build-context clawtune=../ClawTune \
   -t registry.local/openclaw-runner:latest .
 
 docker push registry.local/openclaw-runner:latest

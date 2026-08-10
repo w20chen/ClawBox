@@ -28,15 +28,23 @@ bridge.
 
 ## Build
 
-Expose the ClawTune checkout as `./clawtune`, matching the existing build flow:
+Keep `ClawTune` and `claw-k8s` as sibling directories. From the `claw-k8s`
+directory, pass ClawTune as a BuildKit named context; do not use a symlink that
+points outside the main build context:
 
 ```bash
-ln -s /path/to/ClawTune clawtune
-docker build -f docker/Dockerfile.runtime -t registry.example/claw-runtime:two-sandbox .
-docker build -f docker/Dockerfile.tool-sandbox -t registry.example/claw-tool:two-sandbox .
+test -f ../ClawTune/packages/openclaw-plugin/package.json
+docker build -f docker/Dockerfile.runtime \
+  --build-context clawtune=../ClawTune \
+  -t registry.example/claw-runtime:two-sandbox .
+docker build -f docker/Dockerfile.tool-sandbox \
+  -t registry.example/claw-tool:two-sandbox .
 docker push registry.example/claw-runtime:two-sandbox
 docker push registry.example/claw-tool:two-sandbox
 ```
+
+Replace the `registry.example` image names with a real registry before building
+and pushing.
 
 ## Secrets
 

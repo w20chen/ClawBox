@@ -94,31 +94,37 @@ NetworkPolicy，manifest 虽然可以创建，但租户网络隔离不会真正�
 
 下面所有命令都在 `claw-k8s` 根目录执行。
 
-## 第一步：准备镜像构建上下文
+## 第一步：检查源码目录
 
-Dockerfile 默认从构建上下文中的 `./clawtune` 读取 ClawTune 源码。创建一个
-本地软链接即可；该路径已被 `.gitignore` 忽略：
+Docker 不会可靠地跟随指向构建上下文外部的软链接，因此不要创建
+`clawtune -> ../ClawTune`。下面的构建命令保留当前仓库作为主 context，并用
+BuildKit named context 单独传入 ClawTune 源码。
 
-```bash
-ln -s ../ClawTune clawtune
-```
-
-确认以下文件存在：
+确认两个仓库互为同级目录，并且所需文件存在：
 
 ```bash
-test -f clawtune/packages/openclaw-plugin/package.json
-test -f clawtune/services/scheduler/pyproject.toml
+test -f ../ClawTune/packages/openclaw-plugin/package.json
+test -f ../ClawTune/packages/openclaw-plugin/package-lock.json
+test -f ../ClawTune/packages/openclaw-plugin/README.md
+test -f ../ClawTune/services/scheduler/pyproject.toml
 ```
+
+这些 `test` 命令成功时不会打印任何内容。`ClawTune` 是源码目录，不是命令，
+不要在 shell 中直接执行 `clawtune`。
 
 ## 第二步：构建并推送双沙盒镜像
 
-把镜像地址替换成你的仓库：
+先把下面两个值替换成节点能够访问、且当前用户有 push 权限的真实镜像仓库。
+`registry.example.com` 只是文档占位符，不能直接使用：
 
 ```bash
 export RUNTIME_IMAGE=registry.example.com/claw/runtime:two-sandbox
 export TOOL_IMAGE=registry.example.com/claw/tool:two-sandbox
 
-docker build -f docker/Dockerfile.runtime -t "$RUNTIME_IMAGE" .
+docker build -f docker/Dockerfile.runtime \
+  --build-context clawtune=../ClawTune \
+  -t "$RUNTIME_IMAGE" .
+
 docker build -f docker/Dockerfile.tool-sandbox -t "$TOOL_IMAGE" .
 
 docker push "$RUNTIME_IMAGE"
@@ -391,7 +397,9 @@ bash deploy/kata-firecracker/check-host.sh
 
 ```bash
 export RUNNER_IMAGE=registry.example.com/claw/runner:latest
-docker build -f docker/Dockerfile.runner -t "$RUNNER_IMAGE" .
+docker build -f docker/Dockerfile.runner \
+  --build-context clawtune=../ClawTune \
+  -t "$RUNNER_IMAGE" .
 docker push "$RUNNER_IMAGE"
 ```
 
