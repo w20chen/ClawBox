@@ -303,6 +303,14 @@ bash scripts/linux-deploy.sh logs
 
 脚本在健康检查或验收失败时也会自动打印相关服务的最近日志。
 
+如果第一次部署出现 PostgreSQL `duplicate key ... pg_type_typname_nsp_index`，说明运行的是较早版本，多个服务同时建表发生了竞态。更新代码后直接重新部署即可，不需要删除数据库卷：
+
+```bash
+git pull
+bash scripts/linux-deploy.sh deploy
+bash scripts/linux-deploy.sh verify
+```
+
 ## 当前范围
 
 当前阶段适合：

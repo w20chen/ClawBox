@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .config import settings
@@ -95,4 +95,12 @@ SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    # Scheduler, Allocator and Controller may all start immediately after
+    # PostgreSQL becomes healthy. PostgreSQL's CREATE TABLE IF NOT EXISTS is
+    # not race-free at the catalog level when independent processes create
+    # the same type/table concurrently. Serialize only this short bootstrap
+    # transaction; normal service traffic does not take this lock.
+    with engine.begin() as connection:
+        if connection.dialect.name == "postgresql":
+            connection.execute(text("SELECT pg_advisory_xact_lock(1129071200)"))
+        Base.metadata.create_all(bind=connection)
