@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
+ORIGINAL_ARGS=("$@")
 CLAWTUNE_ROOT="${CLAWTUNE_ROOT:-${ROOT}/../ClawTune}"
 NAMESPACE="${CLAWBOX_NAMESPACE:-clawbox-benchmarks}"
 BUNDLE_IMAGE="${BUNDLE_IMAGE:-clawbox/clawtune-swe-bundle:dev}"
@@ -79,6 +80,10 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
 bootstrap_minikube() {
+  if [[ "${CLAWBOX_LIBVIRT_REEXEC:-0}" == "1" ]]; then
+    minikube status >/dev/null 2>&1 || die "Minikube is not running after libvirt group re-entry"
+    return 0
+  fi
   [[ "$(uname -s)" == "Linux" ]] || die "--bootstrap-minikube requires Linux"
   grep -Eq '(vmx|svm)' /proc/cpuinfo || die "CPU virtualization is unavailable; enable it in BIOS or enable nested virtualization"
   [[ -e /dev/kvm ]] || die "/dev/kvm is missing; enable KVM before bootstrapping Minikube"
@@ -94,6 +99,17 @@ bootstrap_minikube() {
   # sg activates the newly-added libvirt group for this child process without
   # requiring an immediate logout/login. Minikube still runs as the user.
   sg libvirt -c "minikube start --driver=kvm2 --container-runtime=containerd --cpus=8 --memory=16384"
+  # usermod affects new processes only. Re-enter this script in a shell whose
+  # primary group is libvirt so subsequent minikube ssh/image commands can
+  # access /var/run/libvirt/libvirt-sock without requiring logout/login.
+  if [[ "${CLAWBOX_LIBVIRT_REEXEC:-0}" != "1" ]]; then
+    local command argument
+    printf -v command 'CLAWBOX_LIBVIRT_REEXEC=1 exec bash %q' "${ROOT}/scripts/local-kata-swe.sh"
+    for argument in "${ORIGINAL_ARGS[@]}"; do
+      printf -v command '%s %q' "${command}" "${argument}"
+    done
+    exec sg libvirt -c "${command}"
+  fi
 }
 
 latest_pod() {
@@ -173,8 +189,15 @@ install_kata() {
   need curl
   local context version chart
   context="$(kubectl config current-context 2>/dev/null || true)"
-  if [[ "${context}" == "minikube" ]] && ! minikube ssh -- test -r /dev/kvm -a -w /dev/kvm; then
-    die "the Minikube node cannot access /dev/kvm. Recreate Minikube with a VM driver such as kvm2, then retry --install-kata"
+  if [[ "${context}" == "minikube" ]]; then
+    local kvm_output
+    if ! kvm_output="$(minikube ssh -- test -r /dev/kvm -a -w /dev/kvm 2>&1)"; then
+      if grep -qiE 'libvirt.*(permission denied|failed connecting)|libvirt-sock.*permission denied' <<<"${kvm_output}"; then
+        die "current shell cannot access libvirt. Run: newgrp libvirt, then repeat the command"
+      fi
+      echo "${kvm_output}" >&2
+      die "the Minikube node cannot access /dev/kvm. Use a kvm2 cluster with nested virtualization enabled"
+    fi
   fi
   version="${KATA_VERSION:-$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')}"
   chart="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"

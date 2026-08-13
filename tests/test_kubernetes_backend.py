@@ -140,5 +140,7 @@ def test_local_runner_automates_the_complete_smoke_path():
         "apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils",
         "virt-host-validate qemu",
         "minikube start --driver=kvm2",
+        "CLAWBOX_LIBVIRT_REEXEC=1",
+        "exec sg libvirt",
     ):
         assert required in script

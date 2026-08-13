@@ -39,7 +39,8 @@ bash scripts/local-kata-swe.sh \
 ```
 
 该选项会通过 Ubuntu `apt` 安装 KVM/libvirt，创建 8 CPU、16 GiB 的 kvm2 Minikube，
-然后安装 Kata 并运行任务。它要求宿主机已经存在 `/dev/kvm`。
+然后自动进入具有 `libvirt` 权限的新进程、安装 Kata 并运行任务。它要求宿主机已经存在
+`/dev/kvm`，无需手动注销登录。
 
 已有能够访问 `/dev/kvm` 的 Kubernetes 集群时，运行：
 
