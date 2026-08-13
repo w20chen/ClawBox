@@ -1,0 +1,7 @@
+FROM python:3.12-slim
+WORKDIR /opt/clawbox
+COPY pyproject.toml ./
+COPY clawbox ./clawbox
+RUN pip install --no-cache-dir '.[postgres]'
+ENV PYTHONUNBUFFERED=1
+CMD ["clawbox-scheduler"]

@@ -1,5 +1,18 @@
 # ClawBox
 
+> Phase 1-3 multi-tenant control plane is implemented in `clawbox/`. See
+> [implementation mapping](docs/IMPLEMENTATION_MAPPING.md) and the
+> [Phase 3 operations/security guide](docs/PHASE3.md). The original Kubernetes/Kata tenant-cell
+> delivery below is retained as the Phase 4+ deployment foundation.
+
+Quick local verification:
+
+```bash
+python -m pip install -e '.[dev]'
+python -m pytest -q
+python scripts/e2e.py
+```
+
 ClawBox delivers [OpenClaw](https://github.com/openai/openclaw) and [ClawTune](https://github.com/w20chen/ClawTune) to Kubernetes. Each tenant is a pair of Pods — a **Runtime** Pod and a **Tool** Pod — both running in isolated Kata Containers + Firecracker microVMs.
 
 This repo ships no models and deploys no LLM. OpenClaw talks to an external OpenAI-compatible LLM endpoint over HTTP.

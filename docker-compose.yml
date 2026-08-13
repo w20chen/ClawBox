@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clawbox
+      POSTGRES_PASSWORD: clawbox
+      POSTGRES_DB: clawbox
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clawbox"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes: ["clawbox-db:/var/lib/postgresql/data"]
+
+  tenant-scheduler: &control
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.control-plane
+    command: clawbox-scheduler
+    environment: &env
+      DATABASE_URL: postgresql+psycopg://clawbox:clawbox@postgres/clawbox
+      CLAWBOX_SERVICE_TOKEN: ${CLAWBOX_SERVICE_TOKEN:-development-only-token}
+      CLAWBOX_GRANT_SECRET: ${CLAWBOX_GRANT_SECRET:-development-only-grant-secret}
+      ALLOCATOR_URL: http://allocator:8081
+      CONTROLLER_URL: http://controller:8082
+      CONTROLLER_BACKEND: ${CONTROLLER_BACKEND:-docker}
+      CONTROLLER_DOCKER_NETWORK: ${CONTROLLER_DOCKER_NETWORK:-clawbox_default}
+      TOOL_IMAGE: ${TOOL_IMAGE:-clawbox-tool-agent:latest}
+      NUMA_CAPACITY: ${NUMA_CAPACITY:-0:64}
+      RESERVED_CPU_FRACTION: ${RESERVED_CPU_FRACTION:-0.05}
+      CLAWTUNE_SCHEDULER_SRC: /opt/clawtune/services/scheduler/src
+    volumes:
+      - ../ClawTune/services/scheduler:/opt/clawtune/services/scheduler:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      allocator: {condition: service_started}
+      controller: {condition: service_started}
+    ports: ["8080:8080"]
+
+  allocator:
+    <<: *control
+    command: clawbox-allocator
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports: ["8081:8081"]
+
+  controller:
+    <<: *control
+    command: clawbox-controller
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports: ["8082:8082"]
+
+  node-agent:
+    <<: *control
+    command: clawbox-node-agent
+    depends_on: {}
+    volumes:
+      - /sys:/sys:ro
+      - /proc:/host/proc:ro
+    ports: ["8083:8083"]
+
+  tool-agent-image:
+    profiles: ["build"]
+    image: ${TOOL_IMAGE:-clawbox-tool-agent:latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.tool-agent
+
+volumes:
+  clawbox-db:
