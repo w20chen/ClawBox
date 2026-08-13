@@ -25,7 +25,7 @@ This repo ships no models and deploys no LLM. OpenClaw talks to an external Open
                                 | HTTPS (fixed egress)
                                 |
   +-----------------------------+-----------------------------+
-  | Runtime Pod = One Firecracker microVM (kata-fc)               |
+  | Runtime Pod = One Firecracker microVM                     |
   |                                                           |
   |  OpenClaw Gateway/runtime                                 |
   |  ClawTune plugin                                          |
@@ -35,7 +35,7 @@ This repo ships no models and deploys no LLM. OpenClaw talks to an external Open
                                | SSH, tenant-specific Service
                                v
   +-----------------------------------------------------------+
-  | Tool Pod = One Firecracker microVM (kata-fc)                  |
+  | Tool Pod = One Firecracker microVM                        |
   |                                                           |
   |  Non-root SSH executor                                    |
   |  Independent workspace, PID namespace and root filesystem |
