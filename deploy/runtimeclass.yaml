@@ -1,5 +1,5 @@
-# RuntimeClass that routes every Pod in this Job to a Kata Containers
-# Firecracker microVM instead of the default runc.
+# RuntimeClass that routes the ClawBox Runtime Pod and Tool Pod to a Kata
+# Containers Firecracker microVM instead of the default runc runtime.
 #
 # IMPORTANT: the `handler` name MUST match the runtime handler configured in
 # containerd on the host (e.g. /etc/containerd/config.toml:
@@ -9,7 +9,10 @@
 #       ConfigPath = "/etc/kata-containers/configuration-fc.toml"
 # )
 # If the handler does not match, Pods fall back to / fail with runc, which
-# silently breaks the microVM isolation this prototype is testing.
+# silently breaks the microVM isolation this deployment relies on.
+#
+# cell.sh deploy applies this file automatically when kata-fc is missing.
+# cell.sh delete never removes it.
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:

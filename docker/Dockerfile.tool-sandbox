@@ -15,8 +15,8 @@ RUN apt-get update \
  && chmod 0600 /home/executor/.ssh/authorized_keys \
  && chown -R 10001:10001 /workspace /tmp/openclaw-sandboxes /run/tool-sshd /home/executor
 
-COPY scripts/two-sandbox/tool-entrypoint.sh /usr/local/bin/tool-entrypoint
-COPY scripts/two-sandbox/tool-command.sh /usr/local/bin/tool-command
+COPY scripts/tool-entrypoint.sh /usr/local/bin/tool-entrypoint
+COPY scripts/tool-command.sh /usr/local/bin/tool-command
 RUN chmod 0755 /usr/local/bin/tool-entrypoint /usr/local/bin/tool-command
 
 USER 10001:10001

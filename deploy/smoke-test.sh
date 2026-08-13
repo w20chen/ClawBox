@@ -27,13 +27,20 @@ if [[ -n "${OTHER_TENANT_ID}" ]]; then
 fi
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
 
-selector_base="app.kubernetes.io/name=claw-two-sandbox,claw.openai.com/tenant-id=${TENANT_ID}"
+selector_base="app.kubernetes.io/name=clawbox,claw.openai.com/tenant-id=${TENANT_ID}"
 kubectl -n "${NAMESPACE}" rollout status "deployment/claw-${TENANT_ID}-tool" --timeout=180s
 kubectl -n "${NAMESPACE}" rollout status "deployment/claw-${TENANT_ID}-runtime" --timeout=300s
 
 runtime_pod="$(kubectl -n "${NAMESPACE}" get pod -l "${selector_base},app.kubernetes.io/component=runtime" -o jsonpath='{.items[0].metadata.name}')"
 tool_pod="$(kubectl -n "${NAMESPACE}" get pod -l "${selector_base},app.kubernetes.io/component=tool" -o jsonpath='{.items[0].metadata.name}')"
 [[ -n "${runtime_pod}" && -n "${tool_pod}" && "${runtime_pod}" != "${tool_pod}" ]]
+
+runtime_class="$(kubectl -n "${NAMESPACE}" get pod "${runtime_pod}" -o jsonpath='{.spec.runtimeClassName}')"
+tool_class="$(kubectl -n "${NAMESPACE}" get pod "${tool_pod}" -o jsonpath='{.spec.runtimeClassName}')"
+[[ "${runtime_class}" == "kata-fc" && "${tool_class}" == "kata-fc" ]] || {
+  echo "expected kata-fc on both Pods, got runtime=${runtime_class:-default} tool=${tool_class:-default}" >&2
+  exit 1
+}
 
 runtime_host="$(kubectl -n "${NAMESPACE}" exec "${runtime_pod}" -- hostname)"
 tool_host="$(kubectl -n "${NAMESPACE}" exec "${tool_pod}" -- hostname)"
@@ -88,9 +95,7 @@ else
   echo "SKIP cross-tenant check: pass --other-tenant with a deployed second cell" >&2
 fi
 
-runtime_class="$(kubectl -n "${NAMESPACE}" get pod "${runtime_pod}" -o jsonpath='{.spec.runtimeClassName}')"
-tool_runtime_class="$(kubectl -n "${NAMESPACE}" get pod "${tool_pod}" -o jsonpath='{.spec.runtimeClassName}')"
-echo "PASS tenant=${TENANT_ID} runtime_pod=${runtime_pod} tool_pod=${tool_pod} runtimeClass=${runtime_class:-default} toolRuntimeClass=${tool_runtime_class:-default}"
+echo "PASS tenant=${TENANT_ID} runtime_pod=${runtime_pod} tool_pod=${tool_pod} runtimeClass=${runtime_class} toolClass=${tool_class}"
 echo "PASS hostnames runtime=${runtime_host} tool=${tool_host}; pid_namespaces runtime=${runtime_pid_ns} tool=${tool_pid_ns}"
 
 if [[ "${VERIFY_DELETE}" == true ]]; then

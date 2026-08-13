@@ -13,12 +13,13 @@ Usage:
     --llm-secret SECRET --llm-egress-cidr CIDR [options]
   cell.sh delete --tenant TENANT [--namespace NAMESPACE]
 
+Both Pods always run as Firecracker microVMs via the kata-fc RuntimeClass.
+deploy applies deploy/runtimeclass.yaml when kata-fc does not exist yet.
+
 Options:
   --ssh-secret SECRET          Existing Secret with client id_ed25519 keypair and
                                ssh_host_ed25519_key keypair.
                                If omitted, deploy generates a demo key Secret.
-  --runtime-class NAME         Runtime RuntimeClass; omit for cluster default.
-  --tool-runtime-class NAME    Tool RuntimeClass; omit for cluster default.
   --llm-egress-port PORT       Default: 443.
   --tool-egress-cidr CIDR      Optional Tool internet egress; default is denied.
   --tool-egress-port PORT      Default: 443.
@@ -38,8 +39,6 @@ LLM_SECRET_NAME=""
 LLM_EGRESS_CIDR=""
 LLM_EGRESS_PORT="443"
 SSH_SECRET_NAME=""
-RUNTIME_CLASS=""
-TOOL_RUNTIME_CLASS=""
 TOOL_EGRESS_CIDR=""
 TOOL_EGRESS_PORT="443"
 NAMESPACE="default"
@@ -53,8 +52,6 @@ while [[ $# -gt 0 ]]; do
     --llm-egress-cidr) LLM_EGRESS_CIDR="${2:-}"; shift 2 ;;
     --llm-egress-port) LLM_EGRESS_PORT="${2:-}"; shift 2 ;;
     --ssh-secret) SSH_SECRET_NAME="${2:-}"; shift 2 ;;
-    --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
-    --tool-runtime-class) TOOL_RUNTIME_CLASS="${2:-}"; shift 2 ;;
     --tool-egress-cidr) TOOL_EGRESS_CIDR="${2:-}"; shift 2 ;;
     --tool-egress-port) TOOL_EGRESS_PORT="${2:-}"; shift 2 ;;
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
@@ -76,7 +73,7 @@ valid_resource_name "${NAMESPACE}" || { echo "invalid namespace" >&2; exit 64; }
 
 if [[ "${ACTION}" == "delete" ]]; then
   command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
-  selector="app.kubernetes.io/managed-by=claw-two-sandbox,claw.openai.com/tenant-id=${TENANT_ID}"
+  selector="app.kubernetes.io/managed-by=clawbox,claw.openai.com/tenant-id=${TENANT_ID}"
   kubectl -n "${NAMESPACE}" delete deployment,service,networkpolicy -l "${selector}" --ignore-not-found
   kubectl -n "${NAMESPACE}" delete secret -l "${selector},claw.openai.com/demo-key=true" --ignore-not-found
   echo "tenant cell deleted: namespace=${NAMESPACE} tenant_id=${TENANT_ID}"
@@ -90,8 +87,6 @@ valid_image "${TOOL_IMAGE}" || { echo "invalid tool image reference" >&2; exit 6
 valid_resource_name "${LLM_SECRET_NAME}" || { echo "invalid LLM Secret name" >&2; exit 64; }
 valid_cidr "${LLM_EGRESS_CIDR}" || { echo "invalid LLM egress CIDR" >&2; exit 64; }
 valid_port "${LLM_EGRESS_PORT}" || { echo "invalid LLM egress port" >&2; exit 64; }
-[[ -z "${RUNTIME_CLASS}" ]] || valid_resource_name "${RUNTIME_CLASS}" || { echo "invalid Runtime RuntimeClass" >&2; exit 64; }
-[[ -z "${TOOL_RUNTIME_CLASS}" ]] || valid_resource_name "${TOOL_RUNTIME_CLASS}" || { echo "invalid Tool RuntimeClass" >&2; exit 64; }
 [[ -z "${TOOL_EGRESS_CIDR}" ]] || valid_cidr "${TOOL_EGRESS_CIDR}" || { echo "invalid Tool egress CIDR" >&2; exit 64; }
 valid_port "${TOOL_EGRESS_PORT}" || { echo "invalid Tool egress port" >&2; exit 64; }
 
@@ -105,11 +100,6 @@ else
   valid_resource_name "${SSH_SECRET_NAME}" || { echo "invalid SSH Secret name" >&2; exit 64; }
 fi
 
-RUNTIME_RUNTIME_CLASS_LINE=""
-TOOL_RUNTIME_CLASS_LINE=""
-[[ -z "${RUNTIME_CLASS}" ]] || RUNTIME_RUNTIME_CLASS_LINE="runtimeClassName: ${RUNTIME_CLASS}"
-[[ -z "${TOOL_RUNTIME_CLASS}" ]] || TOOL_RUNTIME_CLASS_LINE="runtimeClassName: ${TOOL_RUNTIME_CLASS}"
-
 TOOL_EGRESS_POLICY=""
 if [[ -n "${TOOL_EGRESS_CIDR}" ]]; then
   TOOL_EGRESS_POLICY="---
@@ -118,14 +108,14 @@ kind: NetworkPolicy
 metadata:
   name: claw-${TENANT_ID}-tool-egress
   labels:
-    app.kubernetes.io/name: claw-two-sandbox
-    app.kubernetes.io/managed-by: claw-two-sandbox
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/managed-by: clawbox
     claw.openai.com/tenant-id: ${TENANT_ID}
     claw.openai.com/runtime-id: ${RUNTIME_ID}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: claw-two-sandbox
+      app.kubernetes.io/name: clawbox
       app.kubernetes.io/component: tool
       claw.openai.com/tenant-id: ${TENANT_ID}
   policyTypes: [\"Egress\"]
@@ -145,7 +135,7 @@ spec:
 fi
 
 export TENANT_ID RUNTIME_ID RUNTIME_IMAGE TOOL_IMAGE LLM_SECRET_NAME LLM_EGRESS_CIDR LLM_EGRESS_PORT
-export SSH_SECRET_NAME RUNTIME_RUNTIME_CLASS_LINE TOOL_RUNTIME_CLASS_LINE TOOL_EGRESS_POLICY
+export SSH_SECRET_NAME TOOL_EGRESS_POLICY
 export TOOL_EXEC_TIMEOUT_SECONDS="${TOOL_EXEC_TIMEOUT_SECONDS:-300}" TOOL_PIDS_LIMIT="${TOOL_PIDS_LIMIT:-128}"
 export TOOL_CPU_REQUEST="${TOOL_CPU_REQUEST:-250m}" TOOL_CPU_LIMIT="${TOOL_CPU_LIMIT:-1}"
 export TOOL_MEMORY_REQUEST="${TOOL_MEMORY_REQUEST:-256Mi}" TOOL_MEMORY_LIMIT="${TOOL_MEMORY_LIMIT:-1Gi}"
@@ -156,7 +146,7 @@ export RUNTIME_STORAGE_REQUEST="${RUNTIME_STORAGE_REQUEST:-512Mi}" RUNTIME_STORA
 
 command -v envsubst >/dev/null 2>&1 || { echo "envsubst not found (install gettext/gettext-base)" >&2; exit 69; }
 render() {
-  envsubst '${TENANT_ID} ${RUNTIME_ID} ${RUNTIME_IMAGE} ${TOOL_IMAGE} ${LLM_SECRET_NAME} ${LLM_EGRESS_CIDR} ${LLM_EGRESS_PORT} ${SSH_SECRET_NAME} ${RUNTIME_RUNTIME_CLASS_LINE} ${TOOL_RUNTIME_CLASS_LINE} ${TOOL_EGRESS_POLICY} ${TOOL_EXEC_TIMEOUT_SECONDS} ${TOOL_PIDS_LIMIT} ${TOOL_CPU_REQUEST} ${TOOL_CPU_LIMIT} ${TOOL_MEMORY_REQUEST} ${TOOL_MEMORY_LIMIT} ${TOOL_STORAGE_REQUEST} ${TOOL_STORAGE_LIMIT} ${RUNTIME_CPU_REQUEST} ${RUNTIME_CPU_LIMIT} ${RUNTIME_MEMORY_REQUEST} ${RUNTIME_MEMORY_LIMIT} ${RUNTIME_STORAGE_REQUEST} ${RUNTIME_STORAGE_LIMIT}' <"${TEMPLATE}"
+  envsubst '${TENANT_ID} ${RUNTIME_ID} ${RUNTIME_IMAGE} ${TOOL_IMAGE} ${LLM_SECRET_NAME} ${LLM_EGRESS_CIDR} ${LLM_EGRESS_PORT} ${SSH_SECRET_NAME} ${TOOL_EGRESS_POLICY} ${TOOL_EXEC_TIMEOUT_SECONDS} ${TOOL_PIDS_LIMIT} ${TOOL_CPU_REQUEST} ${TOOL_CPU_LIMIT} ${TOOL_MEMORY_REQUEST} ${TOOL_MEMORY_LIMIT} ${TOOL_STORAGE_REQUEST} ${TOOL_STORAGE_LIMIT} ${RUNTIME_CPU_REQUEST} ${RUNTIME_CPU_LIMIT} ${RUNTIME_MEMORY_REQUEST} ${RUNTIME_MEMORY_LIMIT} ${RUNTIME_STORAGE_REQUEST} ${RUNTIME_STORAGE_LIMIT}' <"${TEMPLATE}"
 }
 
 if [[ "${ACTION}" == "render" ]]; then
@@ -165,6 +155,12 @@ if [[ "${ACTION}" == "render" ]]; then
 fi
 
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
+if ! kubectl get runtimeclass kata-fc >/dev/null 2>&1; then
+  echo "RuntimeClass kata-fc not found; applying ${SCRIPT_DIR}/runtimeclass.yaml" >&2
+  kubectl apply -f "${SCRIPT_DIR}/runtimeclass.yaml"
+fi
+kubectl get runtimeclass kata-fc >/dev/null
+
 secret_has_key() {
   [[ "$(kubectl -n "${NAMESPACE}" get secret "$1" -o "go-template={{if index .data \"$2\"}}present{{end}}")" == "present" ]]
 }
@@ -210,7 +206,7 @@ if [[ "${SSH_SECRET_GENERATED}" == true ]]; then
       --from-file=ssh_host_ed25519_key.pub="${tmp_dir}/ssh_host_ed25519_key.pub" \
       --dry-run=client -o yaml | kubectl -n "${NAMESPACE}" apply -f -
     kubectl -n "${NAMESPACE}" label secret "${SSH_SECRET_NAME}" --overwrite \
-      app.kubernetes.io/managed-by=claw-two-sandbox \
+      app.kubernetes.io/managed-by=clawbox \
       claw.openai.com/tenant-id="${TENANT_ID}" \
       claw.openai.com/demo-key=true >/dev/null
     SSH_SECRET_CREATED=true

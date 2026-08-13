@@ -8,5 +8,4 @@ clawtune-*/
 # Local secrets — never commit
 .env
 .env.*
-!*.example.yaml
 *.key

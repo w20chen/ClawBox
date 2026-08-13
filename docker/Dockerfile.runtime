@@ -33,7 +33,7 @@ COPY --from=clawtune packages/openclaw-plugin/README.md ./packages/openclaw-plug
 RUN python3 -m venv /opt/clawtune/venv \
  && /opt/clawtune/venv/bin/pip install --no-cache-dir ./services/scheduler
 
-COPY scripts/two-sandbox/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
+COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
 RUN groupadd --gid 10001 openclaw \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash openclaw \
  && chmod 0755 /usr/local/bin/runtime-entrypoint \

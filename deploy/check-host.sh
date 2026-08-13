@@ -15,7 +15,7 @@ pass() { say "$1" "PASS"; PASS=$((PASS + 1)); }
 warn() { say "$1" "WARN"; WARN=$((WARN + 1)); }
 fail() { say "$1" "FAIL"; FAIL=$((FAIL + 1)); }
 
-echo "== OpenClaw multi-tenant / Kata-Firecracker host preflight =="
+echo "== ClawBox Kata-Firecracker host preflight (Runtime Pod + Tool Pod) =="
 
 # 1. Architecture
 arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -78,7 +78,7 @@ fi
 if kubectl get runtimeclass kata-fc >/dev/null 2>&1; then
   pass "RuntimeClass kata-fc exists"
 else
-  fail "RuntimeClass kata-fc missing (kubectl apply -f runtimeclass.yaml)"
+  fail "RuntimeClass kata-fc missing (kubectl apply -f deploy/runtimeclass.yaml)"
 fi
 
 # 8. containerd config contains a kata-fc handler
@@ -106,7 +106,7 @@ fi
 echo
 echo "Summary: ${PASS} pass, ${WARN} warn, ${FAIL} fail"
 if [ "${FAIL}" -gt 0 ]; then
-  echo "Fix FAIL items before running the Job. WARN items are informational."
+  echo "Fix FAIL items before deploying. WARN items are informational."
   exit 1
 fi
 exit 0
