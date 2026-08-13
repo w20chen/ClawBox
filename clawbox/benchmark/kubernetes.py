@@ -88,7 +88,7 @@ def render_job(
                     "runtimeClassName": runtime_class,
                     "restartPolicy": "Never",
                     "initContainers": [{
-                        "name": "clawtune-bundle", "image": bundle_image,
+                        "name": "clawtune-bundle", "image": bundle_image, "imagePullPolicy": "IfNotPresent",
                         "command": ["/bin/sh", "-ec", "cp -a /bundle/. /claw/" + (" && mkdir -p /trace-root/$TASK_INSTANCE_ID" if trace_pvc else "")],
                         "env": [{"name": "TASK_INSTANCE_ID", "value": task.instance_id}],
                         "volumeMounts": ([{"name": "claw", "mountPath": "/claw"}] + ([{"name": "traces", "mountPath": "/trace-root"}] if trace_pvc else [])),

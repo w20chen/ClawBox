@@ -20,6 +20,7 @@ def test_swe_job_uses_task_image_openclaw_bundle_and_kata_guaranteed_qos():
     assert pod["runtimeClassName"] == "kata-fc"
     assert pod["automountServiceAccountToken"] is False
     assert pod["initContainers"][0]["image"] == "registry/bundle:dev"
+    assert pod["initContainers"][0]["imagePullPolicy"] == "IfNotPresent"
     assert "mkdir -p /trace-root/$TASK_INSTANCE_ID" in pod["initContainers"][0]["command"][-1]
     runtime = pod["containers"][0]
     assert runtime["image"] == "swebench/task:latest"
@@ -115,3 +116,22 @@ def test_benchmark_preflight_checks_secret_and_bound_trace_pvc():
 
     launcher = KubernetesBenchmarkLauncher(core=Core(), batch=SimpleNamespace())
     launcher._preflight(namespace="bench", llm_secret="llm", trace_pvc="traces")
+
+
+def test_local_runner_automates_the_complete_smoke_path():
+    from pathlib import Path
+
+    script = (Path(__file__).parents[1] / "scripts" / "local-kata-swe.sh").read_text(encoding="utf-8")
+    for required in (
+        "swe_rebench.runner prepare",
+        "Dockerfile.clawtune-bundle",
+        "deploy/runtimeclass.yaml",
+        "deploy/control-plane-rbac.yaml",
+        "create secret generic",
+        "runtimeClassName",
+        "clawbox.benchmark.kubernetes",
+        "kind load docker-image",
+        "k3s ctr images import",
+        "ctr -n k8s.io images import",
+    ):
+        assert required in script

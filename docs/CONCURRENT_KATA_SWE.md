@@ -1,5 +1,28 @@
 # Concurrent Kubernetes + Kata/Firecracker SWE-Rebench MVP
 
+## Local quick start
+
+For a local kind, minikube, k3d, k3s, or containerd-backed cluster, use the automated path:
+
+```bash
+cd ~/ClawBox
+bash scripts/local-kata-swe.sh \
+  --api-key-file ~/llm-api-key.txt \
+  --base-url https://api.example.com/v1 \
+  --model provider-model
+```
+
+It prepares the bundle when missing, builds and imports the image, applies manifests, creates the
+Secret, boots a `kata-fc` smoke microVM, and runs one task. Repeat runs reuse the bundle, image and
+Secret. Use `--rebuild` after ClawTune changes. Useful commands:
+
+```bash
+bash scripts/local-kata-swe.sh --sample 8 --parallelism 4 --cpu 4 --memory 8Gi
+bash scripts/local-kata-swe.sh status
+bash scripts/local-kata-swe.sh logs
+bash scripts/local-kata-swe.sh smoke
+```
+
 ## Decision: reuse ClawTune at a versioned bundle boundary
 
 ClawBox does not import the complete ClawTune application at runtime and does not fork its
