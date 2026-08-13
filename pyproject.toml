@@ -14,6 +14,7 @@ dependencies = [
   "sqlalchemy>=2.0",
   "uvicorn>=0.27",
   "docker>=7.0",
+  "kubernetes>=30,<35",
   "numpy>=1.26",
   "psutil>=5.9",
   "prometheus-client>=0.20",
@@ -30,6 +31,7 @@ clawbox-allocator = "clawbox.allocator.app:main"
 clawbox-controller = "clawbox.controller.app:main"
 clawbox-node-agent = "clawbox.node_agent.app:main"
 clawbox-tool-agent = "clawbox.tool_agent.app:main"
+clawbox-swe-rebench = "clawbox.benchmark.kubernetes:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

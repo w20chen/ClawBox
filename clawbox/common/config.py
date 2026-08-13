@@ -13,6 +13,10 @@ class Settings:
     controller_url: str = os.getenv("CONTROLLER_URL", "http://controller:8082")
     scheduler_url: str = os.getenv("SCHEDULER_URL", "http://tenant-scheduler:8080")
     controller_backend: str = os.getenv("CONTROLLER_BACKEND", "docker")
+    kubernetes_namespace_prefix: str = os.getenv("KUBERNETES_NAMESPACE_PREFIX", "clawbox-tenant")
+    kubernetes_runtime_class: str = os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc")
+    kubernetes_image_pull_policy: str = os.getenv("KUBERNETES_IMAGE_PULL_POLICY", "IfNotPresent")
+    kubernetes_ready_timeout_seconds: int = int(os.getenv("KUBERNETES_READY_TIMEOUT_SECONDS", "180"))
     tool_image: str = os.getenv("TOOL_IMAGE", "clawbox-tool-agent:latest")
     lease_ttl_seconds: int = int(os.getenv("LEASE_TTL_SECONDS", "300"))
     reserved_cpu_fraction: float = float(os.getenv("RESERVED_CPU_FRACTION", "0.05"))
@@ -20,4 +24,3 @@ class Settings:
 
 
 settings = Settings()
-

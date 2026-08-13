@@ -9,7 +9,14 @@ from clawbox.common.models import ExecuteRequest, ToolInstance, ToolSpec
 from clawbox.tool_agent.service import ToolAgent
 
 class Controller:
-    def __init__(self): self.local_agents: dict[str, ToolAgent] = {}
+    def __init__(self, kubernetes_backend=None):
+        self.local_agents: dict[str, ToolAgent] = {}
+        self._kubernetes_backend = kubernetes_backend
+    def _kubernetes(self):
+        if self._kubernetes_backend is None:
+            from clawbox.controller.kubernetes_backend import KubernetesBackend
+            self._kubernetes_backend = KubernetesBackend()
+        return self._kubernetes_backend
     def acquire(self, spec: ToolSpec) -> ToolInstance:
         with SessionLocal.begin() as db:
             binding = db.get(WorkspaceBindingRow, spec.workspace_id)
@@ -39,6 +46,12 @@ class Controller:
                         if "container" in locals(): container.remove(force=True)
                     except Exception: pass
                     raise HTTPException(503, f"Docker tool creation failed: {type(exc).__name__}") from exc
+            elif settings.controller_backend == "kubernetes":
+                try:
+                    tool = self._kubernetes().create(spec, uid)
+                    endpoint = tool.endpoint; backend_id = tool.backend_id
+                except Exception as exc:
+                    raise HTTPException(503, f"Kubernetes tool creation failed: {type(exc).__name__}") from exc
             else: raise HTTPException(500, "unsupported controller backend")
             row = ToolInstanceRow(tool_pod_uid=uid, tenant_id=spec.tenant_id, workspace_id=spec.workspace_id,
                 backend=settings.controller_backend, backend_id=backend_id, endpoint=endpoint, state="READY")
@@ -62,6 +75,8 @@ class Controller:
                     import docker
                     try: docker.from_env().containers.get(row.backend_id).remove(force=True)
                     except docker.errors.NotFound: pass
+                elif row.backend == "kubernetes":
+                    self._kubernetes().delete(row.backend_id)
                 self.local_agents.pop(uid, None); row.state = "DESTROYED"
             return self._model(row)
     @staticmethod

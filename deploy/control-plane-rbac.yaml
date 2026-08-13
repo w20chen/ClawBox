@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clawbox-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clawbox-benchmarks
+  labels:
+    app.kubernetes.io/managed-by: clawbox
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clawbox-controller
+  namespace: clawbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clawbox-controller
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clawbox-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clawbox-controller
+subjects:
+  - kind: ServiceAccount
+    name: clawbox-controller
+    namespace: clawbox-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clawbox-benchmark-launcher
+  namespace: clawbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clawbox-benchmark-launcher
+  namespace: clawbox-benchmarks
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clawbox-benchmark-launcher
+  namespace: clawbox-benchmarks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: clawbox-benchmark-launcher
+subjects:
+  - kind: ServiceAccount
+    name: clawbox-benchmark-launcher
+    namespace: clawbox-system

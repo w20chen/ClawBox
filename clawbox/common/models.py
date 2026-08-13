@@ -101,7 +101,7 @@ class ToolInstance(StrictModel):
     tenant_id: str
     workspace_id: str
     endpoint: str
-    backend: Literal["docker", "subprocess"]
+    backend: Literal["docker", "subprocess", "kubernetes"]
     state: str
 
 
@@ -164,4 +164,3 @@ class ExecutionResult(StrictModel):
     lease_final_state: LeaseState
     stdout: str = ""
     stderr: str = ""
-

@@ -1,0 +1,90 @@
+from types import SimpleNamespace
+
+from clawbox.benchmark.kubernetes import BenchmarkTask, render_job
+from clawbox.controller.kubernetes_backend import KubernetesBackend, dns_label
+
+
+def test_dns_label_is_stable_safe_and_collision_resistant():
+    assert dns_label("Tenant A") == dns_label("Tenant A")
+    assert dns_label("Tenant A") != dns_label("tenant-a")
+    assert len(dns_label("x" * 200, prefix="tool-")) <= 63
+
+
+def test_swe_job_uses_task_image_openclaw_bundle_and_kata_guaranteed_qos():
+    job = render_job(
+        BenchmarkTask("django__case-1", "swebench/task:latest", "fix it"),
+        namespace="clawbox-benchmarks", bundle_image="registry/bundle:dev",
+        llm_secret="llm", trace_pvc="traces",
+    )
+    pod = job["spec"]["template"]["spec"]
+    assert pod["runtimeClassName"] == "kata-fc"
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["initContainers"][0]["image"] == "registry/bundle:dev"
+    assert "mkdir -p /trace-root/$TASK_INSTANCE_ID" in pod["initContainers"][0]["command"][-1]
+    runtime = pod["containers"][0]
+    assert runtime["image"] == "swebench/task:latest"
+    assert runtime["command"] == ["/claw/entrypoint.sh"]
+    assert runtime["resources"]["requests"] == runtime["resources"]["limits"]
+    assert pod["initContainers"][0]["resources"]["requests"] == pod["initContainers"][0]["resources"]["limits"]
+    traces = next(volume for volume in pod["volumes"] if volume["name"] == "traces")
+    assert traces["persistentVolumeClaim"]["claimName"] == "traces"
+    assert next(m for m in runtime["volumeMounts"] if m["name"] == "traces")["subPathExpr"] == "$(TASK_INSTANCE_ID)"
+
+
+def test_swe_job_does_not_put_llm_secrets_in_plaintext():
+    job = render_job(
+        BenchmarkTask("case", "image", "problem"), namespace="bench",
+        bundle_image="bundle", llm_secret="llm",
+    )
+    env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+    secrets = {item["name"]: item["valueFrom"]["secretKeyRef"] for item in env if "valueFrom" in item}
+    assert set(secrets) == {"LLM_API_KEY", "LLM_UPSTREAM_BASE_URL", "LLM_MODEL", "OPENCLAW_MODEL_REF"}
+
+
+class FakeCore:
+    def __init__(self):
+        self.pods = []
+        self.services = []
+        self.namespaces = []
+
+    def read_namespace(self, name):
+        from kubernetes.client.exceptions import ApiException
+        raise ApiException(status=404)
+
+    def create_namespace(self, body):
+        self.namespaces.append(body)
+
+    def create_namespaced_pod(self, namespace, body):
+        self.pods.append((namespace, body))
+        return SimpleNamespace(metadata=SimpleNamespace(uid="physical-pod-uid"))
+
+    def create_namespaced_service(self, namespace, body):
+        self.services.append((namespace, body))
+
+    def read_namespaced_pod(self, name, namespace):
+        return SimpleNamespace(status=SimpleNamespace(
+            phase="Running", container_statuses=[SimpleNamespace(ready=True)]
+        ))
+
+    def delete_namespaced_service(self, name, namespace):
+        return None
+
+    def delete_namespaced_pod(self, name, namespace, grace_period_seconds):
+        return None
+
+
+def test_controller_backend_creates_kata_service_and_guaranteed_tool_pod():
+    from clawbox.common.models import ToolSpec
+
+    core = FakeCore()
+    created = KubernetesBackend(core).create(ToolSpec(
+        tenant_id="tenant-a", execution_id="exec", workspace_id="workspace-a",
+        cpu_count=4, memory_bytes=1024, image="registry/tool:dev",
+    ), "logical-tool-id")
+    assert created.pod_uid == "physical-pod-uid"
+    assert created.endpoint.endswith(".svc:8090")
+    pod = core.pods[0][1]["spec"]
+    assert pod["runtimeClassName"] == "kata-fc"
+    resources = pod["containers"][0]["resources"]
+    assert resources["requests"] == resources["limits"]
+    assert core.services[0][1]["spec"]["selector"] == core.pods[0][1]["metadata"]["labels"]
