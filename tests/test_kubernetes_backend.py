@@ -136,5 +136,9 @@ def test_local_runner_automates_the_complete_smoke_path():
         "helm upgrade --install kata-deploy",
         "no runtime for",
         "minikube ssh -- test -r /dev/kvm",
+        "--bootstrap-minikube",
+        "apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils",
+        "virt-host-validate qemu",
+        "minikube start --driver=kvm2",
     ):
         assert required in script

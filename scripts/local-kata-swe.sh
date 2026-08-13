@@ -22,6 +22,7 @@ OPENCLAW_MODEL="${OPENCLAW_MODEL_REF:-}"
 REBUILD="${REBUILD:-0}"
 SKIP_SMOKE="${SKIP_KATA_SMOKE:-0}"
 INSTALL_KATA="${INSTALL_KATA:-0}"
+BOOTSTRAP_MINIKUBE="${BOOTSTRAP_MINIKUBE:-0}"
 
 usage() {
   cat <<'EOF'
@@ -48,6 +49,7 @@ Options:
   --rebuild            Rebuild the ClawTune bundle and bundle image
   --skip-smoke         Skip the kata-fc Alpine smoke Pod
   --install-kata       Install Kata on cluster nodes with the official Helm chart
+  --bootstrap-minikube Install Ubuntu KVM/libvirt and create a kvm2 Minikube cluster
 EOF
 }
 
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --rebuild) REBUILD=1; shift ;;
     --skip-smoke) SKIP_SMOKE=1; shift ;;
     --install-kata) INSTALL_KATA=1; shift ;;
+    --bootstrap-minikube) BOOTSTRAP_MINIKUBE=1; INSTALL_KATA=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -74,6 +77,24 @@ done
 log() { printf '\n==> %s\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+bootstrap_minikube() {
+  [[ "$(uname -s)" == "Linux" ]] || die "--bootstrap-minikube requires Linux"
+  grep -Eq '(vmx|svm)' /proc/cpuinfo || die "CPU virtualization is unavailable; enable it in BIOS or enable nested virtualization"
+  [[ -e /dev/kvm ]] || die "/dev/kvm is missing; enable KVM before bootstrapping Minikube"
+  need sudo
+  need minikube
+  log "Installing Ubuntu KVM/libvirt prerequisites"
+  sudo apt-get update
+  sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils
+  sudo systemctl enable --now libvirtd
+  sudo usermod -aG libvirt,kvm "${USER}"
+  sudo virt-host-validate qemu || die "virt-host-validate failed; fix KVM/libvirt before continuing"
+  log "Creating Minikube with the kvm2 driver"
+  # sg activates the newly-added libvirt group for this child process without
+  # requiring an immediate logout/login. Minikube still runs as the user.
+  sg libvirt -c "minikube start --driver=kvm2 --container-runtime=containerd --cpus=8 --memory=16384"
+}
 
 latest_pod() {
   kubectl -n "${NAMESPACE}" get pods \
@@ -107,6 +128,10 @@ diagnostics() {
   fi
   kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 >&2 || true
 }
+
+if [[ "${BOOTSTRAP_MINIKUBE}" == "1" ]]; then
+  bootstrap_minikube
+fi
 
 need kubectl
 kubectl cluster-info >/dev/null 2>&1 || die "kubectl cannot reach a Kubernetes cluster"

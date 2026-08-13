@@ -27,6 +27,22 @@ chmod 600 ~/llm-api-key.txt
 
 ### 首次运行
 
+如果当前没有集群（包括刚删除了旧 Docker-driver Minikube），运行：
+
+```bash
+cd ~/ClawBox
+bash scripts/local-kata-swe.sh \
+  --bootstrap-minikube \
+  --api-key-file ~/llm-api-key.txt \
+  --base-url https://api.example.com/v1 \
+  --model provider-model
+```
+
+该选项会通过 Ubuntu `apt` 安装 KVM/libvirt，创建 8 CPU、16 GiB 的 kvm2 Minikube，
+然后安装 Kata 并运行任务。它要求宿主机已经存在 `/dev/kvm`。
+
+已有能够访问 `/dev/kvm` 的 Kubernetes 集群时，运行：
+
 ```bash
 cd ~/ClawBox
 bash scripts/local-kata-swe.sh \
@@ -83,6 +99,7 @@ bash scripts/local-kata-swe.sh smoke
 --rebuild             ClawTune 更新后重建 bundle 和镜像
 --skip-smoke          跳过 kata-fc smoke test
 --install-kata        使用官方 Kata Deploy Helm chart 安装节点运行时
+--bootstrap-minikube  安装 Ubuntu KVM/libvirt 并创建 kvm2 Minikube
 ```
 
 查看全部参数：

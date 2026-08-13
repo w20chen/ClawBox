@@ -2,6 +2,20 @@
 
 ## Local quick start
 
+From a machine with no current cluster, Ubuntu users can bootstrap KVM/libvirt, a kvm2 Minikube,
+Kata, and the first task in one command:
+
+```bash
+bash scripts/local-kata-swe.sh \
+  --bootstrap-minikube \
+  --api-key-file ~/llm-api-key.txt \
+  --base-url https://api.example.com/v1 \
+  --model provider-model
+```
+
+The host must already expose `/dev/kvm`; the script does not change BIOS or nested virtualization
+settings.
+
 For a local kind, minikube, k3d, k3s, or containerd-backed cluster, use the automated path:
 
 ```bash
