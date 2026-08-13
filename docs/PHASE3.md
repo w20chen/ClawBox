@@ -58,10 +58,13 @@ it is also usable on hosts without Docker. It is a test/degraded backend, not a 
 Docker deployment (Linux, Docker socket available):
 
 ```bash
-docker compose --profile build build tool-agent-image
-docker compose up --build postgres allocator controller node-agent tenant-scheduler
-python -c 'import httpx; print(httpx.get("http://localhost:8080/healthz").json())'
+bash scripts/linux-deploy.sh all
 ```
+
+Use `bash scripts/linux-deploy.sh init` to generate configuration only. Existing secrets are
+preserved, including the generated PostgreSQL password. `deploy`, `verify`, `status`, `logs`, and
+`down` provide the remaining lifecycle operations; `down` deliberately preserves the PostgreSQL
+volume.
 
 All control-plane services have console entry points: `clawbox-scheduler`, `clawbox-allocator`,
 `clawbox-controller`, `clawbox-node-agent`, and `clawbox-tool-agent`.

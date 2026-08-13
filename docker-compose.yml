@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: clawbox
-      POSTGRES_PASSWORD: clawbox
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clawbox}
       POSTGRES_DB: clawbox
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U clawbox"]
@@ -18,7 +18,7 @@ services:
       dockerfile: docker/Dockerfile.control-plane
     command: clawbox-scheduler
     environment: &env
-      DATABASE_URL: postgresql+psycopg://clawbox:clawbox@postgres/clawbox
+      DATABASE_URL: postgresql+psycopg://clawbox:${POSTGRES_PASSWORD:-clawbox}@postgres/clawbox
       CLAWBOX_SERVICE_TOKEN: ${CLAWBOX_SERVICE_TOKEN:-development-only-token}
       CLAWBOX_GRANT_SECRET: ${CLAWBOX_GRANT_SECRET:-development-only-grant-secret}
       ALLOCATOR_URL: http://allocator:8081

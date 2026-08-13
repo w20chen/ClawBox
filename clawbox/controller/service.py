@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, uuid
+import os, subprocess, time, uuid
 from pathlib import Path
 from fastapi import HTTPException
 from clawbox.common.config import settings
@@ -33,7 +33,11 @@ class Controller:
                             "WORKSPACE_ID":spec.workspace_id,"CLAWBOX_SERVICE_TOKEN":settings.service_token,
                             "CLAWBOX_GRANT_SECRET":settings.grant_secret})
                     backend_id = container.id
+                    self._wait_ready(endpoint)
                 except Exception as exc:
+                    try:
+                        if "container" in locals(): container.remove(force=True)
+                    except Exception: pass
                     raise HTTPException(503, f"Docker tool creation failed: {type(exc).__name__}") from exc
             else: raise HTTPException(500, "unsupported controller backend")
             row = ToolInstanceRow(tool_pod_uid=uid, tenant_id=spec.tenant_id, workspace_id=spec.workspace_id,
@@ -64,3 +68,14 @@ class Controller:
     def _model(row):
         return ToolInstance(tool_pod_uid=row.tool_pod_uid, tenant_id=row.tenant_id,
             workspace_id=row.workspace_id, endpoint=row.endpoint, backend=row.backend, state=row.state)
+    @staticmethod
+    def _wait_ready(endpoint: str) -> None:
+        import httpx
+        last_error: Exception | None = None
+        for _ in range(60):
+            try:
+                response = httpx.get(f"{endpoint}/healthz", timeout=1)
+                if response.status_code == 200: return
+            except Exception as exc: last_error = exc
+            time.sleep(.25)
+        raise RuntimeError(f"tool agent readiness timed out: {type(last_error).__name__ if last_error else 'unhealthy'}")
