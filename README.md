@@ -1,18 +1,18 @@
 # ClawBox
 
-ClawBox delivers [OpenClaw](https://github.com/openai/openclaw) and ClawTune to Kubernetes. Each tenant is a pair of Pods — a **Runtime** Pod and a **Tool** Pod — both running in isolated Kata Containers + Firecracker microVMs via the `kata-fc` RuntimeClass (the only supported deployment mode).
+ClawBox delivers [OpenClaw](https://github.com/openai/openclaw) and [ClawTune](https://github.com/w20chen/ClawTune) to Kubernetes. Each tenant is a pair of Pods — a **Runtime** Pod and a **Tool** Pod — both running in isolated Kata Containers + Firecracker microVMs.
 
 This repo ships no models and deploys no LLM. OpenClaw talks to an external OpenAI-compatible LLM endpoint over HTTP.
 
 ## Architecture
 
 ```text
-                         external LLM API
+                         External LLM API
                                 ^
                                 | HTTPS (fixed egress)
                                 |
   +-----------------------------+-----------------------------+
-  | Runtime Pod = Firecracker microVM (kata-fc)               |
+  | Runtime Pod = One Firecracker microVM (kata-fc)               |
   |                                                           |
   |  OpenClaw Gateway/runtime                                 |
   |  ClawTune plugin                                          |
@@ -22,10 +22,10 @@ This repo ships no models and deploys no LLM. OpenClaw talks to an external Open
                                | SSH, tenant-specific Service
                                v
   +-----------------------------------------------------------+
-  | Tool Pod = Firecracker microVM (kata-fc)                  |
+  | Tool Pod = One Firecracker microVM (kata-fc)                  |
   |                                                           |
-  |  non-root SSH executor                                    |
-  |  independent workspace, PID namespace and root filesystem |
+  |  Non-root SSH executor                                    |
+  |  Independent workspace, PID namespace and root filesystem |
   +-----------------------------------------------------------+
 ```
 
