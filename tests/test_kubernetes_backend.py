@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from clawbox.benchmark.kubernetes import BenchmarkTask, render_job
+from clawbox.benchmark.kubernetes import BenchmarkTask, KubernetesBenchmarkLauncher, render_job
 from clawbox.controller.kubernetes_backend import KubernetesBackend, dns_label
 
 
@@ -88,3 +88,30 @@ def test_controller_backend_creates_kata_service_and_guaranteed_tool_pod():
     resources = pod["containers"][0]["resources"]
     assert resources["requests"] == resources["limits"]
     assert core.services[0][1]["spec"]["selector"] == core.pods[0][1]["metadata"]["labels"]
+
+
+def test_build_uses_generated_clawtune_bundle():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    script = (root / "scripts" / "build-kubernetes-images.sh").read_text(encoding="utf-8")
+    dockerfile = (root / "docker" / "Dockerfile.clawtune-bundle").read_text(encoding="utf-8")
+    assert "swe_rebench/.runtime/bundle" in script
+    assert "swe_rebench/.runtime/bundle" in dockerfile
+
+
+def test_benchmark_preflight_checks_secret_and_bound_trace_pvc():
+    class Core:
+        def read_namespace(self, name):
+            return SimpleNamespace()
+
+        def read_namespaced_secret(self, name, namespace):
+            return SimpleNamespace(data={key: "encoded" for key in (
+                "llm-api-key", "llm-upstream-base-url", "llm-model", "openclaw-model-ref"
+            )})
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return SimpleNamespace(status=SimpleNamespace(phase="Bound"))
+
+    launcher = KubernetesBenchmarkLauncher(core=Core(), batch=SimpleNamespace())
+    launcher._preflight(namespace="bench", llm_secret="llm", trace_pvc="traces")

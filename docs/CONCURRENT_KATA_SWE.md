@@ -4,7 +4,7 @@
 
 ClawBox does not import the complete ClawTune application at runtime and does not fork its
 SWE-Rebench implementation. ClawTune remains the source of truth for the generated
-`swe_rebench/bundle`: OpenClaw, its plugin, sidecar, setup and task entrypoint. ClawBox packages
+`swe_rebench/.runtime/bundle`: OpenClaw, its plugin, sidecar, setup and task entrypoint. ClawBox packages
 that generated bundle into an immutable image and injects it into each task Pod with an init
 container. The SWE-Rebench task image remains the main container image.
 
@@ -40,6 +40,10 @@ export REGISTRY=registry.example.com/clawbox
 export TAG=dev
 PUSH=1 bash scripts/build-kubernetes-images.sh
 ```
+
+`registry.example.com/clawbox` is only a placeholder. Replace it with a registry reachable by
+every Kubernetes node, for example `ghcr.io/<owner>/clawbox`. For a registry-free local cluster,
+set a local image name, use `PUSH=0`, then import all images into the cluster nodes explicitly.
 
 The build uses the sibling `ClawTune` checkout as a named Docker build context. No ClawTune file
 is copied into this repository.
@@ -77,13 +81,18 @@ The task file uses the same common fields as ClawTune: `instance_id`, `image`, a
 
 ```bash
 python3 -m pip install -e .
-clawbox-swe-rebench \
-  --tasks /data/swe-rebench/tasks.json \
+bash scripts/run-swe-rebench.sh \
+  --tasks ../ClawTune/swe_rebench/tasks.json \
   --sample 8 \
   --parallelism 4 \
   --bundle-image registry.example.com/clawbox/clawtune-swe-bundle:dev \
   --trace-pvc clawbox-traces
 ```
+
+The wrapper runs from the source checkout and gives a direct dependency error. It also checks that
+the namespace, all four Secret keys, and an optional trace PVC exist before creating any Job. After installation,
+the equivalent console command is `clawbox-swe-rebench`. `/data/swe-rebench/tasks.json` in earlier
+examples was a placeholder; use the actual ClawTune dataset path or another existing task file.
 
 Inspect a task:
 

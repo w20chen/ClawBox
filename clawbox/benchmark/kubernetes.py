@@ -126,10 +126,32 @@ class KubernetesBenchmarkLauncher:
         self.core, self.batch = core, batch
 
     def run(self, tasks: list[BenchmarkTask], *, parallelism: int, **job_options: Any) -> list[dict[str, Any]]:
+        self._preflight(**job_options)
         job_options.setdefault("run_id", time.strftime("%Y%m%d%H%M%S", time.gmtime()))
         with ThreadPoolExecutor(max_workers=parallelism) as pool:
             futures = {pool.submit(self._run_one, task, **job_options): task for task in tasks}
             return [future.result() for future in as_completed(futures)]
+
+    def _preflight(self, **job_options: Any) -> None:
+        namespace = job_options["namespace"]
+        llm_secret = job_options["llm_secret"]
+        trace_pvc = job_options.get("trace_pvc")
+        try:
+            self.core.read_namespace(namespace)
+            secret = self.core.read_namespaced_secret(llm_secret, namespace)
+            keys = set((getattr(secret, "data", None) or {}).keys())
+            required = {"llm-api-key", "llm-upstream-base-url", "llm-model", "openclaw-model-ref"}
+            if missing := sorted(required - keys):
+                raise RuntimeError(f"LLM Secret {namespace}/{llm_secret} is missing keys: {', '.join(missing)}")
+            if trace_pvc:
+                pvc = self.core.read_namespaced_persistent_volume_claim(trace_pvc, namespace)
+                phase = getattr(getattr(pvc, "status", None), "phase", None)
+                if phase != "Bound":
+                    raise RuntimeError(f"trace PVC {namespace}/{trace_pvc} is not Bound (phase={phase})")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Kubernetes benchmark preflight failed: {type(exc).__name__}: {exc}") from exc
 
     def _run_one(self, task: BenchmarkTask, **job_options: Any) -> dict[str, Any]:
         namespace = job_options["namespace"]

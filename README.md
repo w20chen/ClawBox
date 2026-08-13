@@ -3,6 +3,8 @@
 > Kubernetes + Kata/Firecracker 并发运行 SWE-Rebench 的新 MVP 路径见
 > [docs/CONCURRENT_KATA_SWE.md](docs/CONCURRENT_KATA_SWE.md)。每个任务/租户拥有一个独立
 > OpenClaw runtime；ClawTune 通过版本化 runtime bundle 复用，而不是复制或直接嵌入整个项目。
+> 运行入口优先使用 `bash scripts/run-swe-rebench.sh`；`clawbox-swe-rebench` 只在执行
+> `python3 -m pip install -e .` 后才会出现。
 
 ClawBox 是一个面向 Linux 的多租户工具执行与资源调度系统。它会在执行命令前预测资源需求，分配 CPU 和内存额度，把命令发送到指定的 Docker Tool 容器，并在执行结束后回收资源、记录结果和更新 ClawTune 知识库。
 
