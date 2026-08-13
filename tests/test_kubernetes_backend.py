@@ -146,8 +146,10 @@ def test_local_runner_automates_the_complete_smoke_path():
         "containerd.userDropIn=",
         "snapshotter devmapper was not found",
         "verify_minikube_devmapper",
+        'involvedObject.uid=${pod_uid}',
     ):
         assert required in script
+    assert "involvedObject.name=kata-fc-smoke" not in script
 
 
 def test_minikube_devmapper_setup_is_persistent_and_nondestructive():

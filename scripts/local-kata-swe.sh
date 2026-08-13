@@ -162,13 +162,17 @@ run_smoke() {
   kubectl delete pod kata-fc-smoke --ignore-not-found --wait=true >/dev/null
   kubectl run kata-fc-smoke --image=alpine:3.22 --restart=Never \
     --overrides='{"spec":{"runtimeClassName":"kata-fc","containers":[{"name":"kata-fc-smoke","image":"alpine:3.22","command":["sh","-c","echo kata-fc-ok; sleep 2"]}]}}' >/dev/null
-  local deadline event phase
+  local deadline event phase pod_uid
+  pod_uid="$(kubectl get pod kata-fc-smoke -o jsonpath='{.metadata.uid}')"
+  [[ -n "${pod_uid}" ]] || die "could not read the new kata-fc smoke Pod UID"
   deadline=$((SECONDS + 180))
   while (( SECONDS < deadline )); do
     phase="$(kubectl get pod kata-fc-smoke -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     [[ "${phase}" == "Succeeded" ]] && { kubectl logs kata-fc-smoke; return 0; }
     [[ "${phase}" == "Failed" ]] && break
-    event="$(kubectl get events --field-selector involvedObject.name=kata-fc-smoke \
+    # Event objects outlive deleted Pods. Filter by UID, not the reused Pod
+    # name, or a previous smoke failure can abort a healthy new attempt.
+    event="$(kubectl get events --field-selector "involvedObject.uid=${pod_uid}" \
       -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)"
     if grep -q 'no runtime for "kata-fc" is configured' <<<"${event}"; then
       echo "kata-fc is not registered in the Kubernetes node's containerd." >&2
