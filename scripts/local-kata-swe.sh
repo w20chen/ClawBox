@@ -184,6 +184,11 @@ run_smoke() {
       echo "For Minikube, re-run with --bootstrap-minikube or --install-kata to repair it." >&2
       break
     fi
+    if grep -qE 'failed to get reader from content store.*not found' <<<"${event}"; then
+      echo "containerd has image metadata but a required content blob is missing." >&2
+      echo "Re-run with --install-kata to restore and unpack bootstrap images for devmapper." >&2
+      break
+    fi
     sleep 2
   done
   if [[ "${phase:-}" != "Succeeded" ]]; then
@@ -216,6 +221,18 @@ verify_minikube_devmapper() {
   if ! awk '$1 ~ /snapshotter/ && $2 == "devmapper" && $4 == "ok" { found=1 } END { exit !found }' <<<"${plugins}"; then
     echo "${plugins}" | grep -E 'TYPE|devmapper' >&2 || true
     die "containerd devmapper snapshotter is not healthy after Kata installation"
+  fi
+}
+
+prepare_minikube_kata_images() {
+  local output remote_script
+  remote_script="/tmp/clawbox-prepare-kata-images"
+  log "Preparing the pause and smoke images with the devmapper snapshotter"
+  minikube cp "${ROOT}/scripts/minikube-prepare-kata-images.sh" "minikube:${remote_script}" || \
+    die "failed to copy the Kata image preparation script into Minikube"
+  if ! output="$(minikube ssh -- "sudo bash ${remote_script}" 2>&1)"; then
+    echo "${output}" >&2
+    die "failed to pull and unpack the Kata bootstrap images with devmapper"
   fi
 }
 
@@ -254,6 +271,7 @@ install_kata() {
   }
   if [[ "${context}" == "minikube" ]]; then
     verify_minikube_devmapper
+    prepare_minikube_kata_images
   fi
 }
 

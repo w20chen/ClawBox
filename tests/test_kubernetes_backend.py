@@ -145,7 +145,9 @@ def test_local_runner_automates_the_complete_smoke_path():
         "configure_minikube_devmapper",
         "containerd.userDropIn=",
         "snapshotter devmapper was not found",
+        "failed to get reader from content store",
         "verify_minikube_devmapper",
+        "prepare_minikube_kata_images",
         'involvedObject.uid=${pod_uid}',
     ):
         assert required in script
@@ -166,3 +168,15 @@ def test_minikube_devmapper_setup_is_persistent_and_nondestructive():
     assert "systemctl enable clawbox-devmapper.service" in setup
     assert "pool_name = 'clawbox-devpool'" in config
     assert "base_image_size = '10GB'" in config
+    assert "discard_unpacked_layers = false" in config
+
+
+def test_kata_bootstrap_images_are_unpacked_for_devmapper():
+    from pathlib import Path
+
+    script = (Path(__file__).parents[1] / "scripts" / "minikube-prepare-kata-images.sh").read_text(encoding="utf-8")
+    assert "containerd config dump" in script
+    assert '$1 == "sandbox"' in script
+    assert "--snapshotter devmapper" in script
+    assert "docker.io/library/alpine:3.22" in script
+    assert "registry.k8s.io/pause:" not in script

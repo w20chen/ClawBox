@@ -104,7 +104,9 @@ kubectl apply -f deploy/benchmark-networkpolicy.yaml
 Firecracker requires a block-device rootfs. The Kata Deploy chart therefore maps `kata-fc` to the
 containerd `devmapper` snapshotter, which the operator must preconfigure. The automated Minikube
 path does this before Helm and refuses to continue unless `ctr plugins ls` reports devmapper as
-`ok`. For non-Minikube clusters, provision a production thin pool on every eligible node; the
+`ok`. It also retains containerd content blobs and pre-unpacks the effective CRI pause image with
+devmapper; this is required when overlayfs and devmapper share the same content store. For
+non-Minikube clusters, provision a production thin pool on every eligible node; the
 loopback pool used here is intended for local development only.
 
 Create the LLM secret without putting its key in shell history or Git. The example documents the
