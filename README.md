@@ -13,7 +13,8 @@ ClawBox 在 Kubernetes 上并发运行隔离的 OpenClaw 租户。当前 MVP 的
 ### 前置条件
 
 - Linux、Kubernetes、Docker 和 Python 3。
-- containerd 已配置可用的 `kata-fc` handler；只有 RuntimeClass 对象还不够。
+- Helm；脚本用 Kata 官方 chart 安装节点运行时。
+- 宿主机及 Kubernetes 节点都能访问 `/dev/kvm`。
 - `~/ClawBox` 和 `~/ClawTune` 位于同一父目录。
 - 一个 OpenAI-compatible 模型服务及 API key。
 
@@ -45,6 +46,7 @@ bash scripts/local-kata-swe.sh \
 6. 运行一个 SWE-Rebench 任务。
 
 支持普通 containerd、k3s、kind、minikube 和 k3d。本地运行不需要远程镜像仓库。
+如果 Kata 已经安装，可以省略 `--install-kata`。
 
 ### 并发运行
 

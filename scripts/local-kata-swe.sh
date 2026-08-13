@@ -165,7 +165,11 @@ install_kata() {
 }
 
 if [[ "${COMMAND}" == "smoke" ]]; then
-  kubectl apply -f "${ROOT}/deploy/runtimeclass.yaml" >/dev/null
+  if [[ "${INSTALL_KATA}" == "1" ]]; then
+    install_kata
+  else
+    kubectl apply -f "${ROOT}/deploy/runtimeclass.yaml" >/dev/null
+  fi
   run_smoke
   exit 0
 fi
