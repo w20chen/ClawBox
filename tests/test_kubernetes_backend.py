@@ -156,6 +156,8 @@ def test_minikube_devmapper_setup_is_persistent_and_nondestructive():
     root = Path(__file__).parents[1]
     setup = (root / "scripts" / "minikube-devmapper.sh").read_text(encoding="utf-8")
     config = (root / "deploy" / "containerd-devmapper.toml").read_text(encoding="utf-8")
+    assert '"$(dirname "${INSTALL_PATH}")"' in setup
+    assert '"$(dirname "${SERVICE_PATH}")"' in setup
     assert "if [[ ! -e \"${DATA_DIR}/data\" ]]" in setup
     assert "if [[ ! -e \"${DATA_DIR}/meta\" ]]" in setup
     assert "Before=containerd.service kubelet.service" in setup

@@ -12,14 +12,15 @@ INSTALL_PATH="/usr/local/sbin/clawbox-devmapper-setup"
 SERVICE_PATH="/etc/systemd/system/clawbox-devmapper.service"
 
 [[ "$(id -u)" == "0" ]] || { echo "run as root" >&2; exit 1; }
-for command in dmsetup losetup blockdev truncate awk; do
+for command in dmsetup losetup blockdev truncate awk install systemctl; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "${command} is required in the Minikube node" >&2
     exit 1
   }
 done
 
-mkdir -p "${DATA_DIR}"
+# Minimal Minikube node images do not necessarily contain /usr/local/sbin.
+mkdir -p "${DATA_DIR}" "$(dirname "${INSTALL_PATH}")" "$(dirname "${SERVICE_PATH}")"
 if [[ ! -e "${DATA_DIR}/data" ]]; then
   truncate -s "${DATA_SIZE}" "${DATA_DIR}/data"
 fi
@@ -68,4 +69,3 @@ EOF
 systemctl daemon-reload
 systemctl enable clawbox-devmapper.service >/dev/null
 dmsetup info "${POOL_NAME}" >/dev/null
-
