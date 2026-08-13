@@ -21,6 +21,7 @@ MODEL="${LLM_MODEL:-}"
 OPENCLAW_MODEL="${OPENCLAW_MODEL_REF:-}"
 REBUILD="${REBUILD:-0}"
 SKIP_SMOKE="${SKIP_KATA_SMOKE:-0}"
+INSTALL_KATA="${INSTALL_KATA:-0}"
 
 usage() {
   cat <<'EOF'
@@ -46,6 +47,7 @@ Options:
   --memory VALUE       Memory per task; default: 4Gi
   --rebuild            Rebuild the ClawTune bundle and bundle image
   --skip-smoke         Skip the kata-fc Alpine smoke Pod
+  --install-kata       Install Kata on cluster nodes with the official Helm chart
 EOF
 }
 
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --memory) MEMORY="${2:?missing value}"; shift 2 ;;
     --rebuild) REBUILD=1; shift ;;
     --skip-smoke) SKIP_SMOKE=1; shift ;;
+    --install-kata) INSTALL_KATA=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -118,12 +121,47 @@ run_smoke() {
   kubectl delete pod kata-fc-smoke --ignore-not-found --wait=true >/dev/null
   kubectl run kata-fc-smoke --image=alpine:3.22 --restart=Never \
     --overrides='{"spec":{"runtimeClassName":"kata-fc","containers":[{"name":"kata-fc-smoke","image":"alpine:3.22","command":["sh","-c","echo kata-fc-ok; sleep 2"]}]}}' >/dev/null
-  if ! kubectl wait pod/kata-fc-smoke --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s >/dev/null; then
+  local deadline event phase
+  deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    phase="$(kubectl get pod kata-fc-smoke -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    [[ "${phase}" == "Succeeded" ]] && { kubectl logs kata-fc-smoke; return 0; }
+    [[ "${phase}" == "Failed" ]] && break
+    event="$(kubectl get events --field-selector involvedObject.name=kata-fc-smoke \
+      -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)"
+    if grep -q 'no runtime for "kata-fc" is configured' <<<"${event}"; then
+      echo "kata-fc is not registered in the Kubernetes node's containerd." >&2
+      echo "Re-run with --install-kata to install it using the official Kata Deploy Helm chart." >&2
+      break
+    fi
+    sleep 2
+  done
+  if [[ "${phase:-}" != "Succeeded" ]]; then
     kubectl describe pod kata-fc-smoke >&2 || true
     kubectl logs kata-fc-smoke >&2 || true
     die "kata-fc smoke Pod failed; RuntimeClass alone is not enough—check the containerd kata-fc handler"
   fi
-  kubectl logs kata-fc-smoke
+}
+
+install_kata() {
+  need helm
+  need curl
+  local context version chart
+  context="$(kubectl config current-context 2>/dev/null || true)"
+  if [[ "${context}" == "minikube" ]] && ! minikube ssh -- test -r /dev/kvm -a -w /dev/kvm; then
+    die "the Minikube node cannot access /dev/kvm. Recreate Minikube with a VM driver such as kvm2, then retry --install-kata"
+  fi
+  version="${KATA_VERSION:-$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')}"
+  chart="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
+  log "Installing Kata Containers ${version} on Kubernetes nodes"
+  # The earlier ClawBox placeholder RuntimeClass would conflict with Helm ownership.
+  kubectl delete runtimeclass kata-fc --ignore-not-found >/dev/null
+  helm upgrade --install kata-deploy "${chart}" --version "${version}" \
+    --namespace kata-system --create-namespace --wait --timeout 10m
+  kubectl get runtimeclass kata-fc >/dev/null 2>&1 || {
+    kubectl get runtimeclass >&2 || true
+    die "Kata Deploy completed but did not create the required kata-fc RuntimeClass"
+  }
 }
 
 if [[ "${COMMAND}" == "smoke" ]]; then
@@ -156,9 +194,13 @@ if [[ "${REBUILD}" == "1" ]] || ! docker image inspect "${BUNDLE_IMAGE}" >/dev/n
 fi
 
 log "Applying Kubernetes resources"
-kubectl apply -f "${ROOT}/deploy/runtimeclass.yaml" >/dev/null
 kubectl apply -f "${ROOT}/deploy/control-plane-rbac.yaml" >/dev/null
 kubectl apply -f "${ROOT}/deploy/benchmark-networkpolicy.yaml" >/dev/null
+if [[ "${INSTALL_KATA}" == "1" ]]; then
+  install_kata
+else
+  kubectl apply -f "${ROOT}/deploy/runtimeclass.yaml" >/dev/null
+fi
 
 import_image() {
   local context runtime tar_file cluster

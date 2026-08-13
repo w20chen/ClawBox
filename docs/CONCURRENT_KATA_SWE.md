@@ -9,7 +9,8 @@ cd ~/ClawBox
 bash scripts/local-kata-swe.sh \
   --api-key-file ~/llm-api-key.txt \
   --base-url https://api.example.com/v1 \
-  --model provider-model
+  --model provider-model \
+  --install-kata
 ```
 
 It prepares the bundle when missing, builds and imports the image, applies manifests, creates the

@@ -133,5 +133,8 @@ def test_local_runner_automates_the_complete_smoke_path():
         "kind load docker-image",
         "k3s ctr images import",
         "ctr -n k8s.io images import",
+        "helm upgrade --install kata-deploy",
+        "no runtime for",
+        "minikube ssh -- test -r /dev/kvm",
     ):
         assert required in script

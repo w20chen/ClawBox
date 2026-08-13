@@ -31,14 +31,15 @@ cd ~/ClawBox
 bash scripts/local-kata-swe.sh \
   --api-key-file ~/llm-api-key.txt \
   --base-url https://api.example.com/v1 \
-  --model provider-model
+  --model provider-model \
+  --install-kata
 ```
 
 脚本会自动：
 
 1. 生成 ClawTune runtime bundle。
 2. 构建并导入本地 bundle 镜像。
-3. 应用 RuntimeClass、namespace、RBAC 和 NetworkPolicy。
+3. 使用 Kata 官方 Helm chart 安装运行时，并应用 namespace、RBAC 和 NetworkPolicy。
 4. 创建或更新 LLM Secret。
 5. 启动一个真实 `kata-fc` smoke Pod。
 6. 运行一个 SWE-Rebench 任务。
@@ -79,6 +80,7 @@ bash scripts/local-kata-swe.sh smoke
 --memory VALUE        每个任务的内存，默认 4Gi
 --rebuild             ClawTune 更新后重建 bundle 和镜像
 --skip-smoke          跳过 kata-fc smoke test
+--install-kata        使用官方 Kata Deploy Helm chart 安装节点运行时
 ```
 
 查看全部参数：
@@ -93,7 +95,9 @@ bash scripts/local-kata-swe.sh --help
 
 检查脚本自动打印的 `kubectl describe pod` 输出。若出现 handler 不存在或
 `FailedCreatePodSandBox`，需要先在 containerd 中配置 Kata Firecracker handler；创建
-`deploy/runtimeclass.yaml` 本身不会安装运行时。
+`deploy/runtimeclass.yaml` 本身不会安装运行时。直接重新运行首次命令并加
+`--install-kata`。若 Minikube 节点看不到 `/dev/kvm`，需先用支持 KVM 的 VM driver
+（例如 `kvm2`）重建 Minikube。
 
 ### ClawTune bundle 权限错误
 
