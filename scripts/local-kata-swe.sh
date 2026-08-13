@@ -175,12 +175,43 @@ run_smoke() {
       echo "Re-run with --install-kata to install it using the official Kata Deploy Helm chart." >&2
       break
     fi
+    if grep -qE 'snapshotter devmapper was not found|snapshotter not loaded.*devmapper|devmapper not configured' <<<"${event}"; then
+      echo "kata-fc selected containerd's devmapper snapshotter, but the plugin is unavailable." >&2
+      echo "For Minikube, re-run with --bootstrap-minikube or --install-kata to repair it." >&2
+      break
+    fi
     sleep 2
   done
   if [[ "${phase:-}" != "Succeeded" ]]; then
     kubectl describe pod kata-fc-smoke >&2 || true
     kubectl logs kata-fc-smoke >&2 || true
-    die "kata-fc smoke Pod failed; RuntimeClass alone is not enough—check the containerd kata-fc handler"
+    die "kata-fc smoke Pod failed; inspect the handler, devmapper plugin, KVM and events above"
+  fi
+}
+
+configure_minikube_devmapper() {
+  local output remote_script
+  remote_script="/tmp/clawbox-devmapper-setup"
+  log "Configuring the Minikube devmapper thin pool required by kata-fc"
+  minikube cp "${ROOT}/scripts/minikube-devmapper.sh" "minikube:${remote_script}" || \
+    die "failed to copy the devmapper setup script into Minikube"
+  if ! output="$(minikube ssh -- "sudo bash ${remote_script}" 2>&1)"; then
+    echo "${output}" >&2
+    die "failed to configure the persistent devmapper thin pool in Minikube"
+  fi
+  minikube ssh -- 'sudo dmsetup info clawbox-devpool >/dev/null' || \
+    die "Minikube devmapper thin pool is not active"
+}
+
+verify_minikube_devmapper() {
+  local plugins
+  plugins="$(minikube ssh -- 'sudo ctr plugins ls' 2>&1)" || {
+    echo "${plugins}" >&2
+    die "cannot inspect containerd plugins in Minikube"
+  }
+  if ! awk '$1 ~ /snapshotter/ && $2 == "devmapper" && $4 == "ok" { found=1 } END { exit !found }' <<<"${plugins}"; then
+    echo "${plugins}" | grep -E 'TYPE|devmapper' >&2 || true
+    die "containerd devmapper snapshotter is not healthy after Kata installation"
   fi
 }
 
@@ -198,18 +229,28 @@ install_kata() {
       echo "${kvm_output}" >&2
       die "the Minikube node cannot access /dev/kvm. Use a kvm2 cluster with nested virtualization enabled"
     fi
+    configure_minikube_devmapper
   fi
   version="${KATA_VERSION:-$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')}"
   chart="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
   log "Installing Kata Containers ${version} on Kubernetes nodes"
   # The earlier ClawBox placeholder RuntimeClass would conflict with Helm ownership.
   kubectl delete runtimeclass kata-fc --ignore-not-found >/dev/null
-  helm upgrade --install kata-deploy "${chart}" --version "${version}" \
+  local helm_args=(
+    --install kata-deploy "${chart}" --version "${version}"
     --namespace kata-system --create-namespace --wait --timeout 10m
+  )
+  if [[ "${context}" == "minikube" ]]; then
+    helm_args+=(--set-file "containerd.userDropIn=${ROOT}/deploy/containerd-devmapper.toml")
+  fi
+  helm upgrade "${helm_args[@]}"
   kubectl get runtimeclass kata-fc >/dev/null 2>&1 || {
     kubectl get runtimeclass >&2 || true
     die "Kata Deploy completed but did not create the required kata-fc RuntimeClass"
   }
+  if [[ "${context}" == "minikube" ]]; then
+    verify_minikube_devmapper
+  fi
 }
 
 if [[ "${COMMAND}" == "smoke" ]]; then

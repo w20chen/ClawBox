@@ -1,0 +1,7 @@
+[plugins.'io.containerd.snapshotter.v1.devmapper']
+  pool_name = 'clawbox-devpool'
+  root_path = '/var/lib/containerd/io.containerd.snapshotter.v1.devmapper'
+  base_image_size = '10GB'
+  discard_blocks = true
+  async_remove = true
+

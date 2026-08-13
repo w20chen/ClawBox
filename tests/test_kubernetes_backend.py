@@ -133,7 +133,7 @@ def test_local_runner_automates_the_complete_smoke_path():
         "kind load docker-image",
         "k3s ctr images import",
         "ctr -n k8s.io images import",
-        "helm upgrade --install kata-deploy",
+        "helm upgrade",
         "no runtime for",
         "minikube ssh -- test -r /dev/kvm",
         "--bootstrap-minikube",
@@ -142,5 +142,23 @@ def test_local_runner_automates_the_complete_smoke_path():
         "minikube start --driver=kvm2",
         "CLAWBOX_LIBVIRT_REEXEC=1",
         "exec sg libvirt",
+        "configure_minikube_devmapper",
+        "containerd.userDropIn=",
+        "snapshotter devmapper was not found",
+        "verify_minikube_devmapper",
     ):
         assert required in script
+
+
+def test_minikube_devmapper_setup_is_persistent_and_nondestructive():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    setup = (root / "scripts" / "minikube-devmapper.sh").read_text(encoding="utf-8")
+    config = (root / "deploy" / "containerd-devmapper.toml").read_text(encoding="utf-8")
+    assert "if [[ ! -e \"${DATA_DIR}/data\" ]]" in setup
+    assert "if [[ ! -e \"${DATA_DIR}/meta\" ]]" in setup
+    assert "Before=containerd.service kubelet.service" in setup
+    assert "systemctl enable clawbox-devmapper.service" in setup
+    assert "pool_name = 'clawbox-devpool'" in config
+    assert "base_image_size = '10GB'" in config

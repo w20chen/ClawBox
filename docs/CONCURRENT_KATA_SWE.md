@@ -28,8 +28,11 @@ bash scripts/local-kata-swe.sh \
 ```
 
 It prepares the bundle when missing, builds and imports the image, applies manifests, creates the
-Secret, boots a `kata-fc` smoke microVM, and runs one task. Repeat runs reuse the bundle, image and
-Secret. Use `--rebuild` after ClawTune changes. Useful commands:
+Secret, boots a `kata-fc` smoke microVM, and runs one task. On Minikube it also creates the
+persistent containerd devmapper thin pool required by Firecracker and installs a systemd unit that
+reattaches the same pool after a VM restart. The backing files are sparse (100 GB data, 2 GB
+metadata), but real writes still consume Minikube's host disk. Repeat runs reuse the pool, bundle,
+image and Secret. Use `--rebuild` after ClawTune changes. Useful commands:
 
 ```bash
 bash scripts/local-kata-swe.sh --sample 8 --parallelism 4 --cpu 4 --memory 8Gi
@@ -97,6 +100,12 @@ kubectl apply -f deploy/runtimeclass.yaml
 kubectl apply -f deploy/control-plane-rbac.yaml
 kubectl apply -f deploy/benchmark-networkpolicy.yaml
 ```
+
+Firecracker requires a block-device rootfs. The Kata Deploy chart therefore maps `kata-fc` to the
+containerd `devmapper` snapshotter, which the operator must preconfigure. The automated Minikube
+path does this before Helm and refuses to continue unless `ctr plugins ls` reports devmapper as
+`ok`. For non-Minikube clusters, provision a production thin pool on every eligible node; the
+loopback pool used here is intended for local development only.
 
 Create the LLM secret without putting its key in shell history or Git. The example documents the
 required keys but must not be applied unchanged:
