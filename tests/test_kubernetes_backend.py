@@ -180,3 +180,6 @@ def test_kata_bootstrap_images_are_unpacked_for_devmapper():
     assert "--snapshotter devmapper" in script
     assert "docker.io/library/alpine:3.22" in script
     assert "registry.k8s.io/pause:" not in script
+    assert "registry.cn-hangzhou.aliyuncs.com/google_containers/pause" in script
+    assert 'images tag --force "${pause_source}" "${pause_image}"' in script
+    assert "CLAWBOX_PAUSE_MIRROR" in script

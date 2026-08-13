@@ -225,12 +225,15 @@ verify_minikube_devmapper() {
 }
 
 prepare_minikube_kata_images() {
-  local output remote_script
+  local command output remote_script
   remote_script="/tmp/clawbox-prepare-kata-images"
   log "Preparing the pause and smoke images with the devmapper snapshotter"
   minikube cp "${ROOT}/scripts/minikube-prepare-kata-images.sh" "minikube:${remote_script}" || \
     die "failed to copy the Kata image preparation script into Minikube"
-  if ! output="$(minikube ssh -- "sudo bash ${remote_script}" 2>&1)"; then
+  printf -v command 'sudo env CLAWBOX_PAUSE_MIRROR=%q CLAWBOX_ALPINE_IMAGE=%q bash %q' \
+    "${CLAWBOX_PAUSE_MIRROR:-registry.cn-hangzhou.aliyuncs.com/google_containers/pause}" \
+    "${CLAWBOX_ALPINE_IMAGE:-docker.io/library/alpine:3.22}" "${remote_script}"
+  if ! output="$(minikube ssh -- "${command}" 2>&1)"; then
     echo "${output}" >&2
     die "failed to pull and unpack the Kata bootstrap images with devmapper"
   fi

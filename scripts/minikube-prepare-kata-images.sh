@@ -18,11 +18,29 @@ pause_image="$(containerd config dump | awk \
   echo "could not determine the CRI sandbox image from containerd config" >&2
   exit 1
 }
+pause_tag="${pause_image##*:}"
+pause_mirror="${CLAWBOX_PAUSE_MIRROR:-registry.cn-hangzhou.aliyuncs.com/google_containers/pause}"
+alpine_image="${CLAWBOX_ALPINE_IMAGE:-docker.io/library/alpine:3.22}"
 
 pull_devmapper() {
   ctr --namespace k8s.io images pull \
     --snapshotter devmapper --platform linux/amd64 "$1"
 }
 
-pull_devmapper "${pause_image}"
-pull_devmapper docker.io/library/alpine:3.22
+# registry.k8s.io redirects to Google Artifact Registry, which is often
+# unreachable from mainland China. Pull the same image from a configurable
+# mirror, then add the exact name requested by kubelet. Fall back to upstream.
+pause_source="${pause_mirror}:${pause_tag}"
+if ! pull_devmapper "${pause_source}"; then
+  echo "pause mirror failed (${pause_source}); trying ${pause_image}" >&2
+  pull_devmapper "${pause_image}"
+  pause_source="${pause_image}"
+fi
+if [[ "${pause_source}" != "${pause_image}" ]]; then
+  ctr --namespace k8s.io images tag --force "${pause_source}" "${pause_image}"
+fi
+
+pull_devmapper "${alpine_image}"
+if [[ "${alpine_image}" != "docker.io/library/alpine:3.22" ]]; then
+  ctr --namespace k8s.io images tag --force "${alpine_image}" docker.io/library/alpine:3.22
+fi

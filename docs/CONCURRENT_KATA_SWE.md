@@ -109,6 +109,15 @@ devmapper; this is required when overlayfs and devmapper share the same content 
 non-Minikube clusters, provision a production thin pool on every eligible node; the
 loopback pool used here is intended for local development only.
 
+The local path tries the Aliyun Kubernetes pause mirror before the upstream registry. Override
+either bootstrap source when using a proxy or private registry:
+
+```bash
+CLAWBOX_PAUSE_MIRROR=registry.example.com/google_containers/pause \
+CLAWBOX_ALPINE_IMAGE=registry.example.com/library/alpine:3.22 \
+bash scripts/local-kata-swe.sh smoke --install-kata
+```
+
 Create the LLM secret without putting its key in shell history or Git. The example documents the
 required keys but must not be applied unchanged:
 
