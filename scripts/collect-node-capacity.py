@@ -49,7 +49,7 @@ def kvm() -> dict[str, Any]:
 def devmapper() -> dict[str, Any]:
     report = json_command(
         "lvs", "--reportformat", "json", "--units", "b", "--nosuffix",
-        "-o", "vg_name,lv_name,lv_size,data_percent,metadata_percent,dm_name",
+        "-o", "vg_name,lv_name,lv_size,data_percent,metadata_percent,lv_dm_path",
     ) if shutil.which("lvs") else None
     result: dict[str, Any] = {"lvs": report, "available_bytes": 0}
     try:
@@ -60,7 +60,7 @@ def devmapper() -> dict[str, Any]:
         result["available_bytes"] = int(size * max(0.0, 100.0 - used) / 100.0)
         result["data_percent"] = used
         result["metadata_percent"] = float(pool.get("metadata_percent") or 100)
-        result["dm_name"] = pool.get("dm_name")
+        result["dm_name"] = os.path.basename(pool.get("lv_dm_path") or "") or None
     except (KeyError, StopIteration, TypeError, ValueError):
         pass
     return result

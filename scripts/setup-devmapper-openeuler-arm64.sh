@@ -239,7 +239,9 @@ lvchange -ay --noudevsync "${VG}/${POOL}"
 dmsetup mknodes
 vgscan --mknodes >/dev/null 2>&1 || true
 
-dm_name="$(lvs --noheadings -o dm_name "${VG}/${POOL}" | xargs)"
+dm_path="$(lvs --noheadings -o lv_dm_path "${VG}/${POOL}" | xargs)"
+[[ -n "${dm_path}" ]] || { echo "LVM did not report a dm path for ${VG}/${POOL}" >&2; exit 1; }
+dm_name="$(basename "${dm_path}")"
 [[ -n "${dm_name}" ]] && dmsetup info "${dm_name}" >/dev/null \
   || { echo "LVM did not expose a usable thin-pool mapping" >&2; exit 1; }
 
