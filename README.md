@@ -3,12 +3,14 @@
 ClawBox 在 Kubernetes 上并发运行隔离的 OpenClaw 租户。当前 MVP 的主路径是：
 
 - 每个 SWE-Rebench 任务对应一个独立 OpenClaw runtime。
-- Pod 使用 Kata Containers 的 `kata-fc` RuntimeClass，由 Firecracker microVM 隔离。
+- Pod 使用可配置的 Kata RuntimeClass；鲲鹏/openEuler 首轮默认 `kata-qemu`，验证后可切换 `kata-fc`。
 - SWE-Rebench 任务代码来自任务自身的 Docker 镜像。
 - OpenClaw、插件和 sidecar 复用 ClawTune 生成的 runtime bundle。
 - 当前先跑通并发部署；预测算法、共享 KB、自定义调度和 eBPF 不在主路径中。
 
 ## 本地一键运行
+
+鲲鹏/openEuler 部署前必须先完成 [ARM64 阶段 0/1 门禁](docs/OPENEUER_ARM64.md)。
 
 ### 前置条件
 
@@ -59,7 +61,7 @@ bash scripts/local-kata-swe.sh \
 2. 构建并导入本地 bundle 镜像。
 3. 使用 Kata 官方 Helm chart 安装运行时，并应用 namespace、RBAC 和 NetworkPolicy。
 4. 创建或更新 LLM Secret。
-5. 启动一个真实 `kata-fc` smoke Pod。
+5. 使用所选 RuntimeClass 启动一个真实 Kata smoke Pod。
 6. 运行一个 SWE-Rebench 任务。
 
 支持普通 containerd、k3s、kind、minikube 和 k3d。本地运行不需要远程镜像仓库。
@@ -77,7 +79,7 @@ bash scripts/local-kata-swe.sh \
   --memory 8Gi
 ```
 
-每个并发任务都拥有独立的 Kata/Firecracker VM。请确保节点有足够的 CPU 和内存。
+每个并发任务都拥有独立的 Kata VM；只有显式选择并验证 `kata-fc` 时才使用 Firecracker。请确保节点有足够的 CPU 和内存。
 
 ### 状态与日志
 
@@ -97,8 +99,9 @@ bash scripts/local-kata-swe.sh smoke
 --parallelism N       最大并发数，默认 1
 --cpu VALUE           每个任务的 CPU，默认 2
 --memory VALUE        每个任务的内存，默认 4Gi
+--runtime-class NAME  已安装的 Kata RuntimeClass，默认 kata-qemu
 --rebuild             ClawTune 更新后重建 bundle 和镜像
---skip-smoke          跳过 kata-fc smoke test
+--skip-smoke          跳过 Kata smoke test
 --install-kata        使用官方 Kata Deploy Helm chart 安装节点运行时
 --bootstrap-minikube  安装 Ubuntu KVM/libvirt 并创建 kvm2 Minikube
 ```
@@ -111,12 +114,12 @@ bash scripts/local-kata-swe.sh --help
 
 ## 常见问题
 
-### `kata-fc` Pod 启动失败
+### Kata Pod 启动失败
 
 检查脚本自动打印的 `kubectl describe pod` 输出。若出现 handler 不存在或
-`FailedCreatePodSandBox`，需要先在 containerd 中配置 Kata Firecracker handler；创建
+`FailedCreatePodSandBox`，需要先在 containerd 中配置所选 Kata handler；创建
 `deploy/runtimeclass.yaml` 本身不会安装运行时。直接重新运行首次命令并加
-`--install-kata`。若 Minikube 节点看不到 `/dev/kvm`，需先用支持 KVM 的 VM driver
+`--install-kata`，或传入机器上实际存在的 `--runtime-class`。若 Minikube 节点看不到 `/dev/kvm`，需先用支持 KVM 的 VM driver
 （例如 `kvm2`）重建 Minikube。
 
 ### ClawTune bundle 权限错误

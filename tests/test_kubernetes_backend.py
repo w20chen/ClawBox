@@ -17,7 +17,7 @@ def test_swe_job_uses_task_image_openclaw_bundle_and_kata_guaranteed_qos():
         llm_secret="llm", trace_pvc="traces",
     )
     pod = job["spec"]["template"]["spec"]
-    assert pod["runtimeClassName"] == "kata-fc"
+    assert pod["runtimeClassName"] == "kata-qemu"
     assert pod["automountServiceAccountToken"] is False
     assert pod["initContainers"][0]["image"] == "registry/bundle:dev"
     assert pod["initContainers"][0]["imagePullPolicy"] == "IfNotPresent"
@@ -85,7 +85,7 @@ def test_controller_backend_creates_kata_service_and_guaranteed_tool_pod():
     assert created.pod_uid == "physical-pod-uid"
     assert created.endpoint.endswith(".svc:8090")
     pod = core.pods[0][1]["spec"]
-    assert pod["runtimeClassName"] == "kata-fc"
+    assert pod["runtimeClassName"] == "kata-qemu"
     resources = pod["containers"][0]["resources"]
     assert resources["requests"] == resources["limits"]
     assert core.services[0][1]["spec"]["selector"] == core.pods[0][1]["metadata"]["labels"]
@@ -97,8 +97,38 @@ def test_build_uses_generated_clawtune_bundle():
     root = Path(__file__).parents[1]
     script = (root / "scripts" / "build-kubernetes-images.sh").read_text(encoding="utf-8")
     dockerfile = (root / "docker" / "Dockerfile.clawtune-bundle").read_text(encoding="utf-8")
-    assert "swe_rebench/.runtime/bundle" in script
-    assert "swe_rebench/.runtime/bundle" in dockerfile
+    assert "swe_rebench/.runtime/assets" in script
+    assert "swe_rebench/.runtime/assets" in dockerfile
+    assert "/bundle/sidecar" in dockerfile
+
+
+def test_runtime_image_reuses_current_clawtune_v2_sources():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    dockerfile = (root / "docker" / "Dockerfile.runtime").read_text(encoding="utf-8")
+    entrypoint = (root / "scripts" / "runtime-entrypoint.sh").read_text(encoding="utf-8")
+    assert "packages/clawtune-plugin" in dockerfile
+    assert "services/sidecar" in dockerfile
+    assert "clawtune_sidecar, tool_resource" in dockerfile
+    assert "packages/openclaw-plugin" not in dockerfile
+    assert "services/scheduler" not in dockerfile
+    assert "clawtune_sidecar.main" in entrypoint
+    assert "plugins enable clawtune" in entrypoint
+    assert '"clawtune"' in entrypoint
+    assert "agent_scheduler" not in entrypoint
+
+
+def test_build_fails_fast_on_clawtune_contract_drift():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    validator = (root / "scripts" / "validate_clawtune_integration.py").read_text(encoding="utf-8")
+    build = (root / "scripts" / "build-kubernetes-images.sh").read_text(encoding="utf-8")
+    assert 'manifest.get("id") != "clawtune"' in validator
+    assert 'scripts.get("clawtune-sidecar")' in validator
+    assert "LEGACY_MARKERS" in validator
+    assert "validate_clawtune_integration.py" in build
 
 
 def test_benchmark_preflight_checks_secret_and_bound_trace_pvc():
@@ -125,7 +155,6 @@ def test_local_runner_automates_the_complete_smoke_path():
     for required in (
         "swe_rebench.runner prepare",
         "Dockerfile.clawtune-bundle",
-        "deploy/runtimeclass.yaml",
         "deploy/control-plane-rbac.yaml",
         "create secret generic",
         "runtimeClassName",
@@ -137,6 +166,7 @@ def test_local_runner_automates_the_complete_smoke_path():
         "no runtime for",
         "minikube ssh -- test -r /dev/kvm",
         "--bootstrap-minikube",
+        "--runtime-class",
         "apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils",
         "virt-host-validate qemu",
         "minikube start --driver=kvm2",
@@ -152,6 +182,32 @@ def test_local_runner_automates_the_complete_smoke_path():
     ):
         assert required in script
     assert "involvedObject.name=kata-fc-smoke" not in script
+
+
+def test_arm64_stage0_gate_checks_arch_isolation_network_and_cleanup():
+    from pathlib import Path
+
+    script = (Path(__file__).parents[1] / "scripts" / "arm64-kata-smoke.sh").read_text(encoding="utf-8")
+    for required in (
+        "kubernetes.io/arch: arm64",
+        "runtimeClassName: ${RUNTIME_CLASS}",
+        "NetworkPolicy",
+        "attacker reached the Tool service",
+        "/proc/sys/kernel/random/boot_id",
+        'kubectl delete namespace "${NAMESPACE}"',
+    ):
+        assert required in script
+
+
+def test_openeuler_host_gate_is_read_only_and_runtime_class_aware():
+    from pathlib import Path
+
+    script = (Path(__file__).parents[1] / "deploy" / "check-host.sh").read_text(encoding="utf-8")
+    assert "/etc/os-release" in script
+    assert "/sys/fs/cgroup/cgroup.controllers" in script
+    assert 'kubectl get runtimeclass "${RUNTIME_CLASS}"' in script
+    assert "arm64-kata-smoke.sh" in script
+    assert "kubectl apply" not in script
 
 
 def test_minikube_devmapper_setup_is_persistent_and_nondestructive():

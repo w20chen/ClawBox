@@ -22,6 +22,7 @@ def render(*, tool_egress: str = "") -> str:
         "LLM_EGRESS_CIDR": "203.0.113.10/32",
         "LLM_EGRESS_PORT": "443",
         "SSH_SECRET_NAME": "tenant-a-ssh",
+        "RUNTIME_CLASS": "kata-qemu",
         "TOOL_EGRESS_POLICY": tool_egress,
         "TOOL_EXEC_TIMEOUT_SECONDS": "300",
         "TOOL_PIDS_LIMIT": "128",
@@ -63,11 +64,11 @@ def test_default_render_is_valid_and_has_two_pods() -> None:
         assert not any(m["mountPath"] == "/var/run/docker.sock" for m in container["volumeMounts"])
 
 
-def test_both_pods_run_in_firecracker_microvm() -> None:
+def test_both_pods_use_the_selected_kata_runtime() -> None:
     docs = load_docs(render())
     by_name = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Deployment"}
     for name in ("claw-tenant-a-runtime", "claw-tenant-a-tool"):
-        assert by_name[name]["spec"]["template"]["spec"]["runtimeClassName"] == "kata-fc"
+        assert by_name[name]["spec"]["template"]["spec"]["runtimeClassName"] == "kata-qemu"
 
 
 def test_secrets_and_network_boundaries() -> None:
@@ -153,7 +154,7 @@ def test_shell_inputs_are_validated_before_render() -> None:
     assert "valid_image" in script
     assert "valid_cidr" in script
     assert 'rm -rf -- "${tmp_dir}"' in script
-    assert "kubectl get runtimeclass kata-fc" in script
+    assert 'kubectl get runtimeclass "${RUNTIME_CLASS}"' in script
 
 
 def test_legacy_runner_mode_is_removed() -> None:
@@ -186,7 +187,9 @@ def test_runtime_entrypoint_emits_valid_openclaw_patch() -> None:
     assert config["tools"]["sandbox"]["tools"]["allow"] == [
         "exec", "process", "read", "write", "edit", "apply_patch"
     ]
-    assert config["plugins"]["entries"]["agent-scheduler"]["config"]["executionBackend"] == "hook-only"
+    plugin = config["plugins"]["entries"]["clawtune"]["config"]
+    assert plugin["executionBackend"] == "hook-only"
+    assert plugin["trace"]["schema_version"] == 6
 
 
 def test_tool_image_has_remote_file_bridge_dependencies() -> None:

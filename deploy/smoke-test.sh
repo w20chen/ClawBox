@@ -5,9 +5,10 @@ TENANT_ID=""
 OTHER_TENANT_ID=""
 NAMESPACE="default"
 VERIFY_DELETE=false
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
 
 usage() {
-  echo "usage: smoke-test.sh --tenant TENANT [--other-tenant TENANT] [--namespace NS] [--verify-delete]" >&2
+  echo "usage: smoke-test.sh --tenant TENANT [--other-tenant TENANT] [--namespace NS] [--runtime-class NAME] [--verify-delete]" >&2
   exit 64
 }
 
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     --tenant) TENANT_ID="${2:-}"; shift 2 ;;
     --other-tenant) OTHER_TENANT_ID="${2:-}"; shift 2 ;;
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
+    --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
     --verify-delete) VERIFY_DELETE=true; shift ;;
     *) usage ;;
   esac
@@ -37,8 +39,8 @@ tool_pod="$(kubectl -n "${NAMESPACE}" get pod -l "${selector_base},app.kubernete
 
 runtime_class="$(kubectl -n "${NAMESPACE}" get pod "${runtime_pod}" -o jsonpath='{.spec.runtimeClassName}')"
 tool_class="$(kubectl -n "${NAMESPACE}" get pod "${tool_pod}" -o jsonpath='{.spec.runtimeClassName}')"
-[[ "${runtime_class}" == "kata-fc" && "${tool_class}" == "kata-fc" ]] || {
-  echo "expected kata-fc on both Pods, got runtime=${runtime_class:-default} tool=${tool_class:-default}" >&2
+[[ "${runtime_class}" == "${RUNTIME_CLASS}" && "${tool_class}" == "${RUNTIME_CLASS}" ]] || {
+  echo "expected ${RUNTIME_CLASS} on both Pods, got runtime=${runtime_class:-default} tool=${tool_class:-default}" >&2
   exit 1
 }
 

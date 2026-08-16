@@ -12,9 +12,11 @@ from clawbox.common.models import ExecutionIntent, Observation, ResourcePredicti
 
 def _load_clawtune():
     candidates = [
+        os.getenv("CLAWTUNE_SIDECAR_SRC"),
+        # Backward-compatible only for an operator upgrading an older install.
         os.getenv("CLAWTUNE_SCHEDULER_SRC"),
-        str(Path(__file__).resolve().parents[3] / "ClawTune" / "services" / "scheduler" / "src"),
-        "/opt/clawtune/services/scheduler/src",
+        str(Path(__file__).resolve().parents[3] / "ClawTune" / "services" / "sidecar" / "src"),
+        "/opt/clawtune/services/sidecar/src",
     ]
     for candidate in candidates:
         if candidate and Path(candidate).is_dir() and candidate not in sys.path:

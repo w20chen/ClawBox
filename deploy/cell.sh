@@ -13,8 +13,8 @@ Usage:
     --llm-secret SECRET --llm-egress-cidr CIDR [options]
   cell.sh delete --tenant TENANT [--namespace NAMESPACE]
 
-Both Pods always run as Firecracker microVMs via the kata-fc RuntimeClass.
-deploy applies deploy/runtimeclass.yaml when kata-fc does not exist yet.
+Both Pods use the selected pre-installed Kata RuntimeClass. The arm64/openEuler
+default is kata-qemu; kata-fc is supported only after its host gate passes.
 
 Options:
   --ssh-secret SECRET          Existing Secret with client id_ed25519 keypair and
@@ -23,6 +23,7 @@ Options:
   --llm-egress-port PORT       Default: 443.
   --tool-egress-cidr CIDR      Optional Tool internet egress; default is denied.
   --tool-egress-port PORT      Default: 443.
+  --runtime-class NAME         Existing Kata RuntimeClass. Default: kata-qemu.
   --namespace NAME             Default: default.
 EOF
   exit 64
@@ -42,6 +43,7 @@ SSH_SECRET_NAME=""
 TOOL_EGRESS_CIDR=""
 TOOL_EGRESS_PORT="443"
 NAMESPACE="default"
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-secret) SSH_SECRET_NAME="${2:-}"; shift 2 ;;
     --tool-egress-cidr) TOOL_EGRESS_CIDR="${2:-}"; shift 2 ;;
     --tool-egress-port) TOOL_EGRESS_PORT="${2:-}"; shift 2 ;;
+    --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
@@ -70,6 +73,7 @@ valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 1 <= 10#$1 && 10#$1 <= 65535 )); }
 [[ -n "${TENANT_ID}" ]] || { echo "--tenant is required" >&2; usage; }
 valid_name "${TENANT_ID}" || { echo "tenant must be a lowercase DNS label (max 40 chars)" >&2; exit 64; }
 valid_resource_name "${NAMESPACE}" || { echo "invalid namespace" >&2; exit 64; }
+valid_resource_name "${RUNTIME_CLASS}" || { echo "invalid RuntimeClass name" >&2; exit 64; }
 
 if [[ "${ACTION}" == "delete" ]]; then
   command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
@@ -134,7 +138,7 @@ spec:
         - {port: ${TOOL_EGRESS_PORT}, protocol: TCP}"
 fi
 
-export TENANT_ID RUNTIME_ID RUNTIME_IMAGE TOOL_IMAGE LLM_SECRET_NAME LLM_EGRESS_CIDR LLM_EGRESS_PORT
+export TENANT_ID RUNTIME_ID RUNTIME_IMAGE TOOL_IMAGE LLM_SECRET_NAME LLM_EGRESS_CIDR LLM_EGRESS_PORT RUNTIME_CLASS
 export SSH_SECRET_NAME TOOL_EGRESS_POLICY
 export TOOL_EXEC_TIMEOUT_SECONDS="${TOOL_EXEC_TIMEOUT_SECONDS:-300}" TOOL_PIDS_LIMIT="${TOOL_PIDS_LIMIT:-128}"
 export TOOL_CPU_REQUEST="${TOOL_CPU_REQUEST:-250m}" TOOL_CPU_LIMIT="${TOOL_CPU_LIMIT:-1}"
@@ -146,7 +150,7 @@ export RUNTIME_STORAGE_REQUEST="${RUNTIME_STORAGE_REQUEST:-512Mi}" RUNTIME_STORA
 
 command -v envsubst >/dev/null 2>&1 || { echo "envsubst not found (install gettext/gettext-base)" >&2; exit 69; }
 render() {
-  envsubst '${TENANT_ID} ${RUNTIME_ID} ${RUNTIME_IMAGE} ${TOOL_IMAGE} ${LLM_SECRET_NAME} ${LLM_EGRESS_CIDR} ${LLM_EGRESS_PORT} ${SSH_SECRET_NAME} ${TOOL_EGRESS_POLICY} ${TOOL_EXEC_TIMEOUT_SECONDS} ${TOOL_PIDS_LIMIT} ${TOOL_CPU_REQUEST} ${TOOL_CPU_LIMIT} ${TOOL_MEMORY_REQUEST} ${TOOL_MEMORY_LIMIT} ${TOOL_STORAGE_REQUEST} ${TOOL_STORAGE_LIMIT} ${RUNTIME_CPU_REQUEST} ${RUNTIME_CPU_LIMIT} ${RUNTIME_MEMORY_REQUEST} ${RUNTIME_MEMORY_LIMIT} ${RUNTIME_STORAGE_REQUEST} ${RUNTIME_STORAGE_LIMIT}' <"${TEMPLATE}"
+  envsubst '${TENANT_ID} ${RUNTIME_ID} ${RUNTIME_IMAGE} ${TOOL_IMAGE} ${LLM_SECRET_NAME} ${LLM_EGRESS_CIDR} ${LLM_EGRESS_PORT} ${SSH_SECRET_NAME} ${TOOL_EGRESS_POLICY} ${TOOL_EXEC_TIMEOUT_SECONDS} ${TOOL_PIDS_LIMIT} ${TOOL_CPU_REQUEST} ${TOOL_CPU_LIMIT} ${TOOL_MEMORY_REQUEST} ${TOOL_MEMORY_LIMIT} ${TOOL_STORAGE_REQUEST} ${TOOL_STORAGE_LIMIT} ${RUNTIME_CPU_REQUEST} ${RUNTIME_CPU_LIMIT} ${RUNTIME_MEMORY_REQUEST} ${RUNTIME_MEMORY_LIMIT} ${RUNTIME_STORAGE_REQUEST} ${RUNTIME_STORAGE_LIMIT} ${RUNTIME_CLASS}' <"${TEMPLATE}"
 }
 
 if [[ "${ACTION}" == "render" ]]; then
@@ -155,11 +159,11 @@ if [[ "${ACTION}" == "render" ]]; then
 fi
 
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
-if ! kubectl get runtimeclass kata-fc >/dev/null 2>&1; then
-  echo "RuntimeClass kata-fc not found; applying ${SCRIPT_DIR}/runtimeclass.yaml" >&2
-  kubectl apply -f "${SCRIPT_DIR}/runtimeclass.yaml"
-fi
-kubectl get runtimeclass kata-fc >/dev/null
+kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || {
+  echo "RuntimeClass ${RUNTIME_CLASS} is not installed." >&2
+  echo "Run deploy/check-host.sh --runtime-class ${RUNTIME_CLASS} and install a matching Kata handler first." >&2
+  exit 69
+}
 
 secret_has_key() {
   [[ "$(kubectl -n "${NAMESPACE}" get secret "$1" -o "go-template={{if index .data \"$2\"}}present{{end}}")" == "present" ]]

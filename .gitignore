@@ -5,6 +5,10 @@ clawtune-*/
 # Rendered / generated k8s artifacts
 *.rendered.yaml
 
+# Python test/runtime caches
+__pycache__/
+*.py[cod]
+
 # Local secrets — never commit
 .env
 .env.*

@@ -1,8 +1,8 @@
-# 部署细节：Runtime Pod + Tool Pod（Firecracker microVM）
+# 部署细节：Runtime Pod + Tool Pod（Kata VM）
 
 每个租户拥有一组独立资源：一个 Runtime Pod 和一个 Tool Pod。两个 Pod 都通过
-`kata-fc` RuntimeClass 运行在独立的 Kata Containers + Firecracker microVM 中，
-这是仓库唯一支持的部署方式。
+同一个可配置的 Kata RuntimeClass 运行在独立 microVM 中。鲲鹏/openEuler 首轮
+默认使用 `kata-qemu`；`kata-fc` 只应在 ARM64 主机门禁通过后启用。
 
 ## 边界与支持的工具
 
@@ -31,7 +31,7 @@ sandbox-relative 媒体文件时才走远程文件系统桥接。
 named context 传入 ClawTune 源码；不要创建指向主 build context 外的软链接：
 
 ```bash
-test -f ../ClawTune/packages/openclaw-plugin/package.json
+test -f ../ClawTune/packages/clawtune-plugin/package.json
 docker build -f docker/Dockerfile.runtime \
   --build-context clawtune=../ClawTune \
   -t registry.example/claw-runtime:latest .
@@ -83,8 +83,8 @@ kubectl -n agents create secret generic tenant-a-tool-ssh \
 租户 ID 必须是小写 Kubernetes DNS label，最长 40 字符；非法 ID 会被拒绝，
 不会被当作 shell 文本执行。
 
-两个 Pod 固定使用 `kata-fc` RuntimeClass。`deploy` 先检查 RuntimeClass，
-缺失时自动 apply `deploy/runtimeclass.yaml`；`delete` 不会移除它：
+两个 Pod 使用 `--runtime-class` 指定的现有 RuntimeClass。部署脚本只检查它，
+不会创建一个没有对应 containerd handler 的空壳 RuntimeClass：
 
 ```bash
 bash deploy/cell.sh deploy \
@@ -94,6 +94,7 @@ bash deploy/cell.sh deploy \
   --tool-image registry.example/claw-tool:latest \
   --llm-secret tenant-a-llm \
   --ssh-secret tenant-a-tool-ssh \
+  --runtime-class kata-qemu \
   --llm-egress-cidr 203.0.113.10/32 \
   --llm-egress-port 443
 ```
@@ -124,7 +125,7 @@ bash deploy/smoke-test.sh \
 ```
 
 Smoke test 会让 OpenClaw 真实执行 shell 和文件工具，并验证：两个不同的 Pod、
-两个 Pod 的 runtimeClassName 均为 `kata-fc`、hostname/PID namespace/文件系统
+两个 Pod 的 runtimeClassName 均为指定值、hostname/PID namespace/文件系统
 不同、远程 `exec` 和 `read/write/edit/apply_patch` 生效、没有 Docker socket、
 Tool 中没有长期凭据、跨租户 SSH 被拒绝。加 `--verify-delete` 会在测试后删除
 该 cell 并验证受管资源清理。

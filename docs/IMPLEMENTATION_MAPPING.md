@@ -2,8 +2,8 @@
 
 | Existing component | New architecture component |
 | --- | --- |
-| ClawTune `packages/openclaw-plugin` | Runtime plugin; unchanged, calls Tenant Scheduler |
-| ClawTune FastAPI sidecar contracts/correlation | Tenant Scheduler adapter and stable execution identity |
+| ClawTune `packages/clawtune-plugin` | Runtime-local plugin; built directly from the sibling ClawTune v2 checkout |
+| ClawTune `services/sidecar` contracts/correlation | Runtime-local sidecar and source of the `tool_resource` prediction code |
 | `RuntimeToolResourceKB` | Tenant-private prediction overlay and snapshot |
 | `ClauseResourceKB` / `LatticeTimeKB` | Preserved Phase 2 prediction sources; adapter is extensible to their richer outputs |
 | `claw-launch` and cgroup-v2 support | Tool execution path; retained for Linux/Kubernetes evolution |

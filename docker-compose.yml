@@ -28,9 +28,9 @@ services:
       TOOL_IMAGE: ${TOOL_IMAGE:-clawbox-tool-agent:latest}
       NUMA_CAPACITY: ${NUMA_CAPACITY:-0:64}
       RESERVED_CPU_FRACTION: ${RESERVED_CPU_FRACTION:-0.05}
-      CLAWTUNE_SCHEDULER_SRC: /opt/clawtune/services/scheduler/src
+      CLAWTUNE_SIDECAR_SRC: /opt/clawtune/services/sidecar/src
     volumes:
-      - ../ClawTune/services/scheduler:/opt/clawtune/services/scheduler:ro
+      - ../ClawTune/services/sidecar:/opt/clawtune/services/sidecar:ro
     depends_on:
       postgres: {condition: service_healthy}
       allocator: {condition: service_started}

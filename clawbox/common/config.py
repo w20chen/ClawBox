@@ -14,7 +14,10 @@ class Settings:
     scheduler_url: str = os.getenv("SCHEDULER_URL", "http://tenant-scheduler:8080")
     controller_backend: str = os.getenv("CONTROLLER_BACKEND", "docker")
     kubernetes_namespace_prefix: str = os.getenv("KUBERNETES_NAMESPACE_PREFIX", "clawbox-tenant")
-    kubernetes_runtime_class: str = os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc")
+    # QEMU is the most broadly supported Kata backend on arm64/openEuler.
+    # Deployments can opt into Firecracker after the host gate has proved a
+    # working kata-fc handler and matching arm64 guest assets.
+    kubernetes_runtime_class: str = os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-qemu")
     kubernetes_image_pull_policy: str = os.getenv("KUBERNETES_IMAGE_PULL_POLICY", "IfNotPresent")
     kubernetes_ready_timeout_seconds: int = int(os.getenv("KUBERNETES_READY_TIMEOUT_SECONDS", "180"))
     tool_image: str = os.getenv("TOOL_IMAGE", "clawbox-tool-agent:latest")

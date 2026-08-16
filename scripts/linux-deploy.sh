@@ -96,7 +96,7 @@ init_config() {
   [[ "$(stat -fc %T /sys/fs/cgroup)" == "cgroup2fs" ]] || die "cgroup v2 is required"
 
   local clawtune_dir="${CLAWTUNE_DIR:-${PROJECT_DIR}/../ClawTune}"
-  [[ -f "${clawtune_dir}/services/scheduler/pyproject.toml" ]] || \
+  [[ -f "${clawtune_dir}/services/sidecar/pyproject.toml" ]] || \
     die "ClawTune not found at ${clawtune_dir}; set CLAWTUNE_DIR or place it beside ClawBox"
   local expected_clawtune
   expected_clawtune="$(CDPATH= cd -- "${PROJECT_DIR}/../ClawTune" 2>/dev/null && pwd || true)"

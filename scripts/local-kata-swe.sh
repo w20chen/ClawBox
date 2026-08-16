@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command local Kubernetes + Kata/Firecracker SWE-Rebench deployment.
+# One-command local Kubernetes + Kata SWE-Rebench deployment.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,6 +24,7 @@ REBUILD="${REBUILD:-0}"
 SKIP_SMOKE="${SKIP_KATA_SMOKE:-0}"
 INSTALL_KATA="${INSTALL_KATA:-0}"
 BOOTSTRAP_MINIKUBE="${BOOTSTRAP_MINIKUBE:-0}"
+RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-qemu}"
 
 usage() {
   cat <<'EOF'
@@ -48,7 +49,8 @@ Options:
   --cpu VALUE          CPU per task; default: 2
   --memory VALUE       Memory per task; default: 4Gi
   --rebuild            Rebuild the ClawTune bundle and bundle image
-  --skip-smoke         Skip the kata-fc Alpine smoke Pod
+  --runtime-class NAME Existing Kata RuntimeClass; default: kata-qemu
+  --skip-smoke         Skip the Kata Alpine smoke Pod
   --install-kata       Install Kata on cluster nodes with the official Helm chart
   --bootstrap-minikube Install Ubuntu KVM/libvirt and create a kvm2 Minikube cluster
 EOF
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --parallelism) PARALLELISM="${2:?missing value}"; shift 2 ;;
     --cpu) CPU="${2:?missing value}"; shift 2 ;;
     --memory) MEMORY="${2:?missing value}"; shift 2 ;;
+    --runtime-class) RUNTIME_CLASS="${2:?missing value}"; shift 2 ;;
     --rebuild) REBUILD=1; shift ;;
     --skip-smoke) SKIP_SMOKE=1; shift ;;
     --install-kata) INSTALL_KATA=1; shift ;;
@@ -85,7 +88,11 @@ bootstrap_minikube() {
     return 0
   fi
   [[ "$(uname -s)" == "Linux" ]] || die "--bootstrap-minikube requires Linux"
-  grep -Eq '(vmx|svm)' /proc/cpuinfo || die "CPU virtualization is unavailable; enable it in BIOS or enable nested virtualization"
+  case "$(uname -m)" in
+    x86_64|amd64) grep -Eq '(vmx|svm)' /proc/cpuinfo || die "CPU virtualization is unavailable" ;;
+    aarch64|arm64) : ;; # /dev/kvm is the authoritative ARM Hyp gate below.
+    *) die "unsupported architecture: $(uname -m)" ;;
+  esac
   [[ -e /dev/kvm ]] || die "/dev/kvm is missing; enable KVM before bootstrapping Minikube"
   need sudo
   need minikube
@@ -158,29 +165,32 @@ case "${COMMAND}" in
 esac
 
 run_smoke() {
-  log "Verifying kata-fc can boot a microVM"
-  kubectl delete pod kata-fc-smoke --ignore-not-found --wait=true >/dev/null
-  kubectl run kata-fc-smoke --image=alpine:3.22 --restart=Never \
-    --overrides='{"spec":{"runtimeClassName":"kata-fc","containers":[{"name":"kata-fc-smoke","image":"alpine:3.22","command":["sh","-c","echo kata-fc-ok; sleep 2"]}]}}' >/dev/null
-  local deadline event phase pod_uid
-  pod_uid="$(kubectl get pod kata-fc-smoke -o jsonpath='{.metadata.uid}')"
-  [[ -n "${pod_uid}" ]] || die "could not read the new kata-fc smoke Pod UID"
+  local deadline event overrides phase pod_uid smoke_pod
+  smoke_pod="clawbox-kata-smoke"
+  log "Verifying ${RUNTIME_CLASS} can boot a $(uname -m) microVM"
+  kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || \
+    die "RuntimeClass ${RUNTIME_CLASS} is missing; install the matching Kata handler first"
+  kubectl delete pod "${smoke_pod}" --ignore-not-found --wait=true >/dev/null
+  printf -v overrides '{"spec":{"runtimeClassName":"%s","containers":[{"name":"kata-smoke","image":"alpine:3.22","command":["sh","-c","uname -m; echo kata-ok; sleep 2"]}]}}' "${RUNTIME_CLASS}"
+  kubectl run "${smoke_pod}" --image=alpine:3.22 --restart=Never --overrides="${overrides}" >/dev/null
+  pod_uid="$(kubectl get pod "${smoke_pod}" -o jsonpath='{.metadata.uid}')"
+  [[ -n "${pod_uid}" ]] || die "could not read the new Kata smoke Pod UID"
   deadline=$((SECONDS + 180))
   while (( SECONDS < deadline )); do
-    phase="$(kubectl get pod kata-fc-smoke -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    [[ "${phase}" == "Succeeded" ]] && { kubectl logs kata-fc-smoke; return 0; }
+    phase="$(kubectl get pod "${smoke_pod}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    [[ "${phase}" == "Succeeded" ]] && { kubectl logs "${smoke_pod}"; return 0; }
     [[ "${phase}" == "Failed" ]] && break
     # Event objects outlive deleted Pods. Filter by UID, not the reused Pod
     # name, or a previous smoke failure can abort a healthy new attempt.
     event="$(kubectl get events --field-selector "involvedObject.uid=${pod_uid}" \
       -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)"
-    if grep -q 'no runtime for "kata-fc" is configured' <<<"${event}"; then
-      echo "kata-fc is not registered in the Kubernetes node's containerd." >&2
+    if grep -q "no runtime for .*${RUNTIME_CLASS}.* is configured" <<<"${event}"; then
+      echo "${RUNTIME_CLASS} is not registered in the Kubernetes node's containerd." >&2
       echo "Re-run with --install-kata to install it using the official Kata Deploy Helm chart." >&2
       break
     fi
     if grep -qE 'snapshotter devmapper was not found|snapshotter not loaded.*devmapper|devmapper not configured' <<<"${event}"; then
-      echo "kata-fc selected containerd's devmapper snapshotter, but the plugin is unavailable." >&2
+      echo "${RUNTIME_CLASS} selected containerd's devmapper snapshotter, but the plugin is unavailable." >&2
       echo "For Minikube, re-run with --bootstrap-minikube or --install-kata to repair it." >&2
       break
     fi
@@ -192,9 +202,9 @@ run_smoke() {
     sleep 2
   done
   if [[ "${phase:-}" != "Succeeded" ]]; then
-    kubectl describe pod kata-fc-smoke >&2 || true
-    kubectl logs kata-fc-smoke >&2 || true
-    die "kata-fc smoke Pod failed; inspect the handler, devmapper plugin, KVM and events above"
+    kubectl describe pod "${smoke_pod}" >&2 || true
+    kubectl logs "${smoke_pod}" >&2 || true
+    die "${RUNTIME_CLASS} smoke Pod failed; inspect the handler, KVM and events above"
   fi
 }
 
@@ -244,7 +254,7 @@ install_kata() {
   need curl
   local context version chart
   context="$(kubectl config current-context 2>/dev/null || true)"
-  if [[ "${context}" == "minikube" ]]; then
+  if [[ "${context}" == "minikube" && "${RUNTIME_CLASS}" == "kata-fc" ]]; then
     local kvm_output
     if ! kvm_output="$(minikube ssh -- test -r /dev/kvm -a -w /dev/kvm 2>&1)"; then
       if grep -qiE 'libvirt.*(permission denied|failed connecting)|libvirt-sock.*permission denied' <<<"${kvm_output}"; then
@@ -258,21 +268,19 @@ install_kata() {
   version="${KATA_VERSION:-$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')}"
   chart="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
   log "Installing Kata Containers ${version} on Kubernetes nodes"
-  # The earlier ClawBox placeholder RuntimeClass would conflict with Helm ownership.
-  kubectl delete runtimeclass kata-fc --ignore-not-found >/dev/null
   local helm_args=(
     --install kata-deploy "${chart}" --version "${version}"
     --namespace kata-system --create-namespace --wait --timeout 10m
   )
-  if [[ "${context}" == "minikube" ]]; then
+  if [[ "${context}" == "minikube" && "${RUNTIME_CLASS}" == "kata-fc" ]]; then
     helm_args+=(--set-file "containerd.userDropIn=${ROOT}/deploy/containerd-devmapper.toml")
   fi
   helm upgrade "${helm_args[@]}"
-  kubectl get runtimeclass kata-fc >/dev/null 2>&1 || {
+  kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || {
     kubectl get runtimeclass >&2 || true
-    die "Kata Deploy completed but did not create the required kata-fc RuntimeClass"
+    die "Kata Deploy completed but did not create the required ${RUNTIME_CLASS} RuntimeClass"
   }
-  if [[ "${context}" == "minikube" ]]; then
+  if [[ "${context}" == "minikube" && "${RUNTIME_CLASS}" == "kata-fc" ]]; then
     verify_minikube_devmapper
     prepare_minikube_kata_images
   fi
@@ -282,7 +290,8 @@ if [[ "${COMMAND}" == "smoke" ]]; then
   if [[ "${INSTALL_KATA}" == "1" ]]; then
     install_kata
   else
-    kubectl apply -f "${ROOT}/deploy/runtimeclass.yaml" >/dev/null
+    kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || \
+      die "RuntimeClass ${RUNTIME_CLASS} is missing; run with --install-kata or install it explicitly"
   fi
   run_smoke
   exit 0
@@ -294,7 +303,7 @@ docker info >/dev/null 2>&1 || die "Docker is not reachable as the current user"
 [[ -d "${CLAWTUNE_ROOT}" ]] || die "ClawTune not found at ${CLAWTUNE_ROOT}; set CLAWTUNE_ROOT"
 [[ -f "${TASKS}" ]] || die "task file not found: ${TASKS}"
 
-BUNDLE_DIR="${CLAWTUNE_ROOT}/swe_rebench/.runtime/bundle"
+BUNDLE_DIR="${CLAWTUNE_ROOT}/swe_rebench/.runtime/assets"
 if [[ "${REBUILD}" == "1" || ! -x "${BUNDLE_DIR}/entrypoint.sh" ]]; then
   log "Preparing ClawTune runtime bundle"
   (cd "${CLAWTUNE_ROOT}" && python3 -m swe_rebench.runner prepare) || {
@@ -304,9 +313,14 @@ if [[ "${REBUILD}" == "1" || ! -x "${BUNDLE_DIR}/entrypoint.sh" ]]; then
   }
 fi
 
+python3 "${ROOT}/scripts/validate_clawtune_integration.py" \
+  --clawtune-root "${CLAWTUNE_ROOT}" --require-assets
+
 if [[ "${REBUILD}" == "1" ]] || ! docker image inspect "${BUNDLE_IMAGE}" >/dev/null 2>&1; then
   log "Building ${BUNDLE_IMAGE}"
+  CLAWTUNE_REVISION="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
   docker build --build-context clawtune="${CLAWTUNE_ROOT}" \
+    --build-arg CLAWTUNE_REVISION="${CLAWTUNE_REVISION}" \
     -f "${ROOT}/docker/Dockerfile.clawtune-bundle" \
     -t "${BUNDLE_IMAGE}" "${ROOT}"
 fi
@@ -317,7 +331,8 @@ kubectl apply -f "${ROOT}/deploy/benchmark-networkpolicy.yaml" >/dev/null
 if [[ "${INSTALL_KATA}" == "1" ]]; then
   install_kata
 else
-  kubectl apply -f "${ROOT}/deploy/runtimeclass.yaml" >/dev/null
+  kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || \
+    die "RuntimeClass ${RUNTIME_CLASS} is missing; run with --install-kata or install it explicitly"
 fi
 
 import_image() {
@@ -376,6 +391,7 @@ set +e
 python3 -m clawbox.benchmark.kubernetes \
   --tasks "${TASKS}" --sample "${SAMPLE}" --parallelism "${PARALLELISM}" \
   --bundle-image "${BUNDLE_IMAGE}" --llm-secret "${LLM_SECRET}" \
+  --runtime-class "${RUNTIME_CLASS}" \
   --cpu "${CPU}" --memory "${MEMORY}" --timeout-seconds "${TIMEOUT_SECONDS}"
 status=$?
 set -e

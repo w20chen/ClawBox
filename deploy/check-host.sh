@@ -1,112 +1,156 @@
 #!/usr/bin/env bash
-# check-host.sh — read-only preflight for the Kata + Firecracker host.
-# It only checks and prints PASS / WARN / FAIL. It never modifies the system.
-#
-# Kata, Firecracker, devmapper and the containerd runtime handler are all
-# host-environment specific, so no auto-install is attempted here.
+# Read-only openEuler/arm64 gate for Kubernetes + Kata.
 set -u
 
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
 PASS=0
 WARN=0
 FAIL=0
 
-say()  { printf '%-56s %s\n' "$1" "$2"; }
+usage() {
+  echo "usage: check-host.sh [--runtime-class NAME]" >&2
+  exit 64
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+done
+
+[[ "${RUNTIME_CLASS}" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || usage
+
+say()  { printf '%-64s %s\n' "$1" "$2"; }
 pass() { say "$1" "PASS"; PASS=$((PASS + 1)); }
 warn() { say "$1" "WARN"; WARN=$((WARN + 1)); }
 fail() { say "$1" "FAIL"; FAIL=$((FAIL + 1)); }
 
-echo "== ClawBox Kata-Firecracker host preflight (Runtime Pod + Tool Pod) =="
+echo "== ClawBox stage-0 host gate: openEuler/arm64 + ${RUNTIME_CLASS} =="
 
-# 1. Architecture
+if [[ -r /etc/os-release ]]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  os_id="${ID:-unknown}"
+  os_version="${VERSION_ID:-unknown}"
+  if [[ "${os_id}" == "openEuler" || "${os_id,,}" == "openeuler" ]]; then
+    pass "operating system = ${os_id} ${os_version}"
+  else
+    warn "operating system = ${os_id} ${os_version} (target is openEuler)"
+  fi
+else
+  fail "/etc/os-release is readable"
+fi
+
 arch="$(uname -m 2>/dev/null || echo unknown)"
 case "${arch}" in
-  aarch64|arm64) pass "arch = ${arch} (ARM64 target)" ;;
-  x86_64|amd64)  warn "arch = ${arch} (works, but not the Kunpeng ARM64 target)" ;;
-  *)             warn "arch = ${arch} (unexpected)" ;;
+  aarch64|arm64) pass "host architecture = ${arch}" ;;
+  *) fail "host architecture = ${arch} (required: aarch64/arm64)" ;;
 esac
 
-# 2. KVM
-if [ -e /dev/kvm ]; then
-  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-    pass "/dev/kvm exists and is accessible"
-  else
-    warn "/dev/kvm exists but is not rw-accessible to this user"
-  fi
+kernel="$(uname -r 2>/dev/null || echo unknown)"
+case "${kernel%%.*}" in
+  ''|*[!0-9]*) warn "kernel = ${kernel} (cannot parse major version)" ;;
+  *)
+    kernel_major="${kernel%%.*}"
+    kernel_minor="${kernel#*.}"; kernel_minor="${kernel_minor%%.*}"
+    if (( kernel_major > 5 || (kernel_major == 5 && kernel_minor >= 10) )); then
+      pass "kernel = ${kernel} (>= 5.10)"
+    else
+      fail "kernel = ${kernel} (Kata baseline requires >= 5.10)"
+    fi
+    ;;
+esac
+
+if [[ -c /dev/kvm ]]; then
+  pass "/dev/kvm character device exists"
+  [[ -r /dev/kvm && -w /dev/kvm ]] \
+    && pass "/dev/kvm is accessible to this account" \
+    || warn "/dev/kvm is not rw-accessible to this account; the runtime service still must have access"
 else
-  fail "/dev/kvm is missing (KVM must be enabled in the kernel/BIOS)"
+  fail "/dev/kvm is missing (enable ARM Hyp/KVM)"
 fi
 
-# 3. kubectl
-if command -v kubectl >/dev/null 2>&1; then
-  pass "kubectl found: $(command -v kubectl)"
+[[ -f /sys/fs/cgroup/cgroup.controllers ]] \
+  && pass "cgroup v2 unified hierarchy is active" \
+  || fail "cgroup v2 unified hierarchy is not active"
+
+if command -v containerd >/dev/null 2>&1 || [[ -S /run/containerd/containerd.sock ]]; then
+  pass "containerd binary or socket is present"
 else
-  fail "kubectl not found"
+  fail "containerd is not installed/running"
 fi
 
-# 4. containerd
-if command -v ctr >/dev/null 2>&1 && ctr version >/dev/null 2>&1; then
-  pass "containerd reachable (ctr version)"
-elif [ -S /run/containerd/containerd.sock ]; then
-  pass "containerd socket present (/run/containerd/containerd.sock)"
-elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet containerd; then
-  pass "containerd service active"
+if command -v ctr >/dev/null 2>&1; then
+  ctr plugins ls 2>/dev/null | grep -q 'io.containerd.grpc.v1.*cri.*ok' \
+    && pass "containerd CRI plugin reports ok" \
+    || warn "containerd CRI plugin could not be confirmed with ctr"
 else
-  fail "containerd not found / not running"
+  warn "ctr is unavailable; skipping containerd plugin inspection"
 fi
 
-# 5. Kata runtime / shim
+if command -v containerd-shim-kata-v2 >/dev/null 2>&1 \
+  || [[ -x /opt/kata/bin/containerd-shim-kata-v2 ]] \
+  || [[ -x /usr/bin/containerd-shim-kata-v2 ]]; then
+  pass "containerd-shim-kata-v2 is installed"
+else
+  fail "containerd-shim-kata-v2 is missing"
+fi
+
 if command -v kata-runtime >/dev/null 2>&1; then
-  pass "kata-runtime found: $(kata-runtime --version 2>/dev/null | head -1)"
-elif command -v containerd-shim-kata-v2 >/dev/null 2>&1; then
-  pass "kata shim found: $(command -v containerd-shim-kata-v2)"
-elif [ -x /opt/kata/bin/kata-runtime ] || [ -x /usr/local/bin/kata-runtime ]; then
-  pass "kata-runtime found in a well-known path"
+  kata-runtime kata-check >/dev/null 2>&1 \
+    && pass "kata-runtime kata-check" \
+    || warn "kata-runtime exists but kata-check did not pass for the current account"
+elif [[ -x /opt/kata/bin/kata-runtime ]]; then
+  /opt/kata/bin/kata-runtime kata-check >/dev/null 2>&1 \
+    && pass "/opt/kata/bin/kata-runtime kata-check" \
+    || warn "Kata runtime exists but kata-check did not pass"
 else
-  fail "kata-runtime / containerd-shim-kata-v2 not found"
+  warn "kata-runtime CLI is unavailable; shim and live Pod gates remain authoritative"
 fi
 
-# 6. Firecracker binary
-if command -v firecracker >/dev/null 2>&1; then
-  pass "firecracker found: $(command -v firecracker)"
-elif [ -x /usr/local/bin/firecracker ] || [ -x /usr/bin/firecracker ] || [ -x /opt/firecracker/bin/firecracker ]; then
-  pass "firecracker found in a well-known path"
+if ! command -v kubectl >/dev/null 2>&1; then
+  fail "kubectl is installed"
 else
-  fail "firecracker binary not found"
-fi
-
-# 7. RuntimeClass kata-fc
-if kubectl get runtimeclass kata-fc >/dev/null 2>&1; then
-  pass "RuntimeClass kata-fc exists"
-else
-  fail "RuntimeClass kata-fc missing (kubectl apply -f deploy/runtimeclass.yaml)"
-fi
-
-# 8. containerd config contains a kata-fc handler
-found=0
-for f in /etc/containerd/config.toml /etc/containerd/config.toml.d/*.toml; do
-  [ -f "${f}" ] || continue
-  if grep -q "kata-fc" "${f}" 2>/dev/null; then
-    found=1
-    break
+  pass "kubectl is installed"
+  if kubectl cluster-info >/dev/null 2>&1; then
+    pass "kubectl can reach the cluster"
+  else
+    fail "kubectl cannot reach the cluster"
   fi
-done
-if [ "${found}" = 1 ]; then
-  pass "containerd config references a kata-fc handler"
-else
-  fail "containerd config does not reference a kata-fc handler (see runtimeclass.yaml comment)"
-fi
 
-# 9. Kubernetes node Ready
-if kubectl get nodes 2>/dev/null | awk 'NR>1 && $2=="Ready" { r=1 } END { exit !r }'; then
-  pass "Kubernetes node(s) Ready"
-else
-  warn "no Ready node detected (run: kubectl get nodes)"
+  runtime_handler="$(kubectl get runtimeclass "${RUNTIME_CLASS}" -o jsonpath='{.handler}' 2>/dev/null || true)"
+  if [[ -n "${runtime_handler}" ]]; then
+    pass "RuntimeClass ${RUNTIME_CLASS} exists (handler=${runtime_handler})"
+  else
+    fail "RuntimeClass ${RUNTIME_CLASS} is missing"
+  fi
+
+  node_arches="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.status.nodeInfo.architecture}{" "}{end}' 2>/dev/null || true)"
+  if [[ -n "${node_arches}" ]] && ! grep -Eq '=(amd64|x86_64)( |$)' <<<"${node_arches}"; then
+    pass "Kubernetes node architectures: ${node_arches}"
+  elif [[ -n "${node_arches}" ]]; then
+    warn "cluster contains non-arm64 nodes: ${node_arches}; use node selectors for sandbox Pods"
+  else
+    fail "Kubernetes node architecture could not be read"
+  fi
+
+  ready_nodes="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2 == "Ready" {count++} END {print count+0}')"
+  (( ready_nodes > 0 )) && pass "Ready Kubernetes nodes = ${ready_nodes}" || fail "no Ready Kubernetes nodes"
+
+  if kubectl api-resources --api-group=networking.k8s.io -o name 2>/dev/null | grep -qx networkpolicies; then
+    pass "Kubernetes NetworkPolicy API is available"
+    warn "NetworkPolicy API presence does not prove CNI enforcement; run scripts/arm64-kata-smoke.sh"
+  else
+    fail "Kubernetes NetworkPolicy API is unavailable"
+  fi
 fi
 
 echo
 echo "Summary: ${PASS} pass, ${WARN} warn, ${FAIL} fail"
-if [ "${FAIL}" -gt 0 ]; then
-  echo "Fix FAIL items before deploying. WARN items are informational."
+if (( FAIL > 0 )); then
+  echo "Stage 0 host preflight FAILED. Fix every FAIL before the live smoke gate."
   exit 1
 fi
-exit 0
+echo "Static preflight passed. Next: scripts/arm64-kata-smoke.sh --runtime-class ${RUNTIME_CLASS}"

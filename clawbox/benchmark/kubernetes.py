@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ def render_job(
     namespace: str,
     bundle_image: str,
     llm_secret: str,
-    runtime_class: str = "kata-fc",
+    runtime_class: str = "kata-qemu",
     cpu: str = "4",
     memory: str = "8Gi",
     timeout_seconds: int = 1800,
@@ -65,7 +66,7 @@ def render_job(
         {"name": "TASK_BASE_COMMIT", "value": task.base_commit},
         {"name": "TASK_HINT_TEXT", "value": task.hint_text},
         {"name": "PROBLEM_STATEMENT", "value": task.problem_statement},
-        {"name": "AGENT_SCHEDULER_TOOL_RESOURCE_STAGE2_REQUIRED", "value": "false"},
+        {"name": "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED", "value": "false"},
     ]
     for variable, key in (
         ("LLM_API_KEY", "llm-api-key"),
@@ -169,12 +170,16 @@ class KubernetesBenchmarkLauncher:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run SWE-Rebench task images as concurrent Kata/Firecracker Jobs")
+    parser = argparse.ArgumentParser(description="Run SWE-Rebench task images as concurrent Kata-isolated Jobs")
     parser.add_argument("--tasks", type=Path, required=True)
     parser.add_argument("--namespace", default="clawbox-benchmarks")
     parser.add_argument("--bundle-image", required=True)
     parser.add_argument("--llm-secret", default="clawbox-llm")
-    parser.add_argument("--runtime-class", default="kata-fc")
+    parser.add_argument(
+        "--runtime-class",
+        default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-qemu"),
+        help="Existing Kata RuntimeClass; use kata-fc only after the arm64 host gate passes",
+    )
     parser.add_argument("--parallelism", type=int, default=1)
     parser.add_argument("--sample", type=int)
     parser.add_argument("--cpu", default="4")

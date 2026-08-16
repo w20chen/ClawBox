@@ -10,14 +10,20 @@ set -euo pipefail
 
 SIDECAR_PORT="${SIDECAR_PORT:-8765}"
 CLAWTUNE_HOME="${CLAWTUNE_HOME:-/opt/clawtune}"
-PLUGIN_DIR="${CLAWTUNE_HOME}/packages/openclaw-plugin"
+PLUGIN_DIR="${CLAWTUNE_HOME}/packages/clawtune-plugin"
 STATE_DIR="/state/${TENANT_ID}"
 TRACE_DIR="${STATE_DIR}/traces"
+ARTIFACT_DIR="${TRACE_DIR}/tool-resource"
 LOG_DIR="${STATE_DIR}/logs"
 KNOWN_HOSTS="${STATE_DIR}/ssh/known_hosts"
 SIDECAR_PID=""
 
-mkdir -p "${TRACE_DIR}" "${LOG_DIR}" "$(dirname "${KNOWN_HOSTS}")" /workspace
+mkdir -p "${ARTIFACT_DIR}" "${LOG_DIR}" "$(dirname "${KNOWN_HOSTS}")" /workspace
+for snapshot in "${CLAWTUNE_HOME}"/cold-start/tool-resource/*-kb.json; do
+  [[ -f "${snapshot}" ]] || continue
+  destination="${ARTIFACT_DIR}/$(basename "${snapshot}")"
+  [[ -e "${destination}" ]] || cp "${snapshot}" "${destination}"
+done
 rm -f "${STATE_DIR}/ready"
 
 cleanup() {
@@ -41,17 +47,15 @@ printf '[%s]:%s %s\n' "${tool_host}" "${tool_port}" "${host_public_key}" >"${KNO
 chmod 0600 "${KNOWN_HOSTS}"
 
 env \
-  AGENT_SCHEDULER_DB_PATH="${STATE_DIR}/kb.sqlite" \
-  AGENT_SCHEDULER_TRACE_DIR="${TRACE_DIR}" \
-  AGENT_SCHEDULER_TOOL_RESOURCE_ARTIFACT_DIR="${TRACE_DIR}/tool-resource" \
-  AGENT_SCHEDULER_TOOL_RESOURCE_STAGE2_REQUIRED=false \
-  AGENT_SCHEDULER_TOOL_RESOURCE_EBPF_REQUIRED=false \
-  AGENT_SCHEDULER_POLICY=observe-only \
-  AGENT_SCHEDULER_LLM_UPSTREAM_BASE_URL="${OPENAI_BASE_URL}" \
-  AGENT_SCHEDULER_LLM_UPSTREAM_API_KEY="${OPENAI_API_KEY}" \
-  AGENT_SCHEDULER_LLM_PROXY_EXPOSE_MODEL="${OPENCLAW_MODEL}" \
-  AGENT_SCHEDULER_LLM_PROXY_UPSTREAM_MODEL="${UPSTREAM_MODEL:-${OPENCLAW_MODEL}}" \
-  "${CLAWTUNE_HOME}/venv/bin/python" -m agent_scheduler.main \
+  CLAWTUNE_TRACE_DIR="${TRACE_DIR}" \
+  CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR="${ARTIFACT_DIR}" \
+  CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false \
+  CLAWTUNE_POLICY=observe-only \
+  CLAWTUNE_LLM_UPSTREAM_BASE_URL="${OPENAI_BASE_URL}" \
+  CLAWTUNE_LLM_UPSTREAM_API_KEY="${OPENAI_API_KEY}" \
+  CLAWTUNE_LLM_PROXY_EXPOSE_MODEL="${OPENCLAW_MODEL}" \
+  CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL="${UPSTREAM_MODEL:-${OPENCLAW_MODEL}}" \
+  "${CLAWTUNE_HOME}/venv/bin/python" -m clawtune_sidecar.main \
     --host 127.0.0.1 --port "${SIDECAR_PORT}" >"${LOG_DIR}/sidecar.log" 2>&1 &
 SIDECAR_PID=$!
 
@@ -64,7 +68,7 @@ curl -fsS "http://127.0.0.1:${SIDECAR_PORT}/health/ready" >/dev/null
 
 openclaw plugins install --link "${PLUGIN_DIR}" >"${LOG_DIR}/plugin.log" 2>&1 || \
   grep -qiE 'already|exists' "${LOG_DIR}/plugin.log"
-openclaw plugins enable agent-scheduler >>"${LOG_DIR}/plugin.log" 2>&1 || true
+openclaw plugins enable clawtune >>"${LOG_DIR}/plugin.log" 2>&1 || true
 
 cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
 {
@@ -87,19 +91,29 @@ cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
       "deny": ["browser", "canvas", "nodes", "cron", "gateway"]
     }}
   },
-  "plugins": {"entries": {"agent-scheduler": {
+  "plugins": {"entries": {"clawtune": {
     "enabled": true,
     "hooks": {"allowConversationAccess": true},
     "config": {
       "endpoint": "http://127.0.0.1:${SIDECAR_PORT}",
+      "mode": "observe",
+      "failOpen": true,
       "autoStartSidecar": false,
       "sidecarCommand": "",
-      "recordRawTrace": true,
       "executionBackend": "hook-only",
       "enableCgroup": false,
       "enableAffinity": false,
       "enableNuma": false,
-      "securityBoundaryAccepted": true
+      "securityBoundaryAccepted": true,
+      "trace": {
+        "schema_version": 6,
+        "include_raw_events": false,
+        "include_llm_messages": true,
+        "include_tool_outputs": true,
+        "redact_sensitive_data": true,
+        "flush_span_start": true,
+        "trace_dir": "${TRACE_DIR}"
+      }
     }
   }}}
 }

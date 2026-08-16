@@ -20,7 +20,7 @@ spec:
       labels: *toolLabels
     spec:
       automountServiceAccountToken: false
-      runtimeClassName: kata-fc
+      runtimeClassName: $RUNTIME_CLASS
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -150,7 +150,7 @@ spec:
       labels: *runtimeLabels
     spec:
       automountServiceAccountToken: false
-      runtimeClassName: kata-fc
+      runtimeClassName: $RUNTIME_CLASS
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
