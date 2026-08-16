@@ -14,7 +14,7 @@ Usage:
   cell.sh delete --tenant TENANT [--namespace NAMESPACE]
 
 Both Pods use the selected pre-installed Kata RuntimeClass. The arm64/openEuler
-default is kata-qemu; kata-fc is supported only after its host gate passes.
+default is kata-qemu-runtime-rs; kata-fc is supported only after its host gate passes.
 
 Options:
   --ssh-secret SECRET          Existing Secret with client id_ed25519 keypair and
@@ -23,7 +23,7 @@ Options:
   --llm-egress-port PORT       Default: 443.
   --tool-egress-cidr CIDR      Optional Tool internet egress; default is denied.
   --tool-egress-port PORT      Default: 443.
-  --runtime-class NAME         Existing Kata RuntimeClass. Default: kata-qemu.
+  --runtime-class NAME         Existing Kata RuntimeClass. Default: kata-qemu-runtime-rs.
   --namespace NAME             Default: default.
 EOF
   exit 64
@@ -43,7 +43,7 @@ SSH_SECRET_NAME=""
 TOOL_EGRESS_CIDR=""
 TOOL_EGRESS_PORT="443"
 NAMESPACE="default"
-RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

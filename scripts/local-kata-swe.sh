@@ -24,7 +24,7 @@ REBUILD="${REBUILD:-0}"
 SKIP_SMOKE="${SKIP_KATA_SMOKE:-0}"
 INSTALL_KATA="${INSTALL_KATA:-0}"
 BOOTSTRAP_MINIKUBE="${BOOTSTRAP_MINIKUBE:-0}"
-RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-qemu}"
+RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
 
 usage() {
   cat <<'EOF'
@@ -49,7 +49,7 @@ Options:
   --cpu VALUE          CPU per task; default: 2
   --memory VALUE       Memory per task; default: 4Gi
   --rebuild            Rebuild the ClawTune bundle and bundle image
-  --runtime-class NAME Existing Kata RuntimeClass; default: kata-qemu
+  --runtime-class NAME Existing Kata RuntimeClass; default: kata-qemu-runtime-rs
   --skip-smoke         Skip the Kata Alpine smoke Pod
   --install-kata       Install Kata on cluster nodes with the official Helm chart
   --bootstrap-minikube Install Ubuntu KVM/libvirt and create a kvm2 Minikube cluster
@@ -251,7 +251,6 @@ prepare_minikube_kata_images() {
 
 install_kata() {
   need helm
-  need curl
   local context version chart
   context="$(kubectl config current-context 2>/dev/null || true)"
   if [[ "${context}" == "minikube" && "${RUNTIME_CLASS}" == "kata-fc" ]]; then
@@ -265,7 +264,8 @@ install_kata() {
     fi
     configure_minikube_devmapper
   fi
-  version="${KATA_VERSION:-$(curl -fsSL https://api.github.com/repos/kata-containers/kata-containers/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')}"
+  # 3.31.0 fixes the runtime-rs virtio-fs host escape CVE-2026-47243.
+  version="${KATA_VERSION:-3.31.0}"
   chart="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
   log "Installing Kata Containers ${version} on Kubernetes nodes"
   local helm_args=(

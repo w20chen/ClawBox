@@ -43,7 +43,7 @@ def render_job(
     namespace: str,
     bundle_image: str,
     llm_secret: str,
-    runtime_class: str = "kata-qemu",
+    runtime_class: str = "kata-qemu-runtime-rs",
     cpu: str = "4",
     memory: str = "8Gi",
     timeout_seconds: int = 1800,
@@ -177,7 +177,7 @@ def main() -> None:
     parser.add_argument("--llm-secret", default="clawbox-llm")
     parser.add_argument(
         "--runtime-class",
-        default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-qemu"),
+        default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-qemu-runtime-rs"),
         help="Existing Kata RuntimeClass; use kata-fc only after the arm64 host gate passes",
     )
     parser.add_argument("--parallelism", type=int, default=1)

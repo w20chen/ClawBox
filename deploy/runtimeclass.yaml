@@ -4,10 +4,10 @@
 #
 # IMPORTANT: the `handler` name MUST match the runtime handler configured in
 # containerd on the host (e.g. /etc/containerd/config.toml:
-#   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu]
+#   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu-runtime-rs]
 #     runtime_type = "io.containerd.kata.v2"
-#     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu.options]
-#       ConfigPath = "/etc/kata-containers/configuration-qemu.toml"
+#     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu-runtime-rs.options]
+#       ConfigPath = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml"
 # )
 # If the handler does not match, Pods fall back to / fail with runc, which
 # silently breaks the microVM isolation this deployment relies on.
@@ -17,5 +17,5 @@
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
-  name: kata-qemu
-handler: kata-qemu
+  name: kata-qemu-runtime-rs
+handler: kata-qemu-runtime-rs

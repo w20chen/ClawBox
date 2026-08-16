@@ -58,14 +58,14 @@ scheduling and eBPF are intentionally disabled on this first path.
 ```text
 clawbox-swe-rebench --parallelism N
   -> N Kubernetes Jobs (bounded client-side)
-       -> runtimeClassName: configured Kata class (default kata-qemu)
+       -> runtimeClassName: configured Kata class (default kata-qemu-runtime-rs)
        -> init: copy ClawTune bundle image to /claw
        -> main: SWE-Rebench task image + /claw/entrypoint.sh
        -> one local OpenClaw + sidecar per task/tenant
        -> /traces/<task-id> on an optional RWX PVC
 ```
 
-Kata Containers is the Kubernetes runtime integration. The default `kata-qemu` baseline is intended
+Kata Containers is the Kubernetes runtime integration. The default `kata-qemu-runtime-rs` baseline is intended
 for the first arm64/openEuler run; `kata-fc` selects Firecracker only when explicitly configured.
 ClawBox does not start either hypervisor directly.
 
@@ -96,8 +96,8 @@ The nodes must have containerd, KVM, Kata Containers, and the selected RuntimeCl
 For openEuler/arm64, run both stage-0 gates before deployment:
 
 ```bash
-bash deploy/check-host.sh --runtime-class kata-qemu
-bash scripts/arm64-kata-smoke.sh --runtime-class kata-qemu
+bash deploy/check-host.sh --runtime-class kata-qemu-runtime-rs
+bash scripts/arm64-kata-smoke.sh --runtime-class kata-qemu-runtime-rs
 kubectl apply -f deploy/control-plane-rbac.yaml
 kubectl apply -f deploy/benchmark-networkpolicy.yaml
 ```

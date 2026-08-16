@@ -5,7 +5,7 @@ TENANT_ID=""
 OTHER_TENANT_ID=""
 NAMESPACE="default"
 VERIFY_DELETE=false
-RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
 
 usage() {
   echo "usage: smoke-test.sh --tenant TENANT [--other-tenant TENANT] [--namespace NS] [--runtime-class NAME] [--verify-delete]" >&2

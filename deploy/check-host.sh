@@ -2,7 +2,8 @@
 # Read-only openEuler/arm64 gate for Kubernetes + Kata.
 set -u
 
-RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
+MIN_SAFE_KATA_VERSION="${CLAWBOX_MIN_SAFE_KATA_VERSION:-3.31.0}"
 PASS=0
 WARN=0
 FAIL=0
@@ -85,15 +86,39 @@ fi
 if command -v ctr >/dev/null 2>&1; then
   ctr plugins ls 2>/dev/null | grep -q 'io.containerd.grpc.v1.*cri.*ok' \
     && pass "containerd CRI plugin reports ok" \
-    || warn "containerd CRI plugin could not be confirmed with ctr"
+    || warn "containerd CRI plugin could not be confirmed (socket permission or plugin state)"
 else
   warn "ctr is unavailable; skipping containerd plugin inspection"
 fi
 
-if command -v containerd-shim-kata-v2 >/dev/null 2>&1 \
-  || [[ -x /opt/kata/bin/containerd-shim-kata-v2 ]] \
-  || [[ -x /usr/bin/containerd-shim-kata-v2 ]]; then
-  pass "containerd-shim-kata-v2 is installed"
+kata_shim=""
+if command -v containerd-shim-kata-v2 >/dev/null 2>&1; then
+  kata_shim="$(command -v containerd-shim-kata-v2)"
+else
+  for candidate in \
+    /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 \
+    /opt/kata/bin/containerd-shim-kata-v2 \
+    /usr/bin/containerd-shim-kata-v2; do
+    if [[ -x "${candidate}" ]]; then
+      kata_shim="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -n "${kata_shim}" ]]; then
+  pass "containerd-shim-kata-v2 is installed (${kata_shim})"
+  if [[ "${RUNTIME_CLASS}" == *runtime-rs* ]]; then
+    kata_version_output="$("${kata_shim}" --version 2>&1 || true)"
+    kata_version="$(grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' <<<"${kata_version_output}" | head -1)"
+    if [[ -z "${kata_version}" ]]; then
+      fail "Kata runtime-rs version could not be established (must be >= ${MIN_SAFE_KATA_VERSION})"
+    elif [[ "$(printf '%s\n%s\n' "${MIN_SAFE_KATA_VERSION}" "${kata_version}" | sort -V | head -1)" == "${MIN_SAFE_KATA_VERSION}" ]]; then
+      pass "Kata runtime-rs = ${kata_version} (>= ${MIN_SAFE_KATA_VERSION})"
+    else
+      fail "Kata runtime-rs = ${kata_version} (< ${MIN_SAFE_KATA_VERSION}; CVE-2026-47243)"
+    fi
+  fi
 else
   fail "containerd-shim-kata-v2 is missing"
 fi
@@ -111,7 +136,7 @@ else
 fi
 
 if ! command -v kubectl >/dev/null 2>&1; then
-  fail "kubectl is installed"
+  fail "kubectl is missing"
 else
   pass "kubectl is installed"
   if kubectl cluster-info >/dev/null 2>&1; then

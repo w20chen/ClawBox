@@ -22,7 +22,7 @@ def render(*, tool_egress: str = "") -> str:
         "LLM_EGRESS_CIDR": "203.0.113.10/32",
         "LLM_EGRESS_PORT": "443",
         "SSH_SECRET_NAME": "tenant-a-ssh",
-        "RUNTIME_CLASS": "kata-qemu",
+        "RUNTIME_CLASS": "kata-qemu-runtime-rs",
         "TOOL_EGRESS_POLICY": tool_egress,
         "TOOL_EXEC_TIMEOUT_SECONDS": "300",
         "TOOL_PIDS_LIMIT": "128",
@@ -68,7 +68,7 @@ def test_both_pods_use_the_selected_kata_runtime() -> None:
     docs = load_docs(render())
     by_name = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Deployment"}
     for name in ("claw-tenant-a-runtime", "claw-tenant-a-tool"):
-        assert by_name[name]["spec"]["template"]["spec"]["runtimeClassName"] == "kata-qemu"
+        assert by_name[name]["spec"]["template"]["spec"]["runtimeClassName"] == "kata-qemu-runtime-rs"
 
 
 def test_secrets_and_network_boundaries() -> None:

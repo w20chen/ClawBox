@@ -17,7 +17,7 @@ def test_swe_job_uses_task_image_openclaw_bundle_and_kata_guaranteed_qos():
         llm_secret="llm", trace_pvc="traces",
     )
     pod = job["spec"]["template"]["spec"]
-    assert pod["runtimeClassName"] == "kata-qemu"
+    assert pod["runtimeClassName"] == "kata-qemu-runtime-rs"
     assert pod["automountServiceAccountToken"] is False
     assert pod["initContainers"][0]["image"] == "registry/bundle:dev"
     assert pod["initContainers"][0]["imagePullPolicy"] == "IfNotPresent"
@@ -85,7 +85,7 @@ def test_controller_backend_creates_kata_service_and_guaranteed_tool_pod():
     assert created.pod_uid == "physical-pod-uid"
     assert created.endpoint.endswith(".svc:8090")
     pod = core.pods[0][1]["spec"]
-    assert pod["runtimeClassName"] == "kata-qemu"
+    assert pod["runtimeClassName"] == "kata-qemu-runtime-rs"
     resources = pod["containers"][0]["resources"]
     assert resources["requests"] == resources["limits"]
     assert core.services[0][1]["spec"]["selector"] == core.pods[0][1]["metadata"]["labels"]
@@ -163,6 +163,7 @@ def test_local_runner_automates_the_complete_smoke_path():
         "k3s ctr images import",
         "ctr -n k8s.io images import",
         "helm upgrade",
+        'version="${KATA_VERSION:-3.31.0}"',
         "no runtime for",
         "minikube ssh -- test -r /dev/kvm",
         "--bootstrap-minikube",
@@ -205,6 +206,9 @@ def test_openeuler_host_gate_is_read_only_and_runtime_class_aware():
     script = (Path(__file__).parents[1] / "deploy" / "check-host.sh").read_text(encoding="utf-8")
     assert "/etc/os-release" in script
     assert "/sys/fs/cgroup/cgroup.controllers" in script
+    assert "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" in script
+    assert "CVE-2026-47243" in script
+    assert "MIN_SAFE_KATA_VERSION" in script
     assert 'kubectl get runtimeclass "${RUNTIME_CLASS}"' in script
     assert "arm64-kata-smoke.sh" in script
     assert "kubectl apply" not in script

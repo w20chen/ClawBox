@@ -3,7 +3,7 @@
 ClawBox 在 Kubernetes 上并发运行隔离的 OpenClaw 租户。当前 MVP 的主路径是：
 
 - 每个 SWE-Rebench 任务对应一个独立 OpenClaw runtime。
-- Pod 使用可配置的 Kata RuntimeClass；鲲鹏/openEuler 首轮默认 `kata-qemu`，验证后可切换 `kata-fc`。
+- Pod 使用可配置的 Kata RuntimeClass；鲲鹏/openEuler 首轮默认 `kata-qemu-runtime-rs`，验证后可切换其他 VMM。
 - SWE-Rebench 任务代码来自任务自身的 Docker 镜像。
 - OpenClaw、插件和 sidecar 复用 ClawTune 生成的 runtime bundle。
 - 当前先跑通并发部署；预测算法、共享 KB、自定义调度和 eBPF 不在主路径中。
@@ -99,7 +99,7 @@ bash scripts/local-kata-swe.sh smoke
 --parallelism N       最大并发数，默认 1
 --cpu VALUE           每个任务的 CPU，默认 2
 --memory VALUE        每个任务的内存，默认 4Gi
---runtime-class NAME  已安装的 Kata RuntimeClass，默认 kata-qemu
+--runtime-class NAME  已安装的 Kata RuntimeClass，默认 kata-qemu-runtime-rs
 --rebuild             ClawTune 更新后重建 bundle 和镜像
 --skip-smoke          跳过 Kata smoke test
 --install-kata        使用官方 Kata Deploy Helm chart 安装节点运行时

@@ -6,8 +6,8 @@ create a RuntimeClass that points at a handler which is not installed.
 
 ## Runtime choice
 
-Use `kata-qemu` for the first openEuler acceptance run. It is the conservative
-arm64 baseline and is the default in ClawBox. `kata-fc` remains supported, but
+Use `kata-qemu-runtime-rs` for the first openEuler acceptance run. It is the
+Kata 4.x recommended arm64 baseline and is the default in ClawBox. `kata-fc` remains supported, but
 only select it after the host has an arm64 Firecracker binary, matching Kata
 guest kernel/rootfs, containerd handler, and a passing live smoke gate.
 
@@ -17,9 +17,15 @@ The exact handler names come from the host's Kata installation. List them with:
 kubectl get runtimeclass
 ```
 
-If the installation calls the QEMU handler `kata` rather than `kata-qemu`, pass
+If the installation uses another QEMU handler name, pass
 that exact name to every command below. `deploy/runtimeclass.yaml` is an example
 mapping only; applying it does not install Kata.
+
+ClawBox pins the automated install to Kata `3.31.0` by default. Do not use
+runtime-rs `<= 3.30.0`: it is affected by the critical virtio-fs host escape
+[CVE-2026-47243](https://github.com/kata-containers/kata-containers/security/advisories/GHSA-2gv2-cffp-j227).
+`KATA_VERSION` may select a newer reviewed release, while the host gate rejects
+versions below `3.31.0`.
 
 ## Stage 0: host and live cluster gates
 
@@ -27,8 +33,8 @@ On the target openEuler machine:
 
 ```bash
 cd ~/ClawBox
-bash deploy/check-host.sh --runtime-class kata-qemu
-bash scripts/arm64-kata-smoke.sh --runtime-class kata-qemu
+bash deploy/check-host.sh --runtime-class kata-qemu-runtime-rs
+bash scripts/arm64-kata-smoke.sh --runtime-class kata-qemu-runtime-rs
 ```
 
 The read-only preflight checks openEuler, arm64, kernel >= 5.10, `/dev/kvm`,

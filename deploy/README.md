@@ -2,7 +2,7 @@
 
 每个租户拥有一组独立资源：一个 Runtime Pod 和一个 Tool Pod。两个 Pod 都通过
 同一个可配置的 Kata RuntimeClass 运行在独立 microVM 中。鲲鹏/openEuler 首轮
-默认使用 `kata-qemu`；`kata-fc` 只应在 ARM64 主机门禁通过后启用。
+默认使用 Kata 4.x 推荐的 `kata-qemu-runtime-rs`；`kata-fc` 只应在 ARM64 主机门禁通过后启用。
 
 ## 边界与支持的工具
 
@@ -94,7 +94,7 @@ bash deploy/cell.sh deploy \
   --tool-image registry.example/claw-tool:latest \
   --llm-secret tenant-a-llm \
   --ssh-secret tenant-a-tool-ssh \
-  --runtime-class kata-qemu \
+  --runtime-class kata-qemu-runtime-rs \
   --llm-egress-cidr 203.0.113.10/32 \
   --llm-egress-port 443
 ```

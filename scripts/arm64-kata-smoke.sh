@@ -2,7 +2,7 @@
 # Live stage-0 gate: two arm64 Kata Pods, pair-only networking and cleanup.
 set -euo pipefail
 
-RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu}"
+RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
 IMAGE="${CLAWBOX_SMOKE_IMAGE:-alpine:3.22}"
 NAMESPACE="clawbox-stage0-${RANDOM:-0}"
 KEEP=false
