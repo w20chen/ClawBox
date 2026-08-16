@@ -141,6 +141,26 @@ spec:
     - from:
         - podSelector: {matchLabels: {app: clawbox-stage0, role: runtime}}
       ports: [{protocol: TCP, port: 8080}]
+---
+# The tool VM must be able to respond to the runtime's connections: its SYN-ACK
+# and HTTP responses are egress traffic, which default-deny would otherwise drop
+# (observed as SYN-ACKs reaching the host veth but never completing the
+# handshake).  Only runtime is reachable; the attacker stays blocked both ways.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tool-egress
+spec:
+  podSelector: {matchLabels: {app: clawbox-stage0, role: tool}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app: clawbox-stage0, role: runtime}}
+      ports: [{protocol: TCP}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 EOF
 
 wait_pod() {
@@ -218,7 +238,14 @@ spec:
       image: ${IMAGE}
       command: ["/bin/sh", "-ec", "mkdir -p /www; uname -m > /www/index.html; exec busybox httpd -f -p 8080 -h /www"]
       ports: [{name: http, containerPort: 8080}]
-      readinessProbe: {httpGet: {path: /, port: http}, periodSeconds: 1}
+      # Probe from inside the guest (exec via the agent), not a host httpGet: the
+      # tool pod's egress is restricted to the runtime pod, so a host-originated
+      # probe's response would be dropped by the tool-egress policy and the pod
+      # would never become Ready even though httpd is healthy.
+      readinessProbe:
+        exec:
+          command: ["/bin/sh", "-ec", "wget -T 2 -qO- http://127.0.0.1:8080/ | grep -q aarch64"]
+        periodSeconds: 1
       resources:
         requests: {cpu: 100m, memory: 128Mi}
         limits: {cpu: 100m, memory: 128Mi}
