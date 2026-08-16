@@ -160,18 +160,21 @@ if [[ "${DATA_SIZE}" =~ ^([0-9]+)%PVS$ ]]; then
   [[ "${pe_total}" =~ ^[0-9]+$ && "${pe_total}" -gt 0 ]] \
     || { echo "could not determine PE count for ${DATA_DEVICE}" >&2; exit 1; }
   pe_count=$(( pe_total * ${BASH_REMATCH[1]} / 100 ))
-  lvcreate --yes -l "${pe_count}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
+  lvcreate --yes --noudevsync -l "${pe_count}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
 elif [[ "${DATA_SIZE}" == *%* ]]; then
-  lvcreate --yes -l "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
+  lvcreate --yes --noudevsync -l "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
 else
-  lvcreate --yes -L "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
+  lvcreate --yes --noudevsync -L "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
 fi
 if [[ "${METADATA_SIZE}" == *%* ]]; then
-  lvcreate --yes -l "${METADATA_SIZE}" -n "${POOL}-meta" "${VG}" "${METADATA_DEVICE}"
+  lvcreate --yes --noudevsync -l "${METADATA_SIZE}" -n "${POOL}-meta" "${VG}" "${METADATA_DEVICE}"
 else
-  lvcreate --yes -L "${METADATA_SIZE}" -n "${POOL}-meta" "${VG}" "${METADATA_DEVICE}"
+  lvcreate --yes --noudevsync -L "${METADATA_SIZE}" -n "${POOL}-meta" "${VG}" "${METADATA_DEVICE}"
 fi
-lvconvert --yes --type thin-pool --poolmetadata "${VG}/${POOL}-meta" "${VG}/${POOL}"
+# Do not wait on udev: on some openEuler hosts a stuck udev worker wedges the
+# default LVM/udev synchronization and every lvcreate/lvconvert hangs in
+# semtimedop while holding the VG lock.
+lvconvert --yes --noudevsync --type thin-pool --poolmetadata "${VG}/${POOL}-meta" "${VG}/${POOL}"
 lvchange -ay "${VG}/${POOL}"
 
 dm_name="$(lvs --noheadings -o dm_name "${VG}/${POOL}" | xargs)"
