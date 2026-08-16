@@ -244,6 +244,11 @@ def test_openeuler_bare_host_bootstrap_is_explicit_pinned_and_recoverable():
         assert required in script
     assert "kubeadm reset" not in script
     assert "/var/lib/clawbox-bootstrap/backups" in script
+    # With `set -u`, Bash expands every assignment in one `local` command
+    # before the newly declared variables are available. Keep dependent
+    # assignments separate so backup_once can run on the first apply.
+    assert 'local source="$1" label="$2"' not in script
+    assert 'local destination="${STATE_DIR}/backups/${label}"' in script
     assert "ExecStart=/usr/local/bin/containerd" in service
     assert "__CLAWBOX_POD_CIDR__" in calico
     assert "encapsulation: VXLAN" in calico

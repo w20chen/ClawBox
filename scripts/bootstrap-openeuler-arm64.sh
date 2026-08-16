@@ -243,7 +243,9 @@ prepare_state() {
 }
 
 backup_once() {
-  local source="$1" label="$2" destination="${STATE_DIR}/backups/${label}"
+  local source="$1"
+  local label="$2"
+  local destination="${STATE_DIR}/backups/${label}"
   if sudo test -e "${source}" && ! sudo test -e "${destination}"; then
     sudo cp -a "${source}" "${destination}"
   fi
