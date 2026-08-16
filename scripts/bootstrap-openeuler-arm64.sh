@@ -570,7 +570,14 @@ install_kata_firecracker() {
     log "Reusing the complete audited Kata/Firecracker artifact tree"
   else
     log "Artifact audit was incomplete; assembling the pinned arm64 stack"
-    sudo env KATA_VERSION="${KATA_VERSION}" FIRECRACKER_VERSION="${FIRECRACKER_VERSION}" \
+    # sudo env replaces the environment; carry the download proxy through so the
+    # Kata/Firecracker GitHub downloads are not silently forced onto a direct,
+    # slow cross-border path.
+    sudo env \
+      KATA_VERSION="${KATA_VERSION}" \
+      FIRECRACKER_VERSION="${FIRECRACKER_VERSION}" \
+      HTTPS_PROXY="${HTTPS_PROXY:-}" HTTP_PROXY="${HTTP_PROXY:-}" \
+      ALL_PROXY="${ALL_PROXY:-}" NO_PROXY="${NO_PROXY:-}" \
       bash "${ROOT}/scripts/build-kata-firecracker-arm64.sh" install
   fi
 
