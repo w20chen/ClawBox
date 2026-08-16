@@ -145,6 +145,8 @@ wait_pod() {
     kubectl -n "${NAMESPACE}" get pods -o wide >&2 || true
     kubectl -n "${NAMESPACE}" describe "pod/${pod}" >&2 || true
     kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp >&2 || true
+    echo "--- logs for ${pod} ---" >&2
+    kubectl -n "${NAMESPACE}" logs "pod/${pod}" --tail=100 >&2 2>&1 || true
     return 1
   fi
 }
