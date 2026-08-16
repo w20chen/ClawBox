@@ -12,6 +12,12 @@ KATA_3_31_0_ARM64_SHA256="42a7e67a2c2bf3e97a615c99a293b2bc01ea9c84111fc2bf4abeed
 OUTPUT="${CLAWBOX_FC_OUTPUT:-${ROOT}/.artifacts/kata-fc-arm64}"
 STATE_DIR="/var/lib/clawbox-bootstrap"
 TMP_DIR=""
+# Firecracker caps a microVM at 32 vCPUs. Kata fills unset vCPU knobs with the
+# host CPU count (128 on Kunpeng), which fails Firecracker config validation
+# with "Firecracker hypervisor can not support 128 vCPUs", so the generated
+# TOML pins both values explicitly.
+FC_DEFAULT_VCPUS="${CLAWBOX_FC_DEFAULT_VCPUS:-2}"
+FC_MAX_VCPUS="${CLAWBOX_FC_MAX_VCPUS:-32}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -34,6 +40,12 @@ done
 
 [[ "${KATA_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
 [[ "${FIRECRACKER_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
+[[ "${FC_DEFAULT_VCPUS}" =~ ^[1-9][0-9]*$ && "${FC_DEFAULT_VCPUS}" -le 32 ]] || {
+  echo "CLAWBOX_FC_DEFAULT_VCPUS must be an integer in [1,32]" >&2; exit 64; }
+[[ "${FC_MAX_VCPUS}" =~ ^[1-9][0-9]*$ && "${FC_MAX_VCPUS}" -le 32 ]] || {
+  echo "CLAWBOX_FC_MAX_VCPUS must be an integer in [1,32]" >&2; exit 64; }
+[[ "${FC_DEFAULT_VCPUS}" -le "${FC_MAX_VCPUS}" ]] || {
+  echo "CLAWBOX_FC_DEFAULT_VCPUS must not exceed CLAWBOX_FC_MAX_VCPUS" >&2; exit 64; }
 
 echo "Kata=${KATA_VERSION} Firecracker=${FIRECRACKER_VERSION} arch=arm64"
 echo "output=${OUTPUT} mode=${MODE}"
@@ -132,15 +144,40 @@ done
 
 mkdir -p "${config_dir}"
 target_config="${config_dir}/configuration-fc-arm64.toml"
-awk '
-  /^\[hypervisor\.firecracker\][[:space:]]*$/ { in_fc=1; print; next }
-  /^\[runtime\][[:space:]]*$/ { in_fc=0; in_runtime=1; print; next }
-  /^\[/ { in_fc=0; in_runtime=0 }
+awk -v default_vcpus="${FC_DEFAULT_VCPUS}" -v max_vcpus="${FC_MAX_VCPUS}" '
+  function flush_fc() {
+    if (in_fc && !fc_emitted) {
+      if (!found_vcpus) { print "default_vcpus = " default_vcpus; found_vcpus = 1 }
+      if (!found_maxvcpus) { print "default_maxvcpus = " max_vcpus; found_maxvcpus = 1 }
+      fc_emitted = 1
+    }
+    in_fc = 0
+  }
+  /^\[hypervisor\.firecracker\][[:space:]]*$/ {
+    flush_fc()
+    in_fc = 1; fc_emitted = 0; in_runtime = 0
+    print; next
+  }
+  /^\[runtime\][[:space:]]*$/ {
+    flush_fc()
+    in_fc = 0; in_runtime = 1
+    print; next
+  }
+  /^\[/ {
+    flush_fc()
+    in_fc = 0; in_runtime = 0
+  }
   in_fc && /^[[:space:]]*(path|path_firecracker)[[:space:]]*=/ {
     sub(/=.*/, "= \"/opt/kata/bin/firecracker\""); found=1
   }
   in_fc && /^[[:space:]]*jailer_path[[:space:]]*=/ {
     sub(/=.*/, "= \"/opt/kata/bin/jailer\""); found_jailer=1
+  }
+  in_fc && /^[[:space:]]*default_vcpus[[:space:]]*=/ {
+    sub(/=.*/, "= " default_vcpus); found_vcpus=1
+  }
+  in_fc && /^[[:space:]]*default_maxvcpus[[:space:]]*=/ {
+    sub(/=.*/, "= " max_vcpus); found_maxvcpus=1
   }
   in_runtime && /^[[:space:]]*static_sandbox_resource_mgmt[[:space:]]*=/ {
     sub(/=.*/, "= true"); found_static=1
@@ -149,11 +186,18 @@ awk '
     sub(/=.*/, "= false"); found_guest_emptydir=1
   }
   { print }
-  END { if (!found || !found_jailer || !found_static || !found_guest_emptydir) exit 42 }
+  END {
+    flush_fc()
+    if (!found || !found_jailer || !found_vcpus || !found_maxvcpus || !found_static || !found_guest_emptydir) exit 42
+  }
 ' "${source_config}" >"${target_config}" \
   || { echo "could not normalize the Firecracker hypervisor section in ${source_config}" >&2; exit 1; }
 grep -Eq '^[[:space:]]*(path|path_firecracker)[[:space:]]*=[[:space:]]*"/opt/kata/bin/firecracker"' "${target_config}" \
   || { echo "could not normalize Firecracker path in ${source_config}" >&2; exit 1; }
+grep -Eq "^[[:space:]]*default_vcpus[[:space:]]*=[[:space:]]*${FC_DEFAULT_VCPUS}([[:space:]]|$)" "${target_config}" \
+  || { echo "could not pin Firecracker default_vcpus in ${source_config}" >&2; exit 1; }
+grep -Eq "^[[:space:]]*default_maxvcpus[[:space:]]*=[[:space:]]*${FC_MAX_VCPUS}([[:space:]]|$)" "${target_config}" \
+  || { echo "could not pin Firecracker default_maxvcpus in ${source_config}" >&2; exit 1; }
 
 bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
   --root "${kata_root}" --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" \

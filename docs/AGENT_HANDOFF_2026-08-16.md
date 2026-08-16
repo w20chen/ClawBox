@@ -142,20 +142,28 @@ WARN: migrating uninitialized QEMU state to Firecracker; changed fields: ...
 - 对 Calico 的具体 raw 文件曾单次超时，说明跨境/CDN链路不稳定；
 - commit `526bb28` 已把 endpoint probe 从单次 HEAD 改成 range GET，并增加 `--retry 4 --retry-all-errors`；正式 bootstrap 下载也增加同样的全错误重试。
 
-最后一次 apply 已完成基础 RPM 依赖安装/升级，至少包括 util-linux 相关包，然后进入：
+之后（2026-08-16 UTC 夜间）借助 `HTTPS_PROXY=http://127.0.0.1:1080` 的 apply 几乎走完了全部阶段，真实进度大幅前移：containerd 2.3.4/runc 1.5.1 安装完成、Kubernetes 1.35.7 单节点初始化完成、Calico 3.32.1（VXLAN + NetworkPolicy）就绪、devmapper thin-pool 创建成功（`clawbox/fc-pool`，数据盘 `/dev/nvme0n1` 90%PVS、元数据盘 `/dev/nvme1n1` 8G，容量 2682.73g）、`kata-fc-arm64` RuntimeClass/handler 生效。静态 gate 全绿（19 pass, 0 warn, 0 fail，含 FC-0 14/14）。**但 stage-0 在线冒烟 gate 失败**，`runtime`/`tool` 两个 Kata Pod 卡在 `ContainerCreating`：
 
 ```text
-==> Installing containerd 2.3.4 and runc 1.5.1
+failed to create containerd task: failed to create shim task:
+Others("failed to handle message try init runtime instance
+  0: load config
+  1: Firecracker hypervisor can not support 128 vCPUs")
 ```
 
-下载情况：28.3 MiB containerd archive，4 分 2 秒下载 3678 KiB，平均约 15.5 KiB/s，进度 12%，随后用户 `Ctrl+C`。因此：
+根因（已修复并提交）：
 
-- 宿主机已有部分前置配置变更，bootstrap 设计上可重复执行这些前置步骤；
-- containerd 新包尚未完成校验和安装；
-- Kubernetes 尚未初始化；
-- Kata/Firecracker 尚未构建；
-- `/dev/nvme0n1`、`/dev/nvme1n1` 尚未被 LVM 初始化；
-- 当前下载临时文件因 EXIT trap 很可能已删除。
+- Kata runtime-rs 在 `configuration-fc-arm64.toml` 未显式设置 `default_vcpus`/`default_maxvcpus` 时，`CpuInfo::adjust_config()` 会把 `default_maxvcpus` 填成宿主机核数（本机 128），而 Firecracker 插件校验上限是 32（`MAX_FIRECRACKER_VCPUS`），配置加载即失败；
+- 该错误发生在 shim `load config` 阶段，不经过 Pod 资源 sizing，因此与 Pod 的 100m CPU 请求无关；
+- FC-0 审计原先不检查这两个键，带病 `/opt/kata` 树通过审计后被 bootstrap“复用”，冒烟持续失败；
+- 修复：`build-kata-firecracker-arm64.sh` 现在把 `default_vcpus = 2`、`default_maxvcpus = 32` 写死进生成的配置（可用 `CLAWBOX_FC_DEFAULT_VCPUS`/`CLAWBOX_FC_MAX_VCPUS` 覆盖，限 [1,32]，且 `default_vcpus <= default_maxvcpus`）；`audit-kata-firecracker-arm64.sh`（FC-0）新增三项检查，带病树会 FAIL，从而触发 bootstrap 重新组装而非复用。
+
+目标机当前状态：
+
+- 两块 NVMe 已被 ClawBox 拥有（PV/VG/pool 已建）；由于 P0-2 的 owned-pool 幂等重跑尚未实现，重跑前必须再次手动 `vgremove`/`pvremove`（见第 20 节）；
+- Kubernetes/Calico 已初始化，`initialize_cluster`/`install_calico` 幂等，重跑会跳过 `kubeadm init`；
+- `/opt/kata` 仍是带病树，重跑 bootstrap 会因新 FC-0 检查失败而自动重建；
+- `clawbox.openai.com/firecracker-ready` 标签在冒烟失败后已被移除，`stage0-passed` 不存在。
 
 ## 4. bootstrap 机制详解
 
@@ -469,6 +477,18 @@ bootstrap在下载和宿主修改前后较早写完整 `versions.env`，导致�
 - stage0完成后才锁定完整版本漂移；
 - migration必须有 schema和明确函数，不能靠删除状态。
 
+### P0-4：Firecracker vCPU 配置未固定导致 128 vCPU 校验失败（已修复）
+
+Kata runtime-rs 对未设置的 `default_vcpus`/`default_maxvcpus` 会用宿主机核数填充 `default_maxvcpus`（Kunpeng 128），而 Firecracker 上限 32，`load config` 即报 `Firecracker hypervisor can not support 128 vCPUs`。FC-0 原先不检查该键，导致 bootstrap 复用带病 `/opt/kata` 树并在在线冒烟持续失败。
+
+已在 `scripts/build-kata-firecracker-arm64.sh` 生成配置时固定 `default_vcpus = 2`、`default_maxvcpus = 32`（`CLAWBOX_FC_DEFAULT_VCPUS`/`CLAWBOX_FC_MAX_VCPUS` 可覆盖，限 [1,32]），并在 `scripts/audit-kata-firecracker-arm64.sh`（FC-0）新增：
+
+- `default_vcpus` 必须在 [1,32]；
+- `default_maxvcpus` 必须在 [1,32]；
+- `default_vcpus <= default_maxvcpus`。
+
+遗留观察：`static_sandbox_resource_mgmt = true` 下，Pod 带 CPU 请求时 VM 按 `overhead_vcpus + 请求` sizing（大 profile Tool 8 CPU → 约 9 vCPU，远小于 32），`default_vcpus` 只是无 sizing 信息时的回退值。若未来单 Pod 请求超过 32 CPU，需在 capacity/placement 层拦截，不能让 Kata 生成超限配置。
+
 ### P1：生产清单仍含 placeholder/tag
 
 `deploy/cell-controller.yaml` 和 `trace-ingester.yaml` 使用 `registry.example.com/...:dev`；必须替换为真实 immutable ARM64 digest。Secret example也必须替换。生产 ingester必须使用持久 PostgreSQL，不能用容器内 SQLite。
@@ -507,20 +527,28 @@ bootstrap在下载和宿主修改前后较早写完整 `versions.env`，导致�
 
 ## 20. 下一次目标机命令
 
-在实现下载缓存前，不建议用户反复中断。若决定暂时不改代码，就必须接受从头下载并等待约 30 分钟以上。推荐修复缓存后执行：
+代码已包含 128-vCPU 修复（P0-4），本次重跑会被 FC-0 新检查触发 Kata/Firecracker 树重建。因为 P0-2（owned-pool 幂等重跑）尚未实现，且当前两块盘已被 ClawBox LVM 拥有（有 holders），必须先手动拆除 pool 才能通过 storage plan；这与上次成功的 apply 流程一致：
 
 ```bash
-git pull
+cd ~/ClawBox && git pull
+
+# 目标机当前两块盘已被 clawbox VG 拥有；先手动拆除（与上次成功 apply 相同）
+sudo vgremove -y clawbox || true
+sudo pvremove -y /dev/nvme0n1 /dev/nvme1n1 || true
 
 sudo bash scripts/bootstrap-openeuler-arm64.sh status
 
 lsblk -e7 -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS
 
-sudo bash scripts/bootstrap-openeuler-arm64.sh apply \
+sudo env HTTPS_PROXY=http://127.0.0.1:1080 HTTP_PROXY=http://127.0.0.1:1080 \
+     NO_PROXY=localhost,127.0.0.1,193.124.7.2,192.168.0.0/22,10.96.0.0/12 \
+  bash scripts/bootstrap-openeuler-arm64.sh apply \
   --devmapper-data-device /dev/nvme0n1 \
   --devmapper-meta-device /dev/nvme1n1 \
   --confirm-erase /dev/nvme0n1,/dev/nvme1n1
 ```
+
+预期：`install_kata_firecracker` 首步 FC-0 审计因带病树 FAIL → 自动执行 `build-kata-firecracker-arm64.sh install` 重建（下载 Kata/Firecracker，约数分钟，走 proxy）→ 生成的 `configuration-fc-arm64.toml` 含 `default_vcpus = 2`、`default_maxvcpus = 32` → FC-0 14+3=17 项全过 → devmapper 重建 → 静态 gate 全绿 → 在线冒烟两个 Kata Pod 应成功启动（不再报 128 vCPUs）。
 
 另开终端观察：
 
@@ -529,7 +557,7 @@ sudo ps -eo pid,etime,cmd | grep -E '[c]url|bootstrap-openeuler'
 sudo ss -tpn | grep ':443'
 ```
 
-如果失败，必须保存“最近一个 `==>` 到 ERROR”的完整输出。不要删除 `versions.env`，不要运行 `kubeadm reset`，不要自行 `wipefs/pvremove/vgremove`。
+如果失败，必须保存“最近一个 `==>` 到 ERROR”的完整输出。不要删除 `versions.env`，不要运行 `kubeadm reset`，不要 `wipefs`。`vgremove`/`pvremove` 仅用于上述明确场景（当前 bootstrap 的 storage plan 不接受带 holders 的盘）。
 
 ## 21. 最终验收证据清单
 

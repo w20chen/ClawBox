@@ -44,6 +44,11 @@ configured_value() {
   [[ -n "${config:-}" ]] || return 1
   sed -n -E "s#^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"([^\"]*)\".*#\1#p" "${config}" | head -1
 }
+numeric_value() {
+  local key="$1"
+  [[ -n "${config:-}" ]] || return 1
+  sed -n -E "s#^[[:space:]]*${key}[[:space:]]*=[[:space:]]*([0-9]+(\.[0-9]+)?).*#\1#p" "${config}" | head -1
+}
 artifact_path() {
   local configured="$1"
   if [[ "${configured}" == /opt/kata/* && "${KATA_ROOT}" != /opt/kata ]]; then
@@ -105,6 +110,25 @@ if [[ -n "${config}" ]] && grep -Eqi 'firecracker|hypervisor[._-]?name[[:space:]
   grep -Eq '^[[:space:]]*disable_guest_empty_dir[[:space:]]*=[[:space:]]*false([[:space:]]|$)' "${config}" \
     && pass "emptyDir stays guest-local instead of using a host shared filesystem" \
     || fail "guest-local emptyDir handling is not enabled"
+  fc_default_vcpus="$(numeric_value default_vcpus || true)"
+  fc_max_vcpus="$(numeric_value default_maxvcpus || true)"
+  if [[ -n "${fc_default_vcpus}" ]] \
+    && awk -v v="${fc_default_vcpus}" 'BEGIN { exit !(v >= 1 && v <= 32) }'; then
+    pass "Firecracker default_vcpus is pinned within [1,32] (${fc_default_vcpus})"
+  else
+    fail "Firecracker default_vcpus must be pinned within [1,32] (${fc_default_vcpus:-unset})"
+  fi
+  if [[ -n "${fc_max_vcpus}" ]] && (( fc_max_vcpus >= 1 && fc_max_vcpus <= 32 )); then
+    pass "Firecracker default_maxvcpus is pinned within [1,32] (${fc_max_vcpus})"
+  else
+    fail "Firecracker default_maxvcpus must be pinned within [1,32] (${fc_max_vcpus:-unset})"
+  fi
+  if [[ -n "${fc_default_vcpus}" && -n "${fc_max_vcpus}" ]] \
+    && awk -v d="${fc_default_vcpus}" -v m="${fc_max_vcpus}" 'BEGIN { exit !(d <= m) }'; then
+    pass "Firecracker default_vcpus does not exceed default_maxvcpus"
+  else
+    fail "Firecracker default_vcpus exceeds default_maxvcpus"
+  fi
 else
   fail "Firecracker Kata configuration is missing or does not select Firecracker"
 fi
