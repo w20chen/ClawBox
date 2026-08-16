@@ -129,6 +129,21 @@ if [[ -n "${config}" ]] && grep -Eqi 'firecracker|hypervisor[._-]?name[[:space:]
   else
     fail "Firecracker default_vcpus exceeds default_maxvcpus"
   fi
+  # Kata runtime-rs derives its agent-connect retry budget as
+  # reconnect_timeout_ms / dial_timeout_ms. 3.31.0 ships an fc config with
+  # dial_timeout_ms=45000 > reconnect_timeout_ms=3000, making the retry count 0
+  # and panicking the shim ("called Option::unwrap() on a None value" in
+  # hybrid_vsock connect). Gate reconnect >= dial (>= 1 retry) with the same
+  # 10 s floor upstream added after 3.31.0.
+  agent_dial_ms="$(numeric_value dial_timeout_ms || true)"
+  agent_reconnect_ms="$(numeric_value reconnect_timeout_ms || true)"
+  if [[ -n "${agent_dial_ms}" && "${agent_dial_ms}" -ge 1 ]] \
+    && [[ -n "${agent_reconnect_ms}" && "${agent_reconnect_ms}" -ge "${agent_dial_ms}" ]] \
+    && (( agent_reconnect_ms >= 10000 )); then
+    pass "Kata agent reconnect_timeout_ms >= dial_timeout_ms (${agent_reconnect_ms} >= ${agent_dial_ms}); runtime-rs retry budget is sound"
+  else
+    fail "Kata agent reconnect_timeout_ms must be >= dial_timeout_ms with a >= 10s budget (reconnect=${agent_reconnect_ms:-unset} dial=${agent_dial_ms:-unset}); runtime-rs retry_times=0 panics in hybrid_vsock connect"
+  fi
 else
   fail "Firecracker Kata configuration is missing or does not select Firecracker"
 fi

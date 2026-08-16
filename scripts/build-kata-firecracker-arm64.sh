@@ -18,6 +18,15 @@ TMP_DIR=""
 # TOML pins both values explicitly.
 FC_DEFAULT_VCPUS="${CLAWBOX_FC_DEFAULT_VCPUS:-2}"
 FC_MAX_VCPUS="${CLAWBOX_FC_MAX_VCPUS:-32}"
+# Kata runtime-rs derives its agent-connect retry budget as
+# reconnect_timeout_ms / dial_timeout_ms. The pinned 3.31.0 release ships a
+# Firecracker config with dial_timeout_ms (45000) larger than the 3000 ms
+# reconnect budget, so the retry count is 0 and the shim panics with
+# `called Option::unwrap() on a None value` in hybrid_vsock connect (upstream
+# fixed this after 3.31.0 by validating reconnect >= dial and clamping to 10 s).
+# Pin both so reconnect >= dial with a generous guest-boot budget.
+AGENT_DIAL_TIMEOUT_MS="${CLAWBOX_AGENT_DIAL_TIMEOUT_MS:-1000}"
+AGENT_RECONNECT_TIMEOUT_MS="${CLAWBOX_AGENT_RECONNECT_TIMEOUT_MS:-30000}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -46,6 +55,12 @@ done
   echo "CLAWBOX_FC_MAX_VCPUS must be an integer in [1,32]" >&2; exit 64; }
 [[ "${FC_DEFAULT_VCPUS}" -le "${FC_MAX_VCPUS}" ]] || {
   echo "CLAWBOX_FC_DEFAULT_VCPUS must not exceed CLAWBOX_FC_MAX_VCPUS" >&2; exit 64; }
+[[ "${AGENT_DIAL_TIMEOUT_MS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "CLAWBOX_AGENT_DIAL_TIMEOUT_MS must be a positive integer" >&2; exit 64; }
+[[ "${AGENT_RECONNECT_TIMEOUT_MS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "CLAWBOX_AGENT_RECONNECT_TIMEOUT_MS must be a positive integer" >&2; exit 64; }
+[[ "${AGENT_RECONNECT_TIMEOUT_MS}" -ge "${AGENT_DIAL_TIMEOUT_MS}" ]] || {
+  echo "CLAWBOX_AGENT_RECONNECT_TIMEOUT_MS must be >= CLAWBOX_AGENT_DIAL_TIMEOUT_MS (runtime-rs retry_times must be >= 1, else hybrid_vsock connect panics)" >&2; exit 64; }
 
 echo "Kata=${KATA_VERSION} Firecracker=${FIRECRACKER_VERSION} arch=arm64"
 echo "output=${OUTPUT} mode=${MODE}"
@@ -144,7 +159,8 @@ done
 
 mkdir -p "${config_dir}"
 target_config="${config_dir}/configuration-fc-arm64.toml"
-awk -v default_vcpus="${FC_DEFAULT_VCPUS}" -v max_vcpus="${FC_MAX_VCPUS}" '
+awk -v default_vcpus="${FC_DEFAULT_VCPUS}" -v max_vcpus="${FC_MAX_VCPUS}" \
+    -v dial_timeout_ms="${AGENT_DIAL_TIMEOUT_MS}" -v reconnect_timeout_ms="${AGENT_RECONNECT_TIMEOUT_MS}" '
   function flush_fc() {
     if (in_fc && !fc_emitted) {
       if (!found_vcpus) { print "default_vcpus = " default_vcpus; found_vcpus = 1 }
@@ -153,19 +169,35 @@ awk -v default_vcpus="${FC_DEFAULT_VCPUS}" -v max_vcpus="${FC_MAX_VCPUS}" '
     }
     in_fc = 0
   }
+  function flush_agent() {
+    if (in_agent && !agent_emitted) {
+      if (!found_dial) { print "dial_timeout_ms = " dial_timeout_ms; found_dial = 1 }
+      if (!found_reconnect) { print "reconnect_timeout_ms = " reconnect_timeout_ms; found_reconnect = 1 }
+      agent_emitted = 1
+    }
+    in_agent = 0
+  }
   /^\[hypervisor\.firecracker\][[:space:]]*$/ {
     flush_fc()
-    in_fc = 1; fc_emitted = 0; in_runtime = 0
+    flush_agent()
+    in_fc = 1; fc_emitted = 0; in_runtime = 0; in_agent = 0
     print; next
   }
   /^\[runtime\][[:space:]]*$/ {
     flush_fc()
-    in_fc = 0; in_runtime = 1
+    flush_agent()
+    in_fc = 0; in_runtime = 1; in_agent = 0
+    print; next
+  }
+  /^\[agent\.kata\][[:space:]]*$/ {
+    flush_fc()
+    in_fc = 0; in_runtime = 0; in_agent = 1; agent_emitted = 0
     print; next
   }
   /^\[/ {
     flush_fc()
-    in_fc = 0; in_runtime = 0
+    flush_agent()
+    in_fc = 0; in_runtime = 0; in_agent = 0
   }
   in_fc && /^[[:space:]]*(path|path_firecracker)[[:space:]]*=/ {
     sub(/=.*/, "= \"/opt/kata/bin/firecracker\""); found=1
@@ -185,10 +217,17 @@ awk -v default_vcpus="${FC_DEFAULT_VCPUS}" -v max_vcpus="${FC_MAX_VCPUS}" '
   in_runtime && /^[[:space:]]*disable_guest_empty_dir[[:space:]]*=/ {
     sub(/=.*/, "= false"); found_guest_emptydir=1
   }
+  in_agent && /^[[:space:]]*dial_timeout_ms[[:space:]]*=/ {
+    sub(/=.*/, "= " dial_timeout_ms); found_dial=1
+  }
+  in_agent && /^[[:space:]]*reconnect_timeout_ms[[:space:]]*=/ {
+    sub(/=.*/, "= " reconnect_timeout_ms); found_reconnect=1
+  }
   { print }
   END {
     flush_fc()
-    if (!found || !found_jailer || !found_vcpus || !found_maxvcpus || !found_static || !found_guest_emptydir) exit 42
+    flush_agent()
+    if (!found || !found_jailer || !found_vcpus || !found_maxvcpus || !found_static || !found_guest_emptydir || !found_dial || !found_reconnect) exit 42
   }
 ' "${source_config}" >"${target_config}" \
   || { echo "could not normalize the Firecracker hypervisor section in ${source_config}" >&2; exit 1; }
@@ -198,6 +237,10 @@ grep -Eq "^[[:space:]]*default_vcpus[[:space:]]*=[[:space:]]*${FC_DEFAULT_VCPUS}
   || { echo "could not pin Firecracker default_vcpus in ${source_config}" >&2; exit 1; }
 grep -Eq "^[[:space:]]*default_maxvcpus[[:space:]]*=[[:space:]]*${FC_MAX_VCPUS}([[:space:]]|$)" "${target_config}" \
   || { echo "could not pin Firecracker default_maxvcpus in ${source_config}" >&2; exit 1; }
+grep -Eq "^[[:space:]]*dial_timeout_ms[[:space:]]*=[[:space:]]*${AGENT_DIAL_TIMEOUT_MS}([[:space:]]|$)" "${target_config}" \
+  || { echo "could not pin Kata agent dial_timeout_ms in ${source_config}" >&2; exit 1; }
+grep -Eq "^[[:space:]]*reconnect_timeout_ms[[:space:]]*=[[:space:]]*${AGENT_RECONNECT_TIMEOUT_MS}([[:space:]]|$)" "${target_config}" \
+  || { echo "could not pin Kata agent reconnect_timeout_ms in ${source_config}" >&2; exit 1; }
 
 bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
   --root "${kata_root}" --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" \
