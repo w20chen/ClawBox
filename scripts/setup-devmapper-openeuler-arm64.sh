@@ -156,10 +156,11 @@ if [[ "${DATA_SIZE}" =~ ^([0-9]+)%PVS$ ]]; then
   # %PVS is a percentage of ALL PVs in the VG, which over-sizes the request when
   # the metadata PV is also a whole multi-TB disk. Size against the data PV's
   # own extent count instead.
+  pct="${BASH_REMATCH[1]}"
   pe_total="$(pvs --noheadings -o pv_name,pv_pe_count | awk -v d="${DATA_DEVICE}" '$1 == d {print $2}')"
   [[ "${pe_total}" =~ ^[0-9]+$ && "${pe_total}" -gt 0 ]] \
     || { echo "could not determine PE count for ${DATA_DEVICE}" >&2; exit 1; }
-  pe_count=$(( pe_total * ${BASH_REMATCH[1]} / 100 ))
+  pe_count=$(( pe_total * pct / 100 ))
   lvcreate --yes --noudevsync -l "${pe_count}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
 elif [[ "${DATA_SIZE}" == *%* ]]; then
   lvcreate --yes --noudevsync -l "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
