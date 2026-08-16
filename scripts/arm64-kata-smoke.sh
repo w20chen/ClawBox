@@ -83,6 +83,7 @@ trap cleanup EXIT INT TERM
 
 kubectl create namespace "${NAMESPACE}" >/dev/null
 created=true
+echo "namespace=${NAMESPACE}" >&2
 kubectl label namespace "${NAMESPACE}" app.kubernetes.io/managed-by=clawbox-stage0 >/dev/null
 
 # Create the Service and NetworkPolicies first, then create the pods one at a
