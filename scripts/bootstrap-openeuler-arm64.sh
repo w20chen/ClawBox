@@ -260,14 +260,22 @@ validate_storage_devices() {
 }
 
 guard_version_drift() {
-  local key requested installed installed_schema
-  local -a missing=()
+  local key requested installed installed_schema installed_runtime
+  local -a missing=() migrated=()
   local legacy_runtime_state=false
   sudo test -f "${STATE_FILE}" || return 0
 
   installed_schema="$(sudo awk -F= '$1 == "STATE_SCHEMA_VERSION" {print substr($0, index($0, "=") + 1)}' "${STATE_FILE}")"
   if [[ -n "${installed_schema}" && "${installed_schema}" != "${STATE_SCHEMA_VERSION}" ]]; then
     die "installed state schema ${installed_schema} is not supported by schema ${STATE_SCHEMA_VERSION}; a reviewed migration is required"
+  fi
+  installed_runtime="$(sudo awk -F= '$1 == "RUNTIME_CLASS" {print substr($0, index($0, "=") + 1)}' "${STATE_FILE}")"
+  if [[ -z "${installed_schema}" \
+    && "${installed_runtime}" == kata-qemu-runtime-rs \
+    && "${RUNTIME_CLASS}" == kata-fc-arm64 ]] \
+    && ! sudo test -s "${ADMIN_CONF}" \
+    && ! sudo test -f "${STATE_DIR}/stage0-passed"; then
+    legacy_runtime_state=true
   fi
   for key in KUBERNETES_MINOR CONTAINERD_VERSION RUNC_VERSION CALICO_VERSION KATA_VERSION FIRECRACKER_VERSION RUNTIME_CLASS POD_CIDR SERVICE_CIDR ADVERTISE_ADDRESS IMAGE_REPOSITORY MAX_PODS SYSTEM_RESERVED KUBE_RESERVED; do
     requested="${!key}"
@@ -277,12 +285,8 @@ guard_version_drift() {
       continue
     fi
     if [[ "${requested}" != "${installed}" ]]; then
-      if [[ "${key}" == RUNTIME_CLASS \
-        && "${installed}" == kata-qemu-runtime-rs \
-        && "${requested}" == kata-fc-arm64 ]] \
-        && ! sudo test -s "${ADMIN_CONF}" \
-        && ! sudo test -f "${STATE_DIR}/stage0-passed"; then
-        legacy_runtime_state=true
+      if [[ "${legacy_runtime_state}" == true ]]; then
+        migrated+=("${key}:${installed}->${requested}")
         continue
       fi
       die "requested ${key}=${requested}, but this host owns ${installed}; upgrades require a reviewed migration"
@@ -298,7 +302,7 @@ guard_version_drift() {
     printf 'WARN: completing incomplete pre-stage0 state; missing fields: %s\n' "${missing[*]}" >&2
   fi
   if [[ "${legacy_runtime_state}" == true ]]; then
-    printf 'WARN: migrating uninitialized runtime state from kata-qemu-runtime-rs to kata-fc-arm64\n' >&2
+    printf 'WARN: migrating uninitialized QEMU state to Firecracker; changed fields: %s\n' "${migrated[*]}" >&2
   fi
 }
 

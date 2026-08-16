@@ -369,7 +369,9 @@ def test_production_deployment_has_only_firecracker_runtimeclass():
     assert 'RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-fc-arm64}"' in bootstrap
     assert 'STATE_SCHEMA_VERSION="2"' in bootstrap
     assert "completing incomplete pre-stage0 state" in bootstrap
-    assert "migrating uninitialized runtime state from kata-qemu-runtime-rs" in bootstrap
+    assert "migrating uninitialized QEMU state to Firecracker" in bootstrap
+    assert '"${installed_runtime}" == kata-qemu-runtime-rs' in bootstrap
+    assert 'migrated+=("${key}:${installed}->${requested}")' in bootstrap
     assert '! sudo test -s "${ADMIN_CONF}"' in bootstrap
     assert 'validate_storage_devices' in bootstrap
     assert "kubeadm reset" not in bootstrap
