@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-fc-arm64}"
-IMAGE="${CLAWBOX_SMOKE_IMAGE:-alpine:3.22}"
+IMAGE="${CLAWBOX_SMOKE_IMAGE:-busybox:1.36}"
 NAMESPACE="clawbox-stage0-${RANDOM:-0}"
 KEEP=false
 
@@ -14,7 +14,10 @@ usage: arm64-kata-smoke.sh [--runtime-class NAME] [--image IMAGE]
                            [--namespace NAME] [--keep]
 
 The image must publish a linux/arm64 manifest and contain /bin/sh, uname,
-busybox httpd and wget (alpine:3.22 is the default).
+busybox httpd and wget (busybox:1.36 is the default).  alpine:3.22's busybox
+build drops the httpd applet, so its tool container exits 127 with
+"httpd: applet not found"; do not switch back to alpine unless a different
+HTTP mechanism is used.
 EOF
   exit 64
 }
