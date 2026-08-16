@@ -296,7 +296,19 @@ EOF
 systemctl daemon-reload
 systemctl enable --now clawbox-devmapper.service
 containerd config dump >/dev/null
-systemctl restart containerd
+# The thin pool was just (re)created from scratch, so every thin device from
+# any previous pool is gone. containerd's devmapper snapshotter metadata
+# (/var/lib/containerd/io.containerd.snapshotter.v1.devmapper) persists across
+# pool wipes and still references the old device IDs (e.g. the alpine base
+# snap-1 / dev 1). Preparing a snapshot whose origin is missing makes dm-thin
+# return ENODATA ("no data available"), which blocked the Kata live gate.
+# Stop containerd and drop the snapshotter state so it re-materializes
+# snapshots from the persistent content store (no re-download) on next use.
+# apply always creates a fresh pool (it refuses to run when the VG exists),
+# so this is unconditional here; a future owned-pool rerun path must skip it.
+systemctl stop containerd 2>/dev/null || true
+rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.devmapper
+systemctl start containerd
 for _ in $(seq 1 30); do
   if ctr plugins ls 2>/dev/null | awk '$1 ~ /snapshotter/ && $2 == "devmapper" && $NF == "ok" {found=1} END {exit !found}'; then
     show_status

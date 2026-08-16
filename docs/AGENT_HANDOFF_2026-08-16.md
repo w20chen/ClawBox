@@ -158,11 +158,25 @@ Others("failed to handle message try init runtime instance
 - FC-0 审计原先不检查这两个键，带病 `/opt/kata` 树通过审计后被 bootstrap“复用”，冒烟持续失败；
 - 修复：`build-kata-firecracker-arm64.sh` 现在把 `default_vcpus = 2`、`default_maxvcpus = 32` 写死进生成的配置（可用 `CLAWBOX_FC_DEFAULT_VCPUS`/`CLAWBOX_FC_MAX_VCPUS` 覆盖，限 [1,32]，且 `default_vcpus <= default_maxvcpus`）；`audit-kata-firecracker-arm64.sh`（FC-0）新增三项检查，带病树会 FAIL，从而触发 bootstrap 重新组装而非复用。
 
+第二次 apply（拉取修复后）的进展与新的失败点：
+
+- 旧 `/opt/kata` 被新 FC-0 检查正确判为带病（15 pass/2 fail：`default_maxvcpus = 0`、`default_vcpus=1 > 0`）→ 自动重建，新树 FC-0 **17/17 全绿**（`default_vcpus = 2`、`default_maxvcpus = 32`）；
+- devmapper pool 重建成功（FC-2 ready），静态 gate **19/19 全绿**；
+- **stage-0 在线冒烟再次失败**，错误已从 vCPU 校验变成 devmapper 快照：
+
+```text
+failed to create containerd container: failed to create snapshot
+"clawbox-fc--pool-snap-493" (dev: 3) from "clawbox-fc--pool-snap-1" (dev: 1): no data available
+```
+
+根因（已修复并提交，见 P0-5）：apply 整盘重建 thin pool 时，containerd 的 devmapper 快照元数据（`/var/lib/containerd/io.containerd.snapshotter.v1.devmapper/`，在 `/var/lib/containerd` 下持久化）没有随 pool 一起清空，仍引用旧 pool 的设备 ID（alpine 基础快照 `snap-1` = dev 1）；新 pool 里没有该 origin 设备，内核 dm-thin 返回 `-ENODATA`。修复：`setup-devmapper-openeuler-arm64.sh apply` 在重建 pool、写完 drop-in/`containerd config dump` 之后、启动 containerd 之前清空该目录（content store 保留，镜像本地重新解包，无需重下载）。
+
 目标机当前状态：
 
 - 两块 NVMe 已被 ClawBox 拥有（PV/VG/pool 已建）；由于 P0-2 的 owned-pool 幂等重跑尚未实现，重跑前必须再次手动 `vgremove`/`pvremove`（见第 20 节）；
-- Kubernetes/Calico 已初始化，`initialize_cluster`/`install_calico` 幂等，重跑会跳过 `kubeadm init`；
-- `/opt/kata` 仍是带病树，重跑 bootstrap 会因新 FC-0 检查失败而自动重建；
+- Kubernetes/Calico 已初始化，`initialize_cluster`/`install_calico` 幂等；
+- `/opt/kata` 已是修复后的 17/17 树（无需重建）；
+- containerd devmapper 快照元数据仍指向旧 pool（当前带病）；按第 20 节快速路径清空后直接重跑冒烟，或拉取 P0-5 修复后走一次完整 apply 自愈；
 - `clawbox.openai.com/firecracker-ready` 标签在冒烟失败后已被移除，`stage0-passed` 不存在。
 
 ## 4. bootstrap 机制详解
@@ -489,6 +503,18 @@ Kata runtime-rs 对未设置的 `default_vcpus`/`default_maxvcpus` 会用宿主�
 
 遗留观察：`static_sandbox_resource_mgmt = true` 下，Pod 带 CPU 请求时 VM 按 `overhead_vcpus + 请求` sizing（大 profile Tool 8 CPU → 约 9 vCPU，远小于 32），`default_vcpus` 只是无 sizing 信息时的回退值。若未来单 Pod 请求超过 32 CPU，需在 capacity/placement 层拦截，不能让 Kata 生成超限配置。
 
+### P0-5：pool 重建后 containerd devmapper 快照元数据陈旧导致 ENODATA（已修复）
+
+apply 整盘重建 thin pool（`vgremove`/`pvremove` + 重新 lvcreate/lvconvert）后，containerd 的 devmapper snapshotter 元数据（`/var/lib/containerd/io.containerd.snapshotter.v1.devmapper/`，持久化在 `/var/lib/containerd`，不在 pool 内）不会自动失效，仍引用旧 pool 的 thin 设备 ID。Kata sandbox 从陈旧的父快照（如 alpine 基础 `snap-1` = dev 1）创建新快照时，内核 dm-thin 因 origin 设备不存在返回 `-ENODATA`，报：
+
+```text
+failed to create snapshot "clawbox-fc--pool-snap-493" (dev: 3) from "clawbox-fc--pool-snap-1" (dev: 1): no data available
+```
+
+已在 `scripts/setup-devmapper-openeuler-arm64.sh apply` 中，于重建 pool、写完 drop-in/`containerd config dump` 之后、`systemctl start containerd` 之前：`systemctl stop containerd` → `rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.devmapper` → 启动。content store（blob）保留，镜像本地重新解包，无需重新下载。
+
+注意：该清理对 apply 是无条件的（apply 目前只允许 VG 不存在时运行，即必然重建 pool）；未来 P0-2 加入 owned-pool 幂等重跑时，重跑路径必须跳过此清理。
+
 ### P1：生产清单仍含 placeholder/tag
 
 `deploy/cell-controller.yaml` 和 `trace-ingester.yaml` 使用 `registry.example.com/...:dev`；必须替换为真实 immutable ARM64 digest。Secret example也必须替换。生产 ingester必须使用持久 PostgreSQL，不能用容器内 SQLite。
@@ -527,12 +553,26 @@ Kata runtime-rs 对未设置的 `default_vcpus`/`default_maxvcpus` 会用宿主�
 
 ## 20. 下一次目标机命令
 
-代码已包含 128-vCPU 修复（P0-4），本次重跑会被 FC-0 新检查触发 Kata/Firecracker 树重建。因为 P0-2（owned-pool 幂等重跑）尚未实现，且当前两块盘已被 ClawBox LVM 拥有（有 holders），必须先手动拆除 pool 才能通过 storage plan；这与上次成功的 apply 流程一致：
+代码已包含 128-vCPU 修复（P0-4）和 devmapper 快照元数据清理（P0-5）。**当前目标机 /opt/kata 已是修复树（FC-0 17/17），Kubernetes/Calico/pool 均已就绪**，优先走快速路径，不必整盘重来：
 
 ```bash
 cd ~/ClawBox && git pull
 
-# 目标机当前两块盘已被 clawbox VG 拥有；先手动拆除（与上次成功 apply 相同）
+# 快速路径：只清 containerd 的 devmapper 快照元数据（仍指向旧 pool 的设备 ID）
+sudo systemctl stop containerd
+sudo rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.devmapper
+sudo systemctl start containerd
+
+# 冒烟失败时 bootstrap 已移除 ready 标签；补回后直接重跑权威 live gate
+kubectl label nodes --all clawbox.openai.com/firecracker-ready=true --overwrite
+bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
+```
+
+预期：containerd 启动后快照器为空，alpine 从 content store 本地重新解包（无需下载）；三个 Pod Ready，两个 Kata VM 正常启动（不再报 ENODATA）。
+
+若仍要完整走一遍 apply（自愈验证 P0-5 已进代码）：与上次相同，先手动拆除 pool 再 apply（P0-2 幂等重跑尚未实现）：
+
+```bash
 sudo vgremove -y clawbox || true
 sudo pvremove -y /dev/nvme0n1 /dev/nvme1n1 || true
 
@@ -548,7 +588,7 @@ sudo env HTTPS_PROXY=http://127.0.0.1:1080 HTTP_PROXY=http://127.0.0.1:1080 \
   --confirm-erase /dev/nvme0n1,/dev/nvme1n1
 ```
 
-预期：`install_kata_firecracker` 首步 FC-0 审计因带病树 FAIL → 自动执行 `build-kata-firecracker-arm64.sh install` 重建（下载 Kata/Firecracker，约数分钟，走 proxy）→ 生成的 `configuration-fc-arm64.toml` 含 `default_vcpus = 2`、`default_maxvcpus = 32` → FC-0 14+3=17 项全过 → devmapper 重建 → 静态 gate 全绿 → 在线冒烟两个 Kata Pod 应成功启动（不再报 128 vCPUs）。
+预期：`install_kata_firecracker` 首步 FC-0 审计通过（/opt/kata 已是修复树）→ 复用不重建；devmapper 重建后 setup-devmapper 自动清空快照元数据（P0-5）→ 静态 gate 全绿 → 在线冒烟两个 Kata Pod 成功启动。
 
 另开终端观察：
 
