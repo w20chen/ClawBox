@@ -77,18 +77,44 @@ fi
   && pass "cgroup v2 unified hierarchy is active" \
   || fail "cgroup v2 unified hierarchy is not active"
 
-if command -v containerd >/dev/null 2>&1 || [[ -S /run/containerd/containerd.sock ]]; then
-  pass "containerd binary or socket is present"
+if command -v containerd >/dev/null 2>&1; then
+  pass "containerd binary is installed"
 else
-  fail "containerd is not installed/running"
+  fail "containerd binary is missing"
+fi
+
+containerd_reachable=false
+containerd_service_active=false
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet containerd; then
+  containerd_service_active=true
+  pass "containerd service is active"
+else
+  fail "containerd service is not active"
 fi
 
 if command -v ctr >/dev/null 2>&1; then
-  ctr plugins ls 2>/dev/null | grep -q 'io.containerd.grpc.v1.*cri.*ok' \
-    && pass "containerd CRI plugin reports ok" \
-    || warn "containerd CRI plugin could not be confirmed (socket permission or plugin state)"
+  if timeout 5 ctr version >/dev/null 2>&1; then
+    containerd_reachable=true
+    pass "containerd socket is reachable"
+  elif [[ "${containerd_service_active}" == true ]]; then
+    warn "containerd socket is not accessible to this account; rerun with sudo for CRI inspection"
+  else
+    fail "containerd socket is not reachable within 5s"
+  fi
 else
-  warn "ctr is unavailable; skipping containerd plugin inspection"
+  fail "ctr is unavailable; containerd cannot be verified"
+fi
+
+if [[ "${containerd_reachable}" == true ]]; then
+  if timeout 5 ctr plugins ls 2>/dev/null | awk '
+    $1 == "io.containerd.grpc.v1" && $2 == "cri" && $NF == "ok" { found=1 }
+    $1 == "io.containerd.cri.v1" && $2 == "runtime" && $NF == "ok" { found=1 }
+    END { exit(found ? 0 : 1) }
+  '; then
+    pass "containerd CRI plugin reports ok"
+  else
+    fail "containerd CRI plugin is absent or unhealthy"
+  fi
 fi
 
 kata_shim=""

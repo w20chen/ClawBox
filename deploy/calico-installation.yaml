@@ -1,0 +1,16 @@
+# Rendered by scripts/bootstrap-openeuler-arm64.sh. The token below must not
+# be submitted to Kubernetes without replacement.
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  registry: quay.io/
+  calicoNetwork:
+    bgp: Disabled
+    ipPools:
+      - blockSize: 26
+        cidr: __CLAWBOX_POD_CIDR__
+        encapsulation: VXLAN
+        natOutgoing: Enabled
+        nodeSelector: all()

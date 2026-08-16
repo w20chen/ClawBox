@@ -7,7 +7,8 @@ create a RuntimeClass that points at a handler which is not installed.
 ## Runtime choice
 
 Use `kata-qemu-runtime-rs` for the first openEuler acceptance run. It is the
-Kata 4.x recommended arm64 baseline and is the default in ClawBox. `kata-fc` remains supported, but
+Rust shim arm64 baseline selected by ClawBox (and the upstream default from
+Kata 4.x onward). `kata-fc` remains supported, but
 only select it after the host has an arm64 Firecracker binary, matching Kata
 guest kernel/rootfs, containerd handler, and a passing live smoke gate.
 
@@ -26,6 +27,49 @@ runtime-rs `<= 3.30.0`: it is affected by the critical virtio-fs host escape
 [CVE-2026-47243](https://github.com/kata-containers/kata-containers/security/advisories/GHSA-2gv2-cffp-j227).
 `KATA_VERSION` may select a newer reviewed release, while the host gate rejects
 versions below `3.31.0`.
+
+## Dedicated bare-host bootstrap
+
+For a new single-node host, inspect the exact plan first:
+
+```bash
+bash scripts/bootstrap-openeuler-arm64.sh plan
+```
+
+The plan rejects non-openEuler/non-arm64 hosts, insufficient CPU/RAM/disk,
+a missing KVM device, conflicting Pod/Service/host CIDRs, and an existing
+cluster not owned by this bootstrap. Override a conflicting network explicitly,
+for example:
+
+```bash
+bash scripts/bootstrap-openeuler-arm64.sh plan \
+  --pod-cidr 172.30.0.0/16 \
+  --service-cidr 172.31.0.0/16
+```
+
+After reviewing the plan, apply it as the intended non-root administrator:
+
+```bash
+bash scripts/bootstrap-openeuler-arm64.sh apply
+```
+
+`apply` first obtains sudo authorization and verifies that root can read/write
+`/dev/kvm` before changing the host.
+
+The pinned profile is Kubernetes `1.35.x`, containerd `2.3.4`, runc `1.5.1`,
+Calico `3.32.1` with VXLAN/NetworkPolicy, Helm `4.2.4`, and Kata `3.31.0` with
+only `qemu-runtime-rs` enabled. The script disables swap and firewalld, places
+SELinux in persistent permissive mode as required by the kubeadm RPM baseline,
+initializes the control plane, installs the runtimes, and executes both
+stage-0 gates. Replaced host configuration is backed up below
+`/var/lib/clawbox-bootstrap/backups`; no automatic `kubeadm reset` or destructive
+rollback is performed.
+
+Inspect an installed host without mutation:
+
+```bash
+bash scripts/bootstrap-openeuler-arm64.sh status
+```
 
 ## Stage 0: host and live cluster gates
 

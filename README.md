@@ -1,5 +1,16 @@
 # ClawBox
 
+全新的 openEuler/Kunpeng 单机可先检查只读安装计划，再显式安装 Kubernetes、
+Calico 和 Kata 基座：
+
+```bash
+bash scripts/bootstrap-openeuler-arm64.sh plan
+bash scripts/bootstrap-openeuler-arm64.sh apply
+```
+
+网络 CIDR、固定版本、备份和验收说明见
+[openEuler/Kunpeng ARM64 部署门禁](docs/OPENEUER_ARM64.md)。
+
 ClawBox 在 Kubernetes 上并发运行隔离的 OpenClaw 租户。当前 MVP 的主路径是：
 
 - 每个 SWE-Rebench 任务对应一个独立 OpenClaw runtime。

@@ -206,12 +206,50 @@ def test_openeuler_host_gate_is_read_only_and_runtime_class_aware():
     script = (Path(__file__).parents[1] / "deploy" / "check-host.sh").read_text(encoding="utf-8")
     assert "/etc/os-release" in script
     assert "/sys/fs/cgroup/cgroup.controllers" in script
+    assert "timeout 5 ctr version" in script
+    assert 'io.containerd.cri.v1' in script
     assert "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" in script
     assert "CVE-2026-47243" in script
     assert "MIN_SAFE_KATA_VERSION" in script
     assert 'kubectl get runtimeclass "${RUNTIME_CLASS}"' in script
     assert "arm64-kata-smoke.sh" in script
     assert "kubectl apply" not in script
+
+
+def test_openeuler_bare_host_bootstrap_is_explicit_pinned_and_recoverable():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    script = (root / "scripts" / "bootstrap-openeuler-arm64.sh").read_text(encoding="utf-8")
+    service = (root / "deploy" / "containerd-clawbox.service").read_text(encoding="utf-8")
+    calico = (root / "deploy" / "calico-installation.yaml").read_text(encoding="utf-8")
+    kata_values = (root / "deploy" / "kata-openeuler-arm64-values.yaml").read_text(encoding="utf-8")
+    for required in (
+        'MODE="plan"',
+        'CONTAINERD_VERSION="${CONTAINERD_VERSION:-2.3.4}"',
+        'HELM_VERSION="${HELM_VERSION:-4.2.4}"',
+        'CALICO_VERSION="${CALICO_VERSION:-3.32.1}"',
+        'KATA_VERSION="${KATA_VERSION:-3.31.0}"',
+        'RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-qemu-runtime-rs}"',
+        "validate_network_inputs",
+        "swapoff -a",
+        "systemctl disable --now firewalld",
+        "setenforce 0",
+        "kubeadm init",
+        "cluster-initialized",
+        "v1_crd_projectcalico_org.yaml",
+        "deploy/check-host.sh",
+        "scripts/arm64-kata-smoke.sh",
+    ):
+        assert required in script
+    assert "kubeadm reset" not in script
+    assert "/var/lib/clawbox-bootstrap/backups" in script
+    assert "ExecStart=/usr/local/bin/containerd" in service
+    assert "__CLAWBOX_POD_CIDR__" in calico
+    assert "encapsulation: VXLAN" in calico
+    assert "disableAll: true" in kata_values
+    assert "qemu-runtime-rs:" in kata_values
+    assert "setup: []" in kata_values
 
 
 def test_minikube_devmapper_setup_is_persistent_and_nondestructive():
