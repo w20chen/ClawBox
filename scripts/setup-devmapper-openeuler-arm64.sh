@@ -158,7 +158,15 @@ fi
   exit 1
 }
 [[ "$(id -u)" == 0 ]] || { echo "apply must run as root" >&2; exit 1; }
-for command in wipefs pvcreate vgcreate lvcreate lvconvert lvs dmsetup containerd ctr systemctl; do need "${command}"; done
+for command in wipefs pvcreate vgcreate lvcreate lvconvert lvchange lvs vgs vgscan dmsetup containerd ctr systemctl; do need "${command}"; done
+
+if vgs "${VG}" >/dev/null 2>&1; then
+  echo "Volume group ${VG} already exists (left over from a partial or complete run); aborting rather than clobbering it." >&2
+  echo "Inspect with: vgs ${VG}; lvs ${VG}" >&2
+  echo "If the thin pool is incomplete, remove it and re-run apply:" >&2
+  echo "  vgremove -y ${VG} && pvremove -y ${DATA_DEVICE} ${METADATA_DEVICE}" >&2
+  exit 1
+fi
 
 install -d -m 0700 "${STATE_DIR}/backups"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -202,10 +210,24 @@ fi
 # Do not wait on udev: on some openEuler hosts a stuck udev worker wedges the
 # default LVM/udev synchronization and every lvcreate/lvconvert hangs in
 # semtimedop while holding the VG lock.
+#
+# --noudevsync also means udev never creates the /dev nodes.  lvconvert must
+# open the metadata LV to wipe it (thin-pool conversion performs "metadata
+# wiping") and aborts with "/dev/clawbox/fc-pool-meta: not found: device not
+# cleared" when the node is missing.  Recreate the nodes (udev-free) BEFORE
+# converting so the fresh lvconvert device scan finds the metadata device.
+lvchange -ay --noudevsync "${VG}/${POOL}" "${VG}/${POOL}-meta" || true
+dmsetup mknodes || true
+vgscan --mknodes >/dev/null 2>&1 || true
+if [[ ! -e "/dev/${VG}/${POOL}-meta" && ! -e "/dev/mapper/${VG}-${POOL}-meta" ]]; then
+  echo "metadata LV device node is missing after node recreation: /dev/${VG}/${POOL}-meta" >&2
+  exit 1
+fi
 lvconvert --yes --noudevsync --type thin-pool --poolmetadata "${VG}/${POOL}-meta" "${VG}/${POOL}"
-lvchange -ay "${VG}/${POOL}"
+lvchange -ay --noudevsync "${VG}/${POOL}"
 # Ensure /dev/mapper nodes exist even though udev was bypassed.
 dmsetup mknodes
+vgscan --mknodes >/dev/null 2>&1 || true
 
 dm_name="$(lvs --noheadings -o dm_name "${VG}/${POOL}" | xargs)"
 [[ -n "${dm_name}" ]] && dmsetup info "${dm_name}" >/dev/null \
