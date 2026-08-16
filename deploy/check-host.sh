@@ -23,6 +23,12 @@ pass() { say "$1" PASS; PASS=$((PASS + 1)); }
 warn() { say "$1" WARN; WARN=$((WARN + 1)); }
 fail() { say "$1" FAIL; FAIL=$((FAIL + 1)); }
 have() { command -v "$1" >/dev/null 2>&1; }
+# /dev/kvm, the containerd socket and /opt/kata are root-owned; fall back to
+# passwordless sudo for the privileged probes so an unprivileged caller gets
+# the same result as root (identical helper as scripts/arm64-kata-smoke.sh).
+host_command() {
+  if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo -n "$@"; fi
+}
 
 echo "== ClawBox Firecracker host gate: openEuler/arm64 + ${RUNTIME_CLASS} =="
 if [[ -r /etc/os-release ]]; then
@@ -37,24 +43,24 @@ fi
 arch="$(uname -m 2>/dev/null || echo unknown)"
 [[ "${arch}" =~ ^(aarch64|arm64)$ ]] && pass "host architecture = ${arch}" \
   || fail "host architecture = ${arch}; native arm64 is required"
-[[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] && pass "/dev/kvm is usable" \
-  || fail "/dev/kvm is not readable/writable"
+host_command test -c /dev/kvm -a -r /dev/kvm -a -w /dev/kvm && pass "/dev/kvm is usable" \
+  || fail "/dev/kvm is not readable/writable (run the gate as root or with sudo)"
 [[ -r /sys/fs/cgroup/cgroup.controllers ]] && pass "cgroup v2 unified hierarchy" \
   || fail "cgroup v2 unified hierarchy is unavailable"
 grep -Eq '(^|[[:space:]])(0|1)$' /sys/module/kvm/parameters/* 2>/dev/null \
   && pass "KVM module parameters are readable" || warn "KVM module parameters could not be inspected"
 
-if have containerd && timeout 5 ctr version >/dev/null 2>&1; then
+if have containerd && timeout 5 host_command ctr version >/dev/null 2>&1; then
   pass "containerd socket is reachable"
-  containerd_version="$(containerd --version 2>/dev/null || true)"
+  containerd_version="$(host_command containerd --version 2>/dev/null || true)"
   grep -Eq 'containerd .* (v)?2\.' <<<"${containerd_version}" \
     && pass "containerd 2.x = ${containerd_version}" \
     || fail "containerd 2.x is required (${containerd_version:-unknown})"
-  plugins="$(ctr plugins ls 2>/dev/null || true)"
+  plugins="$(host_command ctr plugins ls 2>/dev/null || true)"
   awk '$1 ~ /snapshotter/ && $2 == "devmapper" && $NF == "ok" {found=1} END {exit !found}' <<<"${plugins}" \
     && pass "containerd devmapper snapshotter = ok" \
     || fail "containerd devmapper snapshotter is not healthy"
-  config_dump="$(containerd config dump 2>/dev/null || true)"
+  config_dump="$(host_command containerd config dump 2>/dev/null || true)"
   grep -F "runtimes.${RUNTIME_CLASS}" <<<"${config_dump}" >/dev/null \
     && pass "containerd handler ${RUNTIME_CLASS} exists" \
     || fail "containerd handler ${RUNTIME_CLASS} is missing"
@@ -84,7 +90,7 @@ else
   fail "containerd/ctr is installed and reachable"
 fi
 
-if bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
+if host_command bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
   --root /opt/kata --kata-version "${MIN_SAFE_KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" >/dev/null; then
   pass "FC-0 artifact audit (Kata >= ${MIN_SAFE_KATA_VERSION}; CVE-2026-47243 gate)"
 else
