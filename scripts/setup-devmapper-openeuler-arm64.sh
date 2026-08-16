@@ -7,7 +7,10 @@ MODE="plan"
 DATA_DEVICE=""
 METADATA_DEVICE=""
 DATA_SIZE="${CLAWBOX_DEVMAPPER_DATA_SIZE:-90%PVS}"
-METADATA_SIZE="${CLAWBOX_DEVMAPPER_METADATA_SIZE:-16G}"
+# 8G not 16G: with the default 64KiB chunk LVM caps a thin pool's usable
+# metadata LV at <15.88 GiB, so a 16G metadata LV creates fine but
+# lvconvert then aborts with "failed to wipe metadata lv".
+METADATA_SIZE="${CLAWBOX_DEVMAPPER_METADATA_SIZE:-8G}"
 VG="${CLAWBOX_DEVMAPPER_VG:-clawbox}"
 POOL="${CLAWBOX_DEVMAPPER_POOL:-fc-pool}"
 BASE_IMAGE_SIZE="${CLAWBOX_BASE_IMAGE_SIZE:-64GB}"
@@ -25,7 +28,7 @@ usage: setup-devmapper-openeuler-arm64.sh plan|apply|status [options]
   --data-device /dev/DISK       Dedicated data disk (whole block device)
   --metadata-device /dev/DISK   Dedicated metadata disk (whole block device)
   --data-size SIZE              LVM size, default 90%PVS
-  --metadata-size SIZE          LVM size, default 16G
+  --metadata-size SIZE          LVM size, default 8G (cap: <15.88G @64KiB chunk)
   --confirm-erase D,M           Required by apply; exact two canonical devices
 
 plan and status are read-only. apply irreversibly initializes only the two
@@ -50,6 +53,30 @@ done
 valid_lvm_name() { [[ "$1" =~ ^[A-Za-z0-9_+.-]+$ ]]; }
 valid_lvm_name "${VG}" && valid_lvm_name "${POOL}" || usage
 [[ "${THRESHOLD}" =~ ^[0-9]+$ ]] && (( THRESHOLD >= 1 && THRESHOLD <= 99 )) || usage
+
+# LVM caps the usable metadata LV of a 64KiB-chunk thin pool at <15.88 GiB.
+# A 16G metadata LV is created successfully but lvconvert then aborts with
+# "failed to wipe metadata lv". Validate literal sizes so plan/apply fail
+# fast with an actionable message (percentage sizes are left unchecked).
+metadata_mib="$(awk -v s="${METADATA_SIZE}" '
+  BEGIN {
+    if (s ~ /%/) exit
+    if (!match(s, /[0-9.]+/)) exit
+    n = substr(s, RSTART, RLENGTH)
+    u = s
+    gsub(/[0-9.]/, "", u)
+    u = toupper(u)
+    if (u == "T" || u == "TB") m = n * 1024 * 1024
+    else if (u == "G" || u == "GB") m = n * 1024
+    else if (u == "M" || u == "MB") m = n
+    else if (u == "K" || u == "KB") m = n / 1024
+    else m = n / 1024 / 1024
+    printf "%d", m
+  }')"
+if [[ -n "${metadata_mib}" ]] && (( metadata_mib > 15360 )); then
+  echo "--metadata-size ${METADATA_SIZE} exceeds the LVM thin-pool metadata cap (15.88 GiB with a 64 KiB chunk); use <= 8G" >&2
+  exit 64
+fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 69; }; }
 for command in findmnt lsblk readlink; do need "${command}"; done
