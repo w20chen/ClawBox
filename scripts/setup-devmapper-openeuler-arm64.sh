@@ -152,7 +152,16 @@ done
 wipefs -a "${DATA_DEVICE}" "${METADATA_DEVICE}"
 pvcreate --yes --force "${DATA_DEVICE}" "${METADATA_DEVICE}"
 vgcreate "${VG}" "${DATA_DEVICE}" "${METADATA_DEVICE}"
-if [[ "${DATA_SIZE}" == *%* ]]; then
+if [[ "${DATA_SIZE}" =~ ^([0-9]+)%PVS$ ]]; then
+  # %PVS is a percentage of ALL PVs in the VG, which over-sizes the request when
+  # the metadata PV is also a whole multi-TB disk. Size against the data PV's
+  # own extent count instead.
+  pe_total="$(pvs --noheadings -o pv_name,pv_pe_count | awk -v d="${DATA_DEVICE}" '$1 == d {print $2}')"
+  [[ "${pe_total}" =~ ^[0-9]+$ && "${pe_total}" -gt 0 ]] \
+    || { echo "could not determine PE count for ${DATA_DEVICE}" >&2; exit 1; }
+  pe_count=$(( pe_total * ${BASH_REMATCH[1]} / 100 ))
+  lvcreate --yes -l "${pe_count}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
+elif [[ "${DATA_SIZE}" == *%* ]]; then
   lvcreate --yes -l "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
 else
   lvcreate --yes -L "${DATA_SIZE}" -n "${POOL}" "${VG}" "${DATA_DEVICE}"
