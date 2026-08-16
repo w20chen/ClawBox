@@ -38,9 +38,11 @@ RUN python3 -m venv /opt/clawtune/venv \
  && /opt/clawtune/venv/bin/python -c "import clawtune_sidecar, tool_resource"
 
 COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
+COPY scripts/clawtune-sidecar-entrypoint.sh /usr/local/bin/clawtune-sidecar-entrypoint
+COPY scripts/artifact-uploader.py /usr/local/bin/artifact-uploader
 RUN groupadd --gid 10001 openclaw \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash openclaw \
- && chmod 0755 /usr/local/bin/runtime-entrypoint \
+ && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader \
  && mkdir -p /state /workspace /home/openclaw/.openclaw \
  && chown -R 10001:10001 /state /workspace /home/openclaw
 

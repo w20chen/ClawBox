@@ -14,13 +14,17 @@ class Settings:
     scheduler_url: str = os.getenv("SCHEDULER_URL", "http://tenant-scheduler:8080")
     controller_backend: str = os.getenv("CONTROLLER_BACKEND", "docker")
     kubernetes_namespace_prefix: str = os.getenv("KUBERNETES_NAMESPACE_PREFIX", "clawbox-tenant")
-    # QEMU is the most broadly supported Kata backend on arm64/openEuler.
-    # Deployments can opt into Firecracker after the host gate has proved a
-    # working kata-fc handler and matching arm64 guest assets.
-    kubernetes_runtime_class: str = os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-qemu-runtime-rs")
+    # This project is Firecracker-first.  The bootstrap only creates this
+    # RuntimeClass after its handler and all arm64 guest assets pass FC-0.
+    kubernetes_runtime_class: str = os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc-arm64")
     kubernetes_image_pull_policy: str = os.getenv("KUBERNETES_IMAGE_PULL_POLICY", "IfNotPresent")
     kubernetes_ready_timeout_seconds: int = int(os.getenv("KUBERNETES_READY_TIMEOUT_SECONDS", "180"))
     tool_image: str = os.getenv("TOOL_IMAGE", "clawbox-tool-agent:latest")
+    runtime_image: str = os.getenv("RUNTIME_IMAGE", "clawbox-runtime-arm64:latest")
+    tool_bridge_image: str = os.getenv("TOOL_BRIDGE_IMAGE", "clawbox-tool-bridge-arm64:latest")
+    trace_ingester_url: str = os.getenv("TRACE_INGESTER_URL", "http://clawbox-ingester.clawbox-system.svc:8084")
+    ingest_secret: str = os.getenv("CLAWBOX_INGEST_SECRET", "development-only-ingest-secret")
+    cell_namespace: str = os.getenv("CLAWBOX_CELL_NAMESPACE", "clawbox-benchmarks")
     lease_ttl_seconds: int = int(os.getenv("LEASE_TTL_SECONDS", "300"))
     reserved_cpu_fraction: float = float(os.getenv("RESERVED_CPU_FRACTION", "0.05"))
     default_memory_bytes: int = int(os.getenv("DEFAULT_MEMORY_BYTES", str(512 * 1024**2)))

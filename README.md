@@ -1,166 +1,157 @@
-# ClawBox
+# ClawBox: Firecracker-first ARM64 benchmark runtime
 
-全新的 openEuler/Kunpeng 单机可先检查只读安装计划，再显式安装 Kubernetes、
-Calico 和 Kata 基座：
-
-```bash
-bash scripts/bootstrap-openeuler-arm64.sh plan
-bash scripts/bootstrap-openeuler-arm64.sh apply
-```
-
-网络 CIDR、固定版本、备份和验收说明见
-[openEuler/Kunpeng ARM64 部署门禁](docs/OPENEUER_ARM64.md)。
-
-ClawBox 在 Kubernetes 上并发运行隔离的 OpenClaw 租户。当前 MVP 的主路径是：
-
-- 每个 SWE-Rebench 任务对应一个独立 OpenClaw runtime。
-- Pod 使用可配置的 Kata RuntimeClass；鲲鹏/openEuler 首轮默认 `kata-qemu-runtime-rs`，验证后可切换其他 VMM。
-- SWE-Rebench 任务代码来自任务自身的 Docker 镜像。
-- OpenClaw、插件和 sidecar 复用 ClawTune 生成的 runtime bundle。
-- 当前先跑通并发部署；预测算法、共享 KB、自定义调度和 eBPF 不在主路径中。
-
-## 本地一键运行
-
-鲲鹏/openEuler 部署前必须先完成 [ARM64 阶段 0/1 门禁](docs/OPENEUER_ARM64.md)。
-
-### 前置条件
-
-- Linux、Kubernetes、Docker 和 Python 3。
-- Helm；脚本用 Kata 官方 chart 安装节点运行时。
-- 宿主机及 Kubernetes 节点都能访问 `/dev/kvm`。
-- `~/ClawBox` 和 `~/ClawTune` 位于同一父目录。
-- 一个 OpenAI-compatible 模型服务及 API key。
-
-API key 文件中只放 key 本身：
-
-```bash
-printf '%s' 'your-api-key' > ~/llm-api-key.txt
-chmod 600 ~/llm-api-key.txt
-```
-
-### 首次运行
-
-如果当前没有集群（包括刚删除了旧 Docker-driver Minikube），运行：
-
-```bash
-cd ~/ClawBox
-bash scripts/local-kata-swe.sh \
-  --bootstrap-minikube \
-  --api-key-file ~/llm-api-key.txt \
-  --base-url https://api.example.com/v1 \
-  --model provider-model
-```
-
-该选项会通过 Ubuntu `apt` 安装 KVM/libvirt，创建 8 CPU、16 GiB 的 kvm2 Minikube，
-然后自动进入具有 `libvirt` 权限的新进程、安装 Kata 并运行任务。它要求宿主机已经存在
-`/dev/kvm`，无需手动注销登录。
-
-已有能够访问 `/dev/kvm` 的 Kubernetes 集群时，运行：
-
-```bash
-cd ~/ClawBox
-bash scripts/local-kata-swe.sh \
-  --api-key-file ~/llm-api-key.txt \
-  --base-url https://api.example.com/v1 \
-  --model provider-model \
-  --install-kata
-```
-
-脚本会自动：
-
-1. 生成 ClawTune runtime bundle。
-2. 构建并导入本地 bundle 镜像。
-3. 使用 Kata 官方 Helm chart 安装运行时，并应用 namespace、RBAC 和 NetworkPolicy。
-4. 创建或更新 LLM Secret。
-5. 使用所选 RuntimeClass 启动一个真实 Kata smoke Pod。
-6. 运行一个 SWE-Rebench 任务。
-
-支持普通 containerd、k3s、kind、minikube 和 k3d。本地运行不需要远程镜像仓库。
-如果 Kata 已经安装，可以省略 `--install-kata`。
-
-### 并发运行
-
-首次成功后，Secret、bundle 和镜像会被复用：
-
-```bash
-bash scripts/local-kata-swe.sh \
-  --sample 8 \
-  --parallelism 4 \
-  --cpu 4 \
-  --memory 8Gi
-```
-
-每个并发任务都拥有独立的 Kata VM；只有显式选择并验证 `kata-fc` 时才使用 Firecracker。请确保节点有足够的 CPU 和内存。
-
-### 状态与日志
-
-```bash
-bash scripts/local-kata-swe.sh status
-bash scripts/local-kata-swe.sh logs
-bash scripts/local-kata-swe.sh smoke
-```
-
-任务失败时，一键脚本会自动输出最近的 Pod、事件、描述和容器日志。
-
-## 常用选项
+ClawBox runs a dual-VM Cell per `SandboxTask` on Kunpeng/openEuler ARM64 hosts. The Tool Pod hosts the immutable SWE-ReBench task image and a static SSH Tool Bridge; the Runtime Pod hosts OpenClaw and runs ClawTune as a native Kubernetes sidecar. Both Pods are pinned to `kata-fc-arm64`, with no fallback path to other architectures or VMMs.
 
 ```text
---tasks PATH          指定任务 JSON
---sample N            选择任务数量，默认 1
---parallelism N       最大并发数，默认 1
---cpu VALUE           每个任务的 CPU，默认 2
---memory VALUE        每个任务的内存，默认 4Gi
---runtime-class NAME  已安装的 Kata RuntimeClass，默认 kata-qemu-runtime-rs
---rebuild             ClawTune 更新后重建 bundle 和镜像
---skip-smoke          跳过 Kata smoke test
---install-kata        使用官方 Kata Deploy Helm chart 安装节点运行时
---bootstrap-minikube  安装 Ubuntu KVM/libvirt 并创建 kvm2 Minikube
+SandboxTask
+  ├─ Tool Pod (Kata + Firecracker) ── SSH/2222 ──┐
+  └─ Runtime Job/Pod (Kata + Firecracker)        │
+       ├─ runtime: OpenClaw ─────────────────────┘
+       └─ native sidecar: ClawTune observe-only
+              └─ task token → central trace/result ingester
 ```
 
-查看全部参数：
+This repository contains the full software implementation, fail-closed host gates, and automated tests. Real `/dev/kvm`, two dedicated disks, and Firecracker microVMs can only be validated on a target Kunpeng host; a deployment should not be marked production-passing unless the target-machine commands have been run.
+
+## Fixed boundaries
+
+- Kata Containers `3.31.0`, Firecracker `1.12.1`, Linux `arm64` guest/host.
+- containerd 2.x `devmapper` snapshotter; loop devices are forbidden in production.
+- The RuntimeClass name and handler are both `kata-fc-arm64`, and per-VM Pod overhead is declared.
+- Every task must map to a `linux/arm64` registry digest; `unsupported-arm64` blocks submission.
+- The Tool Pod only receives a task-specific SSH public key/host key, never LLM or upload credentials.
+- Runtime and Tool share no hostPath, PVC, or RWX; results and traces are uploaded via a short-lived, task-scoped token.
+- ClawTune is only enabled with `observe-only` and `hook-only`; cgroup, affinity, and NUMA control are disabled.
+
+## 1. Host and Firecracker
+
+Start with a read-only plan on the target machine; `apply` installs Kubernetes/containerd/Kata and only initializes the two dedicated disks when given a confirmation string that exactly matches the canonical device names:
 
 ```bash
-bash scripts/local-kata-swe.sh --help
+bash scripts/bootstrap-openeuler-arm64.sh plan \
+  --devmapper-data-device /dev/DATA_DISK \
+  --devmapper-meta-device /dev/META_DISK
+
+sudo bash scripts/bootstrap-openeuler-arm64.sh apply \
+  --devmapper-data-device /dev/DATA_DISK \
+  --devmapper-meta-device /dev/META_DISK \
+  --confirm-erase /dev/DATA_DISK,/dev/META_DISK
 ```
 
-## 常见问题
-
-### Kata Pod 启动失败
-
-检查脚本自动打印的 `kubectl describe pod` 输出。若出现 handler 不存在或
-`FailedCreatePodSandBox`，需要先在 containerd 中配置所选 Kata handler；创建
-`deploy/runtimeclass.yaml` 本身不会安装运行时。直接重新运行首次命令并加
-`--install-kata`，或传入机器上实际存在的 `--runtime-class`。若 Minikube 节点看不到 `/dev/kvm`，需先用支持 KVM 的 VM driver
-（例如 `kvm2`）重建 Minikube。
-
-### ClawTune bundle 权限错误
-
-此前若使用过 `sudo ... runner prepare`：
+If you prefer to run the steps separately, use:
 
 ```bash
-sudo chown -R "$(id -u):$(id -g)" ~/ClawTune/swe_rebench/.runtime
+bash scripts/audit-kata-firecracker-arm64.sh --root /opt/kata
+bash scripts/build-kata-firecracker-arm64.sh plan
+sudo bash scripts/setup-devmapper-openeuler-arm64.sh status
+bash deploy/check-host.sh --runtime-class kata-fc-arm64
+bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 ```
 
-之后始终以普通用户运行一键脚本。
+Only after the last two checks pass should a node be labeled `clawbox.openai.com/firecracker-ready=true`. See [docs/OPENEUER_ARM64.md](docs/OPENEUER_ARM64.md) for detailed steps and rollback boundaries.
 
-### 查看某个失败任务
+## 2. ARM64 images
+
+All builds must run on a native ARM64 Docker daemon; detection of a foreign-architecture binfmt handler fails the build outright.
 
 ```bash
-kubectl -n clawbox-benchmarks get jobs,pods
-bash scripts/local-kata-swe.sh logs
+REGISTRY=registry.example.com/clawbox PUSH=1 \
+  CLAWTUNE_ROOT=/src/ClawTune \
+  bash scripts/build-kubernetes-images.sh
 ```
 
-## 文档
+The 128 SWE-ReBench images are built from the install recipes in the full dataset and a pinned SWE-bench fork. First pin the fork to the factory default commit:
 
-- [Kubernetes + Kata/Firecracker 并发部署细节](docs/CONCURRENT_KATA_SWE.md)
-- [Phase 3 架构与安全边界](docs/PHASE3.md)
-- [ClawTune 与 ClawBox 组件映射](docs/IMPLEMENTATION_MAPPING.md)
-- [原始租户 cell 部署说明](deploy/README.md)
+```bash
+git clone https://github.com/SWE-rebench/SWE-bench-fork.git /src/SWE-bench-fork
+git -C /src/SWE-bench-fork checkout 980d0cca8aa4e73f1d9f894e906370bef8c4de8a
+```
 
-## 开发验证
+`--selection` refers to the 128 tasks selected by ClawTune. You can use a full local export that includes `install_config`:
+
+```bash
+python3 scripts/build-swe-rebench-arm64.py \
+  --dataset /data/swe-rebench-full.parquet \
+  --selection /src/ClawTune/swe_rebench/tasks.json \
+  --swebench-root /src/SWE-bench-fork \
+  --registry registry.example.com/clawbox \
+  --mapping /data/swe-rebench-arm64-map.json \
+  --tool-bridge-binary .artifacts/tool-bridge-arm64/tool-bridge \
+  --push --fail-fast
+```
+
+Alternatively, you can have the factory read the official dataset at a pinned revision:
+
+```bash
+python3 scripts/build-swe-rebench-arm64.py \
+  --dataset-id nebius/SWE-rebench \
+  --dataset-revision 4ece23ba02fe8b68858e430134adddfd64d6f0f4 \
+  --selection /src/ClawTune/swe_rebench/tasks.json \
+  --swebench-root /src/SWE-bench-fork \
+  --registry registry.example.com/clawbox \
+  --mapping /data/swe-rebench-arm64-map.json \
+  --tool-bridge-binary .artifacts/tool-bridge-arm64/tool-bridge \
+  --push --fail-fast
+```
+
+The factory validates `/testbed`, the shell, git, patches, dependency/test commands, and the ARM64 Tool Bridge before writing a mapping that records `platform`, `recipe_revision`, and the registry digest. Any entry that cannot be built natively is recorded as `unsupported-arm64`, and the launcher does not allow fallback.
+
+Before reading Parquet or remote datasets from Hugging Face, install the optional image-factory dependencies: `python3 -m pip install -e '.[images]'`.
+
+## 3. Control plane and tasks
+
+Replace the example image names with real digests/tags and create the `clawbox-control-plane` and `clawbox-llm` Secrets, then deploy:
+
+```bash
+kubectl apply -f deploy/sandboxtask-crd.yaml
+kubectl apply -f deploy/control-plane-rbac.yaml
+kubectl apply -f deploy/trace-ingester.yaml
+python3 scripts/collect-node-capacity.py --configmap | kubectl apply -f -
+kubectl apply -f deploy/cell-controller.yaml
+```
+
+A template for `clawbox-control-plane` is in `deploy/control-plane-secret.example.yaml`; the keys for `clawbox-llm` are in `deploy/swe-rebench-secret.example.yaml`. The placeholder values in both templates must be replaced, and a production ingester should use persistent PostgreSQL.
+
+Submit a single template:
+
+```bash
+TASK_ID=demo TOOL_IMAGE='registry.example.com/task@sha256:…' \
+LLM_EGRESS_CIDR=203.0.113.10/32 bash deploy/cell.sh render | kubectl apply -f -
+kubectl get sandboxtasks -n clawbox-benchmarks -w
+```
+
+Run the dataset:
+
+```bash
+bash scripts/run-swe-rebench.sh \
+  --tasks /src/ClawTune/swe_rebench/tasks.json \
+  --arm64-map /data/swe-rebench-arm64-map.json \
+  --llm-egress-cidr 203.0.113.10/32 \
+  --parallelism 8
+```
+
+The controller drives each task strictly through `Queued → Admitted → ToolStarting → ToolReady → RuntimeRunning → Collecting → Succeeded/Failed/TimedOut → Cleaned`. If the full dual-VM budget is not available, the task stays `Queued` and never creates a half-built Cell.
+
+## 4. Capacity and incremental load testing
+
+The `small`, `medium`, and `large` profiles account for the Runtime, Tool, ClawTune sidecar, both RuntimeClass overheads, and a 10% safety margin. Node capacity is derived from the allocatable resources of ready ARM64 nodes, minus non-Cell Pod requests, and is bounded by the devmapper baseline budget.
+
+```bash
+python3 scripts/collect-node-capacity.py
+bash scripts/scale-swe-rebench.sh \
+  --tasks /src/ClawTune/swe_rebench/tasks.json \
+  --arm64-map /data/swe-rebench-arm64-map.json \
+  --llm-egress-cidr 203.0.113.10/32
+```
+
+Load testing ramps in fixed steps of `1, 2, 4, 8, 16, 32` and stops on the first task failure or a thin-pool pressure gate failure. See [docs/IMPLEMENTATION_MAPPING.md](docs/IMPLEMENTATION_MAPPING.md) for an index of architecture and implementation files.
+
+## Local verification
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 -m pytest -q
-python3 deploy/test_render.py
+python3 -m pytest
+python3 -m py_compile $(find clawbox scripts -name '*.py')
 ```
+
+Local tests are not a substitute for target-machine acceptance; production-passing evidence must include the host gates, a dual-Pod smoke test, Firecracker host processes/journal, and devmapper cleanup results.

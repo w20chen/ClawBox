@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
@@ -52,6 +51,8 @@ def main() -> None:
         root / "swe_rebench" / "prepare.py",
     )
     missing = [str(path) for path in required if not path.is_file()]
+    if not (root / "traces" / "tool-resource").is_dir():
+        missing.append(str(root / "traces" / "tool-resource"))
     if missing:
         fail("missing current source files: " + ", ".join(missing))
 
@@ -84,8 +85,8 @@ def main() -> None:
 
     integration_files = (
         project_root / "docker" / "Dockerfile.runtime",
-        project_root / "docker" / "Dockerfile.clawtune-bundle",
         project_root / "scripts" / "runtime-entrypoint.sh",
+        project_root / "scripts" / "clawtune-sidecar-entrypoint.sh",
         project_root / "scripts" / "build-kubernetes-images.sh",
     )
     for path in integration_files:

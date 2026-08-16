@@ -9,14 +9,20 @@ MODE="plan"
 KUBERNETES_MINOR="${KUBERNETES_MINOR:-1.35}"
 CONTAINERD_VERSION="${CONTAINERD_VERSION:-2.3.4}"
 RUNC_VERSION="${RUNC_VERSION:-1.5.1}"
-HELM_VERSION="${HELM_VERSION:-4.2.4}"
 CALICO_VERSION="${CALICO_VERSION:-3.32.1}"
 KATA_VERSION="${KATA_VERSION:-3.31.0}"
-RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
-POD_CIDR="${CLAWBOX_POD_CIDR:-192.168.0.0/16}"
+FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-1.12.1}"
+RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-fc-arm64}"
+POD_CIDR="${CLAWBOX_POD_CIDR:-192.168.0.0/22}"
 SERVICE_CIDR="${CLAWBOX_SERVICE_CIDR:-10.96.0.0/12}"
 ADVERTISE_ADDRESS="${CLAWBOX_ADVERTISE_ADDRESS:-}"
 IMAGE_REPOSITORY="${KUBEADM_IMAGE_REPOSITORY:-registry.k8s.io}"
+DEVMAPPER_DATA_DEVICE="${CLAWBOX_DEVMAPPER_DATA_DEVICE:-}"
+DEVMAPPER_METADATA_DEVICE="${CLAWBOX_DEVMAPPER_METADATA_DEVICE:-}"
+DEVMAPPER_CONFIRM="${CLAWBOX_DEVMAPPER_CONFIRM_ERASE:-}"
+MAX_PODS="${CLAWBOX_MAX_PODS:-512}"
+SYSTEM_RESERVED="${CLAWBOX_SYSTEM_RESERVED:-cpu=4,memory=8Gi,ephemeral-storage=20Gi}"
+KUBE_RESERVED="${CLAWBOX_KUBE_RESERVED:-cpu=4,memory=8Gi,ephemeral-storage=20Gi}"
 
 STATE_DIR="/var/lib/clawbox-bootstrap"
 STATE_FILE="${STATE_DIR}/versions.env"
@@ -38,13 +44,18 @@ Modes:
 
 Options:
   --advertise-address IPV4  Kubernetes API address; default: default-route source
-  --pod-cidr CIDR           Calico Pod CIDR; default: 192.168.0.0/16
+  --pod-cidr CIDR           Calico Pod CIDR; default: 192.168.0.0/22
   --service-cidr CIDR       Kubernetes Service CIDR; default: 10.96.0.0/12
-  --runtime-class NAME      Required Kata class; default: kata-qemu-runtime-rs
+  --runtime-class NAME      Required class; must be kata-fc-arm64
+  --devmapper-data-device D Dedicated whole data disk
+  --devmapper-meta-device D Dedicated whole metadata disk
+  --confirm-erase D,M       Required apply authorization for those exact disks
 
 Reviewed version overrides are environment variables:
-  KUBERNETES_MINOR, CONTAINERD_VERSION, RUNC_VERSION, HELM_VERSION,
-  CALICO_VERSION, KATA_VERSION, KUBEADM_IMAGE_REPOSITORY.
+  KUBERNETES_MINOR, CONTAINERD_VERSION, RUNC_VERSION, CALICO_VERSION,
+  KATA_VERSION, FIRECRACKER_VERSION,
+  KUBEADM_IMAGE_REPOSITORY, CLAWBOX_MAX_PODS, CLAWBOX_SYSTEM_RESERVED,
+  CLAWBOX_KUBE_RESERVED.
 
 This installer is for a dedicated bare host. It does not adopt an unrelated
 existing Kubernetes cluster and does not implement an automatic destructive
@@ -60,6 +71,9 @@ while [[ $# -gt 0 ]]; do
     --pod-cidr) POD_CIDR="${2:-}"; shift 2 ;;
     --service-cidr) SERVICE_CIDR="${2:-}"; shift 2 ;;
     --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
+    --devmapper-data-device) DEVMAPPER_DATA_DEVICE="${2:-}"; shift 2 ;;
+    --devmapper-meta-device) DEVMAPPER_METADATA_DEVICE="${2:-}"; shift 2 ;;
+    --confirm-erase) DEVMAPPER_CONFIRM="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -149,10 +163,13 @@ common_preflight() {
   need timeout
 
   valid_minor "${KUBERNETES_MINOR}" || die "invalid KUBERNETES_MINOR: ${KUBERNETES_MINOR}"
-  for version in "${CONTAINERD_VERSION}" "${RUNC_VERSION}" "${HELM_VERSION}" "${CALICO_VERSION}" "${KATA_VERSION}"; do
+  for version in "${CONTAINERD_VERSION}" "${RUNC_VERSION}" "${CALICO_VERSION}" "${KATA_VERSION}"; do
     valid_version "${version}" || die "invalid semantic version: ${version}"
   done
   valid_runtime_name "${RUNTIME_CLASS}" || die "invalid RuntimeClass name: ${RUNTIME_CLASS}"
+  [[ "${RUNTIME_CLASS}" == kata-fc-arm64 ]] || die "Firecracker-first bootstrap only supports kata-fc-arm64"
+  [[ "${MAX_PODS}" =~ ^[0-9]+$ ]] && (( MAX_PODS >= 64 && MAX_PODS <= 1024 )) \
+    || die "CLAWBOX_MAX_PODS must be between 64 and 1024"
   version_at_least "${KATA_VERSION}" "3.31.0" || die "Kata ${KATA_VERSION} is vulnerable to CVE-2026-47243; require >= 3.31.0"
 
   if [[ -z "${ADVERTISE_ADDRESS}" ]]; then
@@ -193,11 +210,16 @@ print_plan() {
   note "firewalld" "${firewalld}"
   note "SELinux" "${selinux}"
   note "active swap entries" "${swap_count}"
-  note "containerd target" "${CONTAINERD_VERSION} (official arm64 tarball)"
+  note "containerd target" "${CONTAINERD_VERSION} (official static arm64 tarball)"
   note "Kubernetes target" "${KUBERNETES_MINOR}.x from pkgs.k8s.io"
   note "Calico target" "${CALICO_VERSION}, VXLAN, BGP disabled"
-  note "Helm target" "${HELM_VERSION}"
   note "Kata target" "${KATA_VERSION} / ${RUNTIME_CLASS}"
+  note "Firecracker target" "${FIRECRACKER_VERSION} / native arm64 only"
+  note "devmapper data disk" "${DEVMAPPER_DATA_DEVICE:-REQUIRED FOR APPLY}"
+  note "devmapper metadata disk" "${DEVMAPPER_METADATA_DEVICE:-REQUIRED FOR APPLY}"
+  note "kubelet maxPods" "${MAX_PODS}"
+  note "system reserved" "${SYSTEM_RESERVED}"
+  note "kube reserved" "${KUBE_RESERVED}"
   note "state/backups" "${STATE_DIR}"
 
   cat <<'EOF'
@@ -208,7 +230,9 @@ Apply performs these ordered mutations:
   3. install verified arm64 containerd/runc artifacts and start containerd;
   4. install kubelet/kubeadm/kubectl and initialize one control plane;
   5. install Calico, enable scheduling on the single control-plane node;
-  6. install Helm and Kata, then run both stage-0 gates.
+  6. build/audit native arm64 Kata + Firecracker artifacts;
+  7. initialize the two explicitly authorized disks as an LVM thin pool;
+  8. install the audited handler and RuntimeClass, then run both smoke gates.
 
 No changes have been made. Run the same command with `apply` after review.
 EOF
@@ -225,7 +249,7 @@ ensure_sudo() {
 guard_version_drift() {
   local key requested installed
   sudo test -f "${STATE_FILE}" || return 0
-  for key in KUBERNETES_MINOR CONTAINERD_VERSION RUNC_VERSION HELM_VERSION CALICO_VERSION KATA_VERSION RUNTIME_CLASS POD_CIDR SERVICE_CIDR ADVERTISE_ADDRESS IMAGE_REPOSITORY; do
+  for key in KUBERNETES_MINOR CONTAINERD_VERSION RUNC_VERSION CALICO_VERSION KATA_VERSION FIRECRACKER_VERSION RUNTIME_CLASS POD_CIDR SERVICE_CIDR ADVERTISE_ADDRESS IMAGE_REPOSITORY MAX_PODS SYSTEM_RESERVED KUBE_RESERVED; do
     requested="${!key}"
     installed="$(sudo awk -F= -v wanted="${key}" '$1 == wanted {print substr($0, index($0, "=") + 1)}' "${STATE_FILE}")"
     [[ -n "${installed}" ]] || die "installed state is missing ${key}: ${STATE_FILE}"
@@ -263,7 +287,6 @@ check_download_endpoints() {
     "https://github.com/containerd/containerd/releases" \
     "https://pkgs.k8s.io/core:/stable:/v${KUBERNETES_MINOR}/rpm/repodata/repomd.xml" \
     "https://raw.githubusercontent.com/projectcalico/calico/v${CALICO_VERSION}/manifests/tigera-operator.yaml" \
-    "https://get.helm.sh/" \
     "https://ghcr.io/v2/" \
     "https://quay.io/v2/" \
     "https://${IMAGE_REPOSITORY}/v2/"; do
@@ -274,8 +297,9 @@ check_download_endpoints() {
 
 install_host_prerequisites() {
   log "Installing host prerequisites"
-  sudo dnf install -y ca-certificates conntrack-tools curl ethtool gzip iproute iptables \
-    openssl policycoreutils python3 socat tar xz chrony
+  sudo dnf install -y ca-certificates conntrack-tools curl device-mapper e2fsprogs ethtool \
+    file findutils gzip iproute iptables lvm2 openssl policycoreutils python3 socat \
+    tar util-linux xz zstd chrony
   sudo systemctl enable --now chronyd
 
   cat >"${TMP_DIR}/clawbox-modules.conf" <<'EOF'
@@ -284,6 +308,7 @@ br_netfilter
 vhost_vsock
 vhost_net
 EOF
+  backup_once /etc/modules-load.d/clawbox-kubernetes.conf modules-load.before-clawbox
   sudo install -m 0644 "${TMP_DIR}/clawbox-modules.conf" /etc/modules-load.d/clawbox-kubernetes.conf
   for module in overlay br_netfilter vhost_vsock vhost_net; do
     sudo modprobe "${module}" || die "kernel module is unavailable: ${module}"
@@ -294,6 +319,7 @@ net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward = 1
 EOF
+  backup_once /etc/sysctl.d/99-clawbox-kubernetes.conf sysctl.before-clawbox
   sudo install -m 0644 "${TMP_DIR}/clawbox-sysctl.conf" /etc/sysctl.d/99-clawbox-kubernetes.conf
   sudo sysctl --system >/dev/null
 
@@ -302,6 +328,7 @@ EOF
 unmanaged-devices=interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico;interface-name:wireguard.cali;interface-name:wg-v6.cali
 EOF
   sudo install -d -m 0755 /etc/NetworkManager/conf.d
+  backup_once /etc/NetworkManager/conf.d/calico.conf networkmanager-calico.before-clawbox
   sudo install -m 0644 "${TMP_DIR}/calico-networkmanager.conf" /etc/NetworkManager/conf.d/calico.conf
   if sudo systemctl is-active --quiet NetworkManager; then
     command -v nmcli >/dev/null 2>&1 || die "NetworkManager is active but nmcli is unavailable"
@@ -342,7 +369,7 @@ EOF
 
 install_containerd() {
   local archive checksum_file runc_binary runc_sums
-  archive="containerd-${CONTAINERD_VERSION}-linux-arm64.tar.gz"
+  archive="containerd-static-${CONTAINERD_VERSION}-linux-arm64.tar.gz"
   checksum_file="${archive}.sha256sum"
   log "Installing containerd ${CONTAINERD_VERSION} and runc ${RUNC_VERSION}"
   download "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/${archive}" "${TMP_DIR}/${archive}"
@@ -410,6 +437,18 @@ EOF
   sudo systemctl enable --now kubelet
 }
 
+configure_kubelet_capacity() {
+  local kubelet_env="/etc/sysconfig/kubelet"
+  log "Configuring single-node capacity guardrails"
+  backup_once "${kubelet_env}" kubelet-sysconfig.before-clawbox
+  cat >"${TMP_DIR}/kubelet" <<EOF
+# Managed by ClawBox. Cell admission accounts for two Pods and two VM overheads.
+KUBELET_EXTRA_ARGS="--max-pods=${MAX_PODS} --system-reserved=${SYSTEM_RESERVED} --kube-reserved=${KUBE_RESERVED} --eviction-hard=memory.available<5%,nodefs.available<10%,nodefs.inodesFree<5%"
+EOF
+  sudo install -m 0644 "${TMP_DIR}/kubelet" "${kubelet_env}"
+  sudo systemctl daemon-reload
+}
+
 configure_user_kubeconfig() {
   local run_user run_home run_uid run_gid
   run_user="${SUDO_USER:-${USER}}"
@@ -470,33 +509,37 @@ install_calico() {
   kubectl wait --for=condition=Ready nodes --all --timeout=600s
 }
 
-install_helm() {
-  local archive expected actual
-  archive="helm-v${HELM_VERSION}-linux-arm64.tar.gz"
-  log "Installing Helm ${HELM_VERSION}"
-  download "https://get.helm.sh/${archive}" "${TMP_DIR}/${archive}"
-  download "https://get.helm.sh/${archive}.sha256sum" "${TMP_DIR}/${archive}.sha256sum"
-  expected="$(awk '{print $1}' "${TMP_DIR}/${archive}.sha256sum")"
-  actual="$(sha256sum "${TMP_DIR}/${archive}" | awk '{print $1}')"
-  [[ -n "${expected}" && "${actual}" == "${expected}" ]] || die "Helm checksum mismatch"
-  tar -C "${TMP_DIR}" -xzf "${TMP_DIR}/${archive}"
-  sudo install -m 0755 "${TMP_DIR}/linux-arm64/helm" /usr/local/bin/helm
-}
+install_kata_firecracker() {
+  log "Auditing Kata ${KATA_VERSION} + Firecracker ${FIRECRACKER_VERSION} before any handler change"
+  if sudo bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
+    --root /opt/kata --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" \
+    --emit "${STATE_DIR}/firecracker-audit.env"; then
+    log "Reusing the complete audited Kata/Firecracker artifact tree"
+  else
+    log "Artifact audit was incomplete; assembling the pinned arm64 stack"
+    sudo env KATA_VERSION="${KATA_VERSION}" FIRECRACKER_VERSION="${FIRECRACKER_VERSION}" \
+      bash "${ROOT}/scripts/build-kata-firecracker-arm64.sh" install
+  fi
 
-install_kata() {
-  log "Installing Kata Containers ${KATA_VERSION}"
-  helm upgrade --install kata-deploy \
-    oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy \
-    --version "${KATA_VERSION}" \
-    --namespace kata-system --create-namespace \
-    --values "${ROOT}/deploy/kata-openeuler-arm64-values.yaml" \
-    --wait --timeout 15m
-  kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || {
-    kubectl get runtimeclass >&2 || true
-    die "Kata chart did not create RuntimeClass ${RUNTIME_CLASS}"
-  }
-  sudo test -x /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 \
-    || die "runtime-rs shim is missing after kata-deploy"
+  [[ -n "${DEVMAPPER_DATA_DEVICE}" && -n "${DEVMAPPER_METADATA_DEVICE}" ]] \
+    || die "apply requires --devmapper-data-device and --devmapper-meta-device"
+  sudo bash "${ROOT}/scripts/setup-devmapper-openeuler-arm64.sh" apply \
+    --data-device "${DEVMAPPER_DATA_DEVICE}" \
+    --metadata-device "${DEVMAPPER_METADATA_DEVICE}" \
+    --confirm-erase "${DEVMAPPER_CONFIRM}"
+
+  sudo bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
+    --root /opt/kata --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" \
+    --emit "${STATE_DIR}/firecracker-audit.env"
+  sudo ctr plugins ls | awk \
+    '$1 ~ /snapshotter/ && $2 == "devmapper" && $NF == "ok" {found=1} END {exit !found}' \
+    || die "devmapper is not healthy; RuntimeClass will not be created"
+  sudo containerd config dump | grep -F "runtimes.${RUNTIME_CLASS}" >/dev/null \
+    || die "containerd does not expose handler ${RUNTIME_CLASS}"
+
+  kubectl apply -f "${ROOT}/deploy/runtimeclass-firecracker.yaml"
+  handler="$(kubectl get runtimeclass "${RUNTIME_CLASS}" -o jsonpath='{.handler}')"
+  [[ "${handler}" == "${RUNTIME_CLASS}" ]] || die "RuntimeClass handler mismatch: ${handler}"
 }
 
 write_state() {
@@ -504,14 +547,17 @@ write_state() {
 KUBERNETES_MINOR=${KUBERNETES_MINOR}
 CONTAINERD_VERSION=${CONTAINERD_VERSION}
 RUNC_VERSION=${RUNC_VERSION}
-HELM_VERSION=${HELM_VERSION}
 CALICO_VERSION=${CALICO_VERSION}
 KATA_VERSION=${KATA_VERSION}
+FIRECRACKER_VERSION=${FIRECRACKER_VERSION}
 RUNTIME_CLASS=${RUNTIME_CLASS}
 POD_CIDR=${POD_CIDR}
 SERVICE_CIDR=${SERVICE_CIDR}
 ADVERTISE_ADDRESS=${ADVERTISE_ADDRESS}
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY}
+MAX_PODS=${MAX_PODS}
+SYSTEM_RESERVED=${SYSTEM_RESERVED}
+KUBE_RESERVED=${KUBE_RESERVED}
 EOF
   sudo install -m 0600 "${TMP_DIR}/versions.env" "${STATE_FILE}"
 }
@@ -522,7 +568,9 @@ show_status() {
   command -v containerd >/dev/null 2>&1 && containerd --version || true
   command -v runc >/dev/null 2>&1 && runc --version | head -1 || true
   command -v kubeadm >/dev/null 2>&1 && kubeadm version -o short || true
-  command -v helm >/dev/null 2>&1 && helm version --short || true
+  bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" --root /opt/kata \
+    --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" || true
+  bash "${ROOT}/scripts/setup-devmapper-openeuler-arm64.sh" status || true
   local status_kubeconfig="${KUBECONFIG:-${HOME}/.kube/config}"
   if [[ -r "${status_kubeconfig}" ]] && command -v kubectl >/dev/null 2>&1; then
     KUBECONFIG="${status_kubeconfig}" kubectl get nodes -o wide
@@ -540,16 +588,24 @@ apply_bootstrap() {
   install_host_prerequisites
   install_containerd
   install_kubernetes_packages
+  configure_kubelet_capacity
   initialize_cluster
   install_calico
-  install_helm
-  install_kata
+  install_kata_firecracker
   write_state
 
   log "Running authoritative ClawBox stage-0 gates"
-  sudo env KUBECONFIG="${ADMIN_CONF}" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    bash "${ROOT}/deploy/check-host.sh" --runtime-class "${RUNTIME_CLASS}"
-  KUBECONFIG="${USER_KUBECONFIG}" bash "${ROOT}/scripts/arm64-kata-smoke.sh" --runtime-class "${RUNTIME_CLASS}"
+  sudo rm -f "${STATE_DIR}/stage0-passed"
+  kubectl label nodes --all clawbox.openai.com/firecracker-ready=true --overwrite
+  if ! sudo env KUBECONFIG="${ADMIN_CONF}" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash "${ROOT}/deploy/check-host.sh" --runtime-class "${RUNTIME_CLASS}"; then
+    kubectl label nodes --all clawbox.openai.com/firecracker-ready- >/dev/null 2>&1 || true
+    die "static Firecracker host gate failed; ready labels were removed"
+  fi
+  if ! KUBECONFIG="${USER_KUBECONFIG}" bash "${ROOT}/scripts/arm64-kata-smoke.sh" --runtime-class "${RUNTIME_CLASS}"; then
+    kubectl label nodes --all clawbox.openai.com/firecracker-ready- >/dev/null 2>&1 || true
+    die "live Firecracker smoke failed; ready labels were removed"
+  fi
   sudo touch "${STATE_DIR}/stage0-passed"
   log "Bootstrap complete"
   show_status

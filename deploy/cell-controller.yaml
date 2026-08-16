@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clawbox-cell-controller
+  namespace: clawbox-system
+  labels: &labels
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: cell-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      serviceAccountName: clawbox-cell-controller
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: controller
+          image: registry.example.com/clawbox/control-plane-arm64:dev
+          imagePullPolicy: IfNotPresent
+          command: ["clawbox-cell-controller"]
+          env:
+            - {name: KUBERNETES_RUNTIME_CLASS, value: kata-fc-arm64}
+            - {name: CLAWBOX_CELL_NAMESPACE, value: clawbox-benchmarks}
+            - {name: RUNTIME_IMAGE, value: registry.example.com/clawbox/runtime-arm64:dev}
+            - {name: TOOL_BRIDGE_IMAGE, value: registry.example.com/clawbox/tool-bridge-arm64:dev}
+            - {name: TRACE_INGESTER_URL, value: http://clawbox-ingester.clawbox-system.svc:8084}
+            - name: CLAWBOX_INGEST_SECRET
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
+            - name: CLAWBOX_DEVMAPPER_AVAILABLE_BYTES
+              valueFrom: {configMapKeyRef: {name: clawbox-node-capacity, key: devmapper-available-bytes}}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}

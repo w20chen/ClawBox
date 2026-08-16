@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+import ipaddress
+import os
+import re
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any, Callable
+
+from clawbox.cell.capacity import (
+    AtomicAdmission,
+    FixedProfileSizer,
+    KubernetesNodeCapacityProvider,
+    PlacementPolicy,
+    ResourceVector,
+    SingleNodePlacementPolicy,
+)
+from clawbox.cell.manifests import (
+    credential_secrets,
+    generate_ssh_credentials,
+    network_policies,
+    prompt_configmap,
+    runtime_job,
+    tool_pod,
+    tool_service,
+)
+
+
+GROUP = "clawbox.openai.com"
+VERSION = "v1alpha1"
+PLURAL = "sandboxtasks"
+FINALIZER = "clawbox.openai.com/cell-cleanup"
+
+
+class CellPhase(StrEnum):
+    QUEUED = "Queued"
+    ADMITTED = "Admitted"
+    TOOL_STARTING = "ToolStarting"
+    TOOL_READY = "ToolReady"
+    RUNTIME_RUNNING = "RuntimeRunning"
+    COLLECTING = "Collecting"
+    SUCCEEDED = "Succeeded"
+    FAILED = "Failed"
+    TIMED_OUT = "TimedOut"
+    CLEANED = "Cleaned"
+
+
+TERMINAL = {CellPhase.SUCCEEDED, CellPhase.FAILED, CellPhase.TIMED_OUT}
+RESERVED = {
+    CellPhase.ADMITTED, CellPhase.TOOL_STARTING, CellPhase.TOOL_READY,
+    CellPhase.RUNTIME_RUNNING, CellPhase.COLLECTING,
+}
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def resource_from_status(value: dict[str, Any]) -> ResourceVector:
+    return ResourceVector(
+        int(value["cpuMillis"]), int(value["memoryBytes"]),
+        int(value["storageBytes"]), int(value["pods"]),
+    )
+
+
+def validate_task(task: dict[str, Any]) -> None:
+    spec = task.get("spec") or {}
+    if len(str(task.get("metadata", {}).get("name", ""))) > 48:
+        raise ValueError("SandboxTask name must be at most 48 characters so owned child names remain valid")
+    image = str(spec.get("toolImage", ""))
+    if not re.fullmatch(r".+@sha256:[a-f0-9]{64}", image):
+        raise ValueError("spec.toolImage must be an immutable linux/arm64 digest")
+    if spec.get("profile", "small") not in FixedProfileSizer.PROFILES:
+        raise ValueError("spec.profile must be small, medium, or large")
+    if not spec.get("problemStatement"):
+        raise ValueError("spec.problemStatement is required")
+    if not spec.get("llmSecretName"):
+        raise ValueError("spec.llmSecretName is required")
+    if not spec.get("llmEgressCIDR"):
+        raise ValueError("spec.llmEgressCIDR is required for fail-closed network policy")
+    try:
+        ipaddress.ip_network(str(spec["llmEgressCIDR"]), strict=True)
+        for cidr in spec.get("toolEgressCIDRs", []):
+            ipaddress.ip_network(str(cidr), strict=True)
+    except ValueError as exc:
+        raise ValueError(f"egress CIDRs must be canonical networks: {exc}") from exc
+
+
+class CellReconciler:
+    def __init__(
+        self, *, core_api, batch_api, networking_api, custom_api,
+        sizer: FixedProfileSizer | None = None,
+        capacity_provider: KubernetesNodeCapacityProvider | None = None,
+        placement_policy: PlacementPolicy | None = None,
+    ):
+        self.core = core_api
+        self.batch = batch_api
+        self.networking = networking_api
+        self.custom = custom_api
+        self.sizer = sizer or FixedProfileSizer()
+        self.capacity_provider = capacity_provider or KubernetesNodeCapacityProvider(
+            core_api, devmapper_available_bytes=int(os.getenv("CLAWBOX_DEVMAPPER_AVAILABLE_BYTES", "0")),
+        )
+        self.placement = placement_policy or SingleNodePlacementPolicy()
+
+    @staticmethod
+    def _not_found(exc: Exception) -> bool:
+        return getattr(exc, "status", None) == 404
+
+    def _patch_status(self, task: dict[str, Any], phase: CellPhase, **values: Any) -> None:
+        current = dict(task.get("status") or {})
+        current.update(values)
+        current.update({
+            "phase": phase.value,
+            "observedGeneration": task["metadata"].get("generation", 1),
+            "lastTransitionTime": now(),
+        })
+        self.custom.patch_namespaced_custom_object_status(
+            GROUP, VERSION, task["metadata"]["namespace"], PLURAL,
+            task["metadata"]["name"], {"status": current},
+        )
+
+    def _patch_metadata(self, task: dict[str, Any], finalizers: list[str]) -> None:
+        self.custom.patch_namespaced_custom_object(
+            GROUP, VERSION, task["metadata"]["namespace"], PLURAL,
+            task["metadata"]["name"], {"metadata": {"finalizers": finalizers}},
+        )
+
+    def _get(self, reader: Callable[..., Any], name: str, namespace: str) -> Any | None:
+        try:
+            return reader(name, namespace)
+        except Exception as exc:
+            if self._not_found(exc):
+                return None
+            raise
+
+    @staticmethod
+    def _assert_owner(existing: Any, expected_uid: str, name: str) -> None:
+        metadata_value = existing.get("metadata", {}) if isinstance(existing, dict) else getattr(existing, "metadata", None)
+        owners = (
+            metadata_value.get("ownerReferences", [])
+            if isinstance(metadata_value, dict)
+            else (getattr(metadata_value, "owner_references", None) or [])
+        )
+        for owner in owners:
+            uid = owner.get("uid") if isinstance(owner, dict) else getattr(owner, "uid", None)
+            controller = owner.get("controller") if isinstance(owner, dict) else getattr(owner, "controller", None)
+            if uid == expected_uid and controller is True:
+                return
+        raise RuntimeError(f"refusing to adopt pre-existing child without the SandboxTask owner: {name}")
+
+    def _ensure(self, reader: Callable[..., Any], creator: Callable[..., Any], manifest: dict[str, Any]) -> Any:
+        name = manifest["metadata"]["name"]
+        namespace = manifest["metadata"]["namespace"]
+        existing = self._get(reader, name, namespace)
+        if existing is not None:
+            expected_uid = manifest["metadata"]["ownerReferences"][0]["uid"]
+            self._assert_owner(existing, expected_uid, name)
+            return existing
+        try:
+            return creator(namespace, manifest)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 409:
+                existing = reader(name, namespace)
+                expected_uid = manifest["metadata"]["ownerReferences"][0]["uid"]
+                self._assert_owner(existing, expected_uid, name)
+                return existing
+            raise
+
+    def _reservation_set(self, namespace: str, exclude: str) -> AtomicAdmission:
+        admission = AtomicAdmission(self.capacity_provider.capacity())
+        response = self.custom.list_namespaced_custom_object(GROUP, VERSION, namespace, PLURAL)
+        for item in response.get("items", []):
+            if item.get("metadata", {}).get("name") == exclude:
+                continue
+            status = item.get("status") or {}
+            try:
+                phase = CellPhase(status.get("phase", "Queued"))
+                reservation = resource_from_status(status["reservation"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if phase in RESERVED:
+                admission.reserve(item["metadata"]["name"], reservation)
+        return admission
+
+    def _ensure_secrets(self, task: dict[str, Any], timeout: int) -> None:
+        namespace = task["metadata"]["namespace"]
+        name = task["metadata"]["name"]
+        secret_name = f"{name}-auth"
+        existing = self._get(self.core.read_namespaced_secret, secret_name, namespace)
+        if existing is not None:
+            self._assert_owner(existing, task["metadata"]["uid"], secret_name)
+            return
+        credentials = generate_ssh_credentials(name)
+        for secret in credential_secrets(task, credentials, timeout):
+            self._ensure(self.core.read_namespaced_secret, self.core.create_namespaced_secret, secret)
+
+    def _ensure_prerequisites(self, task: dict[str, Any], timeout: int) -> None:
+        self._ensure_secrets(task, timeout)
+        self._ensure(
+            self.core.read_namespaced_config_map, self.core.create_namespaced_config_map,
+            prompt_configmap(task),
+        )
+        self._ensure(
+            self.core.read_namespaced_service, self.core.create_namespaced_service,
+            tool_service(task),
+        )
+        for policy in network_policies(task):
+            self._ensure(
+                self.networking.read_namespaced_network_policy,
+                self.networking.create_namespaced_network_policy,
+                policy,
+            )
+
+    @staticmethod
+    def _pod_state(pod: Any | None) -> str:
+        if pod is None:
+            return "Missing"
+        status = getattr(pod, "status", None)
+        phase = getattr(status, "phase", "")
+        statuses = getattr(status, "container_statuses", None) or []
+        if phase == "Running" and statuses and all(bool(getattr(item, "ready", False)) for item in statuses):
+            return "Ready"
+        return phase or "Unknown"
+
+    @staticmethod
+    def _job_state(job: Any | None) -> str:
+        if job is None:
+            return "Missing"
+        status = getattr(job, "status", None)
+        if getattr(status, "succeeded", 0):
+            return "Succeeded"
+        if getattr(status, "failed", 0):
+            return "Failed"
+        if getattr(status, "active", 0):
+            return "Running"
+        return "Pending"
+
+    def _timed_out(self, task: dict[str, Any]) -> bool:
+        timeout = int(task["spec"].get("timeoutSeconds", 1800)) + 300
+        started = (task.get("status") or {}).get("admittedAt")
+        if not started:
+            return False
+        parsed = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - parsed).total_seconds() > timeout
+
+    def _delete(self, call: Callable[..., Any], name: str, namespace: str, **kwargs: Any) -> None:
+        try:
+            call(name, namespace, **kwargs)
+        except Exception as exc:
+            if not self._not_found(exc):
+                raise
+
+    def _cleanup(self, task: dict[str, Any]) -> bool:
+        namespace = task["metadata"]["namespace"]
+        name = task["metadata"]["name"]
+        self._delete(self.batch.delete_namespaced_job, f"{name}-runtime", namespace,
+                     propagation_policy="Foreground")
+        self._delete(self.core.delete_namespaced_pod, f"{name}-tool", namespace,
+                     grace_period_seconds=0)
+        # Foreground Job deletion is asynchronous.  Keep auth/config/network
+        # objects until both workload Pods are actually gone so a terminating
+        # sidecar can still complete its final upload.
+        workloads_remaining = (
+            self._get(self.batch.read_namespaced_job, f"{name}-runtime", namespace)
+            or self._get(self.core.read_namespaced_pod, f"{name}-tool", namespace)
+        )
+        if workloads_remaining is not None:
+            return False
+        self._delete(self.core.delete_namespaced_service, f"{name}-tool", namespace)
+        self._delete(self.core.delete_namespaced_config_map, f"{name}-prompt", namespace)
+        self._delete(self.core.delete_namespaced_secret, f"{name}-auth", namespace)
+        for suffix in ("default-deny", "tool-ingress", "runtime-egress", "tool-egress"):
+            self._delete(self.networking.delete_namespaced_network_policy, f"{name}-{suffix}", namespace)
+        remaining = (
+            self._get(self.core.read_namespaced_secret, f"{name}-auth", namespace)
+            or self._get(self.core.read_namespaced_service, f"{name}-tool", namespace)
+        )
+        return remaining is None
+
+    def reconcile(self, task: dict[str, Any]) -> None:
+        metadata_value = task["metadata"]
+        finalizers = list(metadata_value.get("finalizers") or [])
+        if metadata_value.get("deletionTimestamp"):
+            if self._cleanup(task) and FINALIZER in finalizers:
+                self._patch_metadata(task, [item for item in finalizers if item != FINALIZER])
+            return
+        if FINALIZER not in finalizers:
+            self._patch_metadata(task, finalizers + [FINALIZER])
+            return
+
+        status = task.get("status") or {}
+        try:
+            phase = CellPhase(status.get("phase", CellPhase.QUEUED.value))
+        except ValueError:
+            self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="InvalidPhase")
+            return
+
+        if not status.get("phase"):
+            try:
+                validate_task(task)
+                self.sizer.size(task["spec"].get("profile", "small"))
+            except ValueError as exc:
+                self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="InvalidSpec", message=str(exc))
+                return
+            self._patch_status(task, CellPhase.QUEUED, queuedAt=now(), reason="PendingAdmission")
+            return
+
+        if phase in RESERVED and self._timed_out(task):
+            self._patch_status(task, CellPhase.TIMED_OUT, outcome="TimedOut", reason="CellDeadlineExceeded")
+            return
+
+        size = self.sizer.size(task["spec"].get("profile", "small"))
+        namespace = metadata_value["namespace"]
+        name = metadata_value["name"]
+        timeout = int(task["spec"].get("timeoutSeconds", 1800))
+
+        if phase == CellPhase.QUEUED:
+            admission = self._reservation_set(namespace, name)
+            if not admission.reserve(name, size.reservation):
+                self._patch_status(task, CellPhase.QUEUED, reason="InsufficientCellCapacity",
+                                   message="the complete two-VM Cell budget is unavailable")
+                return
+            node_name = self.placement.select_node(size)
+            self._patch_status(
+                task, CellPhase.ADMITTED, reason="CellBudgetReserved", admittedAt=now(),
+                reservation=size.reservation.as_status(), nodeName=node_name or "",
+            )
+            return
+
+        node_name = status.get("nodeName") or None
+        if phase == CellPhase.ADMITTED:
+            self._ensure_prerequisites(task, timeout)
+            self._ensure(
+                self.core.read_namespaced_pod, self.core.create_namespaced_pod,
+                tool_pod(task, size, node_name=node_name),
+            )
+            self._patch_status(task, CellPhase.TOOL_STARTING, reason="ToolPodCreated")
+            return
+
+        tool = self._get(self.core.read_namespaced_pod, f"{name}-tool", namespace)
+        tool_state = self._pod_state(tool)
+        if phase == CellPhase.TOOL_STARTING:
+            if tool_state in {"Failed", "Succeeded", "Missing"}:
+                self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Tool{tool_state}")
+            elif tool_state == "Ready":
+                self._patch_status(task, CellPhase.TOOL_READY, reason="ToolBridgeReady", toolReadyAt=now())
+            return
+
+        if phase == CellPhase.TOOL_READY:
+            if tool_state != "Ready":
+                self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Tool{tool_state}")
+                return
+            self._ensure(
+                self.batch.read_namespaced_job, self.batch.create_namespaced_job,
+                runtime_job(task, size, node_name=node_name),
+            )
+            self._patch_status(task, CellPhase.RUNTIME_RUNNING, reason="RuntimeJobCreated", runtimeStartedAt=now())
+            return
+
+        job = self._get(self.batch.read_namespaced_job, f"{name}-runtime", namespace)
+        job_state = self._job_state(job)
+        if phase == CellPhase.RUNTIME_RUNNING:
+            if tool_state != "Ready":
+                self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Tool{tool_state}")
+            elif job_state == "Succeeded":
+                self._patch_status(task, CellPhase.COLLECTING, reason="UploadsConfirmedByRuntimeExit")
+            elif job_state in {"Failed", "Missing"}:
+                self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Runtime{job_state}")
+            return
+
+        if phase == CellPhase.COLLECTING:
+            # runtime-entrypoint exits zero only after the ingester receipt says
+            # result + final trace marker are durable.
+            if job_state == "Succeeded":
+                self._patch_status(task, CellPhase.SUCCEEDED, outcome="Succeeded", reason="ArtifactsDurable")
+            else:
+                self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="ReceiptLost")
+            return
+
+        if phase in TERMINAL:
+            if self._cleanup(task):
+                self._patch_status(task, CellPhase.CLEANED, cleanedAt=now(), reason="ChildrenDeleted")
+            return

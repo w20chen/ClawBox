@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+ARG TARGETARCH
+WORKDIR /src
+COPY toolbridge/go.mod toolbridge/go.sum ./
+RUN go mod download
+COPY toolbridge/main.go ./
+RUN test "${TARGETARCH}" = arm64 \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath \
+      -ldflags='-s -w -buildid=' -o /out/tool-bridge .
+
+FROM scratch AS export
+COPY --from=build /out/tool-bridge /tool-bridge
+
+FROM alpine:3.22
+COPY --from=build /out/tool-bridge /usr/local/bin/tool-bridge
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/tool-bridge"]

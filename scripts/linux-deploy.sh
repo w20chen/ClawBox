@@ -107,6 +107,7 @@ init_config() {
   chmod 600 "${ENV_FILE}"
   append_env_if_missing CLAWBOX_SERVICE_TOKEN "$(random_secret)"
   append_env_if_missing CLAWBOX_GRANT_SECRET "$(random_secret)"
+  append_env_if_missing CLAWBOX_INGEST_SECRET "$(random_secret)"
   append_env_if_missing POSTGRES_PASSWORD "$(random_secret)"
   append_env_if_missing CONTROLLER_BACKEND docker
   append_env_if_missing CONTROLLER_DOCKER_NETWORK "${PROJECT_NAME}_default"
@@ -139,13 +140,14 @@ deploy() {
   info "building Tool Agent image"
   "${COMPOSE[@]}" --profile build build tool-agent-image
   info "building control-plane images"
-  "${COMPOSE[@]}" build tenant-scheduler allocator controller node-agent
+  "${COMPOSE[@]}" build tenant-scheduler allocator controller node-agent trace-ingester
   info "starting PostgreSQL and control-plane services"
-  "${COMPOSE[@]}" up -d postgres allocator controller node-agent tenant-scheduler
+  "${COMPOSE[@]}" up -d postgres allocator controller node-agent trace-ingester tenant-scheduler
   wait_url tenant-scheduler http://127.0.0.1:8080/healthz
   wait_url allocator http://127.0.0.1:8081/healthz
   wait_url controller http://127.0.0.1:8082/healthz
   wait_url node-agent http://127.0.0.1:8083/healthz
+  wait_url trace-ingester http://127.0.0.1:8084/healthz
   local scheduler_health
   scheduler_health="$(curl -fsS http://127.0.0.1:8080/healthz)"
   [[ "${scheduler_health}" == *'"clawtune":"available"'* ]] || \
@@ -206,7 +208,7 @@ PY
 status() {
   [[ -f "${ENV_FILE}" ]] || die ".env does not exist"
   "${COMPOSE[@]}" ps
-  for item in tenant-scheduler:8080 allocator:8081 controller:8082 node-agent:8083; do
+  for item in tenant-scheduler:8080 allocator:8081 controller:8082 node-agent:8083 trace-ingester:8084; do
     name="${item%:*}"; port="${item#*:}"
     printf '%-18s ' "${name}"
     curl -fsS --max-time 2 "http://127.0.0.1:${port}/healthz" || printf 'unavailable'
@@ -221,7 +223,7 @@ case "${command}" in
   verify) verify ;;
   all) deploy; verify ;;
   status) status ;;
-  logs) "${COMPOSE[@]}" logs -f --tail=200 tenant-scheduler allocator controller node-agent postgres ;;
+  logs) "${COMPOSE[@]}" logs -f --tail=200 tenant-scheduler allocator controller node-agent trace-ingester postgres ;;
   down) "${COMPOSE[@]}" down ;;
   -h|--help|help) usage ;;
   *) usage >&2; die "unknown command: ${command}" ;;

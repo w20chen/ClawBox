@@ -1,17 +1,21 @@
-# Implementation mapping (Phase 1-3)
+# Firecracker-first implementation map
 
-| Existing component | New architecture component |
-| --- | --- |
-| ClawTune `packages/clawtune-plugin` | Runtime-local plugin; built directly from the sibling ClawTune v2 checkout |
-| ClawTune `services/sidecar` contracts/correlation | Runtime-local sidecar and source of the `tool_resource` prediction code |
-| `RuntimeToolResourceKB` | Tenant-private prediction overlay and snapshot |
-| `ClauseResourceKB` / `LatticeTimeKB` | Preserved Phase 2 prediction sources; adapter is extensible to their richer outputs |
-| `claw-launch` and cgroup-v2 support | Tool execution path; retained for Linux/Kubernetes evolution |
-| cgroup/process/eBPF telemetry | Tool telemetry source; Phase 3 uses portable process telemetry in Docker |
-| ClawBox Runtime/Tool deployments | Phase 4+ Kubernetes backend and Kata/Firecracker packaging |
-| New `allocator` | Machine capacity, quota, transactional leases, fencing |
-| New `controller` | Sticky workspace-to-tool lifecycle and Docker backend |
-| New `node_agent` | Read-only dynamic host topology and PSI API |
+| Objective | Authoritative implementation | Verification |
+|---|---|---|
+| Kata/Firecracker artifact audit | `scripts/audit-kata-firecracker-arm64.sh` | ARM64 ELF/version/config/kernel/block-rootfs/shim gates |
+| Reproducible pinned assembly | `scripts/build-kata-firecracker-arm64.sh` | publisher SHA256 plus FC-0 audit |
+| Production LVM thin pool | `scripts/setup-devmapper-openeuler-arm64.sh` | explicit two-disk confirmation, containerd plugin/status checks |
+| Host bootstrap | `scripts/bootstrap-openeuler-arm64.sh` | plan/apply/status, backups, final stage-0 proof |
+| Handler and RuntimeClass | `deploy/containerd-firecracker.toml`, `deploy/runtimeclass-firecracker.yaml` | `deploy/check-host.sh` |
+| Live isolation smoke | `scripts/arm64-kata-smoke.sh` | two boot IDs, Service/NetworkPolicy, host FC process, snapshot cleanup |
+| ARM64 SWE image factory | `clawbox/images/arm64.py`, `clawbox/images/swerebench.py` | native daemon, contract test, registry manifest/digest mapping |
+| Static Tool Bridge | `toolbridge/main.go`, `docker/Dockerfile.tool-bridge` | ARM64 self-test, SSH key auth, bounded execution audit |
+| Dual-Pod task API | `deploy/sandboxtask-crd.yaml` | schema requires immutable digest and network boundary |
+| Idempotent Cell lifecycle | `clawbox/cell/controller.py`, `clawbox/cell/manifests.py` | owner references, readiness ordering, finalizer cleanup |
+| Native ClawTune sidecar | `scripts/clawtune-sidecar-entrypoint.sh`, `docker/Dockerfile.runtime` | restartable init container, fixed observe-only settings |
+| Central artifact archive | `clawbox/ingester`, `scripts/artifact-uploader.py` | task HMAC token, chunk checksum/idempotence, final receipt handshake |
+| Capacity/admission | `clawbox/cell/capacity.py`, `scripts/collect-node-capacity.py` | full-Cell atomic reservation and resource profiles |
+| Benchmark submission | `clawbox/benchmark/kubernetes.py` | mapping-only SandboxTask launcher; no image fallback |
+| Incremental scale | `scripts/scale-swe-rebench.sh` | steps 1/2/4/8/16/32 with thin-pool stop gate |
 
-No OpenClaw core file or ClawTune checkout is modified. The Scheduler dynamically imports the
-adjacent/mounted ClawTune source and serializes the existing KB format.
+Target hardware evidence is operational output, not source code. A release is production-accepted only after the runbook's FC-0 through FC-5 gates and at least the required scale steps have been archived for the exact host and repository revision.

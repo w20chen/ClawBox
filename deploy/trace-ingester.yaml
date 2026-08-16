@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clawbox-ingester
+  namespace: clawbox-system
+  labels: &labels
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: trace-ingester
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: ingester
+          image: registry.example.com/clawbox/control-plane-arm64:dev
+          imagePullPolicy: IfNotPresent
+          command: ["clawbox-trace-ingester"]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: database-url}}
+            - name: CLAWBOX_INGEST_SECRET
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
+            - name: CLAWBOX_SERVICE_TOKEN
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: service-token}}
+          ports: [{name: http, containerPort: 8084}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 3}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clawbox-ingester
+  namespace: clawbox-system
+  labels:
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: trace-ingester
+spec:
+  selector:
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: trace-ingester
+  ports: [{name: http, port: 8084, targetPort: http}]

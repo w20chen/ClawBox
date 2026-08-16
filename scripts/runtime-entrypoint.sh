@@ -7,6 +7,7 @@ set -euo pipefail
 : "${OPENAI_BASE_URL:?OPENAI_BASE_URL is required}"
 : "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
 : "${OPENCLAW_MODEL:?OPENCLAW_MODEL is required}"
+: "${OPENCLAW_MODEL_REF:?OPENCLAW_MODEL_REF is required}"
 
 SIDECAR_PORT="${SIDECAR_PORT:-8765}"
 CLAWTUNE_HOME="${CLAWTUNE_HOME:-/opt/clawtune}"
@@ -16,7 +17,6 @@ TRACE_DIR="${STATE_DIR}/traces"
 ARTIFACT_DIR="${TRACE_DIR}/tool-resource"
 LOG_DIR="${STATE_DIR}/logs"
 KNOWN_HOSTS="${STATE_DIR}/ssh/known_hosts"
-SIDECAR_PID=""
 
 mkdir -p "${ARTIFACT_DIR}" "${LOG_DIR}" "$(dirname "${KNOWN_HOSTS}")" /workspace
 for snapshot in "${CLAWTUNE_HOME}"/cold-start/tool-resource/*-kb.json; do
@@ -25,14 +25,6 @@ for snapshot in "${CLAWTUNE_HOME}"/cold-start/tool-resource/*-kb.json; do
   [[ -e "${destination}" ]] || cp "${snapshot}" "${destination}"
 done
 rm -f "${STATE_DIR}/ready"
-
-cleanup() {
-  if [[ -n "${SIDECAR_PID}" ]] && kill -0 "${SIDECAR_PID}" 2>/dev/null; then
-    kill "${SIDECAR_PID}" 2>/dev/null || true
-    wait "${SIDECAR_PID}" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
 
 echo "[runtime] tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID} sandbox=runtime" >&2
 
@@ -46,22 +38,8 @@ host_public_key="$(cut -d ' ' -f 1,2 /var/run/secrets/tool-ssh/ssh_host_ed25519_
 printf '[%s]:%s %s\n' "${tool_host}" "${tool_port}" "${host_public_key}" >"${KNOWN_HOSTS}"
 chmod 0600 "${KNOWN_HOSTS}"
 
-env \
-  CLAWTUNE_TRACE_DIR="${TRACE_DIR}" \
-  CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR="${ARTIFACT_DIR}" \
-  CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false \
-  CLAWTUNE_POLICY=observe-only \
-  CLAWTUNE_LLM_UPSTREAM_BASE_URL="${OPENAI_BASE_URL}" \
-  CLAWTUNE_LLM_UPSTREAM_API_KEY="${OPENAI_API_KEY}" \
-  CLAWTUNE_LLM_PROXY_EXPOSE_MODEL="${OPENCLAW_MODEL}" \
-  CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL="${UPSTREAM_MODEL:-${OPENCLAW_MODEL}}" \
-  "${CLAWTUNE_HOME}/venv/bin/python" -m clawtune_sidecar.main \
-    --host 127.0.0.1 --port "${SIDECAR_PORT}" >"${LOG_DIR}/sidecar.log" 2>&1 &
-SIDECAR_PID=$!
-
-for _ in $(seq 1 40); do
+for _ in $(seq 1 120); do
   curl -fsS "http://127.0.0.1:${SIDECAR_PORT}/health/ready" >/dev/null 2>&1 && break
-  kill -0 "${SIDECAR_PID}" 2>/dev/null || { echo "sidecar exited" >&2; exit 1; }
   sleep 0.5
 done
 curl -fsS "http://127.0.0.1:${SIDECAR_PORT}/health/ready" >/dev/null
@@ -76,7 +54,7 @@ cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
     "mode": "all", "backend": "ssh", "scope": "agent", "workspaceAccess": "rw",
     "ssh": {
       "target": "${TOOL_SSH_TARGET}",
-      "workspaceRoot": "/tmp/openclaw-sandboxes",
+      "workspaceRoot": "/testbed",
       "identityFile": "/var/run/secrets/tool-ssh/id_ed25519",
       "knownHostsFile": "${KNOWN_HOSTS}",
       "strictHostKeyChecking": true,
@@ -128,4 +106,78 @@ openclaw onboard --non-interactive --accept-risk --skip-health \
 
 touch "${STATE_DIR}/ready"
 echo "[runtime] tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID} ready=true" >&2
+
+if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
+  : "${TASK_ID:?TASK_ID is required in benchmark mode}"
+  : "${TASK_PROMPT_FILE:?TASK_PROMPT_FILE is required in benchmark mode}"
+  : "${TRACE_UPLOAD_TOKEN:?TRACE_UPLOAD_TOKEN is required in benchmark mode}"
+  : "${TRACE_INGESTER_URL:?TRACE_INGESTER_URL is required in benchmark mode}"
+  session_id="clawbox-${TASK_ID}"
+  set +e
+  openclaw agent --local --agent main --session-id "${session_id}" \
+    --model "${OPENCLAW_MODEL_REF}" --message "$(cat "${TASK_PROMPT_FILE}")" \
+    --timeout "${TASK_TIMEOUT_SECONDS:-1800}" --json \
+    >"${STATE_DIR}/final-answer.json" 2>"${LOG_DIR}/agent.log"
+  agent_status=$?
+  set -e
+
+  tool_target="${TOOL_SSH_TARGET%:*}"
+  tool_port="${TOOL_SSH_TARGET##*:}"
+  ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
+    'cd /testbed && git diff --binary --no-ext-diff' >"${STATE_DIR}/patch.diff" 2>"${LOG_DIR}/patch.log" || true
+  ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
+    'cat /testbed/.clawbox/tool-bridge.jsonl 2>/dev/null || true' \
+    >"${TRACE_DIR}/tool-bridge.jsonl" 2>"${LOG_DIR}/bridge-trace.log" || true
+
+  TASK_STATE_DIR="${STATE_DIR}" SESSION_ID="${session_id}" AGENT_STATUS="${agent_status}" \
+    "${CLAWTUNE_HOME}/venv/bin/python" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["TASK_STATE_DIR"])
+def read(name: str, limit: int) -> str:
+    path = root / name
+    if not path.exists():
+        return ""
+    value = path.read_text(encoding="utf-8", errors="replace")
+    return value[-limit:]
+
+status = int(os.environ["AGENT_STATUS"])
+payload = {
+    "status": "succeeded" if status == 0 else ("timed-out" if status == 124 else "failed"),
+    "final_answer": read("final-answer.json", 8_000_000),
+    "patch": read("patch.diff", 32_000_000),
+    "logs": {
+        "agent": read("logs/agent.log", 2_000_000),
+        "patch": read("logs/patch.log", 500_000),
+        "plugin": read("logs/plugin.log", 500_000),
+        "onboard": read("logs/onboard.log", 500_000),
+    },
+    "session_id": os.environ["SESSION_ID"],
+    "metadata": {
+        "task_id": os.environ.get("TASK_ID", ""),
+        "cell_id": os.environ.get("CELL_ID", ""),
+        "resource_profile": os.environ.get("RESOURCE_PROFILE", ""),
+        "tool_bridge": os.environ.get("TOOL_SSH_TARGET", ""),
+        "agent_exit_code": status,
+        "patch_status": "present" if (root / "patch.diff").stat().st_size else "empty",
+    },
+}
+(root / "result.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+PY
+  touch "${STATE_DIR}/.runtime-complete"
+  upload_deadline=$((SECONDS + 300))
+  while [[ ! -f "${STATE_DIR}/.upload-complete" ]]; do
+    [[ ! -f "${STATE_DIR}/.upload-failed" ]] || { echo "central artifact upload failed" >&2; exit 1; }
+    (( SECONDS < upload_deadline )) || { echo "central artifact upload timed out" >&2; exit 1; }
+    sleep 1
+  done
+  exit "${agent_status}"
+fi
+
 exec openclaw gateway run --bind loopback --auth none

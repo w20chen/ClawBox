@@ -9,10 +9,12 @@ from clawbox.common.config import settings
 from clawbox.common.models import ToolSpec
 
 
-def dns_label(value: str, *, prefix: str = "") -> str:
+def dns_label(value: str, *, prefix: str = "", max_length: int = 63) -> str:
+    if max_length < len(prefix) + 12 or max_length > 63:
+        raise ValueError("max_length must leave room for the prefix and stable digest")
     normalized = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-") or "tenant"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
-    head = f"{prefix}{normalized}"[: 63 - len(digest) - 1].rstrip("-")
+    head = f"{prefix}{normalized}"[: max_length - len(digest) - 1].rstrip("-")
     return f"{head}-{digest}"
 
 

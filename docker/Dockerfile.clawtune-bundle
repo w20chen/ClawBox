@@ -1,6 +1,0 @@
-# syntax=docker/dockerfile:1
-FROM alpine:3.22
-ARG CLAWTUNE_REVISION=unknown
-LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
-COPY --from=clawtune swe_rebench/.runtime/assets /bundle
-RUN test -x /bundle/entrypoint.sh && test -d /bundle/plugin && test -d /bundle/sidecar

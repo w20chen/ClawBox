@@ -1,168 +1,87 @@
-# openEuler / Kunpeng arm64 stage-0 and stage-1 gate
+# openEuler / Kunpeng ARM64 production runbook
 
-This is the required gate before running ClawBox sandboxes on a Kunpeng host.
-It deliberately separates installation from verification: ClawBox must not
-create a RuntimeClass that points at a handler which is not installed.
+This runbook is the only production host path. It assumes a dedicated ARM64 machine, `/dev/kvm`, cgroup v2, two unused whole disks, and administrative access. Firecracker cannot run a guest of a different architecture, so host, Kata artifacts, task images, and Tool Bridge must all be ARM64.
 
-## Runtime choice
+## Gates
 
-Use `kata-qemu-runtime-rs` for the first openEuler acceptance run. It is the
-Rust shim arm64 baseline selected by ClawBox (and the upstream default from
-Kata 4.x onward). `kata-fc` remains supported, but
-only select it after the host has an arm64 Firecracker binary, matching Kata
-guest kernel/rootfs, containerd handler, and a passing live smoke gate.
+| Gate | Command | Pass condition |
+|---|---|---|
+| FC-0 artifact audit | `scripts/audit-kata-firecracker-arm64.sh` | Firecracker 1.12.1, Kata 3.31+, ARM64 ELF shim/kernel, block rootfs, explicit FC config |
+| FC-1 assembly | `scripts/build-kata-firecracker-arm64.sh` | publisher checksums verified; native ARM64 artifact passes FC-0 |
+| FC-2 storage | `scripts/setup-devmapper-openeuler-arm64.sh` | real LVM thin pool and healthy containerd devmapper plugin |
+| FC-3 handler | `deploy/check-host.sh` | containerd handler, ConfigPath and snapshotter agree |
+| FC-4 RuntimeClass | `deploy/check-host.sh` | handler, overhead and ready-node selector agree |
+| FC-5 live proof | `scripts/arm64-kata-smoke.sh` | two isolated ARM64 Pods, different boot IDs, Service/NetworkPolicy checks, FC host processes, clean snapshots |
 
-The exact handler names come from the host's Kata installation. List them with:
+No RuntimeClass should be applied before FC-0 through FC-3 pass.
 
-```bash
-kubectl get runtimeclass
-```
-
-If the installation uses another QEMU handler name, pass
-that exact name to every command below. `deploy/runtimeclass.yaml` is an example
-mapping only; applying it does not install Kata.
-
-ClawBox pins the automated install to Kata `3.31.0` by default. Do not use
-runtime-rs `<= 3.30.0`: it is affected by the critical virtio-fs host escape
-[CVE-2026-47243](https://github.com/kata-containers/kata-containers/security/advisories/GHSA-2gv2-cffp-j227).
-`KATA_VERSION` may select a newer reviewed release, while the host gate rejects
-versions below `3.31.0`.
-
-## Dedicated bare-host bootstrap
-
-For a new single-node host, inspect the exact plan first:
+## Read-only inventory and plan
 
 ```bash
-bash scripts/bootstrap-openeuler-arm64.sh plan
-```
+python3 scripts/collect-node-capacity.py > node-inventory.json
 
-The plan rejects non-openEuler/non-arm64 hosts, insufficient CPU/RAM/disk,
-a missing KVM device, conflicting Pod/Service/host CIDRs, and an existing
-cluster not owned by this bootstrap. Override a conflicting network explicitly,
-for example:
-
-```bash
 bash scripts/bootstrap-openeuler-arm64.sh plan \
-  --pod-cidr 172.30.0.0/16 \
-  --service-cidr 172.31.0.0/16
+  --advertise-address 10.0.0.10 \
+  --devmapper-data-device /dev/nvme1n1 \
+  --devmapper-meta-device /dev/nvme2n1
+
+bash scripts/setup-devmapper-openeuler-arm64.sh plan \
+  --data-device /dev/nvme1n1 \
+  --metadata-device /dev/nvme2n1
 ```
 
-After reviewing the plan, apply it as the intended non-root administrator:
+Review `lsblk -f`, `findmnt`, multipath/LVM ownership and the canonical device names printed by the plan. The storage script rejects partitions, mounted devices, loop devices, devices with children/holders, the root backing chain, and the repository backing chain.
+
+## Apply
+
+The following command is destructive only to the two exact disks named in `--confirm-erase`. Replaced configuration and `/opt/kata` are copied to `/var/lib/clawbox-bootstrap/backups`.
 
 ```bash
-bash scripts/bootstrap-openeuler-arm64.sh apply
+sudo bash scripts/bootstrap-openeuler-arm64.sh apply \
+  --advertise-address 10.0.0.10 \
+  --devmapper-data-device /dev/nvme1n1 \
+  --devmapper-meta-device /dev/nvme2n1 \
+  --confirm-erase /dev/nvme1n1,/dev/nvme2n1
 ```
 
-`apply` first obtains sudo authorization and verifies that root can read/write
-`/dev/kvm` before changing the host.
+The bootstrap installs pinned dependencies, configures kubelet reservations and `maxPods`, initializes Kubernetes and Calico, assembles Kata/Firecracker, creates the thin pool, installs the containerd handler, then runs the host and live smoke gates. It does not automatically reset or adopt an unrelated cluster.
 
-The pinned profile is Kubernetes `1.35.x`, containerd `2.3.4`, runc `1.5.1`,
-Calico `3.32.1` with VXLAN/NetworkPolicy, Helm `4.2.4`, and Kata `3.31.0` with
-only `qemu-runtime-rs` enabled. The script disables swap and firewalld, places
-SELinux in persistent permissive mode as required by the kubeadm RPM baseline,
-initializes the control plane, installs the runtimes, and executes both
-stage-0 gates. Replaced host configuration is backed up below
-`/var/lib/clawbox-bootstrap/backups`; no automatic `kubeadm reset` or destructive
-rollback is performed.
-
-Inspect an installed host without mutation:
+For an existing reviewed Kubernetes installation, execute the stages individually:
 
 ```bash
-bash scripts/bootstrap-openeuler-arm64.sh status
+bash scripts/build-kata-firecracker-arm64.sh build --output /srv/clawbox/kata-fc
+sudo bash scripts/build-kata-firecracker-arm64.sh install
+
+sudo bash scripts/setup-devmapper-openeuler-arm64.sh apply \
+  --data-device /dev/nvme1n1 --metadata-device /dev/nvme2n1 \
+  --confirm-erase /dev/nvme1n1,/dev/nvme2n1
+
+sudo systemctl restart containerd kubelet
+bash deploy/check-host.sh --runtime-class kata-fc-arm64
+kubectl apply -f deploy/runtimeclass-firecracker.yaml
+bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 ```
 
-## Stage 0: host and live cluster gates
+## Acceptance evidence
 
-On the target openEuler machine:
+Archive all of the following with the deployment revision:
+
+- `/var/lib/clawbox-bootstrap/firecracker-audit.env` and `versions.env`;
+- `containerd config dump` showing `kata-fc-arm64`, `devmapper`, and the audited ConfigPath;
+- `file` and `--version` output for Firecracker and the Kata shim;
+- RuntimeClass YAML including `podFixed` overhead;
+- smoke output showing two distinct guest boot IDs and at least two Firecracker host processes;
+- before/after active devmapper snapshot counts and thin-pool data/metadata percentages;
+- node inventory JSON and the applied capacity ConfigMap.
+
+The smoke fails if it observes shared filesystem configuration, hotplug assumptions, shared host storage, an unexpected VMM process, a reachable forbidden network path, or leaked active snapshots.
+
+## Recovery
+
+Do not use an automated cluster reset. Stop kubelet/containerd, inspect the exact backup timestamp, and restore only reviewed files from `/var/lib/clawbox-bootstrap/backups`. LVM removal is intentionally not automated because it destroys task image data. Remove the ready label immediately while investigating:
 
 ```bash
-cd ~/ClawBox
-bash deploy/check-host.sh --runtime-class kata-qemu-runtime-rs
-bash scripts/arm64-kata-smoke.sh --runtime-class kata-qemu-runtime-rs
+kubectl label node NODE clawbox.openai.com/firecracker-ready-
+sudo bash scripts/setup-devmapper-openeuler-arm64.sh status
+sudo bash scripts/bootstrap-openeuler-arm64.sh status
 ```
-
-The read-only preflight checks openEuler, arm64, kernel >= 5.10, `/dev/kvm`,
-cgroup v2, containerd CRI, Kata shim, the selected RuntimeClass, Ready arm64
-nodes, and the NetworkPolicy API.
-
-The live gate creates a temporary namespace containing exactly two Kata Pods
-(`runtime` and `tool`) plus one small non-Kata attacker Pod. It verifies:
-
-- both sandbox images actually execute as `aarch64`/`arm64`;
-- Runtime can reach only its Tool Service;
-- the attacker cannot reach the Tool Service, proving CNI policy enforcement;
-- Runtime and Tool expose different guest boot IDs, proving distinct VMs;
-- the temporary namespace and all resources are deleted on exit.
-
-Use `--keep` only for diagnosis. Delete a retained namespace with the exact
-command printed by the script.
-
-Do not continue when either command reports `FAIL`. Save the complete output,
-plus these diagnostics:
-
-```bash
-uname -a
-cat /etc/os-release
-kubectl get nodes -o wide
-kubectl get runtimeclass -o yaml
-kubectl get pods -A -o wide
-sudo journalctl -u containerd --since '-10 min'
-```
-
-## ARM64 image rule
-
-Firecracker does not emulate x86_64 on an arm64 host. Runtime, bundle, Tool
-executor, and SWE-Rebench task images must therefore publish a `linux/arm64`
-manifest or be rebuilt natively for arm64. Host Docker binfmt/QEMU success is
-not accepted as proof that an image works inside a Kata guest; the live gate's
-`uname -m` checks are authoritative.
-
-## Stage 1: build directly from ClawTune v2
-
-Keep `ClawBox` and `ClawTune` as sibling checkouts. ClawBox now consumes the
-current ClawTune source locations directly:
-
-```text
-ClawTune/packages/clawtune-plugin
-ClawTune/services/sidecar
-ClawTune/swe_rebench/.runtime/assets
-```
-
-Prepare the generated single-Pod compatibility assets, then build native arm64
-images:
-
-```bash
-cd ~/ClawTune
-python3 -m swe_rebench.runner prepare
-
-cd ~/ClawBox
-REGISTRY=registry.example.com/clawbox \
-TAG=arm64-dev \
-PUSH=1 \
-bash scripts/build-kubernetes-images.sh
-```
-
-Run the build on the Kunpeng host, or configure BuildKit with a real arm64
-builder. The Runtime image compiles the current `clawtune-plugin`, installs the
-current `clawtune-sidecar`, copies the tracked cold-start KB snapshots, and
-records the exact ClawTune Git revision in an OCI image label:
-
-```text
-org.opencontainers.image.source.clawtune.revision
-```
-
-Validate the published manifests before deployment:
-
-```bash
-docker buildx imagetools inspect registry.example.com/clawbox/runtime:arm64-dev
-docker buildx imagetools inspect registry.example.com/clawbox/clawtune-swe-bundle:arm64-dev
-```
-
-The legacy names `packages/openclaw-plugin`, `services/scheduler`,
-`agent_scheduler`, and `.runtime/bundle` are no longer part of the build path.
-
-## Current boundary
-
-Passing these gates proves the host substrate and the ClawTune v2 Runtime
-artifact. It does not yet turn the existing SWE launcher into a task-scoped
-Runtime Pod + task-image Tool Pod pair; that is the next lifecycle phase.

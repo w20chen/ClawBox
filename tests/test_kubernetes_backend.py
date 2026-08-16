@@ -1,7 +1,61 @@
+from __future__ import annotations
+
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
-from clawbox.benchmark.kubernetes import BenchmarkTask, KubernetesBenchmarkLauncher, render_job
-from clawbox.controller.kubernetes_backend import KubernetesBackend, dns_label
+import pytest
+
+from clawbox.benchmark.kubernetes import (
+    BenchmarkTask,
+    KubernetesBenchmarkLauncher,
+    load_arm64_mapping,
+    render_sandbox_task,
+    resolve_arm64_tasks,
+)
+from clawbox.cell.capacity import (
+    AtomicAdmission,
+    FixedProfileSizer,
+    ResourceVector,
+    StaticCapacityProvider,
+    pod_request,
+)
+from clawbox.cell.controller import CellPhase, CellReconciler
+from clawbox.cell.manifests import (
+    credential_secrets,
+    generate_ssh_credentials,
+    network_policies,
+    runtime_job,
+    tool_pod,
+)
+from clawbox.controller.kubernetes_backend import dns_label
+from clawbox.ingester.auth import create_upload_token, verify_upload_token
+
+
+ROOT = Path(__file__).parents[1]
+DIGEST = "registry.example.com/swe/task@sha256:" + "a" * 64
+
+
+def task(*, phase: str | None = None) -> dict:
+    value = {
+        "apiVersion": "clawbox.openai.com/v1alpha1",
+        "kind": "SandboxTask",
+        "metadata": {
+            "name": "cell-a", "namespace": "clawbox-benchmarks", "uid": "uid-a",
+            "generation": 1, "finalizers": ["clawbox.openai.com/cell-cleanup"],
+        },
+        "spec": {
+            "toolImage": DIGEST,
+            "problemStatement": "fix it",
+            "llmSecretName": "clawbox-llm",
+            "llmEgressCIDR": "203.0.113.10/32",
+            "profile": "small",
+            "timeoutSeconds": 1800,
+        },
+    }
+    if phase:
+        value["status"] = {"phase": phase, "admittedAt": "2099-01-01T00:00:00Z"}
+    return value
 
 
 def test_dns_label_is_stable_safe_and_collision_resistant():
@@ -10,279 +64,318 @@ def test_dns_label_is_stable_safe_and_collision_resistant():
     assert len(dns_label("x" * 200, prefix="tool-")) <= 63
 
 
-def test_swe_job_uses_task_image_openclaw_bundle_and_kata_guaranteed_qos():
-    job = render_job(
-        BenchmarkTask("django__case-1", "swebench/task:latest", "fix it"),
-        namespace="clawbox-benchmarks", bundle_image="registry/bundle:dev",
-        llm_secret="llm", trace_pvc="traces",
+def test_launcher_requires_a_supported_immutable_arm64_mapping(tmp_path: Path):
+    mapping = tmp_path / "map.json"
+    mapping.write_text(
+        '{"upstream:latest":{"status":"supported","platform":"linux/arm64",'
+        '"recipe_revision":"recipe-v1","arm64_image":"' + DIGEST + '"}}',
+        encoding="utf-8",
     )
-    pod = job["spec"]["template"]["spec"]
-    assert pod["runtimeClassName"] == "kata-qemu-runtime-rs"
-    assert pod["automountServiceAccountToken"] is False
-    assert pod["initContainers"][0]["image"] == "registry/bundle:dev"
-    assert pod["initContainers"][0]["imagePullPolicy"] == "IfNotPresent"
-    assert "mkdir -p /trace-root/$TASK_INSTANCE_ID" in pod["initContainers"][0]["command"][-1]
-    runtime = pod["containers"][0]
-    assert runtime["image"] == "swebench/task:latest"
-    assert runtime["command"] == ["/claw/entrypoint.sh"]
-    assert runtime["resources"]["requests"] == runtime["resources"]["limits"]
-    assert pod["initContainers"][0]["resources"]["requests"] == pod["initContainers"][0]["resources"]["limits"]
-    traces = next(volume for volume in pod["volumes"] if volume["name"] == "traces")
-    assert traces["persistentVolumeClaim"]["claimName"] == "traces"
-    assert next(m for m in runtime["volumeMounts"] if m["name"] == "traces")["subPathExpr"] == "$(TASK_INSTANCE_ID)"
+    resolved = resolve_arm64_tasks(
+        [BenchmarkTask("case", "upstream:latest", "fix")], load_arm64_mapping(mapping),
+    )
+    assert resolved[0].image == DIGEST
+
+    with pytest.raises(ValueError, match="no fallback"):
+        resolve_arm64_tasks([BenchmarkTask("missing", "foreign:latest", "fix")], {})
 
 
-def test_swe_job_does_not_put_llm_secrets_in_plaintext():
-    job = render_job(
-        BenchmarkTask("case", "image", "problem"), namespace="bench",
-        bundle_image="bundle", llm_secret="llm",
+def test_benchmark_renders_only_a_sandbox_task_cr():
+    manifest = render_sandbox_task(
+        BenchmarkTask("case", DIGEST, "fix"), namespace="clawbox-benchmarks",
+        llm_secret="clawbox-llm", llm_egress_cidr="203.0.113.10/32",
     )
-    env = job["spec"]["template"]["spec"]["containers"][0]["env"]
-    secrets = {item["name"]: item["valueFrom"]["secretKeyRef"] for item in env if "valueFrom" in item}
-    assert set(secrets) == {"LLM_API_KEY", "LLM_UPSTREAM_BASE_URL", "LLM_MODEL", "OPENCLAW_MODEL_REF"}
+    assert manifest["kind"] == "SandboxTask"
+    assert manifest["spec"]["toolImage"] == DIGEST
+    assert "runtimeImage" not in manifest["spec"]
+    assert "apiKey" not in str(manifest)
+    assert len(manifest["metadata"]["name"] + "-runtime-egress") <= 63
+
+
+def test_launcher_preflight_requires_firecracker_handler_overhead_and_crd():
+    class Core:
+        def read_namespace(self, name):
+            return SimpleNamespace(metadata=SimpleNamespace(name=name))
+
+        def read_namespaced_secret(self, name, namespace):
+            del name, namespace
+            return SimpleNamespace(data={key: "encoded" for key in (
+                "llm-api-key", "llm-upstream-base-url", "llm-model", "openclaw-model-ref",
+            )})
+
+    class Node:
+        def read_runtime_class(self, name):
+            return SimpleNamespace(handler=name, overhead=SimpleNamespace(pod_fixed={"cpu": "250m"}))
+
+    class Custom:
+        def list_namespaced_custom_object(self, *args, **kwargs):
+            del args, kwargs
+            return {"items": []}
+
+    launcher = KubernetesBenchmarkLauncher(core=Core(), custom=Custom(), node_api=Node())
+    launcher._preflight(
+        namespace="clawbox-benchmarks", llm_secret="clawbox-llm",
+        runtime_class="kata-fc-arm64",
+    )
+    with pytest.raises(RuntimeError, match="only accepts"):
+        launcher._preflight(
+            namespace="clawbox-benchmarks", llm_secret="clawbox-llm",
+            runtime_class="another-handler",
+        )
+
+
+def test_cell_profiles_reserve_both_vms_sidecar_overheads_and_safety():
+    size = FixedProfileSizer().size("small")
+    unsafed = size.runtime + size.tool + size.sidecar + size.vm_overhead + size.vm_overhead
+    assert size.reservation.cpu_millis > unsafed.cpu_millis
+    assert size.reservation.memory_bytes > unsafed.memory_bytes
+    assert size.reservation.storage_bytes > unsafed.storage_bytes
+    assert size.reservation.pods == 2
+
+    admission = AtomicAdmission(size.reservation)
+    assert admission.reserve("one", size.reservation)
+    assert admission.reserve("one", size.reservation)  # idempotent
+    assert not admission.reserve("two", ResourceVector(1, 1, 1, 1))
+
+
+def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():
+    def container(cpu: str, memory: str, *, restart: str | None = None):
+        return SimpleNamespace(
+            resources=SimpleNamespace(requests={"cpu": cpu, "memory": memory}),
+            restart_policy=restart,
+        )
+
+    pod = SimpleNamespace(spec=SimpleNamespace(
+        containers=[container("1", "1Gi")],
+        init_containers=[container("250m", "256Mi", restart="Always"), container("2", "512Mi")],
+        overhead={"cpu": "100m", "memory": "64Mi"},
+    ))
+    request = pod_request(pod)
+    assert request.cpu_millis == 2100  # max(1.25 steady, 2 init) + overhead
+    assert request.memory_bytes == (1024 + 256 + 64) * 1024**2
+    assert request.pods == 1
+
+
+def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():
+    value = task()
+    size = FixedProfileSizer().size("small")
+    tool = tool_pod(value, size)
+    job = runtime_job(value, size)
+    tool_spec = tool["spec"]
+    runtime_spec = job["spec"]["template"]["spec"]
+
+    assert tool_spec["runtimeClassName"] == "kata-fc-arm64"
+    assert runtime_spec["runtimeClassName"] == "kata-fc-arm64"
+    assert tool_spec["containers"][0]["image"] == DIGEST
+    assert tool_spec["initContainers"][0]["name"] == "install-tool-bridge"
+    assert tool_spec["containers"][0]["ports"][0]["containerPort"] == 2222
+    assert runtime_spec["initContainers"][0]["restartPolicy"] == "Always"
+
+    sidecar_env = {item["name"]: item.get("value") for item in runtime_spec["initContainers"][0]["env"]}
+    assert sidecar_env["CLAWTUNE_POLICY"] == "observe-only"
+    assert sidecar_env["CLAWTUNE_EXECUTION_BACKEND"] == "hook-only"
+    assert sidecar_env["CLAWTUNE_ENABLE_CGROUP"] == "false"
+    assert sidecar_env["CLAWTUNE_ENABLE_AFFINITY"] == "false"
+    assert sidecar_env["CLAWTUNE_ENABLE_NUMA"] == "false"
+
+    tool_text = str(tool_spec)
+    assert "OPENAI_API_KEY" not in tool_text
+    assert "trace-upload-token" not in tool_text
+    for volume in tool_spec["volumes"] + runtime_spec["volumes"]:
+        assert "hostPath" not in volume
+        assert "persistentVolumeClaim" not in volume
+    assert tool["metadata"]["ownerReferences"][0]["uid"] == "uid-a"
+    assert job["metadata"]["ownerReferences"][0]["uid"] == "uid-a"
+
+
+def test_task_secret_volume_projections_keep_private_material_separate():
+    value = task()
+    credentials = generate_ssh_credentials("cell-a")
+    secret = credential_secrets(value, credentials, 60)[0]
+    assert "trace-upload-token" in secret["stringData"]
+    tool = tool_pod(value, FixedProfileSizer().size("small"))
+    runtime = runtime_job(value, FixedProfileSizer().size("small"))
+    tool_items = {item["key"] for item in tool["spec"]["volumes"][1]["secret"]["items"]}
+    runtime_items = {
+        item["key"] for item in runtime["spec"]["template"]["spec"]["volumes"][-1]["secret"]["items"]
+    }
+    assert "id_ed25519" not in tool_items
+    assert "trace-upload-token" not in tool_items
+    assert "ssh_host_ed25519_key" not in runtime_items
+
+
+def test_cell_network_policy_is_default_deny_and_task_scoped():
+    policies = network_policies(task())
+    names = {item["metadata"]["name"] for item in policies}
+    assert names == {
+        "cell-a-default-deny", "cell-a-tool-ingress",
+        "cell-a-runtime-egress", "cell-a-tool-egress",
+    }
+    assert all(item["metadata"]["ownerReferences"] for item in policies)
+    runtime = next(item for item in policies if item["metadata"]["name"].endswith("runtime-egress"))
+    assert "203.0.113.10/32" in str(runtime)
+    tool = next(item for item in policies if item["metadata"]["name"].endswith("tool-egress"))
+    assert "203.0.113.10/32" not in str(tool)
+
+
+class Missing(Exception):
+    status = 404
 
 
 class FakeCore:
     def __init__(self):
-        self.pods = []
-        self.services = []
-        self.namespaces = []
+        self.pods = {}
+        self.services = {}
+        self.secrets = {}
+        self.configmaps = {}
 
-    def read_namespace(self, name):
-        from kubernetes.client.exceptions import ApiException
-        raise ApiException(status=404)
+    @staticmethod
+    def _read(store, name, namespace):
+        try:
+            return store[(namespace, name)]
+        except KeyError as exc:
+            raise Missing() from exc
 
-    def create_namespace(self, body):
-        self.namespaces.append(body)
+    @staticmethod
+    def _create(store, namespace, body):
+        store[(namespace, body["metadata"]["name"])] = body
+        return body
 
-    def create_namespaced_pod(self, namespace, body):
-        self.pods.append((namespace, body))
-        return SimpleNamespace(metadata=SimpleNamespace(uid="physical-pod-uid"))
-
-    def create_namespaced_service(self, namespace, body):
-        self.services.append((namespace, body))
-
-    def read_namespaced_pod(self, name, namespace):
-        return SimpleNamespace(status=SimpleNamespace(
-            phase="Running", container_statuses=[SimpleNamespace(ready=True)]
-        ))
-
-    def delete_namespaced_service(self, name, namespace):
-        return None
-
-    def delete_namespaced_pod(self, name, namespace, grace_period_seconds):
-        return None
+    def read_namespaced_pod(self, name, namespace): return self._read(self.pods, name, namespace)
+    def create_namespaced_pod(self, namespace, body): return self._create(self.pods, namespace, body)
+    def read_namespaced_service(self, name, namespace): return self._read(self.services, name, namespace)
+    def create_namespaced_service(self, namespace, body): return self._create(self.services, namespace, body)
+    def read_namespaced_secret(self, name, namespace): return self._read(self.secrets, name, namespace)
+    def create_namespaced_secret(self, namespace, body): return self._create(self.secrets, namespace, body)
+    def read_namespaced_config_map(self, name, namespace): return self._read(self.configmaps, name, namespace)
+    def create_namespaced_config_map(self, namespace, body): return self._create(self.configmaps, namespace, body)
 
 
-def test_controller_backend_creates_kata_service_and_guaranteed_tool_pod():
-    from clawbox.common.models import ToolSpec
-
-    core = FakeCore()
-    created = KubernetesBackend(core).create(ToolSpec(
-        tenant_id="tenant-a", execution_id="exec", workspace_id="workspace-a",
-        cpu_count=4, memory_bytes=1024, image="registry/tool:dev",
-    ), "logical-tool-id")
-    assert created.pod_uid == "physical-pod-uid"
-    assert created.endpoint.endswith(".svc:8090")
-    pod = core.pods[0][1]["spec"]
-    assert pod["runtimeClassName"] == "kata-qemu-runtime-rs"
-    resources = pod["containers"][0]["resources"]
-    assert resources["requests"] == resources["limits"]
-    assert core.services[0][1]["spec"]["selector"] == core.pods[0][1]["metadata"]["labels"]
+class FakeBatch:
+    def __init__(self): self.jobs = {}
+    def read_namespaced_job(self, name, namespace): return FakeCore._read(self.jobs, name, namespace)
+    def create_namespaced_job(self, namespace, body): return FakeCore._create(self.jobs, namespace, body)
 
 
-def test_build_uses_generated_clawtune_bundle():
-    from pathlib import Path
-
-    root = Path(__file__).parents[1]
-    script = (root / "scripts" / "build-kubernetes-images.sh").read_text(encoding="utf-8")
-    dockerfile = (root / "docker" / "Dockerfile.clawtune-bundle").read_text(encoding="utf-8")
-    assert "swe_rebench/.runtime/assets" in script
-    assert "swe_rebench/.runtime/assets" in dockerfile
-    assert "/bundle/sidecar" in dockerfile
+class FakeNetwork:
+    def __init__(self): self.policies = {}
+    def read_namespaced_network_policy(self, name, namespace):
+        return FakeCore._read(self.policies, name, namespace)
+    def create_namespaced_network_policy(self, namespace, body):
+        return FakeCore._create(self.policies, namespace, body)
 
 
-def test_runtime_image_reuses_current_clawtune_v2_sources():
-    from pathlib import Path
-
-    root = Path(__file__).parents[1]
-    dockerfile = (root / "docker" / "Dockerfile.runtime").read_text(encoding="utf-8")
-    entrypoint = (root / "scripts" / "runtime-entrypoint.sh").read_text(encoding="utf-8")
-    assert "packages/clawtune-plugin" in dockerfile
-    assert "services/sidecar" in dockerfile
-    assert "clawtune_sidecar, tool_resource" in dockerfile
-    assert "packages/openclaw-plugin" not in dockerfile
-    assert "services/scheduler" not in dockerfile
-    assert "clawtune_sidecar.main" in entrypoint
-    assert "plugins enable clawtune" in entrypoint
-    assert '"clawtune"' in entrypoint
-    assert "agent_scheduler" not in entrypoint
+class FakeCustom:
+    def __init__(self): self.statuses = []
+    def list_namespaced_custom_object(self, *args, **kwargs):
+        del args, kwargs
+        return {"items": []}
+    def patch_namespaced_custom_object_status(self, *args): self.statuses.append(args[-1]["status"])
+    def patch_namespaced_custom_object(self, *args): pass
 
 
-def test_build_fails_fast_on_clawtune_contract_drift():
-    from pathlib import Path
+def test_reconciler_waits_for_tool_readiness_before_creating_runtime():
+    core, batch, network, custom = FakeCore(), FakeBatch(), FakeNetwork(), FakeCustom()
+    reconciler = CellReconciler(
+        core_api=core, batch_api=batch, networking_api=network, custom_api=custom,
+        capacity_provider=StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000)),
+    )
+    admitted = task(phase=CellPhase.ADMITTED.value)
+    admitted["status"]["reservation"] = FixedProfileSizer().size("small").reservation.as_status()
+    reconciler.reconcile(admitted)
+    assert ("clawbox-benchmarks", "cell-a-tool") in core.pods
+    assert batch.jobs == {}
+    assert custom.statuses[-1]["phase"] == "ToolStarting"
 
-    root = Path(__file__).parents[1]
-    validator = (root / "scripts" / "validate_clawtune_integration.py").read_text(encoding="utf-8")
-    build = (root / "scripts" / "build-kubernetes-images.sh").read_text(encoding="utf-8")
-    assert 'manifest.get("id") != "clawtune"' in validator
-    assert 'scripts.get("clawtune-sidecar")' in validator
-    assert "LEGACY_MARKERS" in validator
-    assert "validate_clawtune_integration.py" in build
+    starting = task(phase=CellPhase.TOOL_STARTING.value)
+    starting["status"]["reservation"] = admitted["status"]["reservation"]
+    core.pods[("clawbox-benchmarks", "cell-a-tool")] = SimpleNamespace(status=SimpleNamespace(
+        phase="Running", container_statuses=[SimpleNamespace(ready=True)],
+    ))
+    reconciler.reconcile(starting)
+    assert custom.statuses[-1]["phase"] == "ToolReady"
+    assert batch.jobs == {}
 
-
-def test_benchmark_preflight_checks_secret_and_bound_trace_pvc():
-    class Core:
-        def read_namespace(self, name):
-            return SimpleNamespace()
-
-        def read_namespaced_secret(self, name, namespace):
-            return SimpleNamespace(data={key: "encoded" for key in (
-                "llm-api-key", "llm-upstream-base-url", "llm-model", "openclaw-model-ref"
-            )})
-
-        def read_namespaced_persistent_volume_claim(self, name, namespace):
-            return SimpleNamespace(status=SimpleNamespace(phase="Bound"))
-
-    launcher = KubernetesBenchmarkLauncher(core=Core(), batch=SimpleNamespace())
-    launcher._preflight(namespace="bench", llm_secret="llm", trace_pvc="traces")
-
-
-def test_local_runner_automates_the_complete_smoke_path():
-    from pathlib import Path
-
-    script = (Path(__file__).parents[1] / "scripts" / "local-kata-swe.sh").read_text(encoding="utf-8")
-    for required in (
-        "swe_rebench.runner prepare",
-        "Dockerfile.clawtune-bundle",
-        "deploy/control-plane-rbac.yaml",
-        "create secret generic",
-        "runtimeClassName",
-        "clawbox.benchmark.kubernetes",
-        "kind load docker-image",
-        "k3s ctr images import",
-        "ctr -n k8s.io images import",
-        "helm upgrade",
-        'version="${KATA_VERSION:-3.31.0}"',
-        "no runtime for",
-        "minikube ssh -- test -r /dev/kvm",
-        "--bootstrap-minikube",
-        "--runtime-class",
-        "apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils",
-        "virt-host-validate qemu",
-        "minikube start --driver=kvm2",
-        "CLAWBOX_LIBVIRT_REEXEC=1",
-        "exec sg libvirt",
-        "configure_minikube_devmapper",
-        "containerd.userDropIn=",
-        "snapshotter devmapper was not found",
-        "failed to get reader from content store",
-        "verify_minikube_devmapper",
-        "prepare_minikube_kata_images",
-        'involvedObject.uid=${pod_uid}',
-    ):
-        assert required in script
-    assert "involvedObject.name=kata-fc-smoke" not in script
+    ready = task(phase=CellPhase.TOOL_READY.value)
+    ready["status"]["reservation"] = admitted["status"]["reservation"]
+    reconciler.reconcile(ready)
+    assert ("clawbox-benchmarks", "cell-a-runtime") in batch.jobs
+    assert custom.statuses[-1]["phase"] == "RuntimeRunning"
 
 
-def test_arm64_stage0_gate_checks_arch_isolation_network_and_cleanup():
-    from pathlib import Path
-
-    script = (Path(__file__).parents[1] / "scripts" / "arm64-kata-smoke.sh").read_text(encoding="utf-8")
-    for required in (
-        "kubernetes.io/arch: arm64",
-        "runtimeClassName: ${RUNTIME_CLASS}",
-        "NetworkPolicy",
-        "attacker reached the Tool service",
-        "/proc/sys/kernel/random/boot_id",
-        'kubectl delete namespace "${NAMESPACE}"',
-    ):
-        assert required in script
-
-
-def test_openeuler_host_gate_is_read_only_and_runtime_class_aware():
-    from pathlib import Path
-
-    script = (Path(__file__).parents[1] / "deploy" / "check-host.sh").read_text(encoding="utf-8")
-    assert "/etc/os-release" in script
-    assert "/sys/fs/cgroup/cgroup.controllers" in script
-    assert "timeout 5 ctr version" in script
-    assert 'io.containerd.cri.v1' in script
-    assert "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" in script
-    assert "CVE-2026-47243" in script
-    assert "MIN_SAFE_KATA_VERSION" in script
-    assert 'kubectl get runtimeclass "${RUNTIME_CLASS}"' in script
-    assert "arm64-kata-smoke.sh" in script
-    assert "kubectl apply" not in script
+def test_reconciler_refuses_to_adopt_a_preexisting_unowned_child():
+    core, batch, network, custom = FakeCore(), FakeBatch(), FakeNetwork(), FakeCustom()
+    core.secrets[("clawbox-benchmarks", "cell-a-auth")] = {
+        "metadata": {"name": "cell-a-auth", "ownerReferences": []},
+        "stringData": {"id_ed25519": "attacker-controlled"},
+    }
+    reconciler = CellReconciler(
+        core_api=core, batch_api=batch, networking_api=network, custom_api=custom,
+        capacity_provider=StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000)),
+    )
+    admitted = task(phase=CellPhase.ADMITTED.value)
+    admitted["status"]["reservation"] = FixedProfileSizer().size("small").reservation.as_status()
+    with pytest.raises(RuntimeError, match="refusing to adopt"):
+        reconciler.reconcile(admitted)
 
 
-def test_openeuler_bare_host_bootstrap_is_explicit_pinned_and_recoverable():
-    from pathlib import Path
-
-    root = Path(__file__).parents[1]
-    script = (root / "scripts" / "bootstrap-openeuler-arm64.sh").read_text(encoding="utf-8")
-    service = (root / "deploy" / "containerd-clawbox.service").read_text(encoding="utf-8")
-    calico = (root / "deploy" / "calico-installation.yaml").read_text(encoding="utf-8")
-    kata_values = (root / "deploy" / "kata-openeuler-arm64-values.yaml").read_text(encoding="utf-8")
-    for required in (
-        'MODE="plan"',
-        'CONTAINERD_VERSION="${CONTAINERD_VERSION:-2.3.4}"',
-        'HELM_VERSION="${HELM_VERSION:-4.2.4}"',
-        'CALICO_VERSION="${CALICO_VERSION:-3.32.1}"',
-        'KATA_VERSION="${KATA_VERSION:-3.31.0}"',
-        'RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-qemu-runtime-rs}"',
-        "validate_network_inputs",
-        "swapoff -a",
-        "systemctl disable --now firewalld",
-        "setenforce 0",
-        "kubeadm init",
-        "cluster-initialized",
-        "v1_crd_projectcalico_org.yaml",
-        "deploy/check-host.sh",
-        "scripts/arm64-kata-smoke.sh",
-    ):
-        assert required in script
-    assert "kubeadm reset" not in script
-    assert "/var/lib/clawbox-bootstrap/backups" in script
-    # With `set -u`, Bash expands every assignment in one `local` command
-    # before the newly declared variables are available. Keep dependent
-    # assignments separate so backup_once can run on the first apply.
-    assert 'local source="$1" label="$2"' not in script
-    assert 'local destination="${STATE_DIR}/backups/${label}"' in script
-    assert "ExecStart=/usr/local/bin/containerd" in service
-    assert "__CLAWBOX_POD_CIDR__" in calico
-    assert "encapsulation: VXLAN" in calico
-    assert "disableAll: true" in kata_values
-    assert "qemu-runtime-rs:" in kata_values
-    assert "setup: []" in kata_values
+def test_upload_tokens_are_task_scoped_signed_and_expiring():
+    token = create_upload_token("cell-a", "secret", expires_at=int(time.time()) + 60)
+    verify_upload_token(token, "cell-a", "secret")
+    with pytest.raises(ValueError, match="another task"):
+        verify_upload_token(token, "cell-b", "secret")
+    expired = create_upload_token("cell-a", "secret", expires_at=int(time.time()) - 1)
+    with pytest.raises(ValueError, match="expired"):
+        verify_upload_token(expired, "cell-a", "secret")
 
 
-def test_minikube_devmapper_setup_is_persistent_and_nondestructive():
-    from pathlib import Path
+def test_firecracker_host_and_image_gates_are_fail_closed():
+    audit = (ROOT / "scripts" / "audit-kata-firecracker-arm64.sh").read_text(encoding="utf-8")
+    builder = (ROOT / "scripts" / "build-kata-firecracker-arm64.sh").read_text(encoding="utf-8")
+    storage = (ROOT / "scripts" / "setup-devmapper-openeuler-arm64.sh").read_text(encoding="utf-8")
+    smoke = (ROOT / "scripts" / "arm64-kata-smoke.sh").read_text(encoding="utf-8")
+    image_factory = (ROOT / "clawbox" / "images" / "arm64.py").read_text(encoding="utf-8")
+    for required in ("Firecracker version is pinned", "aarch64 ELF", "block rootfs image", "explicit hypervisor path"):
+        assert required in audit
+    assert "static_sandbox_resource_mgmt" in audit
+    assert "guest-local emptyDir" in audit
+    assert 'kata_asset="kata-static-${KATA_VERSION}-arm64.tar.zst"' in builder
+    assert "42a7e67a2c2bf3e97a615c99a293b2bc01ea9c84111fc2bf4abeedb7adc9c2ac" in builder
+    assert "kata-go-static" not in builder
+    for required in ("loopback devices are forbidden", "--confirm-erase", "backs a protected filesystem"):
+        assert required in storage
+    for required in ("/proc/sys/kernel/random/boot_id", "NetworkPolicy", "snapshot", "Firecracker"):
+        assert required in smoke
+    assert "foreign-architecture binfmt handlers must be disabled" in image_factory
+    assert "linux/arm64" in image_factory
 
-    root = Path(__file__).parents[1]
-    setup = (root / "scripts" / "minikube-devmapper.sh").read_text(encoding="utf-8")
-    config = (root / "deploy" / "containerd-devmapper.toml").read_text(encoding="utf-8")
-    assert '"$(dirname "${INSTALL_PATH}")"' in setup
-    assert '"$(dirname "${SERVICE_PATH}")"' in setup
-    assert "if [[ ! -e \"${DATA_DIR}/data\" ]]" in setup
-    assert "if [[ ! -e \"${DATA_DIR}/meta\" ]]" in setup
-    assert "Before=containerd.service kubelet.service" in setup
-    assert "systemctl enable clawbox-devmapper.service" in setup
-    assert "pool_name = 'clawbox-devpool'" in config
-    assert "base_image_size = '10GB'" in config
-    assert "discard_unpacked_layers = false" in config
+
+def test_native_sidecar_uses_a_final_upload_handshake():
+    sidecar = (ROOT / "scripts" / "clawtune-sidecar-entrypoint.sh").read_text(encoding="utf-8")
+    runtime = (ROOT / "scripts" / "runtime-entrypoint.sh").read_text(encoding="utf-8")
+    manifest = (ROOT / "clawbox" / "cell" / "manifests.py").read_text(encoding="utf-8")
+    assert '.runtime-complete' in sidecar and '--once --require-result' in sidecar
+    assert '.upload-complete' in runtime and 'central artifact upload timed out' in runtime
+    assert '"workspaceRoot": "/testbed"' in runtime
+    assert '"restartPolicy": "Always"' in manifest
 
 
-def test_kata_bootstrap_images_are_unpacked_for_devmapper():
-    from pathlib import Path
+def test_production_deployment_has_only_firecracker_runtimeclass():
+    runtime_class = (ROOT / "deploy" / "runtimeclass-firecracker.yaml").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts" / "bootstrap-openeuler-arm64.sh").read_text(encoding="utf-8")
+    assert "name: kata-fc-arm64" in runtime_class
+    assert "handler: kata-fc-arm64" in runtime_class
+    assert "podFixed:" in runtime_class
+    assert 'RUNTIME_CLASS="${KUBERNETES_RUNTIME_CLASS:-kata-fc-arm64}"' in bootstrap
+    assert "kubeadm reset" not in bootstrap
 
-    script = (Path(__file__).parents[1] / "scripts" / "minikube-prepare-kata-images.sh").read_text(encoding="utf-8")
-    assert "containerd config dump" in script
-    assert '$1 == "sandbox"' in script
-    assert "--snapshotter devmapper" in script
-    assert "docker.io/library/alpine:3.22" in script
-    assert "registry.k8s.io/pause:" not in script
-    assert "registry.cn-hangzhou.aliyuncs.com/google_containers/pause" in script
-    assert 'images tag --force "${pause_source}" "${pause_image}"' in script
-    assert "CLAWBOX_PAUSE_MIRROR" in script
+
+def test_scale_sequence_and_static_bridge_contract_are_present():
+    scale = (ROOT / "scripts" / "scale-swe-rebench.sh").read_text(encoding="utf-8")
+    bridge = (ROOT / "toolbridge" / "main.go").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "docker" / "Dockerfile.tool-bridge").read_text(encoding="utf-8")
+    assert 'STEPS="${CLAWBOX_SCALE_STEPS:-1 2 4 8 16 32}"' in scale
+    for field in ("CommandSHA256", "DurationMS", "ExitCode", "TimedOut", "MaxRSSKiB"):
+        assert field in bridge
+    assert 'metadata.User() != "executor"' in bridge
+    assert "CGO_ENABLED=0 GOOS=linux GOARCH=arm64" in dockerfile

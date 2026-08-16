@@ -84,6 +84,27 @@ class ToolInstanceRow(Base):
     state: Mapped[str] = mapped_column(String(32))
 
 
+class TraceChunkRow(Base):
+    __tablename__ = "trace_chunks"
+    chunk_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(128), index=True)
+    relative_path: Mapped[str] = mapped_column(String(512))
+    offset: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
+    payload_base64: Mapped[str] = mapped_column(Text)
+    final: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("task_id", "relative_path", "offset", "final"),)
+
+
+class TaskResultRow(Base):
+    __tablename__ = "task_results"
+    task_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 def make_engine(url: str | None = None):
     value = url or os.getenv("DATABASE_URL", settings.database_url)
     kwargs = {"connect_args": {"check_same_thread": False}} if value.startswith("sqlite") else {}

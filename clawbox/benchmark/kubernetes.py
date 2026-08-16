@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from clawbox.cell.controller import GROUP, PLURAL, VERSION
 from clawbox.controller.kubernetes_backend import dns_label
 
 
@@ -24,6 +27,8 @@ class BenchmarkTask:
 def load_tasks(path: Path) -> list[BenchmarkTask]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     records = raw if isinstance(raw, list) else raw.get("tasks", raw.get("instances", []))
+    if not isinstance(records, list):
+        raise ValueError("tasks/instances must be a list")
     tasks: list[BenchmarkTask] = []
     for record in records:
         instance_id = str(record.get("instance_id") or record.get("task_id") or record.get("id") or "").strip()
@@ -31,112 +36,117 @@ def load_tasks(path: Path) -> list[BenchmarkTask]:
         if record.get("image_tag") and image and ":" not in image.rsplit("/", 1)[-1]:
             image = f"{image}:{record['image_tag']}"
         problem = str(record.get("problem_statement") or record.get("problem") or record.get("prompt") or "")
-        if not instance_id or not image:
-            raise ValueError("every task requires instance_id/task_id and image/docker_image")
-        tasks.append(BenchmarkTask(instance_id, image, problem, str(record.get("base_commit") or ""), str(record.get("hint_text") or "")))
+        if not instance_id or not image or not problem:
+            raise ValueError("every task requires instance_id, original image, and problem_statement")
+        tasks.append(BenchmarkTask(
+            instance_id, image, problem,
+            str(record.get("base_commit") or ""),
+            str(record.get("hint_text") or record.get("hints_text") or record.get("hint") or ""),
+        ))
     return tasks
 
 
-def render_job(
-    task: BenchmarkTask,
-    *,
-    namespace: str,
-    bundle_image: str,
-    llm_secret: str,
-    runtime_class: str = "kata-qemu-runtime-rs",
-    cpu: str = "4",
-    memory: str = "8Gi",
-    timeout_seconds: int = 1800,
-    trace_pvc: str | None = None,
-    run_id: str = "run",
+def load_arm64_mapping(path: Path) -> dict[str, str]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("ARM64 image mapping must be a JSON object")
+    mapping: dict[str, str] = {}
+    for original, value in raw.items():
+        if not isinstance(value, dict) or value.get("status") != "supported":
+            continue
+        image = str(value.get("arm64_image") or "")
+        if value.get("platform") != "linux/arm64" or not str(value.get("recipe_revision") or ""):
+            raise ValueError(f"supported mapping for {original} lacks its arm64 platform/recipe provenance")
+        if not re.fullmatch(r".+@sha256:[a-f0-9]{64}", image):
+            raise ValueError(f"supported mapping for {original} is not immutable")
+        mapping[str(original)] = image
+    return mapping
+
+
+def resolve_arm64_tasks(tasks: list[BenchmarkTask], mapping: dict[str, str]) -> list[BenchmarkTask]:
+    resolved: list[BenchmarkTask] = []
+    missing: list[str] = []
+    for task in tasks:
+        image = mapping.get(task.image)
+        if image is None:
+            missing.append(f"{task.instance_id}={task.image}")
+        else:
+            resolved.append(replace(task, image=image))
+    if missing:
+        raise ValueError(
+            "tasks have no supported native arm64 mapping (no fallback is allowed): " + ", ".join(missing)
+        )
+    return resolved
+
+
+def render_sandbox_task(
+    task: BenchmarkTask, *, namespace: str, llm_secret: str,
+    llm_egress_cidr: str, profile: str = "small", timeout_seconds: int = 1800,
+    command_timeout_seconds: int = 300, output_limit_bytes: int = 4 * 1024**2,
+    tool_egress_cidrs: list[str] | None = None, run_id: str = "run",
 ) -> dict[str, Any]:
-    name = dns_label(f"{run_id}-{task.instance_id}", prefix="swe-")
-    tenant = dns_label(task.instance_id)
-    labels = {
-        "app.kubernetes.io/name": "clawbox-swe-rebench",
-        "app.kubernetes.io/managed-by": "clawbox",
-        "clawbox.openai.com/tenant": tenant,
-        "clawbox.openai.com/task": tenant,
-    }
-    env = [
-        {"name": "TENANT_ID", "value": task.instance_id},
-        {"name": "CLAW_RUNTIME_ID", "value": f"swe-rebench-{task.instance_id}"},
-        {"name": "TASK_INSTANCE_ID", "value": task.instance_id},
-        {"name": "TASK_IMAGE", "value": task.image},
-        {"name": "TASK_BASE_COMMIT", "value": task.base_commit},
-        {"name": "TASK_HINT_TEXT", "value": task.hint_text},
-        {"name": "PROBLEM_STATEMENT", "value": task.problem_statement},
-        {"name": "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED", "value": "false"},
-    ]
-    for variable, key in (
-        ("LLM_API_KEY", "llm-api-key"),
-        ("LLM_UPSTREAM_BASE_URL", "llm-upstream-base-url"),
-        ("LLM_MODEL", "llm-model"),
-        ("OPENCLAW_MODEL_REF", "openclaw-model-ref"),
-    ):
-        env.append({"name": variable, "valueFrom": {"secretKeyRef": {"name": llm_secret, "key": key}}})
+    if not re.fullmatch(r".+@sha256:[a-f0-9]{64}", task.image):
+        raise ValueError("SandboxTask tool image must be an immutable arm64 digest")
+    # Child names append up to "-runtime-egress" (15 characters).
+    name = dns_label(f"{run_id}-{task.instance_id}", prefix="swe-", max_length=48)
     return {
-        "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": name, "namespace": namespace, "labels": labels},
-        "spec": {
-            "backoffLimit": 0,
-            "activeDeadlineSeconds": timeout_seconds,
-            "ttlSecondsAfterFinished": 3600,
-            "template": {
-                "metadata": {"labels": labels},
-                "spec": {
-                    "automountServiceAccountToken": False,
-                    "runtimeClassName": runtime_class,
-                    "restartPolicy": "Never",
-                    "initContainers": [{
-                        "name": "clawtune-bundle", "image": bundle_image, "imagePullPolicy": "IfNotPresent",
-                        "command": ["/bin/sh", "-ec", "cp -a /bundle/. /claw/" + (" && mkdir -p /trace-root/$TASK_INSTANCE_ID" if trace_pvc else "")],
-                        "env": [{"name": "TASK_INSTANCE_ID", "value": task.instance_id}],
-                        "volumeMounts": ([{"name": "claw", "mountPath": "/claw"}] + ([{"name": "traces", "mountPath": "/trace-root"}] if trace_pvc else [])),
-                        "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "100m", "memory": "128Mi"}},
-                        "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
-                    }],
-                    "containers": [{
-                        "name": "openclaw-runtime", "image": task.image,
-                        "command": ["/claw/entrypoint.sh"], "env": env,
-                        "resources": {"requests": {"cpu": cpu, "memory": memory}, "limits": {"cpu": cpu, "memory": memory}},
-                        "volumeMounts": [
-                            {"name": "claw", "mountPath": "/claw", "readOnly": True},
-                            {"name": "traces", "mountPath": "/traces", **({"subPathExpr": "$(TASK_INSTANCE_ID)"} if trace_pvc else {})},
-                        ],
-                    }],
-                    "volumes": [
-                        {"name": "claw", "emptyDir": {}},
-                        {"name": "traces", **({"persistentVolumeClaim": {"claimName": trace_pvc}} if trace_pvc else {"emptyDir": {}})},
-                    ],
-                },
+        "apiVersion": f"{GROUP}/{VERSION}",
+        "kind": "SandboxTask",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/name": "clawbox-swe-rebench",
+                "app.kubernetes.io/managed-by": "clawbox-benchmark-launcher",
+                "clawbox.openai.com/run": dns_label(run_id),
+                "clawbox.openai.com/instance": dns_label(task.instance_id),
             },
+            "annotations": {"clawbox.openai.com/original-instance-id": task.instance_id},
+        },
+        "spec": {
+            "toolImage": task.image,
+            "problemStatement": task.problem_statement,
+            "baseCommit": task.base_commit,
+            "hintText": task.hint_text,
+            "llmSecretName": llm_secret,
+            "llmEgressCIDR": llm_egress_cidr,
+            "llmEgressPort": 443,
+            "toolEgressCIDRs": tool_egress_cidrs or [],
+            "profile": profile,
+            "timeoutSeconds": timeout_seconds,
+            "commandTimeoutSeconds": command_timeout_seconds,
+            "outputLimitBytes": output_limit_bytes,
         },
     }
 
 
 class KubernetesBenchmarkLauncher:
-    def __init__(self, core=None, batch=None):
-        if core is None or batch is None:
+    def __init__(self, core=None, custom=None, node_api=None):
+        if core is None or custom is None or node_api is None:
             from kubernetes import client, config
             try:
                 config.load_incluster_config()
             except config.ConfigException:
                 config.load_kube_config()
-            core, batch = client.CoreV1Api(), client.BatchV1Api()
-        self.core, self.batch = core, batch
+            core = client.CoreV1Api()
+            custom = client.CustomObjectsApi()
+            node_api = client.NodeV1Api()
+        self.core, self.custom, self.node_api = core, custom, node_api
 
-    def run(self, tasks: list[BenchmarkTask], *, parallelism: int, **job_options: Any) -> list[dict[str, Any]]:
-        self._preflight(**job_options)
-        job_options.setdefault("run_id", time.strftime("%Y%m%d%H%M%S", time.gmtime()))
+    def run(self, tasks: list[BenchmarkTask], *, parallelism: int, **options: Any) -> list[dict[str, Any]]:
+        self._preflight(**options)
+        if not options.get("run_id"):
+            options["run_id"] = f"{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         with ThreadPoolExecutor(max_workers=parallelism) as pool:
-            futures = {pool.submit(self._run_one, task, **job_options): task for task in tasks}
+            futures = {pool.submit(self._run_one, task, **options): task for task in tasks}
             return [future.result() for future in as_completed(futures)]
 
-    def _preflight(self, **job_options: Any) -> None:
-        namespace = job_options["namespace"]
-        llm_secret = job_options["llm_secret"]
-        trace_pvc = job_options.get("trace_pvc")
+    def _preflight(self, **options: Any) -> None:
+        namespace = options["namespace"]
+        llm_secret = options["llm_secret"]
+        runtime_class = options.get("runtime_class", "kata-fc-arm64")
+        if runtime_class != "kata-fc-arm64":
+            raise RuntimeError("the benchmark launcher only accepts kata-fc-arm64")
         try:
             self.core.read_namespace(namespace)
             secret = self.core.read_namespaced_secret(llm_secret, namespace)
@@ -144,60 +154,77 @@ class KubernetesBenchmarkLauncher:
             required = {"llm-api-key", "llm-upstream-base-url", "llm-model", "openclaw-model-ref"}
             if missing := sorted(required - keys):
                 raise RuntimeError(f"LLM Secret {namespace}/{llm_secret} is missing keys: {', '.join(missing)}")
-            if trace_pvc:
-                pvc = self.core.read_namespaced_persistent_volume_claim(trace_pvc, namespace)
-                phase = getattr(getattr(pvc, "status", None), "phase", None)
-                if phase != "Bound":
-                    raise RuntimeError(f"trace PVC {namespace}/{trace_pvc} is not Bound (phase={phase})")
+            runtime = self.node_api.read_runtime_class(runtime_class)
+            handler = getattr(runtime, "handler", None)
+            overhead = getattr(runtime, "overhead", None)
+            if handler != runtime_class or not getattr(overhead, "pod_fixed", None):
+                raise RuntimeError("kata-fc-arm64 handler and Pod overhead must pass FC-4 before submission")
+            self.custom.list_namespaced_custom_object(GROUP, VERSION, namespace, PLURAL, limit=1)
         except RuntimeError:
             raise
         except Exception as exc:
-            raise RuntimeError(f"Kubernetes benchmark preflight failed: {type(exc).__name__}: {exc}") from exc
+            raise RuntimeError(f"Kubernetes SandboxTask preflight failed: {type(exc).__name__}: {exc}") from exc
 
-    def _run_one(self, task: BenchmarkTask, **job_options: Any) -> dict[str, Any]:
-        namespace = job_options["namespace"]
-        manifest = render_job(task, **job_options)
+    def _run_one(self, task: BenchmarkTask, **options: Any) -> dict[str, Any]:
+        namespace = options["namespace"]
+        manifest_options = {key: value for key, value in options.items() if key != "runtime_class"}
+        manifest = render_sandbox_task(task, **manifest_options)
         name = manifest["metadata"]["name"]
-        self.batch.create_namespaced_job(namespace, manifest)
-        while True:
-            job = self.batch.read_namespaced_job_status(name, namespace)
-            status = job.status
-            if getattr(status, "succeeded", 0):
-                return {"task_id": task.instance_id, "job": name, "status": "succeeded"}
-            if getattr(status, "failed", 0):
-                return {"task_id": task.instance_id, "job": name, "status": "failed"}
+        try:
+            self.custom.create_namespaced_custom_object(GROUP, VERSION, namespace, PLURAL, manifest)
+        except Exception as exc:
+            if getattr(exc, "status", None) != 409:
+                raise
+            existing = self.custom.get_namespaced_custom_object(GROUP, VERSION, namespace, PLURAL, name)
+            if existing.get("spec") != manifest["spec"]:
+                raise RuntimeError(f"SandboxTask name collision with different spec: {namespace}/{name}") from exc
+        deadline = time.monotonic() + int(options.get("timeout_seconds", 1800)) + 900
+        while time.monotonic() < deadline:
+            current = self.custom.get_namespaced_custom_object(GROUP, VERSION, namespace, PLURAL, name)
+            status = current.get("status") or {}
+            if status.get("phase") == "Cleaned":
+                outcome = str(status.get("outcome", "Failed"))
+                return {
+                    "task_id": task.instance_id,
+                    "sandbox_task": name,
+                    "status": outcome.lower().replace("timedout", "timed-out"),
+                    "reason": status.get("reason", ""),
+                }
             time.sleep(2)
+        raise TimeoutError(f"SandboxTask {namespace}/{name} did not reach Cleaned")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run SWE-Rebench task images as concurrent Kata-isolated Jobs")
+    parser = argparse.ArgumentParser(description="Submit SWE-ReBench tasks as two-VM SandboxTask Cells")
     parser.add_argument("--tasks", type=Path, required=True)
+    parser.add_argument("--arm64-map", type=Path, required=True)
     parser.add_argument("--namespace", default="clawbox-benchmarks")
-    parser.add_argument("--bundle-image", required=True)
     parser.add_argument("--llm-secret", default="clawbox-llm")
-    parser.add_argument(
-        "--runtime-class",
-        default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-qemu-runtime-rs"),
-        help="Existing Kata RuntimeClass; use kata-fc only after the arm64 host gate passes",
-    )
+    parser.add_argument("--llm-egress-cidr", required=True)
+    parser.add_argument("--tool-egress-cidr", action="append", default=[])
+    parser.add_argument("--runtime-class", default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc-arm64"))
+    parser.add_argument("--profile", choices=("small", "medium", "large"), default="small")
     parser.add_argument("--parallelism", type=int, default=1)
     parser.add_argument("--sample", type=int)
-    parser.add_argument("--cpu", default="4")
-    parser.add_argument("--memory", default="8Gi")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
-    parser.add_argument("--trace-pvc", help="Existing RWX PVC used for per-task trace directories")
+    parser.add_argument("--command-timeout-seconds", type=int, default=300)
+    parser.add_argument("--output-limit-bytes", type=int, default=4 * 1024**2)
+    parser.add_argument("--run-id", help="stable id for an intentional retry; generated when omitted")
     args = parser.parse_args()
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")
-    tasks = load_tasks(args.tasks)
+    tasks = resolve_arm64_tasks(load_tasks(args.tasks), load_arm64_mapping(args.arm64_map))
     if args.sample is not None:
         tasks = tasks[:args.sample]
     results = KubernetesBenchmarkLauncher().run(
         tasks, parallelism=args.parallelism, namespace=args.namespace,
-        bundle_image=args.bundle_image, llm_secret=args.llm_secret,
-        runtime_class=args.runtime_class, cpu=args.cpu, memory=args.memory,
+        llm_secret=args.llm_secret, llm_egress_cidr=args.llm_egress_cidr,
+        runtime_class=args.runtime_class, profile=args.profile,
         timeout_seconds=args.timeout_seconds,
-        trace_pvc=args.trace_pvc,
+        command_timeout_seconds=args.command_timeout_seconds,
+        output_limit_bytes=args.output_limit_bytes,
+        tool_egress_cidrs=args.tool_egress_cidr,
+        run_id=args.run_id,
     )
     print(json.dumps(results, ensure_ascii=False, indent=2))
     if any(item["status"] != "succeeded" for item in results):

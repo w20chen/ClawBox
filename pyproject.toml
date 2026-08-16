@@ -14,7 +14,8 @@ dependencies = [
   "sqlalchemy>=2.0",
   "uvicorn>=0.27",
   "docker>=7.0",
-  "kubernetes>=30,<35",
+  "kubernetes>=35,<36",
+  "cryptography>=42",
   "numpy>=1.26",
   "psutil>=5.9",
   "prometheus-client>=0.20",
@@ -23,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+images = ["datasets>=3.0"]
 dev = ["pytest>=8"]
 
 [project.scripts]
@@ -32,6 +34,10 @@ clawbox-controller = "clawbox.controller.app:main"
 clawbox-node-agent = "clawbox.node_agent.app:main"
 clawbox-tool-agent = "clawbox.tool_agent.app:main"
 clawbox-swe-rebench = "clawbox.benchmark.kubernetes:main"
+clawbox-cell-controller = "clawbox.cell.app:main"
+clawbox-trace-ingester = "clawbox.ingester.app:main"
+clawbox-arm64-images = "clawbox.images.arm64:main"
+clawbox-swe-rebench-arm64-images = "clawbox.images.swerebench:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

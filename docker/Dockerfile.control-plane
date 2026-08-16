@@ -3,5 +3,8 @@ WORKDIR /opt/clawbox
 COPY pyproject.toml ./
 COPY clawbox ./clawbox
 RUN pip install --no-cache-dir '.[postgres]'
+RUN groupadd --gid 10001 clawbox \
+ && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin clawbox
 ENV PYTHONUNBUFFERED=1
+USER 10001:10001
 CMD ["clawbox-scheduler"]

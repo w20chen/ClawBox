@@ -8,6 +8,7 @@ clawtune-*/
 # Python test/runtime caches
 __pycache__/
 *.py[cod]
+.pytest-tmp-root/
 
 # Local secrets — never commit
 .env

@@ -2,231 +2,85 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-TEMPLATE="${SCRIPT_DIR}/cell.yaml"
+ACTION="${1:-}"
+[[ -n "${ACTION}" ]] || { echo "usage: cell.sh render|deploy|delete --task NAME ..." >&2; exit 64; }
+shift
+
+TASK_NAME=""
+TOOL_IMAGE=""
+PROBLEM_STATEMENT=""
+PROBLEM_FILE=""
+BASE_COMMIT=""
+HINT_TEXT=""
+LLM_SECRET_NAME="clawbox-llm"
+LLM_EGRESS_CIDR=""
+LLM_EGRESS_PORT="443"
+TOOL_EGRESS_CIDRS="[]"
+RESOURCE_PROFILE="small"
+TASK_TIMEOUT_SECONDS="1800"
+TOOL_EXEC_TIMEOUT_SECONDS="300"
+TOOL_OUTPUT_LIMIT_BYTES="4194304"
+NAMESPACE="clawbox-benchmarks"
 
 usage() {
   cat >&2 <<'EOF'
-Usage:
-  cell.sh deploy --tenant TENANT --runtime-image IMAGE --tool-image IMAGE \
-    --llm-secret SECRET --llm-egress-cidr CIDR [options]
-  cell.sh render --tenant TENANT --runtime-image IMAGE --tool-image IMAGE \
-    --llm-secret SECRET --llm-egress-cidr CIDR [options]
-  cell.sh delete --tenant TENANT [--namespace NAMESPACE]
+usage: cell.sh render|deploy --task NAME --tool-image IMAGE@sha256:DIGEST \
+  (--problem TEXT | --problem-file FILE) --llm-egress-cidr CIDR [options]
+       cell.sh delete --task NAME [--namespace NS]
 
-Both Pods use the selected pre-installed Kata RuntimeClass. The arm64/openEuler
-default is kata-qemu-runtime-rs; kata-fc is supported only after its host gate passes.
-
-Options:
-  --ssh-secret SECRET          Existing Secret with client id_ed25519 keypair and
-                               ssh_host_ed25519_key keypair.
-                               If omitted, deploy generates a demo key Secret.
-  --llm-egress-port PORT       Default: 443.
-  --tool-egress-cidr CIDR      Optional Tool internet egress; default is denied.
-  --tool-egress-port PORT      Default: 443.
-  --runtime-class NAME         Existing Kata RuntimeClass. Default: kata-qemu-runtime-rs.
-  --namespace NAME             Default: default.
+The Cell Controller owns credentials, NetworkPolicies, Tool Pod and Runtime
+Job. Runtime image, Tool Bridge image and kata-fc-arm64 are controller-fixed.
 EOF
   exit 64
 }
 
-[[ $# -ge 1 ]] || usage
-ACTION="$1"
-shift
-
-TENANT_ID=""
-RUNTIME_IMAGE=""
-TOOL_IMAGE=""
-LLM_SECRET_NAME=""
-LLM_EGRESS_CIDR=""
-LLM_EGRESS_PORT="443"
-SSH_SECRET_NAME=""
-TOOL_EGRESS_CIDR=""
-TOOL_EGRESS_PORT="443"
-NAMESPACE="default"
-RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-qemu-runtime-rs}"
-
+tool_cidrs=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tenant) TENANT_ID="${2:-}"; shift 2 ;;
-    --runtime-image) RUNTIME_IMAGE="${2:-}"; shift 2 ;;
+    --task) TASK_NAME="${2:-}"; shift 2 ;;
     --tool-image) TOOL_IMAGE="${2:-}"; shift 2 ;;
+    --problem) PROBLEM_STATEMENT="${2:-}"; shift 2 ;;
+    --problem-file) PROBLEM_FILE="${2:-}"; shift 2 ;;
+    --base-commit) BASE_COMMIT="${2:-}"; shift 2 ;;
+    --hint) HINT_TEXT="${2:-}"; shift 2 ;;
     --llm-secret) LLM_SECRET_NAME="${2:-}"; shift 2 ;;
     --llm-egress-cidr) LLM_EGRESS_CIDR="${2:-}"; shift 2 ;;
     --llm-egress-port) LLM_EGRESS_PORT="${2:-}"; shift 2 ;;
-    --ssh-secret) SSH_SECRET_NAME="${2:-}"; shift 2 ;;
-    --tool-egress-cidr) TOOL_EGRESS_CIDR="${2:-}"; shift 2 ;;
-    --tool-egress-port) TOOL_EGRESS_PORT="${2:-}"; shift 2 ;;
-    --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
+    --tool-egress-cidr) tool_cidrs+=("${2:-}"); shift 2 ;;
+    --profile) RESOURCE_PROFILE="${2:-}"; shift 2 ;;
+    --timeout-seconds) TASK_TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
-    *) echo "unknown argument: $1" >&2; usage ;;
+    *) usage ;;
   esac
 done
 
-valid_name() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#1} -le 40 ]]; }
-valid_resource_name() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#1} -le 63 ]]; }
-valid_image() { [[ "$1" =~ ^[A-Za-z0-9._/@:-]+$ ]]; }
-valid_cidr() {
-  [[ "$1" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ && "$1" != "0.0.0.0/0" && "$1" != "::/0" ]]
-}
-valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 1 <= 10#$1 && 10#$1 <= 65535 )); }
+valid_name() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#1} -le 63 ]]; }
+valid_cidr() { python3 -c 'import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=True)' "$1" >/dev/null 2>&1; }
+valid_name "${TASK_NAME}" && valid_name "${NAMESPACE}" && valid_name "${LLM_SECRET_NAME}" || usage
+(( ${#TASK_NAME} <= 48 )) || { echo "task name must be at most 48 characters" >&2; exit 64; }
 
-[[ -n "${TENANT_ID}" ]] || { echo "--tenant is required" >&2; usage; }
-valid_name "${TENANT_ID}" || { echo "tenant must be a lowercase DNS label (max 40 chars)" >&2; exit 64; }
-valid_resource_name "${NAMESPACE}" || { echo "invalid namespace" >&2; exit 64; }
-valid_resource_name "${RUNTIME_CLASS}" || { echo "invalid RuntimeClass name" >&2; exit 64; }
-
-if [[ "${ACTION}" == "delete" ]]; then
-  command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
-  selector="app.kubernetes.io/managed-by=clawbox,claw.openai.com/tenant-id=${TENANT_ID}"
-  kubectl -n "${NAMESPACE}" delete deployment,service,networkpolicy -l "${selector}" --ignore-not-found
-  kubectl -n "${NAMESPACE}" delete secret -l "${selector},claw.openai.com/demo-key=true" --ignore-not-found
-  echo "tenant cell deleted: namespace=${NAMESPACE} tenant_id=${TENANT_ID}"
+if [[ "${ACTION}" == delete ]]; then
+  kubectl -n "${NAMESPACE}" delete sandboxtask "${TASK_NAME}" --wait=true --timeout=300s
   exit 0
 fi
-
-[[ "${ACTION}" == "deploy" || "${ACTION}" == "render" ]] || usage
-[[ -n "${RUNTIME_IMAGE}" && -n "${TOOL_IMAGE}" && -n "${LLM_SECRET_NAME}" && -n "${LLM_EGRESS_CIDR}" ]] || usage
-valid_image "${RUNTIME_IMAGE}" || { echo "invalid runtime image reference" >&2; exit 64; }
-valid_image "${TOOL_IMAGE}" || { echo "invalid tool image reference" >&2; exit 64; }
-valid_resource_name "${LLM_SECRET_NAME}" || { echo "invalid LLM Secret name" >&2; exit 64; }
+[[ "${ACTION}" == render || "${ACTION}" == deploy ]] || usage
+[[ "${TOOL_IMAGE}" =~ @sha256:[a-f0-9]{64}$ ]] || { echo "immutable arm64 tool image digest is required" >&2; exit 64; }
+[[ "${RESOURCE_PROFILE}" =~ ^(small|medium|large)$ ]] || usage
 valid_cidr "${LLM_EGRESS_CIDR}" || { echo "invalid LLM egress CIDR" >&2; exit 64; }
-valid_port "${LLM_EGRESS_PORT}" || { echo "invalid LLM egress port" >&2; exit 64; }
-[[ -z "${TOOL_EGRESS_CIDR}" ]] || valid_cidr "${TOOL_EGRESS_CIDR}" || { echo "invalid Tool egress CIDR" >&2; exit 64; }
-valid_port "${TOOL_EGRESS_PORT}" || { echo "invalid Tool egress port" >&2; exit 64; }
-
-RUNTIME_ID="runtime-${TENANT_ID}"
-SSH_SECRET_GENERATED=false
-SSH_SECRET_CREATED=false
-if [[ -z "${SSH_SECRET_NAME}" ]]; then
-  SSH_SECRET_NAME="claw-${TENANT_ID}-ssh"
-  SSH_SECRET_GENERATED=true
-else
-  valid_resource_name "${SSH_SECRET_NAME}" || { echo "invalid SSH Secret name" >&2; exit 64; }
+if [[ -n "${PROBLEM_FILE}" ]]; then
+  [[ -f "${PROBLEM_FILE}" ]] || { echo "problem file is missing" >&2; exit 66; }
+  PROBLEM_STATEMENT="$(cat "${PROBLEM_FILE}")"
 fi
+[[ -n "${PROBLEM_STATEMENT}" ]] || usage
+for cidr in "${tool_cidrs[@]}"; do valid_cidr "${cidr}" || { echo "invalid Tool egress CIDR: ${cidr}" >&2; exit 64; }; done
 
-TOOL_EGRESS_POLICY=""
-if [[ -n "${TOOL_EGRESS_CIDR}" ]]; then
-  TOOL_EGRESS_POLICY="---
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: claw-${TENANT_ID}-tool-egress
-  labels:
-    app.kubernetes.io/name: clawbox
-    app.kubernetes.io/managed-by: clawbox
-    claw.openai.com/tenant-id: ${TENANT_ID}
-    claw.openai.com/runtime-id: ${RUNTIME_ID}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: clawbox
-      app.kubernetes.io/component: tool
-      claw.openai.com/tenant-id: ${TENANT_ID}
-  policyTypes: [\"Egress\"]
-  egress:
-    - to:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - {port: 53, protocol: UDP}
-        - {port: 53, protocol: TCP}
-    - to:
-        - ipBlock: {cidr: ${TOOL_EGRESS_CIDR}}
-      ports:
-        - {port: ${TOOL_EGRESS_PORT}, protocol: TCP}"
-fi
-
-export TENANT_ID RUNTIME_ID RUNTIME_IMAGE TOOL_IMAGE LLM_SECRET_NAME LLM_EGRESS_CIDR LLM_EGRESS_PORT RUNTIME_CLASS
-export SSH_SECRET_NAME TOOL_EGRESS_POLICY
-export TOOL_EXEC_TIMEOUT_SECONDS="${TOOL_EXEC_TIMEOUT_SECONDS:-300}" TOOL_PIDS_LIMIT="${TOOL_PIDS_LIMIT:-128}"
-export TOOL_CPU_REQUEST="${TOOL_CPU_REQUEST:-250m}" TOOL_CPU_LIMIT="${TOOL_CPU_LIMIT:-1}"
-export TOOL_MEMORY_REQUEST="${TOOL_MEMORY_REQUEST:-256Mi}" TOOL_MEMORY_LIMIT="${TOOL_MEMORY_LIMIT:-1Gi}"
-export TOOL_STORAGE_REQUEST="${TOOL_STORAGE_REQUEST:-256Mi}" TOOL_STORAGE_LIMIT="${TOOL_STORAGE_LIMIT:-1Gi}"
-export RUNTIME_CPU_REQUEST="${RUNTIME_CPU_REQUEST:-500m}" RUNTIME_CPU_LIMIT="${RUNTIME_CPU_LIMIT:-2}"
-export RUNTIME_MEMORY_REQUEST="${RUNTIME_MEMORY_REQUEST:-512Mi}" RUNTIME_MEMORY_LIMIT="${RUNTIME_MEMORY_LIMIT:-2Gi}"
-export RUNTIME_STORAGE_REQUEST="${RUNTIME_STORAGE_REQUEST:-512Mi}" RUNTIME_STORAGE_LIMIT="${RUNTIME_STORAGE_LIMIT:-2Gi}"
-
-command -v envsubst >/dev/null 2>&1 || { echo "envsubst not found (install gettext/gettext-base)" >&2; exit 69; }
-render() {
-  envsubst '${TENANT_ID} ${RUNTIME_ID} ${RUNTIME_IMAGE} ${TOOL_IMAGE} ${LLM_SECRET_NAME} ${LLM_EGRESS_CIDR} ${LLM_EGRESS_PORT} ${SSH_SECRET_NAME} ${TOOL_EGRESS_POLICY} ${TOOL_EXEC_TIMEOUT_SECONDS} ${TOOL_PIDS_LIMIT} ${TOOL_CPU_REQUEST} ${TOOL_CPU_LIMIT} ${TOOL_MEMORY_REQUEST} ${TOOL_MEMORY_LIMIT} ${TOOL_STORAGE_REQUEST} ${TOOL_STORAGE_LIMIT} ${RUNTIME_CPU_REQUEST} ${RUNTIME_CPU_LIMIT} ${RUNTIME_MEMORY_REQUEST} ${RUNTIME_MEMORY_LIMIT} ${RUNTIME_STORAGE_REQUEST} ${RUNTIME_STORAGE_LIMIT} ${RUNTIME_CLASS}' <"${TEMPLATE}"
-}
-
-if [[ "${ACTION}" == "render" ]]; then
-  render
-  exit 0
-fi
-
-command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 69; }
-kubectl get runtimeclass "${RUNTIME_CLASS}" >/dev/null 2>&1 || {
-  echo "RuntimeClass ${RUNTIME_CLASS} is not installed." >&2
-  echo "Run deploy/check-host.sh --runtime-class ${RUNTIME_CLASS} and install a matching Kata handler first." >&2
-  exit 69
-}
-
-secret_has_key() {
-  [[ "$(kubectl -n "${NAMESPACE}" get secret "$1" -o "go-template={{if index .data \"$2\"}}present{{end}}")" == "present" ]]
-}
-kubectl -n "${NAMESPACE}" get secret "${LLM_SECRET_NAME}" >/dev/null
-for key in openai-base-url openai-api-key openclaw-model; do
-  secret_has_key "${LLM_SECRET_NAME}" "${key}" || {
-    echo "LLM Secret ${LLM_SECRET_NAME} is missing key ${key}" >&2; exit 65;
-  }
-done
-
-for name in "claw-${TENANT_ID}-runtime" "claw-${TENANT_ID}-tool"; do
-  existing_tenant="$(kubectl -n "${NAMESPACE}" get deployment "${name}" -o 'jsonpath={.metadata.labels.claw\.openai\.com/tenant-id}' 2>/dev/null || true)"
-  [[ -z "${existing_tenant}" || "${existing_tenant}" == "${TENANT_ID}" ]] || {
-    echo "refusing to overwrite deployment ${name} owned by tenant ${existing_tenant}" >&2; exit 73;
-  }
-done
-
-tmp_dir="$(mktemp -d)"
-cleanup_tmp() { rm -rf -- "${tmp_dir}"; }
-trap cleanup_tmp EXIT
-
-if [[ "${SSH_SECRET_GENERATED}" == true ]]; then
-  existing_secret="$(kubectl -n "${NAMESPACE}" get secret "${SSH_SECRET_NAME}" -o name 2>/dev/null || true)"
-  if [[ -n "${existing_secret}" ]]; then
-    existing_tenant="$(kubectl -n "${NAMESPACE}" get secret "${SSH_SECRET_NAME}" -o 'jsonpath={.metadata.labels.claw\.openai\.com/tenant-id}')"
-    existing_demo="$(kubectl -n "${NAMESPACE}" get secret "${SSH_SECRET_NAME}" -o 'jsonpath={.metadata.labels.claw\.openai\.com/demo-key}')"
-    [[ "${existing_tenant}" == "${TENANT_ID}" && "${existing_demo}" == "true" ]] || {
-      echo "refusing to overwrite existing non-demo SSH Secret ${SSH_SECRET_NAME}" >&2; exit 73;
-    }
-    for key in id_ed25519 id_ed25519.pub ssh_host_ed25519_key ssh_host_ed25519_key.pub; do
-      secret_has_key "${SSH_SECRET_NAME}" "${key}" || {
-        echo "demo SSH Secret ${SSH_SECRET_NAME} is missing key ${key}" >&2; exit 65;
-      }
-    done
-  else
-    command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen required for demo key generation" >&2; exit 69; }
-    ssh-keygen -q -t ed25519 -N '' -C "claw-${TENANT_ID}-demo" -f "${tmp_dir}/id_ed25519"
-    ssh-keygen -q -t ed25519 -N '' -C "claw-${TENANT_ID}-host" -f "${tmp_dir}/ssh_host_ed25519_key"
-    kubectl -n "${NAMESPACE}" create secret generic "${SSH_SECRET_NAME}" \
-      --from-file=id_ed25519="${tmp_dir}/id_ed25519" \
-      --from-file=id_ed25519.pub="${tmp_dir}/id_ed25519.pub" \
-      --from-file=ssh_host_ed25519_key="${tmp_dir}/ssh_host_ed25519_key" \
-      --from-file=ssh_host_ed25519_key.pub="${tmp_dir}/ssh_host_ed25519_key.pub" \
-      --dry-run=client -o yaml | kubectl -n "${NAMESPACE}" apply -f -
-    kubectl -n "${NAMESPACE}" label secret "${SSH_SECRET_NAME}" --overwrite \
-      app.kubernetes.io/managed-by=clawbox \
-      claw.openai.com/tenant-id="${TENANT_ID}" \
-      claw.openai.com/demo-key=true >/dev/null
-    SSH_SECRET_CREATED=true
-  fi
-else
-  kubectl -n "${NAMESPACE}" get secret "${SSH_SECRET_NAME}" >/dev/null
-  for key in id_ed25519 id_ed25519.pub ssh_host_ed25519_key ssh_host_ed25519_key.pub; do
-    secret_has_key "${SSH_SECRET_NAME}" "${key}" || {
-      echo "SSH Secret ${SSH_SECRET_NAME} is missing key ${key}" >&2; exit 65;
-    }
-  done
-fi
-
-render >"${tmp_dir}/cell.yaml"
-kubectl -n "${NAMESPACE}" apply -f "${tmp_dir}/cell.yaml"
-echo "tenant cell applied: namespace=${NAMESPACE} tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID}"
-if [[ "${SSH_SECRET_CREATED}" == true ]]; then
-  echo "demo SSH key Secret ${SSH_SECRET_NAME} will be deleted by: cell.sh delete --tenant ${TENANT_ID} --namespace ${NAMESPACE}"
-fi
+PROBLEM_STATEMENT="$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<<"${PROBLEM_STATEMENT}")"
+BASE_COMMIT="$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip("\n")))' <<<"${BASE_COMMIT}")"
+HINT_TEXT="$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip("\n")))' <<<"${HINT_TEXT}")"
+TOOL_EGRESS_CIDRS="$(printf '%s\n' "${tool_cidrs[@]}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
+export TASK_NAME TOOL_IMAGE PROBLEM_STATEMENT BASE_COMMIT HINT_TEXT LLM_SECRET_NAME LLM_EGRESS_CIDR
+export LLM_EGRESS_PORT TOOL_EGRESS_CIDRS RESOURCE_PROFILE TASK_TIMEOUT_SECONDS TOOL_EXEC_TIMEOUT_SECONDS
+export TOOL_OUTPUT_LIMIT_BYTES NAMESPACE
+command -v envsubst >/dev/null 2>&1 || { echo "envsubst is required" >&2; exit 69; }
+rendered="$(envsubst <"${SCRIPT_DIR}/cell.yaml")"
+if [[ "${ACTION}" == render ]]; then printf '%s\n' "${rendered}"; else printf '%s\n' "${rendered}" | kubectl apply -f -; fi

@@ -21,6 +21,7 @@ services:
       DATABASE_URL: postgresql+psycopg://clawbox:${POSTGRES_PASSWORD:-clawbox}@postgres/clawbox
       CLAWBOX_SERVICE_TOKEN: ${CLAWBOX_SERVICE_TOKEN:-development-only-token}
       CLAWBOX_GRANT_SECRET: ${CLAWBOX_GRANT_SECRET:-development-only-grant-secret}
+      CLAWBOX_INGEST_SECRET: ${CLAWBOX_INGEST_SECRET:-development-only-ingest-secret}
       ALLOCATOR_URL: http://allocator:8081
       CONTROLLER_URL: http://controller:8082
       CONTROLLER_BACKEND: ${CONTROLLER_BACKEND:-docker}
@@ -61,6 +62,13 @@ services:
       - /sys:/sys:ro
       - /proc:/host/proc:ro
     ports: ["8083:8083"]
+
+  trace-ingester:
+    <<: *control
+    command: clawbox-trace-ingester
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports: ["8084:8084"]
 
   tool-agent-image:
     profiles: ["build"]
