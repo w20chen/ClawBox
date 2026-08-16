@@ -553,7 +553,9 @@ install_calico() {
   sed "s|__CLAWBOX_POD_CIDR__|${POD_CIDR}|g" "${ROOT}/deploy/calico-installation.yaml" >"${rendered}"
   grep -q '__CLAWBOX_POD_CIDR__' "${rendered}" && die "Calico Pod CIDR template was not rendered"
   kubectl apply -f "${rendered}"
-  kubectl wait --for=condition=Available installation/default --timeout=600s
+  # Calico/tigera-operator 3.32 reports readiness as the `Ready` condition on the
+  # Installation CR, not `Available`; waiting on the wrong condition always times out.
+  kubectl wait --for=condition=Ready installation/default --timeout=600s
   kubectl -n calico-system rollout status daemonset/calico-node --timeout=600s
   kubectl -n calico-system rollout status deployment/calico-kube-controllers --timeout=600s
   kubectl taint nodes --all node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
