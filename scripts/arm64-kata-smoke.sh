@@ -85,30 +85,15 @@ kubectl create namespace "${NAMESPACE}" >/dev/null
 created=true
 kubectl label namespace "${NAMESPACE}" app.kubernetes.io/managed-by=clawbox-stage0 >/dev/null
 
+# Create the Service and NetworkPolicies first, then create the pods one at a
+# time.  All three pods share the same smoke image, and the two kata pods also
+# share the CRI sandbox image; applying them concurrently makes containerd
+# unpack those images into the devmapper snapshotter from two sandboxes at
+# once, and the losing unpack fails permanently with "unable to prepare
+# extraction snapshot: target snapshot ... already exists" (gRPC AlreadyExists).
+# Serializing matches production, where the Cell controller creates the Tool
+# pod, waits for Ready, and only then creates the Runtime pod.
 cat <<EOF | kubectl -n "${NAMESPACE}" apply -f - >/dev/null
-apiVersion: v1
-kind: Pod
-metadata:
-  name: tool
-  labels: {app: clawbox-stage0, role: tool}
-spec:
-  automountServiceAccountToken: false
-  runtimeClassName: ${RUNTIME_CLASS}
-  restartPolicy: Never
-  nodeSelector: {kubernetes.io/arch: arm64}
-  containers:
-    - name: tool
-      image: ${IMAGE}
-      command: ["/bin/sh", "-ec", "mkdir -p /www; uname -m > /www/index.html; exec busybox httpd -f -p 8080 -h /www"]
-      ports: [{name: http, containerPort: 8080}]
-      readinessProbe: {httpGet: {path: /, port: http}, periodSeconds: 1}
-      resources:
-        requests: {cpu: 100m, memory: 128Mi}
-        limits: {cpu: 100m, memory: 128Mi}
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities: {drop: ["ALL"]}
----
 apiVersion: v1
 kind: Service
 metadata:
@@ -116,47 +101,6 @@ metadata:
 spec:
   selector: {app: clawbox-stage0, role: tool}
   ports: [{name: http, port: 8080, targetPort: http}]
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: runtime
-  labels: {app: clawbox-stage0, role: runtime}
-spec:
-  automountServiceAccountToken: false
-  runtimeClassName: ${RUNTIME_CLASS}
-  restartPolicy: Never
-  nodeSelector: {kubernetes.io/arch: arm64}
-  containers:
-    - name: runtime
-      image: ${IMAGE}
-      command: ["/bin/sh", "-ec", "exec sleep 3600"]
-      resources:
-        requests: {cpu: 100m, memory: 128Mi}
-        limits: {cpu: 100m, memory: 128Mi}
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities: {drop: ["ALL"]}
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: attacker
-  labels: {app: clawbox-stage0, role: attacker}
-spec:
-  automountServiceAccountToken: false
-  restartPolicy: Never
-  nodeSelector: {kubernetes.io/arch: arm64}
-  containers:
-    - name: attacker
-      image: ${IMAGE}
-      command: ["/bin/sh", "-ec", "exec sleep 3600"]
-      resources:
-        requests: {cpu: 10m, memory: 32Mi}
-        limits: {cpu: 10m, memory: 32Mi}
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities: {drop: ["ALL"]}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -195,12 +139,88 @@ spec:
       ports: [{protocol: TCP, port: 8080}]
 EOF
 
-if ! kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod/tool pod/runtime pod/attacker --timeout=240s; then
-  kubectl -n "${NAMESPACE}" get pods -o wide >&2 || true
-  kubectl -n "${NAMESPACE}" describe pods >&2 || true
-  kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp >&2 || true
-  exit 1
-fi
+wait_pod() {
+  local pod="$1"
+  if ! kubectl -n "${NAMESPACE}" wait --for=condition=Ready "pod/${pod}" --timeout=240s; then
+    kubectl -n "${NAMESPACE}" get pods -o wide >&2 || true
+    kubectl -n "${NAMESPACE}" describe "pod/${pod}" >&2 || true
+    kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp >&2 || true
+    return 1
+  fi
+}
+
+cat <<EOF | kubectl -n "${NAMESPACE}" apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker
+  labels: {app: clawbox-stage0, role: attacker}
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/arch: arm64}
+  containers:
+    - name: attacker
+      image: ${IMAGE}
+      command: ["/bin/sh", "-ec", "exec sleep 3600"]
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {cpu: 10m, memory: 32Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+EOF
+wait_pod attacker || exit 1
+
+cat <<EOF | kubectl -n "${NAMESPACE}" apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: runtime
+  labels: {app: clawbox-stage0, role: runtime}
+spec:
+  automountServiceAccountToken: false
+  runtimeClassName: ${RUNTIME_CLASS}
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/arch: arm64}
+  containers:
+    - name: runtime
+      image: ${IMAGE}
+      command: ["/bin/sh", "-ec", "exec sleep 3600"]
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+EOF
+wait_pod runtime || exit 1
+
+cat <<EOF | kubectl -n "${NAMESPACE}" apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tool
+  labels: {app: clawbox-stage0, role: tool}
+spec:
+  automountServiceAccountToken: false
+  runtimeClassName: ${RUNTIME_CLASS}
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/arch: arm64}
+  containers:
+    - name: tool
+      image: ${IMAGE}
+      command: ["/bin/sh", "-ec", "mkdir -p /www; uname -m > /www/index.html; exec busybox httpd -f -p 8080 -h /www"]
+      ports: [{name: http, containerPort: 8080}]
+      readinessProbe: {httpGet: {path: /, port: http}, periodSeconds: 1}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+EOF
+wait_pod tool || exit 1
 
 kubectl -n "${NAMESPACE}" get pod/tool pod/runtime -o json | python3 -c '
 import json, sys
