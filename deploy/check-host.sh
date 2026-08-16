@@ -60,9 +60,10 @@ if have containerd && timeout 5 ctr version >/dev/null 2>&1; then
     || fail "containerd handler ${RUNTIME_CLASS} is missing"
   # Extract the full handler section (header plus its nested options table),
   # not just the first 12 lines: containerd 2.x dumps many runtime fields and
-  # the options/ConfigPath live past line 12.
+  # the options/ConfigPath live past line 12.  Section headers are indented
+  # (SetIndentTables), so match '[ ' with optional leading whitespace.
   handler_block="$(awk -v cls="${RUNTIME_CLASS}" '
-    /^\[/ {
+    /^[[:space:]]*\[/ {
       if (in_block && $0 !~ cls) exit
       if (!in_block && $0 ~ cls) in_block = 1
     }
