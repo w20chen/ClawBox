@@ -131,7 +131,7 @@ fi
   exit 1
 }
 [[ "$(id -u)" == 0 ]] || { echo "apply must run as root" >&2; exit 1; }
-for command in pvcreate vgcreate lvcreate lvconvert lvs dmsetup containerd ctr systemctl; do need "${command}"; done
+for command in wipefs pvcreate vgcreate lvcreate lvconvert lvs dmsetup containerd ctr systemctl; do need "${command}"; done
 
 install -d -m 0700 "${STATE_DIR}/backups"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -144,6 +144,12 @@ for backup in \
   [[ ! -f "${source_path}" ]] || cp -a "${source_path}" "${STATE_DIR}/backups/${backup_name}"
 done
 
+# Provisioning images (e.g. Foreman/PXE) stamp every disk with an empty GPT
+# label; LVM refuses any device that carries a partition table, even one with
+# zero partitions. validate_device has already confirmed these are dedicated
+# whole disks with no children, mounts, or holders, so clearing the signatures
+# is part of the explicit --confirm-erase authorization.
+wipefs -a "${DATA_DEVICE}" "${METADATA_DEVICE}"
 pvcreate --yes --force "${DATA_DEVICE}" "${METADATA_DEVICE}"
 vgcreate "${VG}" "${DATA_DEVICE}" "${METADATA_DEVICE}"
 if [[ "${DATA_SIZE}" == *%* ]]; then
