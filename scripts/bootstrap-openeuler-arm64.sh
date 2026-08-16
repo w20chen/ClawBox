@@ -27,6 +27,7 @@ KUBE_RESERVED="${CLAWBOX_KUBE_RESERVED:-cpu=4,memory=8Gi,ephemeral-storage=20Gi}
 STATE_DIR="/var/lib/clawbox-bootstrap"
 STATE_FILE="${STATE_DIR}/versions.env"
 OWNER_MARKER="${STATE_DIR}/owned-host"
+STATE_SCHEMA_VERSION="2"
 ADMIN_CONF="/etc/kubernetes/admin.conf"
 CONTAINERD_SOCKET="/run/containerd/containerd.sock"
 TMP_DIR=""
@@ -222,6 +223,10 @@ print_plan() {
   note "kube reserved" "${KUBE_RESERVED}"
   note "state/backups" "${STATE_DIR}"
 
+  if [[ -n "${DEVMAPPER_DATA_DEVICE}" || -n "${DEVMAPPER_METADATA_DEVICE}" ]]; then
+    validate_storage_devices
+  fi
+
   cat <<'EOF'
 
 Apply performs these ordered mutations:
@@ -246,17 +251,43 @@ ensure_sudo() {
   fi
 }
 
+validate_storage_devices() {
+  [[ -n "${DEVMAPPER_DATA_DEVICE}" && -n "${DEVMAPPER_METADATA_DEVICE}" ]] \
+    || die "both --devmapper-data-device and --devmapper-meta-device are required"
+  bash "${ROOT}/scripts/setup-devmapper-openeuler-arm64.sh" plan \
+    --data-device "${DEVMAPPER_DATA_DEVICE}" \
+    --metadata-device "${DEVMAPPER_METADATA_DEVICE}"
+}
+
 guard_version_drift() {
-  local key requested installed
+  local key requested installed installed_schema
+  local -a missing=()
   sudo test -f "${STATE_FILE}" || return 0
+
+  installed_schema="$(sudo awk -F= '$1 == "STATE_SCHEMA_VERSION" {print substr($0, index($0, "=") + 1)}' "${STATE_FILE}")"
+  if [[ -n "${installed_schema}" && "${installed_schema}" != "${STATE_SCHEMA_VERSION}" ]]; then
+    die "installed state schema ${installed_schema} is not supported by schema ${STATE_SCHEMA_VERSION}; a reviewed migration is required"
+  fi
   for key in KUBERNETES_MINOR CONTAINERD_VERSION RUNC_VERSION CALICO_VERSION KATA_VERSION FIRECRACKER_VERSION RUNTIME_CLASS POD_CIDR SERVICE_CIDR ADVERTISE_ADDRESS IMAGE_REPOSITORY MAX_PODS SYSTEM_RESERVED KUBE_RESERVED; do
     requested="${!key}"
     installed="$(sudo awk -F= -v wanted="${key}" '$1 == wanted {print substr($0, index($0, "=") + 1)}' "${STATE_FILE}")"
-    [[ -n "${installed}" ]] || die "installed state is missing ${key}: ${STATE_FILE}"
+    if [[ -z "${installed}" ]]; then
+      missing+=("${key}")
+      continue
+    fi
     if [[ "${requested}" != "${installed}" ]]; then
       die "requested ${key}=${requested}, but this host owns ${installed}; upgrades require a reviewed migration"
     fi
   done
+  if [[ -z "${installed_schema}" ]]; then
+    missing+=(STATE_SCHEMA_VERSION)
+  fi
+  if (( ${#missing[@]} > 0 )); then
+    if sudo test -f "${STATE_DIR}/stage0-passed"; then
+      die "completed host state is missing fields (${missing[*]}); refusing an automatic migration"
+    fi
+    printf 'WARN: completing incomplete pre-stage0 state; missing fields: %s\n' "${missing[*]}" >&2
+  fi
 }
 
 prepare_state() {
@@ -544,6 +575,7 @@ install_kata_firecracker() {
 
 write_state() {
   cat >"${TMP_DIR}/versions.env" <<EOF
+STATE_SCHEMA_VERSION=${STATE_SCHEMA_VERSION}
 KUBERNETES_MINOR=${KUBERNETES_MINOR}
 CONTAINERD_VERSION=${CONTAINERD_VERSION}
 RUNC_VERSION=${RUNC_VERSION}
@@ -581,8 +613,10 @@ show_status() {
 
 apply_bootstrap() {
   ensure_sudo
+  validate_storage_devices
   guard_version_drift
   prepare_state
+  backup_once "${STATE_FILE}" "versions.env.before-schema-${STATE_SCHEMA_VERSION}"
   check_download_endpoints
   write_state
   install_host_prerequisites
