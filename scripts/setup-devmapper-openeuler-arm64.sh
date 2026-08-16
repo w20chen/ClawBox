@@ -196,13 +196,18 @@ done
 # is part of the explicit --confirm-erase authorization.
 wipefs -a "${DATA_DEVICE}" "${METADATA_DEVICE}"
 pvcreate --yes --force "${DATA_DEVICE}" "${METADATA_DEVICE}"
-# A wedged udev leaves the empty /dev/${VG} directory behind after a
-# previous vgremove; vgcreate then fails with "already exists in
-# filesystem".  rmdir only succeeds on an empty directory, so this can
-# never touch real leftover LVs -- a non-empty directory aborts instead.
-if [[ -d "/dev/${VG}" ]] && ! rmdir "/dev/${VG}" 2>/dev/null; then
-  echo "/dev/${VG} is not empty; remove stale LVM symlinks and re-run apply" >&2
-  exit 1
+# A wedged udev leaves /dev/${VG} behind after a previous vgremove, and
+# vgcreate then fails with "already exists in filesystem".  The VG was
+# already proven absent by the vgs precheck above, so every entry inside
+# can only be a stale symlink dangling to a removed device: delete the
+# entries, then the empty directory.  If anything survives, abort with a
+# clear message instead of clobbering it.
+if [[ -d "/dev/${VG}" ]]; then
+  find "/dev/${VG}" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+  rmdir "/dev/${VG}" 2>/dev/null || {
+    echo "/dev/${VG} is not empty; remove stale LVM symlinks and re-run apply" >&2
+    exit 1
+  }
 fi
 vgcreate "${VG}" "${DATA_DEVICE}" "${METADATA_DEVICE}"
 if [[ "${DATA_SIZE}" =~ ^([0-9]+)%PVS$ ]]; then
