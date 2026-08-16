@@ -58,8 +58,18 @@ if have containerd && timeout 5 ctr version >/dev/null 2>&1; then
   grep -F "runtimes.${RUNTIME_CLASS}" <<<"${config_dump}" >/dev/null \
     && pass "containerd handler ${RUNTIME_CLASS} exists" \
     || fail "containerd handler ${RUNTIME_CLASS} is missing"
-  handler_block="$(grep -A12 -F "runtimes.${RUNTIME_CLASS}" <<<"${config_dump}" | head -13)"
-  grep -Eq 'snapshotter[[:space:]]*=[[:space:]]*"devmapper"' <<<"${handler_block}" \
+  # Extract the full handler section (header plus its nested options table),
+  # not just the first 12 lines: containerd 2.x dumps many runtime fields and
+  # the options/ConfigPath live past line 12.
+  handler_block="$(awk -v cls="${RUNTIME_CLASS}" '
+    /^\[/ {
+      if (in_block && $0 !~ cls) exit
+      if (!in_block && $0 ~ cls) in_block = 1
+    }
+    in_block { print }
+  ' <<<"${config_dump}")"
+  # containerd's config dump quotes values with single quotes; accept both.
+  grep -Eq "snapshotter[[:space:]]*=[[:space:]]*['\"]devmapper['\"]" <<<"${handler_block}" \
     && pass "handler selects devmapper" || fail "handler does not select devmapper"
   grep -F 'configuration-fc-arm64.toml' <<<"${handler_block}" >/dev/null \
     && pass "handler selects the audited Firecracker config" \
@@ -97,7 +107,7 @@ if have kubectl && kubectl cluster-info >/dev/null 2>&1; then
   kubectl get nodes -l clawbox.openai.com/firecracker-ready=true -o name 2>/dev/null | grep -q . \
     && pass "at least one node passed the Firecracker install gate" \
     || fail "no node has the Firecracker-ready label"
-  kubectl api-resources --api-group=networking.k8s.io -o name 2>/dev/null | grep -qx networkpolicies \
+  kubectl api-resources --api-group=networking.k8s.io -o name 2>/dev/null | grep -q '^networkpolicies' \
     && pass "NetworkPolicy API is available" || fail "NetworkPolicy API is unavailable"
 else
   fail "kubectl is installed and reaches Kubernetes"

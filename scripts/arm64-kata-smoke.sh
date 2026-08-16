@@ -55,8 +55,18 @@ host_command bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" --root /opt/
 host_command ctr plugins ls | awk '$1 ~ /snapshotter/ && $2 == "devmapper" && $NF == "ok" {found=1} END {exit !found}' \
   || { echo "devmapper snapshotter is not healthy" >&2; exit 1; }
 config_dump="$(host_command containerd config dump)"
-handler_block="$(grep -A12 -F "runtimes.${RUNTIME_CLASS}" <<<"${config_dump}" | head -13)"
-grep -Eq 'snapshotter[[:space:]]*=[[:space:]]*"devmapper"' <<<"${handler_block}" \
+# Extract the full handler section (header plus its nested options table),
+# not just the first 12 lines: containerd 2.x dumps many runtime fields and
+# the options/ConfigPath live past line 12.
+handler_block="$(awk -v cls="${RUNTIME_CLASS}" '
+  /^\[/ {
+    if (in_block && $0 !~ cls) exit
+    if (!in_block && $0 ~ cls) in_block = 1
+  }
+  in_block { print }
+' <<<"${config_dump}")"
+# containerd's config dump quotes values with single quotes; accept both.
+grep -Eq "snapshotter[[:space:]]*=[[:space:]]*['\"]devmapper['\"]" <<<"${handler_block}" \
   || { echo "handler does not select devmapper" >&2; exit 1; }
 grep -F 'configuration-fc-arm64.toml' <<<"${handler_block}" >/dev/null \
   || { echo "handler does not select the audited Firecracker config" >&2; exit 1; }

@@ -13,4 +13,3 @@
   root_path = '/var/lib/containerd/io.containerd.snapshotter.v1.devmapper'
   base_image_size = '64GB'
   discard_blocks = true
-  discard_unpacked_layers = false
