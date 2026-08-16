@@ -2,6 +2,16 @@
 # FC-2: production LVM thin pool for containerd.  Loop devices are forbidden.
 set -euo pipefail
 
+# This host's udev worker is wedged: default LVM/udev synchronization hangs in
+# semtimedop holding the VG lock, and devices created with --noudevsync never
+# get /dev nodes (udev never processes their events).  DM_DISABLE_UDEV is the
+# official LVM escape hatch for exactly this: it hardcodes udev_rules=0,
+# udev_sync=0 and udev_fallback=1, so LVM/libdevmapper create the device
+# nodes and /dev/<vg>/<lv> symlinks themselves, and lvconvert's internal
+# deactivate/reactivate of the metadata LV also recreates its node -- without
+# this, the metadata wipe fails with "device not cleared" (device not found).
+export DM_DISABLE_UDEV=1
+
 ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="plan"
 DATA_DEVICE=""
@@ -260,6 +270,8 @@ Before=containerd.service kubelet.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# LVM manages the /dev nodes itself; do not wait on (possibly wedged) udev at boot.
+Environment=DM_DISABLE_UDEV=1
 ExecStart=/usr/sbin/lvchange -ay ${VG}/${POOL}
 ExecStart=/usr/sbin/dmsetup info ${dm_name}
 
