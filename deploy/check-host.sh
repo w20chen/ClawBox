@@ -50,7 +50,9 @@ host_command test -c /dev/kvm -a -r /dev/kvm -a -w /dev/kvm && pass "/dev/kvm is
 grep -Eq '(^|[[:space:]])(0|1)$' /sys/module/kvm/parameters/* 2>/dev/null \
   && pass "KVM module parameters are readable" || warn "KVM module parameters could not be inspected"
 
-if have containerd && timeout 5 host_command ctr version >/dev/null 2>&1; then
+# timeout is an external binary, so it cannot invoke the host_command shell
+# function; run it inside the function so sudo executes `timeout 5 ctr version`.
+if have containerd && host_command timeout 5 ctr version >/dev/null 2>&1; then
   pass "containerd socket is reachable"
   containerd_version="$(host_command containerd --version 2>/dev/null || true)"
   grep -Eq 'containerd .* (v)?2\.' <<<"${containerd_version}" \
