@@ -262,6 +262,7 @@ validate_storage_devices() {
 guard_version_drift() {
   local key requested installed installed_schema
   local -a missing=()
+  local legacy_runtime_state=false
   sudo test -f "${STATE_FILE}" || return 0
 
   installed_schema="$(sudo awk -F= '$1 == "STATE_SCHEMA_VERSION" {print substr($0, index($0, "=") + 1)}' "${STATE_FILE}")"
@@ -276,6 +277,14 @@ guard_version_drift() {
       continue
     fi
     if [[ "${requested}" != "${installed}" ]]; then
+      if [[ "${key}" == RUNTIME_CLASS \
+        && "${installed}" == kata-qemu-runtime-rs \
+        && "${requested}" == kata-fc-arm64 ]] \
+        && ! sudo test -s "${ADMIN_CONF}" \
+        && ! sudo test -f "${STATE_DIR}/stage0-passed"; then
+        legacy_runtime_state=true
+        continue
+      fi
       die "requested ${key}=${requested}, but this host owns ${installed}; upgrades require a reviewed migration"
     fi
   done
@@ -287,6 +296,9 @@ guard_version_drift() {
       die "completed host state is missing fields (${missing[*]}); refusing an automatic migration"
     fi
     printf 'WARN: completing incomplete pre-stage0 state; missing fields: %s\n' "${missing[*]}" >&2
+  fi
+  if [[ "${legacy_runtime_state}" == true ]]; then
+    printf 'WARN: migrating uninitialized runtime state from kata-qemu-runtime-rs to kata-fc-arm64\n' >&2
   fi
 }
 
