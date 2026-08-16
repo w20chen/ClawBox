@@ -44,13 +44,25 @@ tool_image="${REGISTRY}/tool-bridge-arm64:${TAG}"
 runtime_image="${REGISTRY}/runtime-arm64:${TAG}"
 control_image="${REGISTRY}/control-plane-arm64:${TAG}"
 
-docker build --platform linux/arm64 --pull -f "${ROOT}/docker/Dockerfile.tool-bridge" \
+# Module/registry mirrors for restricted networks; defaults keep the official
+# upstreams, so plain `docker build` behaviour is unchanged.
+GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
+PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
+
+docker build --platform linux/arm64 --pull \
+  --build-arg GOPROXY="${GOPROXY}" \
+  -f "${ROOT}/docker/Dockerfile.tool-bridge" \
   -t "${tool_image}" "${ROOT}"
 docker build --platform linux/arm64 --pull --build-context clawtune="${CLAWTUNE_ROOT}" \
   --build-arg CLAWTUNE_REVISION="${CLAWTUNE_REVISION}" \
+  --build-arg NPM_REGISTRY="${NPM_REGISTRY}" \
+  --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
   -f "${ROOT}/docker/Dockerfile.runtime" \
   -t "${runtime_image}" "${ROOT}"
-docker build --platform linux/arm64 --pull -f "${ROOT}/docker/Dockerfile.control-plane" \
+docker build --platform linux/arm64 --pull \
+  --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
+  -f "${ROOT}/docker/Dockerfile.control-plane" \
   -t "${control_image}" "${ROOT}"
 
 for image in "${tool_image}" "${runtime_image}" "${control_image}"; do
