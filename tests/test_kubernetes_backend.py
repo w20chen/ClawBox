@@ -372,6 +372,7 @@ def test_production_deployment_has_only_firecracker_runtimeclass():
     assert "migrating uninitialized QEMU state to Firecracker" in bootstrap
     assert '"${installed_runtime}" == kata-qemu-runtime-rs' in bootstrap
     assert 'migrated+=("${key}:${installed}->${requested}")' in bootstrap
+    assert "--range 0-0 --retry 4 --retry-all-errors" in bootstrap
     assert '! sudo test -s "${ADMIN_CONF}"' in bootstrap
     assert 'validate_storage_devices' in bootstrap
     assert "kubeadm reset" not in bootstrap

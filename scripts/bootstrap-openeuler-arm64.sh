@@ -324,7 +324,8 @@ backup_once() {
 
 download() {
   local url="$1" destination="$2"
-  curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 600 \
+  curl -fL --retry 4 --retry-all-errors --retry-delay 2 \
+    --connect-timeout 15 --max-time 600 \
     "${url}" -o "${destination}"
 }
 
@@ -337,7 +338,10 @@ check_download_endpoints() {
     "https://ghcr.io/v2/" \
     "https://quay.io/v2/" \
     "https://${IMAGE_REPOSITORY}/v2/"; do
-    curl -ILsS --connect-timeout 10 --max-time 30 "${url}" >/dev/null \
+    # Probe with GET because some GitHub/CDN paths handle HEAD unreliably.  A
+    # registry may legitimately return 401; curl still proves the route/TLS.
+    curl -LsS --range 0-0 --retry 4 --retry-all-errors --retry-delay 2 \
+      --connect-timeout 10 --max-time 60 -o /dev/null "${url}" \
       || die "required endpoint is unreachable: ${url}"
   done
 }
