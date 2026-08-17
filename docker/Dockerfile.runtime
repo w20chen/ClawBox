@@ -29,7 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     OPENCLAW_HOME=/home/openclaw/.openclaw
 
 RUN if [ -n "${APT_MIRROR}" ]; then \
-      mirror_host="$(printf '%s' "${APT_MIRROR}" | sed -E 's|^https\?://||')"; \
+      mirror_host="${APT_MIRROR#https://}"; \
+      mirror_host="${mirror_host#http://}"; \
       sed -i -E "s|https?://deb\.debian\.org|http://${mirror_host}|g" \
         /etc/apt/sources.list.d/debian.sources \
         /etc/apt/sources.list 2>/dev/null || true; \
