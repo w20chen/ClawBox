@@ -52,7 +52,13 @@ RUN <<'EOT'
 set -e
 node -e '
     const fs = require("fs"), path = require("path");
-    const dir = "/usr/lib/node_modules/openclaw/dist";
+    const { execSync } = require("child_process");
+    const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
+    const dir = path.join(globalRoot, "openclaw", "dist");
+    if (!fs.existsSync(dir)) {
+      console.error("OPENCLAW_SANDBOX_ROOT_PATCH: no dist at " + dir);
+      process.exit(1);
+    }
     const patched = [];
     for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith(".js")) continue;
@@ -71,7 +77,9 @@ node -e '
   '
 node -e '
     const fs = require("fs"), path = require("path");
-    const dir = "/usr/lib/node_modules/openclaw/dist";
+    const { execSync } = require("child_process");
+    const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
+    const dir = path.join(globalRoot, "openclaw", "dist");
     let found = 0;
     for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith(".js")) continue;
