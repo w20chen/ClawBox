@@ -19,7 +19,7 @@ spec:
         kubernetes.io/arch: arm64
       containers:
         - name: ingester
-          image: registry.example.com/clawbox/control-plane-arm64:dev
+          image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
           imagePullPolicy: IfNotPresent
           command: ["clawbox-trace-ingester"]
           env:

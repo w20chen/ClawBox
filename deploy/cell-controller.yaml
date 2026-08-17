@@ -20,14 +20,14 @@ spec:
         kubernetes.io/arch: arm64
       containers:
         - name: controller
-          image: registry.example.com/clawbox/control-plane-arm64:dev
+          image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
           imagePullPolicy: IfNotPresent
           command: ["clawbox-cell-controller"]
           env:
             - {name: KUBERNETES_RUNTIME_CLASS, value: kata-fc-arm64}
             - {name: CLAWBOX_CELL_NAMESPACE, value: clawbox-benchmarks}
-            - {name: RUNTIME_IMAGE, value: registry.example.com/clawbox/runtime-arm64:dev}
-            - {name: TOOL_BRIDGE_IMAGE, value: registry.example.com/clawbox/tool-bridge-arm64:dev}
+            - {name: RUNTIME_IMAGE, value: 127.0.0.1:5000/clawbox/runtime-arm64:dev}
+            - {name: TOOL_BRIDGE_IMAGE, value: 127.0.0.1:5000/clawbox/tool-bridge-arm64:dev}
             - {name: TRACE_INGESTER_URL, value: http://clawbox-ingester.clawbox-system.svc:8084}
             - name: CLAWBOX_INGEST_SECRET
               valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
