@@ -42,6 +42,13 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
             seccompProfile: {type: RuntimeDefault}
+          # Dev SQLite backend needs a writable location under the
+          # read-only rootfs; replace with a PVC + postgres for production.
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
