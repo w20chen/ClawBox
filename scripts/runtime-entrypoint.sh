@@ -195,18 +195,23 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   tool_port="${TOOL_SSH_TARGET##*:}"
   # Bounded SSH: an unbounded raw ssh can stall the whole pipeline and let the
   # job's activeDeadlineSeconds kill it mid-upload (observed in 2026-08-17 E2E).
-  timeout 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+  # -k 10 guarantees the ssh dies even if it ignores SIGTERM while stuck in a
+  # syscall inside the Kata guest; otherwise `timeout` waits forever.
+  echo "[runtime] collecting patch via ssh" >&2
+  timeout -k 10 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
     -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
     'cd /testbed && git diff --binary --no-ext-diff' >"${STATE_DIR}/patch.diff" 2>"${LOG_DIR}/patch.log" || true
-  timeout 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+  echo "[runtime] collecting tool-bridge trace via ssh" >&2
+  timeout -k 10 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
     -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
     'cat /testbed/.clawbox/tool-bridge.jsonl 2>/dev/null || true' \
     >"${TRACE_DIR}/tool-bridge.jsonl" 2>"${LOG_DIR}/bridge-trace.log" || true
 
+  echo "[runtime] writing result.json" >&2
   TASK_STATE_DIR="${STATE_DIR}" SESSION_ID="${session_id}" AGENT_STATUS="${agent_status}" \
     "${CLAWTUNE_HOME}/venv/bin/python" - <<'PY'
 import json
@@ -245,6 +250,7 @@ payload = {
 (root / "result.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 PY
   touch "${STATE_DIR}/.runtime-complete"
+  echo "[runtime] result written; awaiting final upload" >&2
   upload_deadline=$((SECONDS + 300))
   while [[ ! -f "${STATE_DIR}/.upload-complete" ]]; do
     if [[ -f "${STATE_DIR}/.upload-failed" ]]; then

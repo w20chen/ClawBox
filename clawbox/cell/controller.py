@@ -237,7 +237,10 @@ class CellReconciler:
         return "Pending"
 
     def _timed_out(self, task: dict[str, Any]) -> bool:
-        timeout = int(task["spec"].get("timeoutSeconds", 1800)) + 300
+        # Cell deadline = agent budget + pipeline margin. Keep in sync with
+        # runtime_job()'s activeDeadlineSeconds (clawbox/cell/manifests.py):
+        # 600s headroom for patch collection (two bounded ssh) + final upload.
+        timeout = int(task["spec"].get("timeoutSeconds", 1800)) + 600
         started = (task.get("status") or {}).get("admittedAt")
         if not started:
             return False

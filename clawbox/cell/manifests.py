@@ -207,9 +207,12 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
     # --timeout=timeout, then patch collection + result/upload must still finish
     # before the Job's activeDeadlineSeconds. Equal values cut the pipeline at
     # the deadline (observed: RuntimeFailed/DeadlineExceeded right at the agent
-    # timeout). The controller's cell timeout is already timeout+300, so giving
-    # the Job the same deadline keeps the budgets aligned.
-    pipeline_grace_seconds = 300
+    # timeout). 300s proved too tight (2026-08-17: a stalled patch-collection
+    # ssh blew the margin and the cell hit CellDeadlineExceeded while the
+    # entrypoint was still alive); 600s gives the post-agent phase headroom for
+    # two bounded ssh steps (up to ~130s each with timeout -k) plus the final
+    # upload. Keep in sync with CellReconciler._timed_out.
+    pipeline_grace_seconds = 600
     state_mount = {"name": "state", "mountPath": "/state"}
     llm_env = [
         _secret_env(llm_secret, "OPENAI_API_KEY", "llm-api-key"),
