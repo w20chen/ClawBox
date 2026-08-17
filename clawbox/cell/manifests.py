@@ -137,7 +137,13 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             "kubernetes.io/arch": "arm64",
             "clawbox.openai.com/firecracker-ready": "true",
         },
-        "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001,
+        # Kata's guest agent writes Secret volume data dirs with mode 0000
+        # (probe-verified: `..data` -> `d---------`), so a non-root uid gets
+        # EACCES traversing them. Run as root inside the microVM (guest root
+        # != host root; the microVM is the isolation boundary). GIT_CONFIG_*
+        # skips git "dubious ownership" errors when task commands run as root
+        # over the uid-10001-owned /testbed tree.
+        "securityContext": {"runAsUser": 0, "runAsGroup": 0, "fsGroup": 10001,
                             "seccompProfile": {"type": "RuntimeDefault"}},
         # Kata on this host has no shared filesystem and cannot share volumes
         # across containers (probes: any init+task pair mounting volumes fails
@@ -155,6 +161,9 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
                 {"name": "TOOL_BRIDGE_LOG_PATH", "value": "/testbed/.clawbox/tool-bridge.jsonl"},
                 {"name": "TOOL_EXEC_TIMEOUT_SECONDS", "value": str(spec.get("commandTimeoutSeconds", 300))},
                 {"name": "TOOL_OUTPUT_LIMIT_BYTES", "value": str(spec.get("outputLimitBytes", 4 * 1024**2))},
+                {"name": "GIT_CONFIG_COUNT", "value": "1"},
+                {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
+                {"name": "GIT_CONFIG_VALUE_0", "value": "*"},
             ],
             "readinessProbe": {"tcpSocket": {"port": "ssh"}, "periodSeconds": 2, "failureThreshold": 30},
             "resources": resources(size.tool),
@@ -214,7 +223,10 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             "kubernetes.io/arch": "arm64",
             "clawbox.openai.com/firecracker-ready": "true",
         },
-        "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001,
+        # Same root-run rationale as the tool pod: Kata's agent writes Secret
+        # and ConfigMap volume data dirs with mode 0000, unreadable by uid
+        # 10001. Root inside the microVM reads them (and /prompt) fine.
+        "securityContext": {"runAsUser": 0, "runAsGroup": 0, "fsGroup": 10001,
                             "seccompProfile": {"type": "RuntimeDefault"}},
         # Kata on this host cannot share volumes across containers, so the
         # runtime Job is a SINGLE container (no sidecar init): prompt and SSH
@@ -232,6 +244,9 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
                 {"name": "TASK_TIMEOUT_SECONDS", "value": str(timeout)},
                 {"name": "RESOURCE_PROFILE", "value": str(spec.get("profile", "small"))},
                 {"name": "TOOL_SSH_TARGET", "value": f"executor@{name}-tool:2222"},
+                {"name": "GIT_CONFIG_COUNT", "value": "1"},
+                {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
+                {"name": "GIT_CONFIG_VALUE_0", "value": "*"},
             ],
             "resources": resources(size.runtime),
             "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
