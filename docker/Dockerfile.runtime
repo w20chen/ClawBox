@@ -41,8 +41,16 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
       python3 python3-dev python3-pip python3-venv \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g "openclaw@${OPENCLAW_VERSION}" --registry="${NPM_REGISTRY}" \
- && openclaw --version \
- && node -e '
+ && openclaw --version
+
+# Patch openclaw so the SSH sandbox container root is workspaceRoot itself
+# (/testbed) instead of <workspaceRoot>/openclaw-ssh-<scope>-<hash>/workspace.
+# Without this, read/write/edit tools reject every absolute /testbed path with
+# "Sandbox path escapes allowed mounts". The entrypoint pre-creates the
+# per-scope marker dir so ensureRuntime skips its destructive workspace copy.
+RUN <<'EOT'
+set -e
+node -e '
     const fs = require("fs"), path = require("path");
     const dir = "/usr/lib/node_modules/openclaw/dist";
     const patched = [];
@@ -61,6 +69,21 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
     }
     console.log("OPENCLAW_SANDBOX_ROOT_PATCH applied to: " + patched.join(", "));
   '
+node -e '
+    const fs = require("fs"), path = require("path");
+    const dir = "/usr/lib/node_modules/openclaw/dist";
+    let found = 0;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".js")) continue;
+      if (fs.readFileSync(path.join(dir, f), "utf8").includes("remoteWorkspaceDir: workspaceRoot")) found++;
+    }
+    if (!found) {
+      console.error("OPENCLAW_SANDBOX_ROOT_PATCH verify: replacement missing");
+      process.exit(1);
+    }
+    console.log("OPENCLAW_SANDBOX_ROOT_PATCH verify: OK (" + found + " file(s))");
+  '
+EOT
 
 WORKDIR /opt/clawtune
 COPY --from=clawtune services/sidecar ./services/sidecar
