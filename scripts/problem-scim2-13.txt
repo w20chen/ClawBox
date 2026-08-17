@@ -1,0 +1,13 @@
+It would be nice to return a NamedTuple instead of a tuple here:
+src/scim2_filter_parser/transpilers/sql.py (in the method that builds the
+attr path tuple)
+This way parts of each path could be accessed by name rather than by index
+in the tuple.
+
+Concretely: in src/scim2_filter_parser/transpilers/sql.py, the attr path is
+currently built as a plain 3-tuple (attr_name_value, sub_attr_value,
+uri_value). Define a namedtuple, e.g. AttrPath with fields
+('attr_name', 'sub_attr', 'uri'), and build the attr path with it so each
+part can be accessed by name. Keep the existing behavior (the attr path is
+still appended to self.attr_paths and passed to self.attr_map) and make sure
+the existing test suite still passes. Run the tests in tests/ to verify.
