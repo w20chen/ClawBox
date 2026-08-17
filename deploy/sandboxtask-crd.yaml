@@ -39,7 +39,6 @@ spec:
           properties:
             spec:
               type: object
-              additionalProperties: false
               x-kubernetes-validations:
                 - rule: "self == oldSelf"
                   message: "SandboxTask spec is immutable; create a new task for a retry"
