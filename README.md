@@ -271,8 +271,9 @@ kubectl get pods -A                       # control plane 1/1 Running
 This is the exact, validated sequence that got a single agent task to run the
 full chain (Tool Bridge → runtime sidecar → OpenClaw → real LLM → agent SSH into
 `/testbed` → patch + trace upload). Run these on the target Kunpeng host. A
-working run takes ~5–15 minutes from `single-image-scale.sh` start to the cell
-reaching `Succeeded`.
+real task (`--timeout-seconds 1800`) takes ~21 min from `single-image-scale.sh`
+start to `Succeeded` (validated `real001-001`); a debug run (`--timeout-seconds
+480`) finishes in ~13 min but usually produces no patch.
 
 ### 6.0 Prerequisites (already in place on the validated host)
 
@@ -291,8 +292,18 @@ reaching `Succeeded`.
 ### 6.1 Sync the code
 
 ```bash
-cd ~/ClawBox && git pull   # or scp changed files, then verify:
-grep -n 'clawtune-sidecar-entrypoint' scripts/runtime-entrypoint.sh   # expect ≥1 hit
+cd ~/ClawBox
+# The target's global git config may point at an offline SOCKS proxy; bypass it
+# (a plain `git pull` will hang or fail). If local CRLF edits exist, a clean
+# reset to origin/main is safest (CRLF in *.sh shebangs breaks scripts):
+git -c http.proxy= -c https.proxy= fetch origin main
+git reset --hard origin/main
+git log --oneline -1   # expect the newest commit
+
+# Verify the two load-bearing fixes are present in the source:
+grep -c 'clawtune-sidecar-entrypoint' scripts/runtime-entrypoint.sh   # expect ≥1
+grep -c 'pre-creating sandbox runtime root' scripts/runtime-entrypoint.sh  # expect ≥1 (openclaw marker)
+grep -c 'remoteWorkspaceDir: workspaceRoot' docker/Dockerfile.runtime  # expect ≥1 (openclaw patch)
 grep -n 'KUBERNETES_IMAGE_PULL_POLICY' deploy/cell-controller.yaml    # expect Always
 ```
 
@@ -323,8 +334,12 @@ REGISTRY=127.0.0.1:5000/clawbox PUSH=1 CLAWTUNE_ROOT=~/ClawTune \
   bash scripts/build-kubernetes-images.sh
 ```
 
-Only `runtime-entrypoint.sh` changed? Rebuild just the runtime image (cached
-layers make it fast):
+Only `runtime-entrypoint.sh` / `Dockerfile.runtime` changed? Rebuild just the
+runtime image (cached layers make it fast). The Dockerfile bakes in the
+**openclaw sandbox-root patch** (heredoc `RUN` that rewrites the installed
+`openclaw` bundle so the SSH sandbox root is `/testbed` — required for the
+agent's read/write/edit tools to touch the task source; see §6.8). If the
+patch step fails the build fails (`process.exit(1)`), which is intended.
 
 ```bash
 cd ~/ClawBox
@@ -333,9 +348,13 @@ docker build --platform linux/arm64 --pull --build-context clawtune=~/ClawTune \
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
   --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn \
   -f docker/Dockerfile.runtime -t 127.0.0.1:5000/clawbox/runtime-arm64:dev .
-# verify the fix is inside the image (note: path has NO .sh suffix in the image)
-docker run --rm --entrypoint /bin/sh 127.0.0.1:5000/clawbox/runtime-arm64:dev \
-  -c 'grep -c clawtune-sidecar-entrypoint /usr/local/bin/runtime-entrypoint'
+# verify both fixes are inside the image
+# (entrypoint path has NO .sh suffix in the image)
+docker run --rm --entrypoint /bin/sh 127.0.0.1:5000/clawbox/runtime-arm64:dev -c '
+  grep -c clawtune-sidecar-entrypoint /usr/local/bin/runtime-entrypoint
+  D="$(npm root -g)/openclaw/dist"
+  grep -l "remoteWorkspaceDir: workspaceRoot" "$D"/*.js    # expect one file
+  grep -c pre-creating /usr/local/bin/runtime-entrypoint'
 docker push 127.0.0.1:5000/clawbox/runtime-arm64:dev
 ```
 
@@ -379,49 +398,72 @@ creation — a cell started before the patch keeps the old values.
 
 ### 6.5 Run one cell
 
+**Always use a UNIQUE `--prefix`** per run (see the 409 gotcha in §6.7). The
+default prefix is `single`, which collides with any earlier `single-001` result
+already stored in the ingester and makes the final result upload fail with 409.
+
 ```bash
 cd ~/ClawBox
 export NO_PROXY=localhost,127.0.0.1,193.124.7.2,10.96.0.0/12
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+PREFIX="run$(date +%s)"          # unique per run — do not reuse task names
 bash scripts/single-image-scale.sh \
   --tool-image 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:bdf4637498a4b765f0e91333ff292c226bd011a31c220d76609daff43e2c39fd \
-  --problem-file /tmp/problem.txt \
+  --problem-file scripts/problem-scim2-13.txt \
+  --prefix "${PREFIX}" \
   --llm-egress-cidr 0.0.0.0/0 \
-  --count 1 --wait-seconds 1800
+  --count 1 --timeout-seconds 1800 --wait-seconds 3900
 ```
 
 - `--llm-egress-cidr 0.0.0.0/0` opens TCP 443 egress for the DeepSeek API on the
   runtime NetworkPolicy. Fine for a single-task validation; pin to the provider's
   CIDR for production.
-- **Debug iterations**: pass `--timeout-seconds 480` (or any short budget) so the
-  whole cell fails/succeeds fast instead of waiting 30 min. The cell spec
-  `timeoutSeconds` bounds the runtime Job (`activeDeadlineSeconds`) and the
-  agent's `--timeout`; the entrypoint also reaps a lingering OpenClaw process
-  once `final-answer.json` is written (grace 30 s), so a run that finishes
-  writing the answer is not blocked by a non-exiting CLI.
+- **Budget (`--timeout-seconds`)**:
+  - Real task (needs a non-empty patch): use `1800`+ — a real run takes ~21 min
+    to `Succeeded` (validated `real001-001`). `480` is too short for a real task
+    (the agent is still exploring when the LLM request gets cut off).
+  - Debug/pipeline check only: `480` makes the whole cell fail/succeed fast.
+  - The cell `timeoutSeconds` bounds the runtime Job (`activeDeadlineSeconds`)
+    and the agent's `--timeout`; the entrypoint reaps a lingering OpenClaw
+    process once `final-answer.json` is written (grace 30 s).
+- **Problem statement matters a lot**: a vague prompt ("Fix the reported
+  issue…") makes the agent spend the whole budget exploring. Use the real
+  SWE-ReBench issue text (repo copy: `scripts/problem-scim2-13.txt`). With the
+  real statement the agent locates and fixes the bug in ~4 min.
 - The task image digest above is the validated SWE-ReBench arm64 image with the
   Tool Bridge baked in (`15five__scim2-filter-parser-13`, `/testbed` chowned to
   10001). Do not use the older `ef4a5559…` digest (no bridge).
+- **Expected startup log noise** (harmless): the script's `ctr pre-pull` and
+  devmapper status print `sudo: a password is required` (no passwordless sudo);
+  the runtime pod logs `pre-creating sandbox runtime root …` then
+  `runtime-root-ok` **and** `WARN: could not pre-create sandbox runtime root`
+  (the intermittent runtime→tool SSH 255 — the marker dir is still created, so
+  this is benign).
 
 ### 6.6 Success criteria
 
-1. `kubectl get sandboxtasks -n clawbox-benchmarks` → `Succeeded`/`Cleaned` with
-   `outcome=Succeeded`.
+1. `kubectl get sandboxtasks -n clawbox-benchmarks | grep <prefix>` →
+   `Succeeded`/`Cleaned` with `outcome=Succeeded`.
 2. Runtime pod (`kubectl logs <runtime-pod> -n clawbox-benchmarks`) shows the
    milestones in order:
    `starting clawtune sidecar in-process (port 8765)` → `ready=true` →
-   agent turns with `model-fetch … status=200` and `tool exec: ok` (agent is
-   really SSHing into `/testbed`).
+   `pre-creating sandbox runtime root …` → `runtime-root-ok` → agent turns with
+   `model-fetch … status=200` and `tool exec/edit: ok` (agent is really SSHing
+   into `/testbed`).
 3. Inside the runtime pod: `final-answer.json` + `result.json` written,
    `logs/agent.log` shows the working session, `traces/session-*.jsonl` growing.
 4. The runtime Job exits 0 after the sidecar uploads result+trace to the ingester
    (`.upload-complete`), and the controller transitions
    `RuntimeRunning → Collecting → Succeeded (ArtifactsDurable)`.
+5. **Real-task success** — verify the ingester stored a non-empty patch:
+   `bash /tmp/verify-read-fix.sh <task_id>` → expect `status: succeeded`,
+   `patch_status: present`, `patch len > 0`, `escapes count: 0`.
 
 Logs live under `/state/<task>/logs/` (agent, sidecar, onboard, plugin) inside
 the runtime pod. The controller cleans child pods ~10–16 s after a failure, so
 for debugging either watch live (`kubectl logs -f`) or run a background watcher
-that snapshots each pod's logs to `/tmp` before cleanup.
+(`CLAWBOX_WATCH_SECONDS=N bash /tmp/start-watcher.sh`, snapshots pod logs to
+`/tmp` before cleanup).
 
 ### 6.7 Quick failure diagnosis
 
@@ -433,6 +475,64 @@ that snapshots each pod's logs to `/tmp` before cleanup.
 | Tool log: `ssh handshake failed … EOF` every 2 s | Benign — that's the kubelet `tcpSocket` readiness probe hitting port 2222 |
 | Cell stays `Queued` | Node not labeled `firecracker-ready`, or cell budget unavailable |
 | `ctr pre-pull` / devmapper sudo errors in the script | Expected without passwordless sudo; non-fatal for low counts (§6.0) |
+| **Final upload fails, cell `Failed` with `.upload-failed`** | **Task name reused.** The ingester result is immutable (`task_id` primary key, first write wins); rerunning the same name with different content → `POST /v1/tasks/<id>/result` → 409. **Always use a unique `--prefix`** (§6.5) |
+| agent read/write/edit fails: `Sandbox path escapes allowed mounts` | openclaw sandbox-root patch missing — rebuild runtime image (§6.2) and verify `remoteWorkspaceDir: workspaceRoot` is inside it |
+| runtime pod logs `WARN: could not pre-create sandbox runtime root` right after `runtime-root-ok` | Benign — the intermittent runtime→tool SSH 255; the marker dir is already created |
+| Cell `Succeeded` but `patch_status: empty` | The agent ran out of budget before editing, or the problem statement was too vague. Give `--timeout-seconds 1800+` and use the real issue text (§6.5) |
+| Agent spends the whole run on environment setup | The task image's default python lacks test deps (`sly`/`django`); the real env is `/opt/miniconda3/envs/testbed/bin/python`. Consider preinstalling, or hint it in the problem text |
+
+### 6.8 The openclaw read/write tool fix (validated `real001-001`)
+
+**Why it was needed**: openclaw's SSH sandbox exposes only one container mount,
+`remoteWorkspaceDir = <workspaceRoot>/openclaw-ssh-<scope>-<hash>/workspace`
+(`/testbed/openclaw-ssh-shared-8198076c/workspace`), and its path check is a
+*string* prefix test — so the agent's `read`/`write`/`edit` on absolute
+`/testbed/src/...` paths failed with `Sandbox path escapes allowed mounts`
+(exec always worked). A symlink cannot fix it; only making the mount root
+itself `/testbed` works.
+
+**Fix (already baked into the runtime image)**:
+1. `docker/Dockerfile.runtime` patches the installed openclaw bundle so
+   `remoteWorkspaceDir = workspaceRoot` (i.e. `/testbed`).
+2. `scripts/runtime-entrypoint.sh` pre-creates the per-scope marker dir
+   `/testbed/openclaw-ssh-shared-8198076c` on the tool VM before the agent
+   starts — this makes openclaw's `ensureRuntime` guard skip its destructive
+   "replace remote workspace from local" copy (which would otherwise wipe
+   `/testbed`). See §6.2 for rebuild/verify.
+
+**Validated result (2026-08-17)**: cell `real001-001` (real issue text, 1800 s
+budget) reached `Cleaned/Succeeded` in 21 min; the agent used the **read** tool
+on `/testbed/src/scim2_filter_parser/transpilers/sql.py` and the **edit** tool
+(`edit: ok in 1650ms`); the uploaded result has `status: succeeded`,
+`patch_status: present`, `patch len = 1175` (semantically identical to the gold
+PR #13 `AttrPath` namedtuple fix), `final_answer` 13329 B, `escapes count = 0`.
+
+### 6.9 Driving the target from a Windows laptop (PowerShell)
+
+The validated host is reached over SSH from PowerShell. Keep these rules to
+avoid the quoting failures that waste the most time:
+
+- **Never inline complex commands with nested quotes** (`ssh host "…"` plus
+  inner `"`/`'`/`$()` breaks). Write a small script file, `scp` it, then run:
+  ```powershell
+  scp .\scripts\check-prefix.sh weitianc@193.124.7.2:/tmp/check-prefix.sh
+  ssh weitianc@193.124.7.2 "bash /tmp/check-prefix.sh run123"
+  ```
+- PowerShell expands `$(...)` before SSH sees it — pass unique prefixes as
+  literals (`--prefix run123`) or compute them on the target.
+- Remote `git`/`kubectl` need the proxy env unset
+  (`export NO_PROXY=localhost,127.0.0.1,193.124.7.2,10.96.0.0/12; unset
+  http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY`).
+- Helper scripts (all in `scripts/`; scp to `/tmp` on the target then
+  `bash /tmp/<name>`): `check-prefix.sh <prefix>` (cell/pod/log snapshot),
+  `check-agent-log.sh <prefix>` (agent tool activity),
+  `verify-read-fix.sh <task_id>` (ingester result: status/patch/escapes),
+  `dump-result.sh <task_id>`, `dump-answer.sh <task_id>`,
+  `diag-ingester.sh` (all ingester rows), `start-watcher.sh` (background log
+  snapshot, copy from `.tmp-remote/` on the target or recreate).
+- The laptop's own SSH connection can drop intermittently; commands that
+  finished on the target keep running — re-ssh and re-check, don't restart the
+  run.
 
 ## Local verification
 
