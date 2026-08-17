@@ -48,17 +48,69 @@ bash deploy/check-host.sh --runtime-class kata-fc-arm64
 bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 ```
 
-Only after the last two checks pass should a node be labeled `clawbox.openai.com/firecracker-ready=true`. See [docs/OPENEUER_ARM64.md](docs/OPENEUER_ARM64.md) for detailed steps and rollback boundaries.
+Only after the last two checks pass should a node be labeled `clawbox.openai.com/firecracker-ready=true` (the bootstrap labels it automatically; for a manual run):
+
+```bash
+kubectl label node "$(hostname)" clawbox.openai.com/firecracker-ready=true
+```
+
+The live smoke gate (`arm64-kata-smoke.sh`) is the authoritative FC-3/FC-4 check: it launches two `kata-fc-arm64` Pods (tool + runtime) and one runc attacker Pod in a throwaway namespace, then verifies arm64 guest boot IDs, Runtime→Tool networking through the Service, attacker isolation via NetworkPolicies, Firecracker-only host processes, and devmapper snapshot reclamation. Both `check-host.sh` and the smoke script are safe to run as an unprivileged user (privileged probes fall back to passwordless `sudo`). The smoke image contract is `busybox:1.36` (default) — it must provide `/bin/sh`, `uname`, busybox `httpd` and `wget`; do **not** switch to `alpine:3.22`, whose busybox build drops the `httpd` applet (tool container exits 127 with `httpd: applet not found`).
+
+See [docs/OPENEUER_ARM64.md](docs/OPENEUER_ARM64.md) for detailed steps and rollback boundaries, and [docs/AGENT_HANDOFF_2026-08-17.md](docs/AGENT_HANDOFF_2026-08-17.md) for the validated target-machine record (FC-0 18/18, host gate 19/19, live smoke pass) plus the operational incidents and fixes.
+
+### 1.1 Local image registry and Buildx (single-node setup)
+
+A single-node cluster can build and pull images through a registry on its own loopback. Do this once per host, before building images:
+
+```bash
+# 1) Install Buildx — the image Dockerfiles use BuildKit-only features
+#    (`# syntax=docker/dockerfile:1`, `--platform=$BUILDPLATFORM`); the legacy
+#    builder fails with `invalid platform ""`. openEuler has no
+#    docker-buildx-plugin package, so install the official arm64 binary:
+docker buildx version >/dev/null 2>&1 || {
+  mkdir -p ~/.docker/cli-plugins
+  curl -fsSL https://github.com/docker/buildx/releases/download/v0.15.1/buildx-v0.15.1.linux-arm64 \
+    -o ~/.docker/cli-plugins/docker-buildx
+  chmod +x ~/.docker/cli-plugins/docker-buildx
+}
+docker buildx version
+
+# 2) Run a loopback registry (Docker must be able to run containers)
+sudo docker rm -f clawbox-registry 2>/dev/null || true
+sudo docker run -d --name clawbox-registry --restart=always \
+  -p 127.0.0.1:5000:5000 registry:2
+curl -s http://127.0.0.1:5000/v2/ && echo " registry v2 ok"
+
+# 3) containerd trust for 127.0.0.1:5000 is ALREADY in the bootstrap-generated
+#    config. Verify it — do NOT append it again: appending a table that already
+#    exists crashes containerd with `toml: table ... already exists`.
+sudo grep -n -A3 '127.0.0.1:5000' /etc/containerd/config.toml
+
+# 4) End-to-end proof: docker push → kubelet-side (containerd/crictl) pull
+docker tag busybox:1.36 127.0.0.1:5000/clawbox/test:busybox
+docker push 127.0.0.1:5000/clawbox/test:busybox
+sudo crictl pull 127.0.0.1:5000/clawbox/test:busybox && echo "crictl pull OK"
+sudo crictl rmi 127.0.0.1:5000/clawbox/test:busybox
+```
+
+After this, build and push with `REGISTRY=127.0.0.1:5000/clawbox`.
 
 ## 2. ARM64 images
 
-All builds must run on a native ARM64 Docker daemon; detection of a foreign-architecture binfmt handler fails the build outright.
+All builds must run on a native ARM64 Docker daemon; detection of a foreign-architecture binfmt handler fails the build outright. The builds need Go, npm and PyPI reachable from inside the build containers; on restricted networks export mirrors first (`build-kubernetes-images.sh` forwards `GOPROXY`, `NPM_REGISTRY` and `PIP_INDEX_URL` as build args, defaulting to the official upstreams):
 
 ```bash
-REGISTRY=registry.example.com/clawbox PUSH=1 \
-  CLAWTUNE_ROOT=/src/ClawTune \
+export GOPROXY=https://goproxy.cn,direct            # proxy.golang.org times out from CN hosts
+export NPM_REGISTRY=https://registry.npmmirror.com
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export HF_ENDPOINT=https://hf-mirror.com            # for the SWE-ReBench dataset download
+
+REGISTRY=127.0.0.1:5000/clawbox PUSH=1 \
+  CLAWTUNE_ROOT=~/ClawTune \
   bash scripts/build-kubernetes-images.sh
 ```
+
+`validate_clawtune_integration.py` must pass first; it validates the ClawTune checkout layout, the ClawTune plugin, the sidecar package, and required assets.
 
 The 128 SWE-ReBench images are built from the install recipes in the full dataset and a pinned SWE-bench fork. First pin the fork to the factory default commit:
 
@@ -145,6 +197,71 @@ bash scripts/scale-swe-rebench.sh \
 ```
 
 Load testing ramps in fixed steps of `1, 2, 4, 8, 16, 32` and stops on the first task failure or a thin-pool pressure gate failure. See [docs/IMPLEMENTATION_MAPPING.md](docs/IMPLEMENTATION_MAPPING.md) for an index of architecture and implementation files.
+
+## 5. Target-machine operations and troubleshooting
+
+These are the incidents that actually occur on a Kunpeng/openEuler single node, ordered by likelihood. Full evidence and fixes are in [docs/AGENT_HANDOFF_2026-08-17.md](docs/AGENT_HANDOFF_2026-08-17.md).
+
+### 5.1 Restarting containerd takes down the control plane and orphans VMs
+
+`containerd.service` runs with systemd `KillMode=control-group`, so `systemctl restart containerd` kills every runc container in the service cgroup — including the static control-plane Pods (etcd, kube-apiserver, ...). Kata shims and Firecracker VMs escape the cgroup kill and survive as orphans.
+
+1. kubelet re-creates the static Pods automatically within ~60-90 s; do not panic about `CrashLoopBackOff` immediately after a restart.
+2. If `kube-apiserver` stays down and etcd reports `listen ...:2380: bind: address already in use`, an **orphaned control-plane process** from before the restart is still holding the port:
+
+```bash
+# pkill matches process NAMES, which are truncated to 15 chars — use -f for long names
+sudo pkill -9 -f 'kube-controller-manager' || true
+sudo pkill -9 etcd || true
+sudo pkill -9 kube-apiserver || true
+sudo pkill -9 kube-scheduler || true
+sudo ss -ltnp | grep -E ':(2379|2380|6443|10257|10259)' || echo "ports free"
+sudo systemctl restart kubelet      # clears the 5m CrashLoopBackOff backoff
+```
+
+### 5.2 Leaked Kata VMs from failed smoke runs
+
+Failed smoke runs can leave sandboxes behind; because shims escape the cgroup kill they survive containerd restarts and accumulate (observed: ~490 kata shims + 244 Firecrackers). Symptoms: `docker run` fails with shim `connection refused`, hundreds of `containerd-shim-kata-v2` / `firecracker` processes in `ps`. Cleanup:
+
+```bash
+# crictl -o json returns {"items":[...]}, NOT a bare list
+sudo crictl pods -o json | python3 -c '
+import json,sys
+for p in json.load(sys.stdin)["items"]:
+    if p.get("metadata",{}).get("namespace","") != "kube-system":
+        print(p["id"])' > /tmp/leak-pods
+sudo crictl rmp -f $(cat /tmp/leak-pods) 2>/dev/null || true
+sleep 10
+sudo pkill -9 -f 'containerd-shim-kata-v2' || true
+sudo pkill -9 -f jailer || true
+sudo pkill -9 -f firecracker || true
+ps -eo args | grep -c '[f]irecracker'   # expect 0
+```
+
+### 5.3 Editing the containerd config
+
+The bootstrap-generated config (v4) already contains `[plugins."io.containerd.cri.v1".registry]` (including the loopback trust) and many other tables. **Never append a table that already exists** — TOML rejects it and containerd will not start. Before any restart, validate that the config parses:
+
+```bash
+sudo grep -n -A3 '127.0.0.1:5000' /etc/containerd/config.toml   # inspect before adding
+sudo containerd config dump >/dev/null && echo "config parse OK"  # preflight
+sudo systemctl restart containerd
+```
+
+### 5.4 Image build failures on restricted networks
+
+- `go mod download` timeout → export `GOPROXY` (see §2).
+- `invalid platform ""` from the legacy builder → install Buildx (see §1.1).
+- `npm ci` / `pip install` timeouts → export `NPM_REGISTRY` / `PIP_INDEX_URL` (see §2).
+
+### 5.5 Pre-flight before touching anything
+
+```bash
+sudo systemctl is-active containerd kubelet docker
+kubectl get nodes
+ps -eo args | grep -c '[f]irecracker'     # 0 with no running Cells
+kubectl get pods -A                       # control plane 1/1 Running
+```
 
 ## Local verification
 
