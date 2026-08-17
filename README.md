@@ -152,6 +152,9 @@ Before reading Parquet or remote datasets from Hugging Face, install the optiona
 
 ## 3. Control plane and tasks
 
+> For the exact, validated single-task run (real LLM, local registry, all
+> gotchas), follow **§6 "Run one agent task end-to-end"** first.
+
 Replace the example image names with real digests/tags and create the `clawbox-control-plane` and `clawbox-llm` Secrets, then deploy:
 
 ```bash
@@ -262,6 +265,168 @@ kubectl get nodes
 ps -eo args | grep -c '[f]irecracker'     # 0 with no running Cells
 kubectl get pods -A                       # control plane 1/1 Running
 ```
+
+## 6. Run one agent task end-to-end (validated 2026-08-17)
+
+This is the exact, validated sequence that got a single agent task to run the
+full chain (Tool Bridge → runtime sidecar → OpenClaw → real LLM → agent SSH into
+`/testbed` → patch + trace upload). Run these on the target Kunpeng host. A
+working run takes ~5–15 minutes from `single-image-scale.sh` start to the cell
+reaching `Succeeded`.
+
+### 6.0 Prerequisites (already in place on the validated host)
+
+- Cluster ready, node labeled `clawbox.openai.com/firecracker-ready=true`,
+  FC gates passed (§1), loopback registry `127.0.0.1:5000` up (§1.1).
+- `~/ClawBox` and `~/ClawTune` checkouts on the target.
+- Shell proxy note: any `kubectl`/k8s-client command needs the proxy env unset
+  (`export NO_PROXY=localhost,127.0.0.1,193.124.7.2,10.96.0.0/12; unset
+  http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY`), or
+  kubectl routes `193.124.7.2:6443` through the SOCKS proxy and times out.
+- Non-interactive SSH has **no passwordless sudo** on the validated host: the
+  script's `ctr` pre-pull and devmapper status print sudo errors. These are
+  best-effort and non-fatal; the controller's serialized admission covers the
+  same-image unpack race for low cell counts.
+
+### 6.1 Sync the code
+
+```bash
+cd ~/ClawBox && git pull   # or scp changed files, then verify:
+grep -n 'clawtune-sidecar-entrypoint' scripts/runtime-entrypoint.sh   # expect ≥1 hit
+grep -n 'KUBERNETES_IMAGE_PULL_POLICY' deploy/cell-controller.yaml    # expect Always
+```
+
+Two fixes are load-bearing — do not regress them:
+
+1. **Runtime Job is a single container** (Kata cannot share volumes across
+   containers on this host), so the clawtune sidecar runs **in-process**:
+   `scripts/runtime-entrypoint.sh` starts
+   `/usr/local/bin/clawtune-sidecar-entrypoint` in the background before the
+   `127.0.0.1:8765/health/ready` wait. Without this the runtime exits ~60 s in
+   with `curl: Failed to connect to 127.0.0.1 port 8765` → `RuntimeFailed`.
+2. **Cell containers must re-pull `:dev` images**: `deploy/cell-controller.yaml`
+   sets `KUBERNETES_IMAGE_PULL_POLICY=Always` (default is `IfNotPresent`, which
+   silently reuses a stale locally-cached `:dev` image — observed as the runtime
+   pod running the pre-fix digest). Verify the live deployment too:
+   `kubectl -n clawbox-system set env deployment/clawbox-cell-controller KUBERNETES_IMAGE_PULL_POLICY=Always`
+   then `kubectl -n clawbox-system rollout restart deployment/clawbox-cell-controller`.
+
+### 6.2 Build and push the three images (native arm64 daemon)
+
+```bash
+cd ~/ClawBox
+export GOPROXY=https://goproxy.cn,direct
+export NPM_REGISTRY=https://registry.npmmirror.com
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
+REGISTRY=127.0.0.1:5000/clawbox PUSH=1 CLAWTUNE_ROOT=~/ClawTune \
+  bash scripts/build-kubernetes-images.sh
+```
+
+Only `runtime-entrypoint.sh` changed? Rebuild just the runtime image (cached
+layers make it fast):
+
+```bash
+cd ~/ClawBox
+docker build --platform linux/arm64 --pull --build-context clawtune=~/ClawTune \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn \
+  -f docker/Dockerfile.runtime -t 127.0.0.1:5000/clawbox/runtime-arm64:dev .
+# verify the fix is inside the image (note: path has NO .sh suffix in the image)
+docker run --rm --entrypoint /bin/sh 127.0.0.1:5000/clawbox/runtime-arm64:dev \
+  -c 'grep -c clawtune-sidecar-entrypoint /usr/local/bin/runtime-entrypoint'
+docker push 127.0.0.1:5000/clawbox/runtime-arm64:dev
+```
+
+### 6.3 Deploy / update the control plane
+
+```bash
+cd ~/ClawBox
+kubectl apply -f deploy/sandboxtask-crd.yaml
+kubectl apply -f deploy/control-plane-rbac.yaml
+kubectl apply -f deploy/trace-ingester.yaml
+python3 scripts/collect-node-capacity.py --configmap | kubectl apply -f -
+kubectl apply -f deploy/cell-controller.yaml
+kubectl -n clawbox-system rollout status deployment/clawbox-cell-controller --timeout=120s
+```
+
+### 6.4 Configure the LLM secret (`clawbox-llm`) with a real endpoint
+
+The default secret is placeholder-only (`https://api.example.com/v1`,
+`placeholder-model`) — the agent fails at the first LLM call. Set real values
+(DeepSeek is reachable directly from the host; OpenAI/Anthropic are not):
+
+```bash
+kubectl -n clawbox-benchmarks patch secret clawbox-llm --type=merge -p '{
+  "stringData": {
+    "llm-upstream-base-url": "https://api.deepseek.com",
+    "llm-model": "deepseek-v4-flash",
+    "openclaw-model-ref": "vllm/deepseek-v4-flash",
+    "llm-api-key": "PLACEHOLDER"
+  }
+}'
+# inject the real key — read server-side from the key file, never through chat:
+kubectl -n clawbox-benchmarks patch secret clawbox-llm --type=merge \
+  -p "{\"stringData\":{\"llm-api-key\":\"$(cat ~/ClawTune/swe_rebench/llm_api_key.txt)\"}}"
+# verify (key masked)
+kubectl -n clawbox-benchmarks get secret clawbox-llm -o jsonpath='{.data.llm-upstream-base-url}' | base64 -d; echo
+```
+
+The runtime opens the model as `deepseek-v4-flash` (sidecar rewrites
+`/v1/models`), upstreams to DeepSeek. The runtime pod reads this secret at
+creation — a cell started before the patch keeps the old values.
+
+### 6.5 Run one cell
+
+```bash
+cd ~/ClawBox
+export NO_PROXY=localhost,127.0.0.1,193.124.7.2,10.96.0.0/12
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+bash scripts/single-image-scale.sh \
+  --tool-image 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:bdf4637498a4b765f0e91333ff292c226bd011a31c220d76609daff43e2c39fd \
+  --problem-file /tmp/problem.txt \
+  --llm-egress-cidr 0.0.0.0/0 \
+  --count 1 --wait-seconds 1800
+```
+
+- `--llm-egress-cidr 0.0.0.0/0` opens TCP 443 egress for the DeepSeek API on the
+  runtime NetworkPolicy. Fine for a single-task validation; pin to the provider's
+  CIDR for production.
+- The task image digest above is the validated SWE-ReBench arm64 image with the
+  Tool Bridge baked in (`15five__scim2-filter-parser-13`, `/testbed` chowned to
+  10001). Do not use the older `ef4a5559…` digest (no bridge).
+
+### 6.6 Success criteria
+
+1. `kubectl get sandboxtasks -n clawbox-benchmarks` → `Succeeded`/`Cleaned` with
+   `outcome=Succeeded`.
+2. Runtime pod (`kubectl logs <runtime-pod> -n clawbox-benchmarks`) shows the
+   milestones in order:
+   `starting clawtune sidecar in-process (port 8765)` → `ready=true` →
+   agent turns with `model-fetch … status=200` and `tool exec: ok` (agent is
+   really SSHing into `/testbed`).
+3. Inside the runtime pod: `final-answer.json` + `result.json` written,
+   `logs/agent.log` shows the working session, `traces/session-*.jsonl` growing.
+4. The runtime Job exits 0 after the sidecar uploads result+trace to the ingester
+   (`.upload-complete`), and the controller transitions
+   `RuntimeRunning → Collecting → Succeeded (ArtifactsDurable)`.
+
+Logs live under `/state/<task>/logs/` (agent, sidecar, onboard, plugin) inside
+the runtime pod. The controller cleans child pods ~10–16 s after a failure, so
+for debugging either watch live (`kubectl logs -f`) or run a background watcher
+that snapshots each pod's logs to `/tmp` before cleanup.
+
+### 6.7 Quick failure diagnosis
+
+| Symptom | Cause / check |
+|---|---|
+| Runtime exits ~60 s, `curl … 8765: Couldn't connect` | Sidecar not running — image missing the in-process-sidecar fix (verify image digest §6.2, `imagePullPolicy` §6.1) |
+| Runtime pod uses an old image digest | `KUBERNETES_IMAGE_PULL_POLICY` not `Always` (§6.1) |
+| Runtime fails at the LLM call (401/404/connection) | `clawbox-llm` values (§6.4), egress CIDR/port (§6.5), API key validity |
+| Tool log: `ssh handshake failed … EOF` every 2 s | Benign — that's the kubelet `tcpSocket` readiness probe hitting port 2222 |
+| Cell stays `Queued` | Node not labeled `firecracker-ready`, or cell budget unavailable |
+| `ctr pre-pull` / devmapper sudo errors in the script | Expected without passwordless sudo; non-fatal for low counts (§6.0) |
 
 ## Local verification
 

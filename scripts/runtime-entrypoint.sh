@@ -28,6 +28,15 @@ rm -f "${STATE_DIR}/ready"
 
 echo "[runtime] tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID} sandbox=runtime" >&2
 
+# Kata on this host cannot share volumes across containers, so the runtime Job
+# is a SINGLE container and the clawtune sidecar runs in-process instead of as
+# a sibling container. Everything the sidecar needs (TASK_ID, TRACE_UPLOAD_TOKEN,
+# TRACE_INGESTER_URL, OPENAI_*, OPENCLAW_MODEL, CLAWBOX_STATE_DIR,
+# CLAWTUNE_TRACE_DIR) is already set on this container by the controller.
+echo "[runtime] starting clawtune sidecar in-process (port ${SIDECAR_PORT})" >&2
+/usr/local/bin/clawtune-sidecar-entrypoint >"${LOG_DIR}/sidecar.log" 2>&1 &
+SIDECAR_PID=$!
+
 tool_host="${TOOL_SSH_TARGET#*@}"
 tool_host="${tool_host%:*}"
 tool_port="${TOOL_SSH_TARGET##*:}"

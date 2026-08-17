@@ -27,6 +27,10 @@ spec:
           command: ["clawbox-cell-controller"]
           env:
             - {name: KUBERNETES_RUNTIME_CLASS, value: kata-fc-arm64}
+            # Cells' tool/runtime containers must re-pull :dev images: dev
+            # builds mutate the tag and IfNotPresent silently reuses the stale
+            # locally-cached image (observed: pod ran the old runtime digest).
+            - {name: KUBERNETES_IMAGE_PULL_POLICY, value: Always}
             - {name: CLAWBOX_CELL_NAMESPACE, value: clawbox-benchmarks}
             - {name: RUNTIME_IMAGE, value: 127.0.0.1:5000/clawbox/runtime-arm64:dev}
             - {name: TOOL_BRIDGE_IMAGE, value: 127.0.0.1:5000/clawbox/tool-bridge-arm64:dev}
