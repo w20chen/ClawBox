@@ -83,7 +83,12 @@ def load_harness(root: Path, revision: str) -> tuple[Any, Any, str]:
             f"(missing module: {exc.name}). Install them first, e.g.:\n"
             f"  {hint}"
         ) from exc
-    return test_spec_module.make_test_spec, build_module.build_instance_image, actual
+    return (
+        test_spec_module.make_test_spec,
+        getattr(build_module, "build_env_image", None),
+        build_module.build_instance_image,
+        actual,
+    )
 
 
 def recipe_revision(record: dict[str, Any], dataset_revision: str, harness_revision: str) -> str:
@@ -139,11 +144,28 @@ def normalize_harness_image(local_image: str, output: str) -> None:
         ], check=True, timeout=7200)
 
 
-def harness_build(build_instance_image: Any, spec: Any, client: Any, logger: logging.Logger) -> None:
+def harness_build(
+    build_env_image: Any, build_instance_image: Any, spec: Any,
+    client: Any, logger: logging.Logger,
+) -> None:
     # The pinned fork has changed optional keyword names over time.  Permit
     # only the known cache controls while keeping the required positional API
     # strict, so a future incompatible harness fails instead of silently
     # changing the image recipe.
+    if build_env_image is None:
+        raise RuntimeError(
+            "SWE-bench fork lacks build_env_image; the environment image must "
+            "be built before the instance image"
+        )
+    env_options = {
+        key: value for key, value in {
+            "nocache": False,
+            "force_rebuild": False,
+        }.items() if key in inspect.signature(build_env_image).parameters
+    }
+    env_result = build_env_image(spec, client, logger, **env_options)
+    if env_result is False:
+        raise RuntimeError("SWE-bench harness reported an environment image build failure")
     parameters = inspect.signature(build_instance_image).parameters
     options = {
         key: value for key, value in {
@@ -158,8 +180,8 @@ def harness_build(build_instance_image: Any, spec: Any, client: Any, logger: log
 
 def build_selected(
     records: list[dict[str, Any]], selection: dict[str, dict[str, str]], *,
-    make_test_spec: Any, build_instance_image: Any, registry: str,
-    bridge: Path, mapping_path: Path, push: bool,
+    make_test_spec: Any, build_env_image: Any, build_instance_image: Any,
+    registry: str, bridge: Path, mapping_path: Path, push: bool,
     dataset_revision: str, harness_revision: str, fail_fast: bool,
 ) -> dict[str, Any]:
     import docker
@@ -172,6 +194,10 @@ def build_selected(
     client = docker.from_env()
     logger = logging.getLogger("clawbox.swe-rebench-arm64")
     logging.basicConfig(level=logging.INFO)
+    # The pinned SWE-bench harness writes build logs through a custom logger
+    # exposing `.log_file`; attach it so error reporting doesn't mask failures.
+    if not hasattr(logger, "log_file"):
+        logger.log_file = str(mapping_path.parent / "swe-rebench-harness.log")
 
     for task_id, selected in selection.items():
         record = by_id[task_id]
@@ -204,7 +230,7 @@ def build_selected(
             spec_arch = str(getattr(spec, "arch", "arm64"))
             if spec_arch not in {"arm64", "aarch64"}:
                 raise RuntimeError(f"harness produced a foreign-architecture spec: {spec_arch}")
-            harness_build(build_instance_image, spec, client, logger)
+            harness_build(build_env_image, build_instance_image, spec, client, logger)
             local_image = str(spec.instance_image_key)
             architecture = client.images.get(local_image).attrs.get("Architecture")
             if architecture not in {"arm64", "aarch64"}:
@@ -259,11 +285,12 @@ def main() -> None:
     if len(selection) != args.expected_count:
         raise SystemExit(f"selection count is {len(selection)}, expected {args.expected_count}")
     records = records_from_file(args.dataset) if args.dataset else fetch_dataset(args.dataset_id, args.dataset_revision)
-    make_test_spec, build_instance_image, harness_revision = load_harness(
+    make_test_spec, build_env_image, build_instance_image, harness_revision = load_harness(
         args.swebench_root.resolve(), args.swebench_revision,
     )
     result = build_selected(
-        records, selection, make_test_spec=make_test_spec, build_instance_image=build_instance_image,
+        records, selection, make_test_spec=make_test_spec,
+        build_env_image=build_env_image, build_instance_image=build_instance_image,
         registry=args.registry, bridge=args.tool_bridge_binary, mapping_path=args.mapping,
         push=args.push, dataset_revision=args.dataset_revision, harness_revision=harness_revision,
         fail_fast=args.fail_fast,
