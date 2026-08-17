@@ -139,40 +139,15 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
         },
         "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001,
                             "seccompProfile": {"type": "RuntimeDefault"}},
-        "initContainers": [{
-            "name": "install-tool-bridge", "image": settings.tool_bridge_image,
-            "imagePullPolicy": settings.kubernetes_image_pull_policy,
-            # Kata on this host has no shared filesystem, so Secret volumes (host
-            # bind mounts) cannot reach the guest. Materialize the auth files into
-            # a guest-local emptyDir from env vars instead; the init container and
-            # the task container both run as 10001, so private keys stay 0600.
-            # Init and task MUST mount each shared volume at the SAME path:
-            # guest-local emptyDirs anchored at one path fail ENOENT when a second
-            # container mounts the same volume at a different path.
-            "command": ["/bin/sh", "-ec",
-                        "cp /usr/local/bin/tool-bridge /tool-bridge/tool-bridge && chmod 0555 /tool-bridge/tool-bridge && "
-                        "mkdir -p /var/run/secrets/tool-ssh && "
-                        "printf '%s\\n' \"$SSH_HOST_KEY\" > /var/run/secrets/tool-ssh/ssh_host_ed25519_key && "
-                        "printf '%s\\n' \"$SSH_HOST_KEY_PUB\" > /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && "
-                        "printf '%s\\n' \"$AUTHORIZED_KEY_PUB\" > /var/run/secrets/tool-ssh/id_ed25519.pub && "
-                        "chmod 0600 /var/run/secrets/tool-ssh/ssh_host_ed25519_key && "
-                        "chmod 0644 /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub /var/run/secrets/tool-ssh/id_ed25519.pub"],
-            "env": [
-                _secret_env(f"{name}-auth", "SSH_HOST_KEY", "ssh_host_ed25519_key"),
-                _secret_env(f"{name}-auth", "SSH_HOST_KEY_PUB", "ssh_host_ed25519_key.pub"),
-                _secret_env(f"{name}-auth", "AUTHORIZED_KEY_PUB", "id_ed25519.pub"),
-            ],
-            "resources": resources(ResourceVector(50, 64 * 1024**2, 64 * 1024**2)),
-            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
-            "volumeMounts": [
-                {"name": "bridge", "mountPath": "/tool-bridge"},
-                {"name": "auth", "mountPath": "/var/run/secrets/tool-ssh"},
-            ],
-        }],
+        # Kata on this host has no shared filesystem and cannot share volumes
+        # across containers (probes: any init+task pair mounting volumes fails
+        # agent create_container with ENOENT). The Tool Pod is a SINGLE
+        # container: the bridge binary is baked into the task image and the SSH
+        # keys arrive via a Secret volume (single-container mounts work).
         "containers": [{
             "name": "task", "image": spec["toolImage"],
             "imagePullPolicy": settings.kubernetes_image_pull_policy,
-            "command": ["/tool-bridge/tool-bridge"],
+            "command": ["/usr/local/bin/tool-bridge"],
             "ports": [{"name": "ssh", "containerPort": 2222, "protocol": "TCP"}],
             "env": [
                 {"name": "CELL_ID", "value": name}, {"name": "TASK_ID", "value": name},
@@ -186,13 +161,16 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": False,
                                 "capabilities": {"drop": ["ALL"]}},
             "volumeMounts": [
-                {"name": "bridge", "mountPath": "/tool-bridge", "readOnly": True},
-                {"name": "auth", "mountPath": "/var/run/secrets/tool-ssh", "readOnly": True},
+                {"name": "tool-auth", "mountPath": "/var/run/secrets/tool-ssh", "readOnly": True},
             ],
         }],
         "volumes": [
-            {"name": "bridge", "emptyDir": {"sizeLimit": "64Mi"}},
-            {"name": "auth", "emptyDir": {"sizeLimit": "64Mi"}},
+            {"name": "tool-auth", "secret": {"secretName": f"{name}-auth", "defaultMode": 0o444,
+                "items": [
+                    {"key": "id_ed25519.pub", "path": "id_ed25519.pub"},
+                    {"key": "ssh_host_ed25519_key", "path": "ssh_host_ed25519_key"},
+                    {"key": "ssh_host_ed25519_key.pub", "path": "ssh_host_ed25519_key.pub"},
+                ]}},
         ],
     }
     if node_name:
@@ -238,56 +216,10 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
         },
         "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001,
                             "seccompProfile": {"type": "RuntimeDefault"}},
-        "initContainers": [
-            {
-                "name": "install-secrets", "image": settings.tool_bridge_image,
-                "imagePullPolicy": settings.kubernetes_image_pull_policy,
-                # Kata on this host has no shared filesystem, so Secret and
-                # ConfigMap volumes (host bind mounts) cannot reach the guest.
-                # Materialize auth keys and the task prompt into guest-local
-                # emptyDirs from env vars instead (all containers run as 10001).
-                # Same-path rule as the tool pod: shared volumes must be mounted
-                # at identical paths in init and runtime containers.
-                "command": ["/bin/sh", "-ec",
-                            "mkdir -p /var/run/secrets/tool-ssh /prompt && "
-                            "printf '%s\\n' \"$CLIENT_KEY\" > /var/run/secrets/tool-ssh/id_ed25519 && "
-                            "printf '%s\\n' \"$HOST_KEY_PUB\" > /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && "
-                            "printf '%s\\n' \"$PROBLEM_STATEMENT\" > /prompt/problem_statement && "
-                            "chmod 0600 /var/run/secrets/tool-ssh/id_ed25519 && "
-                            "chmod 0644 /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub /prompt/problem_statement"],
-                "env": [
-                    _secret_env(f"{name}-auth", "CLIENT_KEY", "id_ed25519"),
-                    _secret_env(f"{name}-auth", "HOST_KEY_PUB", "ssh_host_ed25519_key.pub"),
-                    {"name": "PROBLEM_STATEMENT",
-                     "valueFrom": {"configMapKeyRef": {"name": f"{name}-prompt", "key": "problem_statement"}}},
-                ],
-                "resources": resources(ResourceVector(50, 64 * 1024**2, 64 * 1024**2)),
-                "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
-                "volumeMounts": [
-                    {"name": "auth", "mountPath": "/var/run/secrets/tool-ssh"},
-                    {"name": "prompt", "mountPath": "/prompt"},
-                ],
-            },
-            {
-                "name": "clawtune", "image": settings.runtime_image,
-            "imagePullPolicy": settings.kubernetes_image_pull_policy,
-            "command": ["/usr/local/bin/clawtune-sidecar-entrypoint"],
-            "restartPolicy": "Always",
-            "env": llm_env + upload_env + [
-                {"name": "HOME", "value": "/tmp"},
-                {"name": "CLAWTUNE_POLICY", "value": "observe-only"},
-                {"name": "CLAWTUNE_EXECUTION_BACKEND", "value": "hook-only"},
-                {"name": "CLAWTUNE_ENABLE_CGROUP", "value": "false"},
-                {"name": "CLAWTUNE_ENABLE_AFFINITY", "value": "false"},
-                {"name": "CLAWTUNE_ENABLE_NUMA", "value": "false"},
-            ],
-            "startupProbe": {"httpGet": {"path": "/health/ready", "port": 8765},
-                             "periodSeconds": 2, "failureThreshold": 60},
-            "resources": resources(size.sidecar),
-            "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
-                                "capabilities": {"drop": ["ALL"]}},
-            "volumeMounts": [state_mount, {"name": "tmp", "mountPath": "/tmp"}],
-        }],
+        # Kata on this host cannot share volumes across containers, so the
+        # runtime Job is a SINGLE container (no sidecar init): prompt and SSH
+        # keys come straight from ConfigMap/Secret volumes, which work for
+        # single-container pods (verified by probes).
         "containers": [{
             "name": "runtime", "image": settings.runtime_image,
             "imagePullPolicy": settings.kubernetes_image_pull_policy,
@@ -318,8 +250,12 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             {"name": "home", "emptyDir": {"sizeLimit": "2Gi"}},
             {"name": "workspace", "emptyDir": {"sizeLimit": "1Gi"}},
             {"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}},
-            {"name": "prompt", "emptyDir": {"sizeLimit": "1Mi"}},
-            {"name": "auth", "emptyDir": {"sizeLimit": "64Mi"}},
+            {"name": "prompt", "configMap": {"name": f"{name}-prompt"}},
+            {"name": "auth", "secret": {"secretName": f"{name}-auth", "defaultMode": 0o444,
+                "items": [
+                    {"key": "id_ed25519", "path": "id_ed25519"},
+                    {"key": "ssh_host_ed25519_key.pub", "path": "ssh_host_ed25519_key.pub"},
+                ]}},
         ],
     }
     if node_name:

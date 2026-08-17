@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -117,14 +118,17 @@ def load_harness(root: Path, revision: str) -> tuple[Any, Any, str]:
     )
 
 
-def recipe_revision(record: dict[str, Any], dataset_revision: str, harness_revision: str) -> str:
+def recipe_revision(record: dict[str, Any], dataset_revision: str, harness_revision: str, bridge: Path) -> str:
     relevant = {
         key: record.get(key) for key in (
             "instance_id", "repo", "base_commit", "environment_setup_commit",
             "install_config", "requirements", "environment",
         )
     }
-    digest = hashlib.sha256(json.dumps(relevant, sort_keys=True, default=str).encode()).hexdigest()
+    digest = hashlib.sha256(
+        json.dumps(relevant, sort_keys=True, default=str).encode()
+        + b":" + hashlib.sha256(bridge.read_bytes()).hexdigest().encode()
+    ).hexdigest()
     return (
         f"dataset:{dataset_revision}:harness:{harness_revision}:"
         f"contract:{CONTRACT_VERSION}:recipe:{digest}"
@@ -150,15 +154,23 @@ def verify_harness_image(image: str, bridge: Path, test_command: str) -> None:
     ], check=True, timeout=1800)
 
 
-def normalize_harness_image(local_image: str, output: str) -> None:
-    """Make the harness output compatible with the unprivileged Tool Pod."""
+def normalize_harness_image(local_image: str, output: str, bridge: Path) -> None:
+    """Make the harness output compatible with the unprivileged Tool Pod.
+
+    Kata on the target has no shared filesystem, so a Tool Pod cannot use an
+    init container to copy the bridge into a shared emptyDir (cross-container
+    volume sharing fails with agent ENOENT); bake the binary into the image.
+    """
     with tempfile.TemporaryDirectory(prefix="clawbox-arm64-wrapper-") as directory:
+        shutil.copy2(bridge, Path(directory) / "tool-bridge")
         dockerfile = Path(directory) / "Dockerfile"
         dockerfile.write_text(
             "ARG BASE_IMAGE\n"
             "FROM ${BASE_IMAGE}\n"
             "USER 0\n"
             "RUN test -d /testbed && chown -R 10001:10001 /testbed\n"
+            "COPY tool-bridge /usr/local/bin/tool-bridge\n"
+            "RUN chmod 0555 /usr/local/bin/tool-bridge\n"
             # SWE-ReBench testbeds run tests with the `testbed` conda env, but
             # the fork only puts conda's base bin on PATH (and auto-activates
             # testbed only in root's .bashrc). Expose the testbed env bin so the
@@ -247,7 +259,7 @@ def build_selected(
     for task_id, selected in selection.items():
         record = by_id[task_id]
         original = selected["original_image"]
-        revision = recipe_revision(record, dataset_revision, harness_revision)
+        revision = recipe_revision(record, dataset_revision, harness_revision, bridge)
         existing = mapping.get(original)
         if existing and existing.get("status") == "supported":
             if existing.get("recipe_revision") != revision:
@@ -281,7 +293,7 @@ def build_selected(
             if architecture not in {"arm64", "aarch64"}:
                 raise RuntimeError(f"harness image architecture is {architecture}")
             output = f"{registry.rstrip('/')}/swe-rebench-arm64:{safe_tag(task_id)}"
-            normalize_harness_image(local_image, output)
+            normalize_harness_image(local_image, output, bridge)
             install_config = record.get("install_config") or {}
             if isinstance(install_config, str):
                 install_config = json.loads(install_config)
