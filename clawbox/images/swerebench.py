@@ -159,6 +159,12 @@ def normalize_harness_image(local_image: str, output: str) -> None:
             "FROM ${BASE_IMAGE}\n"
             "USER 0\n"
             "RUN test -d /testbed && chown -R 10001:10001 /testbed\n"
+            # SWE-ReBench testbeds run tests with the `testbed` conda env, but
+            # the fork only puts conda's base bin on PATH (and auto-activates
+            # testbed only in root's .bashrc). Expose the testbed env bin so the
+            # unprivileged tool user can launch pytest; a missing directory on
+            # PATH is harmless for tasks without a conda env.
+            "ENV PATH=/opt/miniconda3/envs/testbed/bin:$PATH\n"
             "USER 10001:10001\n"
             "WORKDIR /testbed\n",
             encoding="utf-8",
