@@ -41,7 +41,26 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
       python3 python3-dev python3-pip python3-venv \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g "openclaw@${OPENCLAW_VERSION}" --registry="${NPM_REGISTRY}" \
- && openclaw --version
+ && openclaw --version \
+ && node -e '
+    const fs = require("fs"), path = require("path");
+    const dir = "/usr/lib/node_modules/openclaw/dist";
+    const patched = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".js")) continue;
+      const p = path.join(dir, f);
+      const s = fs.readFileSync(p, "utf8");
+      const next = s.replace(
+        /remoteWorkspaceDir:\s*path\.posix\.join\(runtimeRootDir,\s*"workspace"\)/g,
+        "remoteWorkspaceDir: workspaceRoot");
+      if (next !== s) { fs.writeFileSync(p, next); patched.push(f); }
+    }
+    if (!patched.length) {
+      console.error("OPENCLAW_SANDBOX_ROOT_PATCH: no bundle contained the target");
+      process.exit(1);
+    }
+    console.log("OPENCLAW_SANDBOX_ROOT_PATCH applied to: " + patched.join(", "));
+  '
 
 WORKDIR /opt/clawtune
 COPY --from=clawtune services/sidecar ./services/sidecar

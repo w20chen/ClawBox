@@ -41,6 +41,7 @@ tool_host="${TOOL_SSH_TARGET#*@}"
 tool_host="${tool_host%:*}"
 tool_port="${TOOL_SSH_TARGET##*:}"
 if [[ "${tool_host}" == "${tool_port}" ]]; then tool_port=22; fi
+tool_target="${TOOL_SSH_TARGET%:*}"
 
 host_public_key="$(cut -d ' ' -f 1,2 /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub)"
 [[ "${host_public_key}" == ssh-ed25519\ * ]] || { echo "invalid Tool SSH host public key" >&2; exit 1; }
@@ -138,6 +139,20 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   : "${TASK_PROMPT_FILE:?TASK_PROMPT_FILE is required in benchmark mode}"
   : "${TRACE_UPLOAD_TOKEN:?TRACE_UPLOAD_TOKEN is required in benchmark mode}"
   : "${TRACE_INGESTER_URL:?TRACE_INGESTER_URL is required in benchmark mode}"
+  # openclaw's SSH sandbox mirrors the local workspace into a per-scope dir on
+  # the tool VM and refuses file tools outside it. The runtime image patches
+  # openclaw (see Dockerfile.runtime) so the sandbox container root IS
+  # workspaceRoot (/testbed). Pre-create the per-scope marker dir so openclaw's
+  # ensureRuntime guard sees it and skips its destructive "replace remote
+  # workspace from local" copy, which would otherwise wipe /testbed.
+  runtime_root="/testbed/openclaw-ssh-shared-8198076c"
+  echo "[runtime] pre-creating sandbox runtime root ${runtime_root} on tool VM" >&2
+  timeout -k 10 60 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
+    "mkdir -p '${runtime_root}' && echo runtime-root-ok" >&2 \
+    || echo "[runtime] WARN: could not pre-create sandbox runtime root" >&2
   session_id="clawbox-${TASK_ID}"
   task_timeout="${TASK_TIMEOUT_SECONDS:-1800}"
   set +e
