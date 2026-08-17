@@ -49,6 +49,7 @@ control_image="${REGISTRY}/control-plane-arm64:${TAG}"
 GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
+APT_MIRROR="${APT_MIRROR:-}"
 
 docker build --platform linux/arm64 --pull \
   --build-arg GOPROXY="${GOPROXY}" \
@@ -58,6 +59,7 @@ docker build --platform linux/arm64 --pull --build-context clawtune="${CLAWTUNE_
   --build-arg CLAWTUNE_REVISION="${CLAWTUNE_REVISION}" \
   --build-arg NPM_REGISTRY="${NPM_REGISTRY}" \
   --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
+  --build-arg APT_MIRROR="${APT_MIRROR}" \
   -f "${ROOT}/docker/Dockerfile.runtime" \
   -t "${runtime_image}" "${ROOT}"
 docker build --platform linux/arm64 --pull \
