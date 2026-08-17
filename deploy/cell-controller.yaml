@@ -21,7 +21,9 @@ spec:
       containers:
         - name: controller
           image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
-          imagePullPolicy: IfNotPresent
+          # Always: dev builds mutate the :dev tag and IfNotPresent silently
+          # reused the stale locally-cached image after restarts.
+          imagePullPolicy: Always
           command: ["clawbox-cell-controller"]
           env:
             - {name: KUBERNETES_RUNTIME_CLASS, value: kata-fc-arm64}
