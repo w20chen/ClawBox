@@ -71,8 +71,18 @@ def load_harness(root: Path, revision: str) -> tuple[Any, Any, str]:
     if actual != revision:
         raise RuntimeError(f"SWE-bench fork must be pinned to {revision}; found {actual}")
     sys.path.insert(0, str(root))
-    test_spec_module = importlib.import_module("swebench.harness.test_spec.test_spec")
-    build_module = importlib.import_module("swebench.harness.docker_build")
+    try:
+        test_spec_module = importlib.import_module("swebench.harness.test_spec.test_spec")
+        build_module = importlib.import_module("swebench.harness.docker_build")
+    except ModuleNotFoundError as exc:
+        requirements = root / "requirements.txt"
+        hint = f"python3 -m pip install -r '{requirements}'" if requirements.is_file() else \
+            "python3 -m pip install ghapi docker datasets"
+        raise RuntimeError(
+            "SWE-bench fork dependencies are missing from this Python environment "
+            f"(missing module: {exc.name}). Install them first, e.g.:\n"
+            f"  {hint}"
+        ) from exc
     return test_spec_module.make_test_spec, build_module.build_instance_image, actual
 
 
