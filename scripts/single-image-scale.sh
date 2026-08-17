@@ -169,17 +169,24 @@ fi
 kubectl -n "${NAMESPACE}" get sandboxtasks \
   -l app.kubernetes.io/name=clawbox-cell 2>/dev/null || true
 
-# 4. summary: every cell must reach a successful terminal phase
+# 4. summary: every cell must reach a successful terminal phase AND outcome
 failed=0
 for name in "${names[@]}"; do
   status="$(kubectl -n "${NAMESPACE}" get sandboxtask "${name}" -o jsonpath='{.status}' 2>/dev/null || true)"
   phase="$(printf '%s' "${status}" | sed -n 's/.*"phase":"\([^"]*\)".*/\1/p')"
-  echo "cell ${name}: phase=${phase:-Unknown}"
+  outcome="$(printf '%s' "${status}" | sed -n 's/.*"outcome":"\([^"]*\)".*/\1/p')"
+  echo "cell ${name}: phase=${phase:-Unknown} outcome=${outcome:-}"
   if [[ -n "${status}" ]]; then
     echo "${status}" | python3 -m json.tool 2>/dev/null || printf '%s\n' "${status}"
   fi
   case "${phase}" in
-    Succeeded|Cleaned) ;;
+    Succeeded|Cleaned)
+      # Cleaned can still carry outcome=Failed; judge by outcome.
+      case "${outcome}" in
+        ""|Succeeded) ;;
+        *) failed=$((failed + 1)) ;;
+      esac
+      ;;
     *) failed=$((failed + 1)) ;;
   esac
 done
