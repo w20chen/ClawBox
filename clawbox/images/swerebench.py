@@ -187,10 +187,20 @@ def build_selected(
                 raise RuntimeError(f"supported mapping for {original} lacks arm64 digest provenance")
             continue
         try:
-            spec = make_test_spec(
-                record, namespace="clawbox-arm64", base_image_tag="v1",
-                env_image_tag="v1", instance_image_tag="v1", arch="arm64",
-            )
+            # The pinned fork predates the harness's native `arch` parameter.
+            # Pass only the keyword arguments the installed harness accepts;
+            # without `arch`, building on the native arm64 daemon still yields
+            # arm64 images, which the architecture check below enforces.
+            spec_kwargs = {
+                key: value for key, value in {
+                    "namespace": "clawbox-arm64",
+                    "base_image_tag": "v1",
+                    "env_image_tag": "v1",
+                    "instance_image_tag": "v1",
+                    "arch": "arm64",
+                }.items() if key in inspect.signature(make_test_spec).parameters
+            }
+            spec = make_test_spec(record, **spec_kwargs)
             spec_arch = str(getattr(spec, "arch", "arm64"))
             if spec_arch not in {"arm64", "aarch64"}:
                 raise RuntimeError(f"harness produced a foreign-architecture spec: {spec_arch}")
