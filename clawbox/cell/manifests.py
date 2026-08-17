@@ -146,14 +146,17 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             # bind mounts) cannot reach the guest. Materialize the auth files into
             # a guest-local emptyDir from env vars instead; the init container and
             # the task container both run as 10001, so private keys stay 0600.
+            # Init and task MUST mount each shared volume at the SAME path:
+            # guest-local emptyDirs anchored at one path fail ENOENT when a second
+            # container mounts the same volume at a different path.
             "command": ["/bin/sh", "-ec",
-                        "cp /usr/local/bin/tool-bridge /bridge/tool-bridge && chmod 0555 /bridge/tool-bridge && "
-                        "mkdir -p /auth && "
-                        "printf '%s\\n' \"$SSH_HOST_KEY\" > /auth/ssh_host_ed25519_key && "
-                        "printf '%s\\n' \"$SSH_HOST_KEY_PUB\" > /auth/ssh_host_ed25519_key.pub && "
-                        "printf '%s\\n' \"$AUTHORIZED_KEY_PUB\" > /auth/id_ed25519.pub && "
-                        "chmod 0600 /auth/ssh_host_ed25519_key && "
-                        "chmod 0644 /auth/ssh_host_ed25519_key.pub /auth/id_ed25519.pub"],
+                        "cp /usr/local/bin/tool-bridge /tool-bridge/tool-bridge && chmod 0555 /tool-bridge/tool-bridge && "
+                        "mkdir -p /var/run/secrets/tool-ssh && "
+                        "printf '%s\\n' \"$SSH_HOST_KEY\" > /var/run/secrets/tool-ssh/ssh_host_ed25519_key && "
+                        "printf '%s\\n' \"$SSH_HOST_KEY_PUB\" > /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && "
+                        "printf '%s\\n' \"$AUTHORIZED_KEY_PUB\" > /var/run/secrets/tool-ssh/id_ed25519.pub && "
+                        "chmod 0600 /var/run/secrets/tool-ssh/ssh_host_ed25519_key && "
+                        "chmod 0644 /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub /var/run/secrets/tool-ssh/id_ed25519.pub"],
             "env": [
                 _secret_env(f"{name}-auth", "SSH_HOST_KEY", "ssh_host_ed25519_key"),
                 _secret_env(f"{name}-auth", "SSH_HOST_KEY_PUB", "ssh_host_ed25519_key.pub"),
@@ -162,8 +165,8 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             "resources": resources(ResourceVector(50, 64 * 1024**2, 64 * 1024**2)),
             "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
             "volumeMounts": [
-                {"name": "bridge", "mountPath": "/bridge"},
-                {"name": "auth", "mountPath": "/auth"},
+                {"name": "bridge", "mountPath": "/tool-bridge"},
+                {"name": "auth", "mountPath": "/var/run/secrets/tool-ssh"},
             ],
         }],
         "containers": [{
@@ -243,13 +246,15 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
                 # ConfigMap volumes (host bind mounts) cannot reach the guest.
                 # Materialize auth keys and the task prompt into guest-local
                 # emptyDirs from env vars instead (all containers run as 10001).
+                # Same-path rule as the tool pod: shared volumes must be mounted
+                # at identical paths in init and runtime containers.
                 "command": ["/bin/sh", "-ec",
-                            "mkdir -p /auth /prompt && "
-                            "printf '%s\\n' \"$CLIENT_KEY\" > /auth/id_ed25519 && "
-                            "printf '%s\\n' \"$HOST_KEY_PUB\" > /auth/ssh_host_ed25519_key.pub && "
+                            "mkdir -p /var/run/secrets/tool-ssh /prompt && "
+                            "printf '%s\\n' \"$CLIENT_KEY\" > /var/run/secrets/tool-ssh/id_ed25519 && "
+                            "printf '%s\\n' \"$HOST_KEY_PUB\" > /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub && "
                             "printf '%s\\n' \"$PROBLEM_STATEMENT\" > /prompt/problem_statement && "
-                            "chmod 0600 /auth/id_ed25519 && "
-                            "chmod 0644 /auth/ssh_host_ed25519_key.pub /prompt/problem_statement"],
+                            "chmod 0600 /var/run/secrets/tool-ssh/id_ed25519 && "
+                            "chmod 0644 /var/run/secrets/tool-ssh/ssh_host_ed25519_key.pub /prompt/problem_statement"],
                 "env": [
                     _secret_env(f"{name}-auth", "CLIENT_KEY", "id_ed25519"),
                     _secret_env(f"{name}-auth", "HOST_KEY_PUB", "ssh_host_ed25519_key.pub"),
@@ -259,7 +264,7 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
                 "resources": resources(ResourceVector(50, 64 * 1024**2, 64 * 1024**2)),
                 "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
                 "volumeMounts": [
-                    {"name": "auth", "mountPath": "/auth"},
+                    {"name": "auth", "mountPath": "/var/run/secrets/tool-ssh"},
                     {"name": "prompt", "mountPath": "/prompt"},
                 ],
             },
