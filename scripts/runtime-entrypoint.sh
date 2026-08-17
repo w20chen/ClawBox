@@ -117,6 +117,23 @@ touch "${STATE_DIR}/ready"
 echo "[runtime] tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID} ready=true" >&2
 
 if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
+  # Startup connectivity probe: record DNS + ingester reachability at boot so
+  # a later upload failure can be correlated with the VM network state.
+  ingester_base="${TRACE_INGESTER_URL:-http://clawbox-ingester.clawbox-system.svc:8084}"
+  echo "[runtime] startup probe: resolv.conf:" >&2
+  cat /etc/resolv.conf >&2 2>/dev/null || true
+  echo "[runtime] startup probe: getent ingester svc:" >&2
+  getent hosts clawbox-ingester.clawbox-system.svc >&2 2>/dev/null \
+    || echo "[runtime] startup probe: getent ingester FAILED" >&2
+  echo "[runtime] startup probe: ingester /healthz:" >&2
+  if curl -fsS --max-time 10 "${ingester_base}/healthz" >&2 2>/dev/null; then
+    echo "[runtime] startup probe: ingester OK" >&2
+  else
+    echo "[runtime] startup probe: ingester UNREACHABLE" >&2
+  fi
+fi
+
+if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   : "${TASK_ID:?TASK_ID is required in benchmark mode}"
   : "${TASK_PROMPT_FILE:?TASK_PROMPT_FILE is required in benchmark mode}"
   : "${TRACE_UPLOAD_TOKEN:?TRACE_UPLOAD_TOKEN is required in benchmark mode}"
@@ -230,7 +247,26 @@ PY
   touch "${STATE_DIR}/.runtime-complete"
   upload_deadline=$((SECONDS + 300))
   while [[ ! -f "${STATE_DIR}/.upload-complete" ]]; do
-    [[ ! -f "${STATE_DIR}/.upload-failed" ]] || { echo "central artifact upload failed" >&2; exit 1; }
+    if [[ -f "${STATE_DIR}/.upload-failed" ]]; then
+      echo "central artifact upload failed" >&2
+      # The sidecar is the one that runs the final upload; dump its log plus
+      # live connectivity probes so the root cause lands in `kubectl logs`
+      # (survives pod exit, unlike exec).
+      echo "--- upload failure diagnostics ---" >&2
+      echo "sidecar.log tail (300):" >&2
+      tail -n 300 "${LOG_DIR}/sidecar.log" >&2 2>/dev/null || true
+      echo "/etc/resolv.conf:" >&2
+      cat /etc/resolv.conf >&2 2>/dev/null || true
+      echo "getent hosts clawbox-ingester.clawbox-system.svc:" >&2
+      getent hosts clawbox-ingester.clawbox-system.svc >&2 2>/dev/null || echo "getent FAILED rc=$?" >&2
+      echo "curl ingester /healthz:" >&2
+      curl -v --max-time 10 "${TRACE_INGESTER_URL:-http://clawbox-ingester.clawbox-system.svc:8084}/healthz" >&2 2>&1 || echo "curl FAILED rc=$?" >&2
+      echo "default route + interfaces:" >&2
+      ip route 2>&1 || true
+      ip -o addr show 2>&1 | head -10 || true
+      echo "--- end upload failure diagnostics ---" >&2
+      exit 1
+    fi
     (( SECONDS < upload_deadline )) || { echo "central artifact upload timed out" >&2; exit 1; }
     sleep 1
   done
