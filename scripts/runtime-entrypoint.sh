@@ -60,7 +60,7 @@ openclaw plugins enable clawtune >>"${LOG_DIR}/plugin.log" 2>&1 || true
 cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
 {
   "agents": {"defaults": {"workspace": "/workspace", "sandbox": {
-    "mode": "all", "backend": "ssh", "scope": "agent", "workspaceAccess": "rw",
+    "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
     "ssh": {
       "target": "${TOOL_SSH_TARGET}",
       "workspaceRoot": "/testbed",
@@ -122,22 +122,70 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   : "${TRACE_UPLOAD_TOKEN:?TRACE_UPLOAD_TOKEN is required in benchmark mode}"
   : "${TRACE_INGESTER_URL:?TRACE_INGESTER_URL is required in benchmark mode}"
   session_id="clawbox-${TASK_ID}"
+  task_timeout="${TASK_TIMEOUT_SECONDS:-1800}"
   set +e
+  # OpenClaw's `agent --local --json` can linger in its event loop after the run
+  # ends (observed: "run ... ended with stopReason=stop" but the process never
+  # exits, blocking the whole pipeline). final-answer.json is only populated
+  # when the run completes, so once it is non-empty give the process a short
+  # grace period, then reap it and treat the run as done.
   openclaw agent --local --agent main --session-id "${session_id}" \
     --model "${OPENCLAW_MODEL_REF}" --message "$(cat "${TASK_PROMPT_FILE}")" \
-    --timeout "${TASK_TIMEOUT_SECONDS:-1800}" --json \
-    >"${STATE_DIR}/final-answer.json" 2>"${LOG_DIR}/agent.log"
-  agent_status=$?
+    --timeout "${task_timeout}" --json \
+    >"${STATE_DIR}/final-answer.json" 2>"${LOG_DIR}/agent.log" &
+  agent_pid=$!
+  agent_status=1
+  answer_seen=0
+  agent_deadline=$((SECONDS + task_timeout + 120))
+  while :; do
+    if ! kill -0 "${agent_pid}" 2>/dev/null; then
+      wait "${agent_pid}"
+      agent_status=$?
+      break
+    fi
+    if [[ -s "${STATE_DIR}/final-answer.json" && "${answer_seen}" == 0 ]]; then
+      answer_seen=1
+      echo "[runtime] agent run complete; waiting up to 30s for clean exit" >&2
+      for _ in $(seq 1 6); do
+        sleep 5
+        kill -0 "${agent_pid}" 2>/dev/null || break
+      done
+      if kill -0 "${agent_pid}" 2>/dev/null; then
+        echo "[runtime] agent completed but CLI lingered; reaping as success" >&2
+        kill -TERM "${agent_pid}" 2>/dev/null || true
+        sleep 5
+        kill -KILL "${agent_pid}" 2>/dev/null || true
+        wait "${agent_pid}" 2>/dev/null
+        agent_status=0
+      else
+        wait "${agent_pid}"
+        agent_status=$?
+      fi
+      break
+    fi
+    if (( SECONDS >= agent_deadline )); then
+      echo "[runtime] agent exceeded deadline; killing" >&2
+      kill -KILL "${agent_pid}" 2>/dev/null || true
+      wait "${agent_pid}" 2>/dev/null
+      agent_status=124
+      break
+    fi
+    sleep 5
+  done
   set -e
 
   tool_target="${TOOL_SSH_TARGET%:*}"
   tool_port="${TOOL_SSH_TARGET##*:}"
-  ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+  # Bounded SSH: an unbounded raw ssh can stall the whole pipeline and let the
+  # job's activeDeadlineSeconds kill it mid-upload (observed in 2026-08-17 E2E).
+  timeout 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
     'cd /testbed && git diff --binary --no-ext-diff' >"${STATE_DIR}/patch.diff" 2>"${LOG_DIR}/patch.log" || true
-  ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+  timeout 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
     'cat /testbed/.clawbox/tool-bridge.jsonl 2>/dev/null || true' \
     >"${TRACE_DIR}/tool-bridge.jsonl" 2>"${LOG_DIR}/bridge-trace.log" || true

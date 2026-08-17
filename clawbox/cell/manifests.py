@@ -203,6 +203,13 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
     spec = task["spec"]
     llm_secret = spec["llmSecretName"]
     timeout = int(spec.get("timeoutSeconds", 1800))
+    # Leave a pipeline margin after the agent's own budget: the agent runs with
+    # --timeout=timeout, then patch collection + result/upload must still finish
+    # before the Job's activeDeadlineSeconds. Equal values cut the pipeline at
+    # the deadline (observed: RuntimeFailed/DeadlineExceeded right at the agent
+    # timeout). The controller's cell timeout is already timeout+300, so giving
+    # the Job the same deadline keeps the budgets aligned.
+    pipeline_grace_seconds = 300
     state_mount = {"name": "state", "mountPath": "/state"}
     llm_env = [
         _secret_env(llm_secret, "OPENAI_API_KEY", "llm-api-key"),
@@ -284,7 +291,7 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": metadata(task, f"{name}-runtime", "runtime"),
         "spec": {
-            "backoffLimit": 0, "activeDeadlineSeconds": timeout,
+            "backoffLimit": 0, "activeDeadlineSeconds": timeout + pipeline_grace_seconds,
             "ttlSecondsAfterFinished": 3600,
             "template": {"metadata": {"labels": job_labels}, "spec": pod_spec},
         },

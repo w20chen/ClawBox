@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import signal
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -50,6 +51,7 @@ def save_offsets(offsets: dict[str, int]) -> None:
 def upload_traces(*, final: bool) -> int:
     offsets = load_offsets()
     count = 0
+    skipped = 0
     if TRACE.exists():
         for path in sorted(item for item in TRACE.rglob("*") if item.is_file()):
             relative = path.relative_to(TRACE).as_posix()
@@ -62,14 +64,29 @@ def upload_traces(*, final: bool) -> int:
                 while data := stream.read(512 * 1024):
                     digest = hashlib.sha256(data).hexdigest()
                     chunk_id = hashlib.sha256(f"{TASK_ID}\0{relative}\0{offset}\0{digest}".encode()).hexdigest()
-                    request(f"/v1/tasks/{TASK_ID}/traces", {
-                        "chunk_id": chunk_id, "relative_path": relative, "offset": offset,
-                        "sha256": digest, "data_base64": base64.b64encode(data).decode(), "final": False,
-                    })
-                    offset += len(data)
-                    offsets[relative] = offset
-                    save_offsets(offsets)
-                    count += 1
+                    try:
+                        request(f"/v1/tasks/{TASK_ID}/traces", {
+                            "chunk_id": chunk_id, "relative_path": relative, "offset": offset,
+                            "sha256": digest, "data_base64": base64.b64encode(data).decode(), "final": False,
+                        })
+                        offset += len(data)
+                        offsets[relative] = offset
+                        save_offsets(offsets)
+                        count += 1
+                    except urllib.error.HTTPError as exc:
+                        if exc.code != 409:
+                            raise
+                        # The trace file was rewritten with different content at
+                        # this offset (observed: OpenClaw rewrites session JSONL
+                        # files), so the immutable chunk at this offset can never
+                        # be reconciled. Traces are best-effort: mark the file as
+                        # consumed and keep the pipeline moving. result.json and
+                        # the .final marker are uploaded separately and strictly.
+                        print(f"trace chunk conflict on {relative}@{offset}; skipping file", file=sys.stderr)
+                        offsets[relative] = size
+                        save_offsets(offsets)
+                        skipped += 1
+                        break
     if final:
         digest = hashlib.sha256(b"").hexdigest()
         marker = hashlib.sha256(f"{TASK_ID}\0.final\0{digest}".encode()).hexdigest()
