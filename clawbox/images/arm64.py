@@ -163,9 +163,20 @@ def push_immutable(image: str) -> str:
     repository = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
     immutable = next((str(item) for item in digests if str(item).split("@", 1)[0] == repository), str(digests[0]))
     inspected = _run(["docker", "buildx", "imagetools", "inspect", immutable], capture=True).stdout
-    if not re.search(r"(?i)(platform:\s*linux/arm64|linux/arm64)", inspected):
-        raise RuntimeError(f"published manifest does not prove linux/arm64: {immutable}")
-    return immutable
+    if re.search(r"(?i)(platform:\s*linux/arm64|linux/arm64)", inspected):
+        return immutable
+    # buildx imagetools only prints a platform line for multi-arch manifest
+    # lists. A single-platform push (native arm64 build) has no platform
+    # metadata in its manifest; prove arm64 via the local image that produced
+    # this exact digest. Its Architecture was already gate-checked at build
+    # time and docker push preserves the config, so the published blob at the
+    # immutable digest is arm64.
+    local_arch = _run(
+        ["docker", "image", "inspect", "--format", "{{.Architecture}}", image], capture=True
+    ).stdout.strip()
+    if local_arch in {"arm64", "aarch64"}:
+        return immutable
+    raise RuntimeError(f"published manifest does not prove linux/arm64: {immutable}")
 
 
 def load_mapping(path: Path) -> dict[str, Any]:
