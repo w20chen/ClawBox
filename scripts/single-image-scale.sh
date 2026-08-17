@@ -100,7 +100,11 @@ devmapper_status() {
 #    "target snapshot already exists" unpack race and stall ContainerCreating.
 if [[ "${PREPULL}" == 1 ]]; then
   echo "== pre-pulling ${TOOL_IMAGE} into the devmapper snapshotter =="
-  sudo ctr -n k8s.io images pull --snapshotter devmapper "${TOOL_IMAGE}"
+  # containerd 2.x ctr pull with the transfer service needs an explicit unpack
+  # platform for single-platform (non-index) manifests, otherwise it fails with
+  # "no unpack platforms defined".
+  sudo ctr -n k8s.io images pull --snapshotter devmapper \
+    --platform linux/arm64 "${TOOL_IMAGE}"
 fi
 
 devmapper_status
