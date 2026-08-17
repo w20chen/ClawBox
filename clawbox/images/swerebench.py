@@ -6,6 +6,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -83,6 +84,31 @@ def load_harness(root: Path, revision: str) -> tuple[Any, Any, str]:
             f"(missing module: {exc.name}). Install them first, e.g.:\n"
             f"  {hint}"
         ) from exc
+    # Restricted networks: github.com is often unreachable from inside the
+    # docker build even when the host can reach it through a proxy.  When
+    # CLAWBOX_GIT_PROXY is set, inject a git per-host proxy into every
+    # generated instance Dockerfile (right after FROM, so it applies before
+    # setup_repo.sh clones the repo) and force host networking so the proxy's
+    # loopback address is reachable. Gated: unset env keeps stock behaviour.
+    git_proxy = os.environ.get("CLAWBOX_GIT_PROXY", "")
+    if git_proxy:
+        _original_dockerfile_instance = test_spec_module.get_dockerfile_instance
+
+        def _dockerfile_instance_with_git_proxy(platform: str, language: str, env_image_key: str) -> str:
+            dockerfile = _original_dockerfile_instance(platform, language, env_image_key)
+            lines = dockerfile.splitlines()
+            patched: list[str] = []
+            inserted = False
+            for line in lines:
+                patched.append(line)
+                if not inserted and line.startswith("FROM "):
+                    patched.append(
+                        f"RUN git config --global http.https://github.com.proxy {git_proxy}"
+                    )
+                    inserted = True
+            return "\n".join(patched) + "\n"
+
+        test_spec_module.get_dockerfile_instance = _dockerfile_instance_with_git_proxy
     return (
         test_spec_module.make_test_spec,
         getattr(build_module, "build_env_images", None),
@@ -195,6 +221,16 @@ def build_selected(
         raise RuntimeError(f"selected tasks are absent from the full dataset: {', '.join(missing)}")
     mapping = load_mapping(mapping_path)
     client = docker.from_env()
+    if os.environ.get("CLAWBOX_GIT_PROXY"):
+        # Build containers share the host network so the git proxy bound to the
+        # host loopback (e.g. 127.0.0.1:1080) is reachable inside the build.
+        _original_build = client.api.build
+
+        def _build_with_host_network(*args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("network_mode", "host")
+            return _original_build(*args, **kwargs)
+
+        client.api.build = _build_with_host_network
     logger = logging.getLogger("clawbox.swe-rebench-arm64")
     logging.basicConfig(level=logging.INFO)
     # The pinned SWE-bench harness writes build logs through a custom logger
