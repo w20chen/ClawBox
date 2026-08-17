@@ -172,13 +172,21 @@ kubectl -n "${NAMESPACE}" get sandboxtasks \
 # 4. summary: every cell must reach a successful terminal phase
 failed=0
 for name in "${names[@]}"; do
-  phase="$(kubectl -n "${NAMESPACE}" get sandboxtask "${name}" -o jsonpath='{.status.phase}' 2>/dev/null || echo Missing)"
-  echo "cell ${name}: ${phase}"
+  status="$(kubectl -n "${NAMESPACE}" get sandboxtask "${name}" -o jsonpath='{.status}' 2>/dev/null || true)"
+  phase="$(printf '%s' "${status}" | sed -n 's/.*"phase":"\([^"]*\)".*/\1/p')"
+  echo "cell ${name}: phase=${phase:-Unknown}"
+  if [[ -n "${status}" ]]; then
+    echo "${status}" | python3 -m json.tool 2>/dev/null || printf '%s\n' "${status}"
+  fi
   case "${phase}" in
     Succeeded|Cleaned) ;;
     *) failed=$((failed + 1)) ;;
   esac
 done
+if (( failed > 0 )); then
+  echo "== recent events (last 40) ==" >&2
+  kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 >&2 || true
+fi
 
 if (( DO_DELETE == 1 )); then
   echo "== deleting cells =="
