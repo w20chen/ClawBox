@@ -116,11 +116,13 @@ devmapper_status
 
 # 2. create N identical cells with unique names, staggered
 # SandboxTask spec is immutable, so a leftover terminal task makes kubectl
-# apply a no-op; delete any stale cells with the target names first.
+# apply a no-op; delete any stale cells with the target names first and WAIT
+# for the deletion to finish (async delete lets apply hit a terminating CR
+# and become a no-op too).
 for ((i = 1; i <= COUNT; i++)); do
   stale="${PREFIX}-$(printf '%03d' "${i}")"
   kubectl -n "${NAMESPACE}" delete sandboxtask "${stale}" \
-    --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    --ignore-not-found=true --wait=true --timeout=180s >/dev/null 2>&1 || true
 done
 names=()
 for ((i = 1; i <= COUNT; i++)); do
