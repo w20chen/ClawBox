@@ -393,6 +393,12 @@ bash scripts/single-image-scale.sh \
 - `--llm-egress-cidr 0.0.0.0/0` opens TCP 443 egress for the DeepSeek API on the
   runtime NetworkPolicy. Fine for a single-task validation; pin to the provider's
   CIDR for production.
+- **Debug iterations**: pass `--timeout-seconds 480` (or any short budget) so the
+  whole cell fails/succeeds fast instead of waiting 30 min. The cell spec
+  `timeoutSeconds` bounds the runtime Job (`activeDeadlineSeconds`) and the
+  agent's `--timeout`; the entrypoint also reaps a lingering OpenClaw process
+  once `final-answer.json` is written (grace 30 s), so a run that finishes
+  writing the answer is not blocked by a non-exiting CLI.
 - The task image digest above is the validated SWE-ReBench arm64 image with the
   Tool Bridge baked in (`15five__scim2-filter-parser-13`, `/testbed` chowned to
   10001). Do not use the older `ef4a5559…` digest (no bridge).

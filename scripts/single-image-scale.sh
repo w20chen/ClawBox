@@ -33,6 +33,7 @@ PREFIX="single"
 STAGGER="2"
 PREPULL=1
 WAIT_SECONDS=0
+TIMEOUT_SECONDS="1800"
 DO_DELETE=0
 
 usage() {
@@ -47,6 +48,8 @@ options:
   --prefix NAME          cell name prefix (default single)
   --stagger-seconds S    delay between cell creates (default 2)
   --no-prepull           skip the devmapper pre-pull step
+  --timeout-seconds S    cell/agent run budget; use a short value (e.g. 480)
+                         for fast debug iterations (default 1800)
   --wait-seconds W       wait up to W seconds for terminal phases (default 0 = no wait)
   --delete               delete all created cells after the summary
 EOF
@@ -65,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --prefix) PREFIX="${2:-}"; shift 2 ;;
     --stagger-seconds) STAGGER="${2:-}"; shift 2 ;;
     --no-prepull) PREPULL=0; shift ;;
+    --timeout-seconds) TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     --wait-seconds) WAIT_SECONDS="${2:-}"; shift 2 ;;
     --delete) DO_DELETE=1; shift ;;
     *) usage ;;
@@ -132,11 +136,13 @@ for ((i = 1; i <= COUNT; i++)); do
   if [[ -n "${PROBLEM_FILE}" ]]; then
     bash "${CELL}" deploy --task "${name}" --tool-image "${TOOL_IMAGE}" \
       --problem-file "${PROBLEM_FILE}" --llm-egress-cidr "${LLM_CIDR}" \
-      --namespace "${NAMESPACE}" --profile "${PROFILE}"
+      --namespace "${NAMESPACE}" --profile "${PROFILE}" \
+      --timeout-seconds "${TIMEOUT_SECONDS}"
   else
     bash "${CELL}" deploy --task "${name}" --tool-image "${TOOL_IMAGE}" \
       --problem "${PROBLEM}" --llm-egress-cidr "${LLM_CIDR}" \
-      --namespace "${NAMESPACE}" --profile "${PROFILE}"
+      --namespace "${NAMESPACE}" --profile "${PROFILE}" \
+      --timeout-seconds "${TIMEOUT_SECONDS}"
   fi
   if (( STAGGER > 0 && i < COUNT )); then sleep "${STAGGER}"; fi
 done
