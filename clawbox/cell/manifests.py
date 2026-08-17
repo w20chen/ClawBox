@@ -167,8 +167,11 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             ],
             "readinessProbe": {"tcpSocket": {"port": "ssh"}, "periodSeconds": 2, "failureThreshold": 30},
             "resources": resources(size.tool),
-            "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": False,
-                                "capabilities": {"drop": ["ALL"]}},
+            # allowPrivilegeEscalation:false + drop ALL makes Kata's agent fall
+            # back to the image USER (10001) and ignore pod runAsUser 0
+            # (probe-j vs probe-k). Running as root inside the microVM is the
+            # whole point, so no escalation restriction at container level.
+            "securityContext": {"readOnlyRootFilesystem": False},
             "volumeMounts": [
                 {"name": "tool-auth", "mountPath": "/var/run/secrets/tool-ssh", "readOnly": True},
             ],
@@ -249,8 +252,9 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
                 {"name": "GIT_CONFIG_VALUE_0", "value": "*"},
             ],
             "resources": resources(size.runtime),
-            "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
-                                "capabilities": {"drop": ["ALL"]}},
+            # Same as tool pod: no allowPrivilegeEscalation/drop-ALL so the
+            # agent honors pod runAsUser 0 instead of the image USER.
+            "securityContext": {"readOnlyRootFilesystem": True},
             "volumeMounts": [
                 state_mount,
                 {"name": "home", "mountPath": "/home/openclaw"},
