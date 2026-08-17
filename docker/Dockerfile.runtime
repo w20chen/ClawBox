@@ -16,10 +16,12 @@ ARG OPENCLAW_VERSION
 ARG CLAWTUNE_REVISION=unknown
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ARG PIP_INDEX_URL=https://pypi.org/simple
-# Scheme+host of a Debian mirror that serves both /debian and /debian-security
-# (e.g. https://mirrors.tuna.tsinghua.edu.cn). Must include the scheme: the
-# whole http(s)://deb.debian.org prefix is replaced with it. Empty keeps the
-# official sources.
+# Host (scheme optional) of a Debian mirror that serves both /debian and
+# /debian-security, e.g. https://mirrors.tuna.tsinghua.edu.cn. The resulting
+# apt URIs are forced to http:// because the slim base image ships no system
+# CA certificates, so https verification fails before ca-certificates can be
+# installed. Package integrity is still guaranteed by apt's InRelease
+# signature check. Empty keeps the official sources.
 ARG APT_MIRROR=
 LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -27,7 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     OPENCLAW_HOME=/home/openclaw/.openclaw
 
 RUN if [ -n "${APT_MIRROR}" ]; then \
-      sed -i -E "s|https?://deb\.debian\.org|${APT_MIRROR}|g" \
+      mirror_host="$(printf '%s' "${APT_MIRROR}" | sed -E 's|^https\?://||')"; \
+      sed -i -E "s|https?://deb\.debian\.org|http://${mirror_host}|g" \
         /etc/apt/sources.list.d/debian.sources \
         /etc/apt/sources.list 2>/dev/null || true; \
     fi \
