@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import math
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -125,17 +128,65 @@ def test_launcher_preflight_requires_firecracker_handler_overhead_and_crd():
 
 
 def test_cell_profiles_reserve_both_vms_sidecar_overheads_and_safety():
-    size = FixedProfileSizer().size("small")
-    unsafed = size.runtime + size.tool + size.sidecar + size.vm_overhead + size.vm_overhead
+    sizer = FixedProfileSizer()
+    size = sizer.size("small")
+    # ClawTune runs in-process inside the Runtime container (single-container
+    # Kata job), so its budget is merged into size.runtime; the reservation must
+    # not double-count it as a phantom sidecar on top of the container requests.
+    unsafed = size.runtime + size.tool + size.vm_overhead + size.vm_overhead
     assert size.reservation.cpu_millis > unsafed.cpu_millis
     assert size.reservation.memory_bytes > unsafed.memory_bytes
     assert size.reservation.storage_bytes > unsafed.storage_bytes
     assert size.reservation.pods == 2
+    # Reservation is exactly the merged base scaled by the safety fraction.
+    expected = ResourceVector(
+        math.ceil(unsafed.cpu_millis * (1 + sizer.safety_fraction)),
+        math.ceil(unsafed.memory_bytes * (1 + sizer.safety_fraction)),
+        math.ceil(unsafed.storage_bytes * (1 + sizer.safety_fraction)),
+        2,
+    )
+    assert size.reservation == expected
 
     admission = AtomicAdmission(size.reservation)
     assert admission.reserve("one", size.reservation)
     assert admission.reserve("one", size.reservation)  # idempotent
     assert not admission.reserve("two", ResourceVector(1, 1, 1, 1))
+
+
+def test_runtime_manifest_and_reservation_account_for_inprocess_clawtune():
+    """CBX-M0-002: admission reservation, Runtime request/limit and the design
+    profile math must agree for every profile. The Runtime container (which
+    hosts OpenClaw AND in-process ClawTune) requests exactly size.runtime; the
+    reservation is the merged base + both VM overheads scaled by safety.
+    """
+    sizer = FixedProfileSizer()
+    for profile in ("small", "medium", "large"):
+        size = sizer.size(profile)
+        base_runtime, base_tool = FixedProfileSizer.PROFILES[profile]
+        # ClawTune budget is merged into the runtime budget, tool unchanged.
+        assert size.runtime == base_runtime + size.sidecar
+        assert size.tool == base_tool
+        # Rendered Runtime Job requests exactly the merged runtime budget.
+        job = runtime_job(task(), size)
+        req = job["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"]
+        assert req == {
+            "cpu": f"{size.runtime.cpu_millis}m",
+            "memory": str(size.runtime.memory_bytes),
+            "ephemeral-storage": str(size.runtime.storage_bytes),
+        }
+        # Rendered Tool Pod requests exactly the tool budget.
+        pod = tool_pod(task(), size)
+        tool_req = pod["spec"]["containers"][0]["resources"]["requests"]
+        assert tool_req["cpu"] == f"{size.tool.cpu_millis}m"
+        # Reservation == merged base + both VM overheads, scaled by safety.
+        merged = size.runtime + size.tool + size.vm_overhead + size.vm_overhead
+        expected = ResourceVector(
+            math.ceil(merged.cpu_millis * (1 + sizer.safety_fraction)),
+            math.ceil(merged.memory_bytes * (1 + sizer.safety_fraction)),
+            math.ceil(merged.storage_bytes * (1 + sizer.safety_fraction)),
+            2,
+        )
+        assert size.reservation == expected
 
 
 def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():
@@ -157,6 +208,13 @@ def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():
 
 
 def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():
+    """Lock the current single-container Kata reality (2026-08-18).
+
+    The Tool Pod is a single container with the bridge baked into the task image
+    (command /usr/local/bin/tool-bridge); the Runtime Job is a single container
+    whose entrypoint starts ClawTune in-process. There are no init containers
+    because this Kata substrate cannot share volumes across containers.
+    """
     value = task()
     size = FixedProfileSizer().size("small")
     tool = tool_pod(value, size)
@@ -166,42 +224,77 @@ def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():
 
     assert tool_spec["runtimeClassName"] == "kata-fc-arm64"
     assert runtime_spec["runtimeClassName"] == "kata-fc-arm64"
-    assert tool_spec["containers"][0]["image"] == DIGEST
-    assert tool_spec["initContainers"][0]["name"] == "install-tool-bridge"
-    assert tool_spec["containers"][0]["ports"][0]["containerPort"] == 2222
-    assert runtime_spec["initContainers"][0]["restartPolicy"] == "Always"
+    assert tool_spec["restartPolicy"] == "Never"
+    assert runtime_spec["restartPolicy"] == "Never"
 
-    sidecar_env = {item["name"]: item.get("value") for item in runtime_spec["initContainers"][0]["env"]}
-    assert sidecar_env["CLAWTUNE_POLICY"] == "observe-only"
-    assert sidecar_env["CLAWTUNE_EXECUTION_BACKEND"] == "hook-only"
-    assert sidecar_env["CLAWTUNE_ENABLE_CGROUP"] == "false"
-    assert sidecar_env["CLAWTUNE_ENABLE_AFFINITY"] == "false"
-    assert sidecar_env["CLAWTUNE_ENABLE_NUMA"] == "false"
+    # Tool Pod: single container, no init container bridge installer.
+    assert "initContainers" not in tool_spec
+    assert len(tool_spec["containers"]) == 1
+    assert tool_spec["containers"][0]["name"] == "task"
+    assert tool_spec["containers"][0]["image"] == DIGEST
+    assert tool_spec["containers"][0]["command"] == ["/usr/local/bin/tool-bridge"]
+    assert tool_spec["containers"][0]["ports"][0]["containerPort"] == 2222
+
+    # Runtime Job: single container; ClawTune runs in-process (entrypoint
+    # launches it as a background process), not as a restartable init container.
+    assert "initContainers" not in runtime_spec
+    assert len(runtime_spec["containers"]) == 1
+    assert runtime_spec["containers"][0]["name"] == "runtime"
+    assert runtime_spec["containers"][0]["command"] == ["/usr/local/bin/runtime-entrypoint"]
+
+    # Guest root is a documented, probe-verified compatibility form: Kata's
+    # agent writes Secret/ConfigMap volume data dirs with mode 0000, so a
+    # non-root uid hits EACCES. The microVM is the isolation boundary; the
+    # supervisor/non-root separation is a M2 work item (CBX-M2-001). Do not
+    # pretend the containers are non-root.
+    assert tool_spec["securityContext"]["runAsUser"] == 0
+    assert runtime_spec["securityContext"]["runAsUser"] == 0
+    assert tool_spec["containers"][0]["securityContext"] == {"readOnlyRootFilesystem": False}
+    assert runtime_spec["containers"][0]["securityContext"] == {"readOnlyRootFilesystem": True}
 
     tool_text = str(tool_spec)
     assert "OPENAI_API_KEY" not in tool_text
+    assert "llm-api-key" not in tool_text
     assert "trace-upload-token" not in tool_text
-    for volume in tool_spec["volumes"] + runtime_spec["volumes"]:
-        assert "hostPath" not in volume
-        assert "persistentVolumeClaim" not in volume
+    for spec in (tool_spec, runtime_spec):
+        assert spec["automountServiceAccountToken"] is False
+        for volume in spec["volumes"]:
+            assert "hostPath" not in volume
+            assert "persistentVolumeClaim" not in volume
     assert tool["metadata"]["ownerReferences"][0]["uid"] == "uid-a"
     assert job["metadata"]["ownerReferences"][0]["uid"] == "uid-a"
 
 
 def test_task_secret_volume_projections_keep_private_material_separate():
+    """Single-container Secret projection: the Tool side gets only the
+    authorized public key + SSH host keys, never the runtime's private key,
+    the upload token or any LLM material."""
     value = task()
     credentials = generate_ssh_credentials("cell-a")
     secret = credential_secrets(value, credentials, 60)[0]
     assert "trace-upload-token" in secret["stringData"]
+    assert "id_ed25519" in secret["stringData"]  # runtime's client private key
     tool = tool_pod(value, FixedProfileSizer().size("small"))
     runtime = runtime_job(value, FixedProfileSizer().size("small"))
-    tool_items = {item["key"] for item in tool["spec"]["volumes"][1]["secret"]["items"]}
-    runtime_items = {
-        item["key"] for item in runtime["spec"]["template"]["spec"]["volumes"][-1]["secret"]["items"]
-    }
+
+    # Single-container layout: the Tool Pod has exactly one Secret volume.
+    tool_volumes = tool["spec"]["volumes"]
+    assert len(tool_volumes) == 1
+    assert tool_volumes[0]["secret"]["secretName"] == "cell-a-auth"
+    tool_items = {item["key"] for item in tool_volumes[0]["secret"]["items"]}
+    assert tool_items == {"id_ed25519.pub", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub"}
     assert "id_ed25519" not in tool_items
     assert "trace-upload-token" not in tool_items
-    assert "ssh_host_ed25519_key" not in runtime_items
+
+    auth = next(v for v in runtime["spec"]["template"]["spec"]["volumes"] if v["name"] == "auth")
+    runtime_items = {item["key"] for item in auth["secret"]["items"]}
+    assert runtime_items == {"id_ed25519", "ssh_host_ed25519_key.pub"}
+    assert "ssh_host_ed25519_key" not in runtime_items  # host private key stays on the Tool
+    assert "trace-upload-token" not in runtime_items
+
+    # LLM key never reaches the tool pod in any form.
+    assert "OPENAI_API_KEY" not in str(tool["spec"])
+    assert "llm-api-key" not in str(tool["spec"])
 
 
 def test_cell_network_policy_is_default_deny_and_task_scoped():
@@ -350,14 +443,99 @@ def test_firecracker_host_and_image_gates_are_fail_closed():
     assert "linux/arm64" in image_factory
 
 
-def test_native_sidecar_uses_a_final_upload_handshake():
+def test_runtime_inprocess_sidecar_uses_a_final_upload_handshake():
+    """The ClawTune sidecar is an in-process background process started by
+    runtime-entrypoint inside the single runtime container, and the
+    `.runtime-complete -> final upload -> .upload-complete` contract still
+    holds statically (behavioral coverage lives in the shell/E2E gates).
+    """
     sidecar = (ROOT / "scripts" / "clawtune-sidecar-entrypoint.sh").read_text(encoding="utf-8")
     runtime = (ROOT / "scripts" / "runtime-entrypoint.sh").read_text(encoding="utf-8")
     manifest = (ROOT / "clawbox" / "cell" / "manifests.py").read_text(encoding="utf-8")
+    # In-process sidecar: the entrypoint launches it in the background and
+    # waits on the completion markers, instead of a restartable init container.
+    assert "/usr/local/bin/clawtune-sidecar-entrypoint" in runtime
+    assert "SIDECAR_PID=$!" in runtime
+    assert "runtime-entrypoint" in manifest
+    assert '".runtime-complete"' in runtime or ".runtime-complete" in runtime
     assert '.runtime-complete' in sidecar and '--once --require-result' in sidecar
     assert '.upload-complete' in runtime and 'central artifact upload timed out' in runtime
     assert '"workspaceRoot": "/testbed"' in runtime
-    assert '"restartPolicy": "Always"' in manifest
+    # No restartable init container anywhere in the rendered runtime Job.
+    assert '"restartPolicy": "Always"' not in manifest
+
+
+def test_runtime_entrypoint_clawtune_config_is_observe_only_and_fail_open():
+    """Parse-level contract for the in-process ClawTune config rendered by
+    runtime-entrypoint.sh: it must stay observe-only, hook-only, fail-open with
+    cgroup/affinity/NUMA disabled (M0 red line; only M4/M5 re-enable them).
+    This parses the actual JSON heredoc, not a grep.
+    """
+    runtime = (ROOT / "scripts" / "runtime-entrypoint.sh").read_text(encoding="utf-8")
+    match = re.search(
+        r'cat >"\$\{STATE_DIR\}/openclaw\.patch\.json" <<EOF\n(.*?)\nEOF',
+        runtime, re.DOTALL,
+    )
+    assert match, "runtime-entrypoint.sh must render openclaw.patch.json via heredoc"
+    config = json.loads(match.group(1))
+    clawtune = config["plugins"]["entries"]["clawtune"]["config"]
+    assert clawtune["mode"] == "observe"
+    assert clawtune["executionBackend"] == "hook-only"
+    assert clawtune["failOpen"] is True
+    assert clawtune["enableCgroup"] is False
+    assert clawtune["enableAffinity"] is False
+    assert clawtune["enableNuma"] is False
+    assert clawtune["autoStartSidecar"] is False
+    assert clawtune["sidecarCommand"] == ""
+    assert config["tools"]["elevated"]["enabled"] is False
+
+
+def test_cell_manifests_structural_contract_locks_security_fields():
+    """Golden/structural contract for the rendered Tool Pod, Runtime Job,
+    Secret and NetworkPolicies. Any change to a security-sensitive field must
+    be an explicit, reviewed fixture change (CBX-M0-001).
+    """
+    value = task()
+    size = FixedProfileSizer().size("small")
+    tool = tool_pod(value, size)
+    job = runtime_job(value, size)
+    secret = credential_secrets(value, generate_ssh_credentials("cell-a"), 60)[0]
+    policies = network_policies(value)
+
+    # No API/privilege surface on either workload: no SA token, no host
+    # namespaces, only emptyDir/ConfigMap/Secret volumes.
+    for spec in (tool["spec"], job["spec"]["template"]["spec"]):
+        assert spec["runtimeClassName"] == "kata-fc-arm64"
+        assert spec["automountServiceAccountToken"] is False
+        assert spec["restartPolicy"] == "Never"
+        assert "hostNetwork" not in spec and "hostPID" not in spec and "hostIPC" not in spec
+        for volume in spec["volumes"]:
+            assert "hostPath" not in volume
+            assert "persistentVolumeClaim" not in volume
+            assert "emptyDir" in volume or "configMap" in volume or "secret" in volume
+
+    # The auth Secret is the only secret and both sides project explicit items.
+    assert secret["metadata"]["name"] == "cell-a-auth"
+    assert set(secret["stringData"]) == {
+        "id_ed25519", "id_ed25519.pub",
+        "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "trace-upload-token",
+    }
+    tool_volume = tool["spec"]["volumes"][0]["secret"]
+    assert tool_volume["secretName"] == "cell-a-auth"
+    assert {item["key"] for item in tool_volume["items"]} == {
+        "id_ed25519.pub", "ssh_host_ed25519_key", "ssh_host_ed25519_key.pub",
+    }
+
+    # Exactly 4 fail-closed NetworkPolicies, all owner-referenced.
+    assert len(policies) == 4
+    names = {p["metadata"]["name"] for p in policies}
+    assert names == {
+        "cell-a-default-deny", "cell-a-tool-ingress",
+        "cell-a-runtime-egress", "cell-a-tool-egress",
+    }
+    assert all(p["metadata"]["ownerReferences"] for p in policies)
+    default_deny = next(p for p in policies if p["metadata"]["name"].endswith("default-deny"))
+    assert set(default_deny["spec"]["policyTypes"]) == {"Ingress", "Egress"}
 
 
 def test_production_deployment_has_only_firecracker_runtimeclass():

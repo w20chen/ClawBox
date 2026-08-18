@@ -9,6 +9,18 @@ clawtune-*/
 __pycache__/
 *.py[cod]
 .pytest-tmp-root/
+.pytest_cache/
+
+# Local Python environment / editable-install metadata
+.venv/
+*.egg-info/
+
+# Local test DB state (tests use a per-PID temp DB; never commit one)
+test-clawbox.db
+
+# Local temp / debug staging (scp'd helper scripts, remote experiments)
+.tmp-remote/
+.clawbox-workspaces/
 
 # Local secrets — never commit
 .env

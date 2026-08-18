@@ -43,8 +43,12 @@ class ResourceVector:
 @dataclass(frozen=True)
 class CellSize:
     profile: str
+    # Runtime container budget; already includes the in-process ClawTune budget
+    # (single-container Kata job — see roadmap §10.3).
     runtime: ResourceVector
     tool: ResourceVector
+    # ClawTune budget that was merged into `runtime`; kept as a breakdown so
+    # callers can reason about it, never reserved separately.
     sidecar: ResourceVector
     vm_overhead: ResourceVector
     reservation: ResourceVector
@@ -82,15 +86,22 @@ class FixedProfileSizer:
             runtime, tool = self.PROFILES[profile]
         except KeyError as exc:
             raise ValueError(f"unknown resource profile: {profile}") from exc
-        sidecar = ResourceVector(250, 512 * 1024**2, GIB)
-        base = runtime + tool + sidecar + self.overhead + self.overhead
+        # ClawTune runs in-process inside the Runtime container (Kata on this
+        # host cannot share volumes across containers, so there is no sidecar
+        # container). Its budget must therefore be part of the Runtime
+        # container's real request/limit — the reservation adds it exactly once
+        # (inside runtime), never as a phantom sidecar on top of the container
+        # requests. CBX-M0-002.
+        clawtune = ResourceVector(250, 512 * 1024**2, GIB)
+        runtime = runtime + clawtune
+        base = runtime + tool + self.overhead + self.overhead
         reservation = ResourceVector(
             math.ceil(base.cpu_millis * (1 + self.safety_fraction)),
             math.ceil(base.memory_bytes * (1 + self.safety_fraction)),
             math.ceil(base.storage_bytes * (1 + self.safety_fraction)),
             2,
         )
-        return CellSize(profile, runtime, tool, sidecar, self.overhead, reservation)
+        return CellSize(profile, runtime, tool, clawtune, self.overhead, reservation)
 
 
 class ClawTunePredictionSizer:

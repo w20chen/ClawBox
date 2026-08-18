@@ -1,5 +1,13 @@
 # Firecracker-first implementation map
 
+> **Current-shape notice (2026-08-18):** the Tool Pod and the Runtime Job are both
+> **single containers** — the Tool Bridge is baked into the task image and
+> ClawTune runs as an **in-process background process** started by
+> `runtime-entrypoint` inside the runtime container (Kata on the validated host
+> cannot share volumes across containers). See
+> [`AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md`](AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md)
+> for the authoritative description.
+
 | Objective | Authoritative implementation | Verification |
 |---|---|---|
 | Kata/Firecracker artifact audit | `scripts/audit-kata-firecracker-arm64.sh` | ARM64 ELF/version/config/kernel/block-rootfs/shim gates |
@@ -12,7 +20,7 @@
 | Static Tool Bridge | `toolbridge/main.go`, `docker/Dockerfile.tool-bridge` | ARM64 self-test, SSH key auth, bounded execution audit |
 | Dual-Pod task API | `deploy/sandboxtask-crd.yaml` | schema requires immutable digest and network boundary |
 | Idempotent Cell lifecycle | `clawbox/cell/controller.py`, `clawbox/cell/manifests.py` | owner references, readiness ordering, finalizer cleanup |
-| Native ClawTune sidecar | `scripts/clawtune-sidecar-entrypoint.sh`, `docker/Dockerfile.runtime` | restartable init container, fixed observe-only settings |
+| In-process ClawTune sidecar | `scripts/clawtune-sidecar-entrypoint.sh`, `scripts/runtime-entrypoint.sh`, `docker/Dockerfile.runtime` | background process inside the single runtime container; observe/hook-only, fail-open, cgroup/affinity/NUMA off |
 | Central artifact archive | `clawbox/ingester`, `scripts/artifact-uploader.py` | task HMAC token, chunk checksum/idempotence, final receipt handshake |
 | Capacity/admission | `clawbox/cell/capacity.py`, `scripts/collect-node-capacity.py` | full-Cell atomic reservation and resource profiles |
 | Benchmark submission | `clawbox/benchmark/kubernetes.py` | mapping-only SandboxTask launcher; no image fallback |

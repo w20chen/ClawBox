@@ -191,7 +191,7 @@ The controller drives each task strictly through `Queued → Admitted → ToolSt
 
 ## 4. Capacity and incremental load testing
 
-The `small`, `medium`, and `large` profiles account for the Runtime, Tool, ClawTune sidecar, both RuntimeClass overheads, and a 10% safety margin. Node capacity is derived from the allocatable resources of ready ARM64 nodes, minus non-Cell Pod requests, and is bounded by the devmapper baseline budget.
+The `small`, `medium`, and `large` profiles account for the Runtime container (which includes the in-process ClawTune budget), the Tool, both RuntimeClass overheads, and a 10% safety margin. Node capacity is derived from the allocatable resources of ready ARM64 nodes, minus non-Cell Pod requests, and is bounded by the devmapper baseline budget.
 
 ```bash
 python3 scripts/collect-node-capacity.py

@@ -1,35 +1,46 @@
 # Concurrent SWE-ReBench Cells
 
+> **Current-shape notice (2026-08-18):** this page was written for the earlier
+> two-container design (init-container bridge install + native restartable
+> sidecar). That design is **obsolete**. On the validated Kata host, containers
+> cannot share volumes, so the Tool Pod is a **single container** (the bridge is
+> baked into the task image) and the Runtime Job is a **single container** whose
+> entrypoint starts ClawTune **in-process**. The authoritative description is
+> [`AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md`](AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md)
+> and the current renderers in `clawbox/cell/manifests.py`; this page is kept as
+> design background and is updated below where it would otherwise mislead.
+
 ## Cell isolation model
 
 Each `SandboxTask` owns one Tool Pod, one Runtime Job/Pod, one Service, one prompt ConfigMap, one task-scoped auth Secret, and four NetworkPolicies. Kubernetes owner references and the controller finalizer make reconciliation idempotent and cleanup explicit.
 
-The Tool Pod starts first. An init container copies the static ARM64 Tool Bridge into an `emptyDir`; the immutable task image then runs that binary as UID 10001 on port 2222 with a task-specific Ed25519 key. The controller does not create the Runtime Job until the Tool container readiness probe succeeds.
+The Tool Pod is a **single container**: the ARM64 Tool Bridge is baked into the immutable task image (started via `/usr/local/bin/tool-bridge`) and runs as guest root inside the microVM on port 2222 with a task-specific Ed25519 key. The Tool side only ever holds the authorized public key and SSH host keys — never the runtime's private key, upload token, or any LLM material. The controller does not create the Runtime Job until the Tool container readiness probe succeeds.
 
-The Runtime Pod has two containers:
+The Runtime Job is also a **single container**. The `runtime-entrypoint`:
 
-- the main OpenClaw runtime, which reaches only the Tool Bridge, the LLM CIDR, DNS, and the ingester;
-- a restartable init container (`restartPolicy: Always`) running the native ClawTune sidecar in `observe-only` / `hook-only` mode.
+- starts the ClawTune sidecar **in-process** (`/usr/local/bin/clawtune-sidecar-entrypoint` as a background process) in `observe` / `hook-only` mode, fail-open, with cgroup/affinity/NUMA disabled;
+- runs OpenClaw, which reaches only the Tool Bridge, the LLM CIDR, DNS, and the ingester;
+- writes `result.json` and signals `.runtime-complete`; the sidecar stops, flushes trace chunks, uploads result and final marker, verifies the central receipt, and only then writes `.upload-complete`, after which the entrypoint exits with the agent status. A successful Job therefore implies durable result plus final trace receipt.
 
-The containers share only a Pod-local `emptyDir`. At completion, runtime writes the result and signals ClawTune; the sidecar stops, flushes trace chunks, uploads result and final marker, verifies the central receipt, and only then acknowledges runtime exit. A successful Job therefore implies durable result plus final trace receipt.
+Guest root inside the microVMs is a documented, probe-verified compatibility form (Kata's agent writes Secret/ConfigMap volume data dirs with mode `0000`); the microVM is the isolation boundary. Supervisor/non-root separation for task commands is scheduled for M2 (CBX-M2-001) and is a release blocker before external tenants are allowed.
 
 ## Admission
 
 The controller runs one replica and serializes reconciliation. It reserves the complete Cell before creating either VM:
 
 ```text
-reservation = runtime + tool + sidecar + 2 × RuntimeClass overhead + 10% safety
+reservation = (runtime incl. in-process ClawTune) + tool + 2 × RuntimeClass overhead + 10% safety
 ```
 
 It evaluates CPU, memory, ephemeral/devmapper storage, and two Pod slots together. Capacity is ARM64 ready-node allocatable minus non-Cell Pod requests, bounded by the captured devmapper budget. Existing nonterminal `SandboxTask` reservations are reconstructed from CR status after a controller restart.
 
-Profiles are deliberately conservative:
+Profiles are deliberately conservative; the ClawTune budget is merged into the Runtime container because ClawTune runs in-process in the same container:
 
-| Profile | Runtime | Tool | Sidecar | Cell behavior |
-|---|---:|---:|---:|---|
-| small | 1 CPU / 2 GiB | 2 CPU / 4 GiB | 0.25 CPU / 512 MiB | default validation |
-| medium | 2 CPU / 4 GiB | 4 CPU / 8 GiB | 0.25 CPU / 512 MiB | normal repository work |
-| large | 4 CPU / 8 GiB | 8 CPU / 16 GiB | 0.25 CPU / 512 MiB | heavy builds/tests |
+| Profile | Runtime container (incl. in-process ClawTune) | Tool | Cell behavior |
+|---|---:|---:|---|
+| small | 1.25 CPU / 2.5 GiB | 2 CPU / 4 GiB | default validation |
+| medium | 2.25 CPU / 4.5 GiB | 4 CPU / 8 GiB | normal repository work |
+| large | 4.25 CPU / 8.5 GiB | 8 CPU / 16 GiB | heavy builds/tests |
 
 Each row also includes the two 250m/256Mi RuntimeClass overheads and storage budgets defined in code. `CellSizer`, `NodeCapacityProvider`, and `PlacementPolicy` are interfaces; ClawTune prediction has a fail-closed extension point and is not active in observe-only mode.
 
