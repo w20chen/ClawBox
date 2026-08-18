@@ -168,6 +168,43 @@ def kubectl_facts(namespace: str, run_id: str) -> dict[str, object]:
     return facts
 
 
+def ingester_result(task_id: str) -> dict[str, object] | None:
+    """Fetch the run's result record from the ingester via kubectl exec.
+
+    Returns a summary plus the full payload text; callers decide what to store.
+    The payload is agent/benchmark output (not credentials).
+    """
+    probe = (
+        "import sqlite3,glob,json\n"
+        "dbs=glob.glob('/data/*.db')\n"
+        "conn=sqlite3.connect(dbs[0]); conn.row_factory=sqlite3.Row\n"
+        "cur=conn.cursor()\n"
+        "cur.execute('SELECT * FROM task_results WHERE task_id=?', (%r,))\n"
+        "row=cur.fetchone()\n"
+        "print('NO_ROW' if row is None else row['payload'])" % task_id
+    )
+    code, out = sh(["kubectl", "-n", "clawbox-system", "exec", "deploy/clawbox-ingester",
+                    "--", "python3", "-c", probe], timeout=60)
+    if code != 0 or "NO_ROW" in out:
+        return None
+    payload = out.strip()
+    summary: dict[str, object] = {"sha256": sha256_bytes(payload.encode())}
+    try:
+        obj = json.loads(payload)
+        summary["status"] = obj.get("status")
+        summary["session_id"] = obj.get("session_id")
+        metadata = obj.get("metadata") or {}
+        summary["agent_exit_code"] = metadata.get("agent_exit_code")
+        summary["patch_status"] = metadata.get("patch_status")
+        patch = obj.get("patch") or ""
+        final = obj.get("final_answer") or ""
+        summary["patch_len"] = len(patch)
+        summary["final_answer_len"] = len(final)
+    except json.JSONDecodeError:
+        summary["parse_error"] = True
+    return {"summary": summary, "payload": payload}
+
+
 def collect(args: argparse.Namespace) -> int:
     out_root = Path(args.out_root)
     out_dir = out_root / args.release / args.cluster / args.run
@@ -205,6 +242,17 @@ def collect(args: argparse.Namespace) -> int:
             manifest.setdefault("artifacts", {})[f"{kind}:{name}"] = None
 
     manifest["run"] = kubectl_facts(ns, args.run)
+
+    # Result receipt from the ingester (agent/benchmark output, not credentials).
+    if args.result_task:
+        result = ingester_result(args.result_task)
+        if result is not None:
+            result_file = e2e_dir / f"result.{args.result_task}.json"
+            result_file.write_text(result["payload"], encoding="utf-8")
+            manifest["run"]["result"] = result["summary"]
+            manifest.setdefault("artifacts", {})["result"] = sha256_file(result_file)
+        else:
+            manifest["run"]["result"] = None
 
     gates = []
     for gate in args.gate:
@@ -271,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
     collect_p.add_argument("--cluster", required=True)
     collect_p.add_argument("--run", required=True)
     collect_p.add_argument("--namespace", default="clawbox-benchmarks")
+    collect_p.add_argument("--result-task", default=None,
+                           help="fetch this run's result receipt from the ingester")
     collect_p.add_argument("--out-root", default=str(ROOT / "release-evidence"),
                            help="evidence root (default <repo>/release-evidence)")
     collect_p.add_argument("--image", dest="images", action="append", default=[],

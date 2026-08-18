@@ -21,6 +21,7 @@ TASK_IMAGE="127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:bdf4637498a4b765f0e9
 
 python3 scripts/evidence-manifest.py collect \
   --release "${RELEASE}" --cluster "${CLUSTER}" --run "${RUN}" \
+  --result-task "${RUN}" \
   --image 127.0.0.1:5000/clawbox/control-plane-arm64:dev \
   --image 127.0.0.1:5000/clawbox/runtime-arm64:dev \
   --image 127.0.0.1:5000/clawbox/tool-bridge-arm64:dev \
