@@ -55,7 +55,11 @@ printf '[%s]:%s %s\n' "${pod_ip}" "${tool_port}" "${host_pub}" >"${key_dir}/know
 classify() {
   # $1 = ssh exit code, $2 = ssh combined stderr
   local rc="$1" out="$2"
-  if grep -qiE 'Could not resolve hostname|Temporary failure in name resolution|Name or service not known' <<<"${out}"; then
+  # The flaky symptom: the remote command clearly ran (expected output seen)
+  # but the ssh client still returned non-zero (e.g. 255 on channel close).
+  if [[ "${rc}" -ne 0 ]] && grep -q 'probe-ok' <<<"${out}"; then
+    echo "post-command-255"
+  elif grep -qiE 'Could not resolve hostname|Temporary failure in name resolution|Name or service not known' <<<"${out}"; then
     echo "dns"
   elif grep -qiE 'Connection refused|Connection timed out|No route to host|Network is unreachable' <<<"${out}"; then
     echo "tcp"
@@ -72,7 +76,7 @@ classify() {
 
 declare -A counts
 declare -A samples
-for layer in dns tcp ssh-handshake request command-exit ok; do counts[$layer]=0; done
+for layer in dns tcp ssh-handshake request post-command-255 command-exit ok; do counts[$layer]=0; done
 
 echo "== ssh-255 probe cell=${CELL} pod=${pod_ip} count=${COUNT} =="
 ok_time=0.0
@@ -97,20 +101,21 @@ for ((i = 1; i <= COUNT; i++)); do
     fi
   fi
   if (( i % 100 == 0 )); then
-    echo "  ${i}/${COUNT} done: ok=${counts[ok]} dns=${counts[dns]} tcp=${counts[tcp]} handshake=${counts[ssh-handshake]} request=${counts[request]} cmd=${counts[command-exit]}"
+    echo "  ${i}/${COUNT} done: ok=${counts[ok]} dns=${counts[dns]} tcp=${counts[tcp]} handshake=${counts[ssh-handshake]} request=${counts[request]} post255=${counts[post-command-255]} cmd=${counts[command-exit]}"
   fi
+  unset rc
 done
 
 echo "== results =="
 printf '%-16s %8s\n' "layer" "count"
-for layer in ok dns tcp ssh-handshake request command-exit; do
+for layer in ok dns tcp ssh-handshake request post-command-255 command-exit; do
   printf '%-16s %8d\n' "${layer}" "${counts[$layer]}"
 done
 if (( ok_n > 0 )); then
   printf 'avg ok latency: %.1f ms\n' "$(awk -v t="${ok_time}" -v n="${ok_n}" 'BEGIN{printf "%.1f", t / n}')"
 fi
 echo "== failure samples (first per layer) =="
-for layer in dns tcp ssh-handshake request command-exit; do
+for layer in dns tcp ssh-handshake request post-command-255 command-exit; do
   if [[ -n "${samples[$layer]:-}" ]]; then
     printf '%-16s %s\n' "${layer}" "${samples[$layer]}"
   fi
