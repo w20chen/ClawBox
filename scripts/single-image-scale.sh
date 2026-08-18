@@ -96,7 +96,12 @@ DEVSTATUS="${ROOT}/scripts/setup-devmapper-openeuler-arm64.sh"
 
 devmapper_status() {
   echo "== devmapper status =="
-  sudo bash "${DEVSTATUS}" status || true
+  # Scoped NOPASSWD sudoers may not permit `sudo bash <script>`; fall back to
+  # the thin-pool summary that a scoped `lvs` can produce.
+  if ! sudo bash "${DEVSTATUS}" status 2>/dev/null; then
+    echo "(full devmapper audit needs 'sudo bash'; thin-pool summary:)"
+    sudo /usr/sbin/lvs --units b -o name,lv_size,data_percent,metadata_percent 2>&1 || true
+  fi
 }
 
 # 1. pre-pull once into the devmapper snapshotter. Without this, a burst of
