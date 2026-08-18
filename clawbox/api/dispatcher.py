@@ -53,10 +53,20 @@ class CRBackend(Protocol):
 
 
 class KubernetesCRBackend:
-    """Real backend over the Kubernetes dynamic client."""
+    """Real backend over the Kubernetes dynamic client.
 
-    def __init__(self, custom_api=None, namespace: str = DEFAULT_CELL_NAMESPACE):
+    `version` is configurable so the dispatcher can keep writing v1alpha1 while
+    the cluster is still on the v1alpha1 CRD, then flip to v1alpha2 once the
+    conversion webhook and controller flip are live (ADR-003). Note: on a
+    v1alpha1 CRD the runRef/desiredState fields are pruned server-side.
+    """
+
+    def __init__(
+        self, custom_api=None, namespace: str = DEFAULT_CELL_NAMESPACE,
+        version: str = "v1alpha2",
+    ):
         self.namespace = namespace
+        self.version = version
         if custom_api is None:
             from kubernetes import client, config
 
@@ -69,10 +79,12 @@ class KubernetesCRBackend:
         from clawbox.cell.controller import GROUP, PLURAL
 
         self.group = GROUP
-        self.version = "v1alpha2"
         self.plural = PLURAL
 
     def apply_sandboxtask(self, manifest: dict[str, Any]) -> bool:
+        # Align apiVersion with the cluster's served CRD version; the builder
+        # emits the v1alpha2 shape, and a v1alpha1 CRD prunes the extra fields.
+        manifest = {**manifest, "apiVersion": f"{self.group}/{self.version}"}
         name = manifest["metadata"]["name"]
         namespace = manifest["metadata"].get("namespace", self.namespace)
         try:

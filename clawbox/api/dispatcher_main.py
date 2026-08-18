@@ -25,6 +25,7 @@ def main() -> None:
         registry=_load_registry(),
         cr_backend=KubernetesCRBackend(
             namespace=os.getenv("CLAWBOX_CELL_NAMESPACE", "clawbox-benchmarks"),
+            version=os.getenv("CLAWBOX_CR_VERSION", "v1alpha2"),
         ),
     )
     dispatcher.run_forever(interval_seconds=float(os.getenv("DISPATCHER_INTERVAL_SECONDS", "2")))
