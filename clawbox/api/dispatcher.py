@@ -267,7 +267,9 @@ def _get_run_unscoped(db: Session, run_id: str) -> Run | None:
 
 def _cr_name(run: Run, attempt) -> str:
     # Deterministic, DNS-safe, <= 48 chars (CRD rule + owned child names).
-    return f"run-{run.run_id}-a{attempt.attempt_number}"
+    # ULIDs are Crockford base32 (uppercase); RFC 1123 requires lowercase, so
+    # the name carries the lowercased run id (the runRef keeps the exact id).
+    return f"run-{run.run_id.lower()}-a{attempt.attempt_number}"
 
 
 def _problem_statement(run: Run) -> str:

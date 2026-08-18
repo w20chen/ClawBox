@@ -112,7 +112,7 @@ def test_attempt_created_applies_cr_and_queues_run(env):
         run = _run(db, run_id)
         assert run.phase == RunPhase.QUEUED
         attempt = get_attempt(db, run.current_attempt_id)
-        name = f"run-{run_id}-a1"
+        name = f"run-{run_id.lower()}-a1"
         assert backend.create_calls == 1
         assert name in backend.manifests
         manifest = backend.manifests[name]
@@ -160,8 +160,8 @@ def test_retry_applies_new_cr_for_new_attempt(env):
         run = _run(db, run_id)
         assert run.attempt_counter == 2
         assert backend.create_calls == 2
-        assert f"run-{run_id}-a2" in backend.manifests
-        assert f"run-{run_id}-a1" in backend.manifests
+        assert f"run-{run_id.lower()}-a2" in backend.manifests
+        assert f"run-{run_id.lower()}-a1" in backend.manifests
         # A queued run stays queued (transition guarded).
         assert run.phase == RunPhase.QUEUED
 
@@ -179,7 +179,7 @@ def test_cancel_patches_live_cr(env):
         request_cancel(db, run)
         db.commit()
     dispatcher.run_once()
-    assert backend.cancelled == [f"run-{run_id}-a1"]
+    assert backend.cancelled == [f"run-{run_id.lower()}-a1"]
 
 
 def test_restart_after_cr_apply_does_not_duplicate(env):
