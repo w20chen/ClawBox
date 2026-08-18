@@ -20,12 +20,13 @@ dependencies = [
   "psutil>=5.9",
   "prometheus-client>=0.20",
   "typing-extensions>=4.12",
+  "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
 images = ["datasets>=3.0"]
-dev = ["pytest>=8", "alembic>=1.13"]
+dev = ["pytest>=8"]
 
 [project.scripts]
 clawbox-scheduler = "clawbox.scheduler.app:main"
