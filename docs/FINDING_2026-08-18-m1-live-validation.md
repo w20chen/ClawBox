@@ -20,15 +20,40 @@ POST /v1/runs (Managed API, SQLite)
 - **幂等重放**: 同 key 第二次 POST 返回同一 runId + `idempotencyReplay:true`（201 → 200）
 - **Run events**（经 API 查询）: `run.accepted → attempt.created → run.queued`，sequence 1..3
 
-## 真实 agent 任务（M1-15, 2026-08-18）
+## 真实 agent 任务：全链路成功（M1-15, 2026-08-18）
 
 补上 `problemStatement` 通道（M1-15, commit `51ba8b7` + migration `bf40a779a85c`）后，
 通过 M1 API 提交了**真实 SWE-ReBench 任务** `15five__scim2-filter-parser-13`：
 
-- **Run ID**: `01M0ADY8DNNWNJWVW7G42390RD`；**CR**: `run-01m0ady8dnnwnjwvw7g42390rd-a1`
-- CR 中确认携带**真实问题文本**（NamedTuple/AttrPath 任务）+ 真实 LLM secret `clawbox-llm` + 真实任务镜像 digest
-- Runtime 日志: ClawTune sidecar 启动 → ingester OK → **`runtime-root-ok`（SSH 无 WARN）** → agent 开始执行
-- 预期 ~20 分钟产出真实 patch（与 M0 real001-001 的 21m/1175 字符 patch 同路径）
+```
+POST /v1/runs (Managed API, SQLite, 真实 problemStatement)
+  → Dispatcher → SandboxTask CR (v1alpha1)
+  → 在线 Cell Controller → Tool + Runtime 两个 Firecracker 微 VM
+  → 真实 agent (OpenClaw + deepseek-v4-flash @ ClawTune sidecar) 33 turns
+  → 产出正确修复并 git commit → Cell Cleaned/Succeeded (17m)
+```
+
+### 证据 (Evidence)
+
+- **Run**: `01M0ADY8DNNWNJWVW7G42390RD`；**Attempt #1**: `01M0ADY91MW6TG05283GGC0S22`
+  - 事件: `run.accepted → attempt.created → run.queued`（API 可查）
+- **CR**: `run-01m0ady8dnnwnjwvw7g42390rd-a1` — `Cleaned / outcome=Succeeded`
+  - queuedAt 12:36:09 → toolReadyAt 12:36:16 → runtimeStartedAt 12:36:18 → cleanedAt 12:53:27（~17 分钟）
+  - reservation 4125m / 8267812045B / 2 pods
+- **agent 真实产出** (commit `c1ad059` "Use NamedTuple AttrPath in sql transpiler"):
+  - `AttrPath = namedtuple('AttrPath', ('attr_name', 'sub_attr', 'uri'))`
+  - `visit_AttrPath` 用 `AttrPath(...)` 替换普通 3-tuple，行为保持（append + attr_map.get）
+  - **与 gold PR#13 完全一致**（同 M0 real001-001 的结论）
+- **官方 ingester result**: `status=succeeded`, `agent_exit_code=0`, `final_answer_len=15596`, `patch_status=empty`
+- **无泄漏**: 0 firecracker 进程
+
+### 新发现 (Finding): 结果 patch 提取漏掉已提交改动
+
+- runtime 用 `git diff`（工作区）收集 patch；本次 agent 把修复 **`git commit` 了** → 工作区干净
+  → 官方结果 `patch len: 0`（尽管真实修复在 commit `c1ad059` 里）。
+- **修复方向**: 结果提取应回退到最后一个 agent 提交（`git show HEAD` / `git diff HEAD~1..HEAD`），
+  或统一约束 agent 不提交。这是 M2 artifact/strong-receipt 的输入。
+- 手工提取: `kubectl exec <tool-pod> -- sh -c 'cd /testbed && git show c1ad059'`
 
 ## 验证中修复的缺陷 (Bugs found & fixed)
 
@@ -39,6 +64,9 @@ POST /v1/runs (Managed API, SQLite)
 | 3 | API 忽略 `CLAWBOX_SERVICE_TOKEN` env，永远用默认 token → 所有请求 401 | `create_app(service_token=None)` 读 env；main 从 env 建 app | `0f513a7` (M1-13) |
 | 4 | CR 名用大写 ULID → 违反 RFC 1123（422 Invalid metadata.name） | `_cr_name` 用小写 run id（runRef 保留精确 id） | `a4ea8d7` (M1-14) |
 | 5 | Dispatcher 容器 uid 10001 读不到 `~/.kube`（700） | 拷贝 + chmod 644 + 只读挂载 KUBECONFIG | (host 侧 smoke) |
+| 6 | 真实 problem 无法传入（inputRef ≤512 字符） | `problemStatement` 字段 + `managed_runs.problem_statement` 列 + migration `bf40a779a85c` | `51ba8b7` (M1-15) |
+| 7 | 旧 SQLite 无新列 → API 500 | `alembic upgrade head`（脚本已内置） | (host 侧) |
+| 8 | **结果提取漏已提交 patch** | 待修（M2 artifact/strong-receipt 输入） | — |
 
 ## 环境与运行方式
 
