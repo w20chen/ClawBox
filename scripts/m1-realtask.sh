@@ -10,6 +10,10 @@ OUT=/tmp/m1-realtask.txt
   TASK_IMAGE="127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:bdf4637498a4b765f0e91333ff292c226bd011a31c220d76609daff43e2c39fd"
   TEMPLATES="{\"swe-rebench-arm64\":{\"1\":{\"toolImage\":\"$TASK_IMAGE\",\"secretName\":\"clawbox-llm\",\"runtimeImage\":\"127.0.0.1:5000/clawbox/runtime-arm64:dev\",\"llmEgressCIDR\":\"0.0.0.0/0\",\"profile\":\"small\",\"maxDeadlineSeconds\":3600,\"minDeadlineSeconds\":60}}}"
 
+  echo "== alembic upgrade (idempotent) =="
+  docker run --rm -e "DATABASE_URL=sqlite:////data/clawbox-managed.db" \
+    -v "$DATA:/data" "$IMG" python3 -m alembic upgrade head 2>&1 | tail -2
+
   echo "== recreate API =="
   docker rm -f clawbox-m1-api clawbox-m1-dispatcher 2>/dev/null
   docker run -d --name clawbox-m1-api --restart unless-stopped \
