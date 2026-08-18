@@ -20,6 +20,16 @@ POST /v1/runs (Managed API, SQLite)
 - **幂等重放**: 同 key 第二次 POST 返回同一 runId + `idempotencyReplay:true`（201 → 200）
 - **Run events**（经 API 查询）: `run.accepted → attempt.created → run.queued`，sequence 1..3
 
+## 真实 agent 任务（M1-15, 2026-08-18）
+
+补上 `problemStatement` 通道（M1-15, commit `51ba8b7` + migration `bf40a779a85c`）后，
+通过 M1 API 提交了**真实 SWE-ReBench 任务** `15five__scim2-filter-parser-13`：
+
+- **Run ID**: `01M0ADY8DNNWNJWVW7G42390RD`；**CR**: `run-01m0ady8dnnwnjwvw7g42390rd-a1`
+- CR 中确认携带**真实问题文本**（NamedTuple/AttrPath 任务）+ 真实 LLM secret `clawbox-llm` + 真实任务镜像 digest
+- Runtime 日志: ClawTune sidecar 启动 → ingester OK → **`runtime-root-ok`（SSH 无 WARN）** → agent 开始执行
+- 预期 ~20 分钟产出真实 patch（与 M0 real001-001 的 21m/1175 字符 patch 同路径）
+
 ## 验证中修复的缺陷 (Bugs found & fixed)
 
 | # | 缺陷 | 修复 | commit |
