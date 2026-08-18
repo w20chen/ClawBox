@@ -1,0 +1,77 @@
+# Managed control-plane RBAC separation (M1, roadmap §6.5).
+#
+# Principle of least privilege per component:
+#   - clawbox-managed-api:      PURE DB SERVICE. No Kubernetes permissions at
+#                               all (no Pod/Secret/CR creation). It must never
+#                               be granted sandboxtasks/pods/secrets verbs.
+#   - clawbox-managed-dispatcher: The ONLY path that creates SandboxTask CRs
+#                               (ADR-001). Needs only sandboxtasks
+#                               get/list/create/patch in the cell namespace —
+#                               no Pods, no Secrets, no Jobs, no NetworkPolicies.
+#   - clawbox-cell-controller:  Already in control-plane-rbac.yaml; keeps the
+#                               Pod/Secret/Job/NetworkPolicy verbs it needs to
+#                               realize Cells.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clawbox-managed-api
+  namespace: clawbox-system
+---
+# The Managed API is a database service. It intentionally has NO Role/Binding:
+# a future grant of any kubernetes verb here is a security regression and
+# should be reviewed as a credential-broker violation (ADR-006).
+# (Keep this empty rule as documentation; it binds to nothing.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clawbox-managed-api-no-kubernetes-access
+  namespace: clawbox-system
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clawbox-managed-api-no-kubernetes-access
+  namespace: clawbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: clawbox-managed-api-no-kubernetes-access
+subjects:
+  - kind: ServiceAccount
+    name: clawbox-managed-api
+    namespace: clawbox-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clawbox-managed-dispatcher
+  namespace: clawbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clawbox-managed-dispatcher
+  namespace: clawbox-benchmarks
+rules:
+  - apiGroups: ["clawbox.openai.com"]
+    resources: ["sandboxtasks"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["clawbox.openai.com"]
+    resources: ["sandboxtasks/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clawbox-managed-dispatcher
+  namespace: clawbox-benchmarks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: clawbox-managed-dispatcher
+subjects:
+  - kind: ServiceAccount
+    name: clawbox-managed-dispatcher
+    namespace: clawbox-system
