@@ -64,6 +64,7 @@ class RunRow(ManagedBase):
     deadline_seconds: Mapped[int] = mapped_column(Integer)
     idempotency_key: Mapped[str] = mapped_column(String(512))
     request_digest: Mapped[str] = mapped_column(String(64))
+    problem_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
     phase: Mapped[str] = mapped_column(String(32), default="Accepted")
     desired_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     current_attempt_id: Mapped[str | None] = mapped_column(String(26), nullable=True)

@@ -64,6 +64,16 @@ def body(**overrides):
     return base
 
 
+def test_create_run_accepts_problem_statement(client):
+    c, _ = client
+    problem = "It would be nice to return a NamedTuple instead of a tuple here..."
+    r = c.post("/v1/runs", json=body(problemStatement=problem), headers=HEADERS)
+    assert r.status_code == 201
+    # Same key with a different problem body is a conflict.
+    conflict = c.post("/v1/runs", json=body(problemStatement="different problem"), headers=HEADERS)
+    assert conflict.status_code == 409
+
+
 def test_healthz(client):
     c, _ = client
     assert c.get("/healthz").json() == {"status": "ok"}

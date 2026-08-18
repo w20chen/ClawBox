@@ -13,6 +13,9 @@ class CreateRunRequest(BaseModel):
     inputSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     deadlineSeconds: int = Field(ge=60, le=86400)
     idempotencyKey: str = Field(min_length=1, max_length=512)
+    # Optional full problem text (1MB cap like the CRD); when omitted the
+    # dispatcher falls back to inputRef.
+    problemStatement: str | None = Field(default=None, max_length=1_000_000)
 
 
 class CreateRunResponse(BaseModel):

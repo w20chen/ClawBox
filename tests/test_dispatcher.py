@@ -166,6 +166,35 @@ def test_retry_applies_new_cr_for_new_attempt(env):
         assert run.phase == RunPhase.QUEUED
 
 
+def test_manifest_uses_full_problem_statement_when_provided(env):
+    factory, backend, dispatcher = env
+    problem = "It would be nice to return a NamedTuple instead of a tuple here..."
+    with factory() as db:
+        run, _ = create_run(db, make_intent(problem_statement=problem))
+        db.commit()
+        run_id = run.run_id
+    dispatcher.run_once()
+    dispatcher.run_once()
+    with factory() as db:
+        run = _run(db, run_id)
+        name = f"run-{run_id.lower()}-a1"
+        assert backend.manifests[name]["spec"]["problemStatement"] == problem
+
+
+def test_manifest_falls_back_to_input_ref_without_problem(env):
+    factory, backend, dispatcher = env
+    with factory() as db:
+        run, _ = create_run(db, make_intent(input_ref="15five__scim2-filter-parser-13"))
+        db.commit()
+        run_id = run.run_id
+    dispatcher.run_once()
+    dispatcher.run_once()
+    with factory() as db:
+        run = _run(db, run_id)
+        name = f"run-{run_id.lower()}-a1"
+        assert backend.manifests[name]["spec"]["problemStatement"] == "15five__scim2-filter-parser-13"
+
+
 def test_cancel_patches_live_cr(env):
     factory, backend, dispatcher = env
     with factory() as db:

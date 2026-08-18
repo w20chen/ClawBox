@@ -273,7 +273,6 @@ def _cr_name(run: Run, attempt) -> str:
 
 
 def _problem_statement(run: Run) -> str:
-    # input_ref is a display/registry reference; the actual problem statement
-    # is resolved by the task image / template at execution time. Keep the CR
-    # immutable and small.
-    return run.input_ref
+    # Full problem text when the API provided it (real agent tasks); otherwise
+    # input_ref is a display/registry reference (smoke/placeholder runs).
+    return run.problem_statement or run.input_ref

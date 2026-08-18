@@ -189,3 +189,16 @@ def test_get_run_scoped_by_tenant(db):
     db.commit()
     assert get_run(db, "tenant-a", run.run_id) is not None
     assert get_run(db, "tenant-b", run.run_id) is None
+
+
+def test_problem_statement_round_trip(db):
+    problem = "It would be nice to return a NamedTuple instead of a tuple here..."
+    run, _ = create_run(db, make_intent(problem_statement=problem))
+    db.commit()
+    loaded = get_run(db, "tenant-a", run.run_id)
+    assert loaded is not None
+    assert loaded.problem_statement == problem
+    # Without a problem statement the field is None.
+    other, _ = create_run(db, make_intent(idempotency_key="key-no-problem"))
+    db.commit()
+    assert get_run(db, "tenant-a", other.run_id).problem_statement is None

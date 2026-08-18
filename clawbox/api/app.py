@@ -111,6 +111,7 @@ def create_app(
             deadline_seconds=body.deadlineSeconds,
             idempotency_key=body.idempotencyKey,
             request_digest=idempotency_digest(digest_payload),
+            problem_statement=body.problemStatement,
         )
         try:
             run, created = create_run(session, intent)

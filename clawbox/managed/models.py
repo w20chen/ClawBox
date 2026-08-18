@@ -84,6 +84,8 @@ class RunIntent:
     idempotency_key: str
     # sha256 of the canonical request body; the idempotency match key.
     request_digest: str
+    # Optional full problem text (otherwise input_ref is used as the problem).
+    problem_statement: str | None = None
 
 
 @dataclass
@@ -98,6 +100,8 @@ class Run:
     deadline_seconds: int
     idempotency_key: str
     request_digest: str
+    # Optional full problem text (otherwise input_ref is used as the problem).
+    problem_statement: str | None = None
     phase: RunPhase = RunPhase.ACCEPTED
     # One-way desired state (e.g. "Cancelled"); nil until a cancel is recorded.
     desired_state: str | None = None
@@ -122,6 +126,7 @@ class Run:
             deadline_seconds=intent.deadline_seconds,
             idempotency_key=intent.idempotency_key,
             request_digest=intent.request_digest,
+            problem_statement=intent.problem_statement,
             created_at=now,
             updated_at=now,
         )
