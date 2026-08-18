@@ -182,6 +182,36 @@ def test_cancel_patches_live_cr(env):
     assert backend.cancelled == [f"run-{run_id}-a1"]
 
 
+def test_restart_after_cr_apply_does_not_duplicate(env):
+    """M1 acceptance: crash between CR creation and outbox commit must not
+    create a second attempt/CR on recovery."""
+    factory, backend, dispatcher = env
+    with factory() as db:
+        run, _ = create_run(db, make_intent())
+        db.commit()
+        run_id = run.run_id
+    dispatcher.run_once()  # run.accepted -> attempt 1 (committed)
+    dispatcher.run_once()  # attempt.created -> CR applied + outbox completed
+    assert backend.create_calls == 1
+
+    # Simulate a crash: the CR exists on the cluster, but the outbox rows are
+    # still pending (commit never happened).
+    with factory() as db:
+        for row in db.scalars(select(OutboxRow)).all():
+            row.processed_at = None
+        db.commit()
+
+    dispatcher.run_once()  # recovery cycle
+    with factory() as db:
+        run = _run(db, run_id)
+        assert run.attempt_counter == 1  # no duplicate attempt
+        assert run.phase == RunPhase.QUEUED  # converges, stays queued
+        pending = db.scalars(select(OutboxRow).where(OutboxRow.processed_at.is_(None))).all()
+        assert len(pending) == 0  # drained without side effects
+    assert backend.create_calls == 1  # CR apply was a no-op (name-idempotent)
+    assert len(backend.manifests) == 1
+
+
 def _run(db, run_id):
     from clawbox.managed.db import RunRow
     from clawbox.managed.repo import _row_to_run
