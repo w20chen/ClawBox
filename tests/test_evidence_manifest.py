@@ -47,6 +47,13 @@ def test_collect_writes_reverifiable_manifest(tmp_path: Path):
     assert (path.parent / "gate-summary.json").exists()
 
 
+def test_collect_records_image_refs_with_digests_or_null(tmp_path: Path):
+    result = _collect(tmp_path, "--image", "foo/bar:dev", "--image", "baz@sha256:abcd")
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(_manifest_path(tmp_path).read_text(encoding="utf-8"))
+    assert manifest["images"] == {"foo/bar:dev": None, "baz@sha256:abcd": None}
+
+
 def test_gate_summary_records_results(tmp_path: Path):
     result = _collect(tmp_path, "--gate", "e2e-real-task:pass", "--gate", "cleanup:blocked")
     assert result.returncode == 0, result.stderr

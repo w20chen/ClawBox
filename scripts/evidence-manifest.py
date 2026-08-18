@@ -220,7 +220,7 @@ def collect(args: argparse.Namespace) -> int:
         "git": git_facts(),
         "schemas": schema_facts(),
         "host": host_facts(),
-        "images": {name: image_digest(ref) for name, ref in args.images},
+        "images": {ref: image_digest(ref) for ref in args.images},
     }
 
     # Per-run CR + rendered child resources: save YAML under e2e/ (metadata only
