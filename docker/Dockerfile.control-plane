@@ -3,6 +3,8 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 WORKDIR /opt/clawbox
 COPY pyproject.toml ./
 COPY clawbox ./clawbox
+COPY alembic.ini ./
+COPY alembic ./alembic
 RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" '.[postgres]'
 RUN groupadd --gid 10001 clawbox \
  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin clawbox
