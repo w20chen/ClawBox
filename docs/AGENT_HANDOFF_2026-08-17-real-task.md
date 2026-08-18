@@ -1,5 +1,7 @@
 # ClawBox 交接：read/write 工具修复 + 真实任务全链路成功（2026-08-17 19:33 UTC）
 
+> 后续权威路线图：`docs/AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md`。本文保留单任务里程碑与真机证据；从当前 MVP 走向 managed agent sandbox system 的实施顺序、安全门和最终验收以新文档为准。
+
 目标主机：openEuler 24.03 LTS-SP1、aarch64、单节点 K8s 1.35.7、Kata 3.31.0 + Firecracker 1.12.1、`weitianc@193.124.7.2`（PowerShell `ssh.exe`/`scp.exe`，远程命令用 `bash /tmp/x.sh` 脚本，注意引号）。
 
 ## ✅ 里程碑：真实 SWE-ReBench 任务全链路跑通（cell `real001-001`）

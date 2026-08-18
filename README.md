@@ -1,13 +1,15 @@
 # ClawBox: Firecracker-first ARM64 benchmark runtime
 
-ClawBox runs a dual-VM Cell per `SandboxTask` on Kunpeng/openEuler ARM64 hosts. The Tool Pod hosts the immutable SWE-ReBench task image and a static SSH Tool Bridge; the Runtime Pod hosts OpenClaw and runs ClawTune as a native Kubernetes sidecar. Both Pods are pinned to `kata-fc-arm64`, with no fallback path to other architectures or VMMs.
+Current handoff and completion roadmap: [`docs/AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md`](docs/AGENT_HANDOFF_2026-08-18-managed-sandbox-roadmap.md). It distinguishes the validated single-task MVP from the remaining work required for a managed agent sandbox system.
+
+ClawBox runs a dual-VM Cell per `SandboxTask` on Kunpeng/openEuler ARM64 hosts. The Tool Pod hosts the immutable SWE-ReBench task image and a static SSH Tool Bridge; the Runtime Pod hosts OpenClaw and starts ClawTune as an in-process sidecar process in the same container (the validated Kata host cannot share volumes across containers). Both Pods are pinned to `kata-fc-arm64`, with no fallback path to other architectures or VMMs.
 
 ```text
 SandboxTask
   ├─ Tool Pod (Kata + Firecracker) ── SSH/2222 ──┐
   └─ Runtime Job/Pod (Kata + Firecracker)        │
        ├─ runtime: OpenClaw ─────────────────────┘
-       └─ native sidecar: ClawTune observe-only
+       └─ in-process sidecar process: ClawTune observe-only
               └─ task token → central trace/result ingester
 ```
 
