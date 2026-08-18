@@ -78,6 +78,10 @@ def create_app(
         finally:
             session.close()
 
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.post("/v1/runs", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
     def create_run_endpoint(
         body: CreateRunRequest,

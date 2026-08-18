@@ -64,6 +64,11 @@ def body(**overrides):
     return base
 
 
+def test_healthz(client):
+    c, _ = client
+    assert c.get("/healthz").json() == {"status": "ok"}
+
+
 def test_create_run_201(client):
     c, _ = client
     r = c.post("/v1/runs", json=body(), headers=HEADERS)
