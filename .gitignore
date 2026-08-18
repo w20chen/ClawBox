@@ -22,6 +22,9 @@ test-clawbox.db
 .tmp-remote/
 .clawbox-workspaces/
 
+# Generated release/evidence manifests (kept on object store / CI, not git)
+release-evidence/
+
 # Local secrets — never commit
 .env
 .env.*
