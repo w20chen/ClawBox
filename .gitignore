@@ -18,6 +18,10 @@ __pycache__/
 # Local test DB state (tests use a per-PID temp DB; never commit one)
 test-clawbox.db
 
+# Local dev / migration scratch DBs (never commit)
+clawbox.db
+.tmp-migrate*.db
+
 # Local temp / debug staging (scp'd helper scripts, remote experiments)
 .tmp-remote/
 .clawbox-workspaces/
