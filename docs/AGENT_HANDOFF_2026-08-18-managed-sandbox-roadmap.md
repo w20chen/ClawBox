@@ -977,6 +977,14 @@ release-evidence/<release>/<cluster>/<run-id>/
 
 ADR 批准后先完成 M1 的 Run/Attempt identity、CRD/API、tenant/model/network/artifact policy reference 契约。M2 的凭据、artifact token 和策略实现依赖这些身份，不得先于 M1 各自发明临时 ID。只有 Tool VM cgroup delegation/`cgroup.kill` 真机可行性 spike 和威胁实验可与 M1 并行，但不得以 spike 代替 M2 生产实现。
 
+> **M1 进度（2026-08-18）**：ADR-001..010 已写入 `docs/adr/`（commit `fbc3cbe`，状态 Proposed）。M1 契约工作已开始：
+> - `clawbox/managed/`（M1-1, `2f01070`）：ULID Run/Attempt + UUID Execution ID、Run/Attempt 状态机、取消 one-way、retry 新 Attempt、幂等 digest、分离 outcome（§14.5）。
+> - `deploy/sandboxtask-crd-v1alpha2.yaml` + conversion webhook stub（M1-2, `9c9ad89`）：runRef/idempotencyKey/requestDigest/desiredState CEL、conditions status；未部署（等 conversion handler + controller flip）。
+> - `alembic/` 初始迁移 + `clawbox/managed/{db,repo}.py`（M1-3, `4d2ff37`）：managed_runs/attempts/run_events/outbox/audit；create_run 幂等 200/409；单事务 event+outbox。
+> - `clawbox/api/` Managed API（M1-4, `59ae7c6`）：POST/GET /v1/runs、cancel、retry、attempts、events；template registry 使 API 不能引用任意 Secret；20 并发同 key → 1 Run（测试已证）。
+> - `clawbox/api/dispatcher.py`（M1-5, 本提交）：唯一创建 SandboxTask CR 的路径，outbox → CR + Run→Queued，cancel 补丁，重启安全。
+> - 测试 87 green。M1 剩余：`deploy/` ServiceAccount/RBAC 分离、benchmark launcher 变为 API client、Alembic PG 真机验证、M1 完成定义全量验收。
+
 10. **CBX-M2-001：Tool Supervisor 与 non-root execution**，先完成恶意命令测试和 cgroup.kill 生命周期，再做性能调优。
 11. **CBX-M2-002：凭据/模型 broker 设计**，立即禁止公共 API 接受 `llmSecretName`；ClawTune sidecar 只绑 `127.0.0.1`，OpenClaw 不持有真实上游长 key/upload token。
 12. **CBX-M2-003：PostgreSQL + object store + strong manifest/receipt**，先修复假 complete，再做高并发 uploader 优化。
