@@ -37,6 +37,7 @@ clawbox-swe-rebench = "clawbox.benchmark.kubernetes:main"
 clawbox-cell-controller = "clawbox.cell.app:main"
 clawbox-trace-ingester = "clawbox.ingester.app:main"
 clawbox-managed-api = "clawbox.api.main:main"
+clawbox-managed-dispatcher = "clawbox.api.dispatcher_main:main"
 clawbox-arm64-images = "clawbox.images.arm64:main"
 clawbox-swe-rebench-arm64-images = "clawbox.images.swerebench:main"
 
