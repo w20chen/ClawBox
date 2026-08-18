@@ -8,6 +8,7 @@ X-Tenant-Id for tenant scoping on every resource.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
@@ -48,10 +49,11 @@ def create_app(
     *,
     session_factory=None,
     registry: TemplateRegistry | None = None,
-    service_token: str = "development-only-token",
+    service_token: str | None = None,
 ) -> FastAPI:
     factory = session_factory or managed_session_factory()
     templates = registry or default_registry()
+    service_token = service_token or os.getenv("CLAWBOX_SERVICE_TOKEN", "development-only-token")
 
     app = FastAPI(title="ClawBox Managed API", version="0.2.0")
 
