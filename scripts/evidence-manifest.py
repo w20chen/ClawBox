@@ -98,19 +98,32 @@ def first_line(out: str) -> str | None:
     return line or None
 
 
+def version_fact(command: str, *args: str) -> str | None:
+    """Version string for a tool, trying plain PATH first and then sudo -n
+    across the common root-only bin dirs (scoped NOPASSWD sudoers may only
+    allow specific paths)."""
+    candidates: list[list[str]] = [[command, *args]]
+    for directory in ("/usr/bin", "/usr/local/bin", "/usr/sbin"):
+        candidates.append(["sudo", "-n", f"{directory}/{command}", *args])
+    for cmd in candidates:
+        code, out = sh(cmd, timeout=15)
+        if code == 0 and out.strip():
+            return first_line(out)
+    return None
+
+
 def host_facts() -> dict[str, object]:
     facts: dict[str, object] = {}
     facts["arch"] = first_line(sh(["uname", "-m"])[1])
     facts["kernel"] = first_line(sh(["uname", "-r"])[1])
-    for name, cmd in (
-        ("kubelet", ["kubelet", "--version"]),
-        ("containerd", ["containerd", "--version"]),
-        ("ctr", ["ctr", "version"]),
-        ("kata", ["kata-runtime", "--version"]),
-        ("firecracker", ["firecracker", "--version"]),
+    for name, command, args in (
+        ("kubelet", "kubelet", ["--version"]),
+        ("containerd", "containerd", ["--version"]),
+        ("ctr", "ctr", ["version"]),
+        ("kata", "kata-runtime", ["--version"]),
+        ("firecracker", "firecracker", ["--version"]),
     ):
-        code, out = sh(cmd)
-        facts[name] = first_line(out) if code == 0 else None
+        facts[name] = version_fact(command, *args)
     code, out = sh(["kubectl", "version", "--output=json"], timeout=15)
     if code == 0:
         try:

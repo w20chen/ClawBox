@@ -104,14 +104,19 @@ devmapper_status() {
 #    "target snapshot already exists" unpack race and stall ContainerCreating.
 if [[ "${PREPULL}" == 1 ]]; then
   echo "== pre-pulling ${TOOL_IMAGE} into the devmapper snapshotter =="
-  # Best-effort: containerd 2.x ctr's transfer unpacker derives unpack
-  # platforms from the manifest index, so single-platform (non-index) images
-  # fail with "no unpack platforms defined" even with --platform. The cell
-  # controller's budgeted, serialized admission already prevents the
-  # same-image concurrent unpack race, so a failed pre-pull is not fatal.
-  if ! err="$(sudo ctr -n k8s.io images pull --snapshotter devmapper \
-      --platform linux/arm64 "${TOOL_IMAGE}" 2>&1)"; then
-    echo "WARNING: ctr pre-pull failed (single-platform manifest); relying on serialized cell admission:" >&2
+  # Prefer a ctr path that the scoped NOPASSWD sudoers entry permits
+  # (e.g. /usr/bin/ctr); `sudo ctr` via PATH may resolve to /usr/local/bin/ctr
+  # and fail with "password required". No --platform: single-platform images
+  # derive no unpack platforms from an index and fail otherwise.
+  ctr_bin="$(command -v ctr || true)"
+  [[ -x /usr/bin/ctr ]] && ctr_bin=/usr/bin/ctr
+  ctr_bin="${ctr_bin:-/usr/bin/ctr}"
+  # Best-effort: a failed pre-pull is not fatal because the cell controller's
+  # budgeted, serialized admission already prevents the same-image concurrent
+  # unpack race ("target snapshot already exists").
+  if ! err="$(sudo "${ctr_bin}" -n k8s.io images pull --snapshotter devmapper \
+      "${TOOL_IMAGE}" 2>&1)"; then
+    echo "WARNING: ctr pre-pull failed; relying on serialized cell admission:" >&2
     printf '%s\n' "${err}" | sed 's/^/  /' >&2
   fi
 fi
