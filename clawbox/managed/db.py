@@ -150,7 +150,7 @@ def make_managed_engine(url: str | None = None):
     value = url or __import__("os").getenv("DATABASE_URL", "sqlite:///./clawbox.db")
     kwargs: dict[str, Any] = {"future": True}
     if value.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
     return create_engine(value, **kwargs)
 
 
