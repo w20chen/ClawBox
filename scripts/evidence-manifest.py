@@ -250,7 +250,7 @@ def collect(args: argparse.Namespace) -> int:
             result_file = e2e_dir / f"result.{args.result_task}.json"
             result_file.write_text(result["payload"], encoding="utf-8")
             manifest["run"]["result"] = result["summary"]
-            manifest.setdefault("artifacts", {})["result"] = sha256_file(result_file)
+            manifest.setdefault("artifacts", {})[f"result:{args.result_task}"] = sha256_file(result_file)
         else:
             manifest["run"]["result"] = None
 
@@ -285,16 +285,21 @@ def verify(args: argparse.Namespace) -> int:
     for key, expected in (manifest.get("artifacts") or {}).items():
         if expected is None:
             continue
-        fname = key.replace(":", ".") + ".yaml"
+        base = key.replace(":", ".")
+        matched = False
         for sub in ("e2e",):
-            fpath = path.parent / sub / fname
-            if fpath.exists():
-                actual = sha256_file(fpath)
-                if actual != expected:
-                    problems.append(f"{sub}/{fname}: digest mismatch ({actual} != {expected})")
+            for suffix in (".yaml", ".json"):
+                fpath = path.parent / sub / f"{base}{suffix}"
+                if fpath.exists():
+                    actual = sha256_file(fpath)
+                    if actual != expected:
+                        problems.append(f"{sub}/{base}{suffix}: digest mismatch ({actual} != {expected})")
+                    matched = True
+                    break
+            if matched:
                 break
-        else:
-            problems.append(f"{fname}: missing from evidence dir")
+        if not matched:
+            problems.append(f"{base}: missing from evidence dir")
 
     git = manifest.get("git") or {}
     code, out = sh(["git", "-C", str(ROOT), "rev-parse", "HEAD"])
