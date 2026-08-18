@@ -31,6 +31,7 @@ type executionLog struct {
 	CellID          string `json:"cell_id"`
 	TaskID          string `json:"task_id"`
 	ExecutionID     string `json:"execution_id"`
+	ExecutionSource string `json:"execution_source"`
 	CommandSHA256   string `json:"command_sha256"`
 	CommandBytes    int    `json:"command_bytes"`
 	DurationMS      int64  `json:"duration_ms"`
@@ -166,15 +167,61 @@ func randomID() string {
 
 func durationMS(value time.Duration) int64 { return value.Milliseconds() }
 
-func runCommand(channel ssh.Channel, command, workdir string, timeout time.Duration, outputLimit int64) executionLog {
+// clawboxExecEnvelopePrefix is a single-line marker the ClawTune plugin
+// prepends to an exec command (in hook-only mode) so the tool bridge adopts
+// the runtime-generated execution_id instead of minting its own.  This gives
+// an exact join key between the ClawTune span and the bridge execution record
+// (no time-window heuristic).
+const clawboxExecEnvelopePrefix = "__CBX_EXEC_1__"
+
+type execEnvelope struct {
+	Version     int    `json:"v"`
+	ExecutionID string `json:"execution_id"`
+}
+
+// parseExecEnvelope splits an optional runtime envelope from the actual shell
+// command.  A command that does not carry the envelope prefix is returned
+// unchanged with ok=false so the bridge stays fully backward compatible with
+// raw commands.  Any malformed envelope also degrades to the raw command.
+func parseExecEnvelope(command string) (payload string, executionID string, ok bool) {
+	if !strings.HasPrefix(command, clawboxExecEnvelopePrefix) {
+		return command, "", false
+	}
+	rest := command[len(clawboxExecEnvelopePrefix):]
+	newline := strings.IndexByte(rest, '\n')
+	if newline < 0 {
+		return command, "", false
+	}
+	header := strings.TrimSpace(rest[:newline])
+	payload = rest[newline+1:]
+	var envelope execEnvelope
+	if err := json.Unmarshal([]byte(header), &envelope); err != nil {
+		return command, "", false
+	}
+	if envelope.Version != 1 || envelope.ExecutionID == "" || len(envelope.ExecutionID) > 128 {
+		return command, "", false
+	}
+	return payload, envelope.ExecutionID, true
+}
+
+func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Duration, outputLimit int64) executionLog {
 	started := time.Now()
-	executionID := randomID()
+	command, envelopeExecutionID, enveloped := parseExecEnvelope(rawCommand)
+	executionID := envelopeExecutionID
+	if !enveloped || executionID == "" {
+		executionID = randomID()
+	}
+	executionSource := "bridge-local"
+	if enveloped {
+		executionSource = "runtime-envelope"
+	}
 	digest := sha256.Sum256([]byte(command))
 	record := executionLog{
 		Timestamp:     started.UTC().Format(time.RFC3339Nano),
 		CellID:        os.Getenv("CELL_ID"),
 		TaskID:        os.Getenv("TASK_ID"),
 		ExecutionID:   executionID,
+		ExecutionSource: executionSource,
 		CommandSHA256: hex.EncodeToString(digest[:]),
 		CommandBytes:  len(command),
 		ExitCode:      127,

@@ -89,6 +89,7 @@ cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
       "autoStartSidecar": false,
       "sidecarCommand": "",
       "executionBackend": "hook-only",
+      "sandboxExecEnvelope": true,
       "enableCgroup": false,
       "enableAffinity": false,
       "enableNuma": false,
@@ -153,6 +154,18 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
     "mkdir -p '${runtime_root}' && echo runtime-root-ok" >&2 \
     || echo "[runtime] WARN: could not pre-create sandbox runtime root" >&2
+  # Record the tool VM's baseline HEAD BEFORE the agent runs so the final patch
+  # can include committed changes the agent makes.  `git diff` alone only sees
+  # uncommitted working-tree edits, so an agent that `git commit`s its fix
+  # would otherwise be reported as patch_status=empty and wrongly fail the
+  # "task success" metric.
+  echo "[runtime] recording tool VM baseline HEAD for patch extraction" >&2
+  timeout -k 5 30 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
+    'cd /testbed && git rev-parse HEAD 2>/dev/null || true' \
+    >"${STATE_DIR}/baseline-head" 2>"${LOG_DIR}/baseline-head.log" || true
   session_id="clawbox-${TASK_ID}"
   task_timeout="${TASK_TIMEOUT_SECONDS:-1800}"
   set +e
@@ -212,12 +225,33 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   # job's activeDeadlineSeconds kill it mid-upload (observed in 2026-08-17 E2E).
   # -k 10 guarantees the ssh dies even if it ignores SIGTERM while stuck in a
   # syscall inside the Kata guest; otherwise `timeout` waits forever.
-  echo "[runtime] collecting patch via ssh" >&2
+  # Merge working-tree changes with committed changes since the recorded
+  # baseline HEAD (see the baseline capture before the agent started).  This
+  # makes patch extraction robust to agents that `git commit` their fix.
+  # A heredoc script is piped over `sh -s` to avoid fragile inline SSH quoting.
+  baseline_head="$(tr -d '[:space:]' <"${STATE_DIR}/baseline-head" 2>/dev/null || true)"
+  echo "[runtime] collecting patch via ssh (baseline=${baseline_head:-none})" >&2
+  # __BASELINE_HEAD__ is a standalone placeholder word (no $ prefix) so the sed
+  # below is unambiguous.  When baseline capture failed, it is replaced with an
+  # empty string and the committed-diff branch naturally falls through, leaving
+  # only the working-tree diff (the pre-fix behaviour).
+  cat >"${STATE_DIR}/collect-patch.sh" <<'PATCHEOF'
+#!/bin/sh
+cd /testbed || exit 0
+git diff --binary --no-ext-diff
+current="$(git rev-parse HEAD 2>/dev/null || true)"
+baseline_head="__BASELINE_HEAD__"
+if [ -n "$current" ] && [ -n "$baseline_head" ] && [ "$current" != "$baseline_head" ]; then
+  printf '\n# committed changes since baseline %s\n' "$baseline_head"
+  git diff --binary --no-ext-diff "$baseline_head" HEAD
+fi
+PATCHEOF
+  sed -i "s/__BASELINE_HEAD__/${baseline_head:-}/g" "${STATE_DIR}/collect-patch.sh"
   timeout -k 10 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
     -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
-    'cd /testbed && git diff --binary --no-ext-diff' >"${STATE_DIR}/patch.diff" 2>"${LOG_DIR}/patch.log" || true
+    'sh -s' <"${STATE_DIR}/collect-patch.sh" >"${STATE_DIR}/patch.diff" 2>"${LOG_DIR}/patch.log" || true
   echo "[runtime] collecting tool-bridge trace via ssh" >&2
   timeout -k 10 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
