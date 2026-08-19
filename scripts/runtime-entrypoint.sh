@@ -48,6 +48,7 @@ chmod 0600 "${KNOWN_HOSTS}"
 # happen before the sidecar starts (fail-open: the image cold-start snapshot
 # remains the fallback when the control plane is unreachable).
 repo_key="${CLAWBOX_REPO_KEY:-${CLAWTUNE_REPO_KEY:-}}"
+kb_tenant="${CLAWBOX_TENANT_ID:-${TENANT_ID}}"
 if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   if [[ -z "${repo_key}" ]]; then
     raw_origin="$(timeout -k 5 30 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
@@ -77,16 +78,31 @@ print("/".join(parts) if len(parts) >= 2 else "")
   if [[ -n "${CLAWBOX_KB_ENDPOINT:-}" && -n "${CLAWBOX_KB_TOKEN:-}" ]]; then
     kb_dest="${ARTIFACT_DIR}/runtime-tool-resource-kb.json"
     kb_tmp="${ARTIFACT_DIR}/.runtime-tool-resource-kb.json.tmp"
+    kb_response="${ARTIFACT_DIR}/.runtime-tool-resource-response.json.tmp"
     echo "[runtime] pulling KB snapshot from ${CLAWBOX_KB_ENDPOINT} (repo=${repo_key})" >&2
     if curl -fsS --max-time 30 \
         -H "Authorization: Bearer ${CLAWBOX_KB_TOKEN}" \
-        "${CLAWBOX_KB_ENDPOINT}/v1/kb/snapshot?tenant_id=${TENANT_ID}&repo=${CLAWBOX_REPO_KEY}&format=clawtune" \
-        >"${kb_tmp}" 2>"${LOG_DIR}/kb-pull.log"; then
+        --get --data-urlencode "tenant_id=${kb_tenant}" \
+        --data-urlencode "repo=${CLAWBOX_REPO_KEY}" --data-urlencode "format=clawtune" \
+        "${CLAWBOX_KB_ENDPOINT}/v1/kb/snapshot" \
+        >"${kb_response}" 2>"${LOG_DIR}/kb-pull.log" && \
+        python3 - "${kb_response}" "${kb_tmp}" >>"${LOG_DIR}/kb-pull.log" 2>&1 <<'PY'
+import json, pathlib, sys
+response = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+snapshot = response["snapshot"]
+if not isinstance(snapshot, dict):
+    raise ValueError("clawtune snapshot is not an object")
+pathlib.Path(sys.argv[2]).write_text(json.dumps(snapshot), encoding="utf-8")
+print(f"generation={response['generation']} input_count={response['input_count']}")
+PY
+    then
       mv "${kb_tmp}" "${kb_dest}"
-      echo "[runtime] KB snapshot pulled (repo=${CLAWBOX_REPO_KEY})" >&2
+      rm -f "${kb_response}"
+      kb_generation="$(sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' "${LOG_DIR}/kb-pull.log" | tail -1)"
+      echo "[runtime] KB snapshot pulled (tenant=${kb_tenant} repo=${CLAWBOX_REPO_KEY} generation=${kb_generation:-unknown})" >&2
     else
       echo "[runtime] WARN: KB pull failed; keeping cold-start snapshot" >&2
-      rm -f "${kb_tmp}"
+      rm -f "${kb_tmp}" "${kb_response}"
     fi
   fi
 fi
@@ -362,7 +378,7 @@ PY
     echo "[runtime] flushing observations to ${CLAWBOX_KB_ENDPOINT} (repo=${CLAWBOX_REPO_KEY})" >&2
     KB_ENDPOINT="${CLAWBOX_KB_ENDPOINT}" KB_TOKEN="${CLAWBOX_KB_TOKEN}" \
       KB_INGEST_SECRET="${CLAWBOX_KB_INGEST_SECRET}" \
-      KB_TENANT="${TENANT_ID}" KB_REPO="${CLAWBOX_REPO_KEY}" \
+      KB_TENANT="${kb_tenant}" KB_REPO="${CLAWBOX_REPO_KEY}" \
       KB_TRACE_DIR="${TRACE_DIR}" KB_BRIDGE="${TRACE_DIR}/tool-bridge.jsonl" \
       KB_LOG="${LOG_DIR}/kb-flush.log" \
       python3 /usr/local/bin/kb-flush.py || \

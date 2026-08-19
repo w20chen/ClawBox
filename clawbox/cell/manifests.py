@@ -205,6 +205,22 @@ def _secret_env(secret: str, variable: str, key: str) -> dict[str, Any]:
     return {"name": variable, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
 
 
+def _kb_tenant_id(task: dict[str, Any]) -> str:
+    """Return the stable tenant identity without changing per-cell identity.
+
+    v1alpha2 carries the lossless value in spec.runRef.  The live research
+    cluster still serves v1alpha1, where the dispatcher-provided tenant label
+    is the best available stable key.  Falling back to the task name preserves
+    compatibility for hand-authored CRs.
+    """
+    run_ref = task.get("spec", {}).get("runRef", {})
+    return str(
+        run_ref.get("tenantID")
+        or task.get("metadata", {}).get("labels", {}).get("clawbox.openai.com/tenant")
+        or task["metadata"]["name"]
+    )
+
+
 def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None = None) -> dict[str, Any]:
     name = task["metadata"]["name"]
     spec = task["spec"]
@@ -271,6 +287,9 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             "command": ["/usr/local/bin/runtime-entrypoint"],
             "env": llm_env + upload_env + extra_env + [
                 {"name": "TENANT_ID", "value": name},
+                # TENANT_ID remains the unique cell/state identity.  KB data is
+                # shared by the stable managed tenant across successive cells.
+                {"name": "CLAWBOX_TENANT_ID", "value": _kb_tenant_id(task)},
                 {"name": "RUNTIME_ID", "value": name},
                 {"name": "CLAWBOX_TASK_MODE", "value": "benchmark"},
                 {"name": "TASK_PROMPT_FILE", "value": "/prompt/problem_statement"},
@@ -337,6 +356,9 @@ def network_policies(task: dict[str, Any]) -> list[dict[str, Any]]:
         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "clawbox-system"}},
                  "podSelector": {"matchLabels": {"app.kubernetes.io/component": "trace-ingester"}}}],
          "ports": [{"protocol": "TCP", "port": 8084}]},
+        {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "clawbox-system"}},
+                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "tune-kb"}}}],
+         "ports": [{"protocol": "TCP", "port": 8086}]},
         {"to": [{"ipBlock": {"cidr": task["spec"]["llmEgressCIDR"]}}],
          "ports": [{"protocol": "TCP", "port": int(task["spec"].get("llmEgressPort", 443))}]},
     ]

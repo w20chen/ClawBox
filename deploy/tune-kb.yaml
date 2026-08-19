@@ -22,6 +22,21 @@ spec:
       automountServiceAccountToken: false
       nodeSelector:
         kubernetes.io/arch: arm64
+      initContainers:
+        # DirectoryOrCreate makes the hostPath root-owned.  Give the non-root
+        # API process ownership of this one dedicated persistence directory.
+        - name: prepare-data
+          image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
+          imagePullPolicy: Always
+          command: ["chown", "10001:10001", "/data"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"], add: ["CHOWN"]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: data, mountPath: /data}
       containers:
         - name: tune-kb
           image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev

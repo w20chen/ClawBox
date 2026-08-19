@@ -42,6 +42,11 @@ spec:
             - {name: RUNTIME_IMAGE, value: 127.0.0.1:5000/clawbox/runtime-arm64:dev}
             - {name: TOOL_BRIDGE_IMAGE, value: 127.0.0.1:5000/clawbox/tool-bridge-arm64:dev}
             - {name: TRACE_INGESTER_URL, value: http://clawbox-ingester.clawbox-system.svc:8084}
+            - {name: CLAWBOX_KB_ENDPOINT, value: http://clawbox-tune-kb.clawbox-system.svc:8086}
+            - name: CLAWBOX_KB_TOKEN
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: service-token}}
+            - name: CLAWBOX_KB_INGEST_SECRET
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
             - name: CLAWBOX_INGEST_SECRET
               valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
             - name: CLAWBOX_DEVMAPPER_AVAILABLE_BYTES

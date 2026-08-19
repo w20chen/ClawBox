@@ -189,6 +189,21 @@ def test_runtime_manifest_and_reservation_account_for_inprocess_clawtune():
         assert size.reservation == expected
 
 
+def test_runtime_uses_stable_tenant_for_kb_without_changing_cell_identity():
+    value = task()
+    value["metadata"]["labels"] = {"clawbox.openai.com/tenant": "tenant-a"}
+    job = runtime_job(value, FixedProfileSizer().size("small"))
+    env = {item["name"]: item.get("value") for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["TENANT_ID"] == "cell-a"
+    assert env["CLAWBOX_TENANT_ID"] == "tenant-a"
+
+    value["apiVersion"] = "clawbox.openai.com/v1alpha2"
+    value["spec"]["runRef"] = {"tenantID": "Exact Tenant", "runID": "run-a", "attemptID": "attempt-a"}
+    job = runtime_job(value, FixedProfileSizer().size("small"))
+    env = {item["name"]: item.get("value") for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CLAWBOX_TENANT_ID"] == "Exact Tenant"
+
+
 def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():
     def container(cpu: str, memory: str, *, restart: str | None = None):
         return SimpleNamespace(
