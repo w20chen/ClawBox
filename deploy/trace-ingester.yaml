@@ -17,6 +17,12 @@ spec:
       automountServiceAccountToken: false
       nodeSelector:
         kubernetes.io/arch: arm64
+      # Single-node test cluster: tolerate the control-plane + disk-pressure
+      # taints (kubelet re-adds disk-pressure under load) so the ingester can
+      # schedule/keep running.
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+        - {key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule}
       containers:
         - name: ingester
           image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev

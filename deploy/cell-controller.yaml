@@ -18,6 +18,13 @@ spec:
       automountServiceAccountToken: true
       nodeSelector:
         kubernetes.io/arch: arm64
+      # Single-node test cluster: the control-plane node carries the kubeadm
+      # control-plane taint and (under disk pressure) the kubelet re-adds
+      # node.kubernetes.io/disk-pressure. Tolerate both so the controller can
+      # schedule/keep running.
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+        - {key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule}
       containers:
         - name: controller
           image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
