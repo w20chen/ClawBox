@@ -192,6 +192,22 @@ else
   fail "Kata containerd shim exists"
 fi
 
+# P3: the shim must run under a wrapper that raises the soft RLIMIT_NOFILE to
+# hard.  Kata runtime-rs resets it to 1024, so ~19 concurrent cells exhaust FDs
+# ("No file descriptors available (os error 24)").  A 32-cell run requires the
+# wrapper (scripts/install-shim-nofile-wrapper.sh).
+shim_wrapper="/usr/local/bin/containerd-shim-kata-v2"
+if [[ -f "${shim_wrapper}" ]] && grep -q 'clawbox-shim-nofile-wrapper-v1' "${shim_wrapper}" 2>/dev/null; then
+  soft_nofile="$("${shim_wrapper}" --_selfcheck 2>/dev/null || true)"
+  if [[ -n "${soft_nofile}" ]] && (( soft_nofile >= 8192 )); then
+    pass "Kata shim wrapper raises soft RLIMIT_NOFILE to ${soft_nofile} (>= 8192)"
+  else
+    fail "Kata shim wrapper selfcheck soft RLIMIT_NOFILE is ${soft_nofile:-none} (< 8192)"
+  fi
+else
+  fail "Kata shim RLIMIT_NOFILE wrapper is not installed (install-shim-nofile-wrapper.sh)"
+fi
+
 if [[ -n "${config}" && -n "${firecracker}" ]]; then
   configured_fc="$(grep -E '^[[:space:]]*(path|path_firecracker)[[:space:]]*=' "${config}" | head -1 || true)"
   configured_fc_path="$(sed -n -E 's#^[[:space:]]*(path|path_firecracker)[[:space:]]*=[[:space:]]*"([^"]+)".*#\2#p' <<<"${configured_fc}")"
