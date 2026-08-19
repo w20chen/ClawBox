@@ -8,8 +8,13 @@ CR="${1:-}"
 export NO_PROXY=localhost,127.0.0.1,193.124.7.2,10.96.0.0/12
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 
-if [[ -z "$CR" && -f /tmp/m1-p0-run.txt ]]; then
-  CR=$(grep '^CR=' /tmp/m1-p0-run.txt | cut -d= -f2)
+if [[ -z "$CR" ]]; then
+  for f in /tmp/m1-kb-run.txt /tmp/m1-p0-run.txt; do
+    if [[ -f "$f" ]]; then
+      CR=$(grep '^CR=' "$f" | cut -d= -f2)
+      [[ -n "$CR" ]] && break
+    fi
+  done
 fi
 CR="${CR:-$(kubectl get sandboxtask -n clawbox-benchmarks -o name 2>/dev/null | grep run- | head -1 | cut -d/ -f2)}"
 echo "CR=$CR"
