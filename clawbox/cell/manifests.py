@@ -100,16 +100,23 @@ def credential_secrets(task: dict[str, Any], credentials: SSHCredentials, timeou
         name, settings.ingest_secret, expires_at=int(time.time()) + timeout_seconds + 900,
     )
     common = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque"}
+    string_data = {
+        "id_ed25519": credentials.client_private,
+        "id_ed25519.pub": credentials.client_public,
+        "ssh_host_ed25519_key": credentials.host_private,
+        "ssh_host_ed25519_key.pub": credentials.host_public,
+        "trace-upload-token": upload_token,
+    }
+    # P2: KB pull/flush credentials (only when the control plane advertises a
+    # KB endpoint).  The ingest secret signs this cell's observations so the
+    # projector's HMAC gate accepts them.
+    if settings.kb_endpoint:
+        string_data["kb-token"] = settings.kb_token or settings.service_token
+        string_data["kb-ingest-secret"] = settings.kb_ingest_secret or settings.ingest_secret
     return [{
         **common,
         "metadata": metadata(task, f"{name}-auth", "cell-auth"),
-        "stringData": {
-            "id_ed25519": credentials.client_private,
-            "id_ed25519.pub": credentials.client_public,
-            "ssh_host_ed25519_key": credentials.host_private,
-            "ssh_host_ed25519_key.pub": credentials.host_public,
-            "trace-upload-token": upload_token,
-        },
+        "stringData": string_data,
     }]
 
 
@@ -228,6 +235,19 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
         {"name": "CLAWBOX_STATE_DIR", "value": f"/state/{name}"},
         {"name": "CLAWTUNE_TRACE_DIR", "value": f"/state/{name}/traces"},
     ]
+    # P2: control-plane KB pull/flush wiring (only when kb_endpoint is set).
+    if settings.kb_endpoint:
+        upload_env += [
+            {"name": "CLAWBOX_KB_ENDPOINT", "value": settings.kb_endpoint},
+            _secret_env(f"{name}-auth", "CLAWBOX_KB_TOKEN", "kb-token"),
+            _secret_env(f"{name}-auth", "CLAWBOX_KB_INGEST_SECRET", "kb-ingest-secret"),
+        ]
+    extra_env: list[dict[str, Any]] = []
+    if spec.get("repoKey"):
+        # Explicit repo namespace from the task spec (v1alpha2 path; on v1alpha1
+        # the field is pruned server-side and the runtime derives it from the
+        # tool VM's git remote instead).
+        extra_env.append({"name": "CLAWTUNE_REPO_KEY", "value": str(spec["repoKey"])})
     pod_spec: dict[str, Any] = {
         "automountServiceAccountToken": False,
         "runtimeClassName": settings.kubernetes_runtime_class,
@@ -249,7 +269,7 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             "name": "runtime", "image": settings.runtime_image,
             "imagePullPolicy": settings.kubernetes_image_pull_policy,
             "command": ["/usr/local/bin/runtime-entrypoint"],
-            "env": llm_env + upload_env + [
+            "env": llm_env + upload_env + extra_env + [
                 {"name": "TENANT_ID", "value": name},
                 {"name": "RUNTIME_ID", "value": name},
                 {"name": "CLAWBOX_TASK_MODE", "value": "benchmark"},

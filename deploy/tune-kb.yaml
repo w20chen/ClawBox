@@ -1,0 +1,71 @@
+# Tuning KB control-plane API (P2) — in-cluster Deployment + Service.
+#
+# Runtime pods pull the (tenant, repo) KB snapshot at start and flush signed
+# observations at end via this Service (mirrors the trace ingester layout).
+# SQLite-first for the research path; TUNING_DATABASE_URL overrides DATABASE_URL.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clawbox-tune-kb
+  namespace: clawbox-system
+  labels: &labels
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: tune-kb
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: tune-kb
+          image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
+          imagePullPolicy: Always
+          command: ["clawbox-tune-server"]
+          env:
+            - name: TUNING_DATABASE_URL
+              value: sqlite:////data/tune-kb.db
+            - name: CLAWBOX_SERVICE_TOKEN
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: service-token}}
+            - name: CLAWBOX_INGEST_SECRET
+              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
+          ports: [{name: http, containerPort: 8086}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 3}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          # SQLite file must persist across restarts so a later run on the same
+          # repo sees generation > 0.  hostPath keeps data on the node for the
+          # single-node research cluster; replace with a PVC for production.
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          hostPath: {path: /var/lib/clawbox/tune-kb, type: DirectoryOrCreate}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clawbox-tune-kb
+  namespace: clawbox-system
+  labels:
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: tune-kb
+spec:
+  selector:
+    app.kubernetes.io/name: clawbox
+    app.kubernetes.io/component: tune-kb
+  ports: [{name: http, port: 8086, targetPort: http}]

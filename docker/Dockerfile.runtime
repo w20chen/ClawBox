@@ -107,9 +107,10 @@ RUN python3 -m venv /opt/clawtune/venv \
 COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
 COPY scripts/clawtune-sidecar-entrypoint.sh /usr/local/bin/clawtune-sidecar-entrypoint
 COPY scripts/artifact-uploader.py /usr/local/bin/artifact-uploader
+COPY scripts/kb-flush.py /usr/local/bin/kb-flush.py
 RUN groupadd --gid 10001 openclaw \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash openclaw \
- && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader \
+ && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader /usr/local/bin/kb-flush.py \
  && mkdir -p /state /workspace /home/openclaw/.openclaw \
  && chown -R 10001:10001 /state /workspace /home/openclaw
 

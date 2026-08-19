@@ -24,6 +24,12 @@ class Settings:
     tool_bridge_image: str = os.getenv("TOOL_BRIDGE_IMAGE", "clawbox-tool-bridge-arm64:latest")
     trace_ingester_url: str = os.getenv("TRACE_INGESTER_URL", "http://clawbox-ingester.clawbox-system.svc:8084")
     ingest_secret: str = os.getenv("CLAWBOX_INGEST_SECRET", "development-only-ingest-secret")
+    # P2: control-plane KB endpoint + token + ingest secret the cell controller
+    # forwards into each runtime Job so pods pull the (tenant, repo) snapshot at
+    # start and flush observations at end.  Empty kb_endpoint disables the loop.
+    kb_endpoint: str = os.getenv("CLAWBOX_KB_ENDPOINT", "")
+    kb_token: str = os.getenv("CLAWBOX_KB_TOKEN", "")
+    kb_ingest_secret: str = os.getenv("CLAWBOX_KB_INGEST_SECRET", "")
     cell_namespace: str = os.getenv("CLAWBOX_CELL_NAMESPACE", "clawbox-benchmarks")
     lease_ttl_seconds: int = int(os.getenv("LEASE_TTL_SECONDS", "300"))
     reserved_cpu_fraction: float = float(os.getenv("RESERVED_CPU_FRACTION", "0.05"))

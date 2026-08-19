@@ -66,6 +66,10 @@ def create_app(db_url: str | None = None) -> FastAPI:
 
     app = FastAPI(title="clawbox-tune-kb")
 
+    @app.get("/healthz")
+    def healthz():
+        return {"status": "ok"}
+
     @app.get("/v1/kb/generation", dependencies=[Depends(require_service_token)])
     def get_generation(tenant_id: str, repo: str, db: Session = Depends(get_db)):
         meta = snapshot_metadata(db, tenant_id=tenant_id, repo_fingerprint=repo)

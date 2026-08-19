@@ -28,15 +28,6 @@ rm -f "${STATE_DIR}/ready"
 
 echo "[runtime] tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID} sandbox=runtime" >&2
 
-# Kata on this host cannot share volumes across containers, so the runtime Job
-# is a SINGLE container and the clawtune sidecar runs in-process instead of as
-# a sibling container. Everything the sidecar needs (TASK_ID, TRACE_UPLOAD_TOKEN,
-# TRACE_INGESTER_URL, OPENAI_*, OPENCLAW_MODEL, CLAWBOX_STATE_DIR,
-# CLAWTUNE_TRACE_DIR) is already set on this container by the controller.
-echo "[runtime] starting clawtune sidecar in-process (port ${SIDECAR_PORT})" >&2
-/usr/local/bin/clawtune-sidecar-entrypoint >"${LOG_DIR}/sidecar.log" 2>&1 &
-SIDECAR_PID=$!
-
 tool_host="${TOOL_SSH_TARGET#*@}"
 tool_host="${tool_host%:*}"
 tool_port="${TOOL_SSH_TARGET##*:}"
@@ -47,6 +38,67 @@ host_public_key="$(cut -d ' ' -f 1,2 /var/run/secrets/tool-ssh/ssh_host_ed25519_
 [[ "${host_public_key}" == ssh-ed25519\ * ]] || { echo "invalid Tool SSH host public key" >&2; exit 1; }
 printf '[%s]:%s %s\n' "${tool_host}" "${tool_port}" "${host_public_key}" >"${KNOWN_HOSTS}"
 chmod 0600 "${KNOWN_HOSTS}"
+
+# ── P2: resolve the KB repo key and pull the control-plane KB snapshot ─────
+# (benchmark mode).  The ClawTune plugin resolves its repo namespace from
+# CLAWTUNE_REPO_KEY, then the git remote of its process cwd, then basename;
+# the benchmark repo lives on the tool VM at /testbed, so the runtime derives
+# the key from the tool VM's git remote when it is not explicitly pinned.  The
+# sidecar loads the KB artifact exactly once at startup, so this pull MUST
+# happen before the sidecar starts (fail-open: the image cold-start snapshot
+# remains the fallback when the control plane is unreachable).
+repo_key="${CLAWBOX_REPO_KEY:-${CLAWTUNE_REPO_KEY:-}}"
+if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
+  if [[ -z "${repo_key}" ]]; then
+    raw_origin="$(timeout -k 5 30 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+      -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+      -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
+      'cd /testbed && git remote get-url origin 2>/dev/null || true' 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -n "${raw_origin}" ]]; then
+      repo_key="$(printf '%s' "${raw_origin}" | python3 -c '
+import re, sys
+url = sys.stdin.read().strip()
+url = re.sub(r"\.git/?$", "", url).rstrip("/")
+scp = re.match(r"^[^/@]+@[^:]+:(.+)$", url)
+path = scp.group(1).lstrip("/") if scp else url
+m = re.match(r"^[a-z][a-z0-9+.-]*://(?:[^/@]+@)?[^/]+/(.+)$", path, re.I)
+if m:
+    path = m.group(1)
+parts = [p for p in path.split("/") if p]
+print("/".join(parts) if len(parts) >= 2 else "")
+' 2>/dev/null)"
+    fi
+    [[ -n "${repo_key}" ]] || repo_key="testbed"
+  fi
+  export CLAWTUNE_REPO_KEY="${repo_key}"
+  export CLAWBOX_REPO_KEY="${repo_key}"
+  echo "[runtime] KB repo_key=${repo_key}" >&2
+  if [[ -n "${CLAWBOX_KB_ENDPOINT:-}" && -n "${CLAWBOX_KB_TOKEN:-}" ]]; then
+    kb_dest="${ARTIFACT_DIR}/runtime-tool-resource-kb.json"
+    kb_tmp="${ARTIFACT_DIR}/.runtime-tool-resource-kb.json.tmp"
+    echo "[runtime] pulling KB snapshot from ${CLAWBOX_KB_ENDPOINT} (repo=${repo_key})" >&2
+    if curl -fsS --max-time 30 \
+        -H "Authorization: Bearer ${CLAWBOX_KB_TOKEN}" \
+        "${CLAWBOX_KB_ENDPOINT}/v1/kb/snapshot?tenant_id=${TENANT_ID}&repo=${CLAWBOX_REPO_KEY}&format=clawtune" \
+        >"${kb_tmp}" 2>"${LOG_DIR}/kb-pull.log"; then
+      mv "${kb_tmp}" "${kb_dest}"
+      echo "[runtime] KB snapshot pulled (repo=${CLAWBOX_REPO_KEY})" >&2
+    else
+      echo "[runtime] WARN: KB pull failed; keeping cold-start snapshot" >&2
+      rm -f "${kb_tmp}"
+    fi
+  fi
+fi
+
+# Kata on this host cannot share volumes across containers, so the runtime Job
+# is a SINGLE container and the clawtune sidecar runs in-process instead of as
+# a sibling container. Everything the sidecar needs (TASK_ID, TRACE_UPLOAD_TOKEN,
+# TRACE_INGESTER_URL, OPENAI_*, OPENCLAW_MODEL, CLAWBOX_STATE_DIR,
+# CLAWTUNE_TRACE_DIR) is already set on this container by the controller.
+echo "[runtime] starting clawtune sidecar in-process (port ${SIDECAR_PORT})" >&2
+/usr/local/bin/clawtune-sidecar-entrypoint >"${LOG_DIR}/sidecar.log" 2>&1 &
+SIDECAR_PID=$!
 
 for _ in $(seq 1 120); do
   curl -fsS "http://127.0.0.1:${SIDECAR_PORT}/health/ready" >/dev/null 2>&1 && break
@@ -300,6 +352,25 @@ payload = {
 PY
   touch "${STATE_DIR}/.runtime-complete"
   echo "[runtime] result written; awaiting final upload" >&2
+
+  # ── P2: flush this cell's joined observations to the control-plane KB ─────
+  # Gather ClawTune span JSONL + tool-bridge JSONL, join on execution_id
+  # (exact), HMAC-sign, and POST to the KB endpoint.  Fail-open: any error is
+  # logged (kb-flush.log) but never blocks finalization/upload.
+  if [[ -n "${CLAWBOX_KB_ENDPOINT:-}" && -n "${CLAWBOX_KB_TOKEN:-}" \
+        && -n "${CLAWBOX_KB_INGEST_SECRET:-}" && -n "${CLAWBOX_REPO_KEY:-}" ]]; then
+    echo "[runtime] flushing observations to ${CLAWBOX_KB_ENDPOINT} (repo=${CLAWBOX_REPO_KEY})" >&2
+    KB_ENDPOINT="${CLAWBOX_KB_ENDPOINT}" KB_TOKEN="${CLAWBOX_KB_TOKEN}" \
+      KB_INGEST_SECRET="${CLAWBOX_KB_INGEST_SECRET}" \
+      KB_TENANT="${TENANT_ID}" KB_REPO="${CLAWBOX_REPO_KEY}" \
+      KB_TRACE_DIR="${TRACE_DIR}" KB_BRIDGE="${TRACE_DIR}/tool-bridge.jsonl" \
+      KB_LOG="${LOG_DIR}/kb-flush.log" \
+      python3 /usr/local/bin/kb-flush.py || \
+      echo "[runtime] WARN: KB flush failed (non-fatal)" >&2
+  else
+    echo "[runtime] KB flush skipped (endpoint/token/ingest-secret/repo not all set)" >&2
+  fi
+
   upload_deadline=$((SECONDS + 300))
   while [[ ! -f "${STATE_DIR}/.upload-complete" ]]; do
     if [[ -f "${STATE_DIR}/.upload-failed" ]]; then
