@@ -10,9 +10,12 @@ LOG=/tmp/m1-recreate.log
   unset http_proxy https_proxy all_proxy
 
   echo "== kubeconfig =="
-  mkdir -p /tmp/m1-kubeconfig
-  cp ~/.kube/config /tmp/m1-kubeconfig/config
-  chmod 600 /tmp/m1-kubeconfig/config
+  KUBEDIR="${HOME}/m1-kubeconfig"
+  rm -rf "${KUBEDIR}"
+  mkdir -p "${KUBEDIR}"
+  cp ~/.kube/config "${KUBEDIR}/config"
+  chmod 600 "${KUBEDIR}/config"
+  ls -la "${KUBEDIR}"
 
   TOKEN="clawbox-m1-smoke-token-0001"
   TEMPLATES='{"swe-rebench-arm64":{"1":{"toolImage":"127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:bdf4637498a4b765f0e91333ff292c226bd011a31c220d76609daff43e2c39fd","secretName":"clawbox-llm","runtimeImage":"127.0.0.1:5000/clawbox/runtime-arm64:dev","llmEgressCIDR":"0.0.0.0/0","profile":"small","maxDeadlineSeconds":3600,"minDeadlineSeconds":60}}}'
@@ -37,7 +40,7 @@ LOG=/tmp/m1-recreate.log
     -e CLAWBOX_TEMPLATES="$TEMPLATES" \
     -e KUBECONFIG=/mnt/kube/config \
     -v /home/weitianc/clawbox-m1-data:/data \
-    -v /tmp/m1-kubeconfig:/mnt/kube/config:ro \
+    -v "${KUBEDIR}/config":/mnt/kube/config:ro \
     127.0.0.1:5000/clawbox/control-plane-arm64:dev \
     clawbox-managed-dispatcher
 

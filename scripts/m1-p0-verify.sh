@@ -25,9 +25,11 @@ OUT=/tmp/m1-p0-verify.log
     -v "$DATA:/data" "$IMG" python3 -m alembic upgrade head 2>&1 | tail -2
 
   echo "== kubeconfig =="
-  mkdir -p /tmp/m1-kubeconfig
-  cp ~/.kube/config /tmp/m1-kubeconfig/config
-  chmod 600 /tmp/m1-kubeconfig/config
+  KUBEDIR="${HOME}/m1-kubeconfig"
+  rm -rf "${KUBEDIR}"
+  mkdir -p "${KUBEDIR}"
+  cp ~/.kube/config "${KUBEDIR}/config"
+  chmod 600 "${KUBEDIR}/config"
 
   echo "== recreate API =="
   docker rm -f clawbox-m1-api clawbox-m1-dispatcher 2>/dev/null
@@ -48,7 +50,7 @@ OUT=/tmp/m1-p0-verify.log
     -e "CLAWBOX_TEMPLATES=$TEMPLATES" \
     -e "KUBECONFIG=/mnt/kube/config" \
     -v "$DATA:/data" \
-    -v /tmp/m1-kubeconfig:/mnt/kube/config:ro \
+    -v "${KUBEDIR}/config":/mnt/kube/config:ro \
     "$IMG" clawbox-managed-dispatcher
   sleep 4
   docker ps --format '{{.Names}} {{.Status}}' | grep clawbox-m1 || true
