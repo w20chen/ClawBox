@@ -18,7 +18,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .schema import BridgeRecord, ObservationSource, ToolObservation, span_end_to_observation
+from .schema import (
+    BridgeRecord,
+    CgroupResource,
+    ObservationSource,
+    ToolObservation,
+    span_end_to_observation,
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +32,7 @@ class JoinResult:
     joined: tuple[ToolObservation, ...] = ()
     unmatched_spans: tuple[ToolObservation, ...] = ()
     unmatched_bridges: tuple[BridgeRecord, ...] = ()
+    unmatched_cgroup: tuple[CgroupResource, ...] = ()
 
     @property
     def join_rate(self) -> float:
@@ -59,6 +66,7 @@ def _bridge_to_observation(bridge: BridgeRecord) -> ToolObservation:
 def join_trace_and_bridge(
     span_records: list[dict[str, Any]],
     bridge_records: list[BridgeRecord],
+    cgroup_artifacts: dict[str, CgroupResource] | None = None,
 ) -> JoinResult:
     """Join span_end records with bridge records on execution_id (exact).
 
@@ -69,6 +77,10 @@ def join_trace_and_bridge(
         execution_id are considered; the rest are ignored).
     bridge_records:
         Parsed tool-bridge execution records.
+    cgroup_artifacts:
+        Optional ``{execution_id: CgroupResource}`` map from the Tool-VM
+        collector (ClawTune ``cgroup-resource-*.json``).  When present the
+        merged observation carries the cgroup v2 + eBPF resource view.
     """
     spans: list[ToolObservation] = []
     for record in span_records:
@@ -104,14 +116,29 @@ def join_trace_and_bridge(
             merged.status_code = "timeout"
         if bridge.exit_code != 0 and merged.status_code == "ok":
             merged.status_code = "error"
+        # Attach the independent cgroup v2 + eBPF resource artifact when the
+        # Tool-VM collector produced one for this execution_id.  A dangling
+        # cgroup artifact (no span/bridge) is never silently attached; it is
+        # reported as an unmatched cgroup artifact by the caller.
+        if cgroup_artifacts:
+            merged.cgroup = cgroup_artifacts.get(span.execution_id)
         merged.trusted = merged.collection_quality == "valid" and merged.complete and merged.exit_code == 0
         joined.append(merged)
         used_bridge_ids.add(bridge.execution_id)
     unmatched_bridges = [
         bridge for bridge in bridge_records if bridge.execution_id not in used_bridge_ids
     ]
+    unmatched_cgroup = (
+        [
+            artifact for execution_id, artifact in (cgroup_artifacts or {}).items()
+            if execution_id not in used_bridge_ids
+        ]
+        if cgroup_artifacts
+        else []
+    )
     return JoinResult(
         joined=tuple(joined),
         unmatched_spans=tuple(unmatched_spans),
         unmatched_bridges=tuple(unmatched_bridges),
+        unmatched_cgroup=tuple(unmatched_cgroup),
     )

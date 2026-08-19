@@ -83,6 +83,72 @@ class BridgeRecord(StrictModel):
     max_rss_kib: int | None = None
 
 
+class CgroupResource(StrictModel):
+    """Per-execution cgroup v2 + eBPF resource artifact (ClawTune-compatible).
+
+    Mirrors ClawTune's ``CgroupResourceResult``
+    (``services/sidecar/src/clawtune_sidecar/telemetry/cgroup_resource.py``,
+    schema ``cgroup_resource_v1``) so a Tool-VM collector that reuses ClawTune's
+    ``monitoring`` package produces artifacts we can parse verbatim.  ``source``
+    distinguishes the measurement path:
+
+    * ``cgroup-v2``    — cpu/mem/disk from cgroup v2 counters, network from the
+                         per-process BCC (eBPF) tracker.
+    * ``process-tree`` — psutil process-tree sampling (eBPF unavailable).
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # ``schema_name`` avoids shadowing pydantic's ``BaseModel.schema``; the
+    # JSON key stays ``schema`` (the ClawTune artifact field name).
+    schema_name: str = Field(
+        default="cgroup_resource_v1",
+        validation_alias="schema",
+        serialization_alias="schema",
+    )
+    execution_id: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str = ""
+    source: str = "cgroup-v2"
+    monitor_source: str | None = None
+    attribution_source: str | None = None
+    ts_start: float | None = None
+    ts_end: float | None = None
+    duration_ms: int | None = None
+    cpu_time_s: float | None = None
+    cpu_utilization_avg_cores: float | None = None
+    memory_rss_before_bytes: int | None = None
+    memory_rss_after_bytes: int | None = None
+    memory_rss_peak_bytes: int | None = None
+    disk_read_bytes_delta: int | None = None
+    disk_write_bytes_delta: int | None = None
+    network_rx_bytes_delta: int | None = None
+    network_tx_bytes_delta: int | None = None
+    sampling_interval_ms: int | None = None
+    sampling_point_count: int | None = None
+    sampling_quality: str | None = None
+
+
+def cgroup_artifact_to_resource(
+    data: dict[str, Any],
+) -> CgroupResource | None:
+    """Parse one ClawTune ``cgroup-resource-<execution_id>.json`` artifact.
+
+    Returns ``None`` when the payload is not a cgroup_resource_v1 record or
+    lacks an execution_id (so no dangling reference is attached).
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("schema") not in (None, "cgroup_resource_v1"):
+        return None
+    if not data.get("execution_id"):
+        return None
+    try:
+        return CgroupResource.model_validate(data)
+    except (ValueError, TypeError):
+        return None
+
+
 class ToolObservation(StrictModel):
     """Normalized, joined, validated unit fed to the dataset and KB.
 
@@ -116,6 +182,9 @@ class ToolObservation(StrictModel):
     stderr_bytes: int | None = Field(default=None, ge=0)
     output_truncated: bool = False
     source: ObservationSource = ObservationSource.CLAWTUNE_SPAN
+    # Independent cgroup v2 + eBPF resource artifact, when the Tool-VM
+    # collector produced one for this execution (ClawTune cgroup_resource_v1).
+    cgroup: CgroupResource | None = None
     trusted: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 

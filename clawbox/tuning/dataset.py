@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .join import JoinResult, join_trace_and_bridge
-from .schema import BridgeRecord, ToolObservation, bridge_record_to_observation
+from .schema import (
+    BridgeRecord,
+    CgroupResource,
+    ToolObservation,
+    bridge_record_to_observation,
+    cgroup_artifact_to_resource,
+)
 from .validate import ObservationValidator, classify_observations
 
 
@@ -65,6 +71,31 @@ def iter_trace_dir(trace_dir: Path) -> Iterator[dict[str, Any]]:
         yield from read_trace_jsonl(path)
 
 
+def read_cgroup_artifacts(trace_dir: Path) -> dict[str, CgroupResource]:
+    """Load Tool-VM ``cgroup-resource-<execution_id>.json`` artifacts.
+
+    Scans ``<trace_dir>/tool-resource/*.json`` (the ClawTune layout) plus any
+    ``<trace_dir>/cgroup-resource-*.json`` at the top level.  Malformed or
+    non-cgroup artifacts are skipped; the result is keyed by execution_id.
+    """
+    artifacts: dict[str, CgroupResource] = {}
+    candidates: list[Path] = []
+    tool_resource = trace_dir / "tool-resource"
+    if tool_resource.is_dir():
+        candidates.extend(sorted(tool_resource.glob("*.json")))
+    candidates.extend(sorted(trace_dir.glob("cgroup-resource-*.json")))
+    for path in candidates:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        resource = cgroup_artifact_to_resource(raw)
+        if resource is None or resource.execution_id is None:
+            continue
+        artifacts[resource.execution_id] = resource
+    return artifacts
+
+
 def build_joined_dataset(
     trace_dir: Path,
     bridge_path: Path,
@@ -73,11 +104,14 @@ def build_joined_dataset(
     """Join + validate everything under ``trace_dir`` against the bridge log.
 
     Returns ``(join_result, trusted_observations)`` where ``trusted`` are the
-    validated, deduplicated observations that may train the KB.
+    validated, deduplicated observations that may train the KB.  When the
+    Tool-VM cgroup collector produced ``cgroup-resource-*.json`` artifacts
+    they are joined by execution_id and attached to the observations.
     """
     span_records = list(iter_trace_dir(trace_dir))
     bridges = read_bridge_jsonl(bridge_path)
-    joined = join_trace_and_bridge(span_records, bridges)
+    cgroup_artifacts = read_cgroup_artifacts(trace_dir)
+    joined = join_trace_and_bridge(span_records, bridges, cgroup_artifacts)
     validator = ObservationValidator(ingest_secret)
     report = classify_observations(list(joined.joined), validator)
     return joined, report.trusted
