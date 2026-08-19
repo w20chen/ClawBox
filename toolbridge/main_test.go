@@ -4,8 +4,8 @@ import "testing"
 
 func TestParseExecEnvelope_PlainCommand(t *testing.T) {
 	payload, executionID, ok := parseExecEnvelope("echo hello")
-	if !ok {
-		t.Fatal("plain command should report ok=true so the raw command is used")
+	if ok {
+		t.Fatal("plain command should not report an envelope")
 	}
 	if payload != "echo hello" {
 		t.Fatalf("payload mismatch: %q", payload)
@@ -26,6 +26,45 @@ func TestParseExecEnvelope_Valid(t *testing.T) {
 	}
 	if executionID != "exec-1234-5678" {
 		t.Fatalf("execution_id mismatch: %q", executionID)
+	}
+}
+
+func TestParseExecEnvelope_ShellSafeToken(t *testing.T) {
+	raw := "__CBX_EXEC_1__exec-1234-5678\npytest -q"
+	payload, executionID, ok := parseExecEnvelope(raw)
+	if !ok {
+		t.Fatal("expected a valid shell-safe envelope")
+	}
+	if payload != "pytest -q" {
+		t.Fatalf("payload mismatch: %q", payload)
+	}
+	if executionID != "exec-1234-5678" {
+		t.Fatalf("execution_id mismatch: %q", executionID)
+	}
+}
+
+func TestParseExecEnvelope_ShellWrappedToken(t *testing.T) {
+	raw := "cd /workspace && __CBX_EXEC_1__exec-1234-5678\npytest -q"
+	payload, executionID, ok := parseExecEnvelope(raw)
+	if !ok {
+		t.Fatal("expected a valid shell-wrapped envelope")
+	}
+	if payload != "cd /workspace && pytest -q" {
+		t.Fatalf("payload mismatch: %q", payload)
+	}
+	if executionID != "exec-1234-5678" {
+		t.Fatalf("execution_id mismatch: %q", executionID)
+	}
+}
+
+func TestParseExecEnvelope_InvalidToken(t *testing.T) {
+	raw := "__CBX_EXEC_1__exec id with spaces\necho hi"
+	payload, _, ok := parseExecEnvelope(raw)
+	if ok {
+		t.Fatal("invalid token should degrade to raw command")
+	}
+	if payload != raw {
+		t.Fatalf("expected raw command unchanged, got %q", payload)
 	}
 }
 

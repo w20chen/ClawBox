@@ -18,7 +18,8 @@ LOG=/tmp/m1-recreate.log
   ls -la "${KUBEDIR}"
 
   TOKEN="clawbox-m1-smoke-token-0001"
-  TEMPLATES='{"swe-rebench-arm64":{"1":{"toolImage":"127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:bdf4637498a4b765f0e91333ff292c226bd011a31c220d76609daff43e2c39fd","secretName":"clawbox-llm","runtimeImage":"127.0.0.1:5000/clawbox/runtime-arm64:dev","llmEgressCIDR":"0.0.0.0/0","profile":"small","maxDeadlineSeconds":3600,"minDeadlineSeconds":60}}}'
+  TASK_IMAGE="${TASK_IMAGE:-127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:3e5803ff42a3b77151957f024df03e5e299cc856e5d74e200539a084c658b467}"
+  TEMPLATES="{\"swe-rebench-arm64\":{\"1\":{\"toolImage\":\"${TASK_IMAGE}\",\"secretName\":\"clawbox-llm\",\"runtimeImage\":\"127.0.0.1:5000/clawbox/runtime-arm64:dev\",\"llmEgressCIDR\":\"0.0.0.0/0\",\"profile\":\"small\",\"maxDeadlineSeconds\":3600,\"minDeadlineSeconds\":60}}}"
 
   echo "== recreate API =="
   docker rm -f clawbox-m1-api 2>/dev/null || true

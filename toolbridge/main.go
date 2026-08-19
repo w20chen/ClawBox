@@ -184,24 +184,43 @@ type execEnvelope struct {
 // unchanged with ok=false so the bridge stays fully backward compatible with
 // raw commands.  Any malformed envelope also degrades to the raw command.
 func parseExecEnvelope(command string) (payload string, executionID string, ok bool) {
-	if !strings.HasPrefix(command, clawboxExecEnvelopePrefix) {
+	marker := strings.Index(command, clawboxExecEnvelopePrefix)
+	if marker < 0 {
 		return command, "", false
 	}
-	rest := command[len(clawboxExecEnvelopePrefix):]
+	rest := command[marker+len(clawboxExecEnvelopePrefix):]
 	newline := strings.IndexByte(rest, '\n')
 	if newline < 0 {
 		return command, "", false
 	}
 	header := strings.TrimSpace(rest[:newline])
-	payload = rest[newline+1:]
-	var envelope execEnvelope
-	if err := json.Unmarshal([]byte(header), &envelope); err != nil {
+	payload = command[:marker] + rest[newline+1:]
+	executionID = header
+	if strings.HasPrefix(header, "{") {
+		var envelope execEnvelope
+		if err := json.Unmarshal([]byte(header), &envelope); err != nil || envelope.Version != 1 {
+			return command, "", false
+		}
+		executionID = envelope.ExecutionID
+	}
+	if !validEnvelopeExecutionID(executionID) {
 		return command, "", false
 	}
-	if envelope.Version != 1 || envelope.ExecutionID == "" || len(envelope.ExecutionID) > 128 {
-		return command, "", false
+	return payload, executionID, true
+}
+
+func validEnvelopeExecutionID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
 	}
-	return payload, envelope.ExecutionID, true
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune("-_.:", char) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Duration, outputLimit int64) executionLog {

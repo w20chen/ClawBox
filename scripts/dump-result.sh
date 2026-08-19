@@ -5,7 +5,11 @@ set -u
 TASK="${1:?usage: dump-result.sh <task_id>}"
 export NO_PROXY=localhost,127.0.0.1,193.124.7.2,10.96.0.0/12
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
-IPOD=$(kubectl -n clawbox-system get pods -o jsonpath='{.items[?(@.metadata.labels.app\.kubernetes\.io/component=="trace-ingester")].metadata.name}')
+IPOD=$(kubectl -n clawbox-system get pods \
+  -l app.kubernetes.io/component=trace-ingester \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}')
+[[ -n "$IPOD" ]] || { echo "no Running trace-ingester pod" >&2; exit 1; }
 echo "ingester pod: $IPOD"
 echo "=== schema ==="
 kubectl -n clawbox-system exec "$IPOD" -- python3 -c "
@@ -51,4 +55,3 @@ except Exception as e:
     print('payload head:', payload[:500])
 " 2>&1
 echo "=== done ==="
-
