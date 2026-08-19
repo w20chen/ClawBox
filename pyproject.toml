@@ -40,6 +40,7 @@ clawbox-trace-ingester = "clawbox.ingester.app:main"
 clawbox-managed-api = "clawbox.api.main:main"
 clawbox-managed-dispatcher = "clawbox.api.dispatcher_main:main"
 clawbox-managed-benchmark = "clawbox.benchmark.managed_client:_main"
+clawbox-tune-server = "clawbox.tuning.server:main"
 clawbox-arm64-images = "clawbox.images.arm64:main"
 clawbox-swe-rebench-arm64-images = "clawbox.images.swerebench:main"
 
