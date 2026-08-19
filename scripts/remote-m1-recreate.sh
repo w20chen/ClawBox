@@ -14,7 +14,7 @@ LOG=/tmp/m1-recreate.log
   rm -rf "${KUBEDIR}"
   mkdir -p "${KUBEDIR}"
   cp ~/.kube/config "${KUBEDIR}/config"
-  chmod 600 "${KUBEDIR}/config"
+  chmod 644 "${KUBEDIR}/config"  # container runs non-root; needs world-read on the bind mount
   ls -la "${KUBEDIR}"
 
   TOKEN="clawbox-m1-smoke-token-0001"

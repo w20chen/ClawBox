@@ -29,7 +29,7 @@ OUT=/tmp/m1-p0-verify.log
   rm -rf "${KUBEDIR}"
   mkdir -p "${KUBEDIR}"
   cp ~/.kube/config "${KUBEDIR}/config"
-  chmod 600 "${KUBEDIR}/config"
+  chmod 644 "${KUBEDIR}/config"  # container runs non-root; needs world-read on the bind mount
 
   echo "== recreate API =="
   docker rm -f clawbox-m1-api clawbox-m1-dispatcher 2>/dev/null
