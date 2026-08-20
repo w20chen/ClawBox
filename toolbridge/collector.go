@@ -164,11 +164,11 @@ func ticksToSeconds(ticks int64) float64 { return float64(ticks) / 100.0 } // US
 // double counted across samples).
 func (c *resourceCollector) scanProcessTree() {
 	var rssSum int64
-	pids := listPidsInGroup(c.pgid)
+	pids := descendantPids(c.pgid) // c.pgid is the execution's shell pid (root)
 	first := c.pointCount == 0
 	for _, pid := range pids {
-		state, pgrp, utime, stime, ok := readProcStat(pid)
-		if !ok || pgrp != c.pgid {
+		state, _, utime, stime, ok := readProcStat(pid)
+		if !ok {
 			continue
 		}
 		if state == "Z" {
@@ -211,20 +211,31 @@ func (c *resourceCollector) scanProcessTree() {
 	}
 }
 
-func listPidsInGroup(pgid int) []int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-	pids := make([]int, 0, 16)
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 {
-			continue
+// descendantPids returns root and all its descendants by walking
+// /proc/<pid>/task/<pid>/children.  Robust against guest process-group quirks
+// (the Kata guest keeps container processes in pgrp 0, so Setpgid and
+// pgrp-based filtering are unreliable there).
+func descendantPids(root int) []int {
+	seen := make(map[int]bool)
+	var out []int
+	var walk func(int)
+	walk = func(pid int) {
+		if pid <= 0 || seen[pid] {
+			return
 		}
-		pids = append(pids, pid)
+		seen[pid] = true
+		out = append(out, pid)
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+		if err != nil {
+			return
+		}
+		for _, field := range strings.Fields(string(data)) {
+			child, _ := strconv.Atoi(field)
+			walk(child)
+		}
 	}
-	return pids
+	walk(root)
+	return out
 }
 
 // startResourceCollector begins periodic process-tree sampling of the
@@ -280,27 +291,34 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 // controller for the subtree (both best-effort; they need CAP_SYS_ADMIN,
 // which the tool container is granted).  Without the memory controller only
 // cpu/io are exact and RSS falls back to the process-tree sampler.
-func tryPerExecCgroup(execID string, pgid int) (string, bool) {
+func tryPerExecCgroup(execID string, shellPid int) (string, bool) {
 	remountCgroupRW()
-	enableMemoryController()
 	base := "/sys/fs/cgroup/clawbox"
 	leaf := sanitizeCgroupLeaf(execID)
 	if leaf == "" {
 		return "", false
 	}
-	if err := os.MkdirAll(filepath.Join(base, leaf), 0755); err != nil {
+	if err := os.MkdirAll(base, 0755); err != nil {
 		return "", false
 	}
+	// Enable cpu/memory/pids/io for the clawbox subtree so per-exec cgroups
+	// expose cpu.stat / memory.peak / pids.current.  One write per controller
+	// (best-effort; already-enabled ones fail harmlessly and are ignored).
+	for _, ctl := range []string{"+cpu", "+memory", "+pids", "+io"} {
+		_ = os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte(ctl), 0644)
+		_ = os.WriteFile(filepath.Join(base, "cgroup.subtree_control"), []byte(ctl), 0644)
+	}
 	path := filepath.Join(base, leaf)
-	for _, pid := range listPidsInGroup(pgid) {
-		_, pgrp, _, _, ok := readProcStat(pid) // returns (state, pgrp, utime, stime, ok)
-		if !ok || pgrp != pgid {
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(path, "cgroup.procs"), []byte(strconv.Itoa(pid)+"\n"), 0644); err != nil {
-			_ = os.RemoveAll(path)
-			return "", false
-		}
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return "", false
+	}
+	// Move the execution's shell into the per-exec cgroup; descendants inherit
+	// the cgroup at fork, so one write suffices.  Writes the shell pid
+	// directly and does NOT rely on the guest honoring process groups (the
+	// Kata guest keeps container processes in pgrp 0).
+	if err := os.WriteFile(filepath.Join(path, "cgroup.procs"), []byte(strconv.Itoa(shellPid)+"\n"), 0644); err != nil {
+		_ = os.RemoveAll(path)
+		return "", false
 	}
 	return path, true
 }
@@ -308,12 +326,6 @@ func tryPerExecCgroup(execID string, pgid int) (string, bool) {
 // remountCgroupRW best-effort remounts the guest cgroup2 tree read-write.
 func remountCgroupRW() {
 	_ = exec.Command("mount", "-o", "remount,rw", "/sys/fs/cgroup").Run()
-}
-
-// enableMemoryController best-effort enables the cgroup v2 memory controller
-// for the subtree so per-exec cgroups get memory.peak / memory.current.
-func enableMemoryController() {
-	_ = os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte("+memory"), 0644)
 }
 
 func sanitizeCgroupLeaf(value string) string {
@@ -405,17 +417,22 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 
 	if c.cgroupOK && c.cgroupPath != "" {
 		if userUs, sysUs, memPeak, rBytes, wBytes, pids, ok := readCgroupCounters(c.cgroupPath); ok {
-			stats.Source = "cgroup-v2"
-			stats.MonitorSource = "cgroup-v2"
-			stats.CPUUserSeconds = float64(userUs) / 1e6
-			stats.CPUSystemSeconds = float64(sysUs) / 1e6
-			stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
-			if memPeak > 0 { // memory.peak may be absent on older guest kernels
-				stats.RSSPeakBytes = memPeak
+			// Only trust the cgroup view when it actually observed the
+			// execution (a created-but-empty cgroup reports zeros and must
+			// not override the process-tree sampler).
+			if userUs+sysUs > 0 || pids > 0 {
+				stats.Source = "cgroup-v2"
+				stats.MonitorSource = "cgroup-v2"
+				stats.CPUUserSeconds = float64(userUs) / 1e6
+				stats.CPUSystemSeconds = float64(sysUs) / 1e6
+				stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
+				if memPeak > 0 { // memory.peak may be absent on older guest kernels
+					stats.RSSPeakBytes = memPeak
+				}
+				stats.ReadBytesDelta = rBytes
+				stats.WriteBytesDelta = wBytes
+				stats.PidCount = pids
 			}
-			stats.ReadBytesDelta = rBytes
-			stats.WriteBytesDelta = wBytes
-			stats.PidCount = pids
 		}
 		cleanupCgroup(c.cgroupPath)
 	}

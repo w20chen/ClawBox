@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -106,13 +105,22 @@ func TestTicksToSeconds(t *testing.T) {
 	}
 }
 
-// TestListPidsInGroup ensures the /proc walker returns parseable numeric pids
-// and does not include this test process (different pgid).
-func TestListPidsInGroup(t *testing.T) {
-	pids := listPidsInGroup(-1)
+// TestDescendantPids verifies the children-walker includes the root pid and
+// its descendants regardless of process-group semantics.
+func TestDescendantPids(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "sleep 2")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer cmd.Wait() //nolint:errcheck
+	pids := descendantPids(cmd.Process.Pid)
+	foundRoot := false
 	for _, pid := range pids {
-		if _, err := strconv.Atoi(strconv.Itoa(pid)); err != nil {
-			t.Fatalf("non-numeric pid %d", pid)
+		if pid == cmd.Process.Pid {
+			foundRoot = true
 		}
+	}
+	if !foundRoot {
+		t.Fatalf("descendantPids did not include root pid %d: %v", cmd.Process.Pid, pids)
 	}
 }
