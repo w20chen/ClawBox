@@ -76,33 +76,16 @@ print("/".join(parts) if len(parts) >= 2 else "")
   export CLAWBOX_REPO_KEY="${repo_key}"
   echo "[runtime] KB repo_key=${repo_key}" >&2
   if [[ -n "${CLAWBOX_KB_ENDPOINT:-}" && -n "${CLAWBOX_KB_TOKEN:-}" ]]; then
-    kb_dest="${ARTIFACT_DIR}/runtime-tool-resource-kb.json"
-    kb_tmp="${ARTIFACT_DIR}/.runtime-tool-resource-kb.json.tmp"
-    kb_response="${ARTIFACT_DIR}/.runtime-tool-resource-response.json.tmp"
-    echo "[runtime] pulling KB snapshot from ${CLAWBOX_KB_ENDPOINT} (repo=${repo_key})" >&2
-    if curl -fsS --max-time 30 \
-        -H "Authorization: Bearer ${CLAWBOX_KB_TOKEN}" \
-        --get --data-urlencode "tenant_id=${kb_tenant}" \
-        --data-urlencode "repo=${CLAWBOX_REPO_KEY}" --data-urlencode "format=clawtune" \
-        "${CLAWBOX_KB_ENDPOINT}/v1/kb/snapshot" \
-        >"${kb_response}" 2>"${LOG_DIR}/kb-pull.log" && \
-        python3 - "${kb_response}" "${kb_tmp}" >>"${LOG_DIR}/kb-pull.log" 2>&1 <<'PY'
-import json, pathlib, sys
-response = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-snapshot = response["snapshot"]
-if not isinstance(snapshot, dict):
-    raise ValueError("clawtune snapshot is not an object")
-pathlib.Path(sys.argv[2]).write_text(json.dumps(snapshot), encoding="utf-8")
-print(f"generation={response['generation']} input_count={response['input_count']}")
-PY
+    echo "[runtime] pulling native KB pair from ${CLAWBOX_KB_ENDPOINT} (repo=${repo_key})" >&2
+    if "${CLAWTUNE_HOME}/venv/bin/python" /usr/local/bin/native-kb-pull.py \
+        --endpoint "${CLAWBOX_KB_ENDPOINT}" --token "${CLAWBOX_KB_TOKEN}" \
+        --tenant "${kb_tenant}" --repo "${CLAWBOX_REPO_KEY}" \
+        --artifact-dir "${ARTIFACT_DIR}" >"${LOG_DIR}/kb-pull.log" 2>&1
     then
-      mv "${kb_tmp}" "${kb_dest}"
-      rm -f "${kb_response}"
-      kb_generation="$(sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' "${LOG_DIR}/kb-pull.log" | tail -1)"
-      echo "[runtime] KB snapshot pulled (tenant=${kb_tenant} repo=${CLAWBOX_REPO_KEY} generation=${kb_generation:-unknown})" >&2
+      kb_generation="$(sed -n 's/.*"generation": \([0-9][0-9]*\).*/\1/p' "${LOG_DIR}/kb-pull.log" | tail -1)"
+      echo "[runtime] native KB pair pulled (tenant=${kb_tenant} repo=${CLAWBOX_REPO_KEY} generation=${kb_generation:-unknown})" >&2
     else
-      echo "[runtime] WARN: KB pull failed; keeping cold-start snapshot" >&2
-      rm -f "${kb_tmp}" "${kb_response}"
+      echo "[runtime] WARN: native KB pair pull failed; keeping cold-start snapshots" >&2
     fi
   fi
 fi
@@ -366,6 +349,21 @@ RESEOF
     esac
   done < "${TRACE_DIR}/tool-resources.b64" || true
   rm -f "${TRACE_DIR}/tool-resources.b64"
+
+  # Join ClawTune's native prediction payloads with Tool-VM actuals and the
+  # exact startup generation. This is shadow evidence only; it never changes
+  # the FixedProfileSizer reservation selected before the Cell was created.
+  if [[ -f "${ARTIFACT_DIR}/native-kb-load.json" ]]; then
+    CLAWBOX_RUN_ID="${CLAWBOX_RUN_ID:-${TASK_ID}}" \
+      CLAWBOX_ATTEMPT_ID="${CLAWBOX_ATTEMPT_ID:-${TASK_ID}}" \
+      CLAWBOX_RESOURCE_PROFILE="${RESOURCE_PROFILE:-}" \
+      "${CLAWTUNE_HOME}/venv/bin/python" /usr/local/bin/native-shadow-report.py \
+        --trace-dir "${TRACE_DIR}" \
+        --kb-metadata "${ARTIFACT_DIR}/native-kb-load.json" \
+        --output "${ARTIFACT_DIR}/native-shadow-report.json" \
+        >>"${LOG_DIR}/native-shadow-report.log" 2>&1 || \
+      echo "[runtime] WARN: native shadow report failed (non-fatal)" >&2
+  fi
 
   echo "[runtime] writing result.json" >&2
   TASK_STATE_DIR="${STATE_DIR}" SESSION_ID="${session_id}" AGENT_STATUS="${agent_status}" \

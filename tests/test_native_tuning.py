@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 
 import pytest
@@ -207,3 +208,59 @@ def test_rejected_manifest_does_not_poison_corrected_subset(db):
     reused = ingest(db, replayed_artifacts)
     assert not reused.accepted
     assert "already belongs" in reused.rejection_reason
+
+
+def test_run_b_native_prediction_loads_exact_run_a_generation(db):
+    ingest(db, make_manifest("exec-a", run_id="run-a"))
+    snapshot = native_snapshot_to_dict(latest_native_snapshot(
+        db, tenant_id="tenant-a", repo_fingerprint=REPO
+    ))
+    from tool_resource.runtime_kb import (
+        ClauseResourceKB,
+        LatencyBuckets,
+        RuntimeToolResourceKB,
+        ToolCallQuery,
+    )
+
+    clause_kb = ClauseResourceKB.from_json_obj(snapshot["clause_snapshot"])
+    clause = clause_kb.predict_command_latency_bucket_from_clauses(
+        REPO,
+        [{"bin": "python", "argv": ["python", "-m", "pytest", "-q"]}],
+        1_800_000_000.0,
+        LatencyBuckets((100.0, 500.0, 2_000.0, 10_000.0)),
+        command="python -m pytest -q",
+    )
+    runtime_kb = RuntimeToolResourceKB.from_json_obj(snapshot["runtime_snapshot"])
+    runtime = runtime_kb.query(ToolCallQuery(
+        repo=REPO,
+        tool_name="exec",
+        command="python -m pytest -q",
+        ts_start=1_800_000_000.0,
+        ambient_before_mb=0.0,
+    ))
+
+    assert snapshot["generation"] == 1
+    assert snapshot["evidence"]["runs"] == ["run-a"]
+    assert clause.prediction.scope == "repo"
+    assert clause.prediction.key_kind == "exact_clause"
+    assert clause.prediction.evidence_count == 1
+    assert runtime["peak_cpu_cores"].scope == "repo"
+    assert runtime["peak_cpu_cores"].key_kind == "exact_command"
+    assert runtime["peak_cpu_cores"].evidence_count == 1
+
+
+def test_runtime_loader_publishes_the_exact_atomic_pair(db, tmp_path):
+    ingest(db, make_manifest("exec-a", run_id="run-a"))
+    snapshot = native_snapshot_to_dict(latest_native_snapshot(
+        db, tenant_id="tenant-a", repo_fingerprint=REPO
+    ))
+    path = __import__("pathlib").Path(__file__).resolve().parents[1] / "scripts" / "native-kb-pull.py"
+    spec = importlib.util.spec_from_file_location("native_kb_pull", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    metadata = module.publish_response(snapshot, tmp_path)
+    assert metadata["generation"] == 1
+    assert metadata["evidence"]["runs"] == ["run-a"]
+    assert json.loads((tmp_path / "clause-resource-kb.json").read_text()) == snapshot["clause_snapshot"]
+    assert json.loads((tmp_path / "runtime-tool-resource-kb.json").read_text()) == snapshot["runtime_snapshot"]
+    assert json.loads((tmp_path / "native-kb-load.json").read_text())["pair_digest"] == snapshot["pair_digest"]

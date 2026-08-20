@@ -11,6 +11,7 @@ REGISTRY="${REGISTRY:?set REGISTRY, for example registry.example.com/clawbox}"
 TAG="${TAG:-dev}"
 BRIDGE_OUTPUT="${BRIDGE_OUTPUT:-${ROOT}/.artifacts/tool-bridge-arm64}"
 CLAWTUNE_REVISION="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+CLAWBOX_REVISION="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 [[ "$(uname -m)" =~ ^(aarch64|arm64)$ ]] || {
   echo "Kubernetes images must be built on the native arm64 builder" >&2
@@ -57,6 +58,7 @@ docker build --platform linux/arm64 --pull \
   -t "${tool_image}" "${ROOT}"
 docker build --platform linux/arm64 --pull --build-context clawtune="${CLAWTUNE_ROOT}" \
   --build-arg CLAWTUNE_REVISION="${CLAWTUNE_REVISION}" \
+  --build-arg CLAWBOX_REVISION="${CLAWBOX_REVISION}" \
   --build-arg NPM_REGISTRY="${NPM_REGISTRY}" \
   --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
   --build-arg APT_MIRROR="${APT_MIRROR}" \

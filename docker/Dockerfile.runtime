@@ -14,6 +14,7 @@ RUN npm run build
 FROM node:22-bookworm-slim
 ARG OPENCLAW_VERSION
 ARG CLAWTUNE_REVISION=unknown
+ARG CLAWBOX_REVISION=unknown
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ARG PIP_INDEX_URL=https://pypi.org/simple
 # Host (scheme optional) of a Debian mirror that serves both /debian and
@@ -24,8 +25,11 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 # signature check. Empty keeps the official sources.
 ARG APT_MIRROR=
 LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
+LABEL org.opencontainers.image.source.clawbox.revision="${CLAWBOX_REVISION}"
 ENV DEBIAN_FRONTEND=noninteractive \
     CLAWTUNE_REVISION=${CLAWTUNE_REVISION} \
+    CLAWBOX_REVISION=${CLAWBOX_REVISION} \
+    XDG_CACHE_HOME=/opt/clawtune/cache \
     HOME=/home/openclaw \
     OPENCLAW_HOME=/home/openclaw/.openclaw
 
@@ -103,15 +107,22 @@ COPY --from=clawtune packages/clawtune-plugin/README.md ./packages/clawtune-plug
 COPY --from=clawtune traces/tool-resource ./cold-start/tool-resource
 RUN python3 -m venv /opt/clawtune/venv \
  && /opt/clawtune/venv/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" ./services/sidecar \
+ && sed -i 's/\r$//' services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
+ && /bin/sh services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
+ && rm -rf /opt/clawtune/cache/go-toolchain-* /opt/clawtune/cache/go-mod-cache \
+ && chmod -R a+rX /opt/clawtune/cache \
  && /opt/clawtune/venv/bin/python -c "import clawtune_sidecar, tool_resource"
 
 COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
 COPY scripts/clawtune-sidecar-entrypoint.sh /usr/local/bin/clawtune-sidecar-entrypoint
 COPY scripts/artifact-uploader.py /usr/local/bin/artifact-uploader
 COPY scripts/kb-flush.py /usr/local/bin/kb-flush.py
+COPY scripts/native-shadow-report.py /usr/local/bin/native-shadow-report.py
+COPY scripts/native-kb-pull.py /usr/local/bin/native-kb-pull.py
+COPY scripts/native-shadow-probe.py /usr/local/bin/native-shadow-probe.py
 RUN groupadd --gid 10001 openclaw \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash openclaw \
- && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader /usr/local/bin/kb-flush.py \
+ && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader /usr/local/bin/kb-flush.py /usr/local/bin/native-shadow-report.py /usr/local/bin/native-kb-pull.py /usr/local/bin/native-shadow-probe.py \
  && mkdir -p /state /workspace /home/openclaw/.openclaw \
  && chown -R 10001:10001 /state /workspace /home/openclaw
 

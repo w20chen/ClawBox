@@ -486,6 +486,17 @@ def test_runtime_inprocess_sidecar_uses_a_final_upload_handshake():
     assert '.runtime-complete' in sidecar and '--once --require-result' in sidecar
     assert '.upload-complete' in runtime and 'central artifact upload timed out' in runtime
     assert '"workspaceRoot": "/testbed"' in runtime
+    assert "/usr/local/bin/native-kb-pull.py" in runtime
+    assert "/usr/local/bin/native-shadow-report.py" in runtime
+    pull = (ROOT / "scripts" / "native-kb-pull.py").read_text(encoding="utf-8")
+    assert "/v1/kb/native-snapshot" in pull
+    assert "ClauseResourceKB.from_json_obj" in pull
+    assert "RuntimeToolResourceKB.from_json_obj" in pull
+    assert "native snapshot pair digest mismatch" in pull
+    dockerfile = (ROOT / "docker" / "Dockerfile.runtime").read_text(encoding="utf-8")
+    assert "CLAWBOX_REVISION" in dockerfile
+    assert "_mvdan_adapter/build.sh" in dockerfile
+    assert "native-shadow-probe.py" in dockerfile
     # No restartable init container anywhere in the rendered runtime Job.
     assert '"restartPolicy": "Always"' not in manifest
 
