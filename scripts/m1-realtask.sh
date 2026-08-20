@@ -53,8 +53,8 @@ body = {
     "templateRevision": 1,
     "inputRef": "15five__scim2-filter-parser-13",
     "inputSha256": hashlib.sha256(problem.encode()).hexdigest(),
-    "deadlineSeconds": 1800,
-    "idempotencyKey": "m1-real-task-g0-cgroup-001",
+    "deadlineSeconds": int(os.environ.get("DEADLINE_SECONDS", "1800")),
+    "idempotencyKey": os.environ.get("IDEMPOTENCY_KEY", "m1-real-task-g0-cgroup-001"),
     "problemStatement": problem,
 }
 print(json.dumps(body))
