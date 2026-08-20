@@ -26,6 +26,11 @@ OUT=/tmp/m1-realtask.txt
   curl -s http://127.0.0.1:8085/healthz; echo
 
   echo "== recreate dispatcher =="
+  # The kubeconfig bind-mount must be a world-readable FILE (container runs
+  # non-root).  /tmp/m1-kubeconfig was once a root-owned dir that broke the
+  # mount with IsADirectoryError, so we copy ~/.kube/config to a 644 file.
+  KUBECONF="${KUBECONF_FILE:-$HOME/.kube/config}"
+  cp "$KUBECONF" /tmp/m1-kubeconfig-file && chmod 644 /tmp/m1-kubeconfig-file
   docker run -d --name clawbox-m1-dispatcher --restart unless-stopped \
     -e "DATABASE_URL=sqlite:////data/clawbox-managed.db" \
     -e "CLAWBOX_CR_VERSION=v1alpha1" \
@@ -33,7 +38,7 @@ OUT=/tmp/m1-realtask.txt
     -e "CLAWBOX_TEMPLATES=$TEMPLATES" \
     -e "KUBECONFIG=/mnt/kube/config" \
     -v "$DATA:/data" \
-    -v /tmp/m1-kubeconfig:/mnt/kube/config:ro \
+    -v /tmp/m1-kubeconfig-file:/mnt/kube/config:ro \
     "$IMG" clawbox-managed-dispatcher
   sleep 4
 
