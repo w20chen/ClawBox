@@ -1,11 +1,10 @@
-# Agent Handoff: Tool-VM Telemetry T2
+# Agent Handoff: Tool-VM Telemetry T2-T3
 
 Date: 2026-08-20
 
 This handoff is self-contained. Read it with
 `docs/NEXT_PLAN_TOOL_VM_TELEMETRY.md`; older G0 handoffs are historical. The
-program goal is T0-T4. T0, T1, and T2 are complete. T3 and T4 have not
-started.
+program goal is T0-T4. T0-T3 are complete and T4 is next.
 
 ## Repository state
 
@@ -16,6 +15,9 @@ ClawBox branch `main`:
 - `bae0752` preserved the incomplete T2 takeover state.
 - The next milestone commit completes T2 with the production-image fixes and
   the real-machine evidence below.
+- `daf6654` completed and pushed T2.
+- `507dfd2` implements the accepted T3 native ingestion path; the following
+  documentation commit records its real-machine evidence.
 
 Sibling ClawTune branch `v2` (all pushed):
 
@@ -202,12 +204,43 @@ ClawTune behavior.
 After acceptance, rerun focused ClawTune tests, the ClawBox Python suite, and
 ARM64 Go race tests; update the plan; then commit/push completed T2.
 
-## T3 and T4 are untouched
+## T3 production acceptance
 
-T3 must add immutable signed native manifests, tenant/repository identity,
-idempotent raw storage, pinned ClawTune validation, and atomic native
-`ClauseResourceKB` plus `RuntimeToolResourceKB` snapshots. Do not make
-`clawbox/tuning/clawtune.py` the source of truth.
+T3 passed on `weitianc@193.124.7.2` in isolated worktree
+`/tmp/clawbox-t34-daf6654`; the older dirty handoff tree was not modified.
+The production Tool image remained
+`127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:1e4db5fefd5b3285bcecf432edfe1cf09335e7004a468e46aa2a044365ec3a36`.
+The pinned ARM64 control-plane image was
+`127.0.0.1:5000/clawbox/control-plane-arm64@sha256:72907f6203e03a9ba1c2616814b2fea540fa6c5d9efcb4df464ce190d707230e`.
+Both record ClawTune `e91e60bc1e5f3209fbcf6091013fde96f217e2a7`.
+
+The strict Firecracker run again passed with seven executions, six native
+clause artifacts, non-zero CPU/RSS, zero loss, successful cleanup, distinct
+concurrent cgroups, and native artifact validation. T3 preserved the complete
+signed raw set for audit, rejected its unpaired fail-open member without
+weakening validation, and accepted five exact clause+cgroup pairs (ten
+artifacts). The accepted result was:
+
+- generation `0 -> 1`;
+- manifest digest `9894010730ee300d710668124eafbdb235b4cd9b870c9f9df21faeac145eae3e`;
+- reproducible source digest `67beee6b1274859fa3e9c747de73884bfddfe3c790e5a6895d0361fda8012fcb`;
+- atomic pair digest `b9214c1b54d7c4dab60eb100ccdc9fbbbbd66ea4b216169c5a6a622b5e09c2e6`;
+- exact replay idempotent, cross-tenant signature reuse rejected, both pinned
+  native readers passed, and rollback restored generation 0.
+
+Remote evidence:
+
+- `.artifacts/t3-native-acceptance-r3.json`, SHA-256
+  `7a5120eb40e3408c191b97246829f726e8476b9a58b89ab2990f8ed0f6de39cb`;
+- `.artifacts/t3-native-ingest-final-r3.log`, SHA-256
+  `c179a39caa0dbbdce8edb5e47ba1751da2e33e198b567b0c7132d5a725746b28`;
+- `.artifacts/t3-native-run-a-held.log`, SHA-256
+  `06ca692c7e608b0ef6c9af9e23f9562a7b5c53d89a0c6b55d70a5c3db6a28784`.
+
+The full ClawBox Python suite passed locally and natively on ARM64; the T3
+focused native suite passed against the archived exact ClawTune source.
+
+## T4 remains
 
 T4 must prove a two-run shadow loop: run A advances generation N to N+1; run B
 loads exactly N+1 and records a native prediction whose evidence includes run

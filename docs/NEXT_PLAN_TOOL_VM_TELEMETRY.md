@@ -1,6 +1,6 @@
 # Next Implementation Plan: Tool-VM Telemetry Before Managed Sandbox Completion
 
-**Status:** T0, T1, and T2 complete; T3 is next
+**Status:** T0-T3 complete; T4 is next
 **Date:** 2026-08-20
 **Primary repositories:** `ClawBox` and sibling `ClawTune`
 **Priority decision:** repair and prove the telemetry-to-prediction loop before
@@ -320,6 +320,32 @@ Acceptance:
   KB eligibility.
 
 ### T3 — Preserve and ingest native telemetry
+
+**Completed 2026-08-20:** ClawBox `507dfd2` implements the signed native
+manifest, immutable raw audit store, tenant/repository scoping, idempotent
+projection, fixed ClawTune validation, and atomic clause/runtime snapshot pair.
+The legacy `clawbox/tuning/clawtune.py` builder remains only for the older API;
+the native path imports the pinned ClawTune package and its native readers and
+validators.
+
+Real ARM64 acceptance used the already accepted production Tool image
+`127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:1e4db5fefd5b3285bcecf432edfe1cf09335e7004a468e46aa2a044365ec3a36`
+and final control-plane image
+`127.0.0.1:5000/clawbox/control-plane-arm64@sha256:72907f6203e03a9ba1c2616814b2fea540fa6c5d9efcb4df464ce190d707230e`,
+both pinned to ClawTune `e91e60bc1e5f3209fbcf6091013fde96f217e2a7`.
+Five eligible executions produced ten paired immutable artifacts. Generation
+advanced `0 -> 1`; exact replay was idempotent; cross-tenant signature reuse
+was rejected; both native `from_json_obj` readers passed; source digest
+`67beee6b1274859fa3e9c747de73884bfddfe3c790e5a6895d0361fda8012fcb`
+was reproduced; and rollback returned atomically to generation 0. The complete
+raw audit manifest was retained and rejected (as designed) because it also
+contained the fail-open unpaired cgroup artifact; its eligible subset alone
+advanced the KB. Evidence is
+`.artifacts/t3-native-acceptance-r3.json` (SHA-256
+`7a5120eb40e3408c191b97246829f726e8476b9a58b89ab2990f8ed0f6de39cb`)
+and `.artifacts/t3-native-ingest-final-r3.log` (SHA-256
+`c179a39caa0dbbdce8edb5e47ba1751da2e33e198b567b0c7132d5a725746b28`)
+in remote worktree `/tmp/clawbox-t34-daf6654`.
 
 **Purpose:** replace the simplified imitation with a native, auditable
 multi-tenant data path.
