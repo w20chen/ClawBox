@@ -1,13 +1,13 @@
-# Managed control-plane RBAC separation (M1, roadmap §6.5).
+# Managed control-plane RBAC separation.
 #
 # Principle of least privilege per component:
 #   - clawbox-managed-api:      PURE DB SERVICE. No Kubernetes permissions at
 #                               all (no Pod/Secret/CR creation). It must never
 #                               be granted sandboxtasks/pods/secrets verbs.
 #   - clawbox-managed-dispatcher: The ONLY path that creates SandboxTask CRs
-#                               (ADR-001). Needs only sandboxtasks
+#                               Needs only sandboxtasks
 #                               get/list/create/patch in the cell namespace —
-#                               no Pods, no Secrets, no Jobs, no NetworkPolicies.
+#                               and no Pods, Secrets, Jobs, or NetworkPolicies.
 #   - clawbox-cell-controller:  Already in control-plane-rbac.yaml; keeps the
 #                               Pod/Secret/Job/NetworkPolicy verbs it needs to
 #                               realize Cells.

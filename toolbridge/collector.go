@@ -23,7 +23,7 @@ package main
 // sampler walks /proc for every process in that group, which is exactly the
 // set of processes that belong to this execution — and only this execution.
 //
-// Rationale for guest-side collection (see docs/GAPS.md G0): the host OS only
+// Rationale for guest-side collection: the host OS only
 // sees the whole Firecracker microVM as one process, so per-command attribution
 // is impossible from the host.  The ClawTune sidecar in the Runtime VM only
 // sees the SSH client, not the tool command.  The Tool VM is the only place

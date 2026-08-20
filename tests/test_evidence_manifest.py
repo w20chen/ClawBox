@@ -1,4 +1,4 @@
-"""Tests for scripts/evidence-manifest.py (CBX-M0-005).
+"""Tests for scripts/evidence-manifest.py.
 
 The generator must collect a re-verifiable manifest of Git/image/schema/host
 facts and per-run artifact digests without reading credential plaintext, and

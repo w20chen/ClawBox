@@ -1,4 +1,4 @@
-# Tuning KB control-plane API (P2) — in-cluster Deployment + Service.
+# Tuning KB control-plane API — in-cluster Deployment + Service.
 #
 # Runtime pods pull the (tenant, repo) KB snapshot at start and flush signed
 # observations at end via this Service (mirrors the trace ingester layout).

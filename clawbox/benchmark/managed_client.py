@@ -1,9 +1,4 @@
-"""Managed API client + benchmark launcher as API client (M1, roadmap §6.5).
-
-Production runs are submitted through the Managed API (idempotency-keyed),
-never by writing SandboxTask CRs directly. Direct CR writes remain only in the
-dev/benchmark launcher and are the path being retired by ADR-001.
-"""
+"""Managed API client and benchmark submission helpers."""
 
 from __future__ import annotations
 
@@ -52,7 +47,18 @@ class ManagedAPIClient:
         # `client` is any object with .get/.post(headers=..., json=...); an
         # httpx.Client in production, a starlette TestClient in tests.
         self._client = client or httpx.Client(base_url=base_url, timeout=timeout)
+        self._owns_client = client is None
         self._headers = {"X-Clawbox-Token": token, "X-Tenant-Id": tenant_id}
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+    def __enter__(self) -> "ManagedAPIClient":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def create_run(
         self,
@@ -64,6 +70,7 @@ class ManagedAPIClient:
         input_sha256: str,
         deadline_seconds: int,
         idempotency_key: str,
+        problem_statement: str | None = None,
     ) -> CreateRunResult:
         payload = {
             "projectId": project_id,
@@ -74,6 +81,8 @@ class ManagedAPIClient:
             "deadlineSeconds": deadline_seconds,
             "idempotencyKey": idempotency_key,
         }
+        if problem_statement is not None:
+            payload["problemStatement"] = problem_statement
         response = self._client.post("/v1/runs", headers=self._headers, json=payload)
         if response.status_code in (200, 201):
             data = response.json()
@@ -150,6 +159,7 @@ def submit_benchmark(
             input_sha256=input_sha256(problem),
             deadline_seconds=deadline_seconds,
             idempotency_key=f"{idempotency_prefix}:{instance_id}",
+            problem_statement=problem or None,
         )
         results.append(result)
     return results

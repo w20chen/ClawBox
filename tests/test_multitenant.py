@@ -9,6 +9,9 @@ Verifies that the multi-tenant submitter:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from threading import Lock
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -240,3 +243,46 @@ def test_run_intent_request_digest_is_tenant_stable():
     digest = idempotency_digest(payload)
     assert digest == idempotency_digest(payload)
     assert len(digest) == 64
+
+
+def test_concurrent_load_submission_forwards_problem_and_unique_keys():
+    calls = []
+    lock = Lock()
+
+    @dataclass
+    class Result:
+        run_id: str
+        phase: str = "Accepted"
+        idempotency_replay: bool = False
+
+    class FakeClient:
+        def __init__(self, tenant_id):
+            self.tenant_id = tenant_id
+
+        def create_run(self, **kwargs):
+            with lock:
+                calls.append((self.tenant_id, kwargs))
+            return Result(run_id=f"{self.tenant_id}-{kwargs['idempotency_key']}")
+
+    submissions = submit_tenants(
+        base_url="http://test",
+        token="token",
+        tenants=["tenant-a", "tenant-b", "tenant-c"],
+        runs_per_tenant=3,
+        project_id="load",
+        template_ref="swe-rebench-arm64",
+        template_revision=1,
+        input_ref="repo",
+        input_sha256_="a" * 64,
+        deadline_seconds=300,
+        idempotency_prefix="burst",
+        problem_statement="Run the repository tests.",
+        submit_workers=6,
+        client_factory=FakeClient,
+    )
+
+    assert sum(item.created for item in submissions) == 9
+    assert len({call[1]["idempotency_key"] for call in calls}) == 9
+    assert {call[1]["problem_statement"] for call in calls} == {
+        "Run the repository tests."
+    }

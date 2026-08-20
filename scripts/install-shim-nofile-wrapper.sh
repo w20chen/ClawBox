@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# P3: install a containerd-shim-kata-v2 wrapper that raises RLIMIT_NOFILE to
+# Install a containerd-shim-kata-v2 wrapper that raises RLIMIT_NOFILE to
 # hard before exec'ing the real shim.
 #
 # Why: Kata runtime-rs resets the soft RLIMIT_NOFILE to 1024 (hard 524288),
 # which exhausts file descriptors at ~19 concurrent cells
-# ("No file descriptors available (os error 24)" — see
-# docs/FINDING_2026-08-18-scale32-fd-exhaustion.md).  Raising soft=hard in the
+# with "No file descriptors available (os error 24)". Raising soft=hard in the
 # wrapper gives a 32-cell run headroom.
 #
 # Run on the target (requires root):

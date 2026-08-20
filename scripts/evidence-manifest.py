@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""CBX-M0-005: release/evidence manifest generator.
+"""Release evidence manifest generator.
 
 Collects a re-verifiable evidence manifest for a ClawBox release / cluster /
 run WITHOUT reading any credential plaintext (Secret names only, never data).
 
-Output layout (see roadmap §16.1):
+Output layout:
 
     release-evidence/<release>/<cluster>/<run-id>/
       manifest.json        every fact + file SHA256; self-hashed
@@ -14,7 +14,7 @@ Output layout (see roadmap §16.1):
 Usage (run on the target machine, or anywhere with kubectl/docker + the repo):
 
     python3 scripts/evidence-manifest.py collect \
-        --release m0-2026-08-18 --cluster hostname --run <run-id> \
+        --release release-2026-08-21 --cluster hostname --run <run-id> \
         [--namespace clawbox-benchmarks] [--gate e2e-real-task:pass] ...
 
     python3 scripts/evidence-manifest.py verify --manifest <path>/manifest.json

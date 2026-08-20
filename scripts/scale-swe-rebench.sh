@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SCALE-1: stop at the first failed concurrency step or thin-pool pressure gate.
+# Stop at the first failed concurrency step or thin-pool pressure gate.
 set -euo pipefail
 
 TASKS=""
@@ -29,7 +29,7 @@ done
 ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 for parallelism in ${STEPS}; do
   [[ "${parallelism}" =~ ^[0-9]+$ ]] || { echo "invalid scale step: ${parallelism}" >&2; exit 64; }
-  echo "== SCALE-1 parallelism=${parallelism} =="
+  echo "== parallelism=${parallelism} =="
   sudo bash "${ROOT}/scripts/setup-devmapper-openeuler-arm64.sh" status
   python3 -m clawbox.benchmark.kubernetes \
     --tasks "${TASKS}" --arm64-map "${MAPPING}" --namespace "${NAMESPACE}" \
