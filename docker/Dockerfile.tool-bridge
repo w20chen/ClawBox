@@ -5,7 +5,7 @@ ARG GOPROXY=https://proxy.golang.org,direct
 WORKDIR /src
 COPY toolbridge/go.mod toolbridge/go.sum ./
 RUN GOPROXY="${GOPROXY}" go mod download
-COPY toolbridge/main.go ./
+COPY toolbridge/main.go toolbridge/collector.go ./
 RUN test "${TARGETARCH}" = arm64 \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath \
       -ldflags='-s -w -buildid=' -o /out/tool-bridge .
