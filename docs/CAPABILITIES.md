@@ -43,7 +43,7 @@
 | 离线科研管线 CLI：schema→validate→exact join→dataset→estimators→KB→ablation→summary | 🟢 | `clawbox/tuning/__main__.py`（`python -m clawbox.tuning`）、`tests/test_tuning_cli.py` |
 | runtime 拉取 KB snapshot（按 tenant×repo）+ finalize 时 observation 回刷（fail-open） | 🟡 | `scripts/runtime-entrypoint.sh`（P2 段）、`scripts/kb-flush.py` |
 | ClawTune 影子预测（latency bucket / resource class / p90）在真机产生 | ✅ | `docs/AGENT_HANDOFF_2026-08-19-research-next.md`（真机已见 shadow prediction） |
-| **KB 数据真实性**：tool-bridge 已写真实 per-execution 工件（`cgroup-resource-*.json`：进程树 rusage / cgroup v2），`kb-flush` 优先用真实值覆盖 span 代理值 | 🟡 | `toolbridge/collector.go`、`scripts/kb-flush.py`（真机验证待做） |
+| **KB 数据真实性**：tool-bridge 已写真实 per-execution 工件（`cgroup-resource-*.json`：进程树 rusage），真机已抓到真实 RSS；`kb-flush` 用真实值覆盖 span 代理值；**CPU 捕获待 20ms 镜像上线验证** | 🟡 | `toolbridge/collector.go`（RSS 已验证）、`scripts/kb-flush.py`（CPU 待验证） |
 
 ## 5. 图像供应链 / 安全边界
 

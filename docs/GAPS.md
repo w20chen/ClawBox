@@ -3,20 +3,20 @@
 > 依据：仓库代码 + 真机探测 + 交接文档交叉验证。每项区分：
 > **🔴 未实现**（代码里没有）· **🟠 被环境阻断**（代码思路有，但真机 guest/权限做不到）· **🟡 已实现但未全量验证** · **⚪ 设计上明确跳过**（论文范围外）。
 
-## G0. 核心主线：ClawTune 的 eBPF + cgroup 在 Tool VM 里**未跑通**
+## G0. 核心主线：ClawTune 的 eBPF + cgroup 在 Tool VM 里**部分跑通**
 
-这是"让 ClawTune 那一套全跑通"的最大缺口。现状与原因（真机 guest 探测，`scripts/probe-kata-guest.sh`）：
+这是"让 ClawTune 那一套全跑通"的最大缺口。**真机已实测**（`scripts/probe-kata-guest.sh` + tool pod 诊断）：
 
 | 子项 | 状态 | 代码/探测证据 |
 |---|---|---|
-| 工具命令真实资源观测（cgroup/eBPF） | � 已实现主体（真机待验证） | `toolbridge/collector.go`：每执行写 `tool-resource/cgroup-resource-<id>.json`（`cgroup_resource_v1`）；`source=process-tree` 零特权，guest cgroup 可写时自动 `cgroup-v2` |
-| per-execution 独占 cgroup | � 代码已带优雅回退 | guest `/sys/fs/cgroup` 挂载只读时 `tryPerExecCgroup` 自动回退进程树；**关键未知**：`mount -o remount,rw` 是否可行（探测脚本已加此测试，待真机跑） |
-| BCC eBPF（ClawTune 的 `net_accounting.py` 网络记账） | 🟠 被阻断 | guest 无内核头、无 clang、无 `/lib/modules` → BCC 运行期编译不可用 |
+| 工具命令真实资源观测（进程树） | 🟡 主体已实现，**CPU 捕获待真机验证** | `toolbridge/collector.go`：每执行写 `tool-resource/cgroup-resource-<id>.json`（`cgroup_resource_v1`）；`source=process-tree` 零特权。真机**抓到真实 RSS**（1.5MB），但 CPU 密集命令未验证（20ms 采样已提交 `9e84ce6` 未上线） |
+| per-execution 独占 cgroup | 🟠 **tool 容器被 Kata guest cgroup 委托/nsdelegate 限制** | probe pod（带 CAP_SYS_ADMIN）`remount,rw` + mkdir + `cgroup.procs` 写入**成功**（cpu.stat 读出真实值）；但 **tool 容器里 `+cpu > subtree_control` 和 `echo $$ > cgroup.procs` 都失败**（exit 1，errno 未取）→ `tryPerExecCgroup` 自动回退进程树 |
+| BCC eBPF（ClawTune 的 `net_accounting.py`） | 🟠 被阻断 | guest 无内核头、无 clang、无 `/lib/modules` → BCC 运行期编译不可用 |
 | CO-RE eBPF（cilium/ebpf） | 🟠 被阻断 | guest 无 `/sys/kernel/btf/vmlinux`（无 BTF）——需重建 Kata guest kernel 开 `CONFIG_DEBUG_INFO_BTF` |
-| 非 CO-RE eBPF（kretprobe 预编译对象） | 🔴 未实现 | 需在 tool-bridge 加 loader + 预编译 BPF 对象；**attach 可行性（perf kprobe PMU）未实测** |
-| cgroup 读（容器级）+ 进程树 `/proc` 归因 | 🟢 已实现 | `toolbridge/collector.go` 的 `scanProcessTree` 按 pgid 归因（utime/stime、VmRSS 峰值、io 字节），零特权；`kb-flush.py` 已消费该工件覆盖 span 代理值 |
+| 非 CO-RE eBPF（kretprobe） | 🟠 被阻断 | guest 无 `/sys/kernel/tracing/kprobe_events`（无 tracefs）→ kprobe attach 点缺失；`mount -t tracefs` 是否可行待测 |
+| cgroup 读（容器级）+ 进程树 `/proc` 归因 | 🟢 已实现（RSS 已验证） | `collector.go` 按 shell pid **递归 `children` 遍历**（不依赖 pgrp——guest pgrp=0）；20ms 采样+立即基线；`kb-flush.py` 已消费真实值 |
 
-**含义**：KB/预测已可喂**真实 per-execution 数据**（进程树 rusage；cgroup 可写时为 cgroup v2 精确计数）。剩余两条线：① 真机跑增强后的 `probe-kata-guest.sh` 确认 cgroup remount 与 eBPF attach 可行性；② 若需 eBPF（网络/事件精度），重建 guest kernel 开 BTF + 放宽 seccomp/caps（安全权衡，见下）。
+**含义**：KB/预测已可喂**真实 per-execution RSS**；CPU 需 20ms 镜像上线后验证；cgroup v2 在 tool 容器被 Kata 委托限制（probe pod 可但 tool 容器不可，差异待定向诊断）；eBPF 无 BTF/tracefs，**需重建 guest kernel 才能 CO-RE**（论文 eBPF 核心贡献的最干净路径）。详见 `docs/AGENT_HANDOFF_2026-08-20-g0-real-machine.md`。
 
 ## G1. 采集数据接入管线：已完成，但未接真机数据
 
@@ -51,9 +51,10 @@
 
 ## G5. 立即待办（按论文主线排序）
 
-1. **真机验证 G0**：`scripts/probe-kata-guest.sh`（已加 cgroup remount rw / 每执行 cgroup / bpf syscall 门禁 / tracefs 探测）→ 重建 tool-bridge 镜像（`GOPROXY=... bash scripts/build-kubernetes-images.sh`）→ 跑 1 个真实任务确认 `cgroup-resource-*.json` 落地、`kb-flush` 用真实值、join 仍 100%。
-2. **eBPF 决策点**：若真机探测证明 guest 内可 `bpf()` attach（CAP_SYS_ADMIN 已可授予 + tracefs kprobes 可用），则走"重建 Kata guest kernel 开 BTF + 静态 cilium/ebpf loader"补网络/事件精度；否则以 process-tree/cgroup-v2 为准，网络用 procfs 近似并在论文中声明边界。
-3. 并发扩到 6/8（`scripts/m1-concurrent.sh` 改 `N=`）+ scale 表出图。
-4. patch 提取指标修复（成功率的正确口径）。
+1. **重建任务镜像（含 20ms 采样）并验证 CPU 捕获**：远端同步到 `24d5ad8` → `TAG=g0-fix2`（`rebuild-swe-rebench-tool-overlay.sh`，`BASE_IMAGE`/`TAG` 必须 export）→ 用新 digest 跑短时限任务 → 等 agent 跑 pytest 或经 runtime pod ssh 驱动 CPU burn（`dd if=/dev/urandom of=/dev/null bs=1M count=50`）→ 确认 `cpu_time_s>0`。
+2. **cgroup 定向诊断**：tool 容器里取 `+cpu > subtree_control` / `echo $$ > cgroup.procs` 的真实 errno，对比 probe pod 的 cgroup ns → 判断 Kata 配置能否委托子树；不可解则以进程树为准并文档化。
+3. **eBPF 定案**：guest 试 `mount -t tracefs`；宿主查 `/sys/kernel/btf/vmlinux`；查 Kata kernel config 的 `CONFIG_DEBUG_INFO_BTF` → 选"重建 guest kernel 开 BTF + cilium/ebpf CO-RE"（论文核心贡献路径）或"宿主侧 eBPF + 时间线 join"。
+4. 并发扩到 6/8（`scripts/m1-concurrent.sh` 改 `N=`）+ scale 表出图。
+5. patch 提取指标修复（成功率的正确口径）。
 
-> 诚实的边界：**G0 主线的代码已落地**（tool-bridge 进程树+cgroup 采集 → 工件 → kb-flush 消费真实值）；剩余是**真机验证**和**eBPF 增强层的可行性确认**（后者涉及重建 guest kernel + 放宽 seccomp/caps 的安全权衡，建议论文按"process-tree/cgroup-v2 为准 + eBPF 作交叉验证"交付）。
+> 诚实的边界：**G0 进程树采集已落地并抓到真实 RSS**（工件→runtime 收集→kb-flush 消费真实值）；剩余是**CPU 捕获真机验证**、**cgroup 委托限制定向诊断**、**eBPF 落地**（需重建 guest kernel 开 BTF，是论文 eBPF 核心贡献的最干净路径）。完整状态与下一步见 `docs/AGENT_HANDOFF_2026-08-20-g0-real-machine.md`。
