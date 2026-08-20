@@ -17,6 +17,12 @@ class Settings:
     # This project is Firecracker-first.  The bootstrap only creates this
     # RuntimeClass after its handler and all arm64 guest assets pass FC-0.
     kubernetes_runtime_class: str = os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc-arm64")
+    # Tool commands need the audited debug guest kernel whose BPF/kprobe/perf
+    # configuration passed the native collector gate. Runtime/OpenClaw pods do
+    # not load BPF and remain on the production handler.
+    kubernetes_tool_runtime_class: str = os.getenv(
+        "KUBERNETES_TOOL_RUNTIME_CLASS", "kata-fc-arm64-ebpf"
+    )
     kubernetes_image_pull_policy: str = os.getenv("KUBERNETES_IMAGE_PULL_POLICY", "IfNotPresent")
     kubernetes_ready_timeout_seconds: int = int(os.getenv("KUBERNETES_READY_TIMEOUT_SECONDS", "180"))
     tool_image: str = os.getenv("TOOL_IMAGE", "clawbox-tool-agent:latest")

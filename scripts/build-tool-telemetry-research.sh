@@ -33,6 +33,10 @@ fi
   echo "ClawTune guest smoke entry point is missing" >&2
   exit 66
 }
+[[ -f "${CLAWTUNE_ROOT}/tools/guest_collector_server.py" ]] || {
+  echo "ClawTune guest collector server is missing" >&2
+  exit 66
+}
 [[ -r "${DEBUG_KERNEL}" ]] || { echo "missing ${DEBUG_KERNEL}" >&2; exit 66; }
 debug_release="$(basename "$(readlink -f "${DEBUG_KERNEL}")")"
 debug_release="${debug_release#vmlinux-}"
@@ -54,6 +58,9 @@ cleanup() { rm -rf -- "${context}"; }
 trap cleanup EXIT INT TERM
 cp -a "${CLAWTUNE_ROOT}/services/sidecar" "${context}/sidecar"
 cp "${CLAWTUNE_ROOT}/tools/check_guest_ebpf.py" "${context}/check_guest_ebpf.py"
+cp "${CLAWTUNE_ROOT}/tools/guest_collector_server.py" "${context}/guest_collector_server.py"
+cp "${ROOT}/scripts/validate-toolbridge-guest-artifacts.py" "${context}/validate-toolbridge-guest-artifacts.py"
+cp -a "${ROOT}/toolbridge" "${context}/toolbridge"
 cp "${ROOT}/docker/Dockerfile.tool-telemetry-research" "${context}/Dockerfile"
 cp "${debug_config}" "${context}/kata-debug.config"
 

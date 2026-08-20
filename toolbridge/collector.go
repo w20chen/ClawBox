@@ -17,8 +17,9 @@ package main
 //                        features; a small amount of CPU/mem of processes that
 //                        exit between samples can be missed.
 //
-// The bridge runs the tool command as ``/bin/sh -lc`` with Setpgid, so the
-// whole tool process tree shares one process-group id (the shell pid).  The
+// The bridge prepares the login environment before its pre-exec gate, then
+// runs the tool command as ``/bin/sh -c`` with Setpgid, so the whole tool
+// process tree shares one process-group id (the shell pid).  The
 // sampler walks /proc for every process in that group, which is exactly the
 // set of processes that belong to this execution — and only this execution.
 //
@@ -266,26 +267,33 @@ func descendantPids(root int) []int {
 // (the /bin/sh pid, since the bridge spawns it with Setpgid).  Call Finish()
 // after cmd.Wait() returns.
 func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *resourceCollector {
+	path, ok, setupError := tryPerExecCgroup(execID, pgid)
+	if !ok {
+		path = ""
+	}
+	return startResourceCollectorPrepared(pgid, execID, traceDir, intervalMS, path, setupError)
+}
+
+// startResourceCollectorPrepared starts independent counter sampling after the
+// caller has moved a gated child into its exclusive cgroup.  Keeping cgroup
+// preparation separate lets the native eBPF helper arm before the child execs.
+func startResourceCollectorPrepared(pgid int, execID, traceDir string, intervalMS int, cgroupPath, cgroupSetupError string) *resourceCollector {
 	if intervalMS <= 0 {
 		intervalMS = 20
 	}
 	c := &resourceCollector{
-		execID:     execID,
-		traceDir:   traceDir,
-		pgid:       pgid,
-		intervalMS: intervalMS,
-		done:       make(chan struct{}),
-		lastUser:   map[int]int64{},
-		lastSys:    map[int]int64{},
-		lastRead:   map[int]int64{},
-		lastWrite:  map[int]int64{},
-	}
-	// Attempt per-execution cgroup v2 (best effort; process-tree always runs).
-	if path, ok, setupError := tryPerExecCgroup(execID, pgid); ok {
-		c.cgroupPath = path
-		c.cgroupOK = true
-	} else {
-		c.cgroupSetupError = setupError
+		execID:           execID,
+		traceDir:         traceDir,
+		pgid:             pgid,
+		intervalMS:       intervalMS,
+		done:             make(chan struct{}),
+		lastUser:         map[int]int64{},
+		lastSys:          map[int]int64{},
+		lastRead:         map[int]int64{},
+		lastWrite:        map[int]int64{},
+		cgroupPath:       cgroupPath,
+		cgroupOK:         cgroupPath != "",
+		cgroupSetupError: cgroupSetupError,
 	}
 	// Take an immediate baseline sample so short commands (>=~1 interval) have
 	// a reference point for CPU/IO deltas even if they exit before the first
@@ -308,7 +316,7 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 	return c
 }
 
-// tryPerExecCgroup creates /sys/fs/cgroup/clawbox/<sanitized-exec-id>, moves
+// tryPerExecCgroup creates /sys/fs/cgroup/clawbox-<sanitized-exec-id>, moves
 // the execution's process group into it, and returns the cgroup path on
 // success.  Any failure (read-only mount, missing perms, ...) returns ok=false
 // so the caller falls back to process-tree.  NOTE: the pids written into
@@ -322,22 +330,21 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 // cpu/io are exact and RSS falls back to the process-tree sampler.
 func tryPerExecCgroup(execID string, shellPid int) (string, bool, string) {
 	remountCgroupRW()
-	base := "/sys/fs/cgroup/clawbox"
+	base := "/sys/fs/cgroup"
 	leaf := sanitizeCgroupLeaf(execID)
 	if leaf == "" {
 		return "", false, "empty sanitized execution id"
 	}
-	if err := os.MkdirAll(base, 0755); err != nil {
-		return "", false, fmt.Sprintf("create cgroup base: %v", err)
-	}
-	// Enable cpu/memory/pids/io for the clawbox subtree so per-exec cgroups
-	// expose cpu.stat / memory.peak / pids.current.  One write per controller
-	// (best-effort; already-enabled ones fail harmlessly and are ignored).
-	for _, ctl := range []string{"+cpu", "+memory", "+pids", "+io"} {
-		_ = os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte(ctl), 0644)
-		_ = os.WriteFile(filepath.Join(base, "cgroup.subtree_control"), []byte(ctl), 0644)
-	}
-	path := filepath.Join(base, leaf)
+	// Create the leaf directly below the container's delegated cgroup root.
+	// Kata's guest accepts process migration at this level (the real T1 gate),
+	// while an extra intermediate domain can become invalid when controller
+	// delegation is unavailable and rejects cgroup.procs with EOPNOTSUPP.
+	// Do not mutate subtree_control here. The container's cgroup root contains
+	// the bridge/helper processes, so enabling domain controllers can change or
+	// invalidate child-domain migration on Kata. The T1-proven guest scope uses
+	// a plain direct child and accepts the controllers already delegated by the
+	// runtime; missing memory/io files remain explicit component fallbacks.
+	path := filepath.Join(base, "clawbox-"+leaf)
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return "", false, fmt.Sprintf("create execution cgroup: %v", err)
 	}

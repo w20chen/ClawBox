@@ -28,6 +28,7 @@ clawbox.db
 
 # Generated release/evidence manifests (kept on object store / CI, not git)
 release-evidence/
+.artifacts/
 
 # Local secrets — never commit
 .env

@@ -237,7 +237,7 @@ def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():
     tool_spec = tool["spec"]
     runtime_spec = job["spec"]["template"]["spec"]
 
-    assert tool_spec["runtimeClassName"] == "kata-fc-arm64"
+    assert tool_spec["runtimeClassName"] == "kata-fc-arm64-ebpf"
     assert runtime_spec["runtimeClassName"] == "kata-fc-arm64"
     assert tool_spec["restartPolicy"] == "Never"
     assert runtime_spec["restartPolicy"] == "Never"
@@ -270,7 +270,7 @@ def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():
         # and create per-execution cgroups for exact cpu/io accounting
         # (probe-verified feasible in-guest). The microVM is the isolation
         # boundary; process-tree collection still works without this cap.
-        "capabilities": {"add": ["SYS_ADMIN"]},
+        "capabilities": {"add": ["SYS_ADMIN", "NET_ADMIN", "NET_RAW", "SYS_PTRACE"]},
     }
     assert runtime_spec["containers"][0]["securityContext"] == {"readOnlyRootFilesystem": True}
 
@@ -526,8 +526,9 @@ def test_cell_manifests_structural_contract_locks_security_fields():
 
     # No API/privilege surface on either workload: no SA token, no host
     # namespaces, only emptyDir/ConfigMap/Secret volumes.
+    assert tool["spec"]["runtimeClassName"] == "kata-fc-arm64-ebpf"
+    assert job["spec"]["template"]["spec"]["runtimeClassName"] == "kata-fc-arm64"
     for spec in (tool["spec"], job["spec"]["template"]["spec"]):
-        assert spec["runtimeClassName"] == "kata-fc-arm64"
         assert spec["automountServiceAccountToken"] is False
         assert spec["restartPolicy"] == "Never"
         assert "hostNetwork" not in spec and "hostPID" not in spec and "hostIPC" not in spec

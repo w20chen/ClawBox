@@ -19,9 +19,16 @@ def build_reconciler() -> CellReconciler:
     core = client.CoreV1Api()
     if settings.kubernetes_runtime_class != "kata-fc-arm64":
         raise RuntimeError("the Cell controller only supports kata-fc-arm64")
-    runtime = client.NodeV1Api().read_runtime_class(settings.kubernetes_runtime_class)
+    node_api = client.NodeV1Api()
+    runtime = node_api.read_runtime_class(settings.kubernetes_runtime_class)
     if runtime.handler != settings.kubernetes_runtime_class or not getattr(runtime.overhead, "pod_fixed", None):
         raise RuntimeError("kata-fc-arm64 handler and Pod overhead have not passed the host gate")
+    tool_runtime = node_api.read_runtime_class(settings.kubernetes_tool_runtime_class)
+    if (
+        tool_runtime.handler != settings.kubernetes_tool_runtime_class
+        or not getattr(tool_runtime.overhead, "pod_fixed", None)
+    ):
+        raise RuntimeError("Tool eBPF RuntimeClass has not passed the host gate")
     nodes = core.list_node(label_selector="clawbox.openai.com/firecracker-ready=true").items
     ready_arm64 = [node for node in nodes if (node.metadata.labels or {}).get("kubernetes.io/arch") == "arm64"]
     if len(ready_arm64) != 1:

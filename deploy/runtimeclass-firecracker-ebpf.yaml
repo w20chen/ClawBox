@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: clawbox-bootstrap
     clawbox.openai.com/architecture: arm64
     clawbox.openai.com/hypervisor: firecracker
-    clawbox.openai.com/purpose: telemetry-research
+    clawbox.openai.com/purpose: tool-telemetry
 handler: kata-fc-arm64-ebpf
 overhead:
   podFixed:

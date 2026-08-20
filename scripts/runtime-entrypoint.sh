@@ -334,7 +334,8 @@ PATCHEOF
   # tar dependency and survive arbitrary filenames; failure is fail-open.
   cat >"${STATE_DIR}/collect-resources.sh" <<'RESEOF'
 #!/bin/sh
-for f in /testbed/.clawbox/tool-resource/cgroup-resource-*.json; do
+for f in /testbed/.clawbox/tool-resource/cgroup-resource-*.json \
+         /testbed/.clawbox/tool-resource/clause-telemetry-*.json; do
   [ -e "$f" ] || continue
   b=$(basename "$f")
   printf '====BEGIN %s====\n' "$b"

@@ -138,7 +138,7 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
     spec = task["spec"]
     pod_spec: dict[str, Any] = {
         "automountServiceAccountToken": False,
-        "runtimeClassName": settings.kubernetes_runtime_class,
+        "runtimeClassName": settings.kubernetes_tool_runtime_class,
         "restartPolicy": "Never",
         "nodeSelector": {
             "kubernetes.io/arch": "arm64",
@@ -168,6 +168,10 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
                 {"name": "TOOL_BRIDGE_LOG_PATH", "value": "/testbed/.clawbox/tool-bridge.jsonl"},
                 {"name": "TOOL_EXEC_TIMEOUT_SECONDS", "value": str(spec.get("commandTimeoutSeconds", 300))},
                 {"name": "TOOL_OUTPUT_LIMIT_BYTES", "value": str(spec.get("outputLimitBytes", 4 * 1024**2))},
+                {"name": "CLAWTUNE_GUEST_COLLECTOR_HELPER", "value": "/opt/clawtune-guest/tools/guest_collector_server.py"},
+                {"name": "CLAWTUNE_GUEST_COLLECTOR_PYTHON", "value": "/opt/clawtune/venv/bin/python"},
+                {"name": "CLAWTUNE_GUEST_ARTIFACT_ROOT", "value": "/testbed/.clawbox/tool-resource"},
+                {"name": "CLAWBOX_REPOSITORY", "value": str(spec.get("repository", "unknown/unknown"))},
                 {"name": "GIT_CONFIG_COUNT", "value": "1"},
                 {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
                 {"name": "GIT_CONFIG_VALUE_0", "value": "*"},
@@ -184,7 +188,7 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             # microVM is the isolation boundary; process-tree collection still
             # works without this cap (best-effort fallback in the bridge).
             "securityContext": {"readOnlyRootFilesystem": False,
-                                "capabilities": {"add": ["SYS_ADMIN"]}},
+                                "capabilities": {"add": ["SYS_ADMIN", "NET_ADMIN", "NET_RAW", "SYS_PTRACE"]}},
             "volumeMounts": [
                 {"name": "tool-auth", "mountPath": "/var/run/secrets/tool-ssh", "readOnly": True},
             ],

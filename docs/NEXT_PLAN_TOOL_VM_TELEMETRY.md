@@ -1,6 +1,6 @@
 # Next Implementation Plan: Tool-VM Telemetry Before Managed Sandbox Completion
 
-**Status:** proposed implementation plan
+**Status:** T0 and T1 complete; T2 implemented but production acceptance blocked
 **Date:** 2026-08-20
 **Primary repositories:** `ClawBox` and sibling `ClawTune`
 **Priority decision:** repair and prove the telemetry-to-prediction loop before

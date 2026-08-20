@@ -1,4 +1,13 @@
 ARG BASE_IMAGE
+FROM golang:1.25-bookworm AS toolbridge-build
+ARG GOPROXY=https://goproxy.cn,direct
+WORKDIR /src
+COPY toolbridge/go.mod toolbridge/go.sum ./
+RUN GOPROXY="${GOPROXY}" go mod download
+COPY toolbridge/*.go ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath \
+      -ldflags='-s -w -buildid=' -o /out/tool-bridge .
+
 FROM ${BASE_IMAGE}
 
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
@@ -13,7 +22,7 @@ RUN mirror_host="${APT_MIRROR#https://}" \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       bpfcc-tools python3-bpfcc clang llvm libelf-dev \
-      curl make gcc flex bison bc libssl-dev kmod \
+      curl make gcc flex bison bc libssl-dev kmod openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # BCC compiles ClawTune's program against internal kernel headers. BTF alone
@@ -35,15 +44,20 @@ RUN test -n "${KERNEL_VERSION}" \
  && ln -s "/usr/src/linux-${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/build"
 
 COPY sidecar /opt/clawtune-guest/services/sidecar
-COPY check_guest_ebpf.py /opt/clawtune-guest/tools/check_guest_ebpf.py
 RUN /opt/clawtune/venv/bin/pip install --no-deps --force-reinstall \
       /opt/clawtune-guest/services/sidecar \
  && /opt/clawtune/venv/bin/python -c \
       "from tool_resource.telemetry import _ensure_bcc_importable; print(_ensure_bcc_importable().__file__)" \
  && /opt/clawtune/venv/bin/python -c \
       "from tool_resource.features import parse_command_clauses; result=parse_command_clauses('true'); assert not result['parse_failed'], result"
+COPY check_guest_ebpf.py /opt/clawtune-guest/tools/check_guest_ebpf.py
+COPY guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
+COPY validate-toolbridge-guest-artifacts.py /opt/clawbox/validate-toolbridge-guest-artifacts.py
+COPY --from=toolbridge-build /out/tool-bridge /usr/local/bin/tool-bridge
 
 ENV PYTHONPATH=/opt/clawtune-guest/services/sidecar/src
 ENV BCC_KERNEL_SOURCE=/lib/modules/${KERNEL_VERSION}/build
+ENV CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py
+ENV CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python
 ENTRYPOINT []
 CMD ["sleep", "infinity"]

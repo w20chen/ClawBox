@@ -27,25 +27,34 @@ import (
 const version = "0.1.0"
 
 type executionLog struct {
-	Timestamp       string `json:"timestamp"`
-	CellID          string `json:"cell_id"`
-	TaskID          string `json:"task_id"`
-	ExecutionID     string `json:"execution_id"`
-	ExecutionSource string `json:"execution_source"`
-	CommandSHA256   string `json:"command_sha256"`
-	CommandBytes    int    `json:"command_bytes"`
-	DurationMS      int64  `json:"duration_ms"`
-	ExitCode        int    `json:"exit_code"`
-	TimedOut        bool   `json:"timed_out"`
-	StdoutBytes     int64  `json:"stdout_bytes"`
-	StderrBytes     int64  `json:"stderr_bytes"`
-	OutputTruncated bool   `json:"output_truncated"`
-	UserCPUMS       int64  `json:"user_cpu_ms"`
-	SystemCPUMS     int64  `json:"system_cpu_ms"`
-	MaxRSSKiB       int64  `json:"max_rss_kib"`
+	Timestamp          string `json:"timestamp"`
+	CellID             string `json:"cell_id"`
+	TaskID             string `json:"task_id"`
+	ExecutionID        string `json:"execution_id"`
+	ExecutionSource    string `json:"execution_source"`
+	CommandSHA256      string `json:"command_sha256"`
+	CommandBytes       int    `json:"command_bytes"`
+	DurationMS         int64  `json:"duration_ms"`
+	ExitCode           int    `json:"exit_code"`
+	TimedOut           bool   `json:"timed_out"`
+	StdoutBytes        int64  `json:"stdout_bytes"`
+	StderrBytes        int64  `json:"stderr_bytes"`
+	OutputTruncated    bool   `json:"output_truncated"`
+	UserCPUMS          int64  `json:"user_cpu_ms"`
+	SystemCPUMS        int64  `json:"system_cpu_ms"`
+	MaxRSSKiB          int64  `json:"max_rss_kib"`
+	TelemetryState     string `json:"telemetry_state"`
+	TelemetryError     string `json:"telemetry_error,omitempty"`
+	TelemetryArtifact  string `json:"telemetry_artifact,omitempty"`
+	TelemetryEligible  bool   `json:"telemetry_eligible_for_kb"`
+	TelemetryQuality   string `json:"telemetry_quality,omitempty"`
+	TelemetryValidity  string `json:"telemetry_collection_validity,omitempty"`
+	TelemetryCleanup   string `json:"telemetry_cleanup,omitempty"`
+	TelemetryLossTotal int64  `json:"telemetry_loss_total"`
 }
 
 var executionLogMu sync.Mutex
+var guestCollector guestCollectorAPI
 
 func persistExecutionLog(record executionLog) {
 	encoded, _ := json.Marshal(record)
@@ -223,6 +232,20 @@ func validEnvelopeExecutionID(value string) bool {
 	return true
 }
 
+func commandExitCode(err error, timedOut bool) int {
+	if timedOut {
+		return 124
+	}
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 127
+}
+
 func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Duration, outputLimit int64) executionLog {
 	started := time.Now()
 	command, envelopeExecutionID, enveloped := parseExecEnvelope(rawCommand)
@@ -236,19 +259,32 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	}
 	digest := sha256.Sum256([]byte(command))
 	record := executionLog{
-		Timestamp:     started.UTC().Format(time.RFC3339Nano),
-		CellID:        os.Getenv("CELL_ID"),
-		TaskID:        os.Getenv("TASK_ID"),
-		ExecutionID:   executionID,
+		Timestamp:       started.UTC().Format(time.RFC3339Nano),
+		CellID:          os.Getenv("CELL_ID"),
+		TaskID:          os.Getenv("TASK_ID"),
+		ExecutionID:     executionID,
 		ExecutionSource: executionSource,
-		CommandSHA256: hex.EncodeToString(digest[:]),
-		CommandBytes:  len(command),
-		ExitCode:      127,
+		CommandSHA256:   hex.EncodeToString(digest[:]),
+		CommandBytes:    len(command),
+		ExitCode:        127,
+		TelemetryState:  "unavailable",
 	}
 
-	cmd := exec.Command("/bin/sh", "-lc", command)
+	// The pre-exec gate must stay single-threaded so cgroup.procs can move it
+	// into a new domain cgroup on Kata guests. A Go child starts runtime threads
+	// before user code and is rejected with EOPNOTSUPP by this guest kernel.
+	// Start a login shell before the gate so its profile hooks complete outside
+	// the execution's cgroup and telemetry window. After release, replace it
+	// with a non-login shell that runs only the requested command. This keeps
+	// the historical login environment without attributing /etc/profile helper
+	// commands (for example `id -u`) to the tool execution.
+	gateScript := "dd bs=1 count=1 <&3 >/dev/null 2>&1 || exit 125; exec /bin/sh -c \"$CLAWBOX_GATE_COMMAND\""
+	cmd := exec.Command("/bin/sh", "-lc", gateScript)
 	cmd.Dir = workdir
-	cmd.Env = append(os.Environ(), "CLAWBOX_TOOL_EXECUTION_ID="+executionID)
+	cmd.Env = append(os.Environ(),
+		"CLAWBOX_TOOL_EXECUTION_ID="+executionID,
+		"CLAWBOX_GATE_COMMAND="+command,
+	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = channel
 	stdout := &limitedStream{dst: channel, limit: outputLimit}
@@ -257,13 +293,51 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	cmd.Stderr = stderr
 
 	var collector *resourceCollector
-	err := cmd.Start()
+	gateRead, gateWrite, pipeErr := os.Pipe()
+	var err error
+	if pipeErr != nil {
+		err = pipeErr
+	} else {
+		cmd.ExtraFiles = []*os.File{gateRead}
+		err = cmd.Start()
+		_ = gateRead.Close()
+	}
 	if err == nil {
-		// Process-tree (and best-effort per-exec cgroup) collection.  The
-		// shell is the pgid leader (Setpgid), so the whole tool tree shares
-		// cmd.Process.Pid as its process-group id.  20ms sampling captures
-		// short tool commands that a 100ms ticker would miss entirely.
-		collector = startResourceCollector(cmd.Process.Pid, executionID, resourceTraceDir(), envInt("CLAWBOX_COLLECT_INTERVAL_MS", 20))
+		cgroupPath, cgroupOK, cgroupError := tryPerExecCgroup(executionID, cmd.Process.Pid)
+		if !cgroupOK {
+			cgroupPath = ""
+		}
+		collector = startResourceCollectorPrepared(
+			cmd.Process.Pid, executionID, resourceTraceDir(),
+			envInt("CLAWBOX_COLLECT_INTERVAL_MS", 20), cgroupPath, cgroupError,
+		)
+		telemetryBegun := false
+		if guestCollector == nil {
+			record.TelemetryError = "guest collector helper is not configured"
+		} else if !cgroupOK {
+			record.TelemetryError = "exclusive cgroup unavailable: " + cgroupError
+		} else {
+			repo := os.Getenv("CLAWBOX_REPOSITORY")
+			if repo == "" {
+				repo = os.Getenv("TASK_ID")
+			}
+			response, beginErr := guestCollector.Begin(
+				executionID, command, cgroupPath, cmd.Process.Pid, repo,
+			)
+			if beginErr != nil {
+				record.TelemetryState = "failed"
+				record.TelemetryError = "begin: " + beginErr.Error()
+			} else {
+				telemetryBegun = true
+				record.TelemetryState = "observing"
+				record.TelemetryArtifact = response.ArtifactPath
+			}
+		}
+		if _, releaseErr := gateWrite.Write([]byte{1}); releaseErr != nil {
+			err = releaseErr
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		_ = gateWrite.Close()
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		timer := time.NewTimer(timeout)
@@ -280,21 +354,38 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				err = <-done
 			}
 		}
+		record.ExitCode = commandExitCode(err, record.TimedOut)
+		if telemetryBegun {
+			response, finishErr := guestCollector.Finish(executionID, record.ExitCode)
+			if finishErr != nil {
+				record.TelemetryState = "failed"
+				record.TelemetryError = "finish: " + finishErr.Error()
+				_ = guestCollector.Abort(executionID)
+			} else {
+				record.TelemetryState = "complete"
+				record.TelemetryArtifact = response.ArtifactPath
+				record.TelemetryEligible = response.EligibleForKB
+				record.TelemetryQuality = response.TelemetryQuality
+				record.TelemetryValidity = response.CollectionValidity
+				record.TelemetryCleanup = response.Cleanup
+				record.TelemetryLossTotal = response.LossTotal
+			}
+		}
+	} else {
+		if gateRead != nil {
+			_ = gateRead.Close()
+		}
+		if gateWrite != nil {
+			_ = gateWrite.Close()
+		}
 	}
 	ended := time.Now()
 	record.DurationMS = durationMS(ended.Sub(started))
 	record.StdoutBytes = stdout.total
 	record.StderrBytes = stderr.total
 	record.OutputTruncated = stdout.truncated || stderr.truncated
-	if record.TimedOut {
-		record.ExitCode = 124
-	} else if err == nil {
-		record.ExitCode = 0
-	} else {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			record.ExitCode = exitErr.ExitCode()
-		}
+	if cmd.Process == nil {
+		record.ExitCode = commandExitCode(err, record.TimedOut)
 	}
 	// Prefer the real per-execution numbers from the process-tree/cgroup
 	// collector over the direct-child (shell) rusage that the old code read.
@@ -393,6 +484,14 @@ func main() {
 		authorizedKey = "/var/run/secrets/tool-ssh/id_ed25519.pub"
 	}
 	config := loadServerConfig(hostKey, authorizedKey)
+	collectorProcess, collectorErr := startGuestCollectorProcess()
+	if collectorErr != nil {
+		log.Printf("guest collector unavailable: %v", collectorErr)
+	} else if collectorProcess != nil {
+		guestCollector = collectorProcess.client
+		defer collectorProcess.Stop()
+		log.Printf("guest collector ready")
+	}
 	timeout := time.Duration(envInt("TOOL_EXEC_TIMEOUT_SECONDS", 300)) * time.Second
 	outputLimit := int64(envInt("TOOL_OUTPUT_LIMIT_BYTES", 4*1024*1024))
 	semaphore := make(chan struct{}, envInt("TOOL_MAX_CONCURRENCY", 4))
