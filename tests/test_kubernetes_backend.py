@@ -264,7 +264,14 @@ def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():
     # pretend the containers are non-root.
     assert tool_spec["securityContext"]["runAsUser"] == 0
     assert runtime_spec["securityContext"]["runAsUser"] == 0
-    assert tool_spec["containers"][0]["securityContext"] == {"readOnlyRootFilesystem": False}
+    assert tool_spec["containers"][0]["securityContext"] == {
+        "readOnlyRootFilesystem": False,
+        # CAP_SYS_ADMIN lets the tool-bridge remount the guest cgroup2 tree rw
+        # and create per-execution cgroups for exact cpu/io accounting
+        # (probe-verified feasible in-guest). The microVM is the isolation
+        # boundary; process-tree collection still works without this cap.
+        "capabilities": {"add": ["SYS_ADMIN"]},
+    }
     assert runtime_spec["containers"][0]["securityContext"] == {"readOnlyRootFilesystem": True}
 
     tool_text = str(tool_spec)

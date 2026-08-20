@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -273,7 +274,15 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 // so the caller falls back to process-tree.  NOTE: the pids written into
 // cgroup.procs are exactly the pids in the group at this moment; children
 // forked afterwards inherit the cgroup automatically.
+//
+// The Kata guest mounts cgroup2 read-only (probe-verified: `ro` in
+// /proc/mounts), so the bridge first remounts it rw and enables the memory
+// controller for the subtree (both best-effort; they need CAP_SYS_ADMIN,
+// which the tool container is granted).  Without the memory controller only
+// cpu/io are exact and RSS falls back to the process-tree sampler.
 func tryPerExecCgroup(execID string, pgid int) (string, bool) {
+	remountCgroupRW()
+	enableMemoryController()
 	base := "/sys/fs/cgroup/clawbox"
 	leaf := sanitizeCgroupLeaf(execID)
 	if leaf == "" {
@@ -294,6 +303,17 @@ func tryPerExecCgroup(execID string, pgid int) (string, bool) {
 		}
 	}
 	return path, true
+}
+
+// remountCgroupRW best-effort remounts the guest cgroup2 tree read-write.
+func remountCgroupRW() {
+	_ = exec.Command("mount", "-o", "remount,rw", "/sys/fs/cgroup").Run()
+}
+
+// enableMemoryController best-effort enables the cgroup v2 memory controller
+// for the subtree so per-exec cgroups get memory.peak / memory.current.
+func enableMemoryController() {
+	_ = os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte("+memory"), 0644)
 }
 
 func sanitizeCgroupLeaf(value string) string {

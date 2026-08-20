@@ -178,7 +178,13 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             # back to the image USER (10001) and ignore pod runAsUser 0
             # (probe-j vs probe-k). Running as root inside the microVM is the
             # whole point, so no escalation restriction at container level.
-            "securityContext": {"readOnlyRootFilesystem": False},
+            # CAP_SYS_ADMIN lets the tool-bridge remount the guest's
+            # read-only cgroup2 tree rw and create per-execution cgroups for
+            # exact cpu/io accounting (probe-verified feasible in-guest). The
+            # microVM is the isolation boundary; process-tree collection still
+            # works without this cap (best-effort fallback in the bridge).
+            "securityContext": {"readOnlyRootFilesystem": False,
+                                "capabilities": {"add": ["SYS_ADMIN"]}},
             "volumeMounts": [
                 {"name": "tool-auth", "mountPath": "/var/run/secrets/tool-ssh", "readOnly": True},
             ],
