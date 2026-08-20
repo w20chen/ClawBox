@@ -1,6 +1,6 @@
 # Next Implementation Plan: Tool-VM Telemetry Before Managed Sandbox Completion
 
-**Status:** T0-T3 complete; T4 is next
+**Status:** T0-T4 complete; managed sandbox convergence is next
 **Date:** 2026-08-20
 **Primary repositories:** `ClawBox` and sibling `ClawTune`
 **Priority decision:** repair and prove the telemetry-to-prediction loop before
@@ -377,6 +377,53 @@ Acceptance:
 - Rollback restores the previous pair of native snapshots atomically.
 
 ### T4 — Prove prediction feedback in shadow mode
+
+**Completed 2026-08-20:** ClawBox `99f33b8` implements the production
+Runtime native snapshot loader, validates and atomically publishes the exact
+clause/runtime pair before sidecar startup, records native shadow prediction
+provenance, and joins predictions to Tool-VM cgroup-v2 actuals. The production
+Runtime image is
+`127.0.0.1:5000/clawbox/runtime-arm64@sha256:6215a4b10feec3ba8d6dcd39e763b92322fe7605dba62c39bcdae8bc71d04e44`;
+its OCI labels pin ClawBox
+`99f33b86c0af38a19706ce76633bfcbe44c9c1c0` and ClawTune
+`e91e60bc1e5f3209fbcf6091013fde96f217e2a7`.
+
+Real ARM64 acceptance on `weitianc@193.124.7.2` used Run A's five accepted
+execution pairs to advance generation `0 -> 1`. Run B loaded exactly
+generation 1 and pair digest
+`b9214c1b54d7c4dab60eb100ccdc9fbbbbd66ea4b216169c5a6a622b5e09c2e6`
+through both pinned native readers. Before executing the repeated `dd` command,
+the production Runtime image emitted a native `repo:exact_clause` prediction
+with evidence count 1 and continuous `repo:exact_command` predictions; its
+provenance explicitly named `run-a`.
+
+The fresh Run B Tool workload then passed the strict production
+Kata/Firecracker eBPF integration with native validity, zero loss, successful
+cleanup, non-zero CPU/RSS, distinct concurrent cgroups `1766` and `1781`, and
+an explicit isolated helper fail-open. The shadow report joined `exec-long` to
+real cgroup-v2 actuals: 4600.499 ms, 0.352865 average cores, and 1,531,904 bytes
+peak RSS. It records `FixedProfileSizer` as authoritative,
+`prediction_mode=shadow`, and `prediction_controls_resources=false`.
+
+Remote evidence in `/tmp/clawbox-t34-daf6654`:
+
+- `.artifacts/t4-run-a-ingest.log`, SHA-256
+  `f20c38b8b8b89bc268bd3187c52a25e089bc42c25d7b87771f25b9d5b533d412`;
+- `.artifacts/t4-run-a-snapshot.json`, SHA-256
+  `5f100b94d3a18bdb1691853518fda3d7232645320cbba0595b86f04630f7a7b2`;
+- `.artifacts/t4-run-b-load.log`, SHA-256
+  `2ec3b921fe65a491f8b2de0709ec79fe61e4a4c662256ce6b6f1c1d5d9cee1f3`;
+- `.artifacts/t4-run-b-probe.log`, SHA-256
+  `ee442ee0e69df4e576e40175bb115138c7fbf3c32d09fdc6ed445335f5db6f49`;
+- `.artifacts/t4-run-b-firecracker.log`, SHA-256
+  `bdcc8a22fd099f17fda7e4ff6cf16f50a593c8b1c04df4172a028f7056319f13`;
+- `.artifacts/t4-run-b/native-shadow-report.json`, SHA-256
+  `527f5b0897a01451feb36593f65eae87fe6f09ca30598a224d57032146556658`.
+
+Post-acceptance ARM64 validation passed: 52 focused ClawTune tests, 176
+ClawBox Python tests, and native `go test -race ./...` in 6.937s. Learned
+predictions remain shadow-only; promotion still requires the safety metrics
+below.
 
 **Purpose:** demonstrate usefulness before prediction controls resources.
 

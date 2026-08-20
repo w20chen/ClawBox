@@ -1,10 +1,11 @@
-# Agent Handoff: Tool-VM Telemetry T2-T3
+# Agent Handoff: Tool-VM Telemetry T2-T4
 
 Date: 2026-08-20
 
 This handoff is self-contained. Read it with
 `docs/NEXT_PLAN_TOOL_VM_TELEMETRY.md`; older G0 handoffs are historical. The
-program goal is T0-T4. T0-T3 are complete and T4 is next.
+program goal is T0-T4. T0-T4 are complete; managed sandbox convergence is
+next.
 
 ## Repository state
 
@@ -18,6 +19,8 @@ ClawBox branch `main`:
 - `daf6654` completed and pushed T2.
 - `507dfd2` implements the accepted T3 native ingestion path; the following
   documentation commit records its real-machine evidence.
+- `80aca94` records and pushes the T3 production evidence.
+- `99f33b8` implements the accepted T4 native shadow feedback loop.
 
 Sibling ClawTune branch `v2` (all pushed):
 
@@ -240,13 +243,48 @@ Remote evidence:
 The full ClawBox Python suite passed locally and natively on ARM64; the T3
 focused native suite passed against the archived exact ClawTune source.
 
-## T4 remains
+## T4 production acceptance
 
-T4 must prove a two-run shadow loop: run A advances generation N to N+1; run B
-loads exactly N+1 and records a native prediction whose evidence includes run
-A. `FixedProfileSizer` remains authoritative until safety metrics pass.
+T4 passed on `weitianc@193.124.7.2` in the same isolated task worktree. The
+production Runtime image is
+`127.0.0.1:5000/clawbox/runtime-arm64@sha256:6215a4b10feec3ba8d6dcd39e763b92322fe7605dba62c39bcdae8bc71d04e44`,
+labeled with exact ClawBox
+`99f33b86c0af38a19706ce76633bfcbe44c9c1c0` and ClawTune
+`e91e60bc1e5f3209fbcf6091013fde96f217e2a7` revisions.
 
-Only after T4 should managed sandbox lifecycle convergence resume.
+Run A advanced native generation `0 -> 1`. Run B loaded exactly generation 1
+and atomic pair digest
+`b9214c1b54d7c4dab60eb100ccdc9fbbbbd66ea4b216169c5a6a622b5e09c2e6`,
+then produced a native `repo:exact_clause` prediction with evidence count 1,
+continuous `repo:exact_command` estimates, and explicit evidence lineage
+`[run-a]`. A fresh strict production Tool-image run inside Ubuntu 22.04 plus
+Kata/Firecracker passed with zero loss, cleanup success, native validity,
+non-zero CPU/RSS, and distinct concurrent cgroups. The joined `exec-long`
+actual was 4600.499 ms, 0.352865 average cores, and 1,531,904 bytes peak RSS
+from cgroup-v2.
+
+The report explicitly retains `FixedProfileSizer` as the authoritative sizer,
+uses shadow mode, and states that predictions do not control resources.
+Evidence in `/tmp/clawbox-t34-daf6654`:
+
+- `.artifacts/t4-run-a-ingest.log`, SHA-256
+  `f20c38b8b8b89bc268bd3187c52a25e089bc42c25d7b87771f25b9d5b533d412`;
+- `.artifacts/t4-run-a-snapshot.json`, SHA-256
+  `5f100b94d3a18bdb1691853518fda3d7232645320cbba0595b86f04630f7a7b2`;
+- `.artifacts/t4-run-b-load.log`, SHA-256
+  `2ec3b921fe65a491f8b2de0709ec79fe61e4a4c662256ce6b6f1c1d5d9cee1f3`;
+- `.artifacts/t4-run-b-probe.log`, SHA-256
+  `ee442ee0e69df4e576e40175bb115138c7fbf3c32d09fdc6ed445335f5db6f49`;
+- `.artifacts/t4-run-b-firecracker.log`, SHA-256
+  `bdcc8a22fd099f17fda7e4ff6cf16f50a593c8b1c04df4172a028f7056319f13`;
+- `.artifacts/t4-run-b/native-shadow-report.json`, SHA-256
+  `527f5b0897a01451feb36593f65eae87fe6f09ca30598a224d57032146556658`.
+
+Post-acceptance ARM64 validation passed: exact focused ClawTune suite `52
+passed`, full ClawBox suite `176 passed`, and native `go test -race ./...`
+passed in 6.937s. T0-T4 are complete. Learned resource control remains out of
+scope until its safety gates pass; managed sandbox lifecycle convergence may
+now resume.
 
 ## Incomplete T2 file inventory
 
