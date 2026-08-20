@@ -284,7 +284,7 @@ func tryPerExecCgroup(execID string, pgid int) (string, bool) {
 	}
 	path := filepath.Join(base, leaf)
 	for _, pid := range listPidsInGroup(pgid) {
-		_, _, pgrp, _, ok := readProcStat(pid)
+		_, pgrp, _, _, ok := readProcStat(pid) // returns (state, pgrp, utime, stime, ok)
 		if !ok || pgrp != pgid {
 			continue
 		}
