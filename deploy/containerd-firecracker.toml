@@ -8,6 +8,17 @@
   [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-fc-arm64.options]
     ConfigPath = '/opt/kata/share/defaults/kata-containers/configuration-fc-arm64.toml'
 
+# Research-only Tool VM runtime. It preserves the production Firecracker
+# configuration but boots Kata's shipped debug kernel, which enables BTF,
+# kprobes, tracefs and BPF perf events required by native ClawTune telemetry.
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-fc-arm64-ebpf]
+  runtime_type = 'io.containerd.kata.v2'
+  snapshotter = 'devmapper'
+  privileged_without_host_devices = true
+
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-fc-arm64-ebpf.options]
+    ConfigPath = '/opt/kata/share/defaults/kata-containers/configuration-fc-arm64-ebpf.toml'
+
 [plugins.'io.containerd.snapshotter.v1.devmapper']
   pool_name = 'clawbox-fc--pool'
   root_path = '/var/lib/containerd/io.containerd.snapshotter.v1.devmapper'

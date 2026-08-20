@@ -1,0 +1,49 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG KERNEL_VERSION
+ARG KERNEL_SOURCE_SHA256
+ARG KERNEL_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/kernel/v6.x
+USER root
+RUN mirror_host="${APT_MIRROR#https://}" \
+ && mirror_host="${mirror_host#http://}" \
+ && { sed -i -E "s|https?://deb\.debian\.org|http://${mirror_host}|g" \
+      /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; } \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bpfcc-tools python3-bpfcc clang llvm libelf-dev \
+      curl make gcc flex bison bc libssl-dev kmod \
+ && rm -rf /var/lib/apt/lists/*
+
+# BCC compiles ClawTune's program against internal kernel headers. BTF alone
+# is not sufficient for this existing backend, so prepare the exact vanilla
+# source and the exact debug config shipped by the pinned Kata release.
+COPY kata-debug.config /tmp/kata-debug.config
+RUN test -n "${KERNEL_VERSION}" \
+ && test -n "${KERNEL_SOURCE_SHA256}" \
+ && curl -fL --retry 4 --connect-timeout 15 --max-time 1800 \
+      "${KERNEL_MIRROR}/linux-${KERNEL_VERSION}.tar.xz" \
+      -o /tmp/linux.tar.xz \
+ && printf '%s  %s\n' "${KERNEL_SOURCE_SHA256}" /tmp/linux.tar.xz | sha256sum -c - \
+ && tar -C /usr/src -xf /tmp/linux.tar.xz \
+ && rm /tmp/linux.tar.xz \
+ && cp /tmp/kata-debug.config "/usr/src/linux-${KERNEL_VERSION}/.config" \
+ && rm /tmp/kata-debug.config \
+ && make -C "/usr/src/linux-${KERNEL_VERSION}" olddefconfig prepare modules_prepare \
+ && mkdir -p "/lib/modules/${KERNEL_VERSION}" \
+ && ln -s "/usr/src/linux-${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/build"
+
+COPY sidecar /opt/clawtune-guest/services/sidecar
+COPY check_guest_ebpf.py /opt/clawtune-guest/tools/check_guest_ebpf.py
+RUN /opt/clawtune/venv/bin/pip install --no-deps --force-reinstall \
+      /opt/clawtune-guest/services/sidecar \
+ && /opt/clawtune/venv/bin/python -c \
+      "from tool_resource.telemetry import _ensure_bcc_importable; print(_ensure_bcc_importable().__file__)" \
+ && /opt/clawtune/venv/bin/python -c \
+      "from tool_resource.features import parse_command_clauses; result=parse_command_clauses('true'); assert not result['parse_failed'], result"
+
+ENV PYTHONPATH=/opt/clawtune-guest/services/sidecar/src
+ENV BCC_KERNEL_SOURCE=/lib/modules/${KERNEL_VERSION}/build
+ENTRYPOINT []
+CMD ["sleep", "infinity"]

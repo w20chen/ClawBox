@@ -34,16 +34,20 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
     --image) IMAGE="${2:-}"; shift 2 ;;
+    --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
     --keep) KEEP=true; shift ;;
     --no-caps) CAPABILITIES=""; shift ;;
     -h|--help)
-      echo "usage: probe-kata-guest.sh [--namespace NAME] [--image IMAGE] [--keep] [--no-caps]"
+      echo "usage: probe-kata-guest.sh [--namespace NAME] [--image IMAGE] [--runtime-class NAME] [--keep] [--no-caps]"
       exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 64 ;;
   esac
 done
 
-[[ "${RUNTIME_CLASS}" == kata-fc-arm64 ]] || { echo "only kata-fc-arm64 is accepted" >&2; exit 64; }
+case "${RUNTIME_CLASS}" in
+  kata-fc-arm64|kata-fc-arm64-ebpf) ;;
+  *) echo "unsupported RuntimeClass: ${RUNTIME_CLASS}" >&2; exit 64 ;;
+esac
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl is required" >&2; exit 69; }
 
 PROBE='set -x
@@ -103,6 +107,8 @@ fi
 echo "== bpf syscall gates =="
 cat /proc/sys/kernel/unprivileged_bpf_disabled 2>&1 || echo n/a
 echo "== tracefs (kprobe attach point for non-CO-RE eBPF) =="
+mkdir -p /sys/kernel/tracing
+if mount -t tracefs tracefs /sys/kernel/tracing 2>&1; then echo tracefs-mount-ok; else echo tracefs-mount-fail; fi
 cat /sys/kernel/tracing/tracing_on 2>&1 || echo no-tracefs
 ls /sys/kernel/tracing/kprobe_events 2>&1 || echo no-kprobe-events
 echo "== procfs sampling basics =="
@@ -157,8 +163,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "== waiting for probe pod =="
-kubectl -n "${NAMESPACE}" wait --for=condition=Ready "pod/${POD}" --timeout=240s \
-  || kubectl -n "${NAMESPACE}" get "pod/${POD}" -o wide
+echo "== waiting for probe pod completion =="
+deadline=$((SECONDS + 240))
+while (( SECONDS < deadline )); do
+  phase="$(kubectl -n "${NAMESPACE}" get "pod/${POD}" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  case "${phase}" in
+    Succeeded|Failed) break ;;
+  esac
+  sleep 1
+done
+[[ "${phase:-}" == Succeeded ]] || kubectl -n "${NAMESPACE}" get "pod/${POD}" -o wide
 echo "== probe logs =="
 kubectl -n "${NAMESPACE}" logs "pod/${POD}" --tail=200
+[[ "${phase:-}" == Succeeded ]]

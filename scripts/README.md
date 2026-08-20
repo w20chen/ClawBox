@@ -39,6 +39,8 @@
 | `arm64-kata-smoke.sh` | FC-3/FC-4 实况门：双 kata-fc VM + runc 攻击者隔离验证 |
 | `collect-node-capacity.py` | 节点容量/预留计算（产出 ConfigMap） |
 | `probe-kata-guest.sh` | guest 可行性探测：cgroup v2 读写、BPF/BTF/内核头、caps（支持 `--no-caps`） |
+| `install-ebpf-kata-runtime.sh` | 安装隔离的 `kata-fc-arm64-ebpf` 研究 RuntimeClass（使用 Kata debug guest kernel，不修改生产 handler） |
+| `build-tool-telemetry-research.sh` / `run-guest-ebpf-smoke.sh` | 构建精确 ClawTune+BCC arm64 研究镜像，并在 debug-kernel Firecracker guest 中执行语义 smoke |
 
 ## E. 跑任务 / 基准 / 规模
 | 脚本 | 用途 |
