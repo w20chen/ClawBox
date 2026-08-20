@@ -36,6 +36,9 @@ class Settings:
     kb_endpoint: str = os.getenv("CLAWBOX_KB_ENDPOINT", "")
     kb_token: str = os.getenv("CLAWBOX_KB_TOKEN", "")
     kb_ingest_secret: str = os.getenv("CLAWBOX_KB_INGEST_SECRET", "")
+    clawtune_revision: str = os.getenv(
+        "CLAWTUNE_REVISION", "e91e60bc1e5f3209fbcf6091013fde96f217e2a7"
+    )
     cell_namespace: str = os.getenv("CLAWBOX_CELL_NAMESPACE", "clawbox-benchmarks")
     lease_ttl_seconds: int = int(os.getenv("LEASE_TTL_SECONDS", "300"))
     reserved_cpu_fraction: float = float(os.getenv("RESERVED_CPU_FRACTION", "0.05"))

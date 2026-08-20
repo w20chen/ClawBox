@@ -418,6 +418,9 @@ PY
     KB_ENDPOINT="${CLAWBOX_KB_ENDPOINT}" KB_TOKEN="${CLAWBOX_KB_TOKEN}" \
       KB_INGEST_SECRET="${CLAWBOX_KB_INGEST_SECRET}" \
       KB_TENANT="${kb_tenant}" KB_REPO="${CLAWBOX_REPO_KEY}" \
+      KB_RUN_ID="${CLAWBOX_RUN_ID:-${TASK_ID}}" \
+      KB_ATTEMPT_ID="${CLAWBOX_ATTEMPT_ID:-${TASK_ID}}" \
+      KB_CELL_ID="${CELL_ID}" \
       KB_TRACE_DIR="${TRACE_DIR}" KB_BRIDGE="${TRACE_DIR}/tool-bridge.jsonl" \
       KB_LOG="${LOG_DIR}/kb-flush.log" \
       python3 /usr/local/bin/kb-flush.py || \

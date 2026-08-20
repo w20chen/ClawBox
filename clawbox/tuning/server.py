@@ -32,6 +32,13 @@ from .projector import (
     snapshot_metadata,
     snapshot_row_to_dict,
 )
+from .native import NativeTelemetryManifest
+from .native_projector import (
+    ingest_native_batch,
+    latest_native_snapshot,
+    native_snapshot_to_dict,
+    rollback_native,
+)
 from .schema import ToolObservation
 from .store import init_tuning_db, make_tuning_engine
 
@@ -50,6 +57,11 @@ class ObservationBatch(BaseModel):
 class RollbackRequest(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=128)
     repo_fingerprint: str = Field(min_length=1, max_length=256)
+
+
+class SignedNativeBatch(BaseModel):
+    manifest: NativeTelemetryManifest
+    signature: str = Field(min_length=64, max_length=64)
 
 
 def create_app(db_url: str | None = None) -> FastAPI:
@@ -121,6 +133,43 @@ def create_app(db_url: str | None = None) -> FastAPI:
     @app.post("/v1/kb/rollback", dependencies=[Depends(require_service_token)])
     def post_rollback(body: RollbackRequest, db: Session = Depends(get_db)):
         generation = rollback(db, tenant_id=body.tenant_id, repo_fingerprint=body.repo_fingerprint)
+        db.commit()
+        return {
+            "tenant_id": body.tenant_id,
+            "repo_fingerprint": body.repo_fingerprint,
+            "generation": generation,
+        }
+
+    @app.post("/v1/kb/native-batches", dependencies=[Depends(require_service_token)])
+    def post_native_batch(body: SignedNativeBatch, db: Session = Depends(get_db)):
+        outcome = ingest_native_batch(
+            db,
+            manifest=body.manifest,
+            signature=body.signature,
+            ingest_secret=settings.ingest_secret,
+            expected_clawtune_revision=settings.clawtune_revision,
+        )
+        db.commit()
+        return outcome.to_dict()
+
+    @app.get("/v1/kb/native-snapshot", dependencies=[Depends(require_service_token)])
+    def get_native_snapshot(
+        tenant_id: str, repo: str, db: Session = Depends(get_db)
+    ):
+        row = latest_native_snapshot(
+            db, tenant_id=tenant_id, repo_fingerprint=repo
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="no native snapshot")
+        return native_snapshot_to_dict(row)
+
+    @app.post("/v1/kb/native-rollback", dependencies=[Depends(require_service_token)])
+    def post_native_rollback(body: RollbackRequest, db: Session = Depends(get_db)):
+        generation = rollback_native(
+            db,
+            tenant_id=body.tenant_id,
+            repo_fingerprint=body.repo_fingerprint,
+        )
         db.commit()
         return {
             "tenant_id": body.tenant_id,

@@ -234,6 +234,7 @@ def _kb_tenant_id(task: dict[str, Any]) -> str:
 def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None = None) -> dict[str, Any]:
     name = task["metadata"]["name"]
     spec = task["spec"]
+    run_ref = spec.get("runRef", {})
     llm_secret = spec["llmSecretName"]
     timeout = int(spec.get("timeoutSeconds", 1800))
     # Leave a pipeline margin after the agent's own budget: the agent runs with
@@ -256,6 +257,9 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
     upload_env = [
         {"name": "TASK_ID", "value": name},
         {"name": "CELL_ID", "value": name},
+        {"name": "CLAWBOX_RUN_ID", "value": str(run_ref.get("runID") or name)},
+        {"name": "CLAWBOX_ATTEMPT_ID", "value": str(run_ref.get("attemptID") or name)},
+        {"name": "CLAWTUNE_REVISION", "value": settings.clawtune_revision},
         {"name": "TRACE_INGESTER_URL", "value": settings.trace_ingester_url},
         _secret_env(f"{name}-auth", "TRACE_UPLOAD_TOKEN", "trace-upload-token"),
         {"name": "CLAWBOX_STATE_DIR", "value": f"/state/{name}"},

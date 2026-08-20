@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    ForeignKey,
     DateTime,
     Index,
     Integer,
@@ -103,6 +104,103 @@ class TuningKBSnapshotRow(TuningBase):
             name="uq_tuning_kb_snapshots_tenant_repo_gen",
         ),
         Index("ix_tuning_kb_snapshots_tenant_repo_gen", "tenant_id", "repo_fingerprint", "generation"),
+    )
+
+
+class TuningNativeBatchRow(TuningBase):
+    """Immutable signed manifest, including rejected batches for audit."""
+
+    __tablename__ = "tuning_native_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    repo_fingerprint: Mapped[str] = mapped_column(String(256), index=True)
+    manifest_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(String(128))
+    attempt_id: Mapped[str] = mapped_column(String(128))
+    cell_id: Mapped[str] = mapped_column(String(128))
+    clawtune_revision: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(32))
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "repo_fingerprint",
+            "manifest_digest",
+            name="uq_tuning_native_batch_tenant_repo_digest",
+        ),
+        Index(
+            "ix_tuning_native_batch_tenant_repo_created",
+            "tenant_id",
+            "repo_fingerprint",
+            "created_at",
+        ),
+    )
+
+
+class TuningNativeArtifactRow(TuningBase):
+    """Raw byte-preserving artifact stored before native projection."""
+
+    __tablename__ = "tuning_native_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("tuning_native_batches.id", ondelete="RESTRICT"), index=True
+    )
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    repo_fingerprint: Mapped[str] = mapped_column(String(256), index=True)
+    execution_id: Mapped[str] = mapped_column(String(128))
+    kind: Mapped[str] = mapped_column(String(64))
+    filename: Mapped[str] = mapped_column(String(255))
+    artifact_digest: Mapped[str] = mapped_column(String(64))
+    content_b64: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "repo_fingerprint",
+            "artifact_digest",
+            name="uq_tuning_native_artifact_tenant_repo_digest",
+        ),
+    )
+
+
+class TuningNativeSnapshotRow(TuningBase):
+    """Atomic pair of native ClawTune snapshots for one generation."""
+
+    __tablename__ = "tuning_native_kb_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    repo_fingerprint: Mapped[str] = mapped_column(String(256), index=True)
+    generation: Mapped[int] = mapped_column(Integer)
+    clause_snapshot: Mapped[str] = mapped_column(Text)
+    runtime_snapshot: Mapped[str] = mapped_column(Text)
+    pair_digest: Mapped[str] = mapped_column(String(64))
+    source_digest: Mapped[str] = mapped_column(String(64))
+    artifact_count: Mapped[int] = mapped_column(Integer)
+    evidence: Mapped[str] = mapped_column(Text)
+    clawtune_revision: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "repo_fingerprint",
+            "generation",
+            name="uq_tuning_native_snapshot_tenant_repo_gen",
+        ),
+        Index(
+            "ix_tuning_native_snapshot_tenant_repo_gen",
+            "tenant_id",
+            "repo_fingerprint",
+            "generation",
+        ),
     )
 
 

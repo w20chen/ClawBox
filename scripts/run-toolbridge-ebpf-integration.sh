@@ -7,16 +7,19 @@ IMAGE="${CLAWBOX_EBPF_IMAGE:-127.0.0.1:5000/clawbox/tool-telemetry-research:dev}
 NAMESPACE="${CLAWBOX_EBPF_NAMESPACE:-clawbox-toolbridge-ebpf-${RANDOM:-0}}"
 OUTPUT="${CLAWBOX_EBPF_EVIDENCE:-}"
 KEEP=false
+HOLD_SECONDS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --image) IMAGE="${2:-}"; shift 2 ;;
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --keep) KEEP=true; shift ;;
+    --hold-seconds) HOLD_SECONDS="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
 [[ "${RUNTIME_CLASS}" == kata-fc-arm64-ebpf ]] || exit 64
+[[ "${HOLD_SECONDS}" =~ ^[0-9]+$ ]] || exit 64
 
 COMMAND='set -e
 root=/testbed/.clawbox
@@ -77,7 +80,10 @@ wait "$bridge" 2>/dev/null || true
 /opt/clawtune/venv/bin/python /opt/clawbox/validate-toolbridge-guest-artifacts.py "$root"
 echo ==== TOOL BRIDGE STDERR ====
 tail -n 80 /tmp/tool-bridge.stderr
-echo INTEGRATION_RC=0'
+echo INTEGRATION_RC=0
+if [[ ${CLAWBOX_EBPF_HOLD_OPEN_SECONDS:-0} -gt 0 ]]; then
+  sleep "${CLAWBOX_EBPF_HOLD_OPEN_SECONDS}"
+fi'
 COMMAND_B64="$(printf '%s' "${COMMAND}" | base64 | tr -d '\n')"
 
 cat <<EOF | kubectl apply -f - >/dev/null
@@ -102,6 +108,8 @@ spec:
       imagePullPolicy: Always
       command: ["/bin/sh", "-c"]
       args: ["printf %s '${COMMAND_B64}' | base64 -d | /bin/bash"]
+      env:
+        - {name: CLAWBOX_EBPF_HOLD_OPEN_SECONDS, value: "${HOLD_SECONDS}"}
       securityContext:
         capabilities:
           add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE]
@@ -117,6 +125,9 @@ deadline=$((SECONDS + 360))
 while (( SECONDS < deadline )); do
   phase="$(kubectl -n "${NAMESPACE}" get pod/toolbridge-ebpf-integration -o jsonpath='{.status.phase}' 2>/dev/null || true)"
   case "${phase}" in Succeeded|Failed) break ;; esac
+  if (( HOLD_SECONDS > 0 )) && kubectl -n "${NAMESPACE}" logs pod/toolbridge-ebpf-integration 2>/dev/null | grep -q '^INTEGRATION_RC=0$'; then
+    break
+  fi
   sleep 1
 done
 logs="$(kubectl -n "${NAMESPACE}" logs pod/toolbridge-ebpf-integration --tail=-1 2>&1 || true)"

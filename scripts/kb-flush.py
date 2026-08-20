@@ -23,6 +23,7 @@ Environment (or CLI flags):
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
@@ -161,6 +162,105 @@ def canonical_payload(obs: dict[str, Any]) -> bytes:
 
 def sign_observation(obs: dict[str, Any], secret: str) -> str:
     return hmac.new(secret.encode("utf-8"), canonical_payload(obs), hashlib.sha256).hexdigest()
+
+
+def canonical_native_manifest(manifest: dict[str, Any]) -> bytes:
+    return json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_native_manifest(manifest: dict[str, Any], secret: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"), canonical_native_manifest(manifest), hashlib.sha256
+    ).hexdigest()
+
+
+def build_native_manifest(
+    trace_dir: Path,
+    *,
+    tenant: str,
+    repo: str,
+    run_id: str,
+    attempt_id: str,
+    cell_id: str,
+    collector_version: str,
+    clawtune_revision: str,
+    eligible_only: bool = True,
+) -> dict[str, Any] | None:
+    by_execution: dict[str, dict[str, dict[str, Any]]] = {}
+    root = trace_dir / "tool-resource"
+    for path in sorted(root.glob("*.json")) if root.is_dir() else []:
+        raw = path.read_bytes()
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("schema") == "cgroup_resource_v1":
+            kind = "cgroup_resource_v1"
+            execution_id = payload.get("execution_id")
+        elif payload.get("version") == 2 and payload.get("mode") == "clause":
+            kind = "clause_telemetry_v2"
+            calls = payload.get("calls") or []
+            execution_id = calls[0].get("tool_call_id") if len(calls) == 1 else None
+            eligible = (
+                len(calls) == 1
+                and calls[0].get("eligible_for_kb") is True
+                and any(
+                    isinstance(clause, dict)
+                    and isinstance(clause.get("availability"), dict)
+                    and clause["availability"].get("latency") == "ok"
+                    for clause in (calls[0].get("clauses") or [])
+                )
+            )
+            if eligible_only and not eligible:
+                continue
+        else:
+            continue
+        if not isinstance(execution_id, str) or not execution_id:
+            continue
+        by_execution.setdefault(execution_id, {})[kind] = {
+            "kind": kind,
+            "execution_id": execution_id,
+            "filename": path.name,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "content_b64": base64.b64encode(raw).decode("ascii"),
+        }
+    # Fail-open, failed, and timeout executions can legitimately have only a
+    # cgroup artifact or no latency-eligible clause. They remain in the uploaded
+    # trace bundle, but cannot enter native training.
+    # A native manifest contains only exact clause+cgroup pairs so one isolated
+    # collector failure does not discard other valid executions in the run.
+    required = {"clause_telemetry_v2", "cgroup_resource_v1"}
+    if eligible_only:
+        artifacts = [
+            artifact
+            for execution_id in sorted(by_execution)
+            if set(by_execution[execution_id]) == required
+            for artifact in (
+                by_execution[execution_id]["clause_telemetry_v2"],
+                by_execution[execution_id]["cgroup_resource_v1"],
+            )
+        ]
+    else:
+        artifacts = [
+            by_execution[execution_id][kind]
+            for execution_id in sorted(by_execution)
+            for kind in sorted(by_execution[execution_id])
+        ]
+    if not artifacts:
+        return None
+    return {
+        "schema": "clawbox.native_telemetry_manifest_v1",
+        "tenant_id": tenant,
+        "repo_fingerprint": repo,
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+        "cell_id": cell_id,
+        "collector_version": collector_version,
+        "clawtune_revision": clawtune_revision,
+        "artifacts": artifacts,
+    }
 
 
 def read_span_records(trace_dir: Path) -> list[dict[str, Any]]:
@@ -349,6 +449,30 @@ def post_batch(
         return json.loads(response.read().decode("utf-8"))
 
 
+def post_native_batch(
+    endpoint: str,
+    token: str,
+    manifest: dict[str, Any],
+    secret: str,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    body = {
+        "manifest": manifest,
+        "signature": sign_native_manifest(manifest, secret),
+    }
+    request = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/v1/kb/native-batches",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", default=os.getenv("KB_ENDPOINT", os.getenv("CLAWBOX_KB_ENDPOINT", "")))
@@ -359,6 +483,11 @@ def main() -> int:
     parser.add_argument("--trace-dir", default=os.getenv("KB_TRACE_DIR", os.getenv("CLAWTUNE_TRACE_DIR", "")))
     parser.add_argument("--bridge", default=os.getenv("KB_BRIDGE", ""))
     parser.add_argument("--log", default=os.getenv("KB_LOG", ""))
+    parser.add_argument("--run-id", default=os.getenv("KB_RUN_ID", os.getenv("TASK_ID", "")))
+    parser.add_argument("--attempt-id", default=os.getenv("KB_ATTEMPT_ID", os.getenv("TASK_ID", "")))
+    parser.add_argument("--cell-id", default=os.getenv("KB_CELL_ID", os.getenv("CELL_ID", "")))
+    parser.add_argument("--collector-version", default=os.getenv("KB_COLLECTOR_VERSION", "guest-collector-v1"))
+    parser.add_argument("--clawtune-revision", default=os.getenv("CLAWTUNE_REVISION", ""))
     args = parser.parse_args()
 
     if not args.endpoint or not args.token or not args.secret:
@@ -381,6 +510,46 @@ def main() -> int:
 
     trace_dir = Path(args.trace_dir)
     log(f"resource diagnostics={json.dumps(resource_diagnostics(trace_dir), sort_keys=True)}")
+    if not args.run_id or not args.attempt_id or not args.cell_id or not args.clawtune_revision:
+        log("native flush skipped: run/attempt/cell/ClawTune revision is incomplete")
+    else:
+        audit = build_native_manifest(
+            trace_dir,
+            tenant=args.tenant,
+            repo=args.repo,
+            run_id=args.run_id,
+            attempt_id=args.attempt_id,
+            cell_id=args.cell_id,
+            collector_version=args.collector_version,
+            clawtune_revision=args.clawtune_revision,
+            eligible_only=False,
+        )
+        native = build_native_manifest(
+            trace_dir,
+            tenant=args.tenant,
+            repo=args.repo,
+            run_id=args.run_id,
+            attempt_id=args.attempt_id,
+            cell_id=args.cell_id,
+            collector_version=args.collector_version,
+            clawtune_revision=args.clawtune_revision,
+        )
+        if native is not None:
+            if audit is not None and canonical_native_manifest(audit) != canonical_native_manifest(native):
+                try:
+                    audit_result = post_native_batch(
+                        args.endpoint, args.token, audit, args.secret
+                    )
+                    log(f"native raw audit POST result={json.dumps(audit_result)}")
+                except Exception as exc:
+                    log(f"native raw audit POST failed (non-fatal): {exc}")
+            try:
+                result = post_native_batch(
+                    args.endpoint, args.token, native, args.secret
+                )
+                log(f"native POST result={json.dumps(result)}")
+            except Exception as exc:
+                log(f"native POST failed (non-fatal): {exc}")
     observations = join_observations(trace_dir, Path(args.bridge), repo=args.repo)
     log(f"joined {len(observations)} observations (trace={args.trace_dir}, bridge={args.bridge})")
     if not observations:

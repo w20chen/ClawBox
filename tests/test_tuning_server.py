@@ -12,6 +12,8 @@ from clawbox.common.config import settings
 from clawbox.tuning.schema import CollectionQuality, ToolObservation, utcnow
 from clawbox.tuning.server import create_app
 from clawbox.tuning.validate import sign_observation
+from clawbox.tuning.native import sign_native_manifest
+from test_native_tuning import make_manifest
 
 TOKEN = settings.service_token
 INGEST_SECRET = settings.ingest_secret
@@ -56,6 +58,35 @@ def auth_headers():
 def client(tmp_path):
     app = create_app(f"sqlite:///{tmp_path}/server.db")
     return TestClient(app)
+
+
+def test_native_api_publishes_atomic_pair_and_replays_idempotently(client):
+    manifest = make_manifest()
+    payload = manifest.model_dump(mode="json", by_alias=True)
+    body = {
+        "manifest": payload,
+        "signature": sign_native_manifest(manifest, INGEST_SECRET),
+    }
+    first = client.post("/v1/kb/native-batches", json=body, headers=auth_headers())
+    assert first.status_code == 200
+    assert first.json()["accepted"] is True
+    assert first.json()["generation"] == 1
+
+    replay = client.post("/v1/kb/native-batches", json=body, headers=auth_headers())
+    assert replay.status_code == 200
+    assert replay.json()["duplicate"] is True
+    assert replay.json()["generation"] == 1
+
+    response = client.get(
+        "/v1/kb/native-snapshot",
+        params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo"},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    snapshot = response.json()
+    assert snapshot["generation"] == 1
+    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v4"
+    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v1"
 
 
 def test_requires_service_token(client):

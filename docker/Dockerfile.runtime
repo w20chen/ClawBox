@@ -25,6 +25,7 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG APT_MIRROR=
 LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
 ENV DEBIAN_FRONTEND=noninteractive \
+    CLAWTUNE_REVISION=${CLAWTUNE_REVISION} \
     HOME=/home/openclaw \
     OPENCLAW_HOME=/home/openclaw/.openclaw
 

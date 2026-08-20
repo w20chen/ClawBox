@@ -62,7 +62,8 @@ docker build --platform linux/arm64 --pull --build-context clawtune="${CLAWTUNE_
   --build-arg APT_MIRROR="${APT_MIRROR}" \
   -f "${ROOT}/docker/Dockerfile.runtime" \
   -t "${runtime_image}" "${ROOT}"
-docker build --platform linux/arm64 --pull \
+docker build --platform linux/arm64 --pull --build-context clawtune="${CLAWTUNE_ROOT}" \
+  --build-arg CLAWTUNE_REVISION="${CLAWTUNE_REVISION}" \
   --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
   -f "${ROOT}/docker/Dockerfile.control-plane" \
   -t "${control_image}" "${ROOT}"

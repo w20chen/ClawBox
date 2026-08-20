@@ -13,6 +13,7 @@ from pathlib import Path
 from clawbox.tuning.join import join_trace_and_bridge
 from clawbox.tuning.schema import BridgeRecord, span_end_to_observation
 from clawbox.tuning.validate import sign_observation
+from clawbox.tuning.native import NativeTelemetryManifest, sign_native_manifest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -240,3 +241,93 @@ def test_unmatched_span_is_dropped(tmp_path):
     (trace_dir / "tool-bridge.jsonl").write_text("", encoding="utf-8")
     joined = kb_flush.join_observations(trace_dir, trace_dir / "tool-bridge.jsonl", repo="github.com/acme/foo")
     assert joined == []
+
+
+def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
+    kb_flush = load_kb_flush()
+    root = tmp_path / "tool-resource"
+    root.mkdir()
+    clause = {
+        "version": 2,
+        "mode": "clause",
+        "calls": [{
+            "tool_call_id": "exec-a",
+            "eligible_for_kb": True,
+            "clauses": [{"availability": {"latency": "ok"}}],
+        }],
+    }
+    cgroup = {"schema": "cgroup_resource_v1", "execution_id": "exec-a"}
+    clause_raw = (__import__("json").dumps(clause, indent=2) + "\n").encode()
+    cgroup_raw = (__import__("json").dumps(cgroup, separators=(",", ":")) + "\n").encode()
+    (root / "telemetry-exec-a.json").write_bytes(clause_raw)
+    (root / "cgroup-resource-exec-a.json").write_bytes(cgroup_raw)
+
+    raw = kb_flush.build_native_manifest(
+        tmp_path,
+        tenant="tenant-a",
+        repo="github.com/acme/foo",
+        run_id="run-a",
+        attempt_id="attempt-a",
+        cell_id="cell-a",
+        collector_version="guest-collector-v1",
+        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+    )
+    assert raw is not None
+    manifest = NativeTelemetryManifest.model_validate(raw)
+    assert {item.raw_bytes() for item in manifest.artifacts} == {clause_raw, cgroup_raw}
+    assert kb_flush.sign_native_manifest(raw, "secret") == sign_native_manifest(
+        manifest, "secret"
+    )
+
+    # An unpaired fail-open cgroup artifact remains in the trace archive but
+    # must not poison the valid native training batch.
+    orphan = {"schema": "cgroup_resource_v1", "execution_id": "exec-failopen"}
+    (root / "cgroup-resource-exec-failopen.json").write_text(
+        __import__("json").dumps(orphan), encoding="utf-8"
+    )
+    rebuilt = kb_flush.build_native_manifest(
+        tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
+        attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
+        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+    )
+    assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a"}
+    audit = kb_flush.build_native_manifest(
+        tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
+        attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
+        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7", eligible_only=False,
+    )
+    assert {item["execution_id"] for item in audit["artifacts"]} == {
+        "exec-a", "exec-failopen"
+    }
+
+    ineligible = {
+        "version": 2,
+        "mode": "clause",
+        "calls": [{
+            "tool_call_id": "exec-no-latency",
+            "eligible_for_kb": True,
+            "clauses": [{"availability": {"latency": "unavailable"}}],
+        }],
+    }
+    (root / "clause-telemetry-exec-no-latency.json").write_text(
+        __import__("json").dumps(ineligible), encoding="utf-8"
+    )
+    (root / "cgroup-resource-exec-no-latency.json").write_text(
+        __import__("json").dumps({
+            "schema": "cgroup_resource_v1", "execution_id": "exec-no-latency"
+        }), encoding="utf-8"
+    )
+    rebuilt = kb_flush.build_native_manifest(
+        tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
+        attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
+        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+    )
+    assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a"}
+    audit = kb_flush.build_native_manifest(
+        tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
+        attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
+        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7", eligible_only=False,
+    )
+    assert {item["execution_id"] for item in audit["artifacts"]} == {
+        "exec-a", "exec-failopen", "exec-no-latency"
+    }

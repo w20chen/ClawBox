@@ -1,11 +1,17 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG CLAWTUNE_REVISION=unknown
+LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
 WORKDIR /opt/clawbox
+COPY --from=clawtune services/sidecar /opt/clawtune/services/sidecar
 COPY pyproject.toml ./
 COPY clawbox ./clawbox
 COPY alembic.ini ./
 COPY alembic ./alembic
-RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" '.[postgres]'
+RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
+      /opt/clawtune/services/sidecar '.[postgres]' \
+ && python -c "from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB"
 RUN groupadd --gid 10001 clawbox \
  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin clawbox
 ENV PYTHONUNBUFFERED=1
