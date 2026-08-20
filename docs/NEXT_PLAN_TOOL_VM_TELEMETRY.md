@@ -1,6 +1,6 @@
 # Next Implementation Plan: Tool-VM Telemetry Before Managed Sandbox Completion
 
-**Status:** T0 and T1 complete; T2 implemented but production acceptance blocked
+**Status:** T0, T1, and T2 complete; T3 is next
 **Date:** 2026-08-20
 **Primary repositories:** `ClawBox` and sibling `ClawTune`
 **Priority decision:** repair and prove the telemetry-to-prediction loop before
@@ -277,6 +277,16 @@ Decision after T1:
 
 **Purpose:** make telemetry part of every real SSH tool execution without an
 exec-boundary race.
+
+**Status (2026-08-20): completed.** Production Ubuntu 22.04 image
+`127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:1e4db5fefd5b3285bcecf432edfe1cf09335e7004a468e46aa2a044365ec3a36`
+pins ClawTune `e91e60bc1e5f3209fbcf6091013fde96f217e2a7` and passed the
+strict ARM64 Kata/Firecracker bridge gate. Seven executions produced six
+valid, zero-loss native artifacts with cleanup `ok`; CPU/RSS were nonzero;
+concurrent cgroups `1766` and `1781` remained isolated; native validation and
+KB eligibility passed; exit 7, timeout 124, and explicit helper fail-open were
+preserved. Post-gate validation was 52 focused ClawTune tests, 167 ClawBox
+Python tests, and a passing native ARM64 Go race suite.
 
 Work:
 

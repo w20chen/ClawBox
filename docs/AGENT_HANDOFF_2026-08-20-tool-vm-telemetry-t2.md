@@ -4,8 +4,8 @@ Date: 2026-08-20
 
 This handoff is self-contained. Read it with
 `docs/NEXT_PLAN_TOOL_VM_TELEMETRY.md`; older G0 handoffs are historical. The
-program goal is T0-T4. T0 and T1 are complete. T2 is implemented but has not
-passed its production-image gate. T3 and T4 have not started.
+program goal is T0-T4. T0, T1, and T2 are complete. T3 and T4 have not
+started.
 
 ## Repository state
 
@@ -13,8 +13,9 @@ ClawBox branch `main`:
 
 - T0: `0bae91a`.
 - T1: `9c26605` (last completed milestone).
-- The current tree contains incomplete T2 plus this handoff. Commit it as
-  incomplete work, not as a completed T2 milestone.
+- `bae0752` preserved the incomplete T2 takeover state.
+- The next milestone commit completes T2 with the production-image fixes and
+  the real-machine evidence below.
 
 Sibling ClawTune branch `v2` (all pushed):
 
@@ -24,8 +25,11 @@ Sibling ClawTune branch `v2` (all pushed):
 - `fdc9013`, `7ff4d6d`: BCC tracefs normalization.
 - `a493ab7`: mount a legacy tracefs view.
 - `984861a`: overlay a masked guest debugfs (latest).
+- `e91e60b`: mount the legacy libbcc tracefs view over a private tmpfs
+  (production T2 fix, pushed).
 
-ClawTune was clean after `984861a`. Its remote warns that the repository moved
+ClawTune was clean except for the pre-existing untracked `.tmp/` after
+`e91e60b`. Its remote warns that the repository moved
 to `git@github.com:w20chen/ClawTune.git`, although the configured URL still
 accepted pushes.
 
@@ -88,7 +92,7 @@ accepted pushes.
 - ClawBox Kubernetes backend tests: 20 passed.
 - Native ARM64 `go test -race ./...`: passed.
 
-## Exact unresolved production failure
+## Resolved production failure history
 
 The last completed production image is:
 
@@ -115,8 +119,46 @@ Root-cause history:
    and overlays debugfs otherwise. Unit tests pass. Its production build was
    interrupted for this handoff before producing a digest, so it is not proven.
 
+The takeover reproduced two further strict-gate failures without weakening the
+validator:
+
+1. Image `sha256:e7c92d3b6657c8b206116464b2e35f6acd783f480442176ed5d8c63fb54eb1fd`
+   pinned `984861a`. `mount -t debugfs` returned zero, but debugfs rejected
+   userspace creation of `tracing` with `EPERM`.
+2. A retained debug Pod proved that a private tmpfs at `/sys/kernel/debug`
+   followed by tracefs at `/sys/kernel/debug/tracing` exposed sched tracepoint
+   ID 197 and allowed BPF collection. ClawTune `e91e60b` implements that shim.
+3. Image `sha256:b494eaf8a9cce3dcc849c45ce23796a2e6b80588b4f0b6662867e732e6ae40d9`
+   then reached native finalization but exposed two source-only overlay gaps:
+   NumPy was absent and the CRLF mvdan builder was not prebuilt. The production
+   Dockerfile now installs distro NumPy, normalizes the builder in the image,
+   and prebuilds its pinned Go 1.26.1 / mvdan v3.13.1 adapter into an immutable
+   cache. Standalone ClawTune packaging is unchanged.
+
 Do not weaken the validator and do not call fail-open execution a telemetry
-success. T2 requires valid native artifacts from the production image.
+success. The final production image satisfies the original strict gate.
+
+## T2 production acceptance (completed 2026-08-20)
+
+- ClawBox source: `bae0752` plus the production packaging fix in the following
+  T2 milestone commit.
+- ClawTune source: `e91e60bc1e5f3209fbcf6091013fde96f217e2a7`.
+- Base image:
+  `127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:d424fb2440bbf8d055f8846d6ba783fb558a8185d5c6436c3260e627209f611a`.
+- Accepted production Tool image:
+  `127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:1e4db5fefd5b3285bcecf432edfe1cf09335e7004a468e46aa2a044365ec3a36`.
+- RuntimeClass / guest: `kata-fc-arm64-ebpf`, ARM64 kernel `6.18.28`.
+- Strict integration: `INTEGRATION_RC=0`; seven bridge executions; six native
+  artifacts; long-command peak CPU `1.000000268` cores and peak RSS
+  `2.27328` MB; loss zero; cleanup `ok`; native validity and KB eligibility
+  true; concurrent cgroup IDs `1766` and `1781`; exit 7 and timeout 124
+  preserved; forced helper failure remained explicit and fail-open.
+- Archived log: ignored local artifact
+  `.artifacts/clawbox-t2-production-e91e60b-r2.log`, SHA-256
+  `ee6803aca7561d23e9e5df1bd6b816572472ff268b95b6d5806629392454b02c`.
+- Post-acceptance tests: focused ClawTune ARM64 suite `52 passed`; ClawBox
+  Python suite `167 passed`; native ARM64 `go test -race ./...` passed in
+  `6.928s` (Go 1.25 container, `GOPROXY=https://goproxy.cn,direct`).
 
 ## Shortest takeover sequence
 
