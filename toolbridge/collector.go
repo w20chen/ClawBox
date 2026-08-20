@@ -44,24 +44,33 @@ import (
 // ClawTune cgroup_resource_v1 fields (CgroupResourceResult) so the existing
 // ClawBox pipeline (schema.py / dataset.py / join.py) parses it verbatim.
 type resourceStats struct {
-	Source            string  `json:"source"`             // cgroup-v2 | process-tree
-	MonitorSource     string  `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
-	AttributionSource string  `json:"attribution_source"` // tool-bridge-pgid
-	TsStart           float64 `json:"ts_start"`
-	TsEnd             float64 `json:"ts_end"`
-	DurationMS        int64   `json:"duration_ms"`
-	CPUUserSeconds    float64 `json:"cpu_user_seconds"`
-	CPUSystemSeconds  float64 `json:"cpu_system_seconds"`
-	CPUTimeSeconds    float64 `json:"cpu_time_seconds"`
-	RSSBeforeBytes    int64   `json:"rss_before_bytes"`
-	RSSAfterBytes     int64   `json:"rss_after_bytes"`
-	RSSPeakBytes      int64   `json:"rss_peak_bytes"`
-	ReadBytesDelta    int64   `json:"read_bytes_delta"`
-	WriteBytesDelta   int64   `json:"write_bytes_delta"`
-	PidCount          int     `json:"pid_count"`
-	SamplingIntervalMS int64  `json:"sampling_interval_ms"`
-	SamplingPointCount int   `json:"sampling_point_count"`
-	SamplingQuality   string  `json:"sampling_quality"`
+	Source             string   `json:"source"`             // cgroup-v2 | process-tree
+	MonitorSource      string   `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
+	AttributionSource  string   `json:"attribution_source"` // tool-bridge-pgid
+	TsStart            float64  `json:"ts_start"`
+	TsEnd              float64  `json:"ts_end"`
+	DurationMS         int64    `json:"duration_ms"`
+	CPUUserSeconds     float64  `json:"cpu_user_seconds"`
+	CPUSystemSeconds   float64  `json:"cpu_system_seconds"`
+	CPUTimeSeconds     float64  `json:"cpu_time_seconds"`
+	RSSBeforeBytes     int64    `json:"rss_before_bytes"`
+	RSSAfterBytes      int64    `json:"rss_after_bytes"`
+	RSSPeakBytes       int64    `json:"rss_peak_bytes"`
+	ReadBytesDelta     int64    `json:"read_bytes_delta"`
+	WriteBytesDelta    int64    `json:"write_bytes_delta"`
+	PidCount           int      `json:"pid_count"`
+	SamplingIntervalMS int64    `json:"sampling_interval_ms"`
+	SamplingPointCount int      `json:"sampling_point_count"`
+	SamplingQuality    string   `json:"sampling_quality"`
+	SamplingCoverageMS int64    `json:"sampling_coverage_ms"`
+	CPUSource          string   `json:"cpu_source"`
+	MemorySource       string   `json:"memory_source"`
+	DiskSource         string   `json:"disk_source"`
+	NetworkSource      string   `json:"network_source"`
+	FallbackUsed       bool     `json:"fallback_used"`
+	CgroupSetupError   string   `json:"cgroup_setup_error,omitempty"`
+	CgroupReadError    string   `json:"cgroup_read_error,omitempty"`
+	CollectorErrors    []string `json:"collector_errors"`
 }
 
 type resourceCollector struct {
@@ -81,14 +90,18 @@ type resourceCollector struct {
 	readBytes      int64
 	writeBytes     int64
 	pointCount     int
+	maxPidCount    int
+	firstSample    time.Time
+	lastSample     time.Time
 	lastUser       map[int]int64 // pid -> last utime ticks
 	lastSys        map[int]int64 // pid -> last stime ticks
 	lastRead       map[int]int64 // pid -> last read_bytes
 	lastWrite      map[int]int64 // pid -> last write_bytes
 
 	// cgroup v2 path ("" when unavailable)
-	cgroupPath string
-	cgroupOK   bool
+	cgroupPath       string
+	cgroupOK         bool
+	cgroupSetupError string
 }
 
 func resourceTraceDir() string {
@@ -164,6 +177,7 @@ func ticksToSeconds(ticks int64) float64 { return float64(ticks) / 100.0 } // US
 // double counted across samples).
 func (c *resourceCollector) scanProcessTree() {
 	var rssSum int64
+	var observedPids int
 	pids := descendantPids(c.pgid) // c.pgid is the execution's shell pid (root)
 	first := c.pointCount == 0
 	for _, pid := range pids {
@@ -174,6 +188,7 @@ func (c *resourceCollector) scanProcessTree() {
 		if state == "Z" {
 			continue // zombies have no live resource attribution
 		}
+		observedPids++
 		rssSum += readProcStatusVMRSS(pid)
 		readBytes, writeBytes := readProcIO(pid)
 
@@ -202,6 +217,14 @@ func (c *resourceCollector) scanProcessTree() {
 		c.lastWrite[pid] = writeBytes
 	}
 	c.pointCount++
+	now := time.Now()
+	if c.firstSample.IsZero() {
+		c.firstSample = now
+	}
+	c.lastSample = now
+	if observedPids > c.maxPidCount {
+		c.maxPidCount = observedPids
+	}
 	if c.pointCount == 1 {
 		c.rssBeforeKiB = rssSum
 	}
@@ -258,9 +281,11 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 		lastWrite:  map[int]int64{},
 	}
 	// Attempt per-execution cgroup v2 (best effort; process-tree always runs).
-	if path, ok := tryPerExecCgroup(execID, pgid); ok {
+	if path, ok, setupError := tryPerExecCgroup(execID, pgid); ok {
 		c.cgroupPath = path
 		c.cgroupOK = true
+	} else {
+		c.cgroupSetupError = setupError
 	}
 	// Take an immediate baseline sample so short commands (>=~1 interval) have
 	// a reference point for CPU/IO deltas even if they exit before the first
@@ -295,15 +320,15 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 // controller for the subtree (both best-effort; they need CAP_SYS_ADMIN,
 // which the tool container is granted).  Without the memory controller only
 // cpu/io are exact and RSS falls back to the process-tree sampler.
-func tryPerExecCgroup(execID string, shellPid int) (string, bool) {
+func tryPerExecCgroup(execID string, shellPid int) (string, bool, string) {
 	remountCgroupRW()
 	base := "/sys/fs/cgroup/clawbox"
 	leaf := sanitizeCgroupLeaf(execID)
 	if leaf == "" {
-		return "", false
+		return "", false, "empty sanitized execution id"
 	}
 	if err := os.MkdirAll(base, 0755); err != nil {
-		return "", false
+		return "", false, fmt.Sprintf("create cgroup base: %v", err)
 	}
 	// Enable cpu/memory/pids/io for the clawbox subtree so per-exec cgroups
 	// expose cpu.stat / memory.peak / pids.current.  One write per controller
@@ -314,7 +339,7 @@ func tryPerExecCgroup(execID string, shellPid int) (string, bool) {
 	}
 	path := filepath.Join(base, leaf)
 	if err := os.MkdirAll(path, 0755); err != nil {
-		return "", false
+		return "", false, fmt.Sprintf("create execution cgroup: %v", err)
 	}
 	// Move the execution's shell into the per-exec cgroup; descendants inherit
 	// the cgroup at fork, so one write suffices.  Writes the shell pid
@@ -322,9 +347,9 @@ func tryPerExecCgroup(execID string, shellPid int) (string, bool) {
 	// Kata guest keeps container processes in pgrp 0).
 	if err := os.WriteFile(filepath.Join(path, "cgroup.procs"), []byte(strconv.Itoa(shellPid)+"\n"), 0644); err != nil {
 		_ = os.RemoveAll(path)
-		return "", false
+		return "", false, fmt.Sprintf("move execution into cgroup: %v", err)
 	}
-	return path, true
+	return path, true, ""
 }
 
 // remountCgroupRW best-effort remounts the guest cgroup2 tree read-write.
@@ -402,20 +427,37 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 	defer c.mu.Unlock()
 
 	stats := resourceStats{
-		Source:              "process-tree",
-		MonitorSource:       "psutil-process-tree",
-		AttributionSource:   "tool-bridge-pgid",
-		TsEnd:               float64(tsEnd.UnixNano()) / 1e9,
-		CPUUserSeconds:      c.cpuUserSeconds,
-		CPUSystemSeconds:    c.cpuSysSeconds,
-		RSSBeforeBytes:      c.rssBeforeKiB * 1024,
-		RSSAfterBytes:       c.rssAfterKiB * 1024,
-		RSSPeakBytes:        c.rssPeakKiB * 1024,
-		ReadBytesDelta:      c.readBytes,
-		WriteBytesDelta:     c.writeBytes,
-		SamplingIntervalMS:  int64(c.intervalMS),
-		SamplingPointCount:  c.pointCount,
-		SamplingQuality:     "valid",
+		Source:             "process-tree",
+		MonitorSource:      "psutil-process-tree",
+		AttributionSource:  "tool-bridge-pgid",
+		TsEnd:              float64(tsEnd.UnixNano()) / 1e9,
+		CPUUserSeconds:     c.cpuUserSeconds,
+		CPUSystemSeconds:   c.cpuSysSeconds,
+		RSSBeforeBytes:     c.rssBeforeKiB * 1024,
+		RSSAfterBytes:      c.rssAfterKiB * 1024,
+		RSSPeakBytes:       c.rssPeakKiB * 1024,
+		ReadBytesDelta:     c.readBytes,
+		WriteBytesDelta:    c.writeBytes,
+		PidCount:           c.maxPidCount,
+		SamplingIntervalMS: int64(c.intervalMS),
+		SamplingPointCount: c.pointCount,
+		SamplingQuality:    "degraded",
+		CPUSource:          "procfs-process-tree",
+		MemorySource:       "procfs-process-tree",
+		DiskSource:         "procfs-process-tree",
+		NetworkSource:      "unavailable",
+		FallbackUsed:       true,
+		CgroupSetupError:   c.cgroupSetupError,
+		CollectorErrors:    []string{},
+	}
+	if !c.firstSample.IsZero() && !c.lastSample.IsZero() {
+		stats.SamplingCoverageMS = c.lastSample.Sub(c.firstSample).Milliseconds()
+	}
+	if c.pointCount == 0 || c.maxPidCount == 0 {
+		stats.SamplingQuality = "invalid"
+	}
+	if stats.CgroupSetupError != "" {
+		stats.CollectorErrors = append(stats.CollectorErrors, stats.CgroupSetupError)
 	}
 	stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
 
@@ -427,16 +469,24 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 			if userUs+sysUs > 0 || pids > 0 {
 				stats.Source = "cgroup-v2"
 				stats.MonitorSource = "cgroup-v2"
+				stats.SamplingQuality = "valid"
+				stats.CPUSource = "cgroup-v2-cpu.stat"
+				stats.DiskSource = "cgroup-v2-io.stat"
 				stats.CPUUserSeconds = float64(userUs) / 1e6
 				stats.CPUSystemSeconds = float64(sysUs) / 1e6
 				stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
 				if memPeak > 0 { // memory.peak may be absent on older guest kernels
 					stats.RSSPeakBytes = memPeak
+					stats.MemorySource = "cgroup-v2-memory.peak"
+					stats.FallbackUsed = false
 				}
 				stats.ReadBytesDelta = rBytes
 				stats.WriteBytesDelta = wBytes
 				stats.PidCount = pids
 			}
+		} else {
+			stats.CgroupReadError = "read cgroup cpu.stat failed"
+			stats.CollectorErrors = append(stats.CollectorErrors, stats.CgroupReadError)
 		}
 		cleanupCgroup(c.cgroupPath)
 	}
@@ -460,17 +510,17 @@ func cleanupCgroup(path string) {
 // cgroup-resource-<execution_id>.json.
 func writeResourceArtifact(execID string, stats resourceStats, traceDir string, started time.Time) {
 	artifact := map[string]any{
-		"schema":               "cgroup_resource_v1",
-		"execution_id":         execID,
-		"tool_call_id":         nil,
-		"tool_name":            "",
-		"source":               stats.Source,
-		"monitor_source":       stats.MonitorSource,
-		"attribution_source":   stats.AttributionSource,
-		"ts_start":             float64(started.UnixNano()) / 1e9,
-		"ts_end":               stats.TsEnd,
-		"duration_ms":          stats.DurationMS,
-		"cpu_time_s":           stats.CPUTimeSeconds,
+		"schema":                    "cgroup_resource_v1",
+		"execution_id":              execID,
+		"tool_call_id":              nil,
+		"tool_name":                 "",
+		"source":                    stats.Source,
+		"monitor_source":            stats.MonitorSource,
+		"attribution_source":        stats.AttributionSource,
+		"ts_start":                  float64(started.UnixNano()) / 1e9,
+		"ts_end":                    stats.TsEnd,
+		"duration_ms":               stats.DurationMS,
+		"cpu_time_s":                stats.CPUTimeSeconds,
 		"cpu_utilization_avg_cores": cpuUtilization(stats.CPUTimeSeconds, stats.DurationMS),
 		"memory_rss_before_bytes":   stats.RSSBeforeBytes,
 		"memory_rss_after_bytes":    stats.RSSAfterBytes,
@@ -482,6 +532,16 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string, 
 		"sampling_interval_ms":      stats.SamplingIntervalMS,
 		"sampling_point_count":      stats.SamplingPointCount,
 		"sampling_quality":          stats.SamplingQuality,
+		"sampling_coverage_ms":      stats.SamplingCoverageMS,
+		"cpu_source":                stats.CPUSource,
+		"memory_source":             stats.MemorySource,
+		"disk_source":               stats.DiskSource,
+		"network_source":            stats.NetworkSource,
+		"fallback_used":             stats.FallbackUsed,
+		"cgroup_setup_error":        nilIfEmpty(stats.CgroupSetupError),
+		"cgroup_read_error":         nilIfEmpty(stats.CgroupReadError),
+		"collector_errors":          stats.CollectorErrors,
+		"independence":              "independent cgroup/procfs resource accounting; not eBPF clause telemetry",
 	}
 	payload, err := json.Marshal(artifact)
 	if err != nil {
@@ -493,6 +553,13 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string, 
 	}
 	path := filepath.Join(dir, fmt.Sprintf("cgroup-resource-%s.json", sanitizeCgroupLeaf(execID)))
 	_ = os.WriteFile(path, append(payload, '\n'), 0600)
+}
+
+func nilIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func cpuUtilization(cpuSeconds float64, durationMS int64) float64 {

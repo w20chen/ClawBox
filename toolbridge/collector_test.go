@@ -1,10 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -53,6 +53,12 @@ func TestCollectorProcessTree(t *testing.T) {
 	if stats.SamplingPointCount < 2 {
 		t.Errorf("expected >=2 sampling points, got %d", stats.SamplingPointCount)
 	}
+	if stats.Source == "process-tree" && stats.SamplingQuality != "degraded" {
+		t.Errorf("process-tree fallback must be degraded, got %q", stats.SamplingQuality)
+	}
+	if stats.NetworkSource != "unavailable" {
+		t.Errorf("network must be explicitly unavailable, got %q", stats.NetworkSource)
+	}
 	if stats.Source == "cgroup-v2" && stats.RSSPeakBytes <= 0 {
 		t.Errorf("cgroup-v2 path should report a positive RSS peak, got %d", stats.RSSPeakBytes)
 	}
@@ -66,11 +72,21 @@ func TestCollectorProcessTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read artifact: %v", err)
 	}
-	if !strings.Contains(string(raw), `"execution_id": "exec-tree-test"`) {
+	var artifact map[string]any
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatalf("parse artifact: %v", err)
+	}
+	if artifact["execution_id"] != "exec-tree-test" {
 		t.Errorf("artifact missing execution_id: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"schema": "cgroup_resource_v1"`) {
+	if artifact["schema"] != "cgroup_resource_v1" {
 		t.Errorf("artifact missing schema: %s", raw)
+	}
+	if artifact["network_source"] != "unavailable" {
+		t.Errorf("artifact misreported network source: %s", raw)
+	}
+	if _, ok := artifact["independence"]; !ok {
+		t.Errorf("artifact missing independence statement: %s", raw)
 	}
 }
 

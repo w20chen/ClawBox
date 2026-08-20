@@ -190,6 +190,32 @@ def test_read_cgroup_artifacts_both_layouts(tmp_path):
     assert artifacts["exec-b"]["source"] == "process-tree"
 
 
+def test_resource_diagnostics_counts_sources_quality_and_fallback(tmp_path):
+    kb_flush = load_kb_flush()
+    resource_dir = tmp_path / "tool-resource"
+    resource_dir.mkdir()
+    (resource_dir / "cgroup-resource-a.json").write_text(
+        '{"execution_id":"a","source":"cgroup-v2","sampling_quality":"valid",'
+        '"network_source":"unavailable","fallback_used":false,"collector_errors":[]}\n',
+        encoding="utf-8",
+    )
+    (resource_dir / "cgroup-resource-b.json").write_text(
+        '{"execution_id":"b","source":"process-tree","sampling_quality":"degraded",'
+        '"network_source":"unavailable","fallback_used":true,'
+        '"collector_errors":["cgroup setup failed"]}\n',
+        encoding="utf-8",
+    )
+
+    assert kb_flush.resource_diagnostics(tmp_path) == {
+        "artifacts": 2,
+        "sources": {"cgroup-v2": 1, "process-tree": 1},
+        "qualities": {"degraded": 1, "valid": 1},
+        "network_sources": {"unavailable": 2},
+        "fallback_count": 1,
+        "collector_error_count": 1,
+    }
+
+
 def test_signature_matches_canonical(tmp_path):
     kb_flush = load_kb_flush()
     record = span_end("exec-0003")

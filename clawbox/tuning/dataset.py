@@ -105,8 +105,9 @@ def build_joined_dataset(
 
     Returns ``(join_result, trusted_observations)`` where ``trusted`` are the
     validated, deduplicated observations that may train the KB.  When the
-    Tool-VM cgroup collector produced ``cgroup-resource-*.json`` artifacts
-    they are joined by execution_id and attached to the observations.
+    Tool-VM cgroup/procfs collector produced ``cgroup-resource-*.json``
+    artifacts, they are joined by execution_id and their quality gate and
+    measured CPU/RSS values supersede span-side proxies.
     """
     span_records = list(iter_trace_dir(trace_dir))
     bridges = read_bridge_jsonl(bridge_path)

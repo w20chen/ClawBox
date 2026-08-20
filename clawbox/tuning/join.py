@@ -80,7 +80,7 @@ def join_trace_and_bridge(
     cgroup_artifacts:
         Optional ``{execution_id: CgroupResource}`` map from the Tool-VM
         collector (ClawTune ``cgroup-resource-*.json``).  When present the
-        merged observation carries the cgroup v2 + eBPF resource view.
+        merged observation carries the independent cgroup/procfs resource view.
     """
     spans: list[ToolObservation] = []
     for record in span_records:
@@ -116,12 +116,24 @@ def join_trace_and_bridge(
             merged.status_code = "timeout"
         if bridge.exit_code != 0 and merged.status_code == "ok":
             merged.status_code = "error"
-        # Attach the independent cgroup v2 + eBPF resource artifact when the
+        # Attach the independent cgroup v2/procfs resource artifact when the
         # Tool-VM collector produced one for this execution_id.  A dangling
         # cgroup artifact (no span/bridge) is never silently attached; it is
         # reported as an unmatched cgroup artifact by the caller.
         if cgroup_artifacts:
             merged.cgroup = cgroup_artifacts.get(span.execution_id)
+            if merged.cgroup is not None:
+                resource = merged.cgroup
+                if resource.cpu_time_s is not None:
+                    merged.cpu_time_sec = resource.cpu_time_s
+                if resource.cpu_utilization_avg_cores is not None:
+                    merged.cpu_utilization_avg_cores = resource.cpu_utilization_avg_cores
+                if resource.memory_rss_peak_bytes is not None:
+                    merged.rss_peak_bytes = resource.memory_rss_peak_bytes
+                if resource.memory_rss_after_bytes is not None:
+                    merged.memory_rss_bytes_after = resource.memory_rss_after_bytes
+                if resource.sampling_quality in ("valid", "degraded", "invalid"):
+                    merged.collection_quality = resource.sampling_quality
         merged.trusted = merged.collection_quality == "valid" and merged.complete and merged.exit_code == 0
         joined.append(merged)
         used_bridge_ids.add(bridge.execution_id)

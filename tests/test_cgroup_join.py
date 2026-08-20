@@ -1,8 +1,8 @@
-"""Tests for the cgroup v2 + eBPF artifact pipeline (clawbox/tuning).
+"""Tests for the independent cgroup v2/procfs artifact pipeline.
 
 Covers the three-source join: ClawTune span + tool-bridge record + the
 Tool-VM cgroup artifact (ClawTune ``cgroup_resource_v1`` format), which is the
-data path that carries real cgroup v2 / eBPF resource accounting into the
+data path that carries independently sourced guest resource accounting into the
 observation dataset and KB.
 """
 
@@ -38,11 +38,19 @@ def cgroup_artifact(execution_id: str, **overrides) -> dict:
         "memory_rss_peak_bytes": 4096,
         "disk_read_bytes_delta": 100,
         "disk_write_bytes_delta": 200,
-        "network_rx_bytes_delta": 300,
-        "network_tx_bytes_delta": 400,
+        "network_rx_bytes_delta": None,
+        "network_tx_bytes_delta": None,
         "sampling_interval_ms": 100,
         "sampling_point_count": 50,
-        "sampling_quality": "good",
+        "sampling_quality": "valid",
+        "sampling_coverage_ms": 4900,
+        "cpu_source": "cgroup-v2-cpu.stat",
+        "memory_source": "cgroup-v2-memory.peak",
+        "disk_source": "cgroup-v2-io.stat",
+        "network_source": "unavailable",
+        "fallback_used": False,
+        "collector_errors": [],
+        "independence": "independent resource accounting; not eBPF clause telemetry",
     }
     data.update(overrides)
     return data
@@ -95,7 +103,9 @@ def test_cgroup_artifact_parser_valid():
     assert resource.source == "cgroup-v2"
     assert resource.cpu_time_s == 4.2
     assert resource.memory_rss_peak_bytes == 4096
-    assert resource.network_tx_bytes_delta == 400
+    assert resource.network_tx_bytes_delta is None
+    assert resource.network_source == "unavailable"
+    assert resource.fallback_used is False
 
 
 def test_cgroup_artifact_parser_rejects_invalid():
@@ -133,6 +143,7 @@ def test_three_source_join_attaches_cgroup():
     assert merged.cgroup.cpu_time_s == 4.2
     assert merged.cgroup.memory_rss_peak_bytes == 4096
     assert merged.cgroup.source == "cgroup-v2"
+    assert merged.collection_quality == "valid"
     assert merged.exit_code == 0
     assert merged.trusted is True
 
@@ -162,3 +173,34 @@ def test_build_joined_dataset_carries_cgroup(tmp_path):
     assert len(trusted) == 1
     assert trusted[0].cgroup is not None
     assert trusted[0].cgroup.cpu_time_s == 4.2
+
+
+def test_degraded_process_tree_artifact_cannot_enter_trusted_kb(tmp_path):
+    trace_dir = tmp_path / "traces"
+    (trace_dir / "tool-resource").mkdir(parents=True)
+    (trace_dir / "run-a.jsonl").write_text(
+        json.dumps(span_end("exec-1")) + "\n", encoding="utf-8"
+    )
+    fallback = cgroup_artifact(
+        "exec-1",
+        source="process-tree",
+        monitor_source="psutil-process-tree",
+        sampling_quality="degraded",
+        cpu_source="procfs-process-tree",
+        memory_source="procfs-process-tree",
+        disk_source="procfs-process-tree",
+        fallback_used=True,
+    )
+    (trace_dir / "tool-resource" / "cgroup-resource-exec-1.json").write_text(
+        json.dumps(fallback), encoding="utf-8"
+    )
+    bridge = tmp_path / "tool-bridge.jsonl"
+    bridge.write_text(
+        json.dumps(bridge_record("exec-1").model_dump(mode="json")), encoding="utf-8"
+    )
+
+    joined, trusted = build_joined_dataset(trace_dir, bridge)
+
+    assert joined.joined[0].collection_quality == "degraded"
+    assert joined.joined[0].trusted is False
+    assert trusted == []

@@ -84,17 +84,17 @@ class BridgeRecord(StrictModel):
 
 
 class CgroupResource(StrictModel):
-    """Per-execution cgroup v2 + eBPF resource artifact (ClawTune-compatible).
+    """Independent per-execution cgroup/procfs resource artifact.
 
     Mirrors ClawTune's ``CgroupResourceResult``
     (``services/sidecar/src/clawtune_sidecar/telemetry/cgroup_resource.py``,
-    schema ``cgroup_resource_v1``) so a Tool-VM collector that reuses ClawTune's
-    ``monitoring`` package produces artifacts we can parse verbatim.  ``source``
-    distinguishes the measurement path:
+    schema ``cgroup_resource_v1``) so both repositories parse the same
+    independent resource artifact. It does not prove that eBPF was active.
+    ``source`` distinguishes the measurement path:
 
-    * ``cgroup-v2``    — cpu/mem/disk from cgroup v2 counters, network from the
-                         per-process BCC (eBPF) tracker.
-    * ``process-tree`` — psutil process-tree sampling (eBPF unavailable).
+    * ``cgroup-v2`` -- CPU/memory/disk use guest cgroup counters; network is
+      unavailable here and its fields remain null.
+    * ``process-tree`` -- best-effort guest procfs process-tree sampling.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -127,6 +127,16 @@ class CgroupResource(StrictModel):
     sampling_interval_ms: int | None = None
     sampling_point_count: int | None = None
     sampling_quality: str | None = None
+    sampling_coverage_ms: int | None = None
+    cpu_source: str | None = None
+    memory_source: str | None = None
+    disk_source: str | None = None
+    network_source: str | None = None
+    fallback_used: bool = False
+    cgroup_setup_error: str | None = None
+    cgroup_read_error: str | None = None
+    collector_errors: list[str] = Field(default_factory=list)
+    independence: str | None = None
 
 
 def cgroup_artifact_to_resource(
@@ -182,7 +192,7 @@ class ToolObservation(StrictModel):
     stderr_bytes: int | None = Field(default=None, ge=0)
     output_truncated: bool = False
     source: ObservationSource = ObservationSource.CLAWTUNE_SPAN
-    # Independent cgroup v2 + eBPF resource artifact, when the Tool-VM
+    # Independent cgroup v2/procfs resource artifact, when the Tool-VM
     # collector produced one for this execution (ClawTune cgroup_resource_v1).
     cgroup: CgroupResource | None = None
     trusted: bool = False

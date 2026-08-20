@@ -198,8 +198,9 @@ def read_cgroup_artifacts(trace_dir: Path) -> dict[str, dict[str, Any]]:
     """Load Tool-VM ``cgroup-resource-<execution_id>.json`` artifacts.
 
     Mirrors ``clawbox.tuning.dataset.read_cgroup_artifacts``.  These are the
-    real per-execution measurements written by the tool-bridge (process-tree
-    and/or cgroup v2).  Scans ``<trace_dir>/tool-resource/*.json`` (ClawTune
+    independent per-execution measurements written by the tool-bridge
+    (process-tree and/or cgroup v2; never implicit eBPF evidence). Scans
+    ``<trace_dir>/tool-resource/*.json`` (ClawTune
     layout) plus any top-level ``cgroup-resource-*.json``.
     """
     artifacts: dict[str, dict[str, Any]] = {}
@@ -220,6 +221,33 @@ def read_cgroup_artifacts(trace_dir: Path) -> dict[str, dict[str, Any]]:
             continue
         artifacts[execution_id] = raw
     return artifacts
+
+
+def resource_diagnostics(trace_dir: Path) -> dict[str, Any]:
+    """Return honest source/quality counters for logs and release evidence."""
+    artifacts = read_cgroup_artifacts(trace_dir)
+    sources: dict[str, int] = {}
+    qualities: dict[str, int] = {}
+    network_sources: dict[str, int] = {}
+    fallback_count = 0
+    error_count = 0
+    for artifact in artifacts.values():
+        source = str(artifact.get("source") or "unknown")
+        quality = str(artifact.get("sampling_quality") or "unknown")
+        network = str(artifact.get("network_source") or "unknown")
+        sources[source] = sources.get(source, 0) + 1
+        qualities[quality] = qualities.get(quality, 0) + 1
+        network_sources[network] = network_sources.get(network, 0) + 1
+        fallback_count += int(artifact.get("fallback_used") is True)
+        error_count += len(artifact.get("collector_errors") or [])
+    return {
+        "artifacts": len(artifacts),
+        "sources": dict(sorted(sources.items())),
+        "qualities": dict(sorted(qualities.items())),
+        "network_sources": dict(sorted(network_sources.items())),
+        "fallback_count": fallback_count,
+        "collector_error_count": error_count,
+    }
 
 
 def join_observations(
@@ -351,7 +379,9 @@ def main() -> int:
                 handle.write(line + "\n")
         print(line, file=sys.stderr)
 
-    observations = join_observations(Path(args.trace_dir), Path(args.bridge), repo=args.repo)
+    trace_dir = Path(args.trace_dir)
+    log(f"resource diagnostics={json.dumps(resource_diagnostics(trace_dir), sort_keys=True)}")
+    observations = join_observations(trace_dir, Path(args.bridge), repo=args.repo)
     log(f"joined {len(observations)} observations (trace={args.trace_dir}, bridge={args.bridge})")
     if not observations:
         return 0
