@@ -7,7 +7,7 @@ OUT=/tmp/m1-realtask.txt
   TOKEN="clawbox-m1-smoke-token-0001"
   IMG="127.0.0.1:5000/clawbox/control-plane-arm64:dev"
   DATA="$HOME/clawbox-m1-data"
-  TASK_IMAGE="127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:d424fb2440bbf8d055f8846d6ba783fb558a8185d5c6436c3260e627209f611a"
+  TASK_IMAGE="${TASK_IMAGE:-127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:d424fb2440bbf8d055f8846d6ba783fb558a8185d5c6436c3260e627209f611a}"
   TEMPLATES="{\"swe-rebench-arm64\":{\"1\":{\"toolImage\":\"$TASK_IMAGE\",\"secretName\":\"clawbox-llm\",\"runtimeImage\":\"127.0.0.1:5000/clawbox/runtime-arm64:dev\",\"llmEgressCIDR\":\"0.0.0.0/0\",\"profile\":\"small\",\"maxDeadlineSeconds\":3600,\"minDeadlineSeconds\":60}}}"
 
   echo "== alembic upgrade (idempotent) =="
