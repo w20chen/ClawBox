@@ -244,7 +244,7 @@ func descendantPids(root int) []int {
 // after cmd.Wait() returns.
 func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *resourceCollector {
 	if intervalMS <= 0 {
-		intervalMS = 100
+		intervalMS = 20
 	}
 	c := &resourceCollector{
 		execID:     execID,
@@ -262,6 +262,10 @@ func startResourceCollector(pgid int, execID, traceDir string, intervalMS int) *
 		c.cgroupPath = path
 		c.cgroupOK = true
 	}
+	// Take an immediate baseline sample so short commands (>=~1 interval) have
+	// a reference point for CPU/IO deltas even if they exit before the first
+	// ticker tick.  Single-threaded here, so no lock is needed.
+	c.scanProcessTree()
 	go func() {
 		ticker := time.NewTicker(time.Duration(c.intervalMS) * time.Millisecond)
 		defer ticker.Stop()

@@ -261,8 +261,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	if err == nil {
 		// Process-tree (and best-effort per-exec cgroup) collection.  The
 		// shell is the pgid leader (Setpgid), so the whole tool tree shares
-		// cmd.Process.Pid as its process-group id.
-		collector = startResourceCollector(cmd.Process.Pid, executionID, resourceTraceDir(), 100)
+		// cmd.Process.Pid as its process-group id.  20ms sampling captures
+		// short tool commands that a 100ms ticker would miss entirely.
+		collector = startResourceCollector(cmd.Process.Pid, executionID, resourceTraceDir(), envInt("CLAWBOX_COLLECT_INTERVAL_MS", 20))
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		timer := time.NewTimer(timeout)
