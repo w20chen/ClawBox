@@ -256,8 +256,13 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	var collector *resourceCollector
 	err := cmd.Start()
 	if err == nil {
+		// Process-tree (and best-effort per-exec cgroup) collection.  The
+		// shell is the pgid leader (Setpgid), so the whole tool tree shares
+		// cmd.Process.Pid as its process-group id.
+		collector = startResourceCollector(cmd.Process.Pid, executionID, resourceTraceDir(), 100)
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		timer := time.NewTimer(timeout)
@@ -275,7 +280,8 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			}
 		}
 	}
-	record.DurationMS = durationMS(time.Since(started))
+	ended := time.Now()
+	record.DurationMS = durationMS(ended.Sub(started))
 	record.StdoutBytes = stdout.total
 	record.StderrBytes = stderr.total
 	record.OutputTruncated = stdout.truncated || stderr.truncated
@@ -289,7 +295,16 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			record.ExitCode = exitErr.ExitCode()
 		}
 	}
-	if cmd.ProcessState != nil {
+	// Prefer the real per-execution numbers from the process-tree/cgroup
+	// collector over the direct-child (shell) rusage that the old code read.
+	if collector != nil {
+		stats := collector.Finish(ended)
+		stats.DurationMS = record.DurationMS
+		record.UserCPUMS = int64(stats.CPUUserSeconds * 1000)
+		record.SystemCPUMS = int64(stats.CPUSystemSeconds * 1000)
+		record.MaxRSSKiB = stats.RSSPeakBytes / 1024
+		writeResourceArtifact(executionID, stats, resourceTraceDir(), started)
+	} else if cmd.ProcessState != nil {
 		record.UserCPUMS = durationMS(cmd.ProcessState.UserTime())
 		record.SystemCPUMS = durationMS(cmd.ProcessState.SystemTime())
 		if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {

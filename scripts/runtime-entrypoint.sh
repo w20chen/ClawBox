@@ -328,6 +328,44 @@ PATCHEOF
     'cat /testbed/.clawbox/tool-bridge.jsonl 2>/dev/null || true' \
     >"${TRACE_DIR}/tool-bridge.jsonl" 2>"${LOG_DIR}/bridge-trace.log" || true
 
+  echo "[runtime] collecting tool-VM resource artifacts via ssh" >&2
+  # Pull the per-execution cgroup/process-tree artifacts the tool-bridge wrote
+  # next to tool-bridge.jsonl.  base64 + BEGIN/END delimiters avoid any remote
+  # tar dependency and survive arbitrary filenames; failure is fail-open.
+  cat >"${STATE_DIR}/collect-resources.sh" <<'RESEOF'
+#!/bin/sh
+for f in /testbed/.clawbox/tool-resource/cgroup-resource-*.json; do
+  [ -e "$f" ] || continue
+  b=$(basename "$f")
+  printf '====BEGIN %s====\n' "$b"
+  base64 < "$f" 2>/dev/null || true
+  printf '====END %s====\n' "$b"
+done
+RESEOF
+  timeout -k 10 120 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
+    'sh -s' <"${STATE_DIR}/collect-resources.sh" \
+    >"${TRACE_DIR}/tool-resources.b64" 2>"${LOG_DIR}/resource-trace.log" || true
+  mkdir -p "${TRACE_DIR}/tool-resource"
+  in=0; fname=""
+  while IFS= read -r line; do
+    case "$line" in
+      '====BEGIN '*)
+        fname="${line#====BEGIN }"; fname="${fname%====}"
+        : > "${TRACE_DIR}/tool-resource/${fname}"
+        in=1 ;;
+      '====END '*)
+        in=0 ;;
+      *)
+        if [ "$in" = 1 ] && [ -n "$fname" ]; then
+          printf '%s\n' "$line" | base64 -d >> "${TRACE_DIR}/tool-resource/${fname}" 2>/dev/null || true
+        fi ;;
+    esac
+  done < "${TRACE_DIR}/tool-resources.b64" || true
+  rm -f "${TRACE_DIR}/tool-resources.b64"
+
   echo "[runtime] writing result.json" >&2
   TASK_STATE_DIR="${STATE_DIR}" SESSION_ID="${session_id}" AGENT_STATUS="${agent_status}" \
     "${CLAWTUNE_HOME}/venv/bin/python" - <<'PY'

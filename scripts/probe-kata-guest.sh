@@ -83,6 +83,28 @@ ls /sys/kernel/debug/tracing/kprobe_events 2>&1 || echo "no-debugfs"
 ls /sys/kernel/tracing/kprobe_events 2>&1 || echo "no-tracefs-kprobes"
 echo "== cgroup writability retest =="
 mkdir -p /sys/fs/cgroup/clawbox-probe 2>&1 && echo mkdir-ok || echo mkdir-fail
+echo "== cgroup mount source/options (is ro a mount flag?) =="
+grep cgroup /proc/mounts 2>&1
+echo "== try remount,rw (CAP_SYS_ADMIN present?) =="
+if mount -o remount,rw /sys/fs/cgroup 2>&1; then echo remount-ok; else echo remount-fail; fi
+echo "== retest mkdir after remount =="
+mkdir -p /sys/fs/cgroup/clawbox-probe 2>&1 && echo mkdir-ok-after-remount || echo mkdir-fail-after-remount
+echo "== per-exec cgroup: move self into probe cgroup + read counters =="
+if [ -d /sys/fs/cgroup/clawbox-probe ]; then
+  echo $$ > /sys/fs/cgroup/clawbox-probe/cgroup.procs 2>&1 && echo move-ok || echo move-fail
+  cat /sys/fs/cgroup/clawbox-probe/cpu.stat 2>&1 | head -2
+  cat /sys/fs/cgroup/clawbox-probe/pids.current 2>&1 | head -1
+  cat /sys/fs/cgroup/clawbox-probe/memory.current 2>&1 | head -1
+  echo "== move back to parent + remove probe cgroup =="
+  cat /sys/fs/cgroup/cgroup.procs 2>/dev/null | while read p; do echo $p > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true; done
+  echo $$ > /sys/fs/cgroup/cgroup.procs 2>&1
+  rmdir /sys/fs/cgroup/clawbox-probe 2>&1 && echo rmdir-ok || echo rmdir-fail
+fi
+echo "== bpf syscall gates =="
+cat /proc/sys/kernel/unprivileged_bpf_disabled 2>&1 || echo n/a
+echo "== tracefs (kprobe attach point for non-CO-RE eBPF) =="
+cat /sys/kernel/tracing/tracing_on 2>&1 || echo no-tracefs
+ls /sys/kernel/tracing/kprobe_events 2>&1 || echo no-kprobe-events
 echo "== procfs sampling basics =="
 ls /proc | grep -E "^[0-9]+$" | head -5
 echo "probe-done"'

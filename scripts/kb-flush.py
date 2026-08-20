@@ -194,15 +194,50 @@ def read_bridge_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def read_cgroup_artifacts(trace_dir: Path) -> dict[str, dict[str, Any]]:
+    """Load Tool-VM ``cgroup-resource-<execution_id>.json`` artifacts.
+
+    Mirrors ``clawbox.tuning.dataset.read_cgroup_artifacts``.  These are the
+    real per-execution measurements written by the tool-bridge (process-tree
+    and/or cgroup v2).  Scans ``<trace_dir>/tool-resource/*.json`` (ClawTune
+    layout) plus any top-level ``cgroup-resource-*.json``.
+    """
+    artifacts: dict[str, dict[str, Any]] = {}
+    candidates: list[Path] = []
+    tool_resource = trace_dir / "tool-resource"
+    if tool_resource.is_dir():
+        candidates.extend(sorted(tool_resource.glob("*.json")))
+    candidates.extend(sorted(trace_dir.glob("cgroup-resource-*.json")))
+    for path in candidates:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        execution_id = raw.get("execution_id")
+        if not execution_id:
+            continue
+        artifacts[execution_id] = raw
+    return artifacts
+
+
 def join_observations(
     trace_dir: Path, bridge_path: Path, *, repo: str
 ) -> list[dict[str, Any]]:
-    """Exact execution_id join -> normalized observation dicts."""
+    """Exact execution_id join -> normalized observation dicts.
+
+    When the tool-bridge produced a ``cgroup_resource_v1`` artifact for the
+    execution, its real cpu/memory values REPLACE the span-side estimates
+    before the observation is signed.  The projector only trains trusted
+    observations, so a missing artifact simply keeps the (weaker) span values.
+    """
     spans = [span_end_to_obs(r) for r in read_span_records(trace_dir)]
     spans = [s for s in spans if s is not None]
     by_id: dict[str, list[dict[str, Any]]] = {}
     for bridge in read_bridge_records(bridge_path):
         by_id.setdefault(bridge.get("execution_id"), []).append(bridge)
+    artifacts = read_cgroup_artifacts(trace_dir)
     merged: list[dict[str, Any]] = []
     used: set[str] = set()
     for span in spans:
@@ -226,6 +261,23 @@ def join_observations(
             out["status_code"] = "timeout"
         if out.get("exit_code") != 0 and out.get("status_code") == "ok":
             out["status_code"] = "error"
+        # Real per-execution measurement from the Tool-VM collector, when
+        # present, supersedes the ClawTune span-side proxy values.
+        artifact = artifacts.get(span["execution_id"])
+        if artifact is not None:
+            cpu_time_s = as_float(artifact.get("cpu_time_s"))
+            rss_peak = as_int(artifact.get("memory_rss_peak_bytes"))
+            source = artifact.get("source")
+            if cpu_time_s is not None:
+                out["cpu_time_sec"] = cpu_time_s
+            if rss_peak is not None:
+                out["rss_peak_bytes"] = rss_peak
+            sampling_quality = artifact.get("sampling_quality")
+            if sampling_quality in ("valid", "degraded", "invalid"):
+                out["collection_quality"] = sampling_quality
+            if source in ("cgroup-v2", "process-tree"):
+                out["source"] = source
+                out["resource_source"] = source
         out["trusted"] = (
             out.get("collection_quality") == "valid"
             and out.get("complete") is True

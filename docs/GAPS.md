@@ -9,14 +9,14 @@
 
 | 子项 | 状态 | 代码/探测证据 |
 |---|---|---|
-| 工具命令真实资源观测（cgroup/eBPF） | 🔴 未实现 | ClawTune 采集器跑在 Runtime VM，命令在 Tool VM（两个独立 VM，不共享内核/cgroup）。`clawbox/cell/manifests.py` 未给 tool 容器部署采集器 |
-| per-execution 独占 cgroup | 🟠 被阻断 | guest 里 `/sys/fs/cgroup` **只读**：即使加 `CAP_SYS_ADMIN`，`mkdir /sys/fs/cgroup/...` 仍 `Read-only file system`（探测实证） |
+| 工具命令真实资源观测（cgroup/eBPF） | � 已实现主体（真机待验证） | `toolbridge/collector.go`：每执行写 `tool-resource/cgroup-resource-<id>.json`（`cgroup_resource_v1`）；`source=process-tree` 零特权，guest cgroup 可写时自动 `cgroup-v2` |
+| per-execution 独占 cgroup | � 代码已带优雅回退 | guest `/sys/fs/cgroup` 挂载只读时 `tryPerExecCgroup` 自动回退进程树；**关键未知**：`mount -o remount,rw` 是否可行（探测脚本已加此测试，待真机跑） |
 | BCC eBPF（ClawTune 的 `net_accounting.py` 网络记账） | 🟠 被阻断 | guest 无内核头、无 clang、无 `/lib/modules` → BCC 运行期编译不可用 |
-| CO-RE eBPF（cilium/ebpf） | 🟠 被阻断 | guest 无 `/sys/kernel/btf/vmlinux`（无 BTF） |
+| CO-RE eBPF（cilium/ebpf） | 🟠 被阻断 | guest 无 `/sys/kernel/btf/vmlinux`（无 BTF）——需重建 Kata guest kernel 开 `CONFIG_DEBUG_INFO_BTF` |
 | 非 CO-RE eBPF（kretprobe 预编译对象） | 🔴 未实现 | 需在 tool-bridge 加 loader + 预编译 BPF 对象；**attach 可行性（perf kprobe PMU）未实测** |
-| cgroup 读（容器级）+ 进程树 `/proc` 归因 | 🟢 可做未接入 | 探测证明 cgroup 读可用、bridge 能读自己子进程；但 bridge 尚未实现采集 |
+| cgroup 读（容器级）+ 进程树 `/proc` 归因 | 🟢 已实现 | `toolbridge/collector.go` 的 `scanProcessTree` 按 pgid 归因（utime/stime、VmRSS 峰值、io 字节），零特权；`kb-flush.py` 已消费该工件覆盖 span 代理值 |
 
-**含义**：KB/预测目前喂的是代理值（`kb-flush.py` 的 `SIGNED_FIELDS` 里 `cpu_time_sec/rss_peak_bytes` 来自 span 插件侧估算 + bridge 直接子进程，**不是** Tool VM 命令的真实 cgroup/eBPF 消耗）→ 预测质量存疑。
+**含义**：KB/预测已可喂**真实 per-execution 数据**（进程树 rusage；cgroup 可写时为 cgroup v2 精确计数）。剩余两条线：① 真机跑增强后的 `probe-kata-guest.sh` 确认 cgroup remount 与 eBPF attach 可行性；② 若需 eBPF（网络/事件精度），重建 guest kernel 开 BTF + 放宽 seccomp/caps（安全权衡，见下）。
 
 ## G1. 采集数据接入管线：已完成，但未接真机数据
 
@@ -51,9 +51,9 @@
 
 ## G5. 立即待办（按论文主线排序）
 
-1. **G0 落地**：tool-bridge 加 cgroup 读 + 进程树归因（现在能做）→ 非 CO-RE eBPF loader 真机冒烟（唯一未验证点）。
-2. 真机解锁后：跑真实任务 → `m1-p0-joincheck.sh` 验证 cgroup/eBPF 数据进 KB。
+1. **真机验证 G0**：`scripts/probe-kata-guest.sh`（已加 cgroup remount rw / 每执行 cgroup / bpf syscall 门禁 / tracefs 探测）→ 重建 tool-bridge 镜像（`GOPROXY=... bash scripts/build-kubernetes-images.sh`）→ 跑 1 个真实任务确认 `cgroup-resource-*.json` 落地、`kb-flush` 用真实值、join 仍 100%。
+2. **eBPF 决策点**：若真机探测证明 guest 内可 `bpf()` attach（CAP_SYS_ADMIN 已可授予 + tracefs kprobes 可用），则走"重建 Kata guest kernel 开 BTF + 静态 cilium/ebpf loader"补网络/事件精度；否则以 process-tree/cgroup-v2 为准，网络用 procfs 近似并在论文中声明边界。
 3. 并发扩到 6/8（`scripts/m1-concurrent.sh` 改 `N=`）+ scale 表出图。
 4. patch 提取指标修复（成功率的正确口径）。
 
-> 诚实的边界：**"让 ClawTune 那一套全跑通"目前只差一条主线**——工具命令的真实 cgroup/eBPF 资源观测在 Tool VM 内落地；其余机制层（LLM proxy / trace / join / KB / 多租户 / 控制面）都已就绪并有代码/测试/真机证据。
+> 诚实的边界：**G0 主线的代码已落地**（tool-bridge 进程树+cgroup 采集 → 工件 → kb-flush 消费真实值）；剩余是**真机验证**和**eBPF 增强层的可行性确认**（后者涉及重建 guest kernel + 放宽 seccomp/caps 的安全权衡，建议论文按"process-tree/cgroup-v2 为准 + eBPF 作交叉验证"交付）。

@@ -119,6 +119,77 @@ def test_join_matches_canonical_pipeline(tmp_path):
     assert by_id["exec-0001"]["status_code"] == "ok"
 
 
+def test_cgroup_artifact_overrides_span_estimates(tmp_path):
+    """The Tool-VM collector artifact must replace the span-side proxy values
+    (cpu/rss/quality) before the observation is signed and trusted."""
+    kb_flush = load_kb_flush()
+    execution_id = "exec-0001"
+    span_records = [span_end(execution_id, duration_sec=5.0)]
+    bridge_records = [bridge(execution_id)]
+
+    trace_dir = tmp_path / "traces"
+    trace_dir.mkdir()
+    (trace_dir / "run.jsonl").write_text(
+        "\n".join(__import__("json").dumps(r) for r in span_records) + "\n", encoding="utf-8"
+    )
+    (trace_dir / "tool-bridge.jsonl").write_text(
+        "\n".join(__import__("json").dumps(b) for b in bridge_records) + "\n", encoding="utf-8"
+    )
+    resource_dir = trace_dir / "tool-resource"
+    resource_dir.mkdir()
+    (resource_dir / f"cgroup-resource-{execution_id}.json").write_text(
+        __import__("json").dumps({
+            "schema": "cgroup_resource_v1",
+            "execution_id": execution_id,
+            "source": "cgroup-v2",
+            "monitor_source": "cgroup-v2",
+            "attribution_source": "tool-bridge-pgid",
+            "cpu_time_s": 0.123,
+            "cpu_utilization_avg_cores": 0.12,
+            "memory_rss_peak_bytes": 42 * 1024 * 1024,
+            "sampling_interval_ms": 100,
+            "sampling_point_count": 7,
+            "sampling_quality": "valid",
+        }) + "\n", encoding="utf-8"
+    )
+    joined = kb_flush.join_observations(trace_dir, trace_dir / "tool-bridge.jsonl", repo="github.com/acme/foo")
+    assert len(joined) == 1
+    obs = joined[0]
+    assert obs["cpu_time_sec"] == 0.123  # real value, not the span's 7.5
+    assert obs["rss_peak_bytes"] == 42 * 1024 * 1024  # not the span's 1 MiB
+    assert obs["source"] == "cgroup-v2"
+    assert obs["resource_source"] == "cgroup-v2"
+    assert obs["collection_quality"] == "valid"
+    assert obs["trusted"] is True
+    # Signing happens over the final (real) values, so the HMAC must match
+    # a canonical payload built from those same values.
+    canonical = {key: obs.get(key) for key in kb_flush.SIGNED_FIELDS}
+    assert kb_flush.canonical_payload(canonical) == kb_flush.canonical_payload(obs)
+    assert kb_flush.sign_observation(obs, "secret") == kb_flush.sign_observation(
+        {**obs, "cpu_time_sec": 0.123, "rss_peak_bytes": 42 * 1024 * 1024,
+         "collection_quality": "valid"}, "secret")
+
+
+def test_read_cgroup_artifacts_both_layouts(tmp_path):
+    kb_flush = load_kb_flush()
+    trace_dir = tmp_path / "traces"
+    resource_dir = trace_dir / "tool-resource"
+    resource_dir.mkdir(parents=True)
+    (resource_dir / "cgroup-resource-exec-a.json").write_text(
+        '{"schema":"cgroup_resource_v1","execution_id":"exec-a","source":"process-tree","cpu_time_s":1.5}\n',
+        encoding="utf-8",
+    )
+    (trace_dir / "cgroup-resource-exec-b.json").write_text(
+        '{"schema":"cgroup_resource_v1","execution_id":"exec-b","source":"process-tree","cpu_time_s":2.5}\n',
+        encoding="utf-8",
+    )
+    (trace_dir / "cgroup-resource-bad.json").write_text("{not json\n", encoding="utf-8")
+    artifacts = kb_flush.read_cgroup_artifacts(trace_dir)
+    assert set(artifacts) == {"exec-a", "exec-b"}
+    assert artifacts["exec-a"]["cpu_time_s"] == 1.5
+    assert artifacts["exec-b"]["source"] == "process-tree"
+
+
 def test_signature_matches_canonical(tmp_path):
     kb_flush = load_kb_flush()
     record = span_end("exec-0003")
