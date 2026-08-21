@@ -29,16 +29,26 @@ if [[ ! -e "${SHIM}" ]]; then
   exit 1
 fi
 if grep -q "${MARKER}" "${SHIM}" 2>/dev/null; then
-  echo "wrapper already installed at ${SHIM}"
-  echo -n "selfcheck soft nofile: "
-  "${SHIM}" --_selfcheck
-  exit 0
+  expected_nofile="$(ulimit -Hn)"
+  actual_nofile="$("${SHIM}" --_selfcheck 2>/dev/null || true)"
+  if [[ "${actual_nofile}" == "${expected_nofile}" ]]; then
+    echo "wrapper already installed at ${SHIM}"
+    echo "selfcheck soft nofile: ${actual_nofile}"
+    exit 0
+  fi
+  if [[ ! -x "${REAL}" ]]; then
+    echo "wrapper selfcheck failed and real shim is missing or not executable: ${REAL}" >&2
+    exit 1
+  fi
+  echo "repairing failed wrapper at ${SHIM}"
+else
+  if [[ -e "${REAL}" ]]; then
+    echo "refusing to overwrite existing real-shim backup: ${REAL}" >&2
+    exit 1
+  fi
+  # Move the real shim aside (keep its mode/permissions); the wrapper then execs it.
+  mv "${SHIM}" "${REAL}"
 fi
-
-command -v prlimit >/dev/null 2>&1 || { echo "prlimit (util-linux) is required" >&2; exit 69; }
-
-# Move the real shim aside (keep its mode/permissions); the wrapper then execs it.
-mv "${SHIM}" "${REAL}"
 
 cat >"${SHIM}" <<EOF
 #!/bin/sh
@@ -46,11 +56,20 @@ cat >"${SHIM}" <<EOF
 # Kata runtime-rs resets the soft RLIMIT_NOFILE to 1024 (hard 524288), which
 # exhausts FDs at ~19 concurrent cells.  Raise soft=hard before exec'ing the
 # real shim so a 32-cell run has headroom.
+raise_nofile() {
+  hard_limit=\$(ulimit -Hn) || exit 1
+  ulimit -Sn "\${hard_limit}" || {
+    echo "failed to raise soft RLIMIT_NOFILE to \${hard_limit}" >&2
+    exit 1
+  }
+}
 if [ "\$1" = "--_selfcheck" ]; then
-  prlimit --nofile=hard:hard sh -c 'ulimit -n'
+  raise_nofile
+  ulimit -Sn
   exit 0
 fi
-exec prlimit --nofile=hard:hard "${REAL}" "\$@"
+raise_nofile
+exec "${REAL}" "\$@"
 EOF
 chmod 0755 "${SHIM}"
 

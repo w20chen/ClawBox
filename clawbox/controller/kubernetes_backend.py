@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 
 from clawbox.common.config import settings
+from clawbox.common.auth import grant_public_key
 from clawbox.common.models import ToolSpec
 
 
@@ -69,8 +70,7 @@ class KubernetesBackend:
                         {"name": "TOOL_POD_UID", "value": logical_uid},
                         {"name": "TENANT_ID", "value": spec.tenant_id},
                         {"name": "WORKSPACE_ID", "value": spec.workspace_id},
-                        {"name": "CLAWBOX_SERVICE_TOKEN", "value": settings.service_token},
-                        {"name": "CLAWBOX_GRANT_SECRET", "value": settings.grant_secret},
+                        {"name": "CLAWBOX_GRANT_PUBLIC_KEY", "value": grant_public_key()},
                     ],
                     "resources": {
                         "requests": {"cpu": str(spec.cpu_count), "memory": str(spec.memory_bytes)},

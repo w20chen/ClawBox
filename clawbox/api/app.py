@@ -9,7 +9,7 @@ X-Tenant-Id for tenant scoping on every resource.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from sqlalchemy.orm import Session
@@ -18,7 +18,6 @@ from clawbox.api.schemas import (
     AttemptResponse,
     CreateRunRequest,
     CreateRunResponse,
-    ErrorResponse,
     RunEventResponse,
     RunResponse,
 )
@@ -33,16 +32,7 @@ from clawbox.managed.repo import (
     load_run_events,
     new_attempt,
     request_cancel,
-    transition_attempt,
 )
-from clawbox.managed.state import attempt_can_cancel
-
-
-def _require_token(
-    x_clawbox_token: str | None = Header(default=None),
-    x_tenant_id: str | None = Header(default=None),
-) -> str:
-    return x_tenant_id or ""
 
 
 def create_app(
@@ -57,11 +47,13 @@ def create_app(
 
     app = FastAPI(title="ClawBox Managed API", version="0.2.0")
 
-    def check_auth(x_clawbox_token: str | None = Header(default=None)) -> None:
+    def check_auth(
+        x_clawbox_token: Annotated[str, Header()] = "",
+    ) -> None:
         if x_clawbox_token != service_token:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid service token")
 
-    def tenant(x_tenant_id: str | None = Header(default=None)) -> str:
+    def tenant(x_tenant_id: Annotated[str, Header()] = "") -> str:
         if not x_tenant_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "X-Tenant-Id header is required")
         return x_tenant_id
@@ -96,7 +88,7 @@ def create_app(
             policy = templates.resolve(body.templateRef, body.templateRevision)
             templates.validate_deadline(policy, body.deadlineSeconds)
         except TemplateError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
         # request_digest is computed from the server-canonicalized body so a
         # replay returns the original Run and a different body is a 409.

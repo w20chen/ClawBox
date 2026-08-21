@@ -118,7 +118,7 @@ def test_post_observations_then_read_snapshot(client):
         "observations": [
             {
                 "observation": o.model_dump(mode="json"),
-                "signature": sign_observation(o, INGEST_SECRET),
+                "signature": sign_observation(o, INGEST_SECRET, "tenant-a", "github.com/acme/foo"),
             }
             for o in obs
         ],
@@ -181,7 +181,7 @@ def test_replay_is_idempotent(client):
         "tenant_id": "tenant-a",
         "repo_fingerprint": "github.com/acme/foo",
         "observations": [
-            {"observation": o.model_dump(mode="json"), "signature": sign_observation(o, INGEST_SECRET)}
+            {"observation": o.model_dump(mode="json"), "signature": sign_observation(o, INGEST_SECRET, "tenant-a", "github.com/acme/foo")}
             for o in obs
         ],
     }
@@ -199,7 +199,7 @@ def test_rollback_endpoint(client):
         "tenant_id": "tenant-a",
         "repo_fingerprint": "github.com/acme/foo",
         "observations": [
-            {"observation": o.model_dump(mode="json"), "signature": sign_observation(o, INGEST_SECRET)}
+            {"observation": o.model_dump(mode="json"), "signature": sign_observation(o, INGEST_SECRET, "tenant-a", "github.com/acme/foo")}
             for o in obs
         ],
     }

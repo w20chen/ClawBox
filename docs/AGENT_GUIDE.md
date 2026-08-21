@@ -31,18 +31,19 @@ The latest accepted source and images are:
 
 - ClawTune: `e91e60bc1e5f3209fbcf6091013fde96f217e2a7`.
 - Production Tool image:
-  `127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:1e4db5fefd5b3285bcecf432edfe1cf09335e7004a468e46aa2a044365ec3a36`.
+  `127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:c930c7243e6072924a812b1102356e5c972f3d2e2ef1082a6d4cf0510eb997cd`.
 - Control-plane image:
   `127.0.0.1:5000/clawbox/control-plane-arm64@sha256:72907f6203e03a9ba1c2616814b2fea540fa6c5d9efcb4df464ce190d707230e`.
 - Runtime image:
   `127.0.0.1:5000/clawbox/runtime-arm64@sha256:6215a4b10feec3ba8d6dcd39e763b92322fe7605dba62c39bcdae8bc71d04e44`.
-- Last telemetry completion commit before documentation cleanup: `049b403`.
 
 Acceptance ran on real ARM64 hardware with Ubuntu 22.04 task images,
 Kata/Firecracker, guest kernel 6.18.28, and Ubuntu BCC 0.18. The strict run
 proved BPF compilation, load, attachment, native clause artifacts, non-zero
 CPU/RSS, zero loss, cleanup, distinct concurrent cgroups, no
 cross-attribution, and explicit isolated fail-open behavior.
+The Tool Bridge must mount tracefs before starting BCC; the Kata guest exposes
+the tracepoints but does not mount tracefs by default.
 
 The feedback acceptance used five valid Run A execution pairs to advance the
 native KB from generation 0 to 1. Run B loaded exactly generation 1, produced
@@ -69,6 +70,9 @@ shadow-only and `FixedProfileSizer` remains authoritative.
    x86, runc, QEMU, or alternate-VMM fallback.
 9. Never clean unrelated Kubernetes namespaces, Pods, Kata sandboxes, or
    devmapper snapshots during debugging.
+10. The Kata shim wrapper must raise its inherited soft `RLIMIT_NOFILE` to the
+    hard limit before starting runtime-rs. The live audit requires at least
+    8192.
 
 ## Code map
 
@@ -92,8 +96,9 @@ shadow-only and `FixedProfileSizer` remains authoritative.
 
 - The accepted deployment is single-node ARM64. Multi-node scheduling, leader
   election, and HA reservation consistency are not production-accepted.
-- The managed API and dispatcher are implemented, but full CR-to-database
-  terminal status projection and cancellation convergence still require work.
+- The managed API, dispatcher, terminal projection, and cancellation
+  convergence are implemented for the supplied `v1alpha1` deployment. The
+  `v1alpha2` conversion path remains outside the accepted live baseline.
 - The supplied trace and tuning manifests use node-local persistence suitable
   for the accepted single-node environment; external deployments should use
   durable PostgreSQL/object storage.
@@ -118,6 +123,15 @@ cd toolbridge
 go test -race ./...
 ```
 
+Before a Firecracker acceptance run, install/verify the shim wrapper and cache
+sudo credentials if the smoke is launched non-interactively:
+
+```bash
+sudo bash scripts/install-shim-nofile-wrapper.sh
+sudo -v
+bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
+```
+
 For ClawTune integration changes, run the pinned native readers plus the
 focused guest collector/telemetry suite. For any production Tool-image change,
 rebuild to an immutable digest and run:
@@ -131,3 +145,11 @@ bash scripts/run-toolbridge-ebpf-integration.sh \
 
 Do not call the image accepted unless the script exits zero and its native
 artifact validator passes all strict checks.
+
+Historical failure objects may be removed only after a dry run confirms they
+are in API phase `Failed`:
+
+```bash
+python3 scripts/cleanup-failed-pods.py
+python3 scripts/cleanup-failed-pods.py --namespace clawbox-system --apply
+```

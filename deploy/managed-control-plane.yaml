@@ -114,8 +114,6 @@ spec:
                   optional: true
             - name: CLAWBOX_CELL_NAMESPACE
               value: clawbox-benchmarks
-            # The live controller and CRD currently serve v1alpha1. Change
-            # this only when the controller and conversion webhook are ready.
             - name: CLAWBOX_CR_VERSION
               value: v1alpha1
             - name: DISPATCHER_INTERVAL_SECONDS

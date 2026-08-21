@@ -117,9 +117,16 @@ Install the isolated Tool-VM eBPF runtime and run both host gates:
 
 ```bash
 bash scripts/install-ebpf-kata-runtime.sh apply
+sudo bash scripts/install-shim-nofile-wrapper.sh
 bash deploy/check-host.sh --runtime-class kata-fc-arm64
 bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 ```
+
+The shim wrapper must report a soft `nofile` limit of at least `8192`
+(`524288` on the validated host). The smoke test uses cached passwordless sudo
+when available and otherwise prompts on an interactive terminal. For a
+non-interactive session, run `sudo -v` first so the narrowly scoped `ctr`
+preflight can access containerd.
 
 The node should be labeled ready only after both gates pass:
 
@@ -181,6 +188,8 @@ bash scripts/rebuild-swe-rebench-tool-overlay.sh
 ```
 
 The command prints the final immutable `TOOL_IMAGE=...@sha256:...` value.
+Put that exact digest in the SWE-ReBench mapping or managed template Secret;
+do not leave a previous Tool Bridge digest pinned after rebuilding telemetry.
 
 ## Deploy the cluster services
 
@@ -273,9 +282,9 @@ scripts/clawbox cancel RUN_ID
 scripts/clawbox retry RUN_ID
 ```
 
-The API records cancel intent immediately. The current live CRD/controller
-path does not yet guarantee immediate interruption of an already-running guest,
-so treat cancellation as best effort until lifecycle convergence is completed.
+The API records cancel intent immediately, the dispatcher deletes the bound
+`SandboxTask`, and the controller removes task-owned child resources. A
+cancelled run remains terminal and cannot later be overwritten as succeeded.
 
 ### Direct cluster submission
 
@@ -384,6 +393,38 @@ Success requires real native clause telemetry, non-zero CPU/RSS, zero event
 loss, successful cleanup, distinct concurrent cgroups, no cross-attribution,
 and native artifact validation. Command success alone is not telemetry
 success.
+
+For the local development registry, the default `:dev` image must be rebuilt
+from the current Tool Bridge source. The bridge mounts and verifies tracefs
+before starting BCC because the minimal Kata guest does not mount tracefs by
+default. The standalone kernel gate is also available:
+
+```bash
+kubectl create namespace clawbox-benchmarks --dry-run=client -o yaml | kubectl apply -f -
+kubectl delete pod -n clawbox-benchmarks clawbox-ebpf-cgroup-smoke --ignore-not-found
+kubectl apply -f deploy/ebpf-cgroup-smoke.yaml
+kubectl wait -n clawbox-benchmarks --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/clawbox-ebpf-cgroup-smoke --timeout=360s
+kubectl logs -n clawbox-benchmarks clawbox-ebpf-cgroup-smoke
+```
+
+## Operational cleanup
+
+Kubernetes retains terminated pods until its pod-GC threshold is reached. A
+large failure burst can therefore leave thousands of `Failed` objects even
+after the underlying runtime is healthy. Inspect first, then delete only pods
+whose API phase is already terminal:
+
+```bash
+python3 scripts/cleanup-failed-pods.py
+python3 scripts/cleanup-failed-pods.py --namespace clawbox-system --apply
+```
+
+The cleanup script enumerates exact pod names, batches deletion by namespace,
+and never selects Running, Pending, or Succeeded pods. `--apply` requires an
+explicit namespace unless the operator deliberately passes `--all-namespaces`.
+Remove dedicated probe namespaces separately after preserving any evidence
+you need.
 
 ## Development checks
 

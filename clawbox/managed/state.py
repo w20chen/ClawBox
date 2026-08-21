@@ -40,10 +40,11 @@ class AttemptPhase(str, Enum):
     CANCELLED = "Cancelled"
 
 
+_RUN_ABORTS = {RunPhase.FAILED, RunPhase.TIMED_OUT, RunPhase.CANCELLED}
 RUN_TRANSITIONS: dict[RunPhase, set[RunPhase]] = {
-    RunPhase.ACCEPTED: {RunPhase.QUEUED, RunPhase.CANCELLED},
-    RunPhase.QUEUED: {RunPhase.RUNNING, RunPhase.CANCELLED},
-    RunPhase.RUNNING: {RunPhase.FINALIZING, RunPhase.CANCELLED},
+    RunPhase.ACCEPTED: {RunPhase.QUEUED, *_RUN_ABORTS},
+    RunPhase.QUEUED: {RunPhase.RUNNING, *_RUN_ABORTS},
+    RunPhase.RUNNING: {RunPhase.FINALIZING, *_RUN_ABORTS},
     RunPhase.FINALIZING: {
         RunPhase.SUCCEEDED, RunPhase.FAILED, RunPhase.TIMED_OUT, RunPhase.CANCELLED,
     },
@@ -54,13 +55,14 @@ RUN_TRANSITIONS: dict[RunPhase, set[RunPhase]] = {
     RunPhase.CANCELLED: set(),
 }
 
+_ATTEMPT_ABORTS = {AttemptPhase.FAILED, AttemptPhase.TIMED_OUT, AttemptPhase.CANCELLED}
 ATTEMPT_TRANSITIONS: dict[AttemptPhase, set[AttemptPhase]] = {
-    AttemptPhase.PENDING_DISPATCH: {AttemptPhase.QUEUED, AttemptPhase.CANCELLED},
-    AttemptPhase.QUEUED: {AttemptPhase.ADMITTED, AttemptPhase.CANCELLED},
-    AttemptPhase.ADMITTED: {AttemptPhase.TOOL_STARTING, AttemptPhase.CANCELLED},
-    AttemptPhase.TOOL_STARTING: {AttemptPhase.TOOL_READY, AttemptPhase.CANCELLED},
-    AttemptPhase.TOOL_READY: {AttemptPhase.RUNTIME_RUNNING, AttemptPhase.CANCELLED},
-    AttemptPhase.RUNTIME_RUNNING: {AttemptPhase.COLLECTING, AttemptPhase.CANCELLED},
+    AttemptPhase.PENDING_DISPATCH: {AttemptPhase.QUEUED, *_ATTEMPT_ABORTS},
+    AttemptPhase.QUEUED: {AttemptPhase.ADMITTED, *_ATTEMPT_ABORTS},
+    AttemptPhase.ADMITTED: {AttemptPhase.TOOL_STARTING, *_ATTEMPT_ABORTS},
+    AttemptPhase.TOOL_STARTING: {AttemptPhase.TOOL_READY, *_ATTEMPT_ABORTS},
+    AttemptPhase.TOOL_READY: {AttemptPhase.RUNTIME_RUNNING, *_ATTEMPT_ABORTS},
+    AttemptPhase.RUNTIME_RUNNING: {AttemptPhase.COLLECTING, *_ATTEMPT_ABORTS},
     AttemptPhase.COLLECTING: {
         AttemptPhase.SUCCEEDED, AttemptPhase.FAILED, AttemptPhase.TIMED_OUT,
         AttemptPhase.CANCELLED,

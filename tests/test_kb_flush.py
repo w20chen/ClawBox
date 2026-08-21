@@ -232,6 +232,51 @@ def test_signature_matches_canonical(tmp_path):
     assert runtime_sig == canonical_sig
 
 
+def test_post_batch_binds_signature_to_tenant_and_repo(monkeypatch):
+    kb_flush = load_kb_flush()
+    observation = kb_flush.span_end_to_obs(span_end("exec-scoped"))
+    assert observation is not None
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return b'{"accepted":1}'
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(kb_flush.urllib.request, "urlopen", fake_urlopen)
+    result = kb_flush.post_batch(
+        "http://kb.example",
+        "service-token",
+        "tenant-a",
+        "github.com/acme/foo",
+        [observation],
+        "ingest-secret",
+    )
+
+    body = __import__("json").loads(captured["request"].data)
+    assert result == {"accepted": 1}
+    assert captured["timeout"] == 30.0
+    assert body["tenant_id"] == "tenant-a"
+    assert body["repo_fingerprint"] == "github.com/acme/foo"
+    assert body["observations"][0]["signature"] == kb_flush.sign_observation(
+        observation,
+        "ingest-secret",
+        "tenant-a",
+        "github.com/acme/foo",
+    )
+
+
 def test_unmatched_span_is_dropped(tmp_path):
     kb_flush = load_kb_flush()
     trace_dir = tmp_path / "traces"

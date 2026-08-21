@@ -47,50 +47,66 @@ def dedup_key(observation: ToolObservation) -> tuple[str, str, int]:
     return (observation.execution_id, observation.tool_name, observation.sequence_no)
 
 
-def canonical_payload(observation: ToolObservation) -> bytes:
+def canonical_payload(
+    observation: ToolObservation,
+    tenant_id: str | None = None,
+    repo_fingerprint: str | None = None,
+) -> bytes:
     """Stable canonical JSON for signature verification.
 
     Only signature-relevant fields are included; signature is never part of the
     signed payload.  JSON is emitted with sorted keys and no whitespace so the
     signer and verifier agree regardless of key order.
     """
+    observation_data = observation.model_dump(mode="json", exclude={"trusted", "created_at"})
     data = {
-        "schema_version": observation.schema_version,
-        "execution_id": observation.execution_id,
-        "tool_name": observation.tool_name,
-        "command_digest": observation.command_digest,
-        "run_id": observation.run_id,
-        "sequence_no": observation.sequence_no,
-        "exit_code": observation.exit_code,
-        "duration_sec": observation.duration_sec,
-        "cpu_time_sec": observation.cpu_time_sec,
-        "rss_peak_bytes": observation.rss_peak_bytes,
-        "collection_quality": str(observation.collection_quality.value)
-        if isinstance(observation.collection_quality, CollectionQuality)
-        else str(observation.collection_quality),
-        "complete": observation.complete,
+        "tenant_id": tenant_id,
+        "repo_fingerprint": repo_fingerprint,
+        "observation": observation_data,
     }
     return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def sign_observation(observation: ToolObservation, secret: str) -> str:
+def sign_observation(
+    observation: ToolObservation,
+    secret: str,
+    tenant_id: str | None = None,
+    repo_fingerprint: str | None = None,
+) -> str:
     """HMAC-SHA256 signature over the canonical payload."""
-    digest = hmac.new(secret.encode("utf-8"), canonical_payload(observation), hashlib.sha256)
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        canonical_payload(observation, tenant_id, repo_fingerprint),
+        hashlib.sha256,
+    )
     return digest.hexdigest()
 
 
-def verify_signature(observation: ToolObservation, secret: str, signature: str | None) -> bool:
+def verify_signature(
+    observation: ToolObservation,
+    secret: str,
+    signature: str | None,
+    tenant_id: str | None = None,
+    repo_fingerprint: str | None = None,
+) -> bool:
     if signature is None:
         return False
-    expected = sign_observation(observation, secret)
+    expected = sign_observation(observation, secret, tenant_id, repo_fingerprint)
     return hmac.compare_digest(expected, signature)
 
 
 class ObservationValidator:
     """Quality gate with optional HMAC signature verification."""
 
-    def __init__(self, ingest_secret: str | None = None) -> None:
+    def __init__(
+        self,
+        ingest_secret: str | None = None,
+        tenant_id: str | None = None,
+        repo_fingerprint: str | None = None,
+    ) -> None:
         self.ingest_secret = ingest_secret
+        self.tenant_id = tenant_id
+        self.repo_fingerprint = repo_fingerprint
 
     def validate(self, observation: ToolObservation, signature: str | None = None) -> ValidationResult:
         checks = [
@@ -118,12 +134,20 @@ class ObservationValidator:
             return ValidationResult.reject("execution_id too long")
         if not observation.tool_name:
             return ValidationResult.reject("missing tool_name")
+        if self.repo_fingerprint is not None and observation.repo_fingerprint != self.repo_fingerprint:
+            return ValidationResult.reject("repo_fingerprint does not match signed batch scope")
         return ValidationResult.ok()
 
     def _check_signature(self, observation: ToolObservation, signature: str | None) -> ValidationResult:
         if self.ingest_secret is None:
             return ValidationResult.ok()  # signature not enforced
-        if not verify_signature(observation, self.ingest_secret, signature):
+        if not verify_signature(
+            observation,
+            self.ingest_secret,
+            signature,
+            self.tenant_id,
+            self.repo_fingerprint,
+        ):
             return ValidationResult.reject("invalid HMAC signature")
         return ValidationResult.ok()
 

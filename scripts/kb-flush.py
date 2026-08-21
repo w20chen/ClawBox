@@ -52,6 +52,21 @@ SIGNED_FIELDS = (
     "rss_peak_bytes",
     "collection_quality",
     "complete",
+    "command",
+    "repo_fingerprint",
+    "session_id",
+    "start_time",
+    "end_time",
+    "status_code",
+    "coverage_ratio",
+    "coverage_reason",
+    "cpu_utilization_avg_cores",
+    "memory_rss_bytes_after",
+    "stdout_bytes",
+    "stderr_bytes",
+    "output_truncated",
+    "source",
+    "cgroup",
 )
 
 
@@ -154,14 +169,31 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-def canonical_payload(obs: dict[str, Any]) -> bytes:
+def canonical_payload(
+    obs: dict[str, Any], tenant_id: str | None = None, repo_fingerprint: str | None = None
+) -> bytes:
     """Mirror of clawbox/tuning/validate.py:canonical_payload."""
-    data = {key: obs.get(key) for key in SIGNED_FIELDS}
+    defaults = {"output_truncated": False, "source": "clawtune_span"}
+    data = {
+        "tenant_id": tenant_id,
+        "repo_fingerprint": repo_fingerprint,
+        "observation": {
+            key: (defaults[key] if obs.get(key) is None and key in defaults else obs.get(key))
+            for key in SIGNED_FIELDS
+        },
+    }
     return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def sign_observation(obs: dict[str, Any], secret: str) -> str:
-    return hmac.new(secret.encode("utf-8"), canonical_payload(obs), hashlib.sha256).hexdigest()
+def sign_observation(
+    obs: dict[str, Any], secret: str,
+    tenant_id: str | None = None, repo_fingerprint: str | None = None,
+) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        canonical_payload(obs, tenant_id, repo_fingerprint),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def canonical_native_manifest(manifest: dict[str, Any]) -> bytes:
@@ -428,7 +460,7 @@ def post_batch(
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     signed = [
-        {"observation": obs, "signature": sign_observation(obs, secret)}
+        {"observation": obs, "signature": sign_observation(obs, secret, tenant, repo)}
         for obs in observations
     ]
     body = {

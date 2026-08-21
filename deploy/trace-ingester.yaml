@@ -23,6 +23,19 @@ spec:
       tolerations:
         - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
         - {key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule}
+      initContainers:
+        - name: prepare-data
+          image: 127.0.0.1:5000/clawbox/control-plane-arm64:fixed2
+          imagePullPolicy: Always
+          command: ["chown", "10001:10001", "/data"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"], add: ["CHOWN"]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: data, mountPath: /data}
       containers:
         - name: ingester
           image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
@@ -48,13 +61,11 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
             seccompProfile: {type: RuntimeDefault}
-          # Dev SQLite backend needs a writable location under the
-          # read-only rootfs; replace with a PVC + postgres for production.
           volumeMounts:
             - {name: data, mountPath: /data}
       volumes:
         - name: data
-          emptyDir: {}
+          hostPath: {path: /var/lib/clawbox/ingester, type: DirectoryOrCreate}
 ---
 apiVersion: v1
 kind: Service

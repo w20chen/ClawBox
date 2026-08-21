@@ -25,16 +25,25 @@ from sqlalchemy.orm import Session
 from clawbox.api.templates import TemplateRegistry
 from clawbox.cell.sandboxtask_v1alpha2 import (
     DESIRED_CANCELLED,
+    DESIRED_RUNNING,
     build_sandboxtask_v1alpha2,
     cancel_patch,
 )
 from clawbox.managed.db import OutboxRow, utcnow
-from clawbox.managed.models import Run, RunPhase
+from clawbox.managed.models import (
+    AgentOutcome,
+    ArtifactOutcome,
+    AttemptPhase,
+    PlatformOutcome,
+    Run,
+    RunPhase,
+)
 from clawbox.managed.repo import (
     complete_outbox,
     get_attempt,
     get_run,
     new_attempt,
+    transition_attempt,
     transition_run,
 )
 
@@ -50,6 +59,8 @@ class CRBackend(Protocol):
     def apply_sandboxtask(self, manifest: dict[str, Any]) -> bool: ...
 
     def cancel_sandboxtask(self, name: str, namespace: str) -> None: ...
+
+    def list_sandboxtasks(self, namespace: str) -> list[dict[str, Any]]: ...
 
 
 class KubernetesCRBackend:
@@ -121,6 +132,15 @@ class KubernetesCRBackend:
                 return
             raise
 
+    def list_sandboxtasks(self, namespace: str | None = None) -> list[dict[str, Any]]:
+        response = self.custom.list_namespaced_custom_object(
+            self.group,
+            self.version,
+            namespace or self.namespace,
+            self.plural,
+        )
+        return list(response.get("items", []))
+
 
 class Dispatcher:
     def __init__(
@@ -158,6 +178,7 @@ class Dispatcher:
                         "dispatcher failed for outbox %s (%s)", row.id, row.event_type,
                     )
                     # Leave unprocessed; bounded by worker restarts + attempts col.
+            self._sync_statuses(db)
             db.commit()
         return processed
 
@@ -231,6 +252,9 @@ class Dispatcher:
             attempt_id=attempt.attempt_id,
             idempotency_key=run.idempotency_key,
             request_digest=run.request_digest,
+            desired_state=(
+                DESIRED_CANCELLED if run.desired_state == "Cancelled" else DESIRED_RUNNING
+            ),
             execution_spec={
                 "toolImage": policy.tool_image,
                 "problemStatement": _problem_statement(run),
@@ -254,6 +278,57 @@ class Dispatcher:
             },
         )
 
+    def _sync_statuses(self, db: Session) -> None:
+        list_tasks = getattr(self._cr, "list_sandboxtasks", None)
+        if list_tasks is None:
+            return
+        for task in list_tasks(self.namespace):
+            try:
+                self._sync_status(db, task)
+            except Exception:
+                logger.exception(
+                    "failed to synchronize SandboxTask status for %s",
+                    task.get("metadata", {}).get("name", "unknown"),
+                )
+
+    def _sync_status(self, db: Session, task: dict[str, Any]) -> None:
+        spec = task.get("spec") or {}
+        run_ref = spec.get("runRef") or {}
+        run_id = run_ref.get("runID")
+        attempt_id = run_ref.get("attemptID")
+        status = task.get("status") or {}
+        observed = status.get("phase")
+        if not run_id or not attempt_id or not observed:
+            return
+        run = _get_run_unscoped(db, str(run_id))
+        attempt = get_attempt(db, str(attempt_id))
+        if run is None or attempt is None or attempt.run_id != run.run_id:
+            return
+
+        if observed == "Cleaned":
+            observed = status.get("outcome")
+        attempt_target = _attempt_phase_for_cell(observed)
+        run_target = _run_phase_for_cell(observed)
+        if attempt_target is None or run_target is None:
+            return
+
+        if attempt_target == AttemptPhase.SUCCEEDED:
+            attempt.platform_outcome = PlatformOutcome.SUCCEEDED
+            attempt.agent_outcome = AgentOutcome.SUCCEEDED
+            attempt.artifact_outcome = ArtifactOutcome.COMPLETE
+        elif attempt_target == AttemptPhase.FAILED:
+            attempt.platform_outcome = PlatformOutcome.FAILED
+            attempt.agent_outcome = AgentOutcome.FAILED
+        elif attempt_target == AttemptPhase.TIMED_OUT:
+            attempt.platform_outcome = PlatformOutcome.INTERRUPTED
+            attempt.agent_outcome = AgentOutcome.TIMED_OUT
+        elif attempt_target == AttemptPhase.CANCELLED:
+            attempt.platform_outcome = PlatformOutcome.INTERRUPTED
+            attempt.agent_outcome = AgentOutcome.CANCELLED
+
+        _advance_attempt(db, attempt, attempt_target, status)
+        _advance_run(db, run, run_target, status)
+
 
 # -- helpers ---------------------------------------------------------------
 
@@ -276,3 +351,78 @@ def _problem_statement(run: Run) -> str:
     # Full problem text when the API provided it (real agent tasks); otherwise
     # input_ref is a display/registry reference (smoke/placeholder runs).
     return run.problem_statement or run.input_ref
+
+
+_ATTEMPT_PROGRESS = [
+    AttemptPhase.PENDING_DISPATCH,
+    AttemptPhase.QUEUED,
+    AttemptPhase.ADMITTED,
+    AttemptPhase.TOOL_STARTING,
+    AttemptPhase.TOOL_READY,
+    AttemptPhase.RUNTIME_RUNNING,
+    AttemptPhase.COLLECTING,
+]
+_RUN_PROGRESS = [
+    RunPhase.ACCEPTED,
+    RunPhase.QUEUED,
+    RunPhase.RUNNING,
+    RunPhase.FINALIZING,
+]
+
+
+def _attempt_phase_for_cell(phase: str | None) -> AttemptPhase | None:
+    try:
+        return AttemptPhase(phase) if phase else None
+    except ValueError:
+        return None
+
+
+def _run_phase_for_cell(phase: str | None) -> RunPhase | None:
+    mapping = {
+        "Queued": RunPhase.QUEUED,
+        "Admitted": RunPhase.RUNNING,
+        "ToolStarting": RunPhase.RUNNING,
+        "ToolReady": RunPhase.RUNNING,
+        "RuntimeRunning": RunPhase.RUNNING,
+        "Collecting": RunPhase.FINALIZING,
+        "Succeeded": RunPhase.SUCCEEDED,
+        "Failed": RunPhase.FAILED,
+        "TimedOut": RunPhase.TIMED_OUT,
+        "Cancelled": RunPhase.CANCELLED,
+    }
+    return mapping.get(phase or "")
+
+
+def _status_detail(status: dict[str, Any]) -> tuple[str | None, str | None]:
+    return status.get("reason"), status.get("message")
+
+
+def _advance_attempt(
+    db: Session,
+    attempt,
+    target: AttemptPhase,
+    status: dict[str, Any],
+) -> None:
+    if attempt.phase == target:
+        return
+    reason, message = _status_detail(status)
+    if target in _ATTEMPT_PROGRESS:
+        current = _ATTEMPT_PROGRESS.index(attempt.phase)
+        desired = _ATTEMPT_PROGRESS.index(target)
+        for phase in _ATTEMPT_PROGRESS[current + 1 : desired + 1]:
+            transition_attempt(db, attempt, phase, reason=reason, message=message)
+        return
+    transition_attempt(db, attempt, target, reason=reason, message=message)
+
+
+def _advance_run(db: Session, run: Run, target: RunPhase, status: dict[str, Any]) -> None:
+    if run.phase == target:
+        return
+    reason, message = _status_detail(status)
+    if target in _RUN_PROGRESS:
+        current = _RUN_PROGRESS.index(run.phase)
+        desired = _RUN_PROGRESS.index(target)
+        for phase in _RUN_PROGRESS[current + 1 : desired + 1]:
+            transition_run(db, run, phase, reason=reason, message=message)
+        return
+    transition_run(db, run, target, reason=reason, message=message)

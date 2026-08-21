@@ -286,7 +286,13 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		"CLAWBOX_GATE_COMMAND="+command,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdin = channel
+	// SSH "exec" requests used by the runtime are non-interactive: their
+	// command payload already contains the complete shell program. Passing the
+	// channel as Cmd.Stdin makes os/exec start a copy goroutine; Cmd.Wait then
+	// waits for EOF from the still-open SSH channel while the channel handler
+	// waits for Cmd.Wait before closing it (a deterministic deadlock after the
+	// command has produced all output). Use /dev/null semantics instead.
+	cmd.Stdin = nil
 	stdout := &limitedStream{dst: channel, limit: outputLimit}
 	stderr := &limitedStream{dst: channel.Stderr(), limit: outputLimit}
 	cmd.Stdout = stdout

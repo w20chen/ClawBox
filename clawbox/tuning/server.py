@@ -125,7 +125,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
             repo_fingerprint=body.repo_fingerprint,
             observations=observations,
             signatures=signatures,
-            ingest_secret=settings.ingest_secret,
+            ingest_secret=settings.kb_ingest_secret or settings.ingest_secret,
         )
         db.commit()
         return outcome.to_dict()
@@ -146,7 +146,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
             db,
             manifest=body.manifest,
             signature=body.signature,
-            ingest_secret=settings.ingest_secret,
+            ingest_secret=settings.kb_ingest_secret or settings.ingest_secret,
             expected_clawtune_revision=settings.clawtune_revision,
         )
         db.commit()

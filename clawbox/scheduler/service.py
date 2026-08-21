@@ -81,6 +81,7 @@ class Scheduler:
                 expected_duration=prediction.duration_p90).model_dump(mode="json")))
         tool = None
         observation = None
+        tool_stopped = False
         stdout = stderr = ""
         try:
             tool = ToolInstance.model_validate(post_json(f"{settings.controller_url}/v1/tool-pods/acquire",
@@ -103,7 +104,12 @@ class Scheduler:
             observation = Observation.model_validate(result["observation"])
             stdout, stderr = result.get("stdout", ""), result.get("stderr", "")
             generation, _ = self.observation(intent.execution_id, observation, intent)
-            post_json(f"{settings.controller_url}/v1/tool-pods/{tool.tool_pod_uid}/release", {}, timeout=30)
+            released_tool = post_json(
+                f"{settings.controller_url}/v1/tool-pods/{tool.tool_pod_uid}/release", {}, timeout=30
+            )
+            tool_stopped = released_tool.get("state") == "DESTROYED"
+            if not tool_stopped:
+                raise RuntimeError("controller did not confirm workload destruction")
             released = delete_json(f"{settings.allocator_url}/v1/leases/{lease.lease_id}",
                 ReleaseLease(fencing_token=lease.fencing_token, workload_stopped=True).model_dump(), timeout=30)
             return ExecutionResult(execution_id=intent.execution_id, tenant_id=intent.tenant_id,
@@ -112,9 +118,13 @@ class Scheduler:
                 lease_final_state=released["state"], stdout=stdout, stderr=stderr)
         except Exception:
             if tool:
-                try: post_json(f"{settings.controller_url}/v1/tool-pods/{tool.tool_pod_uid}/release", {})
+                try:
+                    released_tool = post_json(
+                        f"{settings.controller_url}/v1/tool-pods/{tool.tool_pod_uid}/release", {}
+                    )
+                    tool_stopped = released_tool.get("state") == "DESTROYED"
                 except Exception: pass
             try: delete_json(f"{settings.allocator_url}/v1/leases/{lease.lease_id}",
-                ReleaseLease(fencing_token=lease.fencing_token, workload_stopped=tool is not None).model_dump())
+                ReleaseLease(fencing_token=lease.fencing_token, workload_stopped=tool_stopped).model_dump())
             except Exception: pass
             raise

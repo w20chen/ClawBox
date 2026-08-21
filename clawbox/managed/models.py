@@ -143,6 +143,10 @@ class Run:
             raise ValueError(
                 f"cannot retry terminal Run in phase {self.phase.value}"
             )
+        if self.phase == RunPhase.FAILED:
+            self.phase = RunPhase.ACCEPTED
+            self.committed_at = None
+            self.final_reason = None
         self.attempt_counter += 1
         attempt = Attempt(
             attempt_id=new_attempt_id(),

@@ -159,7 +159,7 @@ def ingest(
         the HMAC signature carried alongside each observation.
     """
     signatures = signatures or {}
-    validator = ObservationValidator(ingest_secret)
+    validator = ObservationValidator(ingest_secret, tenant_id, repo_fingerprint)
     existing = _existing_dedup_keys(db, tenant_id=tenant_id, repo_fingerprint=repo_fingerprint)
     batch_dedup = Deduplicator()
     outcome = IngestOutcome(generation=_latest_generation(db, tenant_id=tenant_id, repo_fingerprint=repo_fingerprint))

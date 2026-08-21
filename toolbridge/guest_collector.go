@@ -12,7 +12,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -119,10 +121,37 @@ func randomCollectorToken() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
+// ensureTracefs mounts the guest tracefs before BCC starts. Kata's minimal
+// guest kernel supports tracefs, but does not mount it by default. BCC can
+// compile its tracepoint program in that state and then fails at attach time
+// because the tracepoint id files do not exist. Tool pods carry SYS_ADMIN
+// inside their VM specifically for guest-local cgroup/eBPF setup.
+func ensureTracefs() error {
+	const tracefs = "/sys/kernel/tracing"
+	eventID := filepath.Join(tracefs, "events/sched/sched_process_exit/id")
+	if _, err := os.Stat(eventID); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(tracefs, 0755); err != nil {
+		return fmt.Errorf("create tracefs mountpoint: %w", err)
+	}
+	output, mountErr := exec.Command("mount", "-t", "tracefs", "tracefs", tracefs).CombinedOutput()
+	if _, err := os.Stat(eventID); err == nil {
+		return nil
+	}
+	if mountErr != nil {
+		return fmt.Errorf("mount tracefs: %w: %s", mountErr, strings.TrimSpace(string(output)))
+	}
+	return fmt.Errorf("tracefs mounted without sched_process_exit tracepoint: %s", eventID)
+}
+
 func startGuestCollectorProcess() (*guestCollectorProcess, error) {
 	helper := os.Getenv("CLAWTUNE_GUEST_COLLECTOR_HELPER")
 	if helper == "" {
 		return nil, nil
+	}
+	if err := ensureTracefs(); err != nil {
+		return nil, err
 	}
 	python := os.Getenv("CLAWTUNE_GUEST_COLLECTOR_PYTHON")
 	if python == "" {

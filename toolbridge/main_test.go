@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"io"
+	"testing"
+	"time"
+)
 
 func TestParseExecEnvelope_PlainCommand(t *testing.T) {
 	payload, executionID, ok := parseExecEnvelope("echo hello")
@@ -123,5 +128,40 @@ func TestParseExecEnvelope_NoNewline(t *testing.T) {
 	}
 	if payload != raw {
 		t.Fatalf("expected raw command unchanged, got %q", payload)
+	}
+}
+
+// execTestChannel deliberately never reaches stdin EOF. Real SSH clients keep
+// the channel open while waiting for exit-status, which exposed the Cmd.Wait
+// cycle fixed by runCommand's non-interactive /dev/null stdin semantics.
+type execTestChannel struct {
+	stdout bytes.Buffer
+	stderr bytes.Buffer
+}
+
+func (c *execTestChannel) Read([]byte) (int, error)                       { select {} }
+func (c *execTestChannel) Write(p []byte) (int, error)                    { return c.stdout.Write(p) }
+func (c *execTestChannel) Close() error                                   { return nil }
+func (c *execTestChannel) CloseWrite() error                              { return nil }
+func (c *execTestChannel) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
+func (c *execTestChannel) Stderr() io.ReadWriter                          { return &c.stderr }
+
+func TestRunCommandDoesNotWaitForSSHStdinEOF(t *testing.T) {
+	channel := &execTestChannel{}
+	workdir := t.TempDir()
+	done := make(chan executionLog, 1)
+	go func() {
+		done <- runCommand(channel, "printf command-finished", workdir, time.Second, 1024)
+	}()
+	select {
+	case record := <-done:
+		if record.ExitCode != 0 {
+			t.Fatalf("command exit code = %d", record.ExitCode)
+		}
+		if channel.stdout.String() != "command-finished" {
+			t.Fatalf("stdout = %q", channel.stdout.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runCommand deadlocked waiting for SSH stdin EOF")
 	}
 }

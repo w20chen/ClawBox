@@ -69,9 +69,9 @@ def make_obs(
     )
 
 
-def sign_batch(observations, secret: str = SECRET):
+def sign_batch(observations, secret: str = SECRET, tenant: str = "tenant-a", repo: str = "github.com/acme/foo"):
     return {
-        (obs.execution_id, obs.tool_name, obs.sequence_no): sign_observation(obs, secret)
+        (obs.execution_id, obs.tool_name, obs.sequence_no): sign_observation(obs, secret, tenant, repo)
         for obs in observations
     }
 
@@ -220,7 +220,7 @@ def test_cross_tenant_isolation(db):
     db.commit()
     ingest(
         db, tenant_id="tenant-b", repo_fingerprint="github.com/acme/foo",
-        observations=obs_b, signatures=sign_batch(obs_b), ingest_secret=SECRET,
+        observations=obs_b, signatures=sign_batch(obs_b, tenant="tenant-b"), ingest_secret=SECRET,
     )
     db.commit()
     # tenant A's snapshot contains only A's observation.

@@ -42,10 +42,16 @@ class CellPhase(StrEnum):
     SUCCEEDED = "Succeeded"
     FAILED = "Failed"
     TIMED_OUT = "TimedOut"
+    CANCELLED = "Cancelled"
     CLEANED = "Cleaned"
 
 
-TERMINAL = {CellPhase.SUCCEEDED, CellPhase.FAILED, CellPhase.TIMED_OUT}
+TERMINAL = {
+    CellPhase.SUCCEEDED,
+    CellPhase.FAILED,
+    CellPhase.TIMED_OUT,
+    CellPhase.CANCELLED,
+}
 RESERVED = {
     CellPhase.ADMITTED, CellPhase.TOOL_STARTING, CellPhase.TOOL_READY,
     CellPhase.RUNTIME_RUNNING, CellPhase.COLLECTING,
@@ -297,6 +303,15 @@ class CellReconciler:
             phase = CellPhase(status.get("phase", CellPhase.QUEUED.value))
         except ValueError:
             self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="InvalidPhase")
+            return
+
+        if task.get("spec", {}).get("desiredState") == "Cancelled" and phase not in TERMINAL:
+            self._patch_status(
+                task,
+                CellPhase.CANCELLED,
+                outcome="Cancelled",
+                reason="CancellationRequested",
+            )
             return
 
         if not status.get("phase"):

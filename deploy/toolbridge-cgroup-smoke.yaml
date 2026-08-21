@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clawbox-toolbridge-cgroup-smoke
+  namespace: clawbox-benchmarks
+spec:
+  automountServiceAccountToken: false
+  runtimeClassName: kata-fc-arm64-ebpf
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/arch: arm64
+    clawbox.openai.com/firecracker-ready: "true"
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: 127.0.0.1:5000/clawbox/tool-telemetry-research:dev
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-ec"]
+      args:
+        - >-
+          mkdir -p /tmp/keys /tmp/work /tmp/traces;
+          ssh-keygen -q -t ed25519 -N '' -f /tmp/keys/client;
+          ssh-keygen -q -t ed25519 -N '' -f /tmp/keys/host;
+          export TOOL_BRIDGE_WORKDIR=/tmp/work
+          TOOL_BRIDGE_HOST_KEY=/tmp/keys/host
+          TOOL_BRIDGE_AUTHORIZED_KEY=/tmp/keys/client.pub
+          TOOL_BRIDGE_LOG_PATH=/tmp/traces/tool-bridge.jsonl
+          TOOL_EXEC_TIMEOUT_SECONDS=30
+          CLAWTUNE_GUEST_COLLECTOR_HELPER=
+          CLAWBOX_REPOSITORY=clawbox/live-cgroup-smoke;
+          /usr/local/bin/tool-bridge >/tmp/bridge.log 2>&1 & bridge_pid=$!;
+          for i in $(seq 1 60); do
+            grep -q 'tool bridge ready' /tmp/bridge.log && break;
+            sleep 1;
+          done;
+          grep -q 'tool bridge ready' /tmp/bridge.log;
+          ssh -p 2222 -i /tmp/keys/client
+          -o BatchMode=yes -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null executor@127.0.0.1
+          "sleep 2; echo cgroup-smoke-ok";
+          sleep 1;
+          kill $bridge_pid;
+          /opt/clawtune/venv/bin/python -c
+          'import glob,json; p=glob.glob("/tmp/traces/tool-resource/cgroup-resource-*.json"); assert len(p)==1,p; d=json.load(open(p[0])); assert d["schema"]=="cgroup_resource_v1"; assert d["source"]=="cgroup-v2",d; assert d["sampling_quality"]=="valid",d; assert d["cpu_time_s"]>0,d; assert d["memory_rss_peak_bytes"]>0,d; print({k:d[k] for k in ("schema","source","sampling_quality","cpu_time_s","memory_rss_peak_bytes","sampling_point_count")})'
+      resources:
+        requests: {cpu: "250m", memory: "256Mi"}
+        limits: {cpu: "2", memory: "1Gi"}
+      securityContext:
+        readOnlyRootFilesystem: false
+        capabilities:
+          add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE]

@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=127.0.0.1:5000/clawbox/tool-telemetry-research:t2-candidate
+FROM golang:1.25-bookworm AS build
+ARG GOPROXY=https://goproxy.cn,direct
+WORKDIR /src
+COPY toolbridge/go.mod toolbridge/go.sum ./
+RUN GOPROXY="${GOPROXY}" go mod download
+COPY toolbridge/*.go ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath \
+      -ldflags='-s -w -buildid=' -o /out/tool-bridge .
+
+FROM ${BASE_IMAGE}
+COPY --from=build /out/tool-bridge /usr/local/bin/tool-bridge

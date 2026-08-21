@@ -40,10 +40,20 @@ spec:
             spec:
               type: object
               x-kubernetes-validations:
-                - rule: "self == oldSelf"
-                  message: "SandboxTask spec is immutable; create a new task for a retry"
+                - rule: "self == oldSelf || (oldSelf.desiredState == 'Running' && self.desiredState == 'Cancelled')"
+                  message: "SandboxTask spec is immutable except one-way cancellation via desiredState"
               required: [toolImage, problemStatement, llmSecretName, llmEgressCIDR]
               properties:
+                runRef:
+                  type: object
+                  required: [tenantID, runID, attemptID]
+                  properties:
+                    tenantID: {type: string, minLength: 1, maxLength: 128}
+                    runID: {type: string, minLength: 1, maxLength: 128}
+                    attemptID: {type: string, minLength: 1, maxLength: 128}
+                idempotencyKey: {type: string, minLength: 1, maxLength: 256}
+                requestDigest: {type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
+                desiredState: {type: string, enum: [Running, Cancelled], default: Running}
                 toolImage:
                   type: string
                   pattern: '^.+@sha256:[a-f0-9]{64}$'

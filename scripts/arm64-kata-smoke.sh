@@ -35,7 +35,10 @@ done
 
 valid_name() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#1} -le 63 ]]; }
 valid_name "${RUNTIME_CLASS}" || { echo "invalid RuntimeClass name" >&2; exit 64; }
-[[ "${RUNTIME_CLASS}" == kata-fc-arm64 ]] || { echo "only kata-fc-arm64 is accepted" >&2; exit 64; }
+[[ "${RUNTIME_CLASS}" =~ ^kata-fc-arm64(-ebpf)?$ ]] || {
+  echo "runtime class must be kata-fc-arm64 or kata-fc-arm64-ebpf" >&2
+  exit 64
+}
 valid_name "${NAMESPACE}" || { echo "invalid namespace" >&2; exit 64; }
 [[ "${IMAGE}" =~ ^[A-Za-z0-9._/@:-]+$ ]] || { echo "invalid image reference" >&2; exit 64; }
 
@@ -51,10 +54,25 @@ overhead_memory="$(kubectl get runtimeclass "${RUNTIME_CLASS}" -o jsonpath='{.ov
 }
 
 host_command() {
-  if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo -n "$@"; fi
+  if [[ "$(id -u)" == 0 ]]; then
+    "$@"
+    return
+  fi
+  if sudo -n true 2>/dev/null; then
+    sudo -n "$@"
+    return
+  fi
+  if [[ -t 0 ]]; then
+    sudo "$@"
+    return
+  fi
+  echo "host probe requires sudo; run interactively or cache credentials with: sudo -v" >&2
+  return 77
 }
 command -v ctr >/dev/null 2>&1 || { echo "ctr is required on the node running this gate" >&2; exit 69; }
-host_command bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" --root /opt/kata
+# The artifact tree is normally world-readable. Avoid requiring blanket sudo;
+# the narrowly permitted `ctr` probes below still use host_command.
+bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" --root /opt/kata
 host_command ctr plugins ls | awk '$1 ~ /snapshotter/ && $2 == "devmapper" && $NF == "ok" {found=1} END {exit !found}' \
   || { echo "devmapper snapshotter is not healthy" >&2; exit 1; }
 config_dump="$(host_command containerd config dump)"
@@ -72,7 +90,9 @@ handler_block="$(awk -v cls="${RUNTIME_CLASS}" '
 # containerd's config dump quotes values with single quotes; accept both.
 grep -Eq "snapshotter[[:space:]]*=[[:space:]]*['\"]devmapper['\"]" <<<"${handler_block}" \
   || { echo "handler does not select devmapper" >&2; exit 1; }
-grep -F 'configuration-fc-arm64.toml' <<<"${handler_block}" >/dev/null \
+expected_config="configuration-fc-arm64.toml"
+[[ "${RUNTIME_CLASS}" == kata-fc-arm64-ebpf ]] && expected_config="configuration-fc-arm64-ebpf.toml"
+grep -F "${expected_config}" <<<"${handler_block}" >/dev/null \
   || { echo "handler does not select the audited Firecracker config" >&2; exit 1; }
 active_snapshots_before="$(host_command ctr -n k8s.io snapshots --snapshotter devmapper ls 2>/dev/null | awk 'NR > 1 && $3 == "Active" {count++} END {print count+0}')"
 

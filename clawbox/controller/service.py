@@ -3,6 +3,7 @@ import os, subprocess, time, uuid
 from pathlib import Path
 from fastapi import HTTPException
 from clawbox.common.config import settings
+from clawbox.common.auth import grant_public_key
 from clawbox.common.db import SessionLocal, ToolInstanceRow, WorkspaceBindingRow
 from clawbox.common.http import post_json
 from clawbox.common.models import ExecuteRequest, ToolInstance, ToolSpec
@@ -37,8 +38,8 @@ class Controller:
                         network=os.getenv("CONTROLLER_DOCKER_NETWORK", "clawbox_default"),
                         nano_cpus=spec.cpu_count * 1_000_000_000, mem_limit=spec.memory_bytes,
                         environment={"TOOL_POD_UID":uid,"TENANT_ID":spec.tenant_id,
-                            "WORKSPACE_ID":spec.workspace_id,"CLAWBOX_SERVICE_TOKEN":settings.service_token,
-                            "CLAWBOX_GRANT_SECRET":settings.grant_secret})
+                            "WORKSPACE_ID":spec.workspace_id,
+                            "CLAWBOX_GRANT_PUBLIC_KEY":grant_public_key()})
                     backend_id = container.id
                     self._wait_ready(endpoint)
                 except Exception as exc:
@@ -77,7 +78,13 @@ class Controller:
                     except docker.errors.NotFound: pass
                 elif row.backend == "kubernetes":
                     self._kubernetes().delete(row.backend_id)
-                self.local_agents.pop(uid, None); row.state = "DESTROYED"
+                agent = self.local_agents.pop(uid, None)
+                if agent is not None:
+                    agent.stop()
+                binding = db.get(WorkspaceBindingRow, row.workspace_id)
+                if binding is not None and binding.tool_pod_uid == uid:
+                    db.delete(binding)
+                row.state = "DESTROYED"
             return self._model(row)
     @staticmethod
     def _model(row):

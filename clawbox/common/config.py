@@ -9,6 +9,7 @@ class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./clawbox.db")
     service_token: str = os.getenv("CLAWBOX_SERVICE_TOKEN", "development-only-token")
     grant_secret: str = os.getenv("CLAWBOX_GRANT_SECRET", "development-only-grant-secret")
+    grant_public_key: str = os.getenv("CLAWBOX_GRANT_PUBLIC_KEY", "")
     allocator_url: str = os.getenv("ALLOCATOR_URL", "http://allocator:8081")
     controller_url: str = os.getenv("CONTROLLER_URL", "http://controller:8082")
     scheduler_url: str = os.getenv("SCHEDULER_URL", "http://tenant-scheduler:8080")

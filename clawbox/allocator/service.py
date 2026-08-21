@@ -36,6 +36,12 @@ class Allocator:
                 db.flush()
             existing = db.scalar(select(LeaseRow).where(LeaseRow.execution_id == request.execution_id))
             if existing is not None:
+                if (
+                    existing.tenant_id != request.tenant_id
+                    or existing.cpu_count != request.cpu_count
+                    or existing.memory_bytes != request.memory_bytes
+                ):
+                    raise HTTPException(409, "execution_id is already bound to a different request")
                 return self._model(existing)
             active = list(db.scalars(select(LeaseRow).where(
                 LeaseRow.tenant_id == request.tenant_id,
@@ -79,11 +85,13 @@ class Allocator:
 
     def renew(self, lease_id: str, request: RenewLease) -> ResourceLease:
         with SessionLocal.begin() as db:
+            now = utcnow()
+            self._mark_expired(db, now)
             row = db.get(LeaseRow, lease_id)
             self._fence(row, request.fencing_token)
             if row.state != LeaseState.ACTIVE.value:
                 raise HTTPException(409, f"lease is {row.state}")
-            row.expires_at = utcnow() + timedelta(seconds=request.ttl_seconds)
+            row.expires_at = now + timedelta(seconds=request.ttl_seconds)
             return self._model(row)
 
     def release(self, lease_id: str, request: ReleaseLease) -> ResourceLease:
@@ -106,7 +114,8 @@ class Allocator:
                 LeaseRow.state.in_([LeaseState.ACTIVE.value, LeaseState.LEASE_EXPIRED.value])
             )))
         used = sum(row.cpu_count for row in active)
-        return {"total_cpu": total, "active_cpu": used, "available_cpu": total - used,
+        reserved = min(max(0, int(total * settings.reserved_cpu_fraction + 0.999)), max(0, total - 1))
+        return {"total_cpu": total, "active_cpu": used, "available_cpu": max(0, total - reserved - used),
                 "numa_capacity": nodes, "allocator_epoch": self.epoch}
 
     @staticmethod

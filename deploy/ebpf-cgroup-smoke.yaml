@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clawbox-ebpf-cgroup-smoke
+  namespace: clawbox-benchmarks
+  labels:
+    app.kubernetes.io/name: clawbox-ebpf-cgroup-smoke
+spec:
+  automountServiceAccountToken: false
+  runtimeClassName: kata-fc-arm64-ebpf
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/arch: arm64
+    clawbox.openai.com/firecracker-ready: "true"
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: 127.0.0.1:5000/clawbox/tool-telemetry-research:dev
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - >-
+          mkdir -p /sys/kernel/tracing;
+          test -r /sys/kernel/tracing/events/sched/sched_process_exit/id ||
+          mount -t tracefs tracefs /sys/kernel/tracing;
+          test -r /sys/kernel/tracing/events/sched/sched_process_exit/id;
+          /opt/clawtune/venv/bin/python /opt/clawtune-guest/tools/check_guest_ebpf.py
+          --artifact /tmp/native-artifact.json
+          --report /tmp/native-report.json
+          --repo clawbox/live-smoke
+          --command 'python3 -c "sum(i*i for i in range(50000000))"';
+          rc=$?;
+          echo CHECKER_EXIT=$rc;
+          test -r /sys/fs/cgroup/cgroup.controllers && echo CGROUP_V2=available;
+          cat /tmp/native-report.json 2>/dev/null || true;
+          cat /tmp/native-artifact.json 2>/dev/null || true;
+          exit $rc
+      resources:
+        requests: {cpu: "250m", memory: "256Mi"}
+        limits: {cpu: "2", memory: "1Gi"}
+      securityContext:
+        readOnlyRootFilesystem: false
+        capabilities:
+          add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE]
