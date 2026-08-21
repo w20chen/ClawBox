@@ -1,102 +1,140 @@
 # ClawBox
 
-ClawBox runs coding-agent tasks in two isolated ARM64 Firecracker microVMs:
-one Runtime VM for the agent and one Tool VM for the repository and command
-execution. It provides tenant-scoped submission, immutable task images,
-bounded resource profiles, durable result/trace upload, native command
-telemetry, and shadow resource prediction.
+ClawBox runs each coding-agent task in two isolated ARM64 Firecracker
+microVMs: a Runtime VM for the agent and a Tool VM for repository access and
+command execution. Kubernetes admits both VMs as one `SandboxTask` Cell.
 
-## What is supported
+## Canonical production architecture
 
-- Native ARM64 Kubernetes nodes with Kata Containers and Firecracker.
-- One Runtime VM and one Tool VM per task, admitted as one capacity unit.
-- Immutable `image@sha256:...` task images; unsupported architectures fail
-  closed.
-- Tenant-scoped, idempotent run submission through an HTTP API.
-- Direct `SandboxTask` submission for cluster debugging and benchmark runs.
-- Task-specific SSH keys, isolated NetworkPolicies, and separate Runtime/Tool
-  credentials.
-- SWE-ReBench ARM64 image building and parallel benchmark submission.
-- Per-execution cgroup-v2 CPU, memory, disk, timeout, exit, and process-tree
-  measurements inside the Tool VM.
-- Native ClawTune eBPF clause telemetry inside the Tool guest kernel,
-  including pipelines and concurrent commands.
-- Signed, immutable, tenant/repository-scoped native telemetry ingestion.
-- Atomic `ClauseResourceKB` and `RuntimeToolResourceKB` generations.
-- Shadow predictions that identify their KB generation and evidence run, then
-  join predicted values to real Tool-VM measurements.
+ClawBox has one supported production deployment architecture:
 
-Resource predictions do not control task sizing. `FixedProfileSizer` remains
-authoritative while prediction quality is evaluated.
+```text
+native ARM64 Linux
+  -> Kubernetes + containerd
+  -> Kata Containers + Firecracker
+  -> Runtime VM + Tool VM
+  -> Tool-VM cgroup v2 + eBPF telemetry
+  -> signed tenant/repository-scoped knowledge base
+```
+
+`docker-compose.yml` and `scripts/linux-deploy.sh` are developer checks only.
+They do not run Firecracker, the production Cell, or native Tool-VM eBPF, and
+are not an alternative production deployment.
+
+## Supported scope
+
+- One native ARM64 Kubernetes node.
+- Kata Containers 3.31.0 with Firecracker 1.12.1.
+- One Runtime VM and one Tool VM per task.
+- Immutable ARM64 task and platform images (`image@sha256:...`).
+- Tenant-scoped Managed API submission and idempotency.
+- Direct `SandboxTask` submission for debugging.
+- Per-task credentials and NetworkPolicies.
+- Per-execution Tool-VM cgroup-v2 measurements.
+- Native ClawTune eBPF clause telemetry inside the Tool guest kernel.
+- Signed, immutable telemetry ingestion and atomic KB generations.
+- Fixed resource profiles. Predictions are evaluated in shadow mode and do
+  not resize tasks.
+
+There is no supported x86, QEMU, runc, alternate-VMM, or multi-node fallback.
 
 ## Architecture
 
 ```text
-Managed API ──> Dispatcher ──> SandboxTask ──> Cell Controller
-                                           ├── Tool Firecracker VM
-                                           │   └── task image + Tool Bridge
-                                           └── Runtime Firecracker VM
-                                               └── OpenClaw + ClawTune
+Managed API -> Dispatcher -> SandboxTask -> Cell Controller
+                                      |-> Tool Firecracker VM
+                                      |    -> task image + Tool Bridge
+                                      `-> Runtime Firecracker VM
+                                           -> OpenClaw + ClawTune
 
-Tool VM telemetry ──> signed native artifacts ──> Tuning API ──> atomic KB
-                                                               └── next run
+Tool VM telemetry -> signed native artifacts -> Tuning API -> atomic KB
+                                                            `-> next run
 ```
 
 The eBPF collector runs inside the Tool VM. Moving it to the Kubernetes host
-or Runtime VM would lose command-level process attribution.
+or Runtime VM loses command-level process attribution.
 
-## Requirements
+## Before you start
 
-The production path requires:
+You must provide the following values. The repository cannot invent them:
 
-- an ARM64 Linux host with hardware virtualization;
-- Kubernetes and containerd;
-- two dedicated block devices for the devmapper thin pool;
-- Kata Containers 3.31.0 and Firecracker 1.12.1;
-- Docker with Buildx on the native ARM64 builder;
-- a sibling ClawTune checkout at `../ClawTune`;
-- a registry reachable by containerd;
-- Python 3.12+ for the client and build tools.
+| Input | Required value |
+| --- | --- |
+| Host | Dedicated ARM64 Linux host with hardware virtualization |
+| Fresh-host storage | Two unused whole block devices; both are erased |
+| Registry | Registry reachable from Docker and containerd |
+| ClawTune | Checkout beside ClawBox at `../ClawTune` |
+| PostgreSQL | Reachable `postgresql+psycopg://...` URL |
+| LLM | API key, upstream base URL, provider model, OpenClaw model ref |
+| Task image | Native ARM64 `image@sha256:...` containing the Tool Bridge/telemetry overlay |
+| Network policy | Exact LLM-provider egress CIDR; do not use a placeholder |
 
-Do not initialize disks until the bootstrap plan shows the intended device
-names. The apply command erases both supplied devices.
+The validated host software is Kubernetes 1.35, containerd 2.3.4, Kata
+3.31.0, Firecracker 1.12.1, Docker with Buildx, cgroup v2, and Python 3.12+.
 
-## Install the client and run tests
+## 1. Check out an exact release tree
+
+ClawBox and ClawTune must be siblings:
+
+```text
+/home/USER/
+|-- ClawBox/
+`-- ClawTune/
+```
+
+For a new checkout:
 
 ```bash
-git clone https://github.com/w20chen/ClawBox.git
+cd /home/USER
 git clone https://github.com/w20chen/ClawTune.git
+git clone https://github.com/w20chen/ClawBox.git
 cd ClawBox
+git status --short --branch
+git rev-parse HEAD
+```
 
+Do not build from a dirty working tree. Record both repository revisions with
+the deployment evidence.
+
+### Existing host or divergent checkout
+
+Do not run `git reset --hard`, do not delete local work, and do not rerun the
+destructive host bootstrap. Build from a clean detached worktree instead:
+
+```bash
+cd /home/USER/ClawBox
+git fetch origin main
+git status --short --branch
+release="../ClawBox-release-$(git rev-parse --short=12 origin/main)"
+git worktree add --detach "$release" origin/main
+cd "$release"
+git status --porcelain       # must print nothing
+git rev-parse HEAD
+```
+
+This leaves the existing checkout and its commits untouched. Because the
+release worktree is also directly under `/home/USER`, its default
+`../ClawTune` build context remains valid.
+
+## 2. Install Python tools and run tests
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e '.[dev,postgres]'
 python3 -m pytest -q
 ```
 
-ClawTune must stay beside ClawBox because the image builds use it as a Docker
-build context.
+Do not continue if tests fail.
 
-## Local Docker check
+## 3. Prepare or verify the host
 
-This checks the API, scheduler, allocator, Docker execution path, telemetry
-join, KB update, and lease release. It does not test Firecracker.
+Choose exactly one path.
 
-```bash
-bash scripts/linux-deploy.sh all
-bash scripts/linux-deploy.sh status
-```
+### A. Fresh dedicated host
 
-Useful follow-up commands:
-
-```bash
-bash scripts/linux-deploy.sh logs
-bash scripts/linux-deploy.sh down    # preserves the database volume
-```
-
-## Prepare an ARM64 Firecracker host
-
-Run the read-only plan first:
+The following `plan` is read-only. Replace both device placeholders with
+canonical whole-device paths and inspect every line:
 
 ```bash
 bash scripts/bootstrap-openeuler-arm64.sh plan \
@@ -104,7 +142,9 @@ bash scripts/bootstrap-openeuler-arm64.sh plan \
   --devmapper-meta-device /dev/META_DISK
 ```
 
-Apply only after checking the canonical paths printed by the plan:
+`apply` erases both devices. Run it only on a fresh dedicated host, and only
+after verifying that neither device contains the operating system or user
+data:
 
 ```bash
 sudo bash scripts/bootstrap-openeuler-arm64.sh apply \
@@ -113,39 +153,55 @@ sudo bash scripts/bootstrap-openeuler-arm64.sh apply \
   --confirm-erase /dev/DATA_DISK,/dev/META_DISK
 ```
 
-Install the isolated Tool-VM eBPF runtime and run both host gates:
+Install the Tool-VM eBPF RuntimeClass after the base host succeeds:
 
 ```bash
 bash scripts/install-ebpf-kata-runtime.sh apply
 sudo bash scripts/install-shim-nofile-wrapper.sh
-bash deploy/check-host.sh --runtime-class kata-fc-arm64
+```
+
+### B. Already provisioned host
+
+Never run bootstrap `apply` again. Refresh sudo first because KVM, containerd,
+and LVM checks require root access:
+
+```bash
+sudo -v
+sudo bash scripts/bootstrap-openeuler-arm64.sh status
+sudo bash deploy/check-host.sh --runtime-class kata-fc-arm64
 bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 ```
 
-The shim wrapper must report a soft `nofile` limit of at least `8192`
-(`524288` on the validated host). The smoke test uses cached passwordless sudo
-when available and otherwise prompts on an interactive terminal. For a
-non-interactive session, run `sudo -v` first so the narrowly scoped `ctr`
-preflight can access containerd.
+The host is ready only when:
 
-The node should be labeled ready only after both gates pass:
+- the FC-0 artifact audit has zero failures;
+- the shim soft `nofile` limit is at least 8192;
+- the devmapper plugin is `ok` and below its pressure threshold;
+- the Kata smoke reports `PASS`;
+- both `kata-fc-arm64` and `kata-fc-arm64-ebpf` exist.
+
+Label the node only after those gates pass:
 
 ```bash
 kubectl label node "$(hostname)" \
   clawbox.openai.com/firecracker-ready=true --overwrite
 ```
 
-## Build and push the platform images
+If a non-root status command says it cannot inspect LVM or containerd, rerun
+it with `sudo`; permission failure does not mean the thin pool is missing.
 
-Build on the native ARM64 host. Set mirrors only when the default registries
-are not reachable.
+## 4. Build and push immutable platform images
+
+Build on the native ARM64 host. A local registry on the same node may use
+`127.0.0.1:5000/clawbox`; otherwise use a registry containerd can reach.
 
 ```bash
 export REGISTRY=127.0.0.1:5000/clawbox
 export CLAWTUNE_ROOT="$PWD/../ClawTune"
+export TAG="$(git rev-parse --short=12 HEAD)"
 export PUSH=1
 
-# Optional regional mirrors:
+# Set these only when the default upstreams are unreachable:
 # export GOPROXY=https://goproxy.cn,direct
 # export NPM_REGISTRY=https://registry.npmmirror.com
 # export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -153,113 +209,207 @@ export PUSH=1
 bash scripts/build-kubernetes-images.sh
 ```
 
-This builds the control-plane, Runtime, Tool Bridge, and static ARM64 Tool
-Bridge binary. Pin released images by digest in your deployment manifests.
+The command fails on a non-native builder and prints three immutable
+references after a successful push. Save them as:
 
-### Build SWE-ReBench task images
+```bash
+export CONTROL_IMAGE='REGISTRY/control-plane-arm64@sha256:...'
+export RUNTIME_IMAGE='REGISTRY/runtime-arm64@sha256:...'
+export TOOL_BRIDGE_IMAGE='REGISTRY/tool-bridge-arm64@sha256:...'
+```
 
-Install the image-factory dependency and provide a pinned task selection,
-dataset, SWE-bench checkout, and registry:
+Tags such as `:dev` and `:latest` are not release identifiers.
+
+Render deployable manifests from the immutable references:
+
+```bash
+python3 scripts/render-kubernetes-images.py \
+  --control-image "$CONTROL_IMAGE" \
+  --runtime-image "$RUNTIME_IMAGE" \
+  --tool-bridge-image "$TOOL_BRIDGE_IMAGE"
+```
+
+The rendered files are written to `.artifacts/rendered-deploy/`. Apply those
+files, not the source manifests containing development tags.
+
+### Build or overlay a task image
+
+ClawBox does not ship a universal repository image. For SWE-ReBench, provide
+the dataset, pinned task selection, SWE-bench checkout, and registry:
 
 ```bash
 python3 -m pip install -e '.[images]'
-
 python3 scripts/build-swe-rebench-arm64.py \
   --dataset /data/swe-rebench.parquet \
   --selection ../ClawTune/swe_rebench/tasks.json \
   --swebench-root /src/SWE-bench-fork \
-  --registry registry.example.com/clawbox \
+  --registry REGISTRY/clawbox \
   --mapping /data/swe-rebench-arm64-map.json \
   --tool-bridge-binary .artifacts/tool-bridge-arm64/tool-bridge \
   --push --fail-fast
 ```
 
-The mapping records supported images as native ARM64 immutable digests.
-Submission rejects missing or mutable mappings.
-
-To add the production eBPF collector to an existing task image:
+The mapping is accepted only when each task resolves to a native ARM64 digest.
+To add the current production telemetry collector to an existing ARM64 task
+image:
 
 ```bash
-export BASE_IMAGE='registry.example.com/task@sha256:BASE_DIGEST'
-export REGISTRY='registry.example.com/clawbox'
-export TAG='tool-telemetry-20260821'
+export BASE_IMAGE='REGISTRY/task@sha256:BASE_DIGEST'
+export REGISTRY='REGISTRY/clawbox'
+export TAG="tool-telemetry-$(git rev-parse --short=12 HEAD)"
 export CLAWTUNE_ROOT="$PWD/../ClawTune"
 bash scripts/rebuild-swe-rebench-tool-overlay.sh
 ```
 
-The command prints the final immutable `TOOL_IMAGE=...@sha256:...` value.
-Put that exact digest in the SWE-ReBench mapping or managed template Secret;
-do not leave a previous Tool Bridge digest pinned after rebuilding telemetry.
+Use the immutable `TOOL_IMAGE=...@sha256:...` printed by the command in the
+task mapping or Managed API template. Never keep a previous digest after
+rebuilding Tool Bridge or eBPF code.
 
-## Deploy the cluster services
+## 5. Configure persistence and Secrets
 
-Copy the example Secrets, replace every placeholder, and apply them. Do not
-commit the resulting files.
+Create the namespaces first:
+
+```bash
+kubectl create namespace clawbox-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace clawbox-benchmarks --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Copy the examples outside the repository and replace every placeholder:
 
 ```bash
 cp deploy/control-plane-secret.example.yaml /tmp/clawbox-control-plane.yaml
+cp deploy/managed-secret.example.yaml /tmp/clawbox-managed.yaml
 cp deploy/swe-rebench-secret.example.yaml /tmp/clawbox-llm.yaml
 ${EDITOR:-vi} /tmp/clawbox-control-plane.yaml
+${EDITOR:-vi} /tmp/clawbox-managed.yaml
 ${EDITOR:-vi} /tmp/clawbox-llm.yaml
-
-kubectl apply -f deploy/runtimeclass-firecracker.yaml
-kubectl apply -f deploy/runtimeclass-firecracker-ebpf.yaml
-kubectl apply -f deploy/sandboxtask-crd.yaml
-kubectl apply -f deploy/control-plane-rbac.yaml
-kubectl apply -f /tmp/clawbox-control-plane.yaml
-kubectl apply -f /tmp/clawbox-llm.yaml
-kubectl apply -f deploy/trace-ingester.yaml
-kubectl apply -f deploy/tune-kb.yaml
-python3 scripts/collect-node-capacity.py --configmap | kubectl apply -f -
-kubectl apply -f deploy/cell-controller.yaml
-kubectl -n clawbox-system rollout status deployment/clawbox-cell-controller
 ```
 
-Replace the example image references in the manifests with images from your
-registry before applying them.
+Secret locations and consumers are fixed:
 
-### Deploy the tenant-scoped API
+| Secret | Namespace | Required keys |
+| --- | --- | --- |
+| `clawbox-control-plane` | `clawbox-system` | `database-url`, `service-token`, `ingest-secret` |
+| `clawbox-managed` | `clawbox-system` | `database-url`, `service-token`, `templates` |
+| `clawbox-llm` | `clawbox-benchmarks` | `llm-api-key`, `llm-upstream-base-url`, `llm-model`, `openclaw-model-ref` |
 
-The API and dispatcher require PostgreSQL. Run migrations first, then apply
-the API Secret and workloads:
+Use independent random values of at least 32 bytes for the service and ingest
+secrets. Do not use the development defaults in `clawbox/common/config.py`.
+
+The `templates` JSON in `clawbox-managed` must contain:
+
+- a Tool task image pinned by digest;
+- the same immutable Runtime image rendered above;
+- the exact LLM egress CIDR;
+- the intended resource profile and Secret name.
+
+Validate the YAML locally before applying it:
+
+```bash
+kubectl apply --dry-run=client -f /tmp/clawbox-control-plane.yaml
+kubectl apply --dry-run=client -f /tmp/clawbox-managed.yaml
+kubectl apply --dry-run=client -f /tmp/clawbox-llm.yaml
+```
+
+The Managed API and trace ingester require PostgreSQL. Run migrations from the
+same release tree and with the same database URL stored in the Secret:
 
 ```bash
 export DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST/clawbox'
 alembic upgrade head
-
-cp deploy/managed-secret.example.yaml /tmp/clawbox-managed.yaml
-${EDITOR:-vi} /tmp/clawbox-managed.yaml
-kubectl apply -f deploy/managed-rbac.yaml
-kubectl apply -f /tmp/clawbox-managed.yaml
-kubectl apply -f deploy/managed-control-plane.yaml
-kubectl -n clawbox-system rollout status deployment/clawbox-managed-api
-kubectl -n clawbox-system rollout status deployment/clawbox-managed-dispatcher
 ```
 
-For local access:
+The default tuning KB is single-node SQLite persisted at
+`/var/lib/clawbox/tune-kb`. Set `TUNING_DATABASE_URL` in `deploy/tune-kb.yaml`
+if PostgreSQL-backed KB storage is required. Back up the selected store before
+upgrading.
+
+## 6. Deploy in the required order
+
+```bash
+kubectl apply -f deploy/runtimeclass-firecracker.yaml
+kubectl apply -f deploy/runtimeclass-firecracker-ebpf.yaml
+kubectl apply -f deploy/sandboxtask-crd.yaml
+kubectl apply -f deploy/control-plane-rbac.yaml
+kubectl apply -f deploy/managed-rbac.yaml
+
+kubectl apply -f /tmp/clawbox-control-plane.yaml
+kubectl apply -f /tmp/clawbox-managed.yaml
+kubectl apply -f /tmp/clawbox-llm.yaml
+
+python3 scripts/collect-node-capacity.py --configmap | kubectl apply -f -
+kubectl apply -f .artifacts/rendered-deploy/trace-ingester.yaml
+kubectl apply -f .artifacts/rendered-deploy/tune-kb.yaml
+kubectl apply -f .artifacts/rendered-deploy/cell-controller.yaml
+kubectl apply -f .artifacts/rendered-deploy/managed-control-plane.yaml
+```
+
+The supplied Dispatcher uses the served `v1alpha1` CRD. Do not switch it to
+`v1alpha2` until the controller and conversion webhook support that version
+end to end.
+
+Wait for every service:
+
+```bash
+kubectl -n clawbox-system rollout status deployment/clawbox-ingester --timeout=300s
+kubectl -n clawbox-system rollout status deployment/clawbox-tune-kb --timeout=300s
+kubectl -n clawbox-system rollout status deployment/clawbox-cell-controller --timeout=300s
+kubectl -n clawbox-system rollout status deployment/clawbox-managed-api --timeout=300s
+kubectl -n clawbox-system rollout status deployment/clawbox-managed-dispatcher --timeout=300s
+kubectl -n clawbox-system get pods
+```
+
+Confirm that running Deployments use the expected digests:
+
+```bash
+kubectl -n clawbox-system get deployment \
+  -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
+```
+
+Do not continue if a platform Deployment still shows `:dev`, `:latest`, or an
+old digest.
+
+## 7. Run mandatory acceptance gates
+
+First run native eBPF/cgroup acceptance using a task image that contains the
+production telemetry overlay:
+
+```bash
+bash scripts/run-toolbridge-ebpf-integration.sh \
+  --image 'REGISTRY/task@sha256:DIGEST' \
+  --namespace clawbox-ebpf-acceptance \
+  --output .artifacts/tool-ebpf-acceptance.log
+```
+
+Success requires `INTEGRATION_RC=0`, distinct concurrent cgroup IDs, non-zero
+CPU/RSS, valid native artifacts, zero telemetry loss, and successful cleanup.
+Command exit code zero by itself is not telemetry success.
+
+Then validate KB signature scope and persistence:
+
+```bash
+kubectl -n clawbox-system port-forward service/clawbox-tune-kb 8086:8086
+export CLAWBOX_SERVICE_TOKEN='CONTROL_PLANE_TOKEN'
+export CLAWBOX_KB_INGEST_SECRET='CONTROL_PLANE_INGEST_SECRET'
+python3 scripts/live-kb-smoke.py
+python3 scripts/live-kb-smoke.py --verify-only
+```
+
+Finally validate the Managed API and cancellation path:
 
 ```bash
 kubectl -n clawbox-system port-forward service/clawbox-managed-api 8085:8085
+export CLAWBOX_API_URL=http://127.0.0.1:8085
+CLAWBOX_SERVICE_TOKEN='MANAGED_SERVICE_TOKEN' python3 scripts/live-managed-cancel-smoke.py
 ```
 
-The supplied dispatcher targets the currently served `v1alpha1` CRD. Do not
-switch it to `v1alpha2` until the controller and conversion webhook support
-that version end to end.
-
-## Submit and manage a run
-
-Set the API connection once. Prefer the environment variable so the token is
-not stored in shell history:
+## 8. Submit a real run
 
 ```bash
 export CLAWBOX_API_URL=http://127.0.0.1:8085
-export CLAWBOX_TOKEN='replace-with-service-token'
+export CLAWBOX_TOKEN='MANAGED_SERVICE_TOKEN'
 export CLAWBOX_TENANT='team-a'
-```
 
-Submit one task and watch it:
-
-```bash
 scripts/clawbox submit \
   --project demo \
   --template swe-rebench-arm64 \
@@ -271,7 +421,7 @@ scripts/clawbox submit \
   --watch
 ```
 
-Inspect or operate on the returned run ID:
+Use the returned run ID with:
 
 ```bash
 scripts/clawbox status RUN_ID
@@ -282,162 +432,111 @@ scripts/clawbox cancel RUN_ID
 scripts/clawbox retry RUN_ID
 ```
 
-The API records cancel intent immediately, the dispatcher deletes the bound
-`SandboxTask`, and the controller removes task-owned child resources. A
-cancelled run remains terminal and cannot later be overwritten as succeeded.
-
-### Direct cluster submission
-
-For cluster debugging without the API, create one `SandboxTask` directly:
+For direct cluster debugging without the Managed API:
 
 ```bash
 bash deploy/cell.sh deploy \
   --task demo-001 \
-  --tool-image 'registry.example.com/task@sha256:DIGEST' \
+  --tool-image 'REGISTRY/task@sha256:DIGEST' \
   --problem-file ./problem.txt \
-  --llm-egress-cidr 203.0.113.0/24 \
+  --llm-egress-cidr PROVIDER_CIDR \
   --profile small \
   --timeout-seconds 1800
 
 kubectl -n clawbox-benchmarks get sandboxtask demo-001 -w
-```
-
-Delete only the named task when finished:
-
-```bash
 bash deploy/cell.sh delete --task demo-001
 ```
 
-## Simulate many users
+## Successful deployment checklist
 
-The load driver creates unique tenant scopes and idempotency keys, submits
-requests concurrently, reports intake throughput, and can watch all dispatched
-runs. Ten tenants with two runs each:
+A deployment is complete only when all of the following are true:
 
-```bash
-export CLAWBOX_TOKEN='replace-with-service-token'
+- Git working tree is clean and its exact revision is recorded.
+- Platform and task images are ARM64 immutable digests.
+- Host audit, Kata smoke, and eBPF/cgroup integration pass.
+- Five ClawBox Deployments are Available: ingester, tuning KB, Cell
+  Controller, Managed API, and Dispatcher.
+- A real task reaches a correct terminal state and owned resources are cleaned.
+- Cancellation remains terminal and cannot be overwritten by late success.
+- KB accepts valid scoped telemetry, rejects tampering/cross-tenant replay,
+  and retains its generation after restart.
+- No new ClawBox `Failed` Pods remain after acceptance.
 
-scripts/load-test.sh \
-  --api-url http://127.0.0.1:8085 \
-  --tenant-count 10 \
-  --tenant-prefix team \
-  --runs-per-tenant 2 \
-  --submit-workers 20 \
-  --arrival-rate 5 \
-  --template swe-rebench-arm64 \
-  --input-ref load-test-repository \
-  --problem-file ./problem.txt \
-  --deadline-seconds 900 \
-  --watch --watch-timeout 1800 \
-  --output-json .artifacts/load-test.json
-```
+## Upgrading an existing deployment
 
-Use `--tenants tenant-a tenant-b tenant-c` instead of `--tenant-count` when
-you need explicit tenant IDs. Add `--require-success` in CI to fail on a watch
-timeout or terminal task failure. Omit `--watch` to measure API submission and
-idempotency throughput without waiting for VM execution.
+1. Create a clean release worktree from `origin/main`; never build from a
+   divergent or dirty checkout.
+2. Run tests and record the ClawBox and ClawTune revisions.
+3. Back up PostgreSQL, `/var/lib/clawbox/tune-kb`, and trace data.
+4. Build and push new revision-tagged images.
+5. Render new digest-pinned manifests.
+6. Run `alembic upgrade head` before rolling out the matching API image.
+7. Apply manifests and wait for rollouts.
+8. Rerun all mandatory acceptance gates.
 
-## Run a benchmark set
+Do not rerun host bootstrap `apply` during a software upgrade.
 
-Submit an ARM64-mapped SWE-ReBench selection directly to Kubernetes:
+## Troubleshooting
 
-```bash
-bash scripts/run-swe-rebench.sh \
-  --tasks ../ClawTune/swe_rebench/tasks.json \
-  --arm64-map /data/swe-rebench-arm64-map.json \
-  --llm-egress-cidr 203.0.113.0/24 \
-  --parallelism 8 \
-  --timeout-seconds 1800
-```
+### Host gate reports KVM, containerd, or LVM failures
 
-Run a measured scale ladder by setting the desired steps:
+Run `sudo -v`, then rerun the gate with `sudo`. Non-interactive SSH sessions
+do not inherit an interactive sudo credential.
 
-```bash
-CLAWBOX_SCALE_STEPS='1 2 4 8' \
-bash scripts/scale-swe-rebench.sh \
-  --tasks ../ClawTune/swe_rebench/tasks.json \
-  --arm64-map /data/swe-rebench-arm64-map.json \
-  --llm-egress-cidr 203.0.113.0/24
-```
+### Existing checkout is ahead and behind `origin/main`
 
-The scale script stops at the first task or devmapper pressure failure.
+Do not pull or reset it. Use the detached release-worktree procedure in
+section 1.
 
-## Telemetry and knowledge-base checks
+### A Pod uses an old image after rebuild
 
-Clause telemetry and cgroup artifacts are collected automatically for task
-commands. A native sample enters the KB only when identity pairing, signature,
-schema, quality, loss, cleanup, and resource checks all pass.
+Tags are mutable and node caches can be stale. Render and deploy a new digest;
+do not solve this by repeatedly restarting a `:dev` Deployment.
 
-Query the current generation:
+### KB generation does not advance
 
-```bash
-export CLAWBOX_SERVICE_TOKEN='replace-with-control-plane-token'
-kubectl -n clawbox-system port-forward service/clawbox-tune-kb 8086:8086
-python3 scripts/kb-live-status.py \
-  --endpoint http://127.0.0.1:8086 \
-  --tenant team-a \
-  --repo github.com/example/project
-```
+Check all four values together: `CLAWBOX_KB_ENDPOINT`, `CLAWBOX_KB_TOKEN`,
+`CLAWBOX_KB_INGEST_SECRET`, and the exact repository fingerprint. Invalid,
+incomplete, lossy, or identity-mismatched telemetry is rejected by design.
 
-Run the strict production Tool-VM telemetry gate after rebuilding a task
-image:
+### Thousands of historical Failed Pods exist
 
-```bash
-bash scripts/run-toolbridge-ebpf-integration.sh \
-  --image 'registry.example.com/task@sha256:DIGEST' \
-  --namespace clawbox-ebpf-acceptance \
-  --output .artifacts/tool-ebpf-acceptance.log
-```
-
-Success requires real native clause telemetry, non-zero CPU/RSS, zero event
-loss, successful cleanup, distinct concurrent cgroups, no cross-attribution,
-and native artifact validation. Command success alone is not telemetry
-success.
-
-For the local development registry, the default `:dev` image must be rebuilt
-from the current Tool Bridge source. The bridge mounts and verifies tracefs
-before starting BCC because the minimal Kata guest does not mount tracefs by
-default. The standalone kernel gate is also available:
-
-```bash
-kubectl create namespace clawbox-benchmarks --dry-run=client -o yaml | kubectl apply -f -
-kubectl delete pod -n clawbox-benchmarks clawbox-ebpf-cgroup-smoke --ignore-not-found
-kubectl apply -f deploy/ebpf-cgroup-smoke.yaml
-kubectl wait -n clawbox-benchmarks --for=jsonpath='{.status.phase}'=Succeeded \
-  pod/clawbox-ebpf-cgroup-smoke --timeout=360s
-kubectl logs -n clawbox-benchmarks clawbox-ebpf-cgroup-smoke
-```
-
-## Operational cleanup
-
-Kubernetes retains terminated pods until its pod-GC threshold is reached. A
-large failure burst can therefore leave thousands of `Failed` objects even
-after the underlying runtime is healthy. Inspect first, then delete only pods
-whose API phase is already terminal:
+Inspect first, then delete only terminal objects in an explicitly named
+namespace:
 
 ```bash
 python3 scripts/cleanup-failed-pods.py
 python3 scripts/cleanup-failed-pods.py --namespace clawbox-system --apply
 ```
 
-The cleanup script enumerates exact pod names, batches deletion by namespace,
-and never selects Running, Pending, or Succeeded pods. `--apply` requires an
-explicit namespace unless the operator deliberately passes `--all-namespaces`.
-Remove dedicated probe namespaces separately after preserving any evidence
-you need.
+The script never selects Running, Pending, or Succeeded Pods. Cleaning a
+non-ClawBox namespace requires separate operator review and explicit scope.
 
-## Development checks
+## Developer-only checks
+
+The following Docker harness checks control-plane logic on Linux. It is not a
+ClawBox deployment and does not validate Firecracker or native eBPF:
+
+```bash
+bash scripts/linux-deploy.sh all
+bash scripts/linux-deploy.sh status
+bash scripts/linux-deploy.sh down
+```
+
+Repository checks:
 
 ```bash
 python3 -m pytest -q
 python3 -m py_compile $(find clawbox scripts -name '*.py')
-
-cd toolbridge
-go test -race ./...
+cd toolbridge && go test -race ./...
 ```
 
-Host, Firecracker, and eBPF changes also require the real ARM64 smoke and
-strict integration commands shown above.
+Host, Firecracker, cgroup, or eBPF changes always require the real ARM64 gates
+above. Maintainers should also read [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
 
-Maintainers and code agents should read [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
-before changing the execution, telemetry, identity, or storage contracts.
+## Advanced workflows
+
+- Kubernetes manifest details: [deploy/README.md](deploy/README.md)
+- Execution and telemetry invariants: [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
+- Benchmark scripts: `scripts/run-swe-rebench.sh`,
+  `scripts/scale-swe-rebench.sh`, and `scripts/load-test.sh`

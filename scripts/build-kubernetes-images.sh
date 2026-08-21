@@ -13,6 +13,19 @@ BRIDGE_OUTPUT="${BRIDGE_OUTPUT:-${ROOT}/.artifacts/tool-bridge-arm64}"
 CLAWTUNE_REVISION="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 CLAWBOX_REVISION="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 
+if [[ "${PUSH:-0}" == 1 ]]; then
+  for repository in "${ROOT}" "${CLAWTUNE_ROOT}"; do
+    [[ -z "$(git -C "${repository}" status --porcelain)" ]] || {
+      echo "refusing to publish images from dirty checkout: ${repository}" >&2
+      exit 1
+    }
+  done
+  [[ "${CLAWBOX_REVISION}" != unknown && "${CLAWTUNE_REVISION}" != unknown ]] || {
+    echo "both ClawBox and ClawTune must have recorded Git revisions" >&2
+    exit 1
+  }
+fi
+
 [[ "$(uname -m)" =~ ^(aarch64|arm64)$ ]] || {
   echo "Kubernetes images must be built on the native arm64 builder" >&2
   exit 1
@@ -96,3 +109,16 @@ fi
 
 file "${BRIDGE_OUTPUT}/tool-bridge" | grep -Eqi 'ELF 64-bit.*(ARM aarch64|aarch64)'
 echo "ARM64 images and static Tool Bridge are ready"
+if [[ "${PUSH:-0}" == 1 ]]; then
+  echo "Immutable platform image references:"
+  images=("${control_image}" "${runtime_image}" "${tool_image}")
+  labels=(CONTROL_IMAGE RUNTIME_IMAGE TOOL_BRIDGE_IMAGE)
+  for index in "${!images[@]}"; do
+    image="${images[${index}]}"
+    digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image}")"
+    digest="$(printf '%s\n' "${digest}" | sed -n '1p')"
+    [[ "${digest}" == *@sha256:* ]] \
+      || { echo "registry digest is unavailable after push: ${image}" >&2; exit 1; }
+    printf "export %s='%s'\n" "${labels[${index}]}" "${digest}"
+  done
+fi

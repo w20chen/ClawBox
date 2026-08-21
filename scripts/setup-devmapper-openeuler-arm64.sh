@@ -126,19 +126,35 @@ validate_device() {
 
 show_status() {
   echo "== ClawBox devmapper status =="
-  if command -v lvs >/dev/null 2>&1 && lvs "${VG}/${POOL}" >/dev/null 2>&1; then
-    lvs --units g -o vg_name,lv_name,lv_attr,lv_size,data_percent,metadata_percent "${VG}/${POOL}"
-    usage_values="$(lvs --noheadings --nosuffix -o data_percent,metadata_percent "${VG}/${POOL}" | xargs)"
-    read -r data_used metadata_used <<<"${usage_values}"
-    awk -v d="${data_used:-100}" -v m="${metadata_used:-100}" -v t="${THRESHOLD}" \
-      'BEGIN { if (d+0 >= t || m+0 >= t) exit 1 }' \
-      || { echo "thin pool usage reached ${THRESHOLD}% (data=${data_used}% metadata=${metadata_used}%)" >&2; return 1; }
-  else
-    echo "thin pool ${VG}/${POOL}: missing"
+  if ! command -v lvs >/dev/null 2>&1; then
+    echo "lvs is unavailable; install lvm2 before checking the thin pool" >&2
     return 1
   fi
+  if ! pool_status="$(lvs --units g -o vg_name,lv_name,lv_attr,lv_size,data_percent,metadata_percent "${VG}/${POOL}" 2>&1)"; then
+    if [[ "${EUID}" -ne 0 ]]; then
+      echo "cannot inspect thin pool ${VG}/${POOL} as uid ${EUID}; rerun status with sudo" >&2
+    else
+      echo "thin pool ${VG}/${POOL} is missing or unreadable:" >&2
+      printf '%s\n' "${pool_status}" >&2
+    fi
+    return 1
+  fi
+  printf '%s\n' "${pool_status}"
+  usage_values="$(lvs --noheadings --nosuffix -o data_percent,metadata_percent "${VG}/${POOL}" | xargs)"
+  read -r data_used metadata_used <<<"${usage_values}"
+  awk -v d="${data_used:-100}" -v m="${metadata_used:-100}" -v t="${THRESHOLD}" \
+    'BEGIN { if (d+0 >= t || m+0 >= t) exit 1 }' \
+    || { echo "thin pool usage reached ${THRESHOLD}% (data=${data_used}% metadata=${metadata_used}%)" >&2; return 1; }
   if command -v ctr >/dev/null 2>&1; then
-    ctr plugins ls | awk '$1 ~ /snapshotter/ && $2 == "devmapper" {print; found=($NF == "ok")} END {exit !found}'
+    if ! ctr plugins ls 2>/dev/null \
+      | awk '$1 ~ /snapshotter/ && $2 == "devmapper" {print; found=($NF == "ok")} END {exit !found}'; then
+      if [[ "${EUID}" -ne 0 ]]; then
+        echo "cannot verify containerd devmapper as uid ${EUID}; rerun status with sudo" >&2
+      else
+        echo "containerd devmapper plugin is unavailable or unhealthy" >&2
+      fi
+      return 1
+    fi
   else
     echo "ctr is unavailable; devmapper plugin health is unproven" >&2
     return 1
