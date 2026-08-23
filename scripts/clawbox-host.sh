@@ -15,6 +15,7 @@ DEPLOYMENTS=(
 )
 LOCAL_API_PORT_FORWARD_PID=""
 LOCAL_API_LOG_FILE=""
+SETUP_TEMP_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -141,12 +142,102 @@ cleanup_local_api() {
   fi
 }
 
+cleanup_setup_files() {
+  if [[ -n "${SETUP_TEMP_DIR}" && -d "${SETUP_TEMP_DIR}" ]]; then
+    rm -f \
+      "${SETUP_TEMP_DIR}/database-url" \
+      "${SETUP_TEMP_DIR}/service-token" \
+      "${SETUP_TEMP_DIR}/templates" \
+      "${SETUP_TEMP_DIR}/secret.yaml"
+    rmdir "${SETUP_TEMP_DIR}" 2>/dev/null || true
+  fi
+  SETUP_TEMP_DIR=""
+}
+
+migrate_legacy_managed_secret() {
+  kubectl -n "${SYSTEM_NAMESPACE}" get secret clawbox-managed >/dev/null 2>&1 && return
+  require openssl
+
+  local legacy task_name tool_image llm_secret llm_cidr profile runtime_image
+  legacy="$(kubectl -n "${TASK_NAMESPACE}" get sandboxtasks -o json | python3 -c '
+import ipaddress, json, re, sys
+items = json.load(sys.stdin).get("items", [])
+items.sort(key=lambda item: item.get("metadata", {}).get("creationTimestamp", ""), reverse=True)
+for item in items:
+    spec = item.get("spec") or {}
+    image = str(spec.get("toolImage", ""))
+    cidr = str(spec.get("llmEgressCIDR", ""))
+    secret = str(spec.get("llmSecretName", ""))
+    profile = str(spec.get("profile", "small"))
+    try:
+        network = ipaddress.ip_network(cidr, strict=True)
+    except ValueError:
+        continue
+    if (re.fullmatch(r".+@sha256:[a-f0-9]{64}", image)
+            and secret and profile in {"small", "medium", "large"}
+            and str(network) not in {"0.0.0.0/0", "::/0"}):
+        print("\\t".join((item["metadata"]["name"], image, secret, cidr, profile)))
+        break
+')"
+  [[ -n "${legacy}" ]] || die \
+    "missing Secret ${SYSTEM_NAMESPACE}/clawbox-managed and no prior SandboxTask has safe reusable template settings; complete README section 5 once"
+  IFS=$'\t' read -r task_name tool_image llm_secret llm_cidr profile <<<"${legacy}"
+
+  kubectl -n "${TASK_NAMESPACE}" get secret "${llm_secret}" >/dev/null 2>&1 \
+    || die "legacy task ${task_name} references missing Secret ${TASK_NAMESPACE}/${llm_secret}"
+  runtime_image="$(kubectl -n "${SYSTEM_NAMESPACE}" get deployment clawbox-cell-controller -o json | python3 -c '
+import json, sys
+deployment = json.load(sys.stdin)
+containers = deployment["spec"]["template"]["spec"].get("containers", [])
+for container in containers:
+    for item in container.get("env", []):
+        if item.get("name") == "RUNTIME_IMAGE" and item.get("value"):
+            print(item["value"])
+            raise SystemExit
+')"
+  [[ "${runtime_image}" =~ @sha256:[a-f0-9]{64}$ ]] || die \
+    "the running Cell Controller does not expose a digest-pinned RUNTIME_IMAGE; render immutable manifests using README section 4"
+
+  SETUP_TEMP_DIR="$(mktemp -d)"
+  chmod 700 "${SETUP_TEMP_DIR}"
+  trap cleanup_setup_files EXIT
+  secret_value "${SYSTEM_NAMESPACE}" clawbox-control-plane database-url \
+    >"${SETUP_TEMP_DIR}/database-url"
+  openssl rand -hex 32 >"${SETUP_TEMP_DIR}/service-token"
+  python3 - "${tool_image}" "${llm_secret}" "${runtime_image}" "${llm_cidr}" "${profile}" \
+    >"${SETUP_TEMP_DIR}/templates" <<'PY'
+import json
+import sys
+
+tool_image, secret_name, runtime_image, llm_cidr, profile = sys.argv[1:]
+json.dump({
+    "swe-rebench-arm64": {
+        "1": {
+            "toolImage": tool_image,
+            "secretName": secret_name,
+            "runtimeImage": runtime_image,
+            "llmEgressCIDR": llm_cidr,
+            "profile": profile,
+        }
+    }
+}, sys.stdout, separators=(",", ":"))
+PY
+  kubectl -n "${SYSTEM_NAMESPACE}" create secret generic clawbox-managed \
+    --from-file="database-url=${SETUP_TEMP_DIR}/database-url" \
+    --from-file="service-token=${SETUP_TEMP_DIR}/service-token" \
+    --from-file="templates=${SETUP_TEMP_DIR}/templates" \
+    --dry-run=client -o yaml >"${SETUP_TEMP_DIR}/secret.yaml"
+  kubectl apply -f "${SETUP_TEMP_DIR}/secret.yaml" >/dev/null
+  cleanup_setup_files
+  trap - EXIT
+  printf 'Created clawbox-managed by reusing safe settings from SandboxTask %s.\n' "${task_name}"
+}
+
 preflight_reconcile() {
   local path
-  for secret in clawbox-control-plane clawbox-managed; do
-    kubectl -n "${SYSTEM_NAMESPACE}" get secret "${secret}" >/dev/null 2>&1 \
-      || die "missing Secret ${SYSTEM_NAMESPACE}/${secret}; complete README section 5 once"
-  done
+  kubectl -n "${SYSTEM_NAMESPACE}" get secret clawbox-control-plane >/dev/null 2>&1 \
+    || die "missing Secret ${SYSTEM_NAMESPACE}/clawbox-control-plane; complete README section 5 once"
+  migrate_legacy_managed_secret
   kubectl -n "${TASK_NAMESPACE}" get secret clawbox-llm >/dev/null 2>&1 \
     || die "missing Secret ${TASK_NAMESPACE}/clawbox-llm; complete README section 5 once"
 
