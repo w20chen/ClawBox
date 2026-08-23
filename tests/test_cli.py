@@ -55,3 +55,25 @@ def test_status_cli_uses_tenant_scope(monkeypatch, capsys):
     assert cli.main(["--tenant", "team-b", "status", "01RUN"]) == 0
     assert seen["tenant_id"] == "team-b"
     assert '"phase": "Succeeded"' in capsys.readouterr().out
+
+
+def test_submit_cli_generates_idempotency_key_when_omitted(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, base_url, *, token, tenant_id):
+            pass
+
+        def create_run(self, **kwargs):
+            seen.update(kwargs)
+            return SimpleNamespace(
+                run_id="01TEST",
+                phase="Accepted",
+                idempotency_replay=False,
+                current_attempt_id=None,
+            )
+
+    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
+    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
+    assert cli.main(["submit", "--input-ref", "repo-a"]) == 0
+    assert seen["idempotency_key"].startswith("cli-")

@@ -4,6 +4,37 @@ ClawBox runs each coding-agent task in two isolated ARM64 Firecracker
 microVMs: a Runtime VM for the agent and a Tool VM for repository access and
 command execution. Kubernetes admits both VMs as one `SandboxTask` Cell.
 
+## Daily use on an already-provisioned Kunpeng host
+
+You do not need to repeat the installation sections below. From the ClawBox
+checkout, use one command to start/reconcile the existing deployment:
+
+```bash
+scripts/clawbox up
+```
+
+Then submit a task directly. The CLI reads the existing in-cluster token,
+opens a temporary API port-forward, and closes it when the command exits:
+
+```bash
+scripts/clawbox submit \
+  --input-ref TASK_INPUT \
+  --problem-file ./problem.txt \
+  --watch
+```
+
+`--project`, `--template`, tenant, API URL, token, and idempotency key all have
+safe defaults for local host use. To print one short readiness report without
+changing anything:
+
+```bash
+scripts/clawbox doctor
+```
+
+`up` never runs the destructive host bootstrap. A new host still requires the
+one-time installation below because storage devices, registry, database, LLM
+credentials, task images, and provider egress policy cannot be inferred.
+
 ## Canonical production architecture
 
 ClawBox has one supported production deployment architecture:

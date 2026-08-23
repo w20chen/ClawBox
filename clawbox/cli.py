@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     problem.add_argument("--problem")
     problem.add_argument("--problem-file", type=Path)
     submit.add_argument("--deadline-seconds", type=int, default=1800)
-    submit.add_argument("--idempotency-key", required=True)
+    submit.add_argument(
+        "--idempotency-key",
+        help="request retry key; generated automatically when omitted",
+    )
     submit.add_argument("--watch", action="store_true")
     submit.add_argument("--watch-timeout", type=float, default=2700)
     submit.add_argument("--poll-seconds", type=float, default=10)
@@ -85,7 +89,7 @@ def _run(args: argparse.Namespace, client: ManagedAPIClient) -> int:
             input_ref=args.input_ref,
             input_sha256=input_sha256(problem),
             deadline_seconds=args.deadline_seconds,
-            idempotency_key=args.idempotency_key,
+            idempotency_key=args.idempotency_key or f"cli-{uuid.uuid4()}",
             problem_statement=problem,
         )
         value = {

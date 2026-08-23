@@ -1,3 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+case "${1:-}" in
+  up|doctor)
+    exec bash "${SCRIPT_DIR}/clawbox-host.sh" "$@"
+    ;;
+  -h|--help|help|"")
+    bash "${SCRIPT_DIR}/clawbox-host.sh" help
+    printf '\nTask commands:\n'
+    exec python3 -m clawbox.cli --help
+    ;;
+esac
+
+# On the Kubernetes host, the common case should not require a second terminal,
+# a hand-copied token, or a manually managed port-forward. Explicit API/token
+# settings retain the old remote-client behaviour.
+explicit_connection=0
+for arg in "$@"; do
+  case "${arg}" in
+    --token|--token=*|--api-url|--api-url=*|-h|--help) explicit_connection=1 ;;
+  esac
+done
+if [[ "${explicit_connection}" == 0 ]] \
+  && [[ -z "${CLAWBOX_TOKEN:-}" && -z "${CLAWBOX_API_URL:-}" ]] \
+  && command -v kubectl >/dev/null 2>&1 \
+  && kubectl get nodes >/dev/null 2>&1; then
+  exec bash "${SCRIPT_DIR}/clawbox-host.sh" local-api "$@"
+fi
+
 exec python3 -m clawbox.cli "$@"
