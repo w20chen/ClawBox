@@ -35,6 +35,32 @@ scripts/clawbox doctor
 one-time installation below because storage devices, registry, database, LLM
 credentials, task images, and provider egress policy cannot be inferred.
 
+For an older ClawBox deployment, `up` now performs the non-destructive upgrade
+work automatically: it reuses existing Secrets and the latest SandboxTask
+policy, resolves mutable local image tags to registry digests, renders the
+deployment manifests, runs migrations, and reconciles all five services.
+
+On a newly provisioned host, replace the seven site-specific values once. All
+random tokens, Kubernetes Secrets, and rendered manifests are generated and
+stored in the cluster; no `/tmp/*.yaml` files need to be maintained:
+
+```bash
+scripts/clawbox install \
+  --database-url 'postgresql+psycopg://USER:PASSWORD@HOST/clawbox' \
+  --llm-api-key 'PROVIDER_KEY' \
+  --llm-base-url 'https://provider.example/v1' \
+  --llm-model 'provider-model' \
+  --openclaw-model-ref 'vllm/provider-model' \
+  --tool-image 'REGISTRY/task@sha256:DIGEST' \
+  --llm-egress-cidr 'PROVIDER_CIDR'
+```
+
+Platform image references are discovered from an existing deployment. On a
+new host, build them in section 4 first, or pass `--control-image`,
+`--runtime-image`, and `--tool-bridge-image` to `install`. Corresponding
+`CLAWBOX_*` environment variables are supported so credentials need not be
+placed in shell history.
+
 ## Canonical production architecture
 
 ClawBox has one supported production deployment architecture:
@@ -342,8 +368,13 @@ kubectl apply --dry-run=client -f /tmp/clawbox-managed.yaml
 kubectl apply --dry-run=client -f /tmp/clawbox-llm.yaml
 ```
 
-The Managed API and trace ingester require PostgreSQL. Run migrations from the
-same release tree and with the same database URL stored in the Secret:
+PostgreSQL is recommended for production and required for multi-node or
+multi-replica Managed API deployments. On a single-node installation,
+`scripts/clawbox configure` automatically uses a persistent SQLite database at
+`/var/lib/clawbox/managed` when the existing control-plane URL is SQLite.
+`scripts/clawbox up` runs migrations inside the pinned control-plane image, so
+Alembic does not need to be installed separately on the host. For an explicit
+PostgreSQL deployment, migrations can also be run manually:
 
 ```bash
 export DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST/clawbox'

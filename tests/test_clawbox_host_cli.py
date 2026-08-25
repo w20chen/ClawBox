@@ -104,3 +104,63 @@ esac
 def test_up_script_cannot_invoke_destructive_bootstrap():
     source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
     assert "bootstrap-openeuler-arm64" not in source
+
+
+def test_public_cli_routes_configure_to_host_workflow():
+    source = (ROOT / "scripts/clawbox").read_text(encoding="utf-8")
+    assert "up|doctor|configure|install" in source
+
+
+def test_host_workflow_generates_secrets_without_persisting_plaintext_in_repo():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert "create secret generic clawbox-control-plane" in source
+    assert "create secret generic clawbox-llm" in source
+    assert "create secret generic clawbox-managed" in source
+    assert '--from-file="llm-api-key=' in source
+    assert "resolve_image_digest" in source
+
+
+def test_legacy_migration_emits_real_tab_separators():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert 'print("\\t".join(' in source
+    assert 'print("\\\\t".join(' not in source
+
+
+def test_migrations_run_inside_pinned_control_plane_image():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert 'local docker_args=(--rm --network host --env-file' in source
+    assert 'docker run "${docker_args[@]}"' in source
+    assert '"${control_image}" alembic upgrade head' in source
+    assert "python3 -m alembic" not in source
+    assert "/var/lib/clawbox/managed:/data" in source
+
+
+def test_capacity_inventory_is_not_hidden_behind_a_pipeline():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert 'collect-node-capacity.py" --configmap |' not in source
+    assert 'get configmap clawbox-node-capacity' in source
+
+
+def test_upgrade_stops_only_the_two_superseded_managed_containers():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert "for container in clawbox-m1-api clawbox-m1-dispatcher" in source
+    assert 'docker stop "${container}"' in source
+    assert "docker rm" not in source
+
+
+def test_managed_secret_updates_restart_existing_consumers():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert "restart_managed_deployments_if_present" in source
+    assert 'rollout restart "deployment/${deployment}"' in source
+
+
+def test_generated_tokens_never_include_openssl_trailing_newline():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert 'openssl rand -hex 32 >' not in source
+    assert "openssl rand -hex 32 | tr -d '\\n'" in source
+
+
+def test_install_combines_one_time_configuration_and_deployment():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert 'install) shift; install_host "$@"' in source
+    assert 'configure "$@"' in source

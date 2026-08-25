@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 case "${1:-}" in
-  up|doctor)
+  up|doctor|configure|install)
     exec bash "${SCRIPT_DIR}/clawbox-host.sh" "$@"
     ;;
   -h|--help|help|"")
