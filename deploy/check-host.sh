@@ -6,12 +6,14 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_CLASS="${CLAWBOX_RUNTIME_CLASS:-kata-fc-arm64}"
 MIN_SAFE_KATA_VERSION="${CLAWBOX_MIN_SAFE_KATA_VERSION:-3.31.0}"
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-1.12.1}"
+REQUIRE_READY_LABEL=false
 PASS=0 WARN=0 FAIL=0
 
-usage() { echo "usage: check-host.sh [--runtime-class kata-fc-arm64]" >&2; exit 64; }
+usage() { echo "usage: check-host.sh [--runtime-class kata-fc-arm64] [--require-ready-label]" >&2; exit 64; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --runtime-class) RUNTIME_CLASS="${2:-}"; shift 2 ;;
+    --require-ready-label) REQUIRE_READY_LABEL=true; shift ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
@@ -113,9 +115,13 @@ if have kubectl && kubectl cluster-info >/dev/null 2>&1; then
   [[ -n "${node_arches}" ]] && ! grep -Eq '=(amd64|x86_64)( |$)' <<<"${node_arches}" \
     && pass "Kubernetes node architectures: ${node_arches}" \
     || fail "all sandbox nodes must be arm64 (${node_arches:-unknown})"
-  kubectl get nodes -l clawbox.openai.com/firecracker-ready=true -o name 2>/dev/null | grep -q . \
-    && pass "at least one node passed the Firecracker install gate" \
-    || fail "no node has the Firecracker-ready label"
+  if kubectl get nodes -l clawbox.openai.com/firecracker-ready=true -o name 2>/dev/null | grep -q .; then
+    pass "at least one node passed the Firecracker install gate"
+  elif [[ "${REQUIRE_READY_LABEL}" == true ]]; then
+    fail "no node has the Firecracker-ready label"
+  else
+    warn "Firecracker-ready label is not present yet; add it only after this pre-label gate passes"
+  fi
   kubectl api-resources --api-group=networking.k8s.io -o name 2>/dev/null | grep -q '^networkpolicies' \
     && pass "NetworkPolicy API is available" || fail "NetworkPolicy API is unavailable"
 else

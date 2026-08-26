@@ -661,7 +661,7 @@ apply_bootstrap() {
   sudo rm -f "${STATE_DIR}/stage0-passed"
   kubectl label nodes --all clawbox.openai.com/firecracker-ready=true --overwrite
   if ! sudo env KUBECONFIG="${ADMIN_CONF}" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    bash "${ROOT}/deploy/check-host.sh" --runtime-class "${RUNTIME_CLASS}"; then
+    bash "${ROOT}/deploy/check-host.sh" --runtime-class "${RUNTIME_CLASS}" --require-ready-label; then
     kubectl label nodes --all clawbox.openai.com/firecracker-ready- >/dev/null 2>&1 || true
     die "static Firecracker host gate failed; ready labels were removed"
   fi

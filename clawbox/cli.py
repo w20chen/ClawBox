@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from clawbox.benchmark.managed_client import ManagedAPIClient, input_sha256
+import httpx
+
+from clawbox.benchmark.managed_client import ManagedAPIClient, ManagedAPIError, input_sha256
 
 
 TERMINAL_PHASES = {"Succeeded", "Failed", "Cancelled", "TimedOut"}
@@ -121,13 +124,17 @@ def _run(args: argparse.Namespace, client: ManagedAPIClient) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    client = _client(args, parser)
     try:
-        return _run(args, client)
-    finally:
-        close = getattr(client, "close", None)
-        if close is not None:
-            close()
+        client = _client(args, parser)
+        try:
+            return _run(args, client)
+        finally:
+            close = getattr(client, "close", None)
+            if close is not None:
+                close()
+    except (ManagedAPIError, httpx.HTTPError, ImportError, OSError, TimeoutError) as exc:
+        print(f"clawbox: error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

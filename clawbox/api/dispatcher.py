@@ -304,6 +304,11 @@ class Dispatcher:
         attempt = get_attempt(db, str(attempt_id))
         if run is None or attempt is None or attempt.run_id != run.run_id:
             return
+        # Historical SandboxTasks remain in the namespace after a retry. They
+        # may still report their terminal status, but only the current attempt
+        # is allowed to project the user-visible Run lifecycle.
+        if run.current_attempt_id != attempt.attempt_id:
+            return
 
         if observed == "Cleaned":
             observed = status.get("outcome")
@@ -405,6 +410,8 @@ def _advance_attempt(
 ) -> None:
     if attempt.phase == target:
         return
+    if attempt.is_terminal:
+        return
     reason, message = _status_detail(status)
     if target in _ATTEMPT_PROGRESS:
         current = _ATTEMPT_PROGRESS.index(attempt.phase)
@@ -412,11 +419,20 @@ def _advance_attempt(
         for phase in _ATTEMPT_PROGRESS[current + 1 : desired + 1]:
             transition_attempt(db, attempt, phase, reason=reason, message=message)
         return
+    if target == AttemptPhase.SUCCEEDED:
+        # A Dispatcher restart or a fast Cell can make the first observation a
+        # terminal success. Walk the required state-machine path before the
+        # terminal transition instead of retrying an illegal direct jump.
+        current = _ATTEMPT_PROGRESS.index(attempt.phase)
+        for phase in _ATTEMPT_PROGRESS[current + 1 :]:
+            transition_attempt(db, attempt, phase, reason=reason, message=message)
     transition_attempt(db, attempt, target, reason=reason, message=message)
 
 
 def _advance_run(db: Session, run: Run, target: RunPhase, status: dict[str, Any]) -> None:
     if run.phase == target:
+        return
+    if run.is_terminal:
         return
     reason, message = _status_detail(status)
     if target in _RUN_PROGRESS:
@@ -425,4 +441,10 @@ def _advance_run(db: Session, run: Run, target: RunPhase, status: dict[str, Any]
         for phase in _RUN_PROGRESS[current + 1 : desired + 1]:
             transition_run(db, run, phase, reason=reason, message=message)
         return
+    if target == RunPhase.SUCCEEDED:
+        # Success is only legal from Finalizing. Reconstruct any missed
+        # progressive phases so terminal status remains restart-safe.
+        current = _RUN_PROGRESS.index(run.phase)
+        for phase in _RUN_PROGRESS[current + 1 :]:
+            transition_run(db, run, phase, reason=reason, message=message)
     transition_run(db, run, target, reason=reason, message=message)

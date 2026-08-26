@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from clawbox import cli
+from clawbox.benchmark.managed_client import ManagedAPIError
 
 
 def test_submit_cli_forwards_full_problem_and_tenant(monkeypatch, tmp_path, capsys):
@@ -77,3 +78,51 @@ def test_submit_cli_generates_idempotency_key_when_omitted(monkeypatch):
     monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
     assert cli.main(["submit", "--input-ref", "repo-a"]) == 0
     assert seen["idempotency_key"].startswith("cli-")
+
+
+def test_missing_problem_file_is_reported_without_traceback(monkeypatch, tmp_path, capsys):
+    class FakeClient:
+        def __init__(self, base_url, *, token, tenant_id):
+            pass
+
+    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
+    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
+    missing = tmp_path / "missing.txt"
+
+    assert cli.main([
+        "submit", "--input-ref", "repo-a", "--problem-file", str(missing),
+    ]) == 1
+    stderr = capsys.readouterr().err
+    assert "clawbox: error:" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_managed_api_error_is_reported_without_traceback(monkeypatch, capsys):
+    class FakeClient:
+        def __init__(self, base_url, *, token, tenant_id):
+            pass
+
+        def get_run(self, run_id):
+            raise ManagedAPIError(404, {"detail": "run not found"})
+
+    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
+    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
+
+    assert cli.main(["status", "missing-run"]) == 1
+    stderr = capsys.readouterr().err
+    assert "Managed API 404: run not found" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_client_dependency_error_is_reported_without_traceback(monkeypatch, capsys):
+    class BrokenClient:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("proxy support is unavailable")
+
+    monkeypatch.setattr(cli, "ManagedAPIClient", BrokenClient)
+    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
+
+    assert cli.main(["status", "01RUN"]) == 1
+    stderr = capsys.readouterr().err
+    assert "proxy support is unavailable" in stderr
+    assert "Traceback" not in stderr

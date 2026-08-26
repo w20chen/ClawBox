@@ -2,6 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PROJECT_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+# Daily commands should keep working in a new shell after the documented
+# editable install.  An explicit override still wins for remote/client use.
+if [[ -n "${CLAWBOX_PYTHON:-}" ]]; then
+  PYTHON="${CLAWBOX_PYTHON}"
+elif [[ -x "${PROJECT_DIR}/.venv/bin/python" ]]; then
+  PYTHON="${PROJECT_DIR}/.venv/bin/python"
+else
+  PYTHON=python3
+fi
+export CLAWBOX_PYTHON="${PYTHON}"
 
 case "${1:-}" in
   up|doctor|configure|install)
@@ -10,7 +22,7 @@ case "${1:-}" in
   -h|--help|help|"")
     bash "${SCRIPT_DIR}/clawbox-host.sh" help
     printf '\nTask commands:\n'
-    exec python3 -m clawbox.cli --help
+    exec "${PYTHON}" -m clawbox.cli --help
     ;;
 esac
 
@@ -30,4 +42,4 @@ if [[ "${explicit_connection}" == 0 ]] \
   exec bash "${SCRIPT_DIR}/clawbox-host.sh" local-api "$@"
 fi
 
-exec python3 -m clawbox.cli "$@"
+exec "${PYTHON}" -m clawbox.cli "$@"

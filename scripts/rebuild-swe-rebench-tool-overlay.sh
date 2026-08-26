@@ -2,7 +2,8 @@
 # Rebuild the current Tool Bridge and overlay it onto the known-good task image.
 set -euo pipefail
 
-ROOT="${CLAWBOX_ROOT:-$HOME/ClawBox}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${CLAWBOX_ROOT:-$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)}"
 CLAWTUNE_ROOT="${CLAWTUNE_ROOT:-${ROOT}/../ClawTune}"
 BASE_IMAGE="${BASE_IMAGE:?set BASE_IMAGE to the immutable SWE-Rebench digest}"
 REGISTRY="${REGISTRY:-127.0.0.1:5000/clawbox}"

@@ -118,6 +118,14 @@ def test_deadline_out_of_range_422(client):
     assert r.status_code == 422
 
 
+def test_idempotency_key_matches_crd_limit(client):
+    c, _ = client
+    accepted = c.post("/v1/runs", json=body(idempotencyKey="x" * 512), headers=HEADERS)
+    rejected = c.post("/v1/runs", json=body(idempotencyKey="x" * 513), headers=HEADERS)
+    assert accepted.status_code == 201
+    assert rejected.status_code == 422
+
+
 def test_auth_required(client):
     c, _ = client
     assert c.post("/v1/runs", json=body(), headers={"X-Tenant-Id": "tenant-a"}).status_code == 401

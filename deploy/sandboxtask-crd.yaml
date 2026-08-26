@@ -51,7 +51,7 @@ spec:
                     tenantID: {type: string, minLength: 1, maxLength: 128}
                     runID: {type: string, minLength: 1, maxLength: 128}
                     attemptID: {type: string, minLength: 1, maxLength: 128}
-                idempotencyKey: {type: string, minLength: 1, maxLength: 256}
+                idempotencyKey: {type: string, minLength: 1, maxLength: 512}
                 requestDigest: {type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
                 desiredState: {type: string, enum: [Running, Cancelled], default: Running}
                 toolImage:

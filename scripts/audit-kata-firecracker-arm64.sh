@@ -6,11 +6,13 @@ KATA_ROOT="${KATA_ROOT:-/opt/kata}"
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-1.12.1}"
 KATA_VERSION="${KATA_VERSION:-3.31.0}"
 EMIT=""
+ARTIFACT_ONLY=false
+SHIM_WRAPPER="${CLAWBOX_SHIM_WRAPPER:-/usr/local/bin/containerd-shim-kata-v2}"
 PASS=0
 FAIL=0
 
 usage() {
-  echo "usage: audit-kata-firecracker-arm64.sh [--root DIR] [--kata-version VERSION] [--firecracker-version VERSION] [--emit FILE]" >&2
+  echo "usage: audit-kata-firecracker-arm64.sh [--root DIR] [--kata-version VERSION] [--firecracker-version VERSION] [--artifact-only] [--emit FILE]" >&2
   exit 64
 }
 
@@ -19,6 +21,7 @@ while [[ $# -gt 0 ]]; do
     --root) KATA_ROOT="${2:-}"; shift 2 ;;
     --firecracker-version) FIRECRACKER_VERSION="${2:-}"; shift 2 ;;
     --kata-version) KATA_VERSION="${2:-}"; shift 2 ;;
+    --artifact-only) ARTIFACT_ONLY=true; shift ;;
     --emit) EMIT="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) usage ;;
@@ -32,6 +35,7 @@ done
 say() { printf '%-72s %s\n' "$1" "$2"; }
 pass() { say "$1" PASS; PASS=$((PASS + 1)); }
 fail() { say "$1" FAIL; FAIL=$((FAIL + 1)); }
+skip() { say "$1" SKIP; }
 first_file() {
   local candidate
   for candidate in "$@"; do
@@ -192,13 +196,14 @@ else
   fail "Kata containerd shim exists"
 fi
 
-# P3: the shim must run under a wrapper that raises the soft RLIMIT_NOFILE to
-# hard.  Kata runtime-rs resets it to 1024, so ~19 concurrent cells exhaust FDs
-# ("No file descriptors available (os error 24)").  A 32-cell run requires the
-# wrapper (scripts/install-shim-nofile-wrapper.sh).
-shim_wrapper="/usr/local/bin/containerd-shim-kata-v2"
-if [[ -f "${shim_wrapper}" ]] && grep -q 'clawbox-shim-nofile-wrapper-v1' "${shim_wrapper}" 2>/dev/null; then
-  soft_nofile="$("${shim_wrapper}" --_selfcheck 2>/dev/null || true)"
+# P3 is an installed-host property, not a property of a staged /opt/kata tree.
+# Artifact builders use --artifact-only, then install/refresh the wrapper and
+# run this audit again without the flag before declaring the host installed.
+if [[ "${ARTIFACT_ONLY}" == true ]]; then
+  skip "installed-host Kata shim wrapper validation is deferred"
+elif [[ -f "${SHIM_WRAPPER}" ]] \
+    && grep -q 'clawbox-shim-nofile-wrapper-v1' "${SHIM_WRAPPER}" 2>/dev/null; then
+  soft_nofile="$("${SHIM_WRAPPER}" --_selfcheck 2>/dev/null || true)"
   if [[ -n "${soft_nofile}" ]] && (( soft_nofile >= 8192 )); then
     pass "Kata shim wrapper raises soft RLIMIT_NOFILE to ${soft_nofile} (>= 8192)"
   else
@@ -237,6 +242,13 @@ if [[ -n "${EMIT}" ]]; then
   mkdir -p "$(dirname "${EMIT}")"
   {
     printf 'CLAWBOX_FC_AUDITED=1\n'
+    if [[ "${ARTIFACT_ONLY}" == true ]]; then
+      printf 'CLAWBOX_FC_AUDIT_SCOPE=artifact\n'
+      printf 'CLAWBOX_FC_WRAPPER_AUDITED=0\n'
+    else
+      printf 'CLAWBOX_FC_AUDIT_SCOPE=installed-host\n'
+      printf 'CLAWBOX_FC_WRAPPER_AUDITED=1\n'
+    fi
     printf 'CLAWBOX_FC_VERSION=%q\n' "${FIRECRACKER_VERSION}"
     printf 'CLAWBOX_KATA_VERSION=%q\n' "${KATA_VERSION}"
     printf 'CLAWBOX_KATA_FLAVOR=%q\n' "runtime-rs"

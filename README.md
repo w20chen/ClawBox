@@ -18,10 +18,15 @@ opens a temporary API port-forward, and closes it when the command exits:
 
 ```bash
 scripts/clawbox submit \
-  --input-ref TASK_INPUT \
-  --problem-file ./problem.txt \
+  --input-ref my-first-task \
+  --problem 'Describe the change the agent should make.' \
   --watch
 ```
+
+`--input-ref` is the task/instance identifier; it does not select an image.
+The configured template supplies the Tool image. Use `--idempotency-key` when
+retrying the same submission after a client/network failure; otherwise the CLI
+generates a new key and intentionally creates a new run.
 
 `--project`, `--template`, tenant, API URL, token, and idempotency key all have
 safe defaults for local host use. To print one short readiness report without
@@ -35,31 +40,16 @@ scripts/clawbox doctor
 one-time installation below because storage devices, registry, database, LLM
 credentials, task images, and provider egress policy cannot be inferred.
 
-For an older ClawBox deployment, `up` now performs the non-destructive upgrade
+For an older ClawBox deployment, `up` performs the non-destructive upgrade
 work automatically: it reuses existing Secrets and the latest SandboxTask
 policy, resolves mutable local image tags to registry digests, renders the
 deployment manifests, runs migrations, and reconciles all five services.
 
-On a newly provisioned host, replace the seven site-specific values once. All
-random tokens, Kubernetes Secrets, and rendered manifests are generated and
-stored in the cluster; no `/tmp/*.yaml` files need to be maintained:
-
-```bash
-scripts/clawbox install \
-  --database-url 'postgresql+psycopg://USER:PASSWORD@HOST/clawbox' \
-  --llm-api-key 'PROVIDER_KEY' \
-  --llm-base-url 'https://provider.example/v1' \
-  --llm-model 'provider-model' \
-  --openclaw-model-ref 'vllm/provider-model' \
-  --tool-image 'REGISTRY/task@sha256:DIGEST' \
-  --llm-egress-cidr 'PROVIDER_CIDR'
-```
-
-Platform image references are discovered from an existing deployment. On a
-new host, build them in section 4 first, or pass `--control-image`,
-`--runtime-image`, and `--tool-bridge-image` to `install`. Corresponding
-`CLAWBOX_*` environment variables are supported so credentials need not be
-placed in shell history.
+For a new host, complete sections 1 through 4, then use the recommended
+automated path at the start of section 5. It generates random tokens, creates
+Secrets, runs migrations, applies the deployment, waits for readiness, and
+leaves task submission ready. Do not also run the manual alternatives in
+sections 5 and 6.
 
 ## Canonical production architecture
 
@@ -121,13 +111,17 @@ You must provide the following values. The repository cannot invent them:
 | Fresh-host storage | Two unused whole block devices; both are erased |
 | Registry | Registry reachable from Docker and containerd |
 | ClawTune | Checkout beside ClawBox at `../ClawTune` |
-| PostgreSQL | Reachable `postgresql+psycopg://...` URL |
+| Database | Optional PostgreSQL `postgresql+psycopg://...`; persistent SQLite is the single-node default |
 | LLM | API key, upstream base URL, provider model, OpenClaw model ref |
 | Task image | Native ARM64 `image@sha256:...` containing the Tool Bridge/telemetry overlay |
 | Network policy | Exact LLM-provider egress CIDR; do not use a placeholder |
 
 The validated host software is Kubernetes 1.35, containerd 2.3.4, Kata
 3.31.0, Firecracker 1.12.1, Docker with Buildx, cgroup v2, and Python 3.12+.
+The destructive host bootstrap installs the runtime/Kubernetes stack, but it
+does not install Docker or Buildx. Install those from the host's trusted
+package source before section 4, then verify `docker info` and
+`docker buildx version` both succeed.
 
 ## 1. Check out an exact release tree
 
@@ -145,6 +139,7 @@ For a new checkout:
 cd /home/USER
 git clone https://github.com/w20chen/ClawTune.git
 git clone https://github.com/w20chen/ClawBox.git
+git -C ClawTune checkout --detach e91e60bc1e5f3209fbcf6091013fde96f217e2a7
 cd ClawBox
 git status --short --branch
 git rev-parse HEAD
@@ -167,15 +162,23 @@ git worktree add --detach "$release" origin/main
 cd "$release"
 git status --porcelain       # must print nothing
 git rev-parse HEAD
+
+# Keep the active ClawTune checkout and its generated data untouched too.
+clawtune_release="$HOME/ClawTune-release-e91e60bc"
+git -C "$HOME/ClawTune" fetch origin
+git -C "$HOME/ClawTune" worktree add --detach \
+  "$clawtune_release" e91e60bc1e5f3209fbcf6091013fde96f217e2a7
+git -C "$clawtune_release" status --porcelain  # must print nothing
+export CLAWTUNE_ROOT="$clawtune_release"
 ```
 
-This leaves the existing checkout and its commits untouched. Because the
-release worktree is also directly under `/home/USER`, its default
-`../ClawTune` build context remains valid.
+This leaves both active checkouts, generated data, and local commits untouched.
+Keep `CLAWTUNE_ROOT` set to the clean pinned worktree for sections 4 and 5.
 
 ## 2. Install Python tools and run tests
 
 ```bash
+python3 -c 'import sys; assert sys.version_info >= (3, 12), sys.version'
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e '.[dev,postgres]'
@@ -183,6 +186,8 @@ python3 -m pytest -q
 ```
 
 Do not continue if tests fail.
+After this install, `scripts/clawbox` automatically uses `.venv/bin/python`,
+so daily commands do not require reactivating the virtual environment.
 
 ## 3. Prepare or verify the host
 
@@ -214,8 +219,11 @@ Install the Tool-VM eBPF RuntimeClass after the base host succeeds:
 
 ```bash
 bash scripts/install-ebpf-kata-runtime.sh apply
-sudo bash scripts/install-shim-nofile-wrapper.sh
 ```
+
+The bootstrap installs and verifies the shim `nofile` wrapper before its final
+host gate. Re-running `sudo bash scripts/install-shim-nofile-wrapper.sh` is an
+idempotent repair/verification step, not a separate prerequisite.
 
 ### B. Already provisioned host
 
@@ -225,7 +233,7 @@ and LVM checks require root access:
 ```bash
 sudo -v
 sudo bash scripts/bootstrap-openeuler-arm64.sh status
-sudo bash deploy/check-host.sh --runtime-class kata-fc-arm64
+bash deploy/check-host.sh --runtime-class kata-fc-arm64
 bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 ```
 
@@ -249,12 +257,22 @@ it with `sudo`; permission failure does not mean the thin pool is missing.
 
 ## 4. Build and push immutable platform images
 
-Build on the native ARM64 host. A local registry on the same node may use
-`127.0.0.1:5000/clawbox`; otherwise use a registry containerd can reach.
+Build on the native ARM64 host. Use a registry that both Docker and containerd
+can reach. For a self-contained single-node install, start a persistent local
+registry once:
+
+```bash
+docker run -d --restart unless-stopped --name clawbox-registry \
+  -p 127.0.0.1:5000:5000 \
+  -v clawbox-registry:/var/lib/registry registry:2
+```
+
+Skip that command when using an existing external registry; authenticate with
+that registry before building.
 
 ```bash
 export REGISTRY=127.0.0.1:5000/clawbox
-export CLAWTUNE_ROOT="$PWD/../ClawTune"
+export CLAWTUNE_ROOT="${CLAWTUNE_ROOT:-$PWD/../ClawTune}"
 export TAG="$(git rev-parse --short=12 HEAD)"
 export PUSH=1
 
@@ -266,8 +284,10 @@ export PUSH=1
 bash scripts/build-kubernetes-images.sh
 ```
 
-The command fails on a non-native builder and prints three immutable
-references after a successful push. Save them as:
+The command fails on a non-native builder or incompatible ClawTune checkout.
+After a successful push it prints the three immutable references and saves
+them to `.artifacts/platform-images.env`, which `scripts/clawbox install`
+discovers automatically. The equivalent shell variables are:
 
 ```bash
 export CONTROL_IMAGE='REGISTRY/control-plane-arm64@sha256:...'
@@ -314,7 +334,7 @@ image:
 export BASE_IMAGE='REGISTRY/task@sha256:BASE_DIGEST'
 export REGISTRY='REGISTRY/clawbox'
 export TAG="tool-telemetry-$(git rev-parse --short=12 HEAD)"
-export CLAWTUNE_ROOT="$PWD/../ClawTune"
+export CLAWTUNE_ROOT="${CLAWTUNE_ROOT:-$PWD/../ClawTune}"
 bash scripts/rebuild-swe-rebench-tool-overlay.sh
 ```
 
@@ -322,7 +342,40 @@ Use the immutable `TOOL_IMAGE=...@sha256:...` printed by the command in the
 task mapping or Managed API template. Never keep a previous digest after
 rebuilding Tool Bridge or eBPF code.
 
-## 5. Configure persistence and Secrets
+## 5. Configure and deploy
+
+### Recommended automated path
+
+Set the six site-specific task/provider values. The database is optional:
+single-node installs default to persistent SQLite; set
+`CLAWBOX_DATABASE_URL=postgresql+psycopg://...` when PostgreSQL is required.
+Platform image digests come from section 4's generated handoff file.
+
+```bash
+export CLAWBOX_LLM_API_KEY='PROVIDER_KEY'
+export CLAWBOX_LLM_BASE_URL='https://provider.example/v1'
+export CLAWBOX_LLM_MODEL='provider-model'
+export CLAWBOX_OPENCLAW_MODEL_REF='vllm/provider-model'
+export CLAWBOX_TOOL_IMAGE='REGISTRY/task@sha256:DIGEST'
+export CLAWBOX_LLM_EGRESS_CIDR='PROVIDER_CIDR'
+
+scripts/clawbox install
+```
+
+`install` validates inputs before creating Secrets, generates independent
+tokens, renders digest-pinned manifests, runs migrations, deploys all five
+services, and waits for readiness. Re-run `scripts/clawbox configure` with a
+corrected database or LLM value to rotate it safely without changing generated
+tokens. When `install` succeeds, skip the manual remainder of this section and
+all of section 6; continue with section 7 or submit a task immediately.
+
+For credentials that should not enter shell history, set the corresponding
+`CLAWBOX_*` variables through the host's secret/environment mechanism. Run
+`scripts/clawbox install --help` for the equivalent command-line flags.
+
+### Manual alternative
+
+Use this only when an operator needs to manage the YAML and Secrets directly.
 
 Create the namespaces first:
 
@@ -399,10 +452,20 @@ kubectl apply -f /tmp/clawbox-control-plane.yaml
 kubectl apply -f /tmp/clawbox-managed.yaml
 kubectl apply -f /tmp/clawbox-llm.yaml
 
-python3 scripts/collect-node-capacity.py --configmap | kubectl apply -f -
+capacity_file="$(mktemp)"
+sudo env KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" \
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  "$PWD/.venv/bin/python" scripts/collect-node-capacity.py --configmap \
+  >"$capacity_file"
+kubectl apply -f "$capacity_file"
+rm -f "$capacity_file"
 kubectl apply -f .artifacts/rendered-deploy/trace-ingester.yaml
 kubectl apply -f .artifacts/rendered-deploy/tune-kb.yaml
 kubectl apply -f .artifacts/rendered-deploy/cell-controller.yaml
+
+# The manual path must migrate the Managed database before starting its API.
+DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST/clawbox' \
+  .venv/bin/alembic upgrade head
 kubectl apply -f .artifacts/rendered-deploy/managed-control-plane.yaml
 ```
 
@@ -450,26 +513,52 @@ Command exit code zero by itself is not telemetry success.
 Then validate KB signature scope and persistence:
 
 ```bash
-kubectl -n clawbox-system port-forward service/clawbox-tune-kb 8086:8086
+kubectl -n clawbox-system port-forward service/clawbox-tune-kb 8086:8086 \
+  >.artifacts/kb-port-forward.log 2>&1 &
+kb_forward_pid=$!
+for _ in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:8086/healthz >/dev/null && break
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8086/healthz >/dev/null
 export CLAWBOX_SERVICE_TOKEN='CONTROL_PLANE_TOKEN'
 export CLAWBOX_KB_INGEST_SECRET='CONTROL_PLANE_INGEST_SECRET'
 python3 scripts/live-kb-smoke.py
+kill "$kb_forward_pid"
+kubectl -n clawbox-system rollout restart deployment/clawbox-tune-kb
+kubectl -n clawbox-system rollout status deployment/clawbox-tune-kb --timeout=300s
+kubectl -n clawbox-system port-forward service/clawbox-tune-kb 8086:8086 \
+  >.artifacts/kb-port-forward.log 2>&1 &
+kb_forward_pid=$!
+for _ in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:8086/healthz >/dev/null && break
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8086/healthz >/dev/null
 python3 scripts/live-kb-smoke.py --verify-only
+kill "$kb_forward_pid"
 ```
 
 Finally validate the Managed API and cancellation path:
 
 ```bash
-kubectl -n clawbox-system port-forward service/clawbox-managed-api 8085:8085
+kubectl -n clawbox-system port-forward service/clawbox-managed-api 8085:8085 \
+  >.artifacts/managed-port-forward.log 2>&1 &
+managed_forward_pid=$!
+for _ in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:8085/healthz >/dev/null && break
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8085/healthz >/dev/null
 export CLAWBOX_API_URL=http://127.0.0.1:8085
 CLAWBOX_SERVICE_TOKEN='MANAGED_SERVICE_TOKEN' python3 scripts/live-managed-cancel-smoke.py
+kill "$managed_forward_pid"
 ```
 
 ## 8. Submit a real run
 
 ```bash
-export CLAWBOX_API_URL=http://127.0.0.1:8085
-export CLAWBOX_TOKEN='MANAGED_SERVICE_TOKEN'
+unset CLAWBOX_API_URL CLAWBOX_TOKEN
 export CLAWBOX_TENANT='team-a'
 
 scripts/clawbox submit \
@@ -477,7 +566,7 @@ scripts/clawbox submit \
   --template swe-rebench-arm64 \
   --template-revision 1 \
   --input-ref 15five__scim2-filter-parser-13 \
-  --problem-file ./problem.txt \
+  --problem 'Fix the issue described for this configured task image.' \
   --deadline-seconds 1800 \
   --idempotency-key "demo-$(date +%s)" \
   --watch
@@ -500,11 +589,12 @@ For direct cluster debugging without the Managed API:
 bash deploy/cell.sh deploy \
   --task demo-001 \
   --tool-image 'REGISTRY/task@sha256:DIGEST' \
-  --problem-file ./problem.txt \
+  --problem 'Fix the issue described for this task image.' \
   --llm-egress-cidr PROVIDER_CIDR \
   --profile small \
   --timeout-seconds 1800
 
+# Watch until terminal, then press Ctrl-C before deleting the parent object.
 kubectl -n clawbox-benchmarks get sandboxtask demo-001 -w
 bash deploy/cell.sh delete --task demo-001
 ```

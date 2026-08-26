@@ -244,6 +244,7 @@ grep -Eq "^[[:space:]]*reconnect_timeout_ms[[:space:]]*=[[:space:]]*${AGENT_RECO
 
 bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
   --root "${kata_root}" --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" \
+  --artifact-only \
   --emit "${stage}/audit.env"
 
 if [[ "${MODE}" == build ]]; then
@@ -273,7 +274,7 @@ for candidate in \
   [[ -x "${candidate}" ]] && { shim="${candidate}"; break; }
 done
 [[ -n "${shim}" ]] || { echo "installed artifact lost its Kata shim" >&2; exit 1; }
-ln -sfn "${shim}" /usr/local/bin/containerd-shim-kata-v2
+bash "${ROOT}/scripts/install-shim-nofile-wrapper.sh" --real-shim "${shim}"
 bash "${ROOT}/scripts/audit-kata-firecracker-arm64.sh" \
   --root /opt/kata --kata-version "${KATA_VERSION}" --firecracker-version "${FIRECRACKER_VERSION}" \
   --emit "${STATE_DIR}/firecracker-audit.env"

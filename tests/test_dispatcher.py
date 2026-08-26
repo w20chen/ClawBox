@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from clawbox.api.dispatcher import Dispatcher
 from clawbox.api.templates import TemplateRegistry
 from clawbox.managed.db import ManagedBase, OutboxRow
-from clawbox.managed.models import Attempt, RunPhase, RunIntent, idempotency_digest
+from clawbox.managed.models import Attempt, AttemptPhase, RunPhase, RunIntent, idempotency_digest
 from clawbox.managed.repo import (
     create_run,
     get_attempt,
@@ -47,6 +47,9 @@ class FakeCRBackend:
 
     def cancel_sandboxtask(self, name, namespace):
         self.cancelled.append(name)
+
+    def list_sandboxtasks(self, namespace):
+        return list(self.manifests.values())
 
 
 @pytest.fixture()
@@ -164,6 +167,60 @@ def test_retry_applies_new_cr_for_new_attempt(env):
         assert f"run-{run_id.lower()}-a1" in backend.manifests
         # A queued run stays queued (transition guarded).
         assert run.phase == RunPhase.QUEUED
+
+
+def test_historical_attempt_status_cannot_overwrite_retried_run(env):
+    factory, backend, dispatcher = env
+    with factory() as db:
+        run, _ = create_run(db, make_intent())
+        db.commit()
+        run_id = run.run_id
+
+    dispatcher.run_once()
+    dispatcher.run_once()
+    first_name = f"run-{run_id.lower()}-a1"
+    backend.manifests[first_name]["status"] = {
+        "phase": "Failed",
+        "reason": "FirstAttemptFailed",
+    }
+    dispatcher.run_once()
+
+    with factory() as db:
+        run = _run(db, run_id)
+        assert run.phase == RunPhase.FAILED
+        attempt2 = new_attempt(db, run)
+        db.commit()
+        attempt2_id = attempt2.attempt_id
+
+    dispatcher.run_once()
+    with factory() as db:
+        run = _run(db, run_id)
+        assert run.current_attempt_id == attempt2_id
+        assert run.phase == RunPhase.QUEUED
+
+
+def test_terminal_success_projects_when_intermediate_phases_were_missed(env):
+    factory, backend, dispatcher = env
+    with factory() as db:
+        run, _ = create_run(db, make_intent())
+        db.commit()
+        run_id = run.run_id
+
+    dispatcher.run_once()
+    dispatcher.run_once()
+    task_name = f"run-{run_id.lower()}-a1"
+    backend.manifests[task_name]["status"] = {
+        "phase": "Cleaned",
+        "outcome": "Succeeded",
+        "reason": "ArtifactsDurable",
+    }
+    dispatcher.run_once()
+
+    with factory() as db:
+        run = _run(db, run_id)
+        attempt = get_attempt(db, run.current_attempt_id)
+        assert run.phase == RunPhase.SUCCEEDED
+        assert attempt.phase == AttemptPhase.SUCCEEDED
 
 
 def test_manifest_uses_full_problem_statement_when_provided(env):

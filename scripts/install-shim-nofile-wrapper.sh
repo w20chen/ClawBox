@@ -15,19 +15,49 @@
 #                   /usr/local/bin/containerd-shim-kata-v2
 set -euo pipefail
 
-SHIM_DIR="/usr/local/bin"
+SHIM_DIR="${CLAWBOX_SHIM_DIR:-/usr/local/bin}"
 SHIM="${SHIM_DIR}/containerd-shim-kata-v2"
 REAL="${SHIM}.real"
 MARKER="clawbox-shim-nofile-wrapper-v1"
+REAL_SHIM_SOURCE=""
+
+usage() {
+  echo "usage: install-shim-nofile-wrapper.sh [--real-shim /absolute/path/to/containerd-shim-kata-v2]" >&2
+  exit 64
+}
+
+while (( $# )); do
+  case "$1" in
+    --real-shim) (( $# >= 2 )) || usage; REAL_SHIM_SOURCE="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+done
 
 if [[ "$(id -u)" != 0 ]]; then
   echo "must run as root (sudo); usage: sudo bash install-shim-nofile-wrapper.sh" >&2
   exit 1
 fi
-if [[ ! -e "${SHIM}" ]]; then
+
+if [[ -n "${REAL_SHIM_SOURCE}" ]]; then
+  [[ "${REAL_SHIM_SOURCE}" != "${SHIM}" && "${REAL_SHIM_SOURCE}" != "${REAL}" ]] || {
+    echo "--real-shim must name the Kata binary, not ${SHIM} or ${REAL}" >&2
+    exit 1
+  }
+  REAL_SHIM_SOURCE="$(readlink -f -- "${REAL_SHIM_SOURCE}")"
+  [[ -x "${REAL_SHIM_SOURCE}" ]] || {
+    echo "real shim is missing or not executable: ${REAL_SHIM_SOURCE}" >&2
+    exit 1
+  }
+  install -d -m 0755 "${SHIM_DIR}"
+  # An install/upgrade owns this link and may safely refresh it to the newly
+  # audited /opt/kata binary. The wrapper itself remains stable across reruns.
+  ln -sfn "${REAL_SHIM_SOURCE}" "${REAL}"
+elif [[ ! -e "${SHIM}" && ! -x "${REAL}" ]]; then
   echo "shim not found at ${SHIM}; install Kata first" >&2
   exit 1
 fi
+
 if grep -q "${MARKER}" "${SHIM}" 2>/dev/null; then
   expected_nofile="$(ulimit -Hn)"
   actual_nofile="$("${SHIM}" --_selfcheck 2>/dev/null || true)"
@@ -42,12 +72,30 @@ if grep -q "${MARKER}" "${SHIM}" 2>/dev/null; then
   fi
   echo "repairing failed wrapper at ${SHIM}"
 else
-  if [[ -e "${REAL}" ]]; then
-    echo "refusing to overwrite existing real-shim backup: ${REAL}" >&2
-    exit 1
+  if [[ -z "${REAL_SHIM_SOURCE}" ]]; then
+    if [[ -x "${REAL}" ]]; then
+      if [[ ! -e "${SHIM}" && ! -L "${SHIM}" ]]; then
+        echo "repairing interrupted wrapper install at ${SHIM}"
+      elif [[ -L "${SHIM}" \
+          && "$(readlink -f -- "${SHIM}")" == "$(readlink -f -- "${REAL}")" ]]; then
+        # A previous run may have saved the same raw target and stopped before
+        # replacing the original direct symlink with the wrapper.
+        rm -f -- "${SHIM}"
+        echo "repairing interrupted wrapper install at ${SHIM}"
+      else
+        echo "refusing ambiguous real-shim backup: ${REAL}" >&2
+        exit 1
+      fi
+    else
+      # Move the real shim aside (keep its mode/permissions); the wrapper then execs it.
+      mv "${SHIM}" "${REAL}"
+    fi
+  else
+    # A prior interrupted install may have left SHIM as a symlink directly to
+    # the Kata binary. Remove that link so redirection below cannot overwrite
+    # the audited binary through it.
+    rm -f -- "${SHIM}"
   fi
-  # Move the real shim aside (keep its mode/permissions); the wrapper then execs it.
-  mv "${SHIM}" "${REAL}"
 fi
 
 cat >"${SHIM}" <<EOF

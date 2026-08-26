@@ -3,6 +3,7 @@
 import pytest
 import httpx
 
+from clawbox.benchmark import managed_client
 from clawbox.api.app import create_app
 from clawbox.api.templates import TemplateRegistry
 from clawbox.benchmark.managed_client import (
@@ -26,6 +27,31 @@ TEMPLATES = {
         }
     }
 }
+
+
+def test_loopback_client_ignores_ambient_proxy_settings(monkeypatch):
+    captured = []
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(managed_client.httpx, "Client", FakeHTTPClient)
+
+    local = ManagedAPIClient(
+        "http://127.0.0.1:49152", token=TOKEN, tenant_id="tenant-a"
+    )
+    remote = ManagedAPIClient(
+        "https://api.example.test", token=TOKEN, tenant_id="tenant-a"
+    )
+    local.close()
+    remote.close()
+
+    assert captured[0]["trust_env"] is False
+    assert captured[1]["trust_env"] is True
 
 
 @pytest.fixture()

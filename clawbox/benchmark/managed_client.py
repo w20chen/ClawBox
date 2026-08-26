@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -34,6 +36,22 @@ class CreateRunResult:
     current_attempt_id: str | None = None
 
 
+def _is_loopback_url(value: str) -> bool:
+    """Return true when an API URL must never be sent through an ambient proxy."""
+    try:
+        hostname = urlsplit(value).hostname
+    except ValueError:
+        return False
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 class ManagedAPIClient:
     def __init__(
         self,
@@ -46,7 +64,11 @@ class ManagedAPIClient:
     ):
         # `client` is any object with .get/.post(headers=..., json=...); an
         # httpx.Client in production, a starlette TestClient in tests.
-        self._client = client or httpx.Client(base_url=base_url, timeout=timeout)
+        self._client = client or httpx.Client(
+            base_url=base_url,
+            timeout=timeout,
+            trust_env=not _is_loopback_url(base_url),
+        )
         self._owns_client = client is None
         self._headers = {"X-Clawbox-Token": token, "X-Tenant-Id": tenant_id}
 

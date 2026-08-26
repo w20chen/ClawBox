@@ -4,11 +4,12 @@
 #   - deploy/managed-rbac.yaml (ServiceAccounts clawbox-managed-api /
 #     clawbox-managed-dispatcher)
 #   - a Secret `clawbox-managed` in clawbox-system with:
-#       database-url    PostgreSQL URL (psycopg), production schema via alembic
+#       database-url    PostgreSQL (psycopg) or single-node SQLite URL;
+#                       production schema is managed with Alembic
 #       service-token   >=32 random bytes shared with API clients
 #       templates       JSON TemplateRegistry (optional; else built-in default)
-#   - run `alembic upgrade head` (or the API entry-point bootstrap) before
-#     serving traffic; the DB is authoritative (restart-safe).
+#   - run `alembic upgrade head` before serving traffic; the DB is
+#     authoritative (restart-safe).
 #
 # The Managed API has no Kubernetes RBAC by design (pure DB service); only the
 # Dispatcher can create SandboxTask CRs.

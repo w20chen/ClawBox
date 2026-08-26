@@ -1,6 +1,9 @@
 """M1-2 contract tests: SandboxTask v1alpha2 identity + one-way cancel (ADR-003)."""
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from clawbox.cell.controller import GROUP
 from clawbox.cell.sandboxtask_v1alpha2 import (
@@ -11,6 +14,9 @@ from clawbox.cell.sandboxtask_v1alpha2 import (
     cancel_patch,
     spec_mutation_is_cancel_only,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 EXECUTION_SPEC = {
@@ -72,6 +78,9 @@ def test_v1alpha2_validates_identity_fields():
         build(attempt_id="")
     with pytest.raises(ValueError):
         build(idempotency_key="")
+    assert len(build(idempotency_key="x" * 512)["spec"]["idempotencyKey"]) == 512
+    with pytest.raises(ValueError, match="1..512"):
+        build(idempotency_key="x" * 513)
     with pytest.raises(ValueError):
         build(request_digest="short")
     with pytest.raises(ValueError):
@@ -101,3 +110,18 @@ def test_cancel_patch_is_one_way_running_to_cancelled():
 
 def test_cancel_patch_shape():
     assert cancel_patch() == {"spec": {"desiredState": DESIRED_CANCELLED}}
+
+
+def test_served_crd_idempotency_limits_match():
+    limits = []
+    for filename, version in (
+        ("sandboxtask-crd.yaml", "v1alpha1"),
+        ("sandboxtask-crd-v1alpha2.yaml", "v1alpha2"),
+    ):
+        crd = yaml.safe_load((ROOT / "deploy" / filename).read_text(encoding="utf-8"))
+        schema = next(item for item in crd["spec"]["versions"] if item["name"] == version)
+        limits.append(
+            schema["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["idempotencyKey"]["maxLength"]
+        )
+    assert limits == [512, 512]

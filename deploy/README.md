@@ -32,7 +32,7 @@ Apply `.artifacts/rendered-deploy/*.yaml`; do not deploy a mutable `:dev` or
 | rendered `trace-ingester.yaml` | trace Deployment/Service | control-plane Secret |
 | rendered `tune-kb.yaml` | KB Deployment/Service | control-plane Secret |
 | rendered `cell-controller.yaml` | Cell Controller | RuntimeClasses, capacity ConfigMap |
-| rendered `managed-control-plane.yaml` | Managed API/Dispatcher | migrated PostgreSQL, managed Secret |
+| rendered `managed-control-plane.yaml` | Managed API/Dispatcher | migrated database, managed Secret |
 
 The Cell Controller owns task child Pods, Jobs, Secrets, Services, and
 NetworkPolicies. Operators should create or delete the parent `SandboxTask`,
@@ -61,15 +61,25 @@ kubectl apply -f deploy/managed-rbac.yaml
 kubectl apply -f /tmp/clawbox-control-plane.yaml
 kubectl apply -f /tmp/clawbox-managed.yaml
 kubectl apply -f /tmp/clawbox-llm.yaml
-python3 scripts/collect-node-capacity.py --configmap | kubectl apply -f -
+capacity_file="$(mktemp)"
+sudo env KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" \
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  "$PWD/.venv/bin/python" scripts/collect-node-capacity.py --configmap \
+  >"$capacity_file"
+kubectl apply -f "$capacity_file"
+rm -f "$capacity_file"
 kubectl apply -f .artifacts/rendered-deploy/trace-ingester.yaml
 kubectl apply -f .artifacts/rendered-deploy/tune-kb.yaml
 kubectl apply -f .artifacts/rendered-deploy/cell-controller.yaml
+DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST/clawbox' \
+  .venv/bin/alembic upgrade head
 kubectl apply -f .artifacts/rendered-deploy/managed-control-plane.yaml
 ```
 
 Run `alembic upgrade head` against the exact Managed API database before the
-matching API image starts. The Dispatcher currently targets `v1alpha1`; the
+matching API image starts. For the default single-node SQLite path, prefer
+`scripts/clawbox install/up`, which runs migrations in the pinned image with
+the persistent host mount. The Dispatcher currently targets `v1alpha1`; the
 separate `v1alpha2` and conversion-webhook files are not part of the canonical
 deployment.
 
@@ -78,7 +88,8 @@ deployment.
 - Trace ingestion uses `DATABASE_URL` from `clawbox-control-plane` and also
   mounts the single-node host path `/var/lib/clawbox/ingester`.
 - The default tuning KB uses SQLite at `/var/lib/clawbox/tune-kb`.
-- Managed run state uses PostgreSQL from `clawbox-managed`.
+- Managed run state uses the URL from `clawbox-managed` (persistent SQLite by
+  default on one node; PostgreSQL for multi-node or multi-replica deployments).
 
 Back up these stores before an upgrade. The supplied host paths are accepted
 for the validated single-node deployment; a multi-node storage design is not
@@ -91,7 +102,7 @@ Run privileged host checks only after refreshing sudo:
 ```bash
 sudo -v
 sudo bash scripts/bootstrap-openeuler-arm64.sh status
-sudo bash deploy/check-host.sh --runtime-class kata-fc-arm64
+bash deploy/check-host.sh --runtime-class kata-fc-arm64
 bash scripts/arm64-kata-smoke.sh --runtime-class kata-fc-arm64
 bash scripts/run-toolbridge-ebpf-integration.sh \
   --image 'REGISTRY/task@sha256:DIGEST' \

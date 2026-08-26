@@ -12,8 +12,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+BASH_UNAVAILABLE = sys.platform == "win32" or shutil.which("bash") is None
+
+
+requires_bash = pytest.mark.skipif(
+    BASH_UNAVAILABLE,
     reason="host operator is a Linux bash entrypoint",
 )
 
@@ -28,9 +31,11 @@ def _env(mock_bin: Path) -> dict[str, str]:
     env["PATH"] = f"{mock_bin}{os.pathsep}{env['PATH']}"
     env.pop("CLAWBOX_TOKEN", None)
     env.pop("CLAWBOX_API_URL", None)
+    env["CLAWBOX_PYTHON"] = "python3"
     return env
 
 
+@requires_bash
 def test_doctor_reports_complete_host_concisely(tmp_path):
     mock_bin = tmp_path / "bin"
     mock_bin.mkdir()
@@ -42,12 +47,17 @@ def test_doctor_reports_complete_host_concisely(tmp_path):
     _command(
         mock_bin / "kubectl",
         r'''
+IMAGE_DIGEST=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 case "$*" in
   "get nodes --no-headers") echo "kunpeng Ready" ;;
   "get nodes -l clawbox.openai.com/firecracker-ready=true --no-headers") echo "kunpeng Ready" ;;
   "get runtimeclass "*) ;;
   *"jsonpath={.status.readyReplicas}") echo 1 ;;
   *"jsonpath={.spec.replicas}") echo 1 ;;
+  *"jsonpath={.spec.template.spec.containers[0].image}") echo "registry.example/clawbox/control@sha256:${IMAGE_DIGEST}" ;;
+  "-n clawbox-system get deployment clawbox-cell-controller -o json")
+    printf '{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"RUNTIME_IMAGE","value":"registry.example/clawbox/runtime@sha256:%s"},{"name":"TOOL_BRIDGE_IMAGE","value":"registry.example/clawbox/bridge@sha256:%s"}]}]}}}}' "${IMAGE_DIGEST}" "${IMAGE_DIGEST}"
+    ;;
   *) exit 1 ;;
 esac
 ''',
@@ -67,6 +77,7 @@ esac
     assert "ClawBox is ready" in result.stdout
 
 
+@requires_bash
 def test_cli_automatically_uses_cluster_token_and_local_api(tmp_path):
     mock_bin = tmp_path / "bin"
     mock_bin.mkdir()
@@ -78,6 +89,10 @@ case "$*" in
   "get nodes") ;;
   "-n clawbox-system get deployment clawbox-managed-api") ;;
   "-n clawbox-system get secret clawbox-managed -o jsonpath={.data.service-token}") printf dG9rZW4= ;;
+  "-n clawbox-system port-forward service/clawbox-managed-api :8085")
+    echo "Forwarding from 127.0.0.1:49152 -> 8085"
+    while true; do sleep 1; done
+    ;;
   *) exit 1 ;;
 esac
 ''',
@@ -97,7 +112,7 @@ esac
     )
 
     assert result.returncode == 0, result.stderr
-    assert "token=token api=http://127.0.0.1:8085" in result.stdout
+    assert "token=token api=http://127.0.0.1:49152" in result.stdout
     assert "args=-m clawbox.cli submit --input-ref task-a" in result.stdout
 
 
@@ -163,4 +178,45 @@ def test_generated_tokens_never_include_openssl_trailing_newline():
 def test_install_combines_one_time_configuration_and_deployment():
     source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
     assert 'install) shift; install_host "$@"' in source
-    assert 'configure "$@"' in source
+    assert 'parse_configure_args "$@"' in source
+    assert "configure" in source
+
+
+def test_existing_deployment_still_runs_upgrade_reconciliation():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    up = source.split("\nup() {", 1)[1].split("\ninstall_host() {", 1)[0]
+    assert "Existing ClawBox deployment found; reconciling it in place" in up
+    assert "preflight_reconcile" in up
+    assert "run_migrations" in up
+    assert "return" not in up
+
+
+def test_platform_build_handoff_and_standard_image_env_names_are_supported():
+    host = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    build = (ROOT / "scripts/build-kubernetes-images.sh").read_text(encoding="utf-8")
+    assert '${CLAWBOX_CONTROL_IMAGE:-${CONTROL_IMAGE:-}}' in host
+    assert '${CLAWBOX_RUNTIME_IMAGE:-${RUNTIME_IMAGE:-}}' in host
+    assert '${CLAWBOX_TOOL_BRIDGE_IMAGE:-${TOOL_BRIDGE_IMAGE:-}}' in host
+    assert "platform-images.env" in host
+    assert "Saved platform image handoff" in build
+    assert '"${candidate}" == "${repository}"@sha256:*' in build
+
+
+def test_doctor_does_not_require_a_local_registry():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    doctor = source.split("\ndoctor() {", 1)[1].split("\nsecret_value() {", 1)[0]
+    assert 'registry="SKIP (external registry supported)"' in doctor
+    assert "failed=1" not in doctor.split("local-registry", 1)[0].rsplit("registry=", 1)[1]
+
+
+def test_doctor_checks_init_container_images_too():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    doctor = source.split("\ndoctor() {", 1)[1].split("\nsecret_value() {", 1)[0]
+    assert 'deployment_init_images "${deployment}"' in doctor
+    assert ".spec.template.spec.initContainers[*]" in source
+
+
+def test_task_cli_uses_dynamic_local_port_forward():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert "service/clawbox-managed-api :8085" in source
+    assert 'CLAWBOX_API_URL="http://127.0.0.1:${local_port}"' in source

@@ -10,8 +10,16 @@ CLAWTUNE_ROOT="$(cd "${CLAWTUNE_ROOT}" 2>/dev/null && pwd)" || {
 REGISTRY="${REGISTRY:?set REGISTRY, for example registry.example.com/clawbox}"
 TAG="${TAG:-dev}"
 BRIDGE_OUTPUT="${BRIDGE_OUTPUT:-${ROOT}/.artifacts/tool-bridge-arm64}"
+PLATFORM_IMAGE_ENV="${PLATFORM_IMAGE_ENV:-${ROOT}/.artifacts/platform-images.env}"
+EXPECTED_CLAWTUNE_REVISION="e91e60bc1e5f3209fbcf6091013fde96f217e2a7"
 CLAWTUNE_REVISION="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 CLAWBOX_REVISION="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+
+[[ "${CLAWTUNE_REVISION}" == "${EXPECTED_CLAWTUNE_REVISION}" ]] || {
+  echo "ClawTune revision ${CLAWTUNE_REVISION} is incompatible with this release" >&2
+  echo "expected ${EXPECTED_CLAWTUNE_REVISION}; check out that exact revision" >&2
+  exit 65
+}
 
 if [[ "${PUSH:-0}" == 1 ]]; then
   for repository in "${ROOT}" "${CLAWTUNE_ROOT}"; do
@@ -29,6 +37,11 @@ fi
 [[ "$(uname -m)" =~ ^(aarch64|arm64)$ ]] || {
   echo "Kubernetes images must be built on the native arm64 builder" >&2
   exit 1
+}
+command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 69; }
+docker buildx version >/dev/null 2>&1 || {
+  echo "Docker Buildx is required; install/enable the Buildx CLI plugin" >&2
+  exit 69
 }
 docker_arch="$(docker info --format '{{.Architecture}}')"
 [[ "${docker_arch}" =~ ^(aarch64|arm64)$ ]] || {
@@ -113,12 +126,31 @@ if [[ "${PUSH:-0}" == 1 ]]; then
   echo "Immutable platform image references:"
   images=("${control_image}" "${runtime_image}" "${tool_image}")
   labels=(CONTROL_IMAGE RUNTIME_IMAGE TOOL_BRIDGE_IMAGE)
+  immutable_images=()
   for index in "${!images[@]}"; do
     image="${images[${index}]}"
-    digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image}")"
-    digest="$(printf '%s\n' "${digest}" | sed -n '1p')"
-    [[ "${digest}" == *@sha256:* ]] \
+    repository="${image%:*}"
+    digest=""
+    while IFS= read -r candidate; do
+      if [[ "${candidate}" == "${repository}"@sha256:* ]]; then
+        digest="${candidate}"
+        break
+      fi
+    done < <(docker image inspect \
+      --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image}")
+    [[ "${digest}" == "${repository}"@sha256:* \
+      && "${digest#*@sha256:}" =~ ^[a-f0-9]{64}$ ]] \
       || { echo "registry digest is unavailable after push: ${image}" >&2; exit 1; }
+    immutable_images+=("${digest}")
     printf "export %s='%s'\n" "${labels[${index}]}" "${digest}"
   done
+  mkdir -p "$(dirname "${PLATFORM_IMAGE_ENV}")"
+  platform_env_tmp="$(mktemp "${PLATFORM_IMAGE_ENV}.tmp.XXXXXX")"
+  chmod 0600 "${platform_env_tmp}"
+  for index in "${!immutable_images[@]}"; do
+    printf '%s=%s\n' "${labels[${index}]}" "${immutable_images[${index}]}" \
+      >>"${platform_env_tmp}"
+  done
+  mv "${platform_env_tmp}" "${PLATFORM_IMAGE_ENV}"
+  echo "Saved platform image handoff: ${PLATFORM_IMAGE_ENV}"
 fi
