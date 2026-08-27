@@ -8,6 +8,10 @@ metadata:
     app.kubernetes.io/component: cell-controller
 spec:
   replicas: 1
+  # Admission has no leader election. Recreate trades a brief upgrade pause
+  # for the invariant that two schedulers never reserve Cell capacity at once.
+  strategy:
+    type: Recreate
   selector:
     matchLabels: *labels
   template:

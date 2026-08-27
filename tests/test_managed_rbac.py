@@ -7,12 +7,12 @@ Controller keeps the Pod/Secret/Job verbs it needs to realize Cells.
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 MANAGED_RBAC = REPO / "deploy" / "managed-rbac.yaml"
 CONTROL_RBAC = REPO / "deploy" / "control-plane-rbac.yaml"
+CELL_DEPLOYMENT = REPO / "deploy" / "cell-controller.yaml"
 
 
 def _load(path: Path) -> list[dict]:
@@ -72,6 +72,13 @@ def test_cell_controller_keeps_cell_realization_verbs():
     assert _verbs_for(role_name, "", "secrets", docs) >= {"create", "delete"}
     assert _verbs_for(role_name, "", "services", docs) >= {"create", "delete"}
     assert _verbs_for(role_name, "batch", "jobs", docs) >= {"create", "delete"}
+
+
+def test_single_cell_controller_never_overlaps_without_leader_election():
+    deployment = _load(CELL_DEPLOYMENT)[0]
+    assert deployment["kind"] == "Deployment"
+    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
 
 
 def test_benchmark_launcher_is_direct_cr_path_being_retired():
