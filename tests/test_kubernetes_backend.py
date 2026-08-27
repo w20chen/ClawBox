@@ -19,6 +19,7 @@ from clawbox.benchmark.kubernetes import (
 from clawbox.cell.capacity import (
     AtomicAdmission,
     FixedProfileSizer,
+    KubernetesNodeCapacityProvider,
     ResourceVector,
     StaticCapacityProvider,
     pod_request,
@@ -223,6 +224,133 @@ def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():
     assert request.cpu_millis == 2100  # max(1.25 steady, 2 init) + overhead
     assert request.memory_bytes == (1024 + 256 + 64) * 1024**2
     assert request.pods == 1
+
+
+def test_node_capacity_inventory_is_node_scoped_paginated_and_bounded():
+    def container(cpu: str, memory: str, storage: str = "0"):
+        return SimpleNamespace(resources=SimpleNamespace(requests={
+            "cpu": cpu, "memory": memory, "ephemeral-storage": storage,
+        }))
+
+    def pod(
+        name: str,
+        *,
+        phase: str = "Running",
+        labels: dict[str, str] | None = None,
+        cpu: str = "250m",
+        memory: str = "128Mi",
+        storage: str = "1Gi",
+    ):
+        return SimpleNamespace(
+            metadata=SimpleNamespace(name=name, labels=labels or {}),
+            status=SimpleNamespace(phase=phase),
+            spec=SimpleNamespace(
+                containers=[container(cpu, memory, storage)],
+                init_containers=[],
+                overhead={},
+            ),
+        )
+
+    node = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="kunpeng-a",
+            labels={"kubernetes.io/arch": "arm64"},
+        ),
+        spec=SimpleNamespace(unschedulable=False),
+        status=SimpleNamespace(
+            conditions=[SimpleNamespace(type="Ready", status="True")],
+            allocatable={"cpu": "8", "memory": "16Gi", "ephemeral-storage": "100Gi", "pods": "32"},
+        ),
+    )
+
+    class Core:
+        def __init__(self):
+            self.pod_calls: list[dict[str, object]] = []
+
+        def list_node(self, *, label_selector: str):
+            assert label_selector == "clawbox.openai.com/firecracker-ready=true"
+            return SimpleNamespace(items=[node])
+
+        def list_pod_for_all_namespaces(self, **kwargs):
+            self.pod_calls.append(kwargs)
+            if kwargs.get("_continue") is None:
+                return SimpleNamespace(
+                    items=[
+                        pod("api", cpu="500m", memory="1Gi", storage="2Gi"),
+                        # Completed Pods no longer consume scheduler capacity.
+                        pod("completed", phase="Succeeded", cpu="4", memory="8Gi"),
+                    ],
+                    metadata=SimpleNamespace(_continue="page-2"),
+                )
+            assert kwargs["_continue"] == "page-2"
+            return SimpleNamespace(
+                items=[
+                    pod("database", cpu="1", memory="2Gi", storage="3Gi"),
+                    # Cell Pods are represented by SandboxTask reservations.
+                    pod("cell", labels={"app.kubernetes.io/name": "clawbox-cell"}),
+                ],
+                metadata=SimpleNamespace(_continue=None),
+            )
+
+    core = Core()
+    capacity = KubernetesNodeCapacityProvider(
+        core,
+        devmapper_available_bytes=80 * 1024**3,
+        pod_list_page_size=2,
+    ).capacity()
+
+    assert core.pod_calls == [
+        {"field_selector": "spec.nodeName=kunpeng-a", "limit": 2},
+        {"field_selector": "spec.nodeName=kunpeng-a", "limit": 2, "_continue": "page-2"},
+    ]
+    assert capacity == ResourceVector(
+        6_500,
+        13 * 1024**3,
+        80 * 1024**3,
+        30,
+    )
+
+
+def test_node_capacity_does_not_list_pods_without_an_eligible_node():
+    class Core:
+        def list_node(self, *, label_selector: str):
+            del label_selector
+            return SimpleNamespace(items=[])
+
+        def list_pod_for_all_namespaces(self, **kwargs):
+            raise AssertionError(f"unexpected Pod list: {kwargs}")
+
+    capacity = KubernetesNodeCapacityProvider(
+        Core(), devmapper_available_bytes=1024,
+    ).capacity()
+
+    assert capacity == ResourceVector(0, 0, 0, 0)
+
+
+def test_node_capacity_rejects_repeated_pagination_tokens():
+    node = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="kunpeng-a", labels={"kubernetes.io/arch": "arm64"},
+        ),
+        spec=SimpleNamespace(unschedulable=False),
+        status=SimpleNamespace(
+            conditions=[SimpleNamespace(type="Ready", status="True")],
+            allocatable={"cpu": "8", "memory": "16Gi", "ephemeral-storage": "100Gi", "pods": "32"},
+        ),
+    )
+
+    class Core:
+        def list_node(self, *, label_selector: str):
+            del label_selector
+            return SimpleNamespace(items=[node])
+
+        def list_pod_for_all_namespaces(self, **kwargs):
+            del kwargs
+            return SimpleNamespace(items=[], metadata=SimpleNamespace(_continue="stuck"))
+
+    provider = KubernetesNodeCapacityProvider(Core(), devmapper_available_bytes=0)
+    with pytest.raises(RuntimeError, match="repeated a continuation token"):
+        provider.capacity()
 
 
 def test_tool_and_runtime_are_separate_firecracker_pods_with_least_privilege():

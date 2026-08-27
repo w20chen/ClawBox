@@ -6,6 +6,7 @@ from typing import Protocol
 
 
 GIB = 1024**3
+POD_LIST_PAGE_SIZE = 50
 
 
 @dataclass(frozen=True)
@@ -219,9 +220,47 @@ def pod_request(pod: object) -> ResourceVector:
 
 
 class KubernetesNodeCapacityProvider:
-    def __init__(self, core_api, *, devmapper_available_bytes: int):
+    def __init__(
+        self,
+        core_api,
+        *,
+        devmapper_available_bytes: int,
+        pod_list_page_size: int = POD_LIST_PAGE_SIZE,
+    ):
+        if pod_list_page_size < 1:
+            raise ValueError("pod_list_page_size must be positive")
         self.core = core_api
         self.devmapper_available_bytes = devmapper_available_bytes
+        self.pod_list_page_size = pod_list_page_size
+
+    def _pods_on_node(self, node_name: str):
+        """Yield scheduled Pods without retaining an unbounded cluster list.
+
+        Capacity is node-local, so asking the API server to filter by
+        ``spec.nodeName`` avoids transferring Pods that cannot affect this
+        node. Kubernetes list pagination gives every page in one consistent
+        snapshot while bounding the controller's live decoded-object set.
+        Inventory errors deliberately propagate: admission must fail closed
+        rather than use a partial capacity calculation.
+        """
+        continue_token: str | None = None
+        while True:
+            requested_token = continue_token
+            kwargs: dict[str, object] = {
+                "field_selector": f"spec.nodeName={node_name}",
+                "limit": self.pod_list_page_size,
+            }
+            if continue_token:
+                kwargs["_continue"] = continue_token
+            response = self.core.list_pod_for_all_namespaces(**kwargs)
+            yield from response.items
+            continue_token = getattr(response.metadata, "_continue", None) or None
+            if continue_token is None:
+                return
+            if continue_token == requested_token:
+                raise RuntimeError(
+                    f"Kubernetes Pod pagination repeated a continuation token for node {node_name}"
+                )
 
     def capacity(self) -> ResourceVector:
         cpu = memory = storage = pods = 0
@@ -242,12 +281,10 @@ class KubernetesNodeCapacityProvider:
         # of already scheduled control-plane/workload Pods.  Cell Pods are
         # represented by SandboxTask reservations and must not be subtracted a
         # second time.
-        if eligible_nodes:
-            for pod in self.core.list_pod_for_all_namespaces().items:
+        for node_name in sorted(eligible_nodes):
+            for pod in self._pods_on_node(node_name):
                 phase = getattr(getattr(pod, "status", None), "phase", "")
                 if phase in {"Succeeded", "Failed"}:
-                    continue
-                if getattr(getattr(pod, "spec", None), "node_name", None) not in eligible_nodes:
                     continue
                 labels = getattr(getattr(pod, "metadata", None), "labels", {}) or {}
                 if labels.get("app.kubernetes.io/name") == "clawbox-cell":
