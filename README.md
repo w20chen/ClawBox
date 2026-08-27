@@ -68,6 +68,21 @@ python3 -m pip install -e '.[dev,postgres]'
 python3 -m pytest -q
 ```
 
+If pip reports `Missing dependencies for SOCKS support` or connection refused
+to `127.0.0.1:1080`, the shell has a SOCKS proxy configured but its tunnel is
+not running. Either start the intended tunnel or disable that stale proxy for
+the current shell before retrying:
+
+```bash
+ss -lnt | grep ':1080 ' || true
+unset ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy
+python3 -m pip install -e '.[dev,postgres]'
+```
+
+If the proxy exports come from `~/.bashrc`, remove/comment them when the proxy
+is no longer used; otherwise every new shell will fail in the same way. Do not
+unset a working proxy on a host that requires it for outbound access.
+
 Release image builds refuse dirty ClawBox or ClawTune checkouts. Commit or
 remove local changes before publishing images.
 
@@ -205,7 +220,9 @@ export CLAWBOX_LLM_BASE_URL='https://api.deepseek.com'
 export CLAWBOX_LLM_MODEL='deepseek-v4-flash'
 export CLAWBOX_OPENCLAW_MODEL_REF='vllm/deepseek-v4-flash'
 export CLAWBOX_TOOL_IMAGE='127.0.0.1:5000/clawbox/TASK@sha256:DIGEST'
-export CLAWBOX_LLM_EGRESS_CIDR='PROVIDER_IPV4/32'
+read -rp 'Approved provider CIDR (for example 203.0.113.10/32): ' \
+  CLAWBOX_LLM_EGRESS_CIDR
+export CLAWBOX_LLM_EGRESS_CIDR
 
 scripts/clawbox install
 scripts/clawbox doctor
@@ -222,14 +239,20 @@ when PostgreSQL is required.
 Start with two tasks and a 120-second agent budget:
 
 ```bash
+mkdir -p .artifacts
+.venv/bin/python scripts/make-concurrency-smoke-tasks.py \
+  --tasks ../ClawTune/swe_rebench/tasks.json \
+  --arm64-map /data/swe-rebench-arm64-map.json \
+  --count 2 \
+  --output .artifacts/concurrency-smoke-2.json
+
 RUN_ID="smoke-$(date -u +%Y%m%d%H%M%S)"
 
 bash scripts/run-swe-rebench.sh \
-  --tasks ../ClawTune/swe_rebench/tasks.json \
+  --tasks .artifacts/concurrency-smoke-2.json \
   --arm64-map /data/swe-rebench-arm64-map.json \
   --llm-egress-cidr "$CLAWBOX_LLM_EGRESS_CIDR" \
   --parallelism 2 \
-  --sample 2 \
   --timeout-seconds 120 \
   --command-timeout-seconds 120 \
   --run-id "$RUN_ID"
@@ -268,20 +291,35 @@ kubectl -n clawbox-benchmarks get events --sort-by=.lastTimestamp \
 
 ### 2. Run an 8-concurrency, 2-minute batch
 
-The task JSON must contain `instance_id`, `image`, and `problem_statement` for
-each task. The `image` value is looked up in the ARM64 mapping.
+For an infrastructure concurrency smoke, generate eight uniquely named copies
+of the first task present in the ARM64 mapping. This validates concurrent VM
+creation and LLM calls; repeated tasks are not valid benchmark scores.
 
 ```bash
-export PROVIDER_CIDR='CURRENT_PROVIDER_IPV4/32'
+mkdir -p .artifacts
+.venv/bin/python scripts/make-concurrency-smoke-tasks.py \
+  --tasks ../ClawTune/swe_rebench/tasks.json \
+  --arm64-map /data/swe-rebench-arm64-map.json \
+  --count 8 \
+  --output .artifacts/concurrency-smoke-8.json
+
+getent ahostsv4 api.deepseek.com | awk '{print $1}' | sort -u
+read -rp 'Approved provider CIDR: ' PROVIDER_CIDR
+python3 - "$PROVIDER_CIDR" <<'PY'
+import ipaddress, sys
+network = ipaddress.ip_network(sys.argv[1], strict=True)
+assert network.prefixlen > 0, "an unrestricted CIDR is forbidden"
+print(f"using LLM egress CIDR: {network}")
+PY
+export PROVIDER_CIDR
 export RUN_ID="swe-$(date -u +%Y%m%d%H%M%S)"
 
 bash scripts/run-swe-rebench.sh \
-  --tasks ../ClawTune/swe_rebench/tasks.json \
+  --tasks .artifacts/concurrency-smoke-8.json \
   --arm64-map /data/swe-rebench-arm64-map.json \
   --llm-egress-cidr "$PROVIDER_CIDR" \
   --profile small \
   --parallelism 8 \
-  --sample 8 \
   --timeout-seconds 120 \
   --command-timeout-seconds 120 \
   --run-id "$RUN_ID"
@@ -292,18 +330,21 @@ staggers new VM materialization across reconciliation cycles; this reduces
 devmapper pressure without reducing steady-state concurrency. A task may stay
 `Queued` until capacity for both of its VMs is available.
 
+For real SWE-ReBench evaluation, first build mappings for every selected task,
+then pass the original task file and optionally `--sample N`. The launcher
+fails closed when any selected task lacks an ARM64 mapping.
+
 The foreground command waits for the batch. To survive SSH disconnects:
 
 ```bash
 mkdir -p .artifacts
 
 nohup bash scripts/run-swe-rebench.sh \
-  --tasks ../ClawTune/swe_rebench/tasks.json \
+  --tasks .artifacts/concurrency-smoke-8.json \
   --arm64-map /data/swe-rebench-arm64-map.json \
   --llm-egress-cidr "$PROVIDER_CIDR" \
   --profile small \
   --parallelism 8 \
-  --sample 8 \
   --timeout-seconds 120 \
   --command-timeout-seconds 120 \
   --run-id "$RUN_ID" \

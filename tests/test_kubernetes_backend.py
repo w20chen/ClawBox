@@ -16,7 +16,9 @@ from clawbox.benchmark.kubernetes import (
     render_sandbox_task,
     resolve_arm64_tasks,
     run_label,
+    select_arm64_tasks,
 )
+from clawbox.benchmark.concurrency_smoke import build_smoke_tasks
 from clawbox.cell.capacity import (
     AtomicAdmission,
     FixedProfileSizer,
@@ -88,6 +90,37 @@ def test_launcher_requires_a_supported_immutable_arm64_mapping(tmp_path: Path):
 
     with pytest.raises(ValueError, match="no fallback"):
         resolve_arm64_tasks([BenchmarkTask("missing", "foreign:latest", "fix")], {})
+
+
+def test_sample_is_applied_before_arm64_mapping_validation():
+    selected = BenchmarkTask("selected", "supported:x", "fix")
+    outside_sample = BenchmarkTask("later", "missing:x", "fix")
+    assert select_arm64_tasks(
+        [selected, outside_sample], {"supported:x": DIGEST}, sample=1,
+    ) == [BenchmarkTask("selected", DIGEST, "fix")]
+    with pytest.raises(ValueError, match="later=missing:x"):
+        select_arm64_tasks([selected, outside_sample], {"supported:x": DIGEST})
+    with pytest.raises(ValueError, match="sample must be"):
+        select_arm64_tasks([selected], {"supported:x": DIGEST}, sample=0)
+
+
+def test_concurrency_smoke_generator_repeats_only_a_mapped_task(tmp_path: Path):
+    tasks_path = tmp_path / "tasks.json"
+    mapping_path = tmp_path / "mapping.json"
+    tasks_path.write_text(json.dumps([
+        {"instance_id": "missing", "image": "missing:x", "problem_statement": "x"},
+        {"instance_id": "ready", "image": "supported:x", "problem_statement": "real"},
+    ]), encoding="utf-8")
+    mapping_path.write_text(json.dumps({"supported:x": {
+        "status": "supported", "platform": "linux/arm64",
+        "recipe_revision": "recipe-v1", "arm64_image": DIGEST,
+    }}), encoding="utf-8")
+    records = build_smoke_tasks(tasks_path, mapping_path, 3)
+    assert [item["instance_id"] for item in records] == [
+        "ready-concurrency-01", "ready-concurrency-02", "ready-concurrency-03",
+    ]
+    assert {item["image"] for item in records} == {"supported:x"}
+    assert all("not a benchmark score" in item["hint_text"] for item in records)
 
 
 def test_benchmark_renders_only_a_sandbox_task_cr():
@@ -674,6 +707,7 @@ def test_firecracker_host_and_image_gates_are_fail_closed():
 
 def test_readme_separates_one_time_bootstrap_from_daily_concurrent_runs():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    runner = (ROOT / "scripts" / "run-swe-rebench.sh").read_text(encoding="utf-8")
     assert "## New host: one-time installation" in readme
     assert "## Existing host: start and run tasks" in readme
     assert "repeat the disk bootstrap" in readme
@@ -682,6 +716,9 @@ def test_readme_separates_one_time_bootstrap_from_daily_concurrent_runs():
     assert "--command-timeout-seconds 120" in readme
     assert "deploy/containerd-clawbox.service" in readme
     assert "Do not restart containerd while task VMs are running" in readme
+    assert '[[ -n "${CLAWBOX_PYTHON:-}" ]]' in runner
+    assert '[[ -x "${ROOT}/.venv/bin/python" ]]' in runner
+    assert 'exec "${PYTHON}" -m clawbox.benchmark.kubernetes' in runner
 
 
 def test_runtime_inprocess_sidecar_uses_a_final_upload_handshake():

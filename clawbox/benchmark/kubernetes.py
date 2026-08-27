@@ -86,6 +86,17 @@ def resolve_arm64_tasks(tasks: list[BenchmarkTask], mapping: dict[str, str]) -> 
     return resolved
 
 
+def select_arm64_tasks(
+    tasks: list[BenchmarkTask], mapping: dict[str, str], sample: int | None = None,
+) -> list[BenchmarkTask]:
+    """Apply the requested input sample before enforcing ARM64 coverage."""
+    if sample is not None:
+        if sample < 1:
+            raise ValueError("sample must be >= 1")
+        tasks = tasks[:sample]
+    return resolve_arm64_tasks(tasks, mapping)
+
+
 def render_sandbox_task(
     task: BenchmarkTask, *, namespace: str, llm_secret: str,
     llm_egress_cidr: str, profile: str = "small", timeout_seconds: int = 1800,
@@ -220,9 +231,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")
-    tasks = resolve_arm64_tasks(load_tasks(args.tasks), load_arm64_mapping(args.arm64_map))
-    if args.sample is not None:
-        tasks = tasks[:args.sample]
+    try:
+        tasks = select_arm64_tasks(
+            load_tasks(args.tasks), load_arm64_mapping(args.arm64_map), args.sample,
+        )
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     results = KubernetesBenchmarkLauncher().run(
         tasks, parallelism=args.parallelism, namespace=args.namespace,
         llm_secret=args.llm_secret, llm_egress_cidr=args.llm_egress_cidr,
