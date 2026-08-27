@@ -15,6 +15,13 @@ from clawbox.cell.controller import GROUP, PLURAL, VERSION
 from clawbox.controller.kubernetes_backend import dns_label
 
 
+def run_label(run_id: str) -> str:
+    """Preserve selector-friendly run IDs; hash only unsafe label values."""
+    if len(run_id) <= 63 and re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", run_id):
+        return run_id
+    return dns_label(run_id)
+
+
 @dataclass(frozen=True)
 class BenchmarkTask:
     instance_id: str
@@ -98,7 +105,7 @@ def render_sandbox_task(
             "labels": {
                 "app.kubernetes.io/name": "clawbox-swe-rebench",
                 "app.kubernetes.io/managed-by": "clawbox-benchmark-launcher",
-                "clawbox.openai.com/run": dns_label(run_id),
+                "clawbox.openai.com/run": run_label(run_id),
                 "clawbox.openai.com/instance": dns_label(task.instance_id),
             },
             "annotations": {"clawbox.openai.com/original-instance-id": task.instance_id},

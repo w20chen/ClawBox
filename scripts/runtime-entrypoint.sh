@@ -199,11 +199,14 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   # workspace from local" copy, which would otherwise wipe /testbed.
   runtime_root="/testbed/openclaw-ssh-shared-8198076c"
   echo "[runtime] pre-creating sandbox runtime root ${runtime_root} on tool VM" >&2
-  timeout -k 10 60 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
+  # The Tool bridge can leave the SSH channel open after the remote command
+  # has already completed. Keep this idempotent preparation tightly bounded;
+  # readiness was established before the Runtime Job was materialized.
+  timeout -k 2 10 ssh -p "${tool_port}" -i /var/run/secrets/tool-ssh/id_ed25519 \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
     -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -o "UserKnownHostsFile=${KNOWN_HOSTS}" "${tool_target}" \
-    "mkdir -p '${runtime_root}' && echo runtime-root-ok" >&2 \
+    "mkdir -p '${runtime_root}'" \
     || echo "[runtime] WARN: could not pre-create sandbox runtime root" >&2
   # Record the tool VM's baseline HEAD BEFORE the agent runs so the final patch
   # can include committed changes the agent makes.  `git diff` alone only sees
@@ -232,7 +235,10 @@ if [[ "${CLAWBOX_TASK_MODE:-gateway}" == benchmark ]]; then
   agent_pid=$!
   agent_status=1
   answer_seen=0
-  agent_deadline=$((SECONDS + task_timeout + 120))
+  # TASK_TIMEOUT_SECONDS is the hard wall-clock budget for the agent itself.
+  # Pipeline collection/upload has its own Job-level grace period; do not add
+  # that grace here or a requested 120s task can keep executing for ~240s.
+  agent_deadline=$((SECONDS + task_timeout))
   while :; do
     if ! kill -0 "${agent_pid}" 2>/dev/null; then
       wait "${agent_pid}"

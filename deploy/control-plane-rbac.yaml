@@ -85,6 +85,11 @@ kind: ClusterRole
 metadata:
   name: clawbox-benchmark-runtimeclass-reader
 rules:
+  # The benchmark preflight verifies that its target namespace exists before
+  # creating any CR. This remains read-only and cluster-scoped.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     verbs: ["get"]

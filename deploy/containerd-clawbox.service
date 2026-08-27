@@ -5,6 +5,10 @@ After=network.target local-fs.target
 
 [Service]
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# The audited openEuler host has a wedged udev worker. The devmapper
+# snapshotter inherits this libdevmapper escape hatch so create/remove does not
+# wait forever for udev cookies. Keep this aligned with FC-2 provisioning.
+Environment="DM_DISABLE_UDEV=1"
 ExecStartPre=-/sbin/modprobe overlay
 ExecStart=/usr/local/bin/containerd
 Type=notify

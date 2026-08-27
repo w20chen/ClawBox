@@ -15,6 +15,7 @@ from clawbox.benchmark.kubernetes import (
     load_arm64_mapping,
     render_sandbox_task,
     resolve_arm64_tasks,
+    run_label,
 )
 from clawbox.cell.capacity import (
     AtomicAdmission,
@@ -66,6 +67,11 @@ def test_dns_label_is_stable_safe_and_collision_resistant():
     assert dns_label("Tenant A") == dns_label("Tenant A")
     assert dns_label("Tenant A") != dns_label("tenant-a")
     assert len(dns_label("x" * 200, prefix="tool-")) <= 63
+
+
+def test_run_label_preserves_documented_selector_value_and_hashes_unsafe_input():
+    assert run_label("swe-20260827t120000") == "swe-20260827t120000"
+    assert run_label("Human Run") == dns_label("Human Run")
 
 
 def test_launcher_requires_a_supported_immutable_arm64_mapping(tmp_path: Path):
@@ -498,6 +504,12 @@ class FakeCore:
         store[(namespace, body["metadata"]["name"])] = body
         return body
 
+    @staticmethod
+    def _delete(store, name, namespace, **kwargs):
+        del kwargs
+        if store.pop((namespace, name), None) is None:
+            raise Missing()
+
     def read_namespaced_pod(self, name, namespace): return self._read(self.pods, name, namespace)
     def create_namespaced_pod(self, namespace, body): return self._create(self.pods, namespace, body)
     def read_namespaced_service(self, name, namespace): return self._read(self.services, name, namespace)
@@ -506,12 +518,17 @@ class FakeCore:
     def create_namespaced_secret(self, namespace, body): return self._create(self.secrets, namespace, body)
     def read_namespaced_config_map(self, name, namespace): return self._read(self.configmaps, name, namespace)
     def create_namespaced_config_map(self, namespace, body): return self._create(self.configmaps, namespace, body)
+    def delete_namespaced_pod(self, name, namespace, **kwargs): return self._delete(self.pods, name, namespace, **kwargs)
+    def delete_namespaced_service(self, name, namespace, **kwargs): return self._delete(self.services, name, namespace, **kwargs)
+    def delete_namespaced_secret(self, name, namespace, **kwargs): return self._delete(self.secrets, name, namespace, **kwargs)
+    def delete_namespaced_config_map(self, name, namespace, **kwargs): return self._delete(self.configmaps, name, namespace, **kwargs)
 
 
 class FakeBatch:
     def __init__(self): self.jobs = {}
     def read_namespaced_job(self, name, namespace): return FakeCore._read(self.jobs, name, namespace)
     def create_namespaced_job(self, namespace, body): return FakeCore._create(self.jobs, namespace, body)
+    def delete_namespaced_job(self, name, namespace, **kwargs): return FakeCore._delete(self.jobs, name, namespace, **kwargs)
 
 
 class FakeNetwork:
@@ -520,6 +537,8 @@ class FakeNetwork:
         return FakeCore._read(self.policies, name, namespace)
     def create_namespaced_network_policy(self, namespace, body):
         return FakeCore._create(self.policies, namespace, body)
+    def delete_namespaced_network_policy(self, name, namespace, **kwargs):
+        return FakeCore._delete(self.policies, name, namespace, **kwargs)
 
 
 class FakeCustom:
@@ -558,6 +577,47 @@ def test_reconciler_waits_for_tool_readiness_before_creating_runtime():
     reconciler.reconcile(ready)
     assert ("clawbox-benchmarks", "cell-a-runtime") in batch.jobs
     assert custom.statuses[-1]["phase"] == "RuntimeRunning"
+
+
+def test_reconciler_stable_cleaned_phase_ignores_cancelled_desired_state():
+    core, batch, network, custom = FakeCore(), FakeBatch(), FakeNetwork(), FakeCustom()
+    reconciler = CellReconciler(
+        core_api=core, batch_api=batch, networking_api=network, custom_api=custom,
+        capacity_provider=StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000)),
+    )
+    cleaned = task(phase=CellPhase.CLEANED.value)
+    cleaned["spec"]["desiredState"] = "Cancelled"
+    assert reconciler.reconcile(cleaned) is False
+    assert custom.statuses == []
+
+
+def test_reconciler_cleanup_preserves_terminal_outcome_reason():
+    core, batch, network, custom = FakeCore(), FakeBatch(), FakeNetwork(), FakeCustom()
+    reconciler = CellReconciler(
+        core_api=core, batch_api=batch, networking_api=network, custom_api=custom,
+        capacity_provider=StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000)),
+    )
+    failed = task(phase=CellPhase.FAILED.value)
+    failed["status"].update({"outcome": "Failed", "reason": "RuntimeFailed"})
+    assert reconciler.reconcile(failed) is False
+    assert custom.statuses[-1]["phase"] == "Cleaned"
+    assert custom.statuses[-1]["outcome"] == "Failed"
+    assert custom.statuses[-1]["reason"] == "RuntimeFailed"
+
+
+def test_reconciler_workload_start_gate_defers_materialization_only():
+    core, batch, network, custom = FakeCore(), FakeBatch(), FakeNetwork(), FakeCustom()
+    reconciler = CellReconciler(
+        core_api=core, batch_api=batch, networking_api=network, custom_api=custom,
+        capacity_provider=StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000)),
+    )
+    admitted = task(phase=CellPhase.ADMITTED.value)
+    admitted["status"]["reservation"] = FixedProfileSizer().size("small").reservation.as_status()
+    assert reconciler.reconcile(admitted, allow_workload_start=False) is False
+    assert core.pods == {}
+    assert custom.statuses == []
+    assert reconciler.reconcile(admitted, allow_workload_start=True) is True
+    assert ("clawbox-benchmarks", "cell-a-tool") in core.pods
 
 
 def test_reconciler_refuses_to_adopt_a_preexisting_unowned_child():
@@ -605,6 +665,23 @@ def test_firecracker_host_and_image_gates_are_fail_closed():
         assert required in smoke
     assert "foreign-architecture binfmt handlers must be disabled" in image_factory
     assert "linux/arm64" in image_factory
+    containerd_service = (ROOT / "deploy" / "containerd-clawbox.service").read_text(encoding="utf-8")
+    assert 'Environment="DM_DISABLE_UDEV=1"' in containerd_service
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "**/__pycache__" in dockerignore
+    assert "**/*.py[cod]" in dockerignore
+
+
+def test_readme_separates_one_time_bootstrap_from_daily_concurrent_runs():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "## New host: one-time installation" in readme
+    assert "## Existing host: start and run tasks" in readme
+    assert "repeat the disk bootstrap" in readme
+    assert "--parallelism 8" in readme
+    assert "--timeout-seconds 120" in readme
+    assert "--command-timeout-seconds 120" in readme
+    assert "deploy/containerd-clawbox.service" in readme
+    assert "Do not restart containerd while task VMs are running" in readme
 
 
 def test_runtime_inprocess_sidecar_uses_a_final_upload_handshake():
@@ -625,6 +702,9 @@ def test_runtime_inprocess_sidecar_uses_a_final_upload_handshake():
     assert '.runtime-complete' in sidecar and '--once --require-result' in sidecar
     assert '.upload-complete' in runtime and 'central artifact upload timed out' in runtime
     assert '"workspaceRoot": "/testbed"' in runtime
+    assert "agent_deadline=$((SECONDS + task_timeout))" in runtime
+    assert "task_timeout + 120" not in runtime
+    assert 'timeout -k 2 10 ssh -p "${tool_port}"' in runtime
     assert "/usr/local/bin/native-kb-pull.py" in runtime
     assert "/usr/local/bin/native-shadow-report.py" in runtime
     pull = (ROOT / "scripts" / "native-kb-pull.py").read_text(encoding="utf-8")

@@ -46,16 +46,38 @@ class CellPhase(StrEnum):
     CLEANED = "Cleaned"
 
 
-TERMINAL = {
+# Result phases still need one cleanup pass. CLEANED is deliberately separate:
+# it is the stable lifecycle endpoint and must never be driven back through a
+# desired-state transition. Future suspend/resume phases should likewise be
+# classified explicitly instead of being inferred from "not terminal".
+OUTCOME_TERMINAL = {
     CellPhase.SUCCEEDED,
     CellPhase.FAILED,
     CellPhase.TIMED_OUT,
     CellPhase.CANCELLED,
 }
-RESERVED = {
+FINAL = {CellPhase.CLEANED}
+TERMINAL = OUTCOME_TERMINAL | FINAL
+
+# Capacity ownership is an explicit lifecycle contract. A future Suspended
+# phase can be added here if it retains its Cell reservation, or omitted after
+# a checkpoint has released the underlying VMs.
+CAPACITY_HELD = {
     CellPhase.ADMITTED, CellPhase.TOOL_STARTING, CellPhase.TOOL_READY,
     CellPhase.RUNTIME_RUNNING, CellPhase.COLLECTING,
 }
+
+
+def capacity_reservation_for_phase(
+    phase: CellPhase, reservation: ResourceVector,
+) -> ResourceVector | None:
+    """Return the physical reservation charged by a lifecycle phase.
+
+    Suspend support can return a reduced vector here after checkpointing
+    releases CPU/memory while retaining storage.  Admission remains unaware of
+    the suspend mechanism itself.
+    """
+    return reservation if phase in CAPACITY_HELD else None
 
 
 def now() -> str:
@@ -185,8 +207,9 @@ class CellReconciler:
                 reservation = resource_from_status(status["reservation"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if phase in RESERVED:
-                admission.reserve(item["metadata"]["name"], reservation)
+            held = capacity_reservation_for_phase(phase, reservation)
+            if held is not None:
+                admission.reserve(item["metadata"]["name"], held)
         return admission
 
     def _ensure_secrets(self, task: dict[str, Any], timeout: int) -> None:
@@ -287,23 +310,29 @@ class CellReconciler:
         )
         return remaining is None
 
-    def reconcile(self, task: dict[str, Any]) -> None:
+    def reconcile(self, task: dict[str, Any], *, allow_workload_start: bool = True) -> bool:
+        """Reconcile one Cell and report whether a Pod or Job start was issued.
+
+        ``allow_workload_start`` is the materialization boundary. It rate-limits
+        both today's initial VM creation and a future resume path without
+        delaying status, cancellation, timeout, or cleanup work.
+        """
         metadata_value = task["metadata"]
         finalizers = list(metadata_value.get("finalizers") or [])
         if metadata_value.get("deletionTimestamp"):
             if self._cleanup(task) and FINALIZER in finalizers:
                 self._patch_metadata(task, [item for item in finalizers if item != FINALIZER])
-            return
+            return False
         if FINALIZER not in finalizers:
             self._patch_metadata(task, finalizers + [FINALIZER])
-            return
+            return False
 
         status = task.get("status") or {}
         try:
             phase = CellPhase(status.get("phase", CellPhase.QUEUED.value))
         except ValueError:
             self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="InvalidPhase")
-            return
+            return False
 
         if task.get("spec", {}).get("desiredState") == "Cancelled" and phase not in TERMINAL:
             self._patch_status(
@@ -312,7 +341,7 @@ class CellReconciler:
                 outcome="Cancelled",
                 reason="CancellationRequested",
             )
-            return
+            return False
 
         if not status.get("phase"):
             try:
@@ -320,13 +349,13 @@ class CellReconciler:
                 self.sizer.size(task["spec"].get("profile", "small"))
             except ValueError as exc:
                 self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="InvalidSpec", message=str(exc))
-                return
+                return False
             self._patch_status(task, CellPhase.QUEUED, queuedAt=now(), reason="PendingAdmission")
-            return
+            return False
 
-        if phase in RESERVED and self._timed_out(task):
+        if phase in CAPACITY_HELD and self._timed_out(task):
             self._patch_status(task, CellPhase.TIMED_OUT, outcome="TimedOut", reason="CellDeadlineExceeded")
-            return
+            return False
 
         size = self.sizer.size(task["spec"].get("profile", "small"))
         namespace = metadata_value["namespace"]
@@ -338,23 +367,25 @@ class CellReconciler:
             if not admission.reserve(name, size.reservation):
                 self._patch_status(task, CellPhase.QUEUED, reason="InsufficientCellCapacity",
                                    message="the complete two-VM Cell budget is unavailable")
-                return
+                return False
             node_name = self.placement.select_node(size)
             self._patch_status(
                 task, CellPhase.ADMITTED, reason="CellBudgetReserved", admittedAt=now(),
                 reservation=size.reservation.as_status(), nodeName=node_name or "",
             )
-            return
+            return False
 
         node_name = status.get("nodeName") or None
         if phase == CellPhase.ADMITTED:
+            if not allow_workload_start:
+                return False
             self._ensure_prerequisites(task, timeout)
             self._ensure(
                 self.core.read_namespaced_pod, self.core.create_namespaced_pod,
                 tool_pod(task, size, node_name=node_name),
             )
             self._patch_status(task, CellPhase.TOOL_STARTING, reason="ToolPodCreated")
-            return
+            return True
 
         tool = self._get(self.core.read_namespaced_pod, f"{name}-tool", namespace)
         tool_state = self._pod_state(tool)
@@ -363,18 +394,20 @@ class CellReconciler:
                 self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Tool{tool_state}")
             elif tool_state == "Ready":
                 self._patch_status(task, CellPhase.TOOL_READY, reason="ToolBridgeReady", toolReadyAt=now())
-            return
+            return False
 
         if phase == CellPhase.TOOL_READY:
             if tool_state != "Ready":
                 self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Tool{tool_state}")
-                return
+                return False
+            if not allow_workload_start:
+                return False
             self._ensure(
                 self.batch.read_namespaced_job, self.batch.create_namespaced_job,
                 runtime_job(task, size, node_name=node_name),
             )
             self._patch_status(task, CellPhase.RUNTIME_RUNNING, reason="RuntimeJobCreated", runtimeStartedAt=now())
-            return
+            return True
 
         job = self._get(self.batch.read_namespaced_job, f"{name}-runtime", namespace)
         job_state = self._job_state(job)
@@ -385,7 +418,7 @@ class CellReconciler:
                 self._patch_status(task, CellPhase.COLLECTING, reason="UploadsConfirmedByRuntimeExit")
             elif job_state in {"Failed", "Missing"}:
                 self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason=f"Runtime{job_state}")
-            return
+            return False
 
         if phase == CellPhase.COLLECTING:
             # runtime-entrypoint exits zero only after the ingester receipt says
@@ -394,9 +427,15 @@ class CellReconciler:
                 self._patch_status(task, CellPhase.SUCCEEDED, outcome="Succeeded", reason="ArtifactsDurable")
             else:
                 self._patch_status(task, CellPhase.FAILED, outcome="Failed", reason="ReceiptLost")
-            return
+            return False
 
-        if phase in TERMINAL:
+        if phase in OUTCOME_TERMINAL:
             if self._cleanup(task):
-                self._patch_status(task, CellPhase.CLEANED, cleanedAt=now(), reason="ChildrenDeleted")
-            return
+                # Cleaning is a lifecycle transition, not a new outcome. Keep
+                # the terminal reason (for example RuntimeFailed or
+                # CellDeadlineExceeded) so observers and a future resume
+                # coordinator do not lose the cause when children disappear.
+                self._patch_status(task, CellPhase.CLEANED, cleanedAt=now())
+            return False
+
+        return False

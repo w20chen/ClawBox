@@ -88,3 +88,13 @@ def test_benchmark_launcher_is_direct_cr_path_being_retired():
     assert _verbs_for("clawbox-benchmark-launcher", "clawbox.openai.com", "sandboxtasks", docs) >= {
         "create", "delete",
     }
+    cluster_role = next(
+        d for d in docs
+        if d.get("kind") == "ClusterRole"
+        and d.get("metadata", {}).get("name") == "clawbox-benchmark-runtimeclass-reader"
+    )
+    namespace_verbs = set()
+    for rule in cluster_role["rules"]:
+        if "" in rule.get("apiGroups", []) and "namespaces" in rule.get("resources", []):
+            namespace_verbs.update(rule["verbs"])
+    assert namespace_verbs == {"get"}
