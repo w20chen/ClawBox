@@ -300,8 +300,19 @@ def test_node_capacity_inventory_is_node_scoped_paginated_and_bounded():
     ).capacity()
 
     assert core.pod_calls == [
-        {"field_selector": "spec.nodeName=kunpeng-a", "limit": 2},
-        {"field_selector": "spec.nodeName=kunpeng-a", "limit": 2, "_continue": "page-2"},
+        {
+            "field_selector": (
+                "spec.nodeName=kunpeng-a,status.phase!=Succeeded,status.phase!=Failed"
+            ),
+            "limit": 2,
+        },
+        {
+            "field_selector": (
+                "spec.nodeName=kunpeng-a,status.phase!=Succeeded,status.phase!=Failed"
+            ),
+            "limit": 2,
+            "_continue": "page-2",
+        },
     ]
     assert capacity == ResourceVector(
         6_500,

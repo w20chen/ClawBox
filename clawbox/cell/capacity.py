@@ -236,18 +236,21 @@ class KubernetesNodeCapacityProvider:
     def _pods_on_node(self, node_name: str):
         """Yield scheduled Pods without retaining an unbounded cluster list.
 
-        Capacity is node-local, so asking the API server to filter by
-        ``spec.nodeName`` avoids transferring Pods that cannot affect this
-        node. Kubernetes list pagination gives every page in one consistent
-        snapshot while bounding the controller's live decoded-object set.
-        Inventory errors deliberately propagate: admission must fail closed
-        rather than use a partial capacity calculation.
+        Capacity is node-local and terminal Pods consume no scheduler
+        capacity, so API-server field selectors avoid transferring objects
+        that cannot affect this calculation. Kubernetes list pagination gives
+        every page in one consistent snapshot while bounding the controller's
+        live decoded-object set. Inventory errors deliberately propagate:
+        admission must fail closed rather than use a partial calculation.
         """
         continue_token: str | None = None
         while True:
             requested_token = continue_token
             kwargs: dict[str, object] = {
-                "field_selector": f"spec.nodeName={node_name}",
+                "field_selector": (
+                    f"spec.nodeName={node_name},"
+                    "status.phase!=Succeeded,status.phase!=Failed"
+                ),
                 "limit": self.pod_list_page_size,
             }
             if continue_token:
