@@ -22,15 +22,15 @@ paths.
 
 These project-specific terms are used throughout the commands below:
 
-- **Task image:** a container image, not a picture. It contains the exact
+- **Task image:** a container image containing the exact
   repository state and software dependencies for one coding task. Different
   SWE-ReBench tasks normally require different task images.
-- **Platform image:** the ClawBox software itself, such as the Runtime and Cell
+- **Platform image:** the ClawBox software w, such as the Runtime and Cell
   Controller. Platform images are shared by tasks.
 - **Tool Bridge:** the service inside the Tool VM that receives command
   requests from the agent and runs them against the task repository.
 - **ClawTune:** the sibling project that supplies the selected SWE-ReBench task
-  list and records execution data used by the tuning system.
+  list and records execution data of OpenClaw.
 - **Managed API:** the service used by `scripts/clawbox submit`. It records a
   run ID and provides status, cancellation, and retry operations.
 - **Template:** saved server-side settings for `scripts/clawbox submit`. A
