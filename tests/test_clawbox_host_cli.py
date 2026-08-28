@@ -123,7 +123,14 @@ def test_up_script_cannot_invoke_destructive_bootstrap():
 
 def test_public_cli_routes_configure_to_host_workflow():
     source = (ROOT / "scripts/clawbox").read_text(encoding="utf-8")
-    assert "up|doctor|configure|install" in source
+    assert "up|doctor|configure|install|traces" in source
+
+
+def test_trace_export_is_a_single_host_command():
+    source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
+    assert 'traces) export_traces "$@"' in source
+    assert "service/clawbox-ingester :8084" in source
+    assert "CLAWBOX_ARCHIVE_TOKEN" in source
 
 
 def test_host_workflow_generates_secrets_without_persisting_plaintext_in_repo():

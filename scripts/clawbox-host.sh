@@ -24,6 +24,8 @@ DEPLOYMENTS=(
 )
 LOCAL_API_PORT_FORWARD_PID=""
 LOCAL_API_LOG_FILE=""
+ARCHIVE_PORT_FORWARD_PID=""
+ARCHIVE_LOG_FILE=""
 SETUP_TEMP_DIR=""
 CONFIG_DATABASE_URL="${CLAWBOX_DATABASE_URL:-}"
 CONFIG_LLM_API_KEY="${CLAWBOX_LLM_API_KEY:-}"
@@ -45,6 +47,7 @@ Usage:
   scripts/clawbox install [options]
   scripts/clawbox up
   scripts/clawbox submit [options]
+  scripts/clawbox traces TASK_ID [OUTPUT_DIR]
 
 doctor  Print one concise readiness report. It never changes the host.
 configure
@@ -53,6 +56,8 @@ configure
 install One-time configure + deploy for an already bootstrapped new host.
 up      Start an already-provisioned host and reconcile the five services.
 submit  Uses the normal CLI; on the host, token and port-forward are automatic.
+traces  Export archived trace JSONL files; authentication and port-forwarding
+        are automatic on the Kubernetes host.
 
 `up` never partitions or erases disks and never runs the host bootstrap.
 
@@ -215,6 +220,15 @@ cleanup_local_api() {
   fi
   if [[ -n "${LOCAL_API_LOG_FILE}" ]]; then
     rm -f "${LOCAL_API_LOG_FILE}"
+  fi
+}
+
+cleanup_archive_api() {
+  if [[ -n "${ARCHIVE_PORT_FORWARD_PID}" ]]; then
+    kill "${ARCHIVE_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${ARCHIVE_LOG_FILE}" ]]; then
+    rm -f "${ARCHIVE_LOG_FILE}"
   fi
 }
 
@@ -839,11 +853,59 @@ local_api() {
   "${PYTHON}" -m clawbox.cli "$@"
 }
 
+export_traces() {
+  shift
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    printf 'Usage: scripts/clawbox traces TASK_ID [OUTPUT_DIR]\n'
+    return
+  fi
+  local task_id="${1:-}" output_dir="${2:-}" token ready=0 local_port=""
+  [[ -n "${task_id}" ]] || die "traces requires TASK_ID"
+  [[ $# -le 2 ]] || die "traces accepts TASK_ID and an optional OUTPUT_DIR"
+  output_dir="${output_dir:-${ROOT}/.artifacts/${task_id}.traces}"
+  require kubectl
+  require curl
+  require base64
+  require sed
+  require "${PYTHON}"
+  deployment_exists clawbox-ingester \
+    || die "trace archive service is not deployed; run scripts/clawbox up"
+  token="$(secret_value "${SYSTEM_NAMESPACE}" clawbox-control-plane service-token)"
+  [[ -n "${token}" ]] || die "trace archive service token is empty"
+
+  ARCHIVE_LOG_FILE="$(mktemp)"
+  kubectl -n "${SYSTEM_NAMESPACE}" port-forward \
+    service/clawbox-ingester :8084 >"${ARCHIVE_LOG_FILE}" 2>&1 &
+  ARCHIVE_PORT_FORWARD_PID=$!
+  trap cleanup_archive_api EXIT
+  for _ in $(seq 1 30); do
+    local_port="$(sed -nE 's/^Forwarding from .*:([0-9]+) -> 8084$/\1/p' \
+      "${ARCHIVE_LOG_FILE}" | head -n 1)"
+    if [[ "${local_port}" =~ ^[0-9]+$ ]] \
+      && curl --noproxy '*' -fsS --max-time 2 \
+        "http://127.0.0.1:${local_port}/healthz" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    kill -0 "${ARCHIVE_PORT_FORWARD_PID}" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  if (( ! ready )); then
+    sed -n '1,80p' "${ARCHIVE_LOG_FILE}" >&2
+    die "trace archive port-forward did not become ready"
+  fi
+
+  CLAWBOX_ARCHIVE_URL="http://127.0.0.1:${local_port}" \
+    CLAWBOX_ARCHIVE_TOKEN="${token}" \
+    "${PYTHON}" -m clawbox.ingester.export "${task_id}" --output "${output_dir}"
+}
+
 case "${1:-}" in
   doctor) doctor ;;
   configure) shift; configure "$@" ;;
   install) shift; install_host "$@" ;;
   up) up ;;
+  traces) export_traces "$@" ;;
   local-api) local_api "$@" ;;
   -h|--help|help|"") usage ;;
   *) usage >&2; die "unknown host command: ${1}" ;;

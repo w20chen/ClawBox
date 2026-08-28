@@ -462,6 +462,19 @@ submission after an uncertain client/network failure.
 
 Set `TASK_ID` to the `SandboxTask` name:
 
+Export all archived trace JSONL files with one host command. It obtains the
+cluster credential, creates a temporary local connection, downloads and checks
+the files, and closes the connection automatically:
+
+```bash
+TASK_ID='swe-run-id-instance-hash'
+scripts/clawbox traces "$TASK_ID"
+```
+
+Files are written below `.artifacts/${TASK_ID}.traces/`. Pass a second argument
+to select another output directory. The lower-level API sequence below is kept
+for diagnostics and manual result retrieval.
+
 ```bash
 mkdir -p .artifacts
 TASK_ID='swe-run-id-instance-hash'
@@ -485,9 +498,57 @@ curl -fsS -H "Authorization: Bearer ${TOKEN}" \
   "http://127.0.0.1:8084/v1/archive/${TASK_ID}/traces" \
   -o ".artifacts/${TASK_ID}.traces.json"
 
+# The traces endpoint above returns a manifest. Download every archived JSONL
+# file listed by that manifest, preserving its relative directory structure.
+TASK_ID="${TASK_ID}" TOKEN="${TOKEN}" .venv/bin/python - <<'PY'
+import json
+import os
+import urllib.parse
+import urllib.request
+from pathlib import Path, PurePosixPath
+
+task_id = os.environ["TASK_ID"]
+token = os.environ["TOKEN"]
+manifest_path = Path(".artifacts") / f"{task_id}.traces.json"
+output_root = Path(".artifacts") / f"{task_id}.traces"
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+for relative, metadata in sorted(manifest["paths"].items()):
+    if not relative.endswith(".jsonl"):
+        continue
+    parts = PurePosixPath(relative).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"unsafe trace path: {relative!r}")
+    url = (
+        "http://127.0.0.1:8084/v1/archive/"
+        f"{urllib.parse.quote(task_id, safe='')}/traces/"
+        f"{urllib.parse.quote(relative, safe='/')}"
+    )
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read()
+    expected = int(metadata["bytes"])
+    if len(data) != expected:
+        raise RuntimeError(
+            f"trace size mismatch for {relative}: expected {expected}, got {len(data)}"
+        )
+    output = output_root.joinpath(*parts)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(output.name + ".part")
+    temporary.write_bytes(data)
+    temporary.replace(output)
+    print(output)
+PY
+
 kill "$PORT_FORWARD_PID"
 unset TOKEN
 ```
+
+The manifest is saved as `.artifacts/${TASK_ID}.traces.json`. Downloaded JSONL
+files are written below `.artifacts/${TASK_ID}.traces/`; this includes nested
+paths and `tool-bridge.jsonl` when they were uploaded by the task.
 
 ## Updating an installed host
 
