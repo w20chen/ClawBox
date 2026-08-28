@@ -819,7 +819,9 @@ def test_runtime_entrypoint_clawtune_config_is_observe_only_and_fail_open():
     assert clawtune["mode"] == "observe"
     assert clawtune["executionBackend"] == "hook-only"
     assert clawtune["sandboxExecEnvelope"] is True
-    assert clawtune["instrumentHosts"] == ["sandbox"]
+    # OpenClaw omits params.host for sandboxed exec calls, and ClawTune's
+    # matcher intentionally treats an omitted host as "gateway".
+    assert clawtune["instrumentHosts"] == ["gateway", "sandbox"]
     assert clawtune["instrumentTools"] == ["exec"]
     assert clawtune["failOpen"] is True
     assert clawtune["enableCgroup"] is False

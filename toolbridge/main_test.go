@@ -133,7 +133,7 @@ func TestParseExecEnvelope_NoNewline(t *testing.T) {
 
 // execTestChannel deliberately never reaches stdin EOF. Real SSH clients keep
 // the channel open while waiting for exit-status, which exposed the Cmd.Wait
-// cycle fixed by runCommand's non-interactive /dev/null stdin semantics.
+// cycle fixed by runCommand's independently managed stdin pipe.
 type execTestChannel struct {
 	stdout bytes.Buffer
 	stderr bytes.Buffer
