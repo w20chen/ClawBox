@@ -215,26 +215,36 @@ def _secret_env(secret: str, variable: str, key: str) -> dict[str, Any]:
     return {"name": variable, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
 
 
-def _kb_tenant_id(task: dict[str, Any]) -> str:
+def _kb_tenant_id(task: dict[str, Any]) -> str | None:
     """Return the stable tenant identity without changing per-cell identity.
 
     v1alpha2 carries the lossless value in spec.runRef.  The live research
     cluster still serves v1alpha1, where the dispatcher-provided tenant label
-    is the best available stable key.  Falling back to the task name preserves
-    compatibility for hand-authored CRs.
+    is the best available stable key.  A per-cell fallback would silently
+    defeat cross-run learning, so KB-enabled cells must provide one of these.
     """
     run_ref = task.get("spec", {}).get("runRef", {})
-    return str(
-        run_ref.get("tenantID")
-        or task.get("metadata", {}).get("labels", {}).get("clawbox.openai.com/tenant")
-        or task["metadata"]["name"]
+    value = run_ref.get("tenantID") or task.get("metadata", {}).get("labels", {}).get(
+        "clawbox.openai.com/tenant"
     )
+    return str(value) if value else None
 
 
 def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None = None) -> dict[str, Any]:
     name = task["metadata"]["name"]
     spec = task["spec"]
     run_ref = spec.get("runRef", {})
+    kb_tenant_id = _kb_tenant_id(task)
+    if settings.kb_endpoint and not kb_tenant_id:
+        raise ValueError(
+            "KB-enabled SandboxTask requires spec.runRef.tenantID or "
+            "metadata.labels['clawbox.openai.com/tenant']"
+        )
+    kb_repository = str(
+        task.get("metadata", {}).get("annotations", {}).get(
+            "clawbox.openai.com/repository", ""
+        )
+    ).strip()
     llm_secret = spec["llmSecretName"]
     timeout = int(spec.get("timeoutSeconds", 1800))
     # Leave a pipeline margin after the agent's own budget: the agent runs with
@@ -273,6 +283,8 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             _secret_env(f"{name}-auth", "CLAWBOX_KB_INGEST_SECRET", "kb-ingest-secret"),
         ]
     extra_env: list[dict[str, Any]] = []
+    if kb_repository:
+        extra_env.append({"name": "CLAWBOX_REPO_KEY", "value": kb_repository})
     if spec.get("repoKey"):
         # Explicit repo namespace from the task spec (v1alpha2 path; on v1alpha1
         # the field is pruned server-side and the runtime derives it from the
@@ -303,7 +315,7 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
                 {"name": "TENANT_ID", "value": name},
                 # TENANT_ID remains the unique cell/state identity.  KB data is
                 # shared by the stable managed tenant across successive cells.
-                {"name": "CLAWBOX_TENANT_ID", "value": _kb_tenant_id(task)},
+                {"name": "CLAWBOX_TENANT_ID", "value": kb_tenant_id or name},
                 {"name": "RUNTIME_ID", "value": name},
                 {"name": "CLAWBOX_TASK_MODE", "value": "benchmark"},
                 {"name": "TASK_PROMPT_FILE", "value": "/prompt/problem_statement"},

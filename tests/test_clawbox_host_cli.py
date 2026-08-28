@@ -209,6 +209,13 @@ def test_platform_build_handoff_and_standard_image_env_names_are_supported():
     assert '"${candidate}" == "${repository}"@sha256:*' in build
 
 
+def test_swe_overlay_build_fails_closed_on_clawtune_revision_drift():
+    source = (ROOT / "scripts/rebuild-swe-rebench-tool-overlay.sh").read_text(encoding="utf-8")
+    assert 'actual_clawtune_revision="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD)"' in source
+    assert 'EXPECTED_CLAWTUNE_REVISION:-76eab6fa5c6333f4e80901c030f10cab0e4ce605' in source
+    assert 'does not match checkout' in source
+
+
 def test_doctor_does_not_require_a_local_registry():
     source = (ROOT / "scripts/clawbox-host.sh").read_text(encoding="utf-8")
     doctor = source.split("\ndoctor() {", 1)[1].split("\nsecret_value() {", 1)[0]

@@ -73,6 +73,7 @@ class BenchmarkTask:
     problem_statement: str
     base_commit: str = ""
     hint_text: str = ""
+    repository: str = ""
 
 
 def load_tasks(path: Path) -> list[BenchmarkTask]:
@@ -93,6 +94,7 @@ def load_tasks(path: Path) -> list[BenchmarkTask]:
             instance_id, image, problem,
             str(record.get("base_commit") or ""),
             str(record.get("hint_text") or record.get("hints_text") or record.get("hint") or ""),
+            str(record.get("repo") or record.get("repository") or "").strip(),
         ))
     return tasks
 
@@ -147,6 +149,7 @@ def render_sandbox_task(
     command_timeout_seconds: int = 300, output_limit_bytes: int = 4 * 1024**2,
     tool_egress_cidrs: list[str] | None = None, run_id: str = "run",
     llm_egress_cidrs: list[str] | None = None,
+    tenant_id: str = "benchmark",
 ) -> dict[str, Any]:
     if not re.fullmatch(r".+@sha256:[a-f0-9]{64}", task.image):
         raise ValueError("SandboxTask tool image must be an immutable arm64 digest")
@@ -155,6 +158,12 @@ def render_sandbox_task(
     effective_llm_cidrs = normalize_llm_egress_cidrs(llm_egress_cidrs or [llm_egress_cidr])
     if llm_egress_cidr != effective_llm_cidrs[0]:
         raise ValueError("llm_egress_cidr must equal the first canonical llm_egress_cidrs entry")
+    tenant_id = tenant_id.strip()
+    if not tenant_id:
+        raise ValueError("tenant_id is required for tenant-scoped KB isolation")
+    annotations = {"clawbox.openai.com/original-instance-id": task.instance_id}
+    if task.repository:
+        annotations["clawbox.openai.com/repository"] = task.repository
     return {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SandboxTask",
@@ -166,8 +175,9 @@ def render_sandbox_task(
                 "app.kubernetes.io/managed-by": "clawbox-benchmark-launcher",
                 "clawbox.openai.com/run": run_label(run_id),
                 "clawbox.openai.com/instance": dns_label(task.instance_id),
+                "clawbox.openai.com/tenant": dns_label(tenant_id),
             },
-            "annotations": {"clawbox.openai.com/original-instance-id": task.instance_id},
+            "annotations": annotations,
         },
         "spec": {
             "toolImage": task.image,
@@ -285,6 +295,10 @@ def main() -> None:
     parser.add_argument("--command-timeout-seconds", type=int, default=300)
     parser.add_argument("--output-limit-bytes", type=int, default=4 * 1024**2)
     parser.add_argument("--run-id", help="stable id for an intentional retry; generated when omitted")
+    parser.add_argument(
+        "--tenant", default=os.getenv("CLAWBOX_BENCHMARK_TENANT", "benchmark"),
+        help="stable tenant identity used to isolate and share KB generations",
+    )
     args = parser.parse_args()
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")
@@ -316,6 +330,7 @@ def main() -> None:
             output_limit_bytes=args.output_limit_bytes,
             tool_egress_cidrs=args.tool_egress_cidr,
             run_id=args.run_id,
+            tenant_id=args.tenant,
         )
     except RuntimeError as exc:
         parser.error(str(exc))

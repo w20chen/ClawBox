@@ -5,15 +5,19 @@ import math
 import re
 import socket
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import clawbox.cell.manifests as manifests_module
+
 from clawbox.benchmark.kubernetes import (
     BenchmarkTask,
     KubernetesBenchmarkLauncher,
     load_arm64_mapping,
+    load_tasks,
     normalize_llm_egress_cidrs,
     render_sandbox_task,
     resolve_llm_egress_host,
@@ -93,6 +97,15 @@ def test_launcher_requires_a_supported_immutable_arm64_mapping(tmp_path: Path):
 
     with pytest.raises(ValueError, match="no fallback"):
         resolve_arm64_tasks([BenchmarkTask("missing", "foreign:latest", "fix")], {})
+
+
+def test_load_tasks_preserves_repository_for_kb_scope(tmp_path: Path):
+    tasks_path = tmp_path / "tasks.json"
+    tasks_path.write_text(json.dumps([{
+        "instance_id": "acme__widget-1", "image": "upstream:latest",
+        "problem_statement": "fix", "repo": "acme/widget",
+    }]), encoding="utf-8")
+    assert load_tasks(tasks_path)[0].repository == "acme/widget"
 
 
 def test_sample_is_applied_before_arm64_mapping_validation():
@@ -286,6 +299,35 @@ def test_runtime_uses_stable_tenant_for_kb_without_changing_cell_identity():
     assert env["CLAWBOX_RUN_ID"] == "run-a"
     assert env["CLAWBOX_ATTEMPT_ID"] == "attempt-a"
     assert env["CLAWTUNE_REVISION"] == "76eab6fa5c6333f4e80901c030f10cab0e4ce605"
+
+
+def test_kb_enabled_runtime_rejects_missing_stable_tenant(monkeypatch):
+    monkeypatch.setattr(
+        manifests_module, "settings",
+        replace(manifests_module.settings, kb_endpoint="http://tune-kb:8086"),
+    )
+    with pytest.raises(ValueError, match="KB-enabled SandboxTask requires"):
+        runtime_job(task(), FixedProfileSizer().size("small"))
+
+
+def test_benchmark_manifest_propagates_stable_kb_scope():
+    manifest = render_sandbox_task(
+        BenchmarkTask("case", DIGEST, "fix", repository="acme/widget"),
+        namespace="clawbox-benchmarks", llm_secret="clawbox-llm",
+        llm_egress_cidr="203.0.113.10/32", tenant_id="research-a",
+    )
+    encoded_tenant = dns_label("research-a")
+    assert manifest["metadata"]["labels"]["clawbox.openai.com/tenant"] == encoded_tenant
+    assert manifest["metadata"]["annotations"]["clawbox.openai.com/repository"] == "acme/widget"
+
+    manifest["metadata"].update(uid="uid-a", generation=1)
+    job = runtime_job(manifest, FixedProfileSizer().size("small"))
+    env = {
+        item["name"]: item.get("value")
+        for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["CLAWBOX_TENANT_ID"] == encoded_tenant
+    assert env["CLAWBOX_REPO_KEY"] == "acme/widget"
 
 
 def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():

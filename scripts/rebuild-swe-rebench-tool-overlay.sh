@@ -55,6 +55,17 @@ clawtune_revision="${CLAWTUNE_REVISION:-$(git -C "${CLAWTUNE_ROOT}" rev-parse HE
   echo "CLAWTUNE_REVISION must be an exact 40-character commit id" >&2
   exit 65
 }
+actual_clawtune_revision="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD)"
+expected_clawtune_revision="${EXPECTED_CLAWTUNE_REVISION:-76eab6fa5c6333f4e80901c030f10cab0e4ce605}"
+[[ "${clawtune_revision}" == "${actual_clawtune_revision}" ]] || {
+  echo "CLAWTUNE_REVISION ${clawtune_revision} does not match checkout ${actual_clawtune_revision}" >&2
+  exit 65
+}
+[[ "${clawtune_revision}" == "${expected_clawtune_revision}" ]] || {
+  echo "ClawTune revision ${clawtune_revision} is incompatible with this release" >&2
+  echo "expected ${expected_clawtune_revision}; check out that exact revision" >&2
+  exit 65
+}
 
 docker build --platform linux/arm64 --network host \
   --build-context "clawtune=${CLAWTUNE_ROOT}" \
