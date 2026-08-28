@@ -107,7 +107,13 @@ def validate_task(task: dict[str, Any]) -> None:
     if not spec.get("llmEgressCIDR"):
         raise ValueError("spec.llmEgressCIDR is required for fail-closed network policy")
     try:
-        ipaddress.ip_network(str(spec["llmEgressCIDR"]), strict=True)
+        llm_cidrs = spec.get("llmEgressCIDRs") or [spec["llmEgressCIDR"]]
+        if not isinstance(llm_cidrs, list) or not llm_cidrs or len(llm_cidrs) > 32:
+            raise ValueError("spec.llmEgressCIDRs must contain between 1 and 32 entries")
+        if str(spec["llmEgressCIDR"]) != str(llm_cidrs[0]):
+            raise ValueError("spec.llmEgressCIDR must equal the first spec.llmEgressCIDRs entry")
+        for cidr in llm_cidrs:
+            ipaddress.ip_network(str(cidr), strict=True)
         for cidr in spec.get("toolEgressCIDRs", []):
             ipaddress.ip_network(str(cidr), strict=True)
     except ValueError as exc:

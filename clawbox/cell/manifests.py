@@ -373,9 +373,13 @@ def network_policies(task: dict[str, Any]) -> list[dict[str, Any]]:
         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "clawbox-system"}},
                  "podSelector": {"matchLabels": {"app.kubernetes.io/component": "tune-kb"}}}],
          "ports": [{"protocol": "TCP", "port": 8086}]},
-        {"to": [{"ipBlock": {"cidr": task["spec"]["llmEgressCIDR"]}}],
-         "ports": [{"protocol": "TCP", "port": int(task["spec"].get("llmEgressPort", 443))}]},
     ]
+    llm_cidrs = task["spec"].get("llmEgressCIDRs") or [task["spec"]["llmEgressCIDR"]]
+    for cidr in llm_cidrs:
+        runtime_egress.append({
+            "to": [{"ipBlock": {"cidr": cidr}}],
+            "ports": [{"protocol": "TCP", "port": int(task["spec"].get("llmEgressPort", 443))}],
+        })
     tool_egress = [dns]
     for cidr in task["spec"].get("toolEgressCIDRs", []):
         tool_egress.append({"to": [{"ipBlock": {"cidr": cidr}}]})

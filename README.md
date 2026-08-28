@@ -251,7 +251,7 @@ RUN_ID="smoke-$(date -u +%Y%m%d%H%M%S)"
 bash scripts/run-swe-rebench.sh \
   --tasks .artifacts/concurrency-smoke-2.json \
   --arm64-map /data/swe-rebench-arm64-map.json \
-  --llm-egress-cidr "$CLAWBOX_LLM_EGRESS_CIDR" \
+  --llm-egress-host api.deepseek.com \
   --parallelism 2 \
   --timeout-seconds 120 \
   --command-timeout-seconds 120 \
@@ -303,21 +303,12 @@ mkdir -p .artifacts
   --count 8 \
   --output .artifacts/concurrency-smoke-8.json
 
-getent ahostsv4 api.deepseek.com | awk '{print $1}' | sort -u
-read -rp 'Approved provider CIDR: ' PROVIDER_CIDR
-python3 - "$PROVIDER_CIDR" <<'PY'
-import ipaddress, sys
-network = ipaddress.ip_network(sys.argv[1], strict=True)
-assert network.prefixlen > 0, "an unrestricted CIDR is forbidden"
-print(f"using LLM egress CIDR: {network}")
-PY
-export PROVIDER_CIDR
 export RUN_ID="swe-$(date -u +%Y%m%d%H%M%S)"
 
 bash scripts/run-swe-rebench.sh \
   --tasks .artifacts/concurrency-smoke-8.json \
   --arm64-map /data/swe-rebench-arm64-map.json \
-  --llm-egress-cidr "$PROVIDER_CIDR" \
+  --llm-egress-host api.deepseek.com \
   --profile small \
   --parallelism 8 \
   --timeout-seconds 120 \
@@ -329,6 +320,19 @@ bash scripts/run-swe-rebench.sh \
 staggers new VM materialization across reconciliation cycles; this reduces
 devmapper pressure without reducing steady-state concurrency. A task may stay
 `Queued` until capacity for both of its VMs is available.
+
+`--llm-egress-host` resolves every current public IPv4 address immediately
+before submission. The launcher rejects private, loopback, malformed, empty,
+or excessive results, records the canonical `/32` snapshot in every
+`SandboxTask`, and limits Runtime egress to those addresses on port 443. This
+removes per-run CIDR input while remaining fail-closed. Re-run the launcher for
+each batch so provider DNS changes are captured; never replace this with
+`0.0.0.0/0`.
+
+The runner clears inherited HTTP(S)/SOCKS proxy variables only in its own
+process before connecting to the local Kubernetes API. This prevents a stale
+login-shell proxy from breaking submission and does not modify shell startup
+files or Runtime network policy.
 
 For real SWE-ReBench evaluation, first build mappings for every selected task,
 then pass the original task file and optionally `--sample N`. The launcher
@@ -342,7 +346,7 @@ mkdir -p .artifacts
 nohup bash scripts/run-swe-rebench.sh \
   --tasks .artifacts/concurrency-smoke-8.json \
   --arm64-map /data/swe-rebench-arm64-map.json \
-  --llm-egress-cidr "$PROVIDER_CIDR" \
+  --llm-egress-host api.deepseek.com \
   --profile small \
   --parallelism 8 \
   --timeout-seconds 120 \

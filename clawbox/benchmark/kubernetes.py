@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +15,48 @@ from typing import Any
 
 from clawbox.cell.controller import GROUP, PLURAL, VERSION
 from clawbox.controller.kubernetes_backend import dns_label
+
+
+MAX_LLM_EGRESS_CIDRS = 32
+
+
+def normalize_llm_egress_cidrs(cidrs: list[str]) -> list[str]:
+    """Return unique canonical LLM egress networks in stable address order."""
+    if not cidrs:
+        raise ValueError("at least one LLM egress CIDR is required")
+    networks: dict[tuple[int, int, int], str] = {}
+    for value in cidrs:
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise ValueError(f"invalid LLM egress CIDR {value!r}: {exc}") from exc
+        if network.prefixlen == 0:
+            raise ValueError("unrestricted LLM egress CIDRs are forbidden")
+        key = (network.version, int(network.network_address), network.prefixlen)
+        networks[key] = str(network)
+    if len(networks) > MAX_LLM_EGRESS_CIDRS:
+        raise ValueError(f"at most {MAX_LLM_EGRESS_CIDRS} LLM egress CIDRs are allowed")
+    return [networks[key] for key in sorted(networks)]
+
+
+def resolve_llm_egress_host(host: str) -> list[str]:
+    """Resolve a provider hostname to an auditable, fail-closed IPv4 snapshot."""
+    host = host.strip().rstrip(".")
+    if not host or "://" in host or "/" in host or ":" in host:
+        raise ValueError("LLM egress host must be a hostname without a scheme, path, or port")
+    try:
+        answers = socket.getaddrinfo(host, 443, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"cannot resolve LLM egress host {host!r}: {exc}") from exc
+    addresses = {ipaddress.ip_address(answer[4][0]) for answer in answers}
+    if not addresses:
+        raise ValueError(f"LLM egress host {host!r} returned no IPv4 addresses")
+    non_global = sorted(str(address) for address in addresses if not address.is_global)
+    if non_global:
+        raise ValueError(
+            f"LLM egress host {host!r} resolved to non-public IPv4 addresses: {', '.join(non_global)}"
+        )
+    return normalize_llm_egress_cidrs([f"{address}/32" for address in addresses])
 
 
 def run_label(run_id: str) -> str:
@@ -102,11 +146,15 @@ def render_sandbox_task(
     llm_egress_cidr: str, profile: str = "small", timeout_seconds: int = 1800,
     command_timeout_seconds: int = 300, output_limit_bytes: int = 4 * 1024**2,
     tool_egress_cidrs: list[str] | None = None, run_id: str = "run",
+    llm_egress_cidrs: list[str] | None = None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r".+@sha256:[a-f0-9]{64}", task.image):
         raise ValueError("SandboxTask tool image must be an immutable arm64 digest")
     # Child names append up to "-runtime-egress" (15 characters).
     name = dns_label(f"{run_id}-{task.instance_id}", prefix="swe-", max_length=48)
+    effective_llm_cidrs = normalize_llm_egress_cidrs(llm_egress_cidrs or [llm_egress_cidr])
+    if llm_egress_cidr != effective_llm_cidrs[0]:
+        raise ValueError("llm_egress_cidr must equal the first canonical llm_egress_cidrs entry")
     return {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SandboxTask",
@@ -128,6 +176,7 @@ def render_sandbox_task(
             "hintText": task.hint_text,
             "llmSecretName": llm_secret,
             "llmEgressCIDR": llm_egress_cidr,
+            "llmEgressCIDRs": effective_llm_cidrs,
             "llmEgressPort": 443,
             "toolEgressCIDRs": tool_egress_cidrs or [],
             "profile": profile,
@@ -218,7 +267,15 @@ def main() -> None:
     parser.add_argument("--arm64-map", type=Path, required=True)
     parser.add_argument("--namespace", default="clawbox-benchmarks")
     parser.add_argument("--llm-secret", default="clawbox-llm")
-    parser.add_argument("--llm-egress-cidr", required=True)
+    llm_egress = parser.add_mutually_exclusive_group(required=True)
+    llm_egress.add_argument(
+        "--llm-egress-cidr", action="append",
+        help="canonical provider CIDR; repeat to allow multiple addresses",
+    )
+    llm_egress.add_argument(
+        "--llm-egress-host",
+        help="provider hostname resolved to all public IPv4 /32 networks before submission",
+    )
     parser.add_argument("--tool-egress-cidr", action="append", default=[])
     parser.add_argument("--runtime-class", default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc-arm64"))
     parser.add_argument("--profile", choices=("small", "medium", "large"), default="small")
@@ -235,18 +292,33 @@ def main() -> None:
         tasks = select_arm64_tasks(
             load_tasks(args.tasks), load_arm64_mapping(args.arm64_map), args.sample,
         )
+        llm_egress_cidrs = (
+            resolve_llm_egress_host(args.llm_egress_host)
+            if args.llm_egress_host
+            else normalize_llm_egress_cidrs(args.llm_egress_cidr)
+        )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
-    results = KubernetesBenchmarkLauncher().run(
-        tasks, parallelism=args.parallelism, namespace=args.namespace,
-        llm_secret=args.llm_secret, llm_egress_cidr=args.llm_egress_cidr,
-        runtime_class=args.runtime_class, profile=args.profile,
-        timeout_seconds=args.timeout_seconds,
-        command_timeout_seconds=args.command_timeout_seconds,
-        output_limit_bytes=args.output_limit_bytes,
-        tool_egress_cidrs=args.tool_egress_cidr,
-        run_id=args.run_id,
-    )
+    if args.llm_egress_host:
+        print(
+            f"resolved {args.llm_egress_host} to LLM egress CIDRs: "
+            + ", ".join(llm_egress_cidrs),
+            flush=True,
+        )
+    try:
+        results = KubernetesBenchmarkLauncher().run(
+            tasks, parallelism=args.parallelism, namespace=args.namespace,
+            llm_secret=args.llm_secret, llm_egress_cidr=llm_egress_cidrs[0],
+            llm_egress_cidrs=llm_egress_cidrs,
+            runtime_class=args.runtime_class, profile=args.profile,
+            timeout_seconds=args.timeout_seconds,
+            command_timeout_seconds=args.command_timeout_seconds,
+            output_limit_bytes=args.output_limit_bytes,
+            tool_egress_cidrs=args.tool_egress_cidr,
+            run_id=args.run_id,
+        )
+    except RuntimeError as exc:
+        parser.error(str(exc))
     print(json.dumps(results, ensure_ascii=False, indent=2))
     if any(item["status"] != "succeeded" for item in results):
         raise SystemExit(1)

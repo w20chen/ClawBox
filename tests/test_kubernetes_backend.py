@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import socket
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,9 @@ from clawbox.benchmark.kubernetes import (
     BenchmarkTask,
     KubernetesBenchmarkLauncher,
     load_arm64_mapping,
+    normalize_llm_egress_cidrs,
     render_sandbox_task,
+    resolve_llm_egress_host,
     resolve_arm64_tasks,
     run_label,
     select_arm64_tasks,
@@ -133,6 +136,44 @@ def test_benchmark_renders_only_a_sandbox_task_cr():
     assert "runtimeImage" not in manifest["spec"]
     assert "apiKey" not in str(manifest)
     assert len(manifest["metadata"]["name"] + "-runtime-egress") <= 63
+
+
+def test_llm_egress_host_resolves_all_public_ipv4_addresses(monkeypatch):
+    def getaddrinfo(host, port, *, family, type):
+        assert (host, port, family, type) == (
+            "api.example.com", 443, socket.AF_INET, socket.SOCK_STREAM,
+        )
+        return [
+            (2, 1, 6, "", ("8.8.8.8", 443)),
+            (2, 1, 6, "", ("1.1.1.1", 443)),
+            (2, 1, 6, "", ("8.8.8.8", 443)),
+        ]
+
+    monkeypatch.setattr("clawbox.benchmark.kubernetes.socket.getaddrinfo", getaddrinfo)
+    assert resolve_llm_egress_host("api.example.com.") == ["1.1.1.1/32", "8.8.8.8/32"]
+
+
+def test_llm_egress_resolution_and_manual_cidrs_fail_closed(monkeypatch):
+    monkeypatch.setattr(
+        "clawbox.benchmark.kubernetes.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
+    )
+    with pytest.raises(ValueError, match="non-public"):
+        resolve_llm_egress_host("api.example.com")
+    with pytest.raises(ValueError, match="without a scheme"):
+        resolve_llm_egress_host("https://api.example.com")
+    with pytest.raises(ValueError, match="unrestricted"):
+        normalize_llm_egress_cidrs(["0.0.0.0/0"])
+
+
+def test_benchmark_records_multiple_llm_egress_cidrs():
+    manifest = render_sandbox_task(
+        BenchmarkTask("case", DIGEST, "fix"), namespace="clawbox-benchmarks",
+        llm_secret="clawbox-llm", llm_egress_cidr="1.1.1.1/32",
+        llm_egress_cidrs=["8.8.8.8/32", "1.1.1.1/32"],
+    )
+    assert manifest["spec"]["llmEgressCIDR"] == "1.1.1.1/32"
+    assert manifest["spec"]["llmEgressCIDRs"] == ["1.1.1.1/32", "8.8.8.8/32"]
 
 
 def test_launcher_preflight_requires_firecracker_handler_overhead_and_crd():
@@ -501,7 +542,9 @@ def test_task_secret_volume_projections_keep_private_material_separate():
 
 
 def test_cell_network_policy_is_default_deny_and_task_scoped():
-    policies = network_policies(task())
+    value = task()
+    value["spec"]["llmEgressCIDRs"] = ["203.0.113.10/32", "198.51.100.20/32"]
+    policies = network_policies(value)
     names = {item["metadata"]["name"] for item in policies}
     assert names == {
         "cell-a-default-deny", "cell-a-tool-ingress",
@@ -510,6 +553,7 @@ def test_cell_network_policy_is_default_deny_and_task_scoped():
     assert all(item["metadata"]["ownerReferences"] for item in policies)
     runtime = next(item for item in policies if item["metadata"]["name"].endswith("runtime-egress"))
     assert "203.0.113.10/32" in str(runtime)
+    assert "198.51.100.20/32" in str(runtime)
     tool = next(item for item in policies if item["metadata"]["name"].endswith("tool-egress"))
     assert "203.0.113.10/32" not in str(tool)
 
@@ -718,6 +762,7 @@ def test_readme_separates_one_time_bootstrap_from_daily_concurrent_runs():
     assert "Do not restart containerd while task VMs are running" in readme
     assert '[[ -n "${CLAWBOX_PYTHON:-}" ]]' in runner
     assert '[[ -x "${ROOT}/.venv/bin/python" ]]' in runner
+    assert "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy" in runner
     assert 'exec "${PYTHON}" -m clawbox.benchmark.kubernetes' in runner
 
 
