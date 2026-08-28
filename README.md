@@ -1,6 +1,6 @@
 # ClawBox
 
-![ClawBox architecture overview](clawbox-overview.png)
+![ClawBox architecture overview](docs/images/clawbox-overview.png)
 
 ClawBox runs coding-agent tasks on one native ARM64 Kubernetes node. Each
 task is a `SandboxTask` backed by two isolated Kata/Firecracker VMs:
@@ -11,6 +11,39 @@ task is a `SandboxTask` backed by two isolated Kata/Firecracker VMs:
 
 The supported production target is a dedicated ARM64 host such as Kunpeng.
 There is no supported x86, QEMU, runc, or multi-node fallback.
+
+## ClawBox and ClawTune
+
+![ClawBox and ClawTune relationship](docs/images/clawbox-clawtune-relationship.png)
+
+ClawBox is the sandbox orchestration platform; ClawTune is embedded in each
+Runtime VM as the telemetry and resource-prediction engine. ClawBox reuses
+ClawTune rather than forking its prediction semantics, then adds the control,
+isolation, evidence, and lifecycle layers required to run concurrent coding
+agents safely.
+
+The interaction is a fail-open, generation-based feedback loop:
+
+1. Before the Runtime starts, ClawBox pulls the signed, tenant/repository-scoped
+   KB pair. The in-process ClawTune sidecar loads it once at startup.
+2. The ClawTune OpenClaw plugin observes tool calls, while its sidecar and LLM
+   proxy emit trace spans and shadow prediction payloads.
+3. ClawBox sends tool execution through the Tool Bridge into the isolated Tool
+   VM. The bridge creates per-execution cgroups and drives ClawTune's guest
+   eBPF clause collector, producing independently attributable actuals.
+4. ClawBox joins the ClawTune span, Tool Bridge record, and cgroup artifact by
+   exact `execution_id`, validates and signs the evidence, and publishes the
+   next atomic KB generation.
+5. A later Runtime loads that generation back into ClawTune. Predictions are
+   currently observational only; `FixedProfileSizer` remains authoritative.
+
+| Reused directly from ClawTune | Implemented by ClawBox |
+| --- | --- |
+| OpenClaw plugin hooks and the in-process sidecar/LLM proxy | Multi-tenant Managed API, dispatcher, admission, and Cell lifecycle |
+| Trace, clause/cgroup artifact contracts, and the guest eBPF clause collector | Dual Kata/Firecracker Runtime and Tool VM isolation, networking, and credential separation |
+| Native readers and validators for eligible telemetry | Tool Bridge execution, per-execution cgroups, exact identity propagation, and collector lifecycle |
+| `CompletedCall`, `ToolCallQuery`, `ClauseResourceKB`, and `RuntimeToolResourceKB` | Signed immutable ingestion, tenant/repo scoping, exact three-source joins, and atomic KB publication/rollback |
+| ClawTune KB fitting, observation, query, and JSON load/save semantics | Result collection, cancellation, cleanup, audit evidence, and shadow-vs-actual reporting |
 
 ## Table of contents
 
