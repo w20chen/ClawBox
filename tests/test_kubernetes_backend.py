@@ -818,6 +818,9 @@ def test_runtime_entrypoint_clawtune_config_is_observe_only_and_fail_open():
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["mode"] == "observe"
     assert clawtune["executionBackend"] == "hook-only"
+    assert clawtune["sandboxExecEnvelope"] is True
+    assert clawtune["instrumentHosts"] == ["sandbox"]
+    assert clawtune["instrumentTools"] == ["exec"]
     assert clawtune["failOpen"] is True
     assert clawtune["enableCgroup"] is False
     assert clawtune["enableAffinity"] is False

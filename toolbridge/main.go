@@ -286,13 +286,18 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		"CLAWBOX_GATE_COMMAND="+command,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// SSH "exec" requests used by the runtime are non-interactive: their
-	// command payload already contains the complete shell program. Passing the
-	// channel as Cmd.Stdin makes os/exec start a copy goroutine; Cmd.Wait then
-	// waits for EOF from the still-open SSH channel while the channel handler
-	// waits for Cmd.Wait before closing it (a deterministic deadlock after the
-	// command has produced all output). Use /dev/null semantics instead.
-	cmd.Stdin = nil
+	// Use an OS pipe instead of assigning the SSH channel directly to Cmd.Stdin.
+	// os/exec does not wait for our copy goroutine, so commands that ignore stdin
+	// can finish before the SSH client closes its write side. Commands that need
+	// stdin (OpenClaw's tar-based file tools and runtime collection scripts) still
+	// receive the complete stream.
+	stdinRead, stdinWrite, stdinErr := os.Pipe()
+	if stdinErr != nil {
+		record.TelemetryError = "stdin pipe: " + stdinErr.Error()
+		record.DurationMS = time.Since(started).Milliseconds()
+		return record
+	}
+	cmd.Stdin = stdinRead
 	stdout := &limitedStream{dst: channel, limit: outputLimit}
 	stderr := &limitedStream{dst: channel.Stderr(), limit: outputLimit}
 	cmd.Stdout = stdout
@@ -307,6 +312,15 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		cmd.ExtraFiles = []*os.File{gateRead}
 		err = cmd.Start()
 		_ = gateRead.Close()
+	}
+	_ = stdinRead.Close()
+	if err == nil {
+		go func() {
+			_, _ = io.Copy(stdinWrite, channel)
+			_ = stdinWrite.Close()
+		}()
+	} else {
+		_ = stdinWrite.Close()
 	}
 	if err == nil {
 		cgroupPath, cgroupOK, cgroupError := tryPerExecCgroup(executionID, cmd.Process.Pid)
@@ -360,6 +374,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				err = <-done
 			}
 		}
+		_ = stdinWrite.Close()
 		record.ExitCode = commandExitCode(err, record.TimedOut)
 		if telemetryBegun {
 			response, finishErr := guestCollector.Finish(executionID, record.ExitCode)

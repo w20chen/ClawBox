@@ -1,4 +1,4 @@
 # Replace only the Tool Bridge binary in an existing immutable SWE-Rebench image.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
-COPY --chmod=0555 .artifacts/tool-bridge-overlay /usr/local/bin/tool-bridge
+COPY --from=overlay --chmod=0555 tool-bridge-overlay /usr/local/bin/tool-bridge

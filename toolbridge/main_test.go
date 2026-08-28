@@ -165,3 +165,27 @@ func TestRunCommandDoesNotWaitForSSHStdinEOF(t *testing.T) {
 		t.Fatal("runCommand deadlocked waiting for SSH stdin EOF")
 	}
 }
+
+type stdinTestChannel struct {
+	reader *bytes.Reader
+	stdout bytes.Buffer
+	stderr bytes.Buffer
+}
+
+func (c *stdinTestChannel) Read(p []byte) (int, error)                     { return c.reader.Read(p) }
+func (c *stdinTestChannel) Write(p []byte) (int, error)                    { return c.stdout.Write(p) }
+func (c *stdinTestChannel) Close() error                                   { return nil }
+func (c *stdinTestChannel) CloseWrite() error                              { return nil }
+func (c *stdinTestChannel) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
+func (c *stdinTestChannel) Stderr() io.ReadWriter                          { return &c.stderr }
+
+func TestRunCommandStreamsSSHStdin(t *testing.T) {
+	channel := &stdinTestChannel{reader: bytes.NewReader([]byte("archive-payload"))}
+	record := runCommand(channel, "cat", t.TempDir(), time.Second, 1024)
+	if record.ExitCode != 0 {
+		t.Fatalf("command exit code = %d", record.ExitCode)
+	}
+	if channel.stdout.String() != "archive-payload" {
+		t.Fatalf("stdout = %q", channel.stdout.String())
+	}
+}

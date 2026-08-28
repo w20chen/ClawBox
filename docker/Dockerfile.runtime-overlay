@@ -1,0 +1,4 @@
+# Apply a reviewed runtime entrypoint change to an immutable ARM64 runtime image.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --chmod=0755 scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint

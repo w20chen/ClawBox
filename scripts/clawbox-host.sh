@@ -56,7 +56,7 @@ configure
 install One-time configure + deploy for an already bootstrapped new host.
 up      Start an already-provisioned host and reconcile the five services.
 submit  Uses the normal CLI; on the host, token and port-forward are automatic.
-traces  Export archived trace JSONL files; authentication and port-forwarding
+traces  Export all archived trace files; authentication and port-forwarding
         are automatic on the Kubernetes host.
 
 `up` never partitions or erases disks and never runs the host bootstrap.

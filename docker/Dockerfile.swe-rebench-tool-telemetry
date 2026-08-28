@@ -27,7 +27,7 @@ RUN . /etc/os-release \
       python3 python3-dev python3-pip python3-venv python3-numpy \
  && rm -rf /var/lib/apt/lists/*
 
-COPY .artifacts/kata-debug.config /tmp/kata-debug.config
+COPY --from=overlay kata-debug.config /tmp/kata-debug.config
 RUN test -n "${KERNEL_VERSION}" \
  && test -n "${KERNEL_SOURCE_SHA256}" \
  && curl -fL --retry 4 --connect-timeout 15 --max-time 1800 \
@@ -52,7 +52,7 @@ RUN sed -i 's/\r$//' \
       "import sys; sys.path.insert(0, '/opt/clawtune-guest/services/sidecar/src'); from tool_resource.telemetry import _ensure_bcc_importable; print(_ensure_bcc_importable().__file__)"
 
 COPY --from=clawtune tools/guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
-COPY --chmod=0555 .artifacts/tool-bridge-overlay /usr/local/bin/tool-bridge
+COPY --from=overlay --chmod=0555 tool-bridge-overlay /usr/local/bin/tool-bridge
 COPY scripts/validate-toolbridge-guest-artifacts.py /opt/clawbox/validate-toolbridge-guest-artifacts.py
 LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
 

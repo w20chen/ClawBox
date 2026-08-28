@@ -462,7 +462,7 @@ submission after an uncertain client/network failure.
 
 Set `TASK_ID` to the `SandboxTask` name:
 
-Export all archived trace JSONL files with one host command. It obtains the
+Export all archived trace files with one host command. It obtains the
 cluster credential, creates a temporary local connection, downloads and checks
 the files, and closes the connection automatically:
 
@@ -471,9 +471,11 @@ TASK_ID='swe-run-id-instance-hash'
 scripts/clawbox traces "$TASK_ID"
 ```
 
-Files are written below `.artifacts/${TASK_ID}.traces/`. Pass a second argument
-to select another output directory. The lower-level API sequence below is kept
-for diagnostics and manual result retrieval.
+Files are written below `.artifacts/${TASK_ID}.traces/`. This includes JSONL,
+eBPF clause telemetry, cgroup resource records, and generated reports when the
+task uploaded them. Pass a second argument to select another output directory.
+The lower-level API sequence below is kept for diagnostics and manual result
+retrieval.
 
 ```bash
 mkdir -p .artifacts

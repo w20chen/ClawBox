@@ -141,6 +141,8 @@ cat >"${STATE_DIR}/openclaw.patch.json" <<EOF
       "sidecarCommand": "",
       "executionBackend": "hook-only",
       "sandboxExecEnvelope": true,
+      "instrumentHosts": ["sandbox"],
+      "instrumentTools": ["exec"],
       "enableCgroup": false,
       "enableAffinity": false,
       "enableNuma": false,

@@ -58,6 +58,7 @@ clawtune_revision="${CLAWTUNE_REVISION:-$(git -C "${CLAWTUNE_ROOT}" rev-parse HE
 
 docker build --platform linux/arm64 --network host \
   --build-context "clawtune=${CLAWTUNE_ROOT}" \
+  --build-context "overlay=${ROOT}/.artifacts" \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
   --build-arg "CLAWTUNE_REVISION=${clawtune_revision}" \
   --build-arg "KERNEL_VERSION=${kernel_version}" \
