@@ -38,7 +38,7 @@ class Settings:
     kb_token: str = os.getenv("CLAWBOX_KB_TOKEN", "")
     kb_ingest_secret: str = os.getenv("CLAWBOX_KB_INGEST_SECRET", "")
     clawtune_revision: str = os.getenv(
-        "CLAWTUNE_REVISION", "e91e60bc1e5f3209fbcf6091013fde96f217e2a7"
+        "CLAWTUNE_REVISION", "76eab6fa5c6333f4e80901c030f10cab0e4ce605"
     )
     cell_namespace: str = os.getenv("CLAWBOX_CELL_NAMESPACE", "clawbox-benchmarks")
     lease_ttl_seconds: int = int(os.getenv("LEASE_TTL_SECONDS", "300"))

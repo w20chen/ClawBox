@@ -29,7 +29,7 @@ conversion-webhook convergence is completed.
 
 The latest accepted source and images are:
 
-- ClawTune: `e91e60bc1e5f3209fbcf6091013fde96f217e2a7`.
+- ClawTune: `76eab6fa5c6333f4e80901c030f10cab0e4ce605`.
 - Production Tool image:
   `127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:c930c7243e6072924a812b1102356e5c972f3d2e2ef1082a6d4cf0510eb997cd`.
 - Control-plane image:

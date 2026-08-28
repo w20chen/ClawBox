@@ -285,7 +285,7 @@ def test_runtime_uses_stable_tenant_for_kb_without_changing_cell_identity():
     assert env["CLAWBOX_TENANT_ID"] == "Exact Tenant"
     assert env["CLAWBOX_RUN_ID"] == "run-a"
     assert env["CLAWBOX_ATTEMPT_ID"] == "attempt-a"
-    assert env["CLAWTUNE_REVISION"] == "e91e60bc1e5f3209fbcf6091013fde96f217e2a7"
+    assert env["CLAWTUNE_REVISION"] == "76eab6fa5c6333f4e80901c030f10cab0e4ce605"
 
 
 def test_non_cell_pod_request_counts_native_sidecar_and_runtime_overhead():

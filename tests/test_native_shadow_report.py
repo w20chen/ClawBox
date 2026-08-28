@@ -55,7 +55,7 @@ def test_shadow_report_joins_prediction_actual_and_run_a_evidence(tmp_path, monk
         "generation": 1,
         "pair_digest": "a" * 64,
         "source_digest": "b" * 64,
-        "clawtune_revision": "e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+        "clawtune_revision": "76eab6fa5c6333f4e80901c030f10cab0e4ce605",
         "evidence": {"runs": ["run-a"]},
     }
     monkeypatch.setenv("CLAWBOX_RUN_ID", "run-b")

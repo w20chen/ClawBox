@@ -19,7 +19,7 @@ services:
       additional_contexts:
         clawtune: ../ClawTune
       args:
-        CLAWTUNE_REVISION: ${CLAWTUNE_REVISION:-e91e60bc1e5f3209fbcf6091013fde96f217e2a7}
+        CLAWTUNE_REVISION: ${CLAWTUNE_REVISION:-76eab6fa5c6333f4e80901c030f10cab0e4ce605}
     command: clawbox-scheduler
     environment: &env
       DATABASE_URL: postgresql+psycopg://clawbox:${POSTGRES_PASSWORD:-clawbox}@postgres/clawbox

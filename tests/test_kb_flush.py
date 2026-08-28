@@ -315,7 +315,7 @@ def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
         attempt_id="attempt-a",
         cell_id="cell-a",
         collector_version="guest-collector-v1",
-        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+        clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605",
     )
     assert raw is not None
     manifest = NativeTelemetryManifest.model_validate(raw)
@@ -333,13 +333,13 @@ def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
     rebuilt = kb_flush.build_native_manifest(
         tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
-        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+        clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605",
     )
     assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a"}
     audit = kb_flush.build_native_manifest(
         tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
-        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7", eligible_only=False,
+        clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605", eligible_only=False,
     )
     assert {item["execution_id"] for item in audit["artifacts"]} == {
         "exec-a", "exec-failopen"
@@ -365,13 +365,13 @@ def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
     rebuilt = kb_flush.build_native_manifest(
         tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
-        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7",
+        clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605",
     )
     assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a"}
     audit = kb_flush.build_native_manifest(
         tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
-        clawtune_revision="e91e60bc1e5f3209fbcf6091013fde96f217e2a7", eligible_only=False,
+        clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605", eligible_only=False,
     )
     assert {item["execution_id"] for item in audit["artifacts"]} == {
         "exec-a", "exec-failopen", "exec-no-latency"

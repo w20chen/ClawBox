@@ -25,7 +25,7 @@ from clawbox.tuning.store import (
     make_tuning_engine,
 )
 
-REVISION = "e91e60bc1e5f3209fbcf6091013fde96f217e2a7"
+REVISION = "76eab6fa5c6333f4e80901c030f10cab0e4ce605"
 SECRET = "native-test-secret"
 REPO = "github.com/acme/foo"
 

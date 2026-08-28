@@ -50,7 +50,7 @@ spec:
             - name: CLAWBOX_INGEST_SECRET
               valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
             - name: CLAWTUNE_REVISION
-              value: e91e60bc1e5f3209fbcf6091013fde96f217e2a7
+              value: 76eab6fa5c6333f4e80901c030f10cab0e4ce605
           ports: [{name: http, containerPort: 8086}]
           readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 3}
           resources:

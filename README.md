@@ -12,9 +12,13 @@ task is a `SandboxTask` backed by two isolated Kata/Firecracker VMs:
 The supported production target is a dedicated ARM64 host such as Kunpeng.
 There is no supported x86, QEMU, runc, or multi-node fallback.
 
-This README has two paths. Use **New host: one-time installation** exactly
-once for a new machine. For every later reboot or task run, skip it and use
-**Existing host: start and run tasks**.
+## Table of contents
+
+- [New host: one-time installation](#new-host-one-time-installation)
+- [Existing host: start and run tasks](#existing-host-start-and-run-tasks)
+- [Updating an installed host](#updating-an-installed-host)
+- [Troubleshooting](#troubleshooting)
+- [Lifecycle and development references](#lifecycle-and-development-references)
 
 ## Command map
 
@@ -59,7 +63,7 @@ Replace `/home/USER` with the administrator's home directory:
 cd /home/USER
 git clone https://github.com/w20chen/ClawTune.git
 git clone https://github.com/w20chen/ClawBox.git
-git -C ClawTune checkout --detach e91e60bc1e5f3209fbcf6091013fde96f217e2a7
+git -C ClawTune checkout --detach 76eab6fa5c6333f4e80901c030f10cab0e4ce605
 cd ClawBox
 
 python3 -m venv .venv

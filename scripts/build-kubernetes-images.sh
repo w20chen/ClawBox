@@ -11,7 +11,7 @@ REGISTRY="${REGISTRY:?set REGISTRY, for example registry.example.com/clawbox}"
 TAG="${TAG:-dev}"
 BRIDGE_OUTPUT="${BRIDGE_OUTPUT:-${ROOT}/.artifacts/tool-bridge-arm64}"
 PLATFORM_IMAGE_ENV="${PLATFORM_IMAGE_ENV:-${ROOT}/.artifacts/platform-images.env}"
-EXPECTED_CLAWTUNE_REVISION="e91e60bc1e5f3209fbcf6091013fde96f217e2a7"
+EXPECTED_CLAWTUNE_REVISION="76eab6fa5c6333f4e80901c030f10cab0e4ce605"
 CLAWTUNE_REVISION="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 CLAWBOX_REVISION="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 
