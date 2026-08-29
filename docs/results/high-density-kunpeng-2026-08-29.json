@@ -1,0 +1,48 @@
+{
+  "host": "kunpeng",
+  "architecture": "aarch64",
+  "firecracker_version": "1.12.1",
+  "numa_node": 0,
+  "cpu_set": "0-79",
+  "pod_cpu_limit": 80,
+  "sessions": 8,
+  "resident_slots": 4,
+  "vcpu_per_vm": 1,
+  "memory_mib_per_vm": 512,
+  "touched_working_set_mib": 384,
+  "trace_actions_per_session": 47,
+  "llm_actions_per_session": 24,
+  "tool_actions_per_session": 23,
+  "recorded_llm_seconds_per_session": 104.911,
+  "sleep_scale": 1.0,
+  "snapshot_threshold_seconds": 3.0,
+  "snapshot_cycles": 192,
+  "resident": {
+    "completed": 8,
+    "failures": 0,
+    "tool_exit_mismatches": 0,
+    "wall_seconds": 213.46473797099316,
+    "throughput_sessions_per_hour": 134.91689669098187,
+    "mean_firecracker_rss_mib": 1714.9020458156779,
+    "p95_firecracker_rss_mib": 1730.05859375,
+    "peak_firecracker_rss_mib": 1730.109375
+  },
+  "snapshot": {
+    "completed": 8,
+    "failures": 0,
+    "tool_exit_mismatches": 0,
+    "wall_seconds": 152.6872206670232,
+    "throughput_sessions_per_hour": 188.62089357698363,
+    "mean_firecracker_rss_mib": 379.2587279871626,
+    "p95_firecracker_rss_mib": 1066.8203125,
+    "peak_firecracker_rss_mib": 1844.16015625,
+    "mean_snapshot_seconds": 0.3010349271598898,
+    "mean_restore_seconds": 0.04645152784784538
+  },
+  "comparison": {
+    "throughput_increase_fraction": 0.39805241747449305,
+    "wall_time_reduction_fraction": 0.28471923691784984,
+    "mean_rss_reduction_fraction": 0.7788452530495573,
+    "rss_time_reduction_fraction": 0.8418122638420475
+  }
+}

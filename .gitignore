@@ -10,6 +10,7 @@ __pycache__/
 *.py[cod]
 .pytest-tmp-root/
 .pytest_cache/
+.pytest_tmp*/
 
 # Local Python environment / editable-install metadata
 .venv/

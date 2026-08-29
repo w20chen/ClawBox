@@ -26,6 +26,7 @@ Apply `.artifacts/rendered-deploy/*.yaml`; do not deploy a mutable `:dev` or
 | --- | --- | --- |
 | `runtimeclass-firecracker.yaml` | base Kata RuntimeClass | audited host artifacts |
 | `runtimeclass-firecracker-ebpf.yaml` | Tool-VM eBPF RuntimeClass | eBPF guest configuration |
+| `high-density-replay-runner.example.yaml` | research-only Firecracker replay Pod | edit host name, image, and dedicated experiment path first |
 | `sandboxtask-crd.yaml` | served/storage `v1alpha1` CRD | API extensions available |
 | `control-plane-rbac.yaml` | namespaces and Cell Controller RBAC | cluster-admin apply |
 | `managed-rbac.yaml` | Managed API/Dispatcher RBAC | cluster-admin apply |
@@ -49,6 +50,12 @@ not its children.
 Copy the matching `*.example.yaml` files to `/tmp`, replace every placeholder,
 validate with `kubectl apply --dry-run=client`, and never commit real values.
 The template policy must use immutable Tool and Runtime image digests.
+
+`high-density-replay-runner.example.yaml` is not part of the production
+installation below. It runs privileged so Firecracker can open `/dev/kvm` and
+mounts host runtime files plus one dedicated experiment directory. Use it only
+on the selected experiment node, remove it after collecting results, and never
+replace the dedicated directory mount with a broad host filesystem mount.
 
 ## Required apply order
 

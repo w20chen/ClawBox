@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import socket
@@ -222,7 +223,17 @@ class _UnixHttpClient:
         ).encode() + payload
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(self.timeout_s)
-            client.connect(str(self.socket_path))
+            deadline = time.monotonic() + self.timeout_s
+            while True:
+                try:
+                    client.connect(str(self.socket_path))
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.ENOENT, errno.ECONNREFUSED}:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
             client.sendall(request)
             response = b""
             while b"\r\n\r\n" not in response:
@@ -277,6 +288,9 @@ class FirecrackerConfig:
     boot_args: str = "console=ttyS0 reboot=k panic=1 pci=off"
     tap_device: str | None = None
     guest_mac: str = "06:00:ac:10:00:02"
+    vsock_uds: Path | None = None
+    guest_cid: int = 3
+    guest_agent_port: int | None = None
     cpu_set: str | None = None
     numa_node: int | None = None
     log_path: Path | None = None
@@ -288,7 +302,7 @@ class FirecrackerConfig:
         raw = json.loads(path.read_text(encoding="utf-8"))
         path_fields = {
             "binary", "api_socket", "kernel_image", "rootfs",
-            "snapshot_state", "snapshot_memory", "log_path",
+            "snapshot_state", "snapshot_memory", "log_path", "vsock_uds",
         }
         values = {
             key: (None if value is None else Path(value)) if key in path_fields else value
@@ -341,6 +355,13 @@ class FirecrackerLifecycle:
                 "guest_mac": self.config.guest_mac,
                 "host_dev_name": self.config.tap_device,
             })
+        if self.config.vsock_uds:
+            self.config.vsock_uds.parent.mkdir(parents=True, exist_ok=True)
+            api.request("PUT", "/vsock", {
+                "vsock_id": "runtime",
+                "guest_cid": self.config.guest_cid,
+                "uds_path": str(self.config.vsock_uds),
+            })
         api.request("PUT", "/actions", {"action_type": "InstanceStart"})
         self._resident = True
         return time.monotonic() - started
@@ -354,11 +375,20 @@ class FirecrackerLifecycle:
         next_state, next_memory = self._next_snapshot_paths()
         next_state.parent.mkdir(parents=True, exist_ok=True)
         next_memory.parent.mkdir(parents=True, exist_ok=True)
-        api.request("PUT", "/snapshot/create", {
-            "snapshot_type": "Full",
-            "snapshot_path": str(next_state),
-            "mem_file_path": str(next_memory),
-        })
+        try:
+            api.request("PUT", "/snapshot/create", {
+                "snapshot_type": "Full",
+                "snapshot_path": str(next_state),
+                "mem_file_path": str(next_memory),
+            })
+        except Exception:
+            # Snapshot failure must not strand a healthy agent in Paused state.
+            try:
+                api.request("PATCH", "/vm", {"state": "Resumed"})
+            finally:
+                next_state.unlink(missing_ok=True)
+                next_memory.unlink(missing_ok=True)
+            raise
         previous_state = self._snapshot_state_path
         previous_memory = self._snapshot_memory_path
         self._stop_process()
@@ -384,16 +414,32 @@ class FirecrackerLifecycle:
             raise LifecycleError("snapshot paths are unavailable")
         started = time.monotonic()
         self._spawn()
-        api = _UnixHttpClient(self.config.api_socket, self.config.api_timeout_s)
-        api.request("PUT", "/snapshot/load", {
-            "snapshot_path": str(self._snapshot_state_path),
-            "mem_backend": {
-                "backend_type": "File",
-                "backend_path": str(self._snapshot_memory_path),
-            },
-            "enable_diff_snapshots": False,
-            "resume_vm": True,
-        })
+        try:
+            api = _UnixHttpClient(self.config.api_socket, self.config.api_timeout_s)
+            request: dict[str, Any] = {
+                "snapshot_path": str(self._snapshot_state_path),
+                "mem_backend": {
+                    "backend_type": "File",
+                    "backend_path": str(self._snapshot_memory_path),
+                },
+                "enable_diff_snapshots": False,
+                "resume_vm": True,
+            }
+            if self.config.vsock_uds:
+                request["vsock_override"] = {"uds_path": str(self.config.vsock_uds)}
+            try:
+                api.request("PUT", "/snapshot/load", request)
+            except LifecycleError as exc:
+                # Firecracker 1.12 restores the snapshotted vsock path but does
+                # not yet accept vsock_override. Retry only for that explicit
+                # schema error; all other restore failures remain fatal.
+                if "unknown field `vsock_override`" not in str(exc):
+                    raise
+                request.pop("vsock_override", None)
+                api.request("PUT", "/snapshot/load", request)
+        except Exception:
+            self._stop_process()
+            raise
         self._resident = True
         return time.monotonic() - started
 
@@ -418,6 +464,7 @@ class FirecrackerLifecycle:
             if not socket_path.is_socket():
                 raise LifecycleError(f"refusing to remove non-socket API path: {socket_path}")
             socket_path.unlink()
+        self._remove_stale_vsock()
         argv: list[str] = []
         if self.config.numa_node is not None or self.config.cpu_set:
             if self.config.numa_node is None or not self.config.cpu_set:
@@ -457,6 +504,15 @@ class FirecrackerLifecycle:
             self._log_handle = None
         if self.config.api_socket.exists() and self.config.api_socket.is_socket():
             self.config.api_socket.unlink()
+        self._remove_stale_vsock()
+
+    def _remove_stale_vsock(self) -> None:
+        path = self.config.vsock_uds
+        if path is None or not path.exists():
+            return
+        if not path.is_socket():
+            raise LifecycleError(f"refusing to remove non-socket vsock path: {path}")
+        path.unlink()
 
     def _next_snapshot_paths(self) -> tuple[Path, Path]:
         if self._snapshot_memory_path == self.config.snapshot_memory:
@@ -470,8 +526,12 @@ class FirecrackerLifecycle:
         if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
             return
         for path in (state_path, memory_path):
-            with path.open("rb") as handle:
-                os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            try:
+                with path.open("rb") as handle:
+                    os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            except OSError:
+                # Eviction already succeeded; cache dropping is best effort.
+                pass
 
 
 class ResidentSlotLifecycle:

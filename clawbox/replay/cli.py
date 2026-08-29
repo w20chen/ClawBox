@@ -13,6 +13,8 @@ from threading import BoundedSemaphore
 from typing import Any
 
 from .engine import JsonlEventWriter, ReplayEngine, SnapshotPolicy
+from .guest import VsockRuntimeAgentClient
+from .inference import TraceReplayInferenceProvider
 from .latency import LinearLatencyPredictor
 from .lifecycle import (
     FirecrackerConfig,
@@ -36,8 +38,35 @@ def _policy(args: argparse.Namespace) -> SnapshotPolicy:
         min_predicted_llm_s=args.snapshot_threshold_s,
         estimated_snapshot_s=args.estimated_snapshot_s,
         estimated_restore_s=args.estimated_restore_s,
+        estimated_refault_s=args.estimated_refault_s,
         safety_margin_s=args.safety_margin_s,
     )
+
+
+def _tool_policy(args: argparse.Namespace) -> SnapshotPolicy:
+    return SnapshotPolicy(
+        min_predicted_llm_s=args.tool_snapshot_threshold_s,
+        estimated_snapshot_s=args.estimated_snapshot_s,
+        estimated_restore_s=args.estimated_restore_s,
+        estimated_refault_s=args.estimated_refault_s,
+        safety_margin_s=args.safety_margin_s,
+    )
+
+
+def _inference(args: argparse.Namespace) -> TraceReplayInferenceProvider:
+    return TraceReplayInferenceProvider(
+        time_scale=args.sleep_scale,
+        simulated_gpu_id=args.simulated_gpu_id,
+        simulated_kv_bytes=args.simulated_kv_bytes,
+    )
+
+
+def _runtime_agent(config: FirecrackerConfig) -> VsockRuntimeAgentClient | None:
+    if config.guest_agent_port is None:
+        return None
+    if config.vsock_uds is None:
+        raise ValueError("guest_agent_port requires vsock_uds in Firecracker config")
+    return VsockRuntimeAgentClient(config.vsock_uds, port=config.guest_agent_port)
 
 
 def inspect_trace(args: argparse.Namespace) -> int:
@@ -82,7 +111,15 @@ def run_replay(args: argparse.Namespace) -> int:
     if args.backend == "firecracker":
         if args.firecracker_config is None:
             raise ValueError("firecracker backend requires --firecracker-config")
-        lifecycle = FirecrackerLifecycle(FirecrackerConfig.from_json(args.firecracker_config))
+        config = FirecrackerConfig.from_json(args.firecracker_config)
+        lifecycle = FirecrackerLifecycle(config)
+        runtime_agent = _runtime_agent(config)
+        tool_lifecycle = None
+        tool_runtime_agent = None
+        if args.tool_firecracker_config is not None:
+            tool_config = FirecrackerConfig.from_json(args.tool_firecracker_config)
+            tool_lifecycle = FirecrackerLifecycle(tool_config)
+            tool_runtime_agent = _runtime_agent(tool_config)
         if args.tool_transport == "local":
             executor = LocalCommandExecutor(cwd=args.cwd, workspace_alias="/workspace")
         elif args.tool_transport == "kubectl":
@@ -105,6 +142,9 @@ def run_replay(args: argparse.Namespace) -> int:
             restore_s=args.estimated_restore_s,
         )
         executor = LocalCommandExecutor(cwd=args.cwd)
+        runtime_agent = None
+        tool_lifecycle = None
+        tool_runtime_agent = None
     writer = JsonlEventWriter(args.events) if args.events else None
     try:
         engine = ReplayEngine(
@@ -115,6 +155,10 @@ def run_replay(args: argparse.Namespace) -> int:
             mode=args.mode,
             sleep_scale=args.sleep_scale,
             tool_time_scale=args.tool_time_scale,
+            inference_provider=_inference(args), runtime_agent=runtime_agent,
+            tool_lifecycle=tool_lifecycle,
+            tool_runtime_agent=tool_runtime_agent,
+            tool_policy=_tool_policy(args),
             command_timeout_s=args.command_timeout_s,
             strict_exit_codes=not args.allow_exit_mismatch,
             event_sink=writer,
@@ -133,6 +177,7 @@ def run_experiment(args: argparse.Namespace) -> int:
     if not isinstance(sessions, list) or not sessions:
         raise ValueError("experiment manifest requires a non-empty sessions array")
     slots = BoundedSemaphore(args.resident_slots)
+    tool_slots = BoundedSemaphore(args.tool_resident_slots)
     lifecycles: list[ResidentSlotLifecycle] = []
     lifecycle_lock = threading.Lock()
     output_dir = args.output_dir
@@ -156,10 +201,22 @@ def run_experiment(args: argparse.Namespace) -> int:
         trace = Path(spec["trace"])
         calibration = [Path(path) for path in spec.get("calibration", [])]
         predictor = _predictor(calibration)
-        inner = FirecrackerLifecycle(FirecrackerConfig.from_json(Path(spec["firecracker_config"])))
+        config = FirecrackerConfig.from_json(Path(spec["firecracker_config"]))
+        inner = FirecrackerLifecycle(config)
+        runtime_agent = _runtime_agent(config)
         lifecycle = ResidentSlotLifecycle(inner, slots)
         with lifecycle_lock:
             lifecycles.append(lifecycle)
+        tool_lifecycle = None
+        tool_runtime_agent = None
+        tool_config_path = spec.get("tool_firecracker_config")
+        if tool_config_path is not None:
+            tool_config = FirecrackerConfig.from_json(Path(tool_config_path))
+            tool_inner = FirecrackerLifecycle(tool_config)
+            tool_runtime_agent = _runtime_agent(tool_config)
+            tool_lifecycle = ResidentSlotLifecycle(tool_inner, tool_slots)
+            with lifecycle_lock:
+                lifecycles.append(tool_lifecycle)
         tool_transport = spec.get("tool_transport", "kubectl")
         if tool_transport == "local":
             executor = LocalCommandExecutor(
@@ -186,6 +243,10 @@ def run_experiment(args: argparse.Namespace) -> int:
                 lifecycle=lifecycle, executor=executor, predictor=predictor,
                 policy=_policy(args), mode=args.mode, sleep_scale=args.sleep_scale,
                 tool_time_scale=args.tool_time_scale,
+                inference_provider=_inference(args), runtime_agent=runtime_agent,
+                tool_lifecycle=tool_lifecycle,
+                tool_runtime_agent=tool_runtime_agent,
+                tool_policy=_tool_policy(args),
                 command_timeout_s=args.command_timeout_s,
                 strict_exit_codes=not args.allow_exit_mismatch,
                 event_sink=writer,
@@ -218,6 +279,7 @@ def run_experiment(args: argparse.Namespace) -> int:
         "sessions_completed": len(results),
         "failures": failures,
         "resident_slots": args.resident_slots,
+        "tool_resident_slots": args.tool_resident_slots,
         "wall_s": wall_s,
         "throughput_sessions_per_hour": len(results) / wall_s * 3600 if wall_s else 0.0,
         "peak_firecracker_rss_bytes": max((sample["rss_bytes"] for sample in rss_samples), default=0),
@@ -228,6 +290,7 @@ def run_experiment(args: argparse.Namespace) -> int:
         "peak_resident_vms": max((sample["resident_vms"] for sample in rss_samples), default=0),
         "mean_session_wall_s": statistics.fmean(item["wall_s"] for item in results) if results else None,
         "total_snapshots": sum(item["snapshots"] for item in results),
+        "total_tool_snapshots": sum(item["tool_snapshots"] for item in results),
         "sessions": results,
     }
     (output_dir / "rss.json").write_text(json.dumps(rss_samples, indent=2) + "\n", encoding="utf-8")
@@ -262,9 +325,13 @@ def _common_replay_args(parser: argparse.ArgumentParser) -> None:
         "--tool-time-scale", type=float, default=0.0,
         help="pad real tool calls to this fraction of their recorded duration",
     )
+    parser.add_argument("--simulated-gpu-id", default="replay-gpu-unbounded")
+    parser.add_argument("--simulated-kv-bytes", type=int, default=0)
     parser.add_argument("--snapshot-threshold-s", type=float, default=20.0)
+    parser.add_argument("--tool-snapshot-threshold-s", type=float, default=30.0)
     parser.add_argument("--estimated-snapshot-s", type=float, default=1.0)
     parser.add_argument("--estimated-restore-s", type=float, default=1.0)
+    parser.add_argument("--estimated-refault-s", type=float, default=0.0)
     parser.add_argument("--safety-margin-s", type=float, default=2.0)
     parser.add_argument("--command-timeout-s", type=float, default=300.0)
     parser.add_argument("--allow-exit-mismatch", action="store_true")
@@ -283,6 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--calibration", type=Path, action="append", default=[])
     run_parser.add_argument("--backend", choices=("local", "firecracker"), default="local")
     run_parser.add_argument("--firecracker-config", type=Path)
+    run_parser.add_argument("--tool-firecracker-config", type=Path)
     run_parser.add_argument("--tool-transport", choices=("local", "ssh", "kubectl"), default="ssh")
     run_parser.add_argument("--ssh-host", default="127.0.0.1")
     run_parser.add_argument("--ssh-port", type=int, default=22)
@@ -300,6 +368,10 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("manifest", type=Path)
     experiment.add_argument("--output-dir", type=Path, required=True)
     experiment.add_argument("--resident-slots", type=int, required=True)
+    experiment.add_argument(
+        "--tool-resident-slots", type=int,
+        help="Tool VM resident budget; defaults to --resident-slots",
+    )
     experiment.add_argument("--numa-node", type=int)
     _common_replay_args(experiment)
     experiment.set_defaults(func=run_experiment)
@@ -313,8 +385,21 @@ def main() -> None:
         parser.error("--sleep-scale must be non-negative")
     if getattr(args, "tool_time_scale", 0) < 0:
         parser.error("--tool-time-scale must be non-negative")
+    if getattr(args, "simulated_kv_bytes", 0) < 0:
+        parser.error("--simulated-kv-bytes must be non-negative")
+    for field in (
+        "snapshot_threshold_s", "tool_snapshot_threshold_s",
+        "estimated_snapshot_s", "estimated_restore_s", "estimated_refault_s",
+        "safety_margin_s",
+    ):
+        if getattr(args, field, 0) < 0:
+            parser.error(f"--{field.replace('_', '-')} must be non-negative")
     if getattr(args, "resident_slots", 1) < 1:
         parser.error("--resident-slots must be positive")
+    if getattr(args, "tool_resident_slots", None) is None:
+        args.tool_resident_slots = getattr(args, "resident_slots", 1)
+    if args.tool_resident_slots < 1:
+        parser.error("--tool-resident-slots must be positive")
     try:
         raise SystemExit(args.func(args))
     except (OSError, ValueError, RuntimeError) as exc:

@@ -7,7 +7,7 @@ task is a `SandboxTask` backed by two isolated Kata/Firecracker VMs:
 
 - the Runtime VM runs OpenClaw and calls the LLM;
 - the Tool VM contains the repository and executes tools;
-- the Cell Controller admits, starts, observes, and cleans up both VMs.
+- the Kubernetes controller starts, monitors, and cleans up both VMs.
 
 The supported production target is a dedicated ARM64 host such as Kunpeng.
 There is no supported x86, QEMU, runc, or multi-node fallback.
@@ -16,39 +16,32 @@ There is no supported x86, QEMU, runc, or multi-node fallback.
 
 ![ClawBox and ClawTune relationship](docs/images/clawbox-clawtune-relationship.png)
 
-ClawBox is the sandbox orchestration platform; ClawTune is embedded in each
-Runtime VM as the telemetry and resource-prediction engine. ClawBox reuses
-ClawTune rather than forking its prediction semantics, then adds the control,
-isolation, evidence, and lifecycle layers required to run concurrent coding
-agents safely.
+ClawBox creates and manages the isolated VMs. ClawTune runs inside the Runtime
+VM and records LLM calls, tool calls, and resource use. ClawBox stores those
+records and makes them available to later tasks from the same tenant and
+repository.
 
-The interaction is a fail-open, generation-based feedback loop:
+The current flow is:
 
-1. Before the Runtime starts, ClawBox pulls the signed, tenant/repository-scoped
-   KB pair. The in-process ClawTune sidecar loads it once at startup.
-2. The ClawTune OpenClaw plugin observes tool calls, while its sidecar and LLM
-   proxy emit trace spans and shadow prediction payloads.
-3. ClawBox sends tool execution through the Tool Bridge into the isolated Tool
-   VM. The bridge creates per-execution cgroups and drives ClawTune's guest
-   eBPF clause collector, producing independently attributable actuals.
-4. ClawBox joins the ClawTune span, Tool Bridge record, and cgroup artifact by
-   exact `execution_id`, validates and signs the evidence, and publishes the
-   next atomic KB generation.
-5. A later Runtime loads that generation back into ClawTune. Predictions are
-   currently observational only; `FixedProfileSizer` remains authoritative.
+1. A Runtime VM downloads the latest signed measurement data for its tenant and
+   repository.
+2. ClawTune records LLM and tool activity.
+3. ClawBox forwards each tool command to the isolated Tool VM and measures its
+   CPU and memory use.
+4. ClawBox checks that the records refer to the same tool execution, signs the
+   combined result, and stores a new version.
+5. Later tasks can load that version for reporting and prediction.
 
-| Reused directly from ClawTune | Implemented by ClawBox |
-| --- | --- |
-| OpenClaw plugin hooks and the in-process sidecar/LLM proxy | Multi-tenant Managed API, dispatcher, admission, and Cell lifecycle |
-| Trace, clause/cgroup artifact contracts, and the guest eBPF clause collector | Dual Kata/Firecracker Runtime and Tool VM isolation, networking, and credential separation |
-| Native readers and validators for eligible telemetry | Tool Bridge execution, per-execution cgroups, exact identity propagation, and collector lifecycle |
-| `CompletedCall`, `ToolCallQuery`, `ClauseResourceKB`, and `RuntimeToolResourceKB` | Signed immutable ingestion, tenant/repo scoping, exact three-source joins, and atomic KB publication/rollback |
-| ClawTune KB fitting, observation, query, and JSON load/save semantics | Result collection, cancellation, cleanup, audit evidence, and shadow-vs-actual reporting |
+Predictions currently do not change the CPU or memory assigned to production
+tasks. Production task sizes still come from fixed profiles. The trace-replay
+experiment described later in this README is the first place where an LLM
+duration estimate controls VM memory reclamation.
 
 ## Table of contents
 
 - [New host: one-time installation](#new-host-one-time-installation)
 - [Existing host: start and run tasks](#existing-host-start-and-run-tasks)
+- [Replay traces and reclaim idle VM memory](#replay-traces-and-reclaim-idle-vm-memory)
 - [Updating an installed host](#updating-an-installed-host)
 - [Troubleshooting](#troubleshooting)
 - [Lifecycle and development references](#lifecycle-and-development-references)
@@ -62,6 +55,7 @@ The interaction is a fail-open, generation-based feedback loop:
 | Submit one task using the installed fixed-image template | `scripts/clawbox submit ...` |
 | Run mapped SWE-ReBench tasks, including concurrent batches | `scripts/run-swe-rebench.sh ...` |
 | Install ClawBox on an already bootstrapped new host | `scripts/clawbox install ...` |
+| Run the trace-replay memory experiment | `python -m clawbox.replay.cli experiment ...` |
 
 All commands below run from the ClawBox checkout on the ARM64 host unless a
 section says otherwise. Platform and task images must use immutable
@@ -240,11 +234,9 @@ If this prints several addresses, do not arbitrarily copy the first one: use
 the provider/network operator's narrow stable CIDR. The CIDR passed to a batch
 must cover the hostname stored in the `clawbox-llm` Secret.
 
-As of this README update, DeepSeek's official OpenAI-compatible base URL is
-`https://api.deepseek.com` and its current model IDs include
-`deepseek-v4-flash` and `deepseek-v4-pro`. Recheck the
-[official DeepSeek API documentation](https://api-docs.deepseek.com/) before
-a new installation.
+Obtain the base URL and model name from the provider's current documentation.
+Do not copy model names from an old installation: providers can rename or
+retire them.
 
 Choose one task image from the mapping for the Managed API's default
 single-task template, then install:
@@ -253,9 +245,9 @@ single-task template, then install:
 read -rsp 'DeepSeek API key: ' CLAWBOX_LLM_API_KEY
 echo
 export CLAWBOX_LLM_API_KEY
-export CLAWBOX_LLM_BASE_URL='https://api.deepseek.com'
-export CLAWBOX_LLM_MODEL='deepseek-v4-flash'
-export CLAWBOX_OPENCLAW_MODEL_REF='vllm/deepseek-v4-flash'
+export CLAWBOX_LLM_BASE_URL='https://PROVIDER_BASE_URL'
+export CLAWBOX_LLM_MODEL='PROVIDER_MODEL_ID'
+export CLAWBOX_OPENCLAW_MODEL_REF='vllm/PROVIDER_MODEL_ID'
 export CLAWBOX_TOOL_IMAGE='127.0.0.1:5000/clawbox/TASK@sha256:DIGEST'
 read -rp 'Approved provider CIDR (for example 203.0.113.10/32): ' \
   CLAWBOX_LLM_EGRESS_CIDR
@@ -353,7 +345,7 @@ bash scripts/run-swe-rebench.sh \
   --run-id "$RUN_ID"
 ```
 
-`--parallelism 8` allows eight Cells to be active. The controller deliberately
+`--parallelism 8` allows eight tasks to be active. The controller deliberately
 staggers new VM materialization across reconciliation cycles; this reduces
 devmapper pressure without reducing steady-state concurrency. A task may stay
 `Queued` until capacity for both of its VMs is available.
@@ -552,6 +544,184 @@ The manifest is saved as `.artifacts/${TASK_ID}.traces.json`. Downloaded JSONL
 files are written below `.artifacts/${TASK_ID}.traces/`; this includes nested
 paths and `tool-bridge.jsonl` when they were uploaded by the task.
 
+## Replay traces and reclaim idle VM memory
+
+This section describes a research experiment. It is separate from the normal
+Kubernetes task path above and does not change how production `SandboxTask`
+objects run.
+
+The experiment replays an existing JSONL agent trace. Recorded tool commands
+are executed again in a disposable checkout or an existing Tool Pod. An LLM
+call is not sent to a GPU; the runner waits for the recorded duration instead.
+A small model estimates the LLM duration from request size. If the estimate is
+long enough, the runner saves the Firecracker VM state and memory to disk,
+stops the Firecracker process, and releases its resident memory. It restores
+the VM before the next tool command.
+
+The runner can manage two Firecracker VMs per replay:
+
+- the first represents the agent process that waits for the LLM;
+- the optional second tracks the memory and saved state of a tool environment.
+
+In the current prototype, the real tool command is still executed by the
+configured local, SSH, or Kubernetes command runner rather than inside that
+second VM.
+
+Each VM contains a small state-checking program. Before saving a VM, the runner
+records the current LLM request. After restoring it, the runner verifies that
+the VM was restored rather than rebooted and that the same request is still in
+progress. A tool command runs only after all VMs selected for that LLM call
+have passed this check.
+
+The decision rule is intentionally small:
+
+```text
+save the VM when:
+estimated LLM wait >= configured threshold
+and
+estimated LLM wait >= save time + restore time + expected page-loading time + margin
+```
+
+The default threshold is 20 seconds for the agent VM and 30 seconds for the
+tool VM. The tool threshold is higher because tool environments are commonly
+larger and cost more to load after restoration.
+
+### What this experiment does not do
+
+- It does not transparently suspend a Kubernetes Pod managed by containerd.
+- The optional tool VM is managed directly through the Firecracker API. The
+  actual tool command still uses the selected local, SSH, or Kubernetes command
+  executor.
+- GPU inference and GPU KV-cache placement are simulated metadata. A real GPU
+  client can replace the simulator later without changing VM handling.
+- Saved VM memory briefly increases host memory use while it is being written.
+  Limit concurrent saves and report peak memory as well as average memory.
+
+### Prepare a root filesystem
+
+Run this on the ARM64 experiment host. It requires `gcc`, `debugfs`, the Kata
+kernel and disk image, Firecracker, and `/dev/kvm`:
+
+```bash
+export REPLAY_ROOT="$PWD/.artifacts/replay"
+mkdir -p "$REPLAY_ROOT"
+
+python3 scripts/build-runtime-agent-rootfs.py \
+  --base-image /opt/kata/share/kata-containers/kata-containers.img \
+  --agent-source clawbox/replay/guest_agent.c \
+  --output-rootfs "$REPLAY_ROOT/agent-rootfs.ext4"
+```
+
+First verify one save-and-restore cycle with
+`scripts/firecracker-runtime-continuity-smoke.py`. Its JSON configuration must
+contain the Firecracker binary, kernel, root filesystem, API socket, snapshot
+paths, vsock path, CPU set, and NUMA node. A complete configuration example is
+in [the experiment guide](docs/high-density-replay.md).
+
+```bash
+python3 scripts/firecracker-runtime-continuity-smoke.py \
+  --config /path/to/firecracker.json --cycles 2 \
+  --expected-resident-mib 128 \
+  --output "$REPLAY_ROOT/continuity-result.json"
+```
+
+### Inspect and replay a trace
+
+Use an older, separate trace for fitting the duration model:
+
+```bash
+python3 -m clawbox.replay.cli inspect trace.jsonl \
+  --calibration calibration.jsonl
+```
+
+For a local parser and tool-execution check that does not start Firecracker:
+
+```bash
+python3 -m clawbox.replay.cli run trace.jsonl \
+  --backend local --mode resident --sleep-scale 0 \
+  --cwd /tmp/disposable-checkout
+```
+
+For the Firecracker experiment, create independent input directories for the
+resident baseline and the save/restore run. Never reuse a root filesystem that
+has already executed a replay.
+
+```bash
+for run_mode in resident snapshot; do
+  python3 scripts/prepare-high-density-experiment.py \
+    --output "$REPLAY_ROOT/${run_mode}-input" \
+    --sessions 8 \
+    --workspace-source /path/to/disposable/source-repository \
+    --base-commit COMMIT_SHA \
+    --rootfs-source "$REPLAY_ROOT/agent-rootfs.ext4" \
+    --tool-rootfs-source "$REPLAY_ROOT/agent-rootfs.ext4" \
+    --trace /path/to/trace.jsonl \
+    --calibration /path/to/calibration.jsonl \
+    --memory-mib 512 --guest-agent \
+    --guest-touch-mib 128 --tool-guest-touch-mib 256
+done
+```
+
+The generated manifest assigns separate root filesystems, sockets, snapshot
+files, vsock addresses, and CPUs to every VM. Run both modes with the same
+number of sessions and the same limits:
+
+```bash
+python3 -m clawbox.replay.cli experiment \
+  "$REPLAY_ROOT/resident-input/manifest.json" \
+  --mode resident --resident-slots 4 --tool-resident-slots 4 \
+  --numa-node 0 --output-dir "$REPLAY_ROOT/resident-results"
+
+python3 -m clawbox.replay.cli experiment \
+  "$REPLAY_ROOT/snapshot-input/manifest.json" \
+  --mode snapshot --resident-slots 4 --tool-resident-slots 4 \
+  --snapshot-threshold-s 20 --tool-snapshot-threshold-s 30 \
+  --estimated-snapshot-s 0.3 --estimated-restore-s 0.1 \
+  --estimated-refault-s 0.5 --safety-margin-s 2 \
+  --numa-node 0 --output-dir "$REPLAY_ROOT/snapshot-results"
+```
+
+`--resident-slots` and `--tool-resident-slots` limit how many agent and tool
+VMs may occupy memory at once. They must be identical in both modes. Bind the
+runner and all VM processes to CPUs and memory from one NUMA node; the guide
+shows the wrapper used on Kunpeng.
+
+Compare `summary.json` and `rss.json` from both output directories. Report at
+least completed sessions, failures, tool exit-code mismatches, wall time,
+sessions per hour, average and peak Firecracker RSS, save/restore time, and the
+number of times each VM was saved. Run several repetitions before using the
+numbers in a paper.
+
+### What has been verified
+
+On the Kunpeng host, an eight-session run kept at most four agent VMs in memory
+at once. It used one CPU per VM, 512 MiB per VM, and a 384 MiB touched memory
+region. LLM waits were replayed at their full recorded duration. Both modes
+completed every session and every tool command with no exit-code mismatch.
+
+| Measurement | Keep all agent VMs in memory | Save idle agent VMs | Difference |
+| --- | ---: | ---: | ---: |
+| Total time | 213.5 s | 152.7 s | 28.5% lower |
+| Completed sessions per hour | 134.9 | 188.6 | 39.8% higher |
+| Average Firecracker process memory | 1714.9 MiB | 379.3 MiB | 77.9% lower |
+| Peak Firecracker process memory | 1730.1 MiB | 1844.2 MiB | 6.6% higher |
+
+The higher peak occurs while several VM memory files are being written. The
+average reduction is useful for capacity, but the peak means save operations
+must be rate-limited before this can become a production feature.
+
+A separate two-VM check used a 128 MiB agent environment and a 256 MiB tool
+environment. The agent VM was saved during all 24 LLM waits; the higher tool-VM
+threshold selected only 6 waits. All six tool-VM restores completed and passed
+state checks before the next tool command. Average combined Firecracker memory
+fell by 43.0%. That check used LLM waits shortened to one tenth of their
+recorded duration, so save/restore overhead made it slower; it demonstrates
+correct operation, not a throughput improvement.
+
+Implementation details, the Kubernetes runner example, known limitations, and
+the current Kunpeng measurements are in
+[docs/high-density-replay.md](docs/high-density-replay.md).
+
 ## Updating an installed host
 
 ### Deploy new ClawBox code
@@ -649,10 +819,13 @@ Do not clean unrelated namespaces without identifying their owner and cause.
 
 ## Lifecycle and development references
 
-The current controller has explicit capacity ownership and workload
-materialization boundaries so a future suspend/resume implementation can
-checkpoint and release VMs without reusing ambiguous terminal states. See
-[ADR 004](docs/adr/004-cell-suspend-resume-boundary.md).
+The production Kubernetes controller does not yet suspend running Pods. The
+trace-replay experiment above can save and restore directly managed
+Firecracker VMs, including an optional second VM representing the tool
+environment. Integrating this with containerd and Kata without making
+Kubernetes treat the Pod as failed remains future work. See
+[ADR 004](docs/adr/004-cell-suspend-resume-boundary.md) for the controller
+lifecycle boundary.
 
 Development checks:
 
