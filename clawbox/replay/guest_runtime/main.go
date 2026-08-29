@@ -175,8 +175,18 @@ func saveState(cfg config, current state) {
 	encoded, err := json.Marshal(current)
 	fatalIf(err, "encode replay state")
 	temporary := cfg.StatePath + ".next"
-	fatalIf(os.WriteFile(temporary, encoded, 0600), "write replay state")
+	handle, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	fatalIf(err, "open replay state")
+	if _, err = handle.Write(encoded); err == nil {
+		err = handle.Sync()
+	}
+	fatalIf(handle.Close(), "close replay state")
+	fatalIf(err, "write replay state")
 	fatalIf(os.Rename(temporary, cfg.StatePath), "commit replay state")
+	directory, err := os.Open(filepath.Dir(cfg.StatePath))
+	fatalIf(err, "open replay state directory")
+	fatalIf(directory.Sync(), "sync replay state directory")
+	fatalIf(directory.Close(), "close replay state directory")
 }
 
 func postJSON(url string, input any, output any) {
