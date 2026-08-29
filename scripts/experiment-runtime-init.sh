@@ -62,6 +62,9 @@ fail_stage() {
   while :; do sleep 3600; done
 }
 
+# OCI layers retain the image builder's uid, while direct kernel boot runs PID
+# 1 as root. OpenClaw intentionally rejects plugins owned by another uid.
+chown -R 0:0 /opt/clawtune/packages/clawtune-plugin
 set +e
 openclaw plugins install --link /opt/clawtune/packages/clawtune-plugin \
   >/state/logs/plugin.log 2>&1
@@ -70,7 +73,8 @@ set -e
 if [ "$status" -ne 0 ] && ! grep -qiE 'already|exists' /state/logs/plugin.log; then
   fail_stage plugin-install "$status" /state/logs/plugin.log
 fi
-openclaw plugins enable clawtune >>/state/logs/plugin.log 2>&1 || true
+openclaw plugins enable clawtune >>/state/logs/plugin.log 2>&1 \
+  || fail_stage plugin-enable "$?" /state/logs/plugin.log
 cat >/state/openclaw.patch.json <<EOF
 {
   "agents": {"defaults": {"workspace": "/workspace", "sandbox": {

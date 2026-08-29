@@ -1,43 +1,31 @@
 {
-  "output": "/experiment/results/paper-study-001",
+  "output": "/data/paper-study-001",
   "source": {
-    "workspace": "/experiment/workspace",
-    "base_commit": "COMMIT_SHA",
-    "runtime_rootfs": "/experiment/runtime-agent-rootfs.ext4",
-    "tool_rootfs": "/experiment/runtime-agent-rootfs.ext4",
-    "trace": "/experiment/traces/task.jsonl",
-    "calibration": "/experiment/traces/calibration.jsonl"
+    "runtime_rootfs": "/data/openclaw-runtime.ext4",
+    "tool_rootfs": "/data/tool-workspace.ext4",
+    "prompt": "/data/workloads/prompt.txt",
+    "trace": "/data/workloads/model-trace.jsonl"
   },
   "sessions": 8,
   "repetitions": 3,
   "seed": 7,
-  "validation_command": "cd /workspace && git diff --binary --no-ext-diff HEAD",
+  "network_prefix": "172.30",
+  "validation_command": "cd /testbed && git diff --binary --no-ext-diff HEAD",
   "inference_backends": ["replay", "api"],
   "memory_policies": ["resident", "snapshot"],
-  "resident_slots": 4,
-  "tool_resident_slots": 4,
   "resources": {
-    "memory_mib": 512,
-    "runtime_touch_mib": 128,
-    "tool_touch_mib": 256,
+    "runtime_memory_mib": 2048,
+    "tool_memory_mib": 4096,
     "cpu_first": 0,
     "numa_node": 0
   },
-  "policy": {
-    "sleep_scale": 1.0,
-    "tool_time_scale": 1.0,
-    "runtime_threshold_s": 20.0,
-    "tool_threshold_s": 30.0,
-    "estimated_snapshot_s": 0.3,
-    "estimated_restore_s": 0.1,
-    "estimated_refault_s": 0.5,
-    "safety_margin_s": 2.0
+  "replay": {
+    "time_scale": 1.0
   },
+  "timeout_s": 900,
   "api": {
     "base_url": "https://PROVIDER_BASE_URL/v1",
     "model": "PROVIDER_MODEL_ID",
-    "key_env": "OPENAI_API_KEY",
-    "timeout_s": 600,
-    "trust_env": false
+    "key_env": "OPENAI_API_KEY"
   }
 }

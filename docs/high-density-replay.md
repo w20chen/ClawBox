@@ -1,5 +1,10 @@
 # High-density Firecracker trace replay
 
+> This document describes the earlier host-driven prototype and is retained
+> only for historical comparison. It is not the paper experiment entry point.
+> Use the "Paper experiment" workflow in the repository README: OpenClaw and
+> ClawTune run in the agent VM, and the repository VM is reached over SSH.
+
 This prototype re-executes recorded shell tools while replacing each LLM call
 with its recorded duration. `--tool-time-scale 1` also pads a completed real
 tool invocation to its recorded phase duration, which keeps the replay timeline

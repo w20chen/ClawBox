@@ -51,12 +51,11 @@ has two independent workflows:
    recorded timing with a real model API, and compares keeping virtual machines
    in memory with saving idle virtual machines to disk.
 
-The paper workflow is ready for experimental use. It has passed a short run on
-Kunpeng with recorded timing, a short real-API call, save/restore of both
-virtual machines, real tool execution, final-state comparison, and memory
-measurement. The optional alternative in which the agent inside the virtual
-machine initiates SSH connections has not yet passed end-to-end on Kunpeng; it
-is not needed for the main paper workflow.
+The paper workflow is ready for experimental use. In both recorded and real
+model modes, OpenClaw and ClawTune run inside the agent virtual machine, while
+commands run in the repository-holding virtual machine over SSH. Only the
+source of model responses changes. This exact path has passed short resident,
+save/restore, and real-API runs on Kunpeng.
 
 Use these entry points instead of assembling lower-level commands:
 
@@ -67,7 +66,6 @@ Use these entry points instead of assembling lower-level commands:
 | Submit one real task | `scripts/clawbox submit ...` |
 | Run a real task batch | `bash scripts/run-swe-rebench.sh ...` |
 | Download a task's traces and reports | `scripts/clawbox traces TASK_ID` |
-| Test one Firecracker configuration | `bash scripts/run-direct-firecracker-smoke.sh ...` |
 | Run the complete paper comparison | `python3 -m clawbox.replay.cli study STUDY.json` |
 
 The main documentation flow is:
@@ -491,97 +489,90 @@ connection automatically.
 
 ## Paper experiment: save idle virtual machines
 
-This experiment is separate from the Kubernetes task service. It reads a
-recorded sequence of model calls and tool calls, then executes the same tool
-commands in fresh virtual machines. Every session uses two virtual machines:
-one represents the coding agent and one owns the repository and executes
-commands.
+This experiment is separate from the Kubernetes task service, but preserves
+the task architecture. Every session has two Firecracker virtual machines: the
+agent VM runs OpenClaw and ClawTune; the tool VM owns `/testbed` and executes
+commands received over SSH.
+
+OpenClaw always controls the agent loop. Recorded mode supplies saved model
+responses through an OpenAI-compatible endpoint; real mode forwards the same
+requests to a real service. Prompts, tools, SSH, instrumentation, VM images,
+and agent settings therefore stay the same.
 
 The experiment varies two independent dimensions:
 
 | Dimension | Baseline | Alternative |
 | --- | --- | --- |
-| Model-call timing | wait for the recorded duration | call a real OpenAI-compatible API |
+| Model source | replay recorded responses and latency | call a real OpenAI-compatible API |
 | Memory management | keep both virtual machines in memory | save idle machines to disk and restore them before the next command |
 
-The action sequence remains fixed in both model modes. A real API response
-provides real service latency and token accounting, but does not decide which
-tool command runs next. This makes the four experiment groups directly
-comparable.
-
-During a long model call, the controller may save a virtual machine when the
-estimated wait exceeds both a configured threshold and the expected
-save/restore overhead. Before each save it records the in-progress request.
-After restore it verifies the same request and the same virtual-machine boot
-state before allowing another command. The repository-holding machine is
-restored and checked first.
+During an outstanding model request, snapshot mode saves the tool VM and then
+the agent VM, exits their Firecracker processes, and restores them in the
+opposite order before the response is consumed. The model gateway identifies
+requests by content and stores responses, so retrying an interrupted HTTP
+connection cannot duplicate a real API call.
 
 ### What this experiment does not do
 
 - It does not suspend a Kubernetes Pod. The experimental virtual machines are
   managed directly through the Firecracker API.
-- Recorded mode does not run a model. API mode calls a real model service, but
-  GPU placement and model-side cache management remain outside this project.
+- Recorded mode does not run a model, but it runs the real OpenClaw loop, tool
+  calls, SSH backend, and ClawTune instrumentation.
+- API mode forwards model traffic through a host gateway so request identity
+  survives save/restore. GPU placement and provider-side cache management are
+  outside this project.
 - Saving memory can briefly increase peak host memory while files are written.
   Paper results must report peak as well as average memory.
-- The alternative guest-initiated SSH execution path is still experimental.
-  Use the default host-controlled path for paper results.
 
-### 1. Verify the host and run a short smoke test
+### 1. Prepare the two reusable VM disks
 
-The smoke command builds a disposable disk image, generates a four-action test
-trace, starts both virtual machines, and writes `summary.json` under the output
-directory. Output directories must not already exist.
-
-```bash
-scripts/clawbox doctor
-
-bash scripts/run-direct-firecracker-smoke.sh \
-  --mode resident --output /data/replay-smoke-resident
-
-bash scripts/run-direct-firecracker-smoke.sh \
-  --mode snapshot --output /data/replay-smoke-snapshot \
-  --snapshot-threshold-s 1 --tool-snapshot-threshold-s 1
-```
-
-Both commands should complete one session without failures. The snapshot run
-should report non-zero save counts for both virtual machines. These are
-functional checks, not publishable measurements.
-
-### 2. Inspect the recorded workload
-
-Use one trace for the experiment and an older, separate trace to fit the model-
-call duration estimator. Inspection parses the records and reports how many
-model and tool actions can be replayed; it does not start a virtual machine.
+Build the platform images first as described above. Export the Runtime image
+containing OpenClaw and ClawTune, and the workload image containing the
+repository and SSH tool service. Replace the example image references with the
+exact images built for the experiment.
 
 ```bash
-python3 -m clawbox.replay.cli inspect /data/traces/task.jsonl \
-  --calibration /data/traces/older-task.jsonl
+python3 scripts/build-oci-firecracker-rootfs.py \
+  --image REGISTRY/runtime-arm64:TAG \
+  --output /data/openclaw-runtime.ext4 --size-mib 6144 \
+  --inject-file scripts/experiment-runtime-init.sh:/usr/local/bin/experiment-runtime-init
+
+python3 scripts/build-oci-firecracker-rootfs.py \
+  --image REGISTRY/workload-arm64:TAG \
+  --output /data/tool-workspace.ext4 --size-mib 16384 \
+  --inject-file scripts/experiment-tool-init.sh:/usr/local/bin/experiment-tool-init
 ```
 
-Stop here if inspection reports an incomplete model call or a tool action that
-cannot be translated into a shell command.
+Every experiment group receives fresh copies of these disks. Never reuse a
+copy that has already executed a task.
 
-### 3. Build the reusable virtual-machine disk
+### 2. Prepare the workload
 
-Run this once on the ARM64 experiment host. It requires the installed Kata
-disk image, Kata kernel, Firecracker, `gcc`, `debugfs`, and `/dev/kvm`.
+Create a plain-text prompt and a ClawTune JSONL trace. The trace must contain a
+complete model response for every turn, including tool-call arguments, plus
+the measured duration. Inspection is read-only:
 
 ```bash
-mkdir -p /data/replay-inputs
-python3 scripts/build-runtime-agent-rootfs.py \
-  --base-image /opt/kata/share/kata-containers/kata-containers.img \
-  --agent-source clawbox/replay/guest_agent.c \
-  --output-rootfs /data/replay-inputs/agent.ext4
+python3 -m clawbox.replay.cli inspect /data/workloads/model-trace.jsonl
 ```
 
-The study runner copies this disk for every experiment group and repetition;
-it never intentionally reuses a disk that has already executed a task.
+Replay is faithful at the OpenClaw API boundary, not merely a sleep schedule:
+OpenClaw receives recorded assistant text and tool calls, executes tools over
+SSH, sends tool results into the next request, and waits for recorded latency.
+
+### 3. Create the private VM networks
+
+Create one isolated bridge and two TAP devices per concurrent session. Keep
+them up for all experiment groups and remove them only after every VM exits.
+
+```bash
+sudo bash scripts/direct-firecracker-network.sh up --sessions 8 --prefix 172.30
+```
 
 ### 4. Configure and run the comparison
 
-Copy the example, then edit its paths, source commit, session count, repetition
-count, and model-service settings. The output path must not already exist.
+Copy the example, then edit its paths, session count, repetition count, and
+model-service settings. The output path must not already exist.
 
 ```bash
 cp deploy/study.example.json /data/study.json
@@ -592,14 +583,14 @@ The configuration names correspond to these general experiment concepts:
 
 | Configuration field | Meaning |
 | --- | --- |
-| `source` | repository, pinned revision, disk image, workload trace, and older calibration trace |
+| `source` | the two reusable VM disks, prompt, and recorded model trace |
 | `sessions`, `repetitions`, `seed` | concurrent workload size, repeat count, and randomized group order |
 | `inference_backends` | recorded timing, real model API, or both |
 | `memory_policies` | keep virtual machines in memory, save idle machines, or both |
-| `resident_slots`, `tool_resident_slots` | maximum simultaneously memory-resident agent and tool virtual machines |
-| `resources`, `policy` | virtual-machine size, CPU/NUMA placement, and save/restore decision thresholds |
+| `resources` | VM memory size, CPU numbering, and NUMA placement |
+| `replay.time_scale` | recorded latency multiplier; use `1.0` for measurements |
 | `validation_command` | command whose output represents the final task state |
-| `api` | OpenAI-compatible endpoint, model, credential variable, and timeout |
+| `api` | OpenAI-compatible endpoint, model, and credential variable |
 
 For a recorded-only trial, set `inference_backends` to `["replay"]` and no API
 key is needed. For a real-API comparison, retain both values and export the key
@@ -620,18 +611,15 @@ python3 -m clawbox.replay.cli study /data/study.json
 unset OPENAI_API_KEY
 ```
 
-The runner randomizes group order using the configured seed, creates fresh
-disks, and writes intermediate results after each group. The final
-`study-summary.json` contains:
+The runner randomizes group order, creates fresh VM disks for every group, and
+writes intermediate results. The final `study-summary.json` contains:
 
 - completed sessions and failures;
 - wall time and completed sessions per hour;
-- average, 95th percentile, and peak Firecracker process memory;
-- memory used above the experiment process's cgroup baseline;
+- average and peak Firecracker process memory;
 - save/restore counts and time;
 - means, standard deviations, and 95% confidence intervals across repetitions;
-- percentage changes between resident and saved-memory modes;
-- commit, source-tree hash, input hashes, host identity, and full configuration;
+- commit, source-tree hash, trace hash, host identity, and full configuration;
 - hashes produced by `validation_command` for cross-group final-state checks.
 
 The example validation command hashes the tracked repository changes. Replace
@@ -639,17 +627,17 @@ it with a command that prints the scientifically relevant final artifact for
 your workload. Identical stdout produces an identical recorded hash; a
 non-zero exit code or different hashes make the study fail.
 
-### 5. Read the result
+### 5. Read the result and clean up
 
 ```bash
-python3 -m json.tool /experiment/results/paper-study-001/study-summary.json | less
+python3 -m json.tool /data/paper-study-001/study-summary.json | less
+sudo bash scripts/direct-firecracker-network.sh down --sessions 8 --prefix 172.30
 ```
 
-Do not draw conclusions from the smoke test or from a single repetition. Use
-the same session count and resident-memory limit for every group, retain the
-generated manifest, and report both peak and average memory. If you need the
-individual preparation and execution commands, network topology, or event
-schema, see [the detailed experiment guide](docs/high-density-replay.md).
+Do not draw conclusions from a single repetition. Use the same session count
+and VM sizes for every group, retain the generated manifest, and report both
+peak and average memory. Each group retains VM serial logs, request metadata,
+memory samples, and per-session results below its output directory.
 
 For a quick local trace/tool check that does not start Firecracker:
 
@@ -661,33 +649,13 @@ python3 -m clawbox.replay.cli run trace.jsonl \
 
 ### What has been verified
 
-On the Kunpeng host, an eight-session run kept at most four agent VMs in memory
-at once. It used one CPU per VM, 512 MiB per VM, and a 384 MiB touched memory
-region. LLM waits were replayed at their full recorded duration. Both modes
-completed every session and every tool command with no exit-code mismatch.
-
-| Measurement | Keep all agent VMs in memory | Save idle agent VMs | Difference |
-| --- | ---: | ---: | ---: |
-| Total time | 213.5 s | 152.7 s | 28.5% lower |
-| Completed sessions per hour | 134.9 | 188.6 | 39.8% higher |
-| Average Firecracker process memory | 1714.9 MiB | 379.3 MiB | 77.9% lower |
-| Peak Firecracker process memory | 1730.1 MiB | 1844.2 MiB | 6.6% higher |
-
-The higher peak occurs while several VM memory files are being written. The
-average reduction is useful for capacity, but the peak means save operations
-must be rate-limited before this can become a production feature.
-
-A separate two-VM check used a 128 MiB agent environment and a 256 MiB tool
-environment. The agent VM was saved during all 24 LLM waits; the higher tool-VM
-threshold selected only 6 waits. All six tool-VM restores completed and passed
-state checks before the next tool command. Average combined Firecracker memory
-fell by 43.0%. That check used LLM waits shortened to one tenth of their
-recorded duration, so save/restore overhead made it slower; it demonstrates
-correct operation, not a throughput improvement.
-
-Implementation details, the Kubernetes runner example, known limitations, and
-the current Kunpeng measurements are in
-[docs/high-density-replay.md](docs/high-density-replay.md).
+On Kunpeng, a single-session recorded run completed two model turns and one
+real SSH tool call. Snapshot mode saved and restored both VMs during each model
+turn (two cycles) and produced the same final-state hash as resident mode. A
+separate single-session run used the configured real model service, completed
+the same SSH tool action, and produced the same hash. These are functional
+checks; publishable density and performance claims still require the configured
+concurrency and repeated trials.
 
 ## Updating an installed host
 

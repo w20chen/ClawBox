@@ -373,15 +373,14 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
 
 def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> None:
     trace = tmp_path / "trace.jsonl"
-    calibration = tmp_path / "calibration.jsonl"
+    prompt = tmp_path / "prompt.txt"
     trace.write_text("{}\n", encoding="utf-8")
-    calibration.write_text("{}\n", encoding="utf-8")
+    prompt.write_text("run it\n", encoding="utf-8")
     config = tmp_path / "study.json"
     config.write_text(json.dumps({
         "output": "out",
         "source": {
-            "trace": "trace.jsonl", "calibration": "calibration.jsonl",
-            "workspace": ".", "base_commit": "abc",
+            "trace": "trace.jsonl", "prompt": "prompt.txt",
             "runtime_rootfs": "runtime.ext4", "tool_rootfs": "tool.ext4",
         },
         "sessions": 2, "repetitions": 1,
@@ -392,21 +391,19 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
     def fake_run(argv, **_kwargs):
         if argv[0] == "git":
             return SimpleNamespace(stdout="commit-id\n" if "rev-parse" in argv else "")
-        if "prepare-high-density-experiment.py" in str(argv[1]):
+        if "prepare-openclaw-experiment.py" in str(argv[1]):
             output = Path(argv[argv.index("--output") + 1])
             output.mkdir(parents=True)
             (output / "manifest.json").write_text('{"sessions":[{}]}', encoding="utf-8")
-        elif "clawbox.replay.cli" in argv:
-            output = Path(argv[argv.index("--output-dir") + 1])
+        elif "run-openclaw-experiment.py" in str(argv[1]):
+            output = Path(argv[argv.index("--output") + 1])
             output.mkdir(parents=True)
             (output / "summary.json").write_text(json.dumps({
                 "sessions_completed": 2, "failures": [], "wall_s": 10,
                 "throughput_sessions_per_hour": 720,
                 "peak_firecracker_rss_bytes": 100,
                 "mean_firecracker_rss_bytes": 80,
-                "peak_numa_memory_used_bytes": 1000,
-                "peak_cgroup_memory_delta_bytes": 500,
-                "sessions": [{"validation_sha256": None}],
+                "sessions": [{"validation_sha256": "same-state"}],
             }), encoding="utf-8")
         return SimpleNamespace(stdout="")
 
@@ -415,7 +412,7 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
     summary = json.loads((tmp_path / "out" / "study-summary.json").read_text())
     assert set(summary["groups"]) == {"replay-resident", "replay-snapshot"}
     assert summary["groups"]["replay-snapshot"]["sessions_completed"] == 2
-    assert "replay" in summary["comparisons"]
+    assert summary["final_state_equal"] is True
 
 
 def test_engine_hashes_final_state_validation() -> None:

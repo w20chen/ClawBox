@@ -35,6 +35,15 @@ def complete(log: Path) -> tuple[bool, int | None]:
     return False, None
 
 
+def request_summaries(gateway: ModelGateway) -> list[dict]:
+    summaries = []
+    for item in gateway.records():
+        encoded = item.pop("response_b64", "")
+        item["response_bytes"] = (len(encoded) * 3 // 4 - encoded.count("=")) if encoded else 0
+        summaries.append(item)
+    return summaries
+
+
 def ssh_validate(spec: dict, command: str) -> str:
     marker = b"\n__CLAWBOX_VALIDATION_EXIT__:"
     remote = f"{command}; status=$?; printf '\\n__CLAWBOX_VALIDATION_EXIT__:%d\\n' \"$status\""
@@ -106,7 +115,7 @@ def main() -> None:
                     return {"session": index, "snapshots": snapshots,
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
                             "validation_sha256": ssh_validate(spec, a.validation_command),
-                            "model_requests": gateway.records()}
+                            "model_requests": request_summaries(gateway)}
                 runtime_exit = runtime.process_exit_code()
                 tool_exit = tool.process_exit_code()
                 if runtime_exit is not None:
@@ -142,9 +151,14 @@ def main() -> None:
                 except Exception as exc: failures.append({"session": futures[future], "type": type(exc).__name__, "error": str(exc)})
     finally:
         stop.set(); sampler.join(timeout=2)
+    wall_s = time.monotonic() - started
     report = {"mode": a.mode, "inference": a.inference,
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
-              "failures": failures, "wall_s": time.monotonic() - started,
+              "failures": failures, "wall_s": wall_s,
+              "throughput_sessions_per_hour": len(results) * 3600 / wall_s,
+              "mean_firecracker_rss_bytes": (
+                  sum(x["firecracker_rss_bytes"] for x in samples) / len(samples) if samples else 0
+              ),
               "peak_firecracker_rss_bytes": max((x["firecracker_rss_bytes"] for x in samples), default=0),
               "sessions": results}
     (a.output / "memory.json").write_text(json.dumps(samples, indent=2) + "\n")
