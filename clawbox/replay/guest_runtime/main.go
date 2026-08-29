@@ -159,7 +159,9 @@ func runSSH(target sshTarget, command string) int {
 func loadState(cfg config) state {
 	current := state{SessionID: cfg.SessionID}
 	data, err := os.ReadFile(cfg.StatePath)
-	if os.IsNotExist(err) { return current }
+	if os.IsNotExist(err) {
+		return current
+	}
 	fatalIf(err, "read replay state")
 	fatalIf(json.Unmarshal(data, &current), "decode replay state")
 	if current.SessionID != cfg.SessionID || current.NextAction < 0 || current.NextAction > len(cfg.Actions) {
@@ -178,24 +180,47 @@ func saveState(cfg config, current state) {
 }
 
 func postJSON(url string, input any, output any) {
-	payload, err := json.Marshal(input); fatalIf(err, "encode inference request")
-	response, err := http.Post(url, "application/json", bytes.NewReader(payload)); fatalIf(err, "submit inference request")
+	payload, err := json.Marshal(input)
+	fatalIf(err, "encode inference request")
+	response, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	fatalIf(err, "submit inference request")
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 { fatalf("inference POST returned %s", response.Status) }
-	if output != nil { fatalIf(json.NewDecoder(response.Body).Decode(output), "decode inference response") }
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		fatalf("inference POST returned %s", response.Status)
+	}
+	if output != nil {
+		fatalIf(json.NewDecoder(response.Body).Decode(output), "decode inference response")
+	}
 }
 
 func getJSON(url string, output any) {
-	response, err := http.Get(url); fatalIf(err, "query inference request")
+	response, err := http.Get(url)
+	fatalIf(err, "query inference request")
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 { fatalf("inference GET returned %s", response.Status) }
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		fatalf("inference GET returned %s", response.Status)
+	}
 	fatalIf(json.NewDecoder(response.Body).Decode(output), "decode inference status")
 }
 
-func readJSON(path string, output any) { data, err := os.ReadFile(path); fatalIf(err, "read config"); fatalIf(json.Unmarshal(data, output), "decode config") }
-func fatalIf(err error, context string) { if err != nil { fatalf("%s: %v", context, err) } }
-func fatalf(format string, values ...any) { fmt.Fprintf(os.Stderr, "replay guest runtime: "+format+"\n", values...); os.Exit(1) }
+func readJSON(path string, output any) {
+	data, err := os.ReadFile(path)
+	fatalIf(err, "read config")
+	fatalIf(json.Unmarshal(data, output), "decode config")
+}
+func fatalIf(err error, context string) {
+	if err != nil {
+		fatalf("%s: %v", context, err)
+	}
+}
+func fatalf(format string, values ...any) {
+	fmt.Fprintf(os.Stderr, "replay guest runtime: "+format+"\n", values...)
+	os.Exit(1)
+}
 
 // Keep a deterministic identifier helper available for callers generating
 // plans from arbitrary traces without leaking raw prompt content into state.
-func requestID(sessionID, actionID string) string { sum := sha256.Sum256([]byte(sessionID + "\x00" + actionID)); return hex.EncodeToString(sum[:]) }
+func requestID(sessionID, actionID string) string {
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + actionID))
+	return hex.EncodeToString(sum[:])
+}
