@@ -14,6 +14,7 @@ printf '127.0.0.1 localhost runtime-vm\n::1 localhost\n' >/etc/hosts
 
 source /etc/clawbox/experiment.env
 : "${EXPERIMENT_ID:?}" "${MODEL_BASE_URL:?}" "${MODEL_ID:?}" "${RUNTIME_IP:?}" "${TOOL_SSH_TARGET:?}"
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HOME=/home/openclaw OPENCLAW_HOME=/home/openclaw/.openclaw
 export CLAWTUNE_POLICY=observe-only CLAWTUNE_TRACE_DIR=/state/traces
 export CLAWTUNE_LLM_UPSTREAM_BASE_URL="${MODEL_BASE_URL}"
@@ -21,6 +22,12 @@ export CLAWTUNE_LLM_UPSTREAM_API_KEY=experiment-gateway
 export CLAWTUNE_LLM_PROXY_EXPOSE_MODEL="${MODEL_ID}"
 export CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL="${MODEL_ID}"
 export XDG_CACHE_HOME=/opt/clawtune/cache
+
+# Direct kernel boot does not apply OCI entrypoint/environment metadata.
+# Invoke the packaged CLI explicitly so it behaves exactly as in the image.
+openclaw() {
+  /usr/local/bin/node /usr/local/lib/node_modules/openclaw/openclaw.mjs "$@"
+}
 
 echo "[experiment] starting ClawTune" >&2
 /opt/clawtune/venv/bin/python --version >&2
@@ -45,8 +52,24 @@ done
 curl -fsS "http://${RUNTIME_IP}:8765/health/ready" >/dev/null
 echo "[experiment] ClawTune ready; configuring OpenClaw" >&2
 
+fail_stage() {
+  local stage="$1" status="$2" log="${3:-}"
+  echo "[experiment] ${stage} failed with exit code ${status}" >&2
+  if [ -n "$log" ]; then cat "$log" >&2 2>/dev/null || true; fi
+  printf '{"ok":false,"experiment_id":"%s","openclaw_exit_code":%d,"stage":"%s"}\n' \
+    "${EXPERIMENT_ID}" "$status" "$stage"
+  touch /state/experiment-complete
+  while :; do sleep 3600; done
+}
+
+set +e
 openclaw plugins install --link /opt/clawtune/packages/clawtune-plugin \
-  >/state/logs/plugin.log 2>&1 || grep -qiE 'already|exists' /state/logs/plugin.log
+  >/state/logs/plugin.log 2>&1
+status=$?
+set -e
+if [ "$status" -ne 0 ] && ! grep -qiE 'already|exists' /state/logs/plugin.log; then
+  fail_stage plugin-install "$status" /state/logs/plugin.log
+fi
 openclaw plugins enable clawtune >>/state/logs/plugin.log 2>&1 || true
 cat >/state/openclaw.patch.json <<EOF
 {
@@ -75,11 +98,23 @@ cat >/state/openclaw.patch.json <<EOF
     }}}}
 }
 EOF
+set +e
 openclaw config patch --stdin </state/openclaw.patch.json >>/state/logs/plugin.log 2>&1
+status=$?
+set -e
+if [ "$status" -ne 0 ]; then fail_stage config-patch "$status" /state/logs/plugin.log; fi
 openclaw onboard --non-interactive --accept-risk --skip-health --mode local \
   --auth-choice vllm --custom-base-url "http://${RUNTIME_IP}:8765/v1" \
   --custom-api-key experiment-gateway --custom-model-id "${MODEL_ID}" \
-  >/state/logs/onboard.log 2>&1
+  >/state/logs/onboard.log 2>&1 || fail_stage onboard "$?" /state/logs/onboard.log
+
+# The SSH backend uses this stable shared-scope directory as its remote root.
+tool_login="${TOOL_SSH_TARGET%:*}"
+timeout -k 2 10 ssh -p 2222 -i /etc/clawbox/ssh/id_ed25519 \
+  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/etc/clawbox/ssh/known_hosts "$tool_login" \
+  'mkdir -p /testbed/openclaw-ssh-shared-8198076c' \
+  >/state/logs/ssh-prepare.log 2>&1 || fail_stage ssh-prepare "$?" /state/logs/ssh-prepare.log
 
 set +e
 openclaw agent --local --agent main --session-id "${EXPERIMENT_ID}" \
@@ -88,6 +123,9 @@ openclaw agent --local --agent main --session-id "${EXPERIMENT_ID}" \
   >/state/final-answer.json 2>/state/logs/openclaw.log
 status=$?
 set -e
+cat /state/final-answer.json
+if [ "$status" -ne 0 ]; then cat /state/logs/openclaw.log >&2 || true; fi
+sync
 printf '{"ok":%s,"experiment_id":"%s","openclaw_exit_code":%d}\n' \
   "$(if [ "$status" -eq 0 ]; then echo true; else echo false; fi)" "${EXPERIMENT_ID}" "$status"
 touch /state/experiment-complete

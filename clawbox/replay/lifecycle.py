@@ -327,6 +327,11 @@ class FirecrackerLifecycle:
     def resident(self) -> bool:
         return self._resident
 
+    def process_exit_code(self) -> int | None:
+        """Return the Firecracker exit code, or None while it is running."""
+        process = self._process
+        return None if process is None or process.poll() is None else process.returncode
+
     def start(self) -> float:
         if self._resident or self._process is not None:
             raise LifecycleError("Firecracker VM is already started")

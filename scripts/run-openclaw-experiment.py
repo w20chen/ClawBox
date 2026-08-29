@@ -36,13 +36,26 @@ def complete(log: Path) -> tuple[bool, int | None]:
 
 
 def ssh_validate(spec: dict, command: str) -> str:
-    result = subprocess.run([
+    marker = b"\n__CLAWBOX_VALIDATION_EXIT__:"
+    remote = f"{command}; status=$?; printf '\\n__CLAWBOX_VALIDATION_EXIT__:%d\\n' \"$status\""
+    process = subprocess.Popen([
         "ssh", "-p", "2222", "-i", spec["identity"], "-o", "BatchMode=yes",
         "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={spec['known_hosts']}",
-        f"executor@{spec['tool_host']}", command,
-    ], check=True, capture_output=True, text=True, timeout=60)
-    return hashlib.sha256(result.stdout.encode()).hexdigest()
+        f"executor@{spec['tool_host']}", remote,
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+    before, found, after = stdout.rpartition(marker)
+    if not found:
+        raise RuntimeError(f"validation did not return a completion marker: {stderr.decode(errors='replace')}")
+    exit_text = after.splitlines()[0]
+    if exit_text != b"0":
+        raise RuntimeError(f"validation command exited with {exit_text.decode(errors='replace')}")
+    return hashlib.sha256(before).hexdigest()
 
 
 def main() -> None:
@@ -94,6 +107,12 @@ def main() -> None:
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
                             "validation_sha256": ssh_validate(spec, a.validation_command),
                             "model_requests": gateway.records()}
+                runtime_exit = runtime.process_exit_code()
+                tool_exit = tool.process_exit_code()
+                if runtime_exit is not None:
+                    raise RuntimeError(f"Runtime VM exited unexpectedly ({runtime_exit})")
+                if tool_exit is not None:
+                    raise RuntimeError(f"Tool VM exited unexpectedly ({tool_exit})")
                 pending = [item for item in gateway.records()
                            if not item["ready"] and item["request_id"] not in processed]
                 if a.mode == "snapshot" and pending:
