@@ -51,6 +51,10 @@ def main() -> None:
     )
     parser.add_argument("--compiler", default="gcc")
     parser.add_argument("--debugfs", default="debugfs")
+    parser.add_argument(
+        "--inject-file", action="append", default=[], metavar="SOURCE:DESTINATION",
+        help="inject an additional regular file into the rootfs (repeatable)",
+    )
     args = parser.parse_args()
     if args.extra_space_mib < 1:
         parser.error("--extra-space-mib must be positive")
@@ -71,6 +75,9 @@ def main() -> None:
             str(args.output_rootfs))
         run(args.debugfs, "-w", "-R", "set_inode_field /clawbox-runtime-agent mode 0100755",
             str(args.output_rootfs))
+        for injection in args.inject_file:
+            source, destination = parse_injection(injection)
+            inject_file(args.debugfs, source, destination, args.output_rootfs)
         if args.workspace_source is not None:
             copy_workspace(args.debugfs, args.workspace_source, args.output_rootfs)
         run(args.debugfs, "-R", "stat /clawbox-runtime-agent", str(args.output_rootfs))
@@ -116,6 +123,32 @@ def copy_workspace(debugfs: str, source: Path, rootfs: Path) -> None:
             run(debugfs, "-w", "-R", f"mkdir {destination}", str(rootfs))
         else:
             run(debugfs, "-w", "-R", f"write {path} {destination}", str(rootfs))
+
+
+def parse_injection(value: str) -> tuple[Path, str]:
+    """Validate the deliberately small debugfs-safe injection syntax."""
+    if value.count(":") != 1:
+        raise ValueError("--inject-file must be SOURCE:DESTINATION")
+    source_text, destination = value.split(":", 1)
+    source = Path(source_text).resolve()
+    if not source.is_file() or source.is_symlink():
+        raise ValueError(f"injected source must be a regular file: {source}")
+    if not destination.startswith("/") or destination == "/":
+        raise ValueError("injected destination must be an absolute file path")
+    if any(char.isspace() or char in {'\"', "'"} for char in f"{source}{destination}"):
+        raise ValueError("injected paths must not contain whitespace or quotes")
+    if any(part in {"", ".", ".."} for part in destination.split("/")[1:]):
+        raise ValueError("injected destination contains an invalid path component")
+    return source, destination
+
+
+def inject_file(debugfs: str, source: Path, destination: str, rootfs: Path) -> None:
+    parts = destination.split("/")[1:-1]
+    current = ""
+    for part in parts:
+        current += f"/{part}"
+        run(debugfs, "-w", "-R", f"mkdir {current}", str(rootfs))
+    run(debugfs, "-w", "-R", f"write {source} {destination}", str(rootfs))
 
 
 if __name__ == "__main__":

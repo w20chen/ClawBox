@@ -33,6 +33,39 @@ The production `SandboxTask` CRD is deliberately unchanged. This experiment
 uses Firecracker's API directly so a full snapshot followed by process exit is
 measured before a reversible lifecycle is promised by the Kubernetes API.
 
+## Guest-driven SSH path (in progress)
+
+The next experiment path moves the replay control loop into the Runtime guest:
+it submits idempotent replay requests to a host inference endpoint and creates
+a fresh, strict-host-key SSH connection to the Tool guest for every tool call.
+The Tool side is the same `tool-bridge` SSH server used by the OpenClaw
+sandbox backend; it is not a new vsock command protocol. This makes the CPU
+side replay topology match the production Runtime-to-Tool boundary while the
+inference endpoint can later be swapped for a GPU scheduler.
+
+Two reusable helpers support this path on an ARM64 Firecracker host:
+
+```bash
+# Produces static linux/arm64 guest binaries with Docker; no host Go install.
+bash scripts/build-direct-replay-guest-binaries.sh /experiment/guest-binaries
+
+# One private L2 network per session. Keep it up for the whole replay arm.
+sudo bash scripts/direct-firecracker-network.sh up --sessions 8 --prefix 172.30
+# Cleanup after every Firecracker process has exited:
+sudo bash scripts/direct-firecracker-network.sh down --sessions 8 --prefix 172.30
+```
+
+`prepare-high-density-experiment.py --network-prefix 172.30` emits matching
+`crtNNNN`/`ctlNNNN` TAP names and static pre-init guest addresses: Runtime
+`172.30.(N+1).2`, Tool `172.30.(N+1).3`, and host inference service
+`172.30.(N+1).1`. Each session has its own bridge, so a Runtime cannot reach a
+different session's Tool. The rootfs builder accepts repeatable
+`--inject-file SOURCE:DESTINATION` arguments for the statically built driver,
+Tool Bridge, guest config, and per-trial SSH material. This plumbing is
+presently a foundation; the existing paired benchmark remains the separately
+validated direct Tool-vsock mode until the guest SSH controller's end-to-end
+snapshot gate is landed.
+
 ## Trace validation
 
 Both agent-test-bench action-v4 JSONL and ClawTune span-v6 JSONL are accepted.

@@ -95,18 +95,18 @@ func main() {
 }
 
 func runLLM(cfg config, current *state, a action) {
-	requestID := a.ActionID
-	if current.InflightRequest != "" && current.InflightRequest != requestID {
-		fatalf("expected request %s but state holds %s", requestID, current.InflightRequest)
+	deterministicID := requestID(cfg.SessionID, a.ActionID)
+	if current.InflightRequest != "" && current.InflightRequest != deterministicID {
+		fatalf("expected request %s but state holds %s", deterministicID, current.InflightRequest)
 	}
-	current.InflightRequest = requestID
+	current.InflightRequest = deterministicID
 	saveState(cfg, *current) // Persist before POST: retries are request-idempotent.
-	request := inferenceRequest{requestID, cfg.SessionID, a.Content, a.RecordedLatencyMS}
+	request := inferenceRequest{deterministicID, cfg.SessionID, a.Content, a.RecordedLatencyMS}
 	postJSON(cfg.InferenceURL+"/v1/replay/requests", request, nil)
 	for {
 		var status inferenceStatus
-		getJSON(fmt.Sprintf("%s/v1/replay/requests/%s", cfg.InferenceURL, requestID), &status)
-		if status.RequestID != requestID {
+		getJSON(fmt.Sprintf("%s/v1/replay/requests/%s", cfg.InferenceURL, deterministicID), &status)
+		if status.RequestID != deterministicID {
 			fatalf("inference response request id mismatch: %q", status.RequestID)
 		}
 		if status.Ready {
