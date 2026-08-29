@@ -561,11 +561,18 @@ the VM before the next tool command.
 The runner can manage two Firecracker VMs per replay:
 
 - the first represents the agent process that waits for the LLM;
-- the optional second tracks the memory and saved state of a tool environment.
+- the optional second owns the tool workspace and executes shell commands.
 
-In the current prototype, the real tool command is still executed by the
-configured local, SSH, or Kubernetes command runner rather than inside that
-second VM.
+In a paired direct-Firecracker run, the host sends each tool command through a
+fresh vsock connection to the Tool VM's guest agent. Local, SSH, and Kubernetes
+executors are rejected for paired runs, preventing a Tool VM from serving only
+as a memory placeholder. The Tool VM restores first, passes a new vsock health
+check, and then Runtime restores.
+
+The current Tool-vsock implementation has local unit coverage but has not yet
+been run on Kunpeng from this checkout. The checked-in paired Kunpeng result is
+therefore historical state-continuity evidence from the former host-side Tool
+transport, not a benchmark result for the direct Tool-vsock path.
 
 Each VM contains a small state-checking program. Before saving a VM, the runner
 records the current LLM request. After restoring it, the runner verifies that
@@ -589,9 +596,8 @@ larger and cost more to load after restoration.
 ### What this experiment does not do
 
 - It does not transparently suspend a Kubernetes Pod managed by containerd.
-- The optional tool VM is managed directly through the Firecracker API. The
-  actual tool command still uses the selected local, SSH, or Kubernetes command
-  executor.
+- The optional Tool VM is managed directly through the Firecracker API; it is
+  not a transparent Kubernetes Pod suspend/resume implementation.
 - GPU inference and GPU KV-cache placement are simulated metadata. A real GPU
   client can replace the simulator later without changing VM handling.
 - Saved VM memory briefly increases host memory use while it is being written.

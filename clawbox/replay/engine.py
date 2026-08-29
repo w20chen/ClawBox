@@ -96,7 +96,6 @@ class ReplayEngine:
         snapshots = tool_snapshots = exit_mismatches = 0
         try:
             self.event_sink({"event": "sandbox_start", "elapsed_s": self.lifecycle.start()})
-            self._wait_executor_ready("sandbox_ready")
             self._wait_runtime_ready("runtime_agent_ready")
             if self.tool_lifecycle is not None:
                 self.event_sink({
@@ -104,6 +103,10 @@ class ReplayEngine:
                     "elapsed_s": self.tool_lifecycle.start(),
                 })
                 self._wait_tool_runtime_ready("tool_runtime_agent_ready")
+            # For paired direct Firecracker, this reaches the Tool guest only
+            # after its lifecycle is resident.  Other executors keep their
+            # original start-of-session health check here.
+            self._wait_executor_ready("sandbox_ready")
             for index, action in enumerate(action_list):
                 if action.kind == "llm":
                     predicted = self.predictor.predict(action)
@@ -155,12 +158,6 @@ class ReplayEngine:
                     wait_started = time.monotonic()
                     inference_result = inference.wait_ready()
                     slept_llm_s += time.monotonic() - wait_started
-                    if decision:
-                        elapsed = self.lifecycle.restore()
-                        restore_s += elapsed
-                        self.event_sink({"event": "sandbox_restored", "index": index, "elapsed_s": elapsed})
-                        self._wait_executor_ready("sandbox_ready", index=index)
-                        self._wait_runtime_ready("runtime_agent_ready", index=index)
                     if tool_decision:
                         if self.tool_lifecycle is None:
                             raise RuntimeError("tool restore selected without a tool lifecycle")
@@ -171,6 +168,14 @@ class ReplayEngine:
                             "elapsed_s": elapsed,
                         })
                         self._wait_tool_runtime_ready("tool_runtime_agent_ready", index=index)
+                        # A reconnecting Tool executor can only probe after the
+                        # Tool VM is restored; the old vsock connection is gone.
+                        self._wait_executor_ready("tool_executor_ready", index=index)
+                    if decision:
+                        elapsed = self.lifecycle.restore()
+                        restore_s += elapsed
+                        self.event_sink({"event": "sandbox_restored", "index": index, "elapsed_s": elapsed})
+                        self._wait_runtime_ready("runtime_agent_ready", index=index)
                     guest_state = None
                     if self.runtime_agent is not None:
                         if before_state is None:

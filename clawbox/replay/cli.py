@@ -13,7 +13,7 @@ from threading import BoundedSemaphore
 from typing import Any
 
 from .engine import JsonlEventWriter, ReplayEngine, SnapshotPolicy
-from .guest import VsockRuntimeAgentClient
+from .guest import VsockCommandExecutor, VsockRuntimeAgentClient
 from .inference import TraceReplayInferenceProvider
 from .latency import LinearLatencyPredictor
 from .lifecycle import (
@@ -120,7 +120,15 @@ def run_replay(args: argparse.Namespace) -> int:
             tool_config = FirecrackerConfig.from_json(args.tool_firecracker_config)
             tool_lifecycle = FirecrackerLifecycle(tool_config)
             tool_runtime_agent = _runtime_agent(tool_config)
-        if args.tool_transport == "local":
+            if tool_runtime_agent is None:
+                raise ValueError("tool Firecracker config requires guest_agent_port and vsock_uds")
+            if args.tool_transport != "vsock":
+                raise ValueError(
+                    "paired Tool Firecracker requires --tool-transport vsock; "
+                    "local, SSH, and kubectl transports are placeholder modes"
+                )
+            executor = VsockCommandExecutor(tool_runtime_agent)
+        elif args.tool_transport == "local":
             executor = LocalCommandExecutor(cwd=args.cwd, workspace_alias="/workspace")
         elif args.tool_transport == "kubectl":
             if not args.tool_pod:
@@ -129,13 +137,15 @@ def run_replay(args: argparse.Namespace) -> int:
                 namespace=args.tool_namespace, pod=args.tool_pod,
                 container=args.tool_container,
             )
-        else:
+        elif args.tool_transport == "ssh":
             if args.ssh_identity is None:
                 raise ValueError("ssh tool transport requires --ssh-identity")
             executor = SSHCommandExecutor(
                 host=args.ssh_host, port=args.ssh_port, user=args.ssh_user,
                 identity_file=args.ssh_identity,
             )
+        else:
+            raise ValueError("--tool-transport vsock requires --tool-firecracker-config")
     else:
         lifecycle = SimulatedLifecycle(
             snapshot_s=args.estimated_snapshot_s,
@@ -214,11 +224,21 @@ def run_experiment(args: argparse.Namespace) -> int:
             tool_config = FirecrackerConfig.from_json(Path(tool_config_path))
             tool_inner = FirecrackerLifecycle(tool_config)
             tool_runtime_agent = _runtime_agent(tool_config)
+            if tool_runtime_agent is None:
+                raise ValueError("tool Firecracker config requires guest_agent_port and vsock_uds")
             tool_lifecycle = ResidentSlotLifecycle(tool_inner, tool_slots)
             with lifecycle_lock:
                 lifecycles.append(tool_lifecycle)
         tool_transport = spec.get("tool_transport", "kubectl")
-        if tool_transport == "local":
+        if tool_config_path is not None:
+            if tool_transport != "vsock":
+                raise ValueError(
+                    "paired Tool Firecracker requires tool_transport: vsock; "
+                    "local, SSH, and kubectl transports are placeholder modes"
+                )
+            assert tool_runtime_agent is not None
+            executor = VsockCommandExecutor(tool_runtime_agent)
+        elif tool_transport == "local":
             executor = LocalCommandExecutor(
                 cwd=Path(spec["cwd"]), workspace_alias="/workspace",
             )
@@ -351,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--backend", choices=("local", "firecracker"), default="local")
     run_parser.add_argument("--firecracker-config", type=Path)
     run_parser.add_argument("--tool-firecracker-config", type=Path)
-    run_parser.add_argument("--tool-transport", choices=("local", "ssh", "kubectl"), default="ssh")
+    run_parser.add_argument("--tool-transport", choices=("local", "ssh", "kubectl", "vsock"), default="ssh")
     run_parser.add_argument("--ssh-host", default="127.0.0.1")
     run_parser.add_argument("--ssh-port", type=int, default=22)
     run_parser.add_argument("--ssh-user", default="root")

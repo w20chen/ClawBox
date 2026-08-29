@@ -18,10 +18,13 @@ fails unless the guest boot nonce and in-flight request are unchanged. This
 turns snapshot continuity into an asserted property rather than assuming that
 a newly booted dummy VM is equivalent.
 
-Tool commands are deliberately executed in a disposable paired workspace (or
-Tool pod), then acknowledged to every configured state-checking guest. They are
-not executed by the minimal PID-1 program. This keeps the prototype focused on
-VM memory reclamation; it is not an in-guest shell runtime.
+For a paired direct-Firecracker run, Tool commands execute in the Tool VM's
+PID-1 guest agent through vsock. Commands and output are base64-framed and the
+host opens a new vsock connection for every command, so no pre-snapshot
+connection is reused after restoration. The Tool agent rejects execution while
+an LLM request is marked in flight. Local, SSH, and Kubernetes executors remain
+available only for single-VM/legacy comparison runs and are rejected when a
+paired Tool Firecracker configuration is supplied.
 The inference side is behind `InferenceProvider`, so trace sleep can later be
 replaced by a real GPU client without changing lifecycle decisions. Current GPU
 and KV handles are simulated metadata only.
@@ -118,9 +121,10 @@ and effective predicted LLM time >= snapshot + restore + refault + margin
 Runtime and Tool thresholds are independent. The defaults are 20 seconds for
 Runtime and a more conservative 30 seconds for Tool, and both are configurable.
 During a selected LLM phase the engine marks the request in both guests, saves
-and stops the selected VMs, restores them when inference completes, verifies
-both boot nonces and in-flight request IDs, and only then executes the next
-real tool command.
+and stops the selected VMs, restores the Tool VM first, waits for its vsock
+health check, then restores Runtime. It verifies both boot nonces and in-flight
+request IDs before opening a new Tool-vsock connection for the next real tool
+command.
 
 Generate paired configs by adding a Tool rootfs and working-set size:
 
@@ -136,17 +140,14 @@ python -m clawbox.replay.cli experiment manifest.json \
   --output-dir results/paired
 ```
 
-This is a direct-Firecracker Tool-sandbox prototype. The actual tool command
-continues to run through the configured local, SSH, or Kubernetes executor and
-is acknowledged to both guests. It does not transparently stop a production
-Kubernetes Pod or reconnect a containerd/Kata shim; that remains a production
-integration gap.
-
-With `--tool-transport ssh`, the guest image must boot networking and SSH
-without host-side cloud-init. TAP,
-routes, NAT/port forwarding, private rootfs copies, and SSH keys must be
-prepared before the run. Snapshot files should live on local NVMe; putting them
-on tmpfs defeats the memory-density measurement.
+This is a direct-Firecracker Tool-sandbox prototype. A paired manifest uses
+`"tool_transport": "vsock"`; the runner rejects local, SSH, and Kubernetes
+tool transports in that mode so a Tool VM cannot merely stand in for memory.
+The Tool rootfs must be a private writable image containing the task workspace
+at `/workspace`. It does not transparently stop a production Kubernetes Pod or
+reconnect a containerd/Kata shim; those remain future work. Snapshot files
+should live on local NVMe; putting them on tmpfs defeats the memory-density
+measurement.
 
 The lifecycle alternates the configured snapshot paths with a `.next` pair.
 This is required because a restored VM memory-maps its current memory snapshot;
@@ -157,15 +158,12 @@ When `numa_node` and `cpu_set` are configured, the lifecycle uses a small
 `set_mempolicy(2)` plus `sched_setaffinity(2)` exec wrapper. This avoids loading
 a host `numactl` binary into a guest/container with an incompatible glibc.
 
-For the native ClawBox two-VM Cell layout, prefer `--tool-transport kubectl`:
-the directly managed Runtime microVM is checkpointed during LLM sleep, while
-the recorded tools run again in its paired Kata/Firecracker Tool pod.
+For the two-direct-Firecracker path, pass both private configs and use vsock:
 
 ```bash
 python -m clawbox.replay.cli run trace.jsonl --backend firecracker \
-  --firecracker-config runtime-000.json --tool-transport kubectl \
-  --tool-namespace clawbox-benchmarks --tool-pod replay-tool-000 \
-  --mode snapshot --events results/session-000.jsonl
+  --firecracker-config runtime-000.json --tool-firecracker-config tool-000.json \
+  --tool-transport vsock --mode snapshot --events results/session-000.jsonl
 ```
 
 Single-session command:
@@ -185,8 +183,8 @@ An experiment manifest has one independently provisioned session per entry:
 ```json
 {"sessions": [
   {"trace": "trace.jsonl", "calibration": ["calibration.jsonl"],
-   "firecracker_config": "session-000.json", "tool_transport": "kubectl",
-   "tool_namespace": "clawbox-benchmarks", "tool_pod": "replay-tool-000"}
+   "firecracker_config": "session-000.json",
+   "tool_firecracker_config": "tool-000.json", "tool_transport": "vsock"}
 ]}
 ```
 
@@ -248,17 +246,13 @@ Raw summaries and sampled RSS files are kept in the Kunpeng experiment
 directory; the compact checked-in record is
 `docs/results/high-density-kunpeng-2026-08-29.json`.
 
-### Paired Runtime/Tool validation
+### Historical paired Runtime/Tool state-continuity smoke
 
-A follow-up Kunpeng smoke replay configured a 128 MiB Runtime working set and a
-256 MiB Tool working set. At `sleep-scale=0.1`, Runtime threshold 0.300 seconds,
-and Tool threshold 0.335 seconds, the request-length predictor selected all 24
-Runtime phases but only 6 longer-predicted Tool idle phases. All 47 actions and
-23 real tools completed with zero mismatches; Tool state reached turn 24 and
-all six Tool restores occurred before the following tool command. Tool
-checkpoint averaged 0.264 seconds and restore averaged 0.045 seconds.
-
-The scaled smoke reduced mean combined Firecracker RSS by 43.0%, but its wall
-time was worse because 0.1-scale inference windows do not amortize 30 total
-snapshots. It validates the rule and continuity, not a throughput claim. Use
-scale 1.0 and repeated trials for a performance result.
+Before the direct Tool-vsock executor was added, a Kunpeng smoke replay
+validated paired VM state continuity (128 MiB Runtime, 256 MiB Tool, six Tool
+restores), but dispatched its commands through a host-side transport. Its 43.0%
+mean combined-RSS reduction is retained in
+`docs/results/paired-tool-reclamation-kunpeng-2026-08-29.json` only as a
+historical state-continuity observation, not as validation of the current
+end-to-end Tool execution path. Re-run the paired resident/snapshot protocol
+above on Kunpeng before citing two-VM command-continuity performance results.

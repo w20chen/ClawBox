@@ -8,7 +8,7 @@ import pytest
 
 from clawbox.replay._numa_exec import parse_cpu_set
 from clawbox.replay.engine import ReplayEngine, SnapshotPolicy
-from clawbox.replay.guest import RuntimeAgentState, VsockRuntimeAgentClient
+from clawbox.replay.guest import RuntimeAgentState, VsockCommandExecutor, VsockRuntimeAgentClient
 from clawbox.replay.inference import TraceReplayInferenceProvider
 from clawbox.replay.latency import LatencyObservation, LinearLatencyPredictor
 from clawbox.replay.lifecycle import FirecrackerConfig, FirecrackerLifecycle, LocalCommandExecutor, SimulatedLifecycle
@@ -237,6 +237,24 @@ def test_guest_protocol_rejects_unescaped_tokens(tmp_path: Path) -> None:
         client.begin_llm("request with spaces", 1.0, {})
     with pytest.raises(ValueError, match="protocol token"):
         client.begin_llm("ok", 1.0, {"gpu_id": 'gpu\"bad'})
+
+
+def test_vsock_tool_executor_uses_a_fresh_guest_exec_request(tmp_path: Path) -> None:
+    class StubAgent(VsockRuntimeAgentClient):
+        def __init__(self) -> None:
+            super().__init__(tmp_path / "unused.sock")
+            self.command = ""
+
+        def _request(self, command: str, *, timeout_s: float | None = None) -> dict:
+            self.command = command
+            return {"ok": True, "result": {
+                "exit_code": 0, "stdout_b64": "b2s=", "stderr_b64": "",
+            }}
+
+    agent = StubAgent()
+    result = VsockCommandExecutor(agent).execute("printf ok", 3)
+    assert agent.command == "EXEC cHJpbnRmIG9r"
+    assert (result.exit_code, result.stdout, result.stderr) == (0, "ok", "")
 
 
 def test_trace_inference_provider_exposes_future_gpu_metadata() -> None:

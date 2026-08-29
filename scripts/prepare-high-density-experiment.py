@@ -93,7 +93,7 @@ def main() -> None:
             "trace": str(args.trace),
             "calibration": [str(args.calibration)],
             "firecracker_config": str(config_path),
-            "tool_transport": "local",
+            "tool_transport": "vsock" if args.tool_rootfs_source is not None else "local",
             "cwd": str(workspace),
         }
         if args.tool_rootfs_source is not None:

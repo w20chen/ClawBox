@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import re
 import socket
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 
-from .lifecycle import LifecycleError
+from .lifecycle import CommandResult, LifecycleError
 
 
 _TOKEN = re.compile(r"^[A-Za-z0-9_.:/@+-]{1,255}$")
@@ -125,6 +126,33 @@ class VsockRuntimeAgentClient:
         action_id = _protocol_token(action_id, name="action_id")
         return RuntimeAgentState.from_response(self._request(f"TOOL {action_id} {exit_code}"))
 
+    def execute_tool(self, command: str, timeout_s: float) -> CommandResult:
+        """Run a shell command in this guest through a fresh vsock connection.
+
+        The fresh connection is intentional: a Firecracker restore replaces the
+        old host UDS endpoint, so retaining a TCP/vsock connection would make
+        the continuity experiment depend on an implementation accident.
+        """
+        if not command:
+            raise ValueError("tool command must not be empty")
+        encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        started = time.monotonic()
+        response = self._request(f"EXEC {encoded}", timeout_s=timeout_s)
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise LifecycleError(f"guest EXEC response has no result: {response!r}")
+        try:
+            stdout = base64.b64decode(str(result.get("stdout_b64", "")), validate=True).decode(
+                "utf-8", errors="replace",
+            )
+            stderr = base64.b64decode(str(result.get("stderr_b64", "")), validate=True).decode(
+                "utf-8", errors="replace",
+            )
+            exit_code = int(result["exit_code"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise LifecycleError(f"invalid guest EXEC result: {result!r}") from exc
+        return CommandResult(exit_code, stdout, stderr, time.monotonic() - started)
+
     def _request(self, command: str, *, timeout_s: float | None = None) -> dict[str, Any]:
         if "\n" in command or "\r" in command:
             raise ValueError("guest command must be one line")
@@ -137,7 +165,7 @@ class VsockRuntimeAgentClient:
             if not acknowledgement.startswith(b"OK "):
                 raise LifecycleError(f"Firecracker vsock handshake failed: {acknowledgement!r}")
             client.sendall(command.encode("utf-8") + b"\n")
-            raw = self._readline(client, 65536)
+            raw = self._readline(client, 131072)
         try:
             response = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -157,3 +185,16 @@ class VsockRuntimeAgentClient:
                 return bytes(data)
             data.extend(chunk)
         raise LifecycleError(f"unterminated or oversized guest response ({len(data)} bytes)")
+
+
+class VsockCommandExecutor:
+    """Tool executor backed by the direct Tool Firecracker guest agent."""
+
+    def __init__(self, agent: VsockRuntimeAgentClient) -> None:
+        self.agent = agent
+
+    def execute(self, command: str, timeout_s: float) -> CommandResult:
+        return self.agent.execute_tool(command, timeout_s)
+
+    def wait_ready(self, timeout_s: float) -> float:
+        return self.agent.wait_ready(timeout_s)

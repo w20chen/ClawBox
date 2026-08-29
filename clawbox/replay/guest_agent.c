@@ -11,11 +11,15 @@
 #include <sys/socket.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/select.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #define AGENT_PORT 18080U
-#define LINE_SIZE 1024U
+#define LINE_SIZE 65536U
+#define TOOL_OUTPUT_LIMIT 32768U
 
 struct agent_state {
     uint64_t boot_nonce;
@@ -31,6 +35,8 @@ struct agent_state {
 static struct agent_state state;
 static volatile unsigned char *working_set;
 static size_t working_set_bytes;
+
+static void send_error(int fd, const char *message);
 
 static void touch_working_set(void) {
     for (size_t offset = 0; offset < working_set_bytes; offset += 4096U) {
@@ -50,6 +56,113 @@ static void write_all(int fd, const char *buffer, size_t length) {
         buffer += (size_t)written;
         length -= (size_t)written;
     }
+}
+
+static const char base64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int base64_value(unsigned char value) {
+    const char *match = strchr(base64_table, value);
+    return match == NULL ? -1 : (int)(match - base64_table);
+}
+
+static unsigned char *base64_decode(const char *input, size_t *output_length) {
+    size_t input_length = strlen(input);
+    if (input_length == 0 || input_length % 4U != 0) return NULL;
+    size_t padding = input[input_length - 1] == '=' ? 1U : 0U;
+    if (input[input_length - 2] == '=') padding++;
+    unsigned char *output = malloc(input_length / 4U * 3U - padding + 1U);
+    if (output == NULL) return NULL;
+    size_t written = 0;
+    for (size_t i = 0; i < input_length; i += 4U) {
+        int a = base64_value((unsigned char)input[i]);
+        int b = base64_value((unsigned char)input[i + 1]);
+        int c = input[i + 2] == '=' ? 0 : base64_value((unsigned char)input[i + 2]);
+        int d = input[i + 3] == '=' ? 0 : base64_value((unsigned char)input[i + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0 ||
+            (input[i + 2] == '=' && i + 4U != input_length) ||
+            (input[i + 3] == '=' && i + 4U != input_length)) {
+            free(output); return NULL;
+        }
+        uint32_t group = ((uint32_t)a << 18U) | ((uint32_t)b << 12U) |
+                         ((uint32_t)c << 6U) | (uint32_t)d;
+        output[written++] = (unsigned char)(group >> 16U);
+        if (input[i + 2] != '=') output[written++] = (unsigned char)(group >> 8U);
+        if (input[i + 3] != '=') output[written++] = (unsigned char)group;
+    }
+    output[written] = '\0';
+    *output_length = written;
+    return output;
+}
+
+static char *base64_encode(const unsigned char *input, size_t input_length) {
+    size_t encoded_length = ((input_length + 2U) / 3U) * 4U;
+    char *output = malloc(encoded_length + 1U);
+    if (output == NULL) return NULL;
+    size_t source = 0, target = 0;
+    while (source < input_length) {
+        uint32_t a = input[source++];
+        int have_b = source < input_length;
+        uint32_t b = have_b ? input[source++] : 0;
+        int have_c = source < input_length;
+        uint32_t c = have_c ? input[source++] : 0;
+        uint32_t group = (a << 16U) | (b << 8U) | c;
+        output[target++] = base64_table[(group >> 18U) & 63U];
+        output[target++] = base64_table[(group >> 12U) & 63U];
+        output[target++] = have_b ? base64_table[(group >> 6U) & 63U] : '=';
+        output[target++] = have_c ? base64_table[group & 63U] : '=';
+    }
+    output[target] = '\0';
+    return output;
+}
+
+static void execute_tool(int fd, const char *encoded) {
+    size_t command_length = 0;
+    unsigned char *command = base64_decode(encoded, &command_length);
+    if (command == NULL || command_length == 0) {
+        free(command); send_error(fd, "invalid EXEC payload"); return;
+    }
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        free(command); send_error(fd, "cannot create tool pipes"); return;
+    }
+    pid_t child = fork();
+    if (child < 0) { free(command); close(stdout_pipe[0]); close(stdout_pipe[1]); close(stderr_pipe[0]); close(stderr_pipe[1]); send_error(fd, "cannot fork tool"); return; }
+    if (child == 0) {
+        dup2(stdout_pipe[1], STDOUT_FILENO); dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[0]); close(stdout_pipe[1]); close(stderr_pipe[0]); close(stderr_pipe[1]);
+        execl("/bin/sh", "sh", "-c", (char *)command, (char *)NULL);
+        _exit(127);
+    }
+    free(command); close(stdout_pipe[1]); close(stderr_pipe[1]);
+    unsigned char stdout_data[TOOL_OUTPUT_LIMIT], stderr_data[TOOL_OUTPUT_LIMIT];
+    size_t stdout_length = 0, stderr_length = 0;
+    int output_open = 1, error_open = 1;
+    while (output_open || error_open) {
+        fd_set readable; FD_ZERO(&readable);
+        int maximum = -1;
+        if (output_open) { FD_SET(stdout_pipe[0], &readable); maximum = stdout_pipe[0]; }
+        if (error_open) { FD_SET(stderr_pipe[0], &readable); if (stderr_pipe[0] > maximum) maximum = stderr_pipe[0]; }
+        if (select(maximum + 1, &readable, NULL, NULL, NULL) < 0) { if (errno == EINTR) continue; break; }
+        int pipes[2] = {stdout_pipe[0], stderr_pipe[0]};
+        unsigned char *targets[2] = {stdout_data, stderr_data};
+        size_t *lengths[2] = {&stdout_length, &stderr_length};
+        int *opens[2] = {&output_open, &error_open};
+        for (int index = 0; index < 2; ++index) if (*opens[index] && FD_ISSET(pipes[index], &readable)) {
+            unsigned char scratch[4096]; ssize_t count = read(pipes[index], scratch, sizeof(scratch));
+            if (count <= 0) { *opens[index] = 0; close(pipes[index]); continue; }
+            size_t copy = (size_t)count; if (copy > TOOL_OUTPUT_LIMIT - *lengths[index]) copy = TOOL_OUTPUT_LIMIT - *lengths[index];
+            if (copy > 0) memcpy(targets[index] + *lengths[index], scratch, copy);
+            *lengths[index] += copy;
+        }
+    }
+    int status = 0; while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    char *stdout_b64 = base64_encode(stdout_data, stdout_length);
+    char *stderr_b64 = base64_encode(stderr_data, stderr_length);
+    if (stdout_b64 == NULL || stderr_b64 == NULL) { free(stdout_b64); free(stderr_b64); send_error(fd, "cannot encode tool output"); return; }
+    dprintf(fd, "{\"ok\":true,\"result\":{\"exit_code\":%d,\"stdout_b64\":\"%s\",\"stderr_b64\":\"%s\"}}\n", exit_code, stdout_b64, stderr_b64);
+    free(stdout_b64); free(stderr_b64);
 }
 
 static void send_state(int fd) {
@@ -153,6 +266,15 @@ static void handle_command(int fd, char *line) {
         touch_working_set();
         state.tool_count += 1;
         send_state(fd);
+        return;
+    }
+
+    if (strncmp(line, "EXEC ", 5) == 0 && line[5] != '\0') {
+        if (state.inflight_request[0]) {
+            send_error(fd, "tool executed while LLM request is in flight");
+            return;
+        }
+        execute_tool(fd, line + 5);
         return;
     }
 
