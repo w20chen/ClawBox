@@ -3,10 +3,11 @@
 ![ClawBox architecture overview](docs/images/clawbox-overview.png)
 
 ClawBox runs coding-agent tasks on one native ARM64 Kubernetes node. Each
-task is a `SandboxTask` backed by two isolated Kata/Firecracker VMs:
+task is represented by a custom Kubernetes object (named `SandboxTask` in the
+API) and backed by two isolated Kata/Firecracker virtual machines:
 
-- the Runtime VM runs OpenClaw and calls the LLM;
-- the Tool VM contains the repository and executes tools;
+- the **agent virtual machine** runs OpenClaw and calls the language model;
+- the **tool virtual machine** contains the repository and executes commands;
 - the Kubernetes controller starts, monitors, and cleans up both VMs.
 
 The supported production target is a dedicated ARM64 host such as Kunpeng.
@@ -16,18 +17,19 @@ There is no supported x86, QEMU, runc, or multi-node fallback.
 
 ![ClawBox and ClawTune relationship](docs/images/clawbox-clawtune-relationship.png)
 
-ClawBox creates and manages the isolated VMs. ClawTune runs inside the Runtime
-VM and records LLM calls, tool calls, and resource use. ClawBox stores those
+ClawBox creates and manages the isolated virtual machines. ClawTune is the
+instrumentation library inside the agent virtual machine; it records model
+calls, tool calls, and resource use. ClawBox stores those
 records and makes them available to later tasks from the same tenant and
 repository.
 
 The current flow is:
 
-1. A Runtime VM downloads the latest signed measurement data for its tenant and
-   repository.
+1. An agent virtual machine downloads the latest signed measurements for its
+   tenant and repository.
 2. ClawTune records LLM and tool activity.
-3. ClawBox forwards each tool command to the isolated Tool VM and measures its
-   CPU and memory use.
+3. ClawBox forwards each command to the isolated tool virtual machine and
+   measures its CPU and memory use.
 4. ClawBox checks that the records refer to the same tool execution, signs the
    combined result, and stores a new version.
 5. Later tasks can load that version for reporting and prediction.
@@ -37,74 +39,47 @@ tasks. Production task sizes still come from fixed profiles. The trace-replay
 experiment described later in this README is the first place where an LLM
 duration estimate controls VM memory reclamation.
 
-## Table of contents
+## Start here
 
-- [New host: one-time installation](#new-host-one-time-installation)
-- [Existing host: start and run tasks](#existing-host-start-and-run-tasks)
-- [Replay traces and reclaim idle VM memory](#replay-traces-and-reclaim-idle-vm-memory)
-- [Updating an installed host](#updating-an-installed-host)
-- [Troubleshooting](#troubleshooting)
-- [Lifecycle and development references](#lifecycle-and-development-references)
+All commands below run from the repository root on the ARM64 host. The project
+has two independent workflows:
 
-## Command map
+1. **Run real coding tasks:** Kubernetes creates two isolated virtual machines
+   per task, OpenClaw drives the task, and ClawTune records the execution.
+2. **Run the paper experiment:** previously recorded actions are executed in
+   directly managed Firecracker virtual machines. The experiment compares
+   recorded timing with a real model API, and compares keeping virtual machines
+   in memory with saving idle virtual machines to disk.
 
-| Situation | Command |
+The paper workflow is ready for experimental use. It has passed a short run on
+Kunpeng with recorded timing, a short real-API call, save/restore of both
+virtual machines, real tool execution, final-state comparison, and memory
+measurement. The optional alternative in which the agent inside the virtual
+machine initiates SSH connections has not yet passed end-to-end on Kunpeng; it
+is not needed for the main paper workflow.
+
+Use these entry points instead of assembling lower-level commands:
+
+| Goal | Command |
 | --- | --- |
-| Read-only health check | `scripts/clawbox doctor` |
-| Start/reconcile an installed host | `scripts/clawbox up` |
-| Submit one task using the installed fixed-image template | `scripts/clawbox submit ...` |
-| Run mapped SWE-ReBench tasks, including concurrent batches | `scripts/run-swe-rebench.sh ...` |
-| Install ClawBox on an already bootstrapped new host | `scripts/clawbox install ...` |
-| Run the validated direct Firecracker smoke | `bash scripts/run-direct-firecracker-smoke.sh --mode snapshot --output /path/out` |
-| Run a parameterized trace-replay experiment | `bash scripts/run-direct-firecracker-experiment.sh ...` |
-| Run the replay/API x resident/snapshot paper matrix | `python3 -m clawbox.replay.cli study /path/study.json` |
+| Check an installed host without changing it | `scripts/clawbox doctor` |
+| Start services after a reboot | `scripts/clawbox up` |
+| Submit one real task | `scripts/clawbox submit ...` |
+| Run a real task batch | `bash scripts/run-swe-rebench.sh ...` |
+| Download a task's traces and reports | `scripts/clawbox traces TASK_ID` |
+| Test one Firecracker configuration | `bash scripts/run-direct-firecracker-smoke.sh ...` |
+| Run the complete paper comparison | `python3 -m clawbox.replay.cli study STUDY.json` |
 
-All commands below run from the ClawBox checkout on the ARM64 host unless a
-section says otherwise. Platform and task images must use immutable
-`IMAGE@sha256:...` references.
+The main documentation flow is:
 
-## Replay traces and reclaim idle VM memory
+- [Install a new host](#new-host-one-time-installation)
+- [Run real tasks on an installed host](#existing-host-start-and-run-tasks)
+- [Run the paper experiment](#paper-experiment-save-idle-virtual-machines)
+- [Update an installation](#updating-an-installed-host)
+- [Troubleshoot](#troubleshooting)
 
-The paper prototype has two clearly separated states:
-
-- **Validated:** direct Runtime and Tool Firecracker VMs, Tool commands over a
-  fresh vsock connection, full snapshot/evict/restore of both VMs, and the
-  Tool-first restore order. This is the path used for the current density
-  smoke and its RSS evidence.
-- **In progress:** a guest-resident Runtime replay loop that uses the same
-  strict-host-key SSH Tool Bridge boundary as OpenClaw. Its ARM64 binaries,
-  idempotent inference protocol, rootfs injection support, isolated TAP
-  network setup, and completion-gated snapshot controller exist, but the full
-  path has not yet passed on the target host with injected guest assets.
-  Do not present it as a completed GPU-compatible result.
-
-For the shortest repeatable smoke on Kunpeng (after logging in again following
-membership in the `kvm` group):
-
-```bash
-cd ~/ClawBox
-bash scripts/run-direct-firecracker-smoke.sh \
-  --mode snapshot --output /data/clawbox-smoke-snapshot
-```
-
-Compare it with the same command using `--mode resident` and a different
-output directory. The wrapper generates a two-LLM/two-Tool trace and uses the
-Kata base image, current checkout commit, and current workspace automatically.
-Use `--sessions N` and `--memory-mib MIB` to scale it; all other replay flags
-are forwarded to the parameterized runner. Results are under `OUTPUT/results`.
-
-For the SSH guest path, build binaries and provision the per-session bridges
-explicitly, keeping the bridges alive through snapshot/restore:
-
-```bash
-bash scripts/build-direct-replay-guest-binaries.sh /data/clawbox-guest-binaries
-sudo bash scripts/direct-firecracker-network.sh up --sessions 8 --prefix 172.30
-# ... future guest-SSH controller command ...
-sudo bash scripts/direct-firecracker-network.sh down --sessions 8 --prefix 172.30
-```
-
-The network script needs interactive `sudo` on Kunpeng; it creates an isolated
-bridge and two TAP devices per session, then removes them only with `down`.
+Container images used for real tasks must be immutable references of the form
+`IMAGE@sha256:...`.
 
 ## New host: one-time installation
 
@@ -457,7 +432,7 @@ done < <(kubectl -n clawbox-benchmarks get sandboxtasks \
 Stopping the local launcher does not cancel tasks already created in the
 cluster.
 
-### 3. Submit one asynchronous Managed API task
+### 3. Submit one asynchronous task through the web API
 
 This path always uses the fixed task image stored in template
 `swe-rebench-arm64`. Use it only when that image matches the requested
@@ -497,7 +472,7 @@ submission after an uncertain client/network failure.
 
 ### 4. Retrieve task results
 
-Set `TASK_ID` to the `SandboxTask` name:
+Set `TASK_ID` to the Kubernetes task-object name:
 
 Export all archived trace files with one host command. It obtains the
 cluster credential, creates a temporary local connection, downloads and checks
@@ -509,259 +484,180 @@ scripts/clawbox traces "$TASK_ID"
 ```
 
 Files are written below `.artifacts/${TASK_ID}.traces/`. This includes JSONL,
-eBPF clause telemetry, cgroup resource records, and generated reports when the
-task uploaded them. Pass a second argument to select another output directory.
-The lower-level API sequence below is kept for diagnostics and manual result
-retrieval.
+Linux kernel event telemetry, control-group resource records, and generated
+reports when the task uploaded them. Pass a second argument to choose another
+output directory. The command creates and closes its temporary local
+connection automatically.
 
-```bash
-mkdir -p .artifacts
-TASK_ID='swe-run-id-instance-hash'
-TOKEN="$(kubectl -n clawbox-system get secret clawbox-control-plane \
-  -o jsonpath='{.data.service-token}' | base64 -d)"
+## Paper experiment: save idle virtual machines
 
-kubectl -n clawbox-system port-forward service/clawbox-ingester 8084:8084 \
-  >.artifacts/ingester-port-forward.log 2>&1 &
-PORT_FORWARD_PID=$!
+This experiment is separate from the Kubernetes task service. It reads a
+recorded sequence of model calls and tool calls, then executes the same tool
+commands in fresh virtual machines. Every session uses two virtual machines:
+one represents the coding agent and one owns the repository and executes
+commands.
 
-for _ in $(seq 1 30); do
-  curl -fsS http://127.0.0.1:8084/healthz >/dev/null && break
-  sleep 1
-done
-curl -fsS http://127.0.0.1:8084/healthz >/dev/null
+The experiment varies two independent dimensions:
 
-curl -fsS -H "Authorization: Bearer ${TOKEN}" \
-  "http://127.0.0.1:8084/v1/archive/${TASK_ID}/result" \
-  -o ".artifacts/${TASK_ID}.result.json"
-curl -fsS -H "Authorization: Bearer ${TOKEN}" \
-  "http://127.0.0.1:8084/v1/archive/${TASK_ID}/traces" \
-  -o ".artifacts/${TASK_ID}.traces.json"
+| Dimension | Baseline | Alternative |
+| --- | --- | --- |
+| Model-call timing | wait for the recorded duration | call a real OpenAI-compatible API |
+| Memory management | keep both virtual machines in memory | save idle machines to disk and restore them before the next command |
 
-# The traces endpoint above returns a manifest. Download every archived JSONL
-# file listed by that manifest, preserving its relative directory structure.
-TASK_ID="${TASK_ID}" TOKEN="${TOKEN}" .venv/bin/python - <<'PY'
-import json
-import os
-import urllib.parse
-import urllib.request
-from pathlib import Path, PurePosixPath
+The action sequence remains fixed in both model modes. A real API response
+provides real service latency and token accounting, but does not decide which
+tool command runs next. This makes the four experiment groups directly
+comparable.
 
-task_id = os.environ["TASK_ID"]
-token = os.environ["TOKEN"]
-manifest_path = Path(".artifacts") / f"{task_id}.traces.json"
-output_root = Path(".artifacts") / f"{task_id}.traces"
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-for relative, metadata in sorted(manifest["paths"].items()):
-    if not relative.endswith(".jsonl"):
-        continue
-    parts = PurePosixPath(relative).parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise ValueError(f"unsafe trace path: {relative!r}")
-    url = (
-        "http://127.0.0.1:8084/v1/archive/"
-        f"{urllib.parse.quote(task_id, safe='')}/traces/"
-        f"{urllib.parse.quote(relative, safe='/')}"
-    )
-    request = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {token}"},
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        data = response.read()
-    expected = int(metadata["bytes"])
-    if len(data) != expected:
-        raise RuntimeError(
-            f"trace size mismatch for {relative}: expected {expected}, got {len(data)}"
-        )
-    output = output_root.joinpath(*parts)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".part")
-    temporary.write_bytes(data)
-    temporary.replace(output)
-    print(output)
-PY
-
-kill "$PORT_FORWARD_PID"
-unset TOKEN
-```
-
-The manifest is saved as `.artifacts/${TASK_ID}.traces.json`. Downloaded JSONL
-files are written below `.artifacts/${TASK_ID}.traces/`; this includes nested
-paths and `tool-bridge.jsonl` when they were uploaded by the task.
-
-## Replay traces and reclaim idle VM memory
-
-This section describes a research experiment. It is separate from the normal
-Kubernetes task path above and does not change how production `SandboxTask`
-objects run.
-
-The experiment replays an existing JSONL agent trace. Recorded tool commands
-are executed again in a disposable checkout or an existing Tool Pod. An LLM
-call is not sent to a GPU; the runner waits for the recorded duration instead.
-A small model estimates the LLM duration from request size. If the estimate is
-long enough, the runner saves the Firecracker VM state and memory to disk,
-stops the Firecracker process, and releases its resident memory. It restores
-the VM before the next tool command.
-
-The runner can manage two Firecracker VMs per replay:
-
-- the first represents the agent process that waits for the LLM;
-- the optional second owns the tool workspace and executes shell commands.
-
-In a paired direct-Firecracker run, the host sends each tool command through a
-fresh vsock connection to the Tool VM's guest agent. Local, SSH, and Kubernetes
-executors are rejected for paired runs, preventing a Tool VM from serving only
-as a memory placeholder. The Tool VM restores first, passes a new vsock health
-check, and then Runtime restores.
-
-The direct Tool-vsock path was validated once on Kunpeng with a two-minute,
-two-LLM, two-real-tool smoke trace. Both snapshot cycles restored Tool first,
-then Runtime, and the Tool file written after the first restore was verified
-after the second with no exit mismatches. The compact result is
-`docs/results/direct-tool-vsock-kunpeng-2026-08-29.json`; it is a functional
-single-session validation, not a repeated throughput benchmark.
-
-Each VM contains a small state-checking program. Before saving a VM, the runner
-records the current LLM request. After restoring it, the runner verifies that
-the VM was restored rather than rebooted and that the same request is still in
-progress. A tool command runs only after all VMs selected for that LLM call
-have passed this check.
-
-The decision rule is intentionally small:
-
-```text
-save the VM when:
-estimated LLM wait >= configured threshold
-and
-estimated LLM wait >= save time + restore time + expected page-loading time + margin
-```
-
-The default threshold is 20 seconds for the agent VM and 30 seconds for the
-tool VM. The tool threshold is higher because tool environments are commonly
-larger and cost more to load after restoration.
+During a long model call, the controller may save a virtual machine when the
+estimated wait exceeds both a configured threshold and the expected
+save/restore overhead. Before each save it records the in-progress request.
+After restore it verifies the same request and the same virtual-machine boot
+state before allowing another command. The repository-holding machine is
+restored and checked first.
 
 ### What this experiment does not do
 
-- It does not transparently suspend a Kubernetes Pod managed by containerd.
-- The optional Tool VM is managed directly through the Firecracker API; it is
-  not a transparent Kubernetes Pod suspend/resume implementation.
-- GPU inference and GPU KV-cache placement are simulated metadata. A real GPU
-  client can replace the simulator later without changing VM handling.
-- Saved VM memory briefly increases host memory use while it is being written.
-  Limit concurrent saves and report peak memory as well as average memory.
+- It does not suspend a Kubernetes Pod. The experimental virtual machines are
+  managed directly through the Firecracker API.
+- Recorded mode does not run a model. API mode calls a real model service, but
+  GPU placement and model-side cache management remain outside this project.
+- Saving memory can briefly increase peak host memory while files are written.
+  Paper results must report peak as well as average memory.
+- The alternative guest-initiated SSH execution path is still experimental.
+  Use the default host-controlled path for paper results.
 
-### Prepare a root filesystem
+### 1. Verify the host and run a short smoke test
 
-Run this on the ARM64 experiment host. It requires `gcc`, `debugfs`, the Kata
-kernel and disk image, Firecracker, and `/dev/kvm`:
+The smoke command builds a disposable disk image, generates a four-action test
+trace, starts both virtual machines, and writes `summary.json` under the output
+directory. Output directories must not already exist.
 
 ```bash
-export REPLAY_ROOT="$PWD/.artifacts/replay"
-mkdir -p "$REPLAY_ROOT"
+scripts/clawbox doctor
 
+bash scripts/run-direct-firecracker-smoke.sh \
+  --mode resident --output /data/replay-smoke-resident
+
+bash scripts/run-direct-firecracker-smoke.sh \
+  --mode snapshot --output /data/replay-smoke-snapshot \
+  --snapshot-threshold-s 1 --tool-snapshot-threshold-s 1
+```
+
+Both commands should complete one session without failures. The snapshot run
+should report non-zero save counts for both virtual machines. These are
+functional checks, not publishable measurements.
+
+### 2. Inspect the recorded workload
+
+Use one trace for the experiment and an older, separate trace to fit the model-
+call duration estimator. Inspection parses the records and reports how many
+model and tool actions can be replayed; it does not start a virtual machine.
+
+```bash
+python3 -m clawbox.replay.cli inspect /data/traces/task.jsonl \
+  --calibration /data/traces/older-task.jsonl
+```
+
+Stop here if inspection reports an incomplete model call or a tool action that
+cannot be translated into a shell command.
+
+### 3. Build the reusable virtual-machine disk
+
+Run this once on the ARM64 experiment host. It requires the installed Kata
+disk image, Kata kernel, Firecracker, `gcc`, `debugfs`, and `/dev/kvm`.
+
+```bash
+mkdir -p /data/replay-inputs
 python3 scripts/build-runtime-agent-rootfs.py \
   --base-image /opt/kata/share/kata-containers/kata-containers.img \
   --agent-source clawbox/replay/guest_agent.c \
-  --output-rootfs "$REPLAY_ROOT/agent-rootfs.ext4"
+  --output-rootfs /data/replay-inputs/agent.ext4
 ```
 
-First verify one save-and-restore cycle with
-`scripts/firecracker-runtime-continuity-smoke.py`. Its JSON configuration must
-contain the Firecracker binary, kernel, root filesystem, API socket, snapshot
-paths, vsock path, CPU set, and NUMA node. A complete configuration example is
-in [the experiment guide](docs/high-density-replay.md).
+The study runner copies this disk for every experiment group and repetition;
+it never intentionally reuses a disk that has already executed a task.
+
+### 4. Configure and run the comparison
+
+Copy the example, then edit its paths, source commit, session count, repetition
+count, and model-service settings. The output path must not already exist.
 
 ```bash
-python3 scripts/firecracker-runtime-continuity-smoke.py \
-  --config /path/to/firecracker.json --cycles 2 \
-  --expected-resident-mib 128 \
-  --output "$REPLAY_ROOT/continuity-result.json"
+cp deploy/study.example.json /data/study.json
+${EDITOR:-vi} /data/study.json
 ```
 
-### Inspect and replay a trace
+The configuration names correspond to these general experiment concepts:
 
-For a paper study, copy `deploy/study.example.json`, pin its inputs, and run:
+| Configuration field | Meaning |
+| --- | --- |
+| `source` | repository, pinned revision, disk image, workload trace, and older calibration trace |
+| `sessions`, `repetitions`, `seed` | concurrent workload size, repeat count, and randomized group order |
+| `inference_backends` | recorded timing, real model API, or both |
+| `memory_policies` | keep virtual machines in memory, save idle machines, or both |
+| `resident_slots`, `tool_resident_slots` | maximum simultaneously memory-resident agent and tool virtual machines |
+| `resources`, `policy` | virtual-machine size, CPU/NUMA placement, and save/restore decision thresholds |
+| `validation_command` | command whose output represents the final task state |
+| `api` | OpenAI-compatible endpoint, model, credential variable, and timeout |
+
+For a recorded-only trial, set `inference_backends` to `["replay"]` and no API
+key is needed. For a real-API comparison, retain both values and export the key
+named by `api.key_env`. Choose exactly one of the following runs.
+
+Recorded timing only:
 
 ```bash
-export OPENAI_API_KEY='...'  # required only when the matrix includes `api`
-python3 -m clawbox.replay.cli study /path/to/study.json
+python3 -m clawbox.replay.cli study /data/study.json
 ```
 
-The study command creates fresh disks for every repetition, randomizes arm
-order from the configured seed, and runs the cross-product of recorded or real
-OpenAI-compatible inference with resident or snapshot memory policy. Results
-and provenance are written under the configured output directory. The workload
-remains a deterministic recorded action sequence in both inference modes; real
-responses supply actual service latency and usage but do not choose later tool
-actions. Set `validation_command` to hash a task-relevant final artifact; the
-study then requires one identical hash across all successful arms. Reports also
-include the exact source-tree hash, cgroup memory above the pre-run baseline,
-per-arm confidence intervals, and resident-versus-snapshot percentage changes.
-
-Use an older, separate trace for fitting the duration model:
+Recorded timing plus the real API:
 
 ```bash
-python3 -m clawbox.replay.cli inspect trace.jsonl \
-  --calibration calibration.jsonl
+read -rsp 'Model API key: ' OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+python3 -m clawbox.replay.cli study /data/study.json
+unset OPENAI_API_KEY
 ```
 
-For a local parser and tool-execution check that does not start Firecracker:
+The runner randomizes group order using the configured seed, creates fresh
+disks, and writes intermediate results after each group. The final
+`study-summary.json` contains:
+
+- completed sessions and failures;
+- wall time and completed sessions per hour;
+- average, 95th percentile, and peak Firecracker process memory;
+- memory used above the experiment process's cgroup baseline;
+- save/restore counts and time;
+- means, standard deviations, and 95% confidence intervals across repetitions;
+- percentage changes between resident and saved-memory modes;
+- commit, source-tree hash, input hashes, host identity, and full configuration;
+- hashes produced by `validation_command` for cross-group final-state checks.
+
+The example validation command hashes the tracked repository changes. Replace
+it with a command that prints the scientifically relevant final artifact for
+your workload. Identical stdout produces an identical recorded hash; a
+non-zero exit code or different hashes make the study fail.
+
+### 5. Read the result
+
+```bash
+python3 -m json.tool /experiment/results/paper-study-001/study-summary.json | less
+```
+
+Do not draw conclusions from the smoke test or from a single repetition. Use
+the same session count and resident-memory limit for every group, retain the
+generated manifest, and report both peak and average memory. If you need the
+individual preparation and execution commands, network topology, or event
+schema, see [the detailed experiment guide](docs/high-density-replay.md).
+
+For a quick local trace/tool check that does not start Firecracker:
 
 ```bash
 python3 -m clawbox.replay.cli run trace.jsonl \
   --backend local --mode resident --sleep-scale 0 \
   --cwd /tmp/disposable-checkout
 ```
-
-For the Firecracker experiment, create independent input directories for the
-resident baseline and the save/restore run. Never reuse a root filesystem that
-has already executed a replay.
-
-```bash
-for run_mode in resident snapshot; do
-  python3 scripts/prepare-high-density-experiment.py \
-    --output "$REPLAY_ROOT/${run_mode}-input" \
-    --sessions 8 \
-    --workspace-source /path/to/disposable/source-repository \
-    --base-commit COMMIT_SHA \
-    --rootfs-source "$REPLAY_ROOT/agent-rootfs.ext4" \
-    --tool-rootfs-source "$REPLAY_ROOT/agent-rootfs.ext4" \
-    --trace /path/to/trace.jsonl \
-    --calibration /path/to/calibration.jsonl \
-    --memory-mib 512 --guest-agent \
-    --guest-touch-mib 128 --tool-guest-touch-mib 256
-done
-```
-
-The generated manifest assigns separate root filesystems, sockets, snapshot
-files, vsock addresses, and CPUs to every VM. Run both modes with the same
-number of sessions and the same limits:
-
-```bash
-python3 -m clawbox.replay.cli experiment \
-  "$REPLAY_ROOT/resident-input/manifest.json" \
-  --mode resident --resident-slots 4 --tool-resident-slots 4 \
-  --numa-node 0 --output-dir "$REPLAY_ROOT/resident-results"
-
-python3 -m clawbox.replay.cli experiment \
-  "$REPLAY_ROOT/snapshot-input/manifest.json" \
-  --mode snapshot --resident-slots 4 --tool-resident-slots 4 \
-  --snapshot-threshold-s 20 --tool-snapshot-threshold-s 30 \
-  --estimated-snapshot-s 0.3 --estimated-restore-s 0.1 \
-  --estimated-refault-s 0.5 --safety-margin-s 2 \
-  --numa-node 0 --output-dir "$REPLAY_ROOT/snapshot-results"
-```
-
-`--resident-slots` and `--tool-resident-slots` limit how many agent and tool
-VMs may occupy memory at once. They must be identical in both modes. Bind the
-runner and all VM processes to CPUs and memory from one NUMA node; the guide
-shows the wrapper used on Kunpeng.
-
-Compare `summary.json` and `rss.json` from both output directories. Report at
-least completed sessions, failures, tool exit-code mismatches, wall time,
-sessions per hour, average and peak Firecracker RSS, save/restore time, and the
-number of times each VM was saved. Run several repetitions before using the
-numbers in a paper.
 
 ### What has been verified
 

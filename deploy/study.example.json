@@ -11,7 +11,7 @@
   "sessions": 8,
   "repetitions": 3,
   "seed": 7,
-  "validation_command": "test -f /workspace/result.txt && sha256sum /workspace/result.txt",
+  "validation_command": "cd /workspace && git diff --binary --no-ext-diff HEAD",
   "inference_backends": ["replay", "api"],
   "memory_policies": ["resident", "snapshot"],
   "resident_slots": 4,
