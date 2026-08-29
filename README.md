@@ -55,11 +55,54 @@ duration estimate controls VM memory reclamation.
 | Submit one task using the installed fixed-image template | `scripts/clawbox submit ...` |
 | Run mapped SWE-ReBench tasks, including concurrent batches | `scripts/run-swe-rebench.sh ...` |
 | Install ClawBox on an already bootstrapped new host | `scripts/clawbox install ...` |
-| Run the trace-replay memory experiment | `python -m clawbox.replay.cli experiment ...` |
+| Run the validated direct Firecracker smoke | `bash scripts/run-direct-firecracker-smoke.sh --mode snapshot --output /path/out` |
+| Run a parameterized trace-replay experiment | `bash scripts/run-direct-firecracker-experiment.sh ...` |
 
 All commands below run from the ClawBox checkout on the ARM64 host unless a
 section says otherwise. Platform and task images must use immutable
 `IMAGE@sha256:...` references.
+
+## Replay traces and reclaim idle VM memory
+
+The paper prototype has two clearly separated states:
+
+- **Validated:** direct Runtime and Tool Firecracker VMs, Tool commands over a
+  fresh vsock connection, full snapshot/evict/restore of both VMs, and the
+  Tool-first restore order. This is the path used for the current density
+  smoke and its RSS evidence.
+- **In progress:** a guest-resident Runtime replay loop that uses the same
+  strict-host-key SSH Tool Bridge boundary as OpenClaw. Its ARM64 binaries,
+  idempotent inference protocol, rootfs injection support, and isolated TAP
+  network setup exist, but the end-to-end snapshot controller is not yet wired.
+  Do not present it as a completed GPU-compatible result.
+
+For the shortest repeatable smoke on Kunpeng (after logging in again following
+membership in the `kvm` group):
+
+```bash
+cd ~/ClawBox
+bash scripts/run-direct-firecracker-smoke.sh \
+  --mode snapshot --output /data/clawbox-smoke-snapshot
+```
+
+Compare it with the same command using `--mode resident` and a different
+output directory. The wrapper generates a two-LLM/two-Tool trace and uses the
+Kata base image, current checkout commit, and current workspace automatically.
+Use `--sessions N` and `--memory-mib MIB` to scale it; all other replay flags
+are forwarded to the parameterized runner. Results are under `OUTPUT/results`.
+
+For the SSH guest path, build binaries and provision the per-session bridges
+explicitly, keeping the bridges alive through snapshot/restore:
+
+```bash
+bash scripts/build-direct-replay-guest-binaries.sh /data/clawbox-guest-binaries
+sudo bash scripts/direct-firecracker-network.sh up --sessions 8 --prefix 172.30
+# ... future guest-SSH controller command ...
+sudo bash scripts/direct-firecracker-network.sh down --sessions 8 --prefix 172.30
+```
+
+The network script needs interactive `sudo` on Kunpeng; it creates an isolated
+bridge and two TAP devices per session, then removes them only with `down`.
 
 ## New host: one-time installation
 
