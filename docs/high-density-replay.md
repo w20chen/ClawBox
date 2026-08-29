@@ -109,6 +109,8 @@ entry point. It refuses an existing output directory, builds a fresh agent
 rootfs with a copy of the specified disposable workspace at `/workspace`,
 creates independent Runtime and Tool rootfs copies, and runs one arm. Invoke it
 once per arm with identical inputs; do not reuse either output directory.
+Keep `--output` outside `--workspace`; the runner rejects nested paths to avoid
+copying generated rootfs files back into the guest workspace.
 
 ```bash
 BASE_COMMIT="$(git -C /experiment/workspace-base rev-parse HEAD)"

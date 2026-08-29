@@ -29,6 +29,14 @@ done
 [[ $mode == resident || $mode == snapshot ]] || usage
 [[ -n $output && -n $base_image && -n $workspace && -n $base_commit && -n $trace && -n $calibration ]] || usage
 [[ ! -e $output ]] || { echo "refusing to reuse existing output: $output" >&2; exit 2; }
+workspace_abs=$(realpath "$workspace")
+output_abs=$(realpath -m "$output")
+case "$output_abs/" in
+  "$workspace_abs/"*)
+    echo "output must not be inside workspace; rootfs injection would recurse" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$output"
 rootfs="$output/tool-runtime.ext4"
