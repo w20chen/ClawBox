@@ -73,8 +73,9 @@ The paper prototype has two clearly separated states:
   smoke and its RSS evidence.
 - **In progress:** a guest-resident Runtime replay loop that uses the same
   strict-host-key SSH Tool Bridge boundary as OpenClaw. Its ARM64 binaries,
-  idempotent inference protocol, rootfs injection support, and isolated TAP
-  network setup exist, but the end-to-end snapshot controller is not yet wired.
+  idempotent inference protocol, rootfs injection support, isolated TAP
+  network setup, and completion-gated snapshot controller exist, but the full
+  path has not yet passed on the target host with injected guest assets.
   Do not present it as a completed GPU-compatible result.
 
 For the shortest repeatable smoke on Kunpeng (after logging in again following

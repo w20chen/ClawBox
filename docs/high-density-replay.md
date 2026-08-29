@@ -61,10 +61,12 @@ sudo bash scripts/direct-firecracker-network.sh down --sessions 8 --prefix 172.3
 `172.30.(N+1).1`. Each session has its own bridge, so a Runtime cannot reach a
 different session's Tool. The rootfs builder accepts repeatable
 `--inject-file SOURCE:DESTINATION` arguments for the statically built driver,
-Tool Bridge, guest config, and per-trial SSH material. This plumbing is
-presently a foundation; the existing paired benchmark remains the separately
-validated direct Tool-vsock mode until the guest SSH controller's end-to-end
-snapshot gate is landed.
+Tool Bridge, guest config, and per-trial SSH material.
+`run-guest-ssh-smoke.py` gates success on the persisted inference-request count
+and the Runtime guest's completion marker after restore, and emits a
+machine-readable timing report. The existing paired benchmark remains the
+separately validated direct Tool-vsock mode until this SSH path has passed on
+the target host with injected guest assets.
 
 ## Trace validation
 
