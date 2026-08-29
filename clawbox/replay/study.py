@@ -5,6 +5,8 @@ import json
 import os
 import platform
 import random
+import math
+import statistics
 import subprocess
 import sys
 import time
@@ -28,6 +30,38 @@ def _sha256(path: Path) -> str:
 def _add(options: list[str], name: str, value: object | None) -> None:
     if value is not None:
         options.extend([name, str(value)])
+
+
+_SOURCE_PATHS = ("README.md", "pyproject.toml", "clawbox", "scripts", "deploy", "docker", "toolbridge")
+
+
+def _source_tree_hash(root: Path) -> tuple[str, list[str]]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--cached", "--others",
+         "--exclude-standard", "--", *_SOURCE_PATHS],
+        check=True, capture_output=True, text=True,
+    )
+    files = sorted(line for line in result.stdout.splitlines() if line)
+    digest = hashlib.sha256()
+    for relative in files:
+        path = root / relative
+        if path.is_file():
+            digest.update(relative.replace("\\", "/").encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest(), files
+
+
+def _stats(rows: list[dict[str, Any]], field: str) -> dict[str, float | int | None]:
+    values = [float(row[field]) for row in rows if row.get(field) is not None]
+    if not values:
+        return {"n": 0, "mean": None, "stdev": None, "ci95_half_width": None}
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    return {
+        "n": len(values), "mean": statistics.fmean(values), "stdev": stdev,
+        "ci95_half_width": 1.96 * stdev / math.sqrt(len(values)),
+    }
 
 
 def run_study(config_path: Path) -> int:
@@ -68,10 +102,13 @@ def run_study(config_path: Path) -> int:
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
+    source_tree_sha256, source_files = _source_tree_hash(root)
     metadata = {
         "schema_version": 1,
         "started_unix_s": time.time(),
         "commit": commit,
+        "source_tree_sha256": source_tree_sha256,
+        "source_file_count": len(source_files),
         "host": platform.node(),
         "machine": platform.machine(),
         "trace_sha256": _sha256(trace),
@@ -118,6 +155,7 @@ def run_study(config_path: Path) -> int:
                 "--tool-resident-slots", str(tool_resident_slots),
                 "--numa-node", str(resources.get("numa_node", 0)),
             ]
+            _add(command, "--validation-command", raw.get("validation_command"))
             for flag, key, default in (
                 ("--sleep-scale", "sleep_scale", 1.0),
                 ("--tool-time-scale", "tool_time_scale", 1.0),
@@ -146,7 +184,7 @@ def run_study(config_path: Path) -> int:
                 **summary,
             })
 
-    grouped: dict[str, dict[str, float | int]] = {}
+    grouped: dict[str, dict[str, Any]] = {}
     for backend, memory in arms:
         rows = [row for row in summaries if row["inference_backend"] == backend
                 and row["memory_policy"] == memory]
@@ -170,10 +208,52 @@ def run_study(config_path: Path) -> int:
                  for row in rows if row["peak_numa_memory_used_bytes"] is not None),
                 default=None,
             ),
+            "max_peak_cgroup_memory_delta_bytes": max(
+                (int(row["peak_cgroup_memory_delta_bytes"])
+                 for row in rows if row.get("peak_cgroup_memory_delta_bytes") is not None),
+                default=None,
+            ),
+            "validation_hashes": sorted({
+                str(item["validation_sha256"])
+                for row in rows for item in row.get("sessions", [])
+                if item.get("validation_sha256") is not None
+            }),
+            "statistics": {
+                field: _stats(rows, field) for field in (
+                    "wall_s", "throughput_sessions_per_hour",
+                    "mean_firecracker_rss_bytes", "peak_cgroup_memory_delta_bytes",
+                )
+            },
         }
-    report = {"metadata": metadata, "groups": grouped, "runs": summaries}
+    comparisons: dict[str, dict[str, float | None]] = {}
+    for backend in inference_backends:
+        resident = grouped.get(f"{backend}-resident")
+        snapshot = grouped.get(f"{backend}-snapshot")
+        if resident is None or snapshot is None:
+            continue
+        def change(field: str) -> float | None:
+            baseline = resident.get(field)
+            value = snapshot.get(field)
+            return None if baseline in (None, 0) or value is None else (value / baseline - 1) * 100
+        comparisons[backend] = {
+            "snapshot_wall_time_change_percent": change("mean_wall_s"),
+            "snapshot_throughput_change_percent": change("mean_throughput_sessions_per_hour"),
+            "snapshot_mean_rss_change_percent": change("mean_firecracker_rss_bytes"),
+            "snapshot_peak_cgroup_memory_change_percent": change(
+                "max_peak_cgroup_memory_delta_bytes"
+            ),
+        }
+    all_validation_hashes = sorted({
+        value for group in grouped.values() for value in group["validation_hashes"]
+    })
+    correctness_equal = not raw.get("validation_command") or len(all_validation_hashes) == 1
+    report = {
+        "metadata": metadata, "groups": grouped, "comparisons": comparisons,
+        "correctness": {"equal": correctness_equal, "validation_hashes": all_validation_hashes},
+        "runs": summaries,
+    }
     (output / "study-summary.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8",
     )
     print(json.dumps(grouped, indent=2, sort_keys=True))
-    return 0
+    return 0 if correctness_equal else 1

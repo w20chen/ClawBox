@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -48,6 +49,7 @@ class ReplaySummary:
     tool_wait_s: float
     wall_s: float
     exit_mismatches: int
+    validation_sha256: str | None
 
 
 class ReplayEngine:
@@ -62,6 +64,7 @@ class ReplayEngine:
                  tool_policy: SnapshotPolicy | None = None,
                  command_timeout_s: float = 300.0,
                  strict_exit_codes: bool = True,
+                 validation_command: str | None = None,
                  event_sink: Callable[[dict[str, Any]], None] | None = None) -> None:
         if mode not in {"resident", "snapshot"}:
             raise ValueError("mode must be resident or snapshot")
@@ -87,6 +90,7 @@ class ReplayEngine:
             raise ValueError("tool_runtime_agent requires tool_lifecycle")
         self.command_timeout_s = command_timeout_s
         self.strict_exit_codes = strict_exit_codes
+        self.validation_command = validation_command
         self.event_sink = event_sink or (lambda event: None)
 
     def run(self, actions: Iterable[ReplayAction]) -> ReplaySummary:
@@ -95,6 +99,7 @@ class ReplayEngine:
         snapshot_s = restore_s = tool_snapshot_s = tool_restore_s = 0.0
         tool_s = tool_wait_s = slept_llm_s = inference_s = 0.0
         snapshots = tool_snapshots = exit_mismatches = 0
+        validation_sha256 = None
         try:
             self.event_sink({"event": "sandbox_start", "elapsed_s": self.lifecycle.start()})
             self._wait_runtime_ready("runtime_agent_ready")
@@ -243,6 +248,24 @@ class ReplayEngine:
                     tool_wait_s += wait_s
                 else:
                     raise ValueError(f"unsupported replay action kind {action.kind!r}")
+            if self.validation_command is not None:
+                if not self.lifecycle.resident or (
+                    self.tool_lifecycle is not None and not self.tool_lifecycle.resident
+                ):
+                    raise RuntimeError("sandbox is not resident before final-state validation")
+                result = self.executor.execute(
+                    self.validation_command, self.command_timeout_s,
+                )
+                if result.exit_code != 0:
+                    raise RuntimeError(
+                        f"final-state validation failed with exit code {result.exit_code}: "
+                        f"{result.stderr.strip()}"
+                    )
+                validation_sha256 = hashlib.sha256(result.stdout.encode()).hexdigest()
+                self.event_sink({
+                    "event": "validation_end", "elapsed_s": result.duration_s,
+                    "stdout_sha256": validation_sha256,
+                })
         finally:
             try:
                 if self.tool_lifecycle is not None:
@@ -272,6 +295,7 @@ class ReplayEngine:
             tool_wait_s=tool_wait_s,
             wall_s=time.monotonic() - started,
             exit_mismatches=exit_mismatches,
+            validation_sha256=validation_sha256,
         )
         self.event_sink({"event": "summary", **asdict(summary)})
         return summary

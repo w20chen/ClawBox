@@ -357,7 +357,7 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
 
     def fake_run(argv, **_kwargs):
         if argv[0] == "git":
-            return SimpleNamespace(stdout="commit-id\n")
+            return SimpleNamespace(stdout="commit-id\n" if "rev-parse" in argv else "")
         if "prepare-high-density-experiment.py" in str(argv[1]):
             output = Path(argv[argv.index("--output") + 1])
             output.mkdir(parents=True)
@@ -371,6 +371,8 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
                 "peak_firecracker_rss_bytes": 100,
                 "mean_firecracker_rss_bytes": 80,
                 "peak_numa_memory_used_bytes": 1000,
+                "peak_cgroup_memory_delta_bytes": 500,
+                "sessions": [{"validation_sha256": None}],
             }), encoding="utf-8")
         return SimpleNamespace(stdout="")
 
@@ -379,6 +381,22 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
     summary = json.loads((tmp_path / "out" / "study-summary.json").read_text())
     assert set(summary["groups"]) == {"replay-resident", "replay-snapshot"}
     assert summary["groups"]["replay-snapshot"]["sessions_completed"] == 2
+    assert "replay" in summary["comparisons"]
+
+
+def test_engine_hashes_final_state_validation() -> None:
+    class Executor:
+        def execute(self, command: str, timeout_s: float):
+            assert command == "check-state"
+            return SimpleNamespace(exit_code=0, stdout="stable", stderr="", duration_s=0.1)
+
+    summary = ReplayEngine(
+        lifecycle=SimulatedLifecycle(), executor=Executor(),
+        predictor=LinearLatencyPredictor.from_actions([]),
+        policy=SnapshotPolicy(), mode="resident", sleep_scale=0,
+        validation_command="check-state",
+    ).run([])
+    assert summary.validation_sha256 == __import__("hashlib").sha256(b"stable").hexdigest()
 
 
 def test_engine_detects_replay_divergence() -> None:

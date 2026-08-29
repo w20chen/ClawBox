@@ -692,7 +692,10 @@ OpenAI-compatible inference with resident or snapshot memory policy. Results
 and provenance are written under the configured output directory. The workload
 remains a deterministic recorded action sequence in both inference modes; real
 responses supply actual service latency and usage but do not choose later tool
-actions.
+actions. Set `validation_command` to hash a task-relevant final artifact; the
+study then requires one identical hash across all successful arms. Reports also
+include the exact source-tree hash, cgroup memory above the pre-run baseline,
+per-arm confidence intervals, and resident-versus-snapshot percentage changes.
 
 Use an older, separate trace for fitting the duration model:
 

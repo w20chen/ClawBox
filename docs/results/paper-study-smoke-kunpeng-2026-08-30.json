@@ -51,5 +51,15 @@
     "runtime_snapshots": 1,
     "tool_snapshots": 1,
     "tool_exit_mismatches": 0
+  },
+  "measurement_validation_snapshot": {
+    "backend": "recorded inference",
+    "completed": 1,
+    "failures": 0,
+    "wall_seconds": 3.6374467849964276,
+    "runtime_snapshots": 2,
+    "tool_snapshots": 2,
+    "peak_cgroup_memory_delta_bytes": 1564844032,
+    "final_state_sha256": "0c3b85f45ddc939aafc8baddd5436e0c38aad15c82ad517eca5e526a5d602545"
   }
 }

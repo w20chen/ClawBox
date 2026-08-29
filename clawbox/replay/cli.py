@@ -185,6 +185,7 @@ def run_replay(args: argparse.Namespace) -> int:
             tool_policy=_tool_policy(args),
             command_timeout_s=args.command_timeout_s,
             strict_exit_codes=not args.allow_exit_mismatch,
+            validation_command=args.validation_command,
             event_sink=writer,
         )
         summary = engine.run(actions)
@@ -208,18 +209,27 @@ def run_experiment(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     stop_sample = threading.Event()
     rss_samples: list[dict[str, Any]] = []
+    cgroup_baseline = _cgroup_memory_used_bytes()
 
     def sample_rss() -> None:
-        while not stop_sample.wait(0.1):
+        while True:
             with lifecycle_lock:
                 rss = sum(item.rss_bytes() for item in lifecycles)
                 resident = sum(item.resident for item in lifecycles)
+            cgroup_memory = _cgroup_memory_used_bytes()
             rss_samples.append({
                 "elapsed_s": time.monotonic() - wall_start,
                 "rss_bytes": rss,
                 "resident_vms": resident,
                 "numa_memory_used_bytes": _numa_memory_used_bytes(args.numa_node),
+                "cgroup_memory_used_bytes": cgroup_memory,
+                "cgroup_memory_delta_bytes": (
+                    None if cgroup_memory is None or cgroup_baseline is None
+                    else max(0, cgroup_memory - cgroup_baseline)
+                ),
             })
+            if stop_sample.wait(0.1):
+                return
 
     def run_one(index: int, spec: dict[str, Any]) -> dict[str, Any]:
         trace = Path(spec["trace"])
@@ -283,6 +293,9 @@ def run_experiment(args: argparse.Namespace) -> int:
                 tool_policy=_tool_policy(args),
                 command_timeout_s=args.command_timeout_s,
                 strict_exit_codes=not args.allow_exit_mismatch,
+                validation_command=spec.get(
+                    "validation_command", args.validation_command,
+                ),
                 event_sink=writer,
             ).run(load_trace(trace))
             return asdict(summary)
@@ -310,6 +323,8 @@ def run_experiment(args: argparse.Namespace) -> int:
     firecracker_rss = [int(sample["rss_bytes"]) for sample in rss_samples]
     numa_used = [int(sample["numa_memory_used_bytes"]) for sample in rss_samples
                  if sample["numa_memory_used_bytes"] is not None]
+    cgroup_delta = [int(sample["cgroup_memory_delta_bytes"]) for sample in rss_samples
+                    if sample["cgroup_memory_delta_bytes"] is not None]
     rss_time = sum(
         firecracker_rss[index] * max(
             0.0, float(rss_samples[index]["elapsed_s"])
@@ -336,6 +351,11 @@ def run_experiment(args: argparse.Namespace) -> int:
             (sample["numa_memory_used_bytes"] for sample in rss_samples
              if sample["numa_memory_used_bytes"] is not None), default=None,
         ),
+        "cgroup_memory_baseline_bytes": cgroup_baseline,
+        "mean_cgroup_memory_delta_bytes": (
+            statistics.fmean(cgroup_delta) if cgroup_delta else None
+        ),
+        "peak_cgroup_memory_delta_bytes": max(cgroup_delta, default=None),
         "peak_resident_vms": max((sample["resident_vms"] for sample in rss_samples), default=0),
         "mean_session_wall_s": statistics.fmean(item["wall_s"] for item in results) if results else None,
         "total_snapshots": sum(item["snapshots"] for item in results),
@@ -367,6 +387,21 @@ def _numa_memory_used_bytes(node: int | None) -> int | None:
     return None
 
 
+def _cgroup_memory_used_bytes() -> int | None:
+    try:
+        relative = None
+        for line in Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines():
+            fields = line.split(":", 2)
+            if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
+                relative = fields[2].lstrip("/")
+                break
+        if relative is None:
+            return None
+        return int((Path("/sys/fs/cgroup") / relative / "memory.current").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def _percentile(values: list[int], fraction: float) -> float:
     if not values:
         return 0.0
@@ -396,6 +431,7 @@ def _common_replay_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--estimated-refault-s", type=float, default=0.0)
     parser.add_argument("--safety-margin-s", type=float, default=2.0)
     parser.add_argument("--command-timeout-s", type=float, default=300.0)
+    parser.add_argument("--validation-command")
     parser.add_argument("--allow-exit-mismatch", action="store_true")
 
 
