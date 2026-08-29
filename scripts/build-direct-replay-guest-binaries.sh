@@ -16,11 +16,11 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -e HOME=/tmp -e GOCACHE=/tmp/go-build -e GOMODCACHE=/tmp/go-mod \
   -e "GOPROXY=${GOPROXY:-https://goproxy.cn,direct}" \
   -e "GOSUMDB=${GOSUMDB:-sum.golang.google.cn}" \
-  -v "${ROOT}:/src" -w /src golang:1.25-bookworm \
+  -v "${ROOT}:/src:ro" -v "${OUTPUT}:/out" -w /src golang:1.25-bookworm \
   sh -ec '
     export CGO_ENABLED=0 GOOS=linux GOARCH=arm64
-    (cd clawbox/replay/guest_runtime && go build -trimpath -ldflags="-s -w" -o "'"${OUTPUT}"'/clawbox-replay-runtime" .)
-    (cd toolbridge && go build -trimpath -ldflags="-s -w" -o "'"${OUTPUT}"'/tool-bridge" .)
+    (cd clawbox/replay/guest_runtime && go build -trimpath -ldflags="-s -w" -o /out/clawbox-replay-runtime .)
+    (cd toolbridge && go build -trimpath -ldflags="-s -w" -o /out/tool-bridge .)
   '
 chmod 0755 "${OUTPUT}/clawbox-replay-runtime" "${OUTPUT}/tool-bridge"
 printf 'guest runtime: %s\ntool bridge: %s\n' \
