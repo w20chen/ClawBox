@@ -296,3 +296,17 @@ mean combined-RSS reduction is retained in
 historical state-continuity observation, not as validation of the current
 end-to-end Tool execution path. Re-run the paired resident/snapshot protocol
 above on Kunpeng before citing two-VM command-continuity performance results.
+
+### Direct Tool-vsock smoke (2026-08-29)
+
+The current path was run once on Kunpeng using two independent 512 MiB VM image
+pairs, a fresh Tool `/workspace`, and two 60-second simulated LLM waits. Both
+resident and snapshot arms completed two real Tool commands with zero exit
+mismatches. Snapshot mode made two Runtime and two Tool checkpoints; each Tool
+restore and new vsock health check completed before Runtime restoration and the
+next command. Resident wall time was 120.709 s; snapshot wall time was 122.692
+s. Mean summed Firecracker RSS was 475.8 MiB resident and 7.8 MiB snapshot,
+while snapshot writing raised peak RSS to 775.6 MiB. See
+`docs/results/direct-tool-vsock-kunpeng-2026-08-29.json` for raw aggregates.
+This is a functional single-session result; repeat it at realistic concurrency
+before drawing throughput conclusions.

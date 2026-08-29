@@ -569,10 +569,12 @@ executors are rejected for paired runs, preventing a Tool VM from serving only
 as a memory placeholder. The Tool VM restores first, passes a new vsock health
 check, and then Runtime restores.
 
-The current Tool-vsock implementation has local unit coverage but has not yet
-been run on Kunpeng from this checkout. The checked-in paired Kunpeng result is
-therefore historical state-continuity evidence from the former host-side Tool
-transport, not a benchmark result for the direct Tool-vsock path.
+The direct Tool-vsock path was validated once on Kunpeng with a two-minute,
+two-LLM, two-real-tool smoke trace. Both snapshot cycles restored Tool first,
+then Runtime, and the Tool file written after the first restore was verified
+after the second with no exit mismatches. The compact result is
+`docs/results/direct-tool-vsock-kunpeng-2026-08-29.json`; it is a functional
+single-session validation, not a repeated throughput benchmark.
 
 Each VM contains a small state-checking program. Before saving a VM, the runner
 records the current LLM request. After restoring it, the runner verifies that
