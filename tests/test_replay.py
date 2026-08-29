@@ -14,6 +14,7 @@ from clawbox.replay.engine import ReplayEngine, SnapshotPolicy
 from clawbox.replay.guest import RuntimeAgentState, VsockCommandExecutor, VsockRuntimeAgentClient
 from clawbox.replay.inference import OpenAIInferenceProvider, TraceReplayInferenceProvider
 from clawbox.replay.inference_service import ReplayInferenceService
+from clawbox.replay.model_gateway import ModelGateway
 from clawbox.replay.latency import LatencyObservation, LinearLatencyPredictor
 from clawbox.replay.lifecycle import FirecrackerConfig, FirecrackerLifecycle, LocalCommandExecutor, SimulatedLifecycle
 from clawbox.replay.study import run_study
@@ -336,6 +337,38 @@ def test_external_inference_service_is_request_idempotent(tmp_path: Path) -> Non
         assert json.loads((tmp_path / "inference.json").read_text())[0]["ready"] is True
     finally:
         service.close()
+
+
+def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    _write_jsonl(trace, [{
+        "type": "action", "action_type": "llm_call", "action_id": "model-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 1,
+        "data": {"messages_in": [{"role": "user", "content": "run it"}],
+                 "raw_response": {"content": "", "tool_calls": [{
+                     "id": "call-1", "type": "function",
+                     "function": {"name": "exec", "arguments": "{\"command\":\"true\"}"},
+                 }]}, "llm_latency_ms": 0},
+    }])
+    gateway = ModelGateway(tmp_path / "store.json", mode="replay", trace=trace, time_scale=0)
+    base = gateway.start("127.0.0.1", 0)
+    try:
+        payload = json.dumps({"model": "guest-model", "messages": [
+            {"role": "user", "content": "run it"},
+        ]}).encode()
+        request = urllib.request.Request(
+            base + "/chat/completions", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            first = json.load(response)
+        with urllib.request.urlopen(request) as response:
+            second = json.load(response)
+        assert first == second
+        assert first["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "exec"
+        assert len(gateway.records()) == 1
+    finally:
+        gateway.close()
 
 
 def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> None:
