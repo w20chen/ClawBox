@@ -14,6 +14,8 @@ mkdir -p "${OUTPUT}"
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 69; }
 docker run --rm --user "$(id -u):$(id -g)" \
   -e HOME=/tmp -e GOCACHE=/tmp/go-build -e GOMODCACHE=/tmp/go-mod \
+  -e "GOPROXY=${GOPROXY:-https://goproxy.cn,direct}" \
+  -e "GOSUMDB=${GOSUMDB:-sum.golang.google.cn}" \
   -v "${ROOT}:/src" -w /src golang:1.25-bookworm \
   sh -ec '
     export CGO_ENABLED=0 GOOS=linux GOARCH=arm64
