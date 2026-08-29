@@ -127,6 +127,9 @@ bash scripts/run-direct-firecracker-experiment.sh \
 Repeat with `--mode snapshot --output /experiment/direct-snapshot` and compare
 the two `results/summary.json` and `results/rss.json` files. The script leaves
 the generated images and event JSONL files in its output directory for audit.
+For a fast functional smoke, generate a two-request/two-tool trace with
+`python3 scripts/make-direct-replay-smoke.py --output /tmp/direct-smoke.jsonl`
+and pass that same file as both `--trace` and `--calibration`.
 
 `scripts/firecracker-runtime-continuity-smoke.py` is a fail-closed preflight:
 it snapshots and kills Firecracker, verifies zero process RSS, restores, checks
