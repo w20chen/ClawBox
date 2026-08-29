@@ -136,7 +136,9 @@ administrator can add it to the `kvm` group (`sudo usermod -aG kvm "$USER"`),
 then start a new login session. The workspace copier intentionally omits Git
 metadata, virtual environments, test caches, and artifacts so the guest image
 contains task state rather than host build output. Choose a base rootfs with
-enough free space for the remaining workspace files.
+enough free space for the remaining workspace files. The runner extends the
+extracted ext4 filesystem by 512 MiB by default; use `--extra-space-mib` to
+increase it for larger task workspaces.
 
 `scripts/firecracker-runtime-continuity-smoke.py` is a fail-closed preflight:
 it snapshots and kills Firecracker, verifies zero process RSS, restores, checks

@@ -42,12 +42,18 @@ def main() -> None:
     parser.add_argument("--output-rootfs", required=True, type=Path)
     parser.add_argument("--output-agent", type=Path)
     parser.add_argument(
+        "--extra-space-mib", type=int, default=512,
+        help="extend the extracted ext4 filesystem before agent/workspace injection",
+    )
+    parser.add_argument(
         "--workspace-source", type=Path,
         help="optional disposable workspace copied into /workspace in the image",
     )
     parser.add_argument("--compiler", default="gcc")
     parser.add_argument("--debugfs", default="debugfs")
     args = parser.parse_args()
+    if args.extra_space_mib < 1:
+        parser.error("--extra-space-mib must be positive")
     if args.output_rootfs.exists():
         raise FileExistsError(args.output_rootfs)
     output_agent = args.output_agent or args.output_rootfs.with_suffix(".agent")
@@ -60,6 +66,7 @@ def main() -> None:
         run(args.compiler, "-static", "-O2", "-Wall", "-Wextra", "-Werror",
             "-o", str(output_agent), str(args.agent_source))
         extract_first_mbr_partition(args.base_image, args.output_rootfs)
+        extend_ext4(args.output_rootfs, args.extra_space_mib)
         run(args.debugfs, "-w", "-R", f"write {output_agent} /clawbox-runtime-agent",
             str(args.output_rootfs))
         run(args.debugfs, "-w", "-R", "set_inode_field /clawbox-runtime-agent mode 0100755",
@@ -72,6 +79,13 @@ def main() -> None:
         args.output_rootfs.unlink(missing_ok=True)
         output_agent.unlink(missing_ok=True)
         raise
+
+
+def extend_ext4(rootfs: Path, extra_space_mib: int) -> None:
+    """Create real free ext4 blocks; Kata's extracted root partition is full."""
+    with rootfs.open("ab") as handle:
+        handle.truncate(rootfs.stat().st_size + extra_space_mib * 1024 * 1024)
+    run("resize2fs", str(rootfs))
 
 
 def copy_workspace(debugfs: str, source: Path, rootfs: Path) -> None:

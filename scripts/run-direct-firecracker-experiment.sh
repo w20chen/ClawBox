@@ -8,7 +8,7 @@ usage() {
 }
 
 mode='' output='' base_image='' workspace='' base_commit='' trace='' calibration=''
-sessions=1 memory_mib=512
+sessions=1 memory_mib=512 extra_space_mib=512
 extra=()
 while (($#)); do
   case "$1" in
@@ -21,6 +21,7 @@ while (($#)); do
     --calibration) calibration=${2:-}; shift 2;;
     --sessions) sessions=${2:-}; shift 2;;
     --memory-mib) memory_mib=${2:-}; shift 2;;
+    --extra-space-mib) extra_space_mib=${2:-}; shift 2;;
     --help|-h) usage;;
     *) extra+=("$1"); shift;;
   esac
@@ -33,7 +34,7 @@ mkdir -p "$output"
 rootfs="$output/tool-runtime.ext4"
 python3 scripts/build-runtime-agent-rootfs.py \
   --base-image "$base_image" --agent-source clawbox/replay/guest_agent.c \
-  --workspace-source "$workspace" --output-rootfs "$rootfs"
+  --workspace-source "$workspace" --extra-space-mib "$extra_space_mib" --output-rootfs "$rootfs"
 python3 scripts/prepare-high-density-experiment.py \
   --output "$output/input" --sessions "$sessions" --workspace-source "$workspace" \
   --base-commit "$base_commit" --rootfs-source "$rootfs" --tool-rootfs-source "$rootfs" \
