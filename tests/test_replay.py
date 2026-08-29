@@ -4,16 +4,18 @@ import json
 import os
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from clawbox.replay._numa_exec import parse_cpu_set
 from clawbox.replay.engine import ReplayEngine, SnapshotPolicy
 from clawbox.replay.guest import RuntimeAgentState, VsockCommandExecutor, VsockRuntimeAgentClient
-from clawbox.replay.inference import TraceReplayInferenceProvider
+from clawbox.replay.inference import OpenAIInferenceProvider, TraceReplayInferenceProvider
 from clawbox.replay.inference_service import ReplayInferenceService
 from clawbox.replay.latency import LatencyObservation, LinearLatencyPredictor
 from clawbox.replay.lifecycle import FirecrackerConfig, FirecrackerLifecycle, LocalCommandExecutor, SimulatedLifecycle
+from clawbox.replay.study import run_study
 from clawbox.replay.trace import ReplayAction, load_trace
 
 
@@ -275,6 +277,39 @@ def test_trace_inference_provider_exposes_future_gpu_metadata() -> None:
     }
 
 
+def test_openai_inference_provider_calls_compatible_api() -> None:
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"usage": {"total_tokens": 7}, "choices": []}
+
+    seen = {}
+
+    def post(url, **kwargs):
+        seen.update(url=url, **kwargs)
+        return Response()
+
+    action = ReplayAction(
+        kind="llm", action_id="llm-api", sequence_no=0, start_s=0,
+        duration_s=1, name="model",
+        input=[{"role": "user", "content": "hi"}],
+    )
+    wait = OpenAIInferenceProvider(
+        base_url="https://model.example/v1/", api_key="secret",
+        model="paper-model", post=post,
+    ).begin(action, 2.5)
+    result = wait.wait_ready()
+    assert seen["url"] == "https://model.example/v1/chat/completions"
+    assert seen["json"]["model"] == "paper-model"
+    assert seen["json"]["messages"] == action.input
+    assert result.request_id == "llm-api"
+    assert result.metadata["usage"] == {"total_tokens": 7}
+
+
 def test_external_inference_service_is_request_idempotent(tmp_path: Path) -> None:
     service = ReplayInferenceService(tmp_path / "inference.json", time_scale=0)
     base = service.start()
@@ -300,6 +335,50 @@ def test_external_inference_service_is_request_idempotent(tmp_path: Path) -> Non
         assert json.loads((tmp_path / "inference.json").read_text())[0]["ready"] is True
     finally:
         service.close()
+
+
+def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> None:
+    trace = tmp_path / "trace.jsonl"
+    calibration = tmp_path / "calibration.jsonl"
+    trace.write_text("{}\n", encoding="utf-8")
+    calibration.write_text("{}\n", encoding="utf-8")
+    config = tmp_path / "study.json"
+    config.write_text(json.dumps({
+        "output": "out",
+        "source": {
+            "trace": "trace.jsonl", "calibration": "calibration.jsonl",
+            "workspace": ".", "base_commit": "abc",
+            "runtime_rootfs": "runtime.ext4", "tool_rootfs": "tool.ext4",
+        },
+        "sessions": 2, "repetitions": 1,
+        "inference_backends": ["replay"],
+        "memory_policies": ["resident", "snapshot"],
+    }), encoding="utf-8")
+
+    def fake_run(argv, **_kwargs):
+        if argv[0] == "git":
+            return SimpleNamespace(stdout="commit-id\n")
+        if "prepare-high-density-experiment.py" in str(argv[1]):
+            output = Path(argv[argv.index("--output") + 1])
+            output.mkdir(parents=True)
+            (output / "manifest.json").write_text('{"sessions":[{}]}', encoding="utf-8")
+        elif "clawbox.replay.cli" in argv:
+            output = Path(argv[argv.index("--output-dir") + 1])
+            output.mkdir(parents=True)
+            (output / "summary.json").write_text(json.dumps({
+                "sessions_completed": 2, "failures": [], "wall_s": 10,
+                "throughput_sessions_per_hour": 720,
+                "peak_firecracker_rss_bytes": 100,
+                "mean_firecracker_rss_bytes": 80,
+                "peak_numa_memory_used_bytes": 1000,
+            }), encoding="utf-8")
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr("clawbox.replay.study.subprocess.run", fake_run)
+    assert run_study(config) == 0
+    summary = json.loads((tmp_path / "out" / "study-summary.json").read_text())
+    assert set(summary["groups"]) == {"replay-resident", "replay-snapshot"}
+    assert summary["groups"]["replay-snapshot"]["sessions_completed"] == 2
 
 
 def test_engine_detects_replay_divergence() -> None:

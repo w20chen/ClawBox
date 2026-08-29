@@ -38,6 +38,7 @@ class ReplaySummary:
     snapshots: int
     tool_snapshots: int
     recorded_llm_s: float
+    inference_s: float
     slept_llm_s: float
     snapshot_s: float
     restore_s: float
@@ -92,7 +93,7 @@ class ReplayEngine:
         action_list = list(actions)
         started = time.monotonic()
         snapshot_s = restore_s = tool_snapshot_s = tool_restore_s = 0.0
-        tool_s = tool_wait_s = slept_llm_s = 0.0
+        tool_s = tool_wait_s = slept_llm_s = inference_s = 0.0
         snapshots = tool_snapshots = exit_mismatches = 0
         try:
             self.event_sink({"event": "sandbox_start", "elapsed_s": self.lifecycle.start()})
@@ -158,6 +159,7 @@ class ReplayEngine:
                     wait_started = time.monotonic()
                     inference_result = inference.wait_ready()
                     slept_llm_s += time.monotonic() - wait_started
+                    inference_s += inference_result.simulated_s
                     if tool_decision:
                         if self.tool_lifecycle is None:
                             raise RuntimeError("tool restore selected without a tool lifecycle")
@@ -197,6 +199,8 @@ class ReplayEngine:
                     self.event_sink({
                         "event": "llm_end", "index": index,
                         "request_id": inference_result.request_id,
+                        "inference_s": inference_result.simulated_s,
+                        "inference_metadata": inference_result.metadata,
                         "guest_turn": None if guest_state is None else guest_state.turn,
                         "tool_guest_turn": (
                             None if tool_guest_state is None else tool_guest_state.turn
@@ -244,7 +248,12 @@ class ReplayEngine:
                 if self.tool_lifecycle is not None:
                     self.tool_lifecycle.close()
             finally:
-                self.lifecycle.close()
+                try:
+                    self.lifecycle.close()
+                finally:
+                    close_provider = getattr(self.inference_provider, "close", None)
+                    if callable(close_provider):
+                        close_provider()
         summary = ReplaySummary(
             mode=self.mode,
             action_count=len(action_list),
@@ -253,6 +262,7 @@ class ReplayEngine:
             snapshots=snapshots,
             tool_snapshots=tool_snapshots,
             recorded_llm_s=sum(action.duration_s for action in action_list if action.kind == "llm"),
+            inference_s=inference_s,
             slept_llm_s=slept_llm_s,
             snapshot_s=snapshot_s,
             restore_s=restore_s,

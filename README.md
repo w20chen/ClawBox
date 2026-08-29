@@ -57,6 +57,7 @@ duration estimate controls VM memory reclamation.
 | Install ClawBox on an already bootstrapped new host | `scripts/clawbox install ...` |
 | Run the validated direct Firecracker smoke | `bash scripts/run-direct-firecracker-smoke.sh --mode snapshot --output /path/out` |
 | Run a parameterized trace-replay experiment | `bash scripts/run-direct-firecracker-experiment.sh ...` |
+| Run the replay/API x resident/snapshot paper matrix | `python3 -m clawbox.replay.cli study /path/study.json` |
 
 All commands below run from the ClawBox checkout on the ARM64 host unless a
 section says otherwise. Platform and task images must use immutable
@@ -677,6 +678,21 @@ python3 scripts/firecracker-runtime-continuity-smoke.py \
 ```
 
 ### Inspect and replay a trace
+
+For a paper study, copy `deploy/study.example.json`, pin its inputs, and run:
+
+```bash
+export OPENAI_API_KEY='...'  # required only when the matrix includes `api`
+python3 -m clawbox.replay.cli study /path/to/study.json
+```
+
+The study command creates fresh disks for every repetition, randomizes arm
+order from the configured seed, and runs the cross-product of recorded or real
+OpenAI-compatible inference with resident or snapshot memory policy. Results
+and provenance are written under the configured output directory. The workload
+remains a deterministic recorded action sequence in both inference modes; real
+responses supply actual service latency and usage but do not choose later tool
+actions.
 
 Use an older, separate trace for fitting the duration model:
 

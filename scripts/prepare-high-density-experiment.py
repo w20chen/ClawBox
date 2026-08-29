@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--calibration", required=True, type=Path)
     parser.add_argument("--memory-mib", type=int, default=512)
     parser.add_argument("--cpu-first", type=int, default=0)
+    parser.add_argument("--numa-node", type=int, default=0)
     parser.add_argument(
         "--guest-agent", action="store_true",
         help="boot /clawbox-runtime-agent and configure a per-VM vsock endpoint",
@@ -94,7 +95,7 @@ def main() -> None:
                 )
             ),
             "cpu_set": str(args.cpu_first + index),
-            "numa_node": 0,
+            "numa_node": args.numa_node,
             "log_path": str(session / "firecracker.log"),
         }
         if args.guest_agent:
@@ -141,7 +142,7 @@ def main() -> None:
                 "guest_cid": 1003 + index,
                 "guest_agent_port": 18080,
                 "cpu_set": str(args.cpu_first + args.sessions + index),
-                "numa_node": 0,
+                "numa_node": args.numa_node,
                 "log_path": str(session / "tool-firecracker.log"),
             }
             if prefix is not None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import threading
@@ -14,7 +15,7 @@ from typing import Any
 
 from .engine import JsonlEventWriter, ReplayEngine, SnapshotPolicy
 from .guest import VsockCommandExecutor, VsockRuntimeAgentClient
-from .inference import TraceReplayInferenceProvider
+from .inference import OpenAIInferenceProvider, TraceReplayInferenceProvider
 from .latency import LinearLatencyPredictor
 from .lifecycle import (
     FirecrackerConfig,
@@ -53,11 +54,24 @@ def _tool_policy(args: argparse.Namespace) -> SnapshotPolicy:
     )
 
 
-def _inference(args: argparse.Namespace) -> TraceReplayInferenceProvider:
-    return TraceReplayInferenceProvider(
-        time_scale=args.sleep_scale,
-        simulated_gpu_id=args.simulated_gpu_id,
-        simulated_kv_bytes=args.simulated_kv_bytes,
+def _inference(args: argparse.Namespace):
+    if args.inference_backend == "replay":
+        return TraceReplayInferenceProvider(
+            time_scale=args.sleep_scale,
+            simulated_gpu_id=args.simulated_gpu_id,
+            simulated_kv_bytes=args.simulated_kv_bytes,
+        )
+    api_key = os.environ.get(args.api_key_env, "")
+    if not api_key:
+        raise ValueError(f"real inference requires environment variable {args.api_key_env}")
+    if not args.api_base_url or not args.api_model:
+        raise ValueError("real inference requires --api-base-url and --api-model")
+    return OpenAIInferenceProvider(
+        base_url=args.api_base_url,
+        api_key=api_key,
+        model=args.api_model,
+        timeout_s=args.api_timeout_s,
+        trust_env=args.api_trust_env,
     )
 
 
@@ -293,8 +307,19 @@ def run_experiment(args: argparse.Namespace) -> int:
         stop_sample.set()
         sampler.join(timeout=2)
     wall_s = time.monotonic() - wall_start
+    firecracker_rss = [int(sample["rss_bytes"]) for sample in rss_samples]
+    numa_used = [int(sample["numa_memory_used_bytes"]) for sample in rss_samples
+                 if sample["numa_memory_used_bytes"] is not None]
+    rss_time = sum(
+        firecracker_rss[index] * max(
+            0.0, float(rss_samples[index]["elapsed_s"])
+            - float(rss_samples[index - 1]["elapsed_s"]),
+        )
+        for index in range(1, len(rss_samples))
+    )
     report = {
         "mode": args.mode,
+        "inference_backend": args.inference_backend,
         "sessions_requested": len(sessions),
         "sessions_completed": len(results),
         "failures": failures,
@@ -303,6 +328,10 @@ def run_experiment(args: argparse.Namespace) -> int:
         "wall_s": wall_s,
         "throughput_sessions_per_hour": len(results) / wall_s * 3600 if wall_s else 0.0,
         "peak_firecracker_rss_bytes": max((sample["rss_bytes"] for sample in rss_samples), default=0),
+        "mean_firecracker_rss_bytes": statistics.fmean(firecracker_rss) if firecracker_rss else 0,
+        "p95_firecracker_rss_bytes": _percentile(firecracker_rss, 0.95),
+        "firecracker_rss_time_byte_seconds": rss_time,
+        "mean_numa_memory_used_bytes": statistics.fmean(numa_used) if numa_used else None,
         "peak_numa_memory_used_bytes": max(
             (sample["numa_memory_used_bytes"] for sample in rss_samples
              if sample["numa_memory_used_bytes"] is not None), default=None,
@@ -338,8 +367,21 @@ def _numa_memory_used_bytes(node: int | None) -> int | None:
     return None
 
 
+def _percentile(values: list[int], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return float(ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))])
+
+
 def _common_replay_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", choices=("resident", "snapshot"), required=True)
+    parser.add_argument("--inference-backend", choices=("replay", "api"), default="replay")
+    parser.add_argument("--api-base-url")
+    parser.add_argument("--api-model")
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    parser.add_argument("--api-timeout-s", type=float, default=600.0)
+    parser.add_argument("--api-trust-env", action="store_true")
     parser.add_argument("--sleep-scale", type=float, default=1.0)
     parser.add_argument(
         "--tool-time-scale", type=float, default=0.0,
@@ -395,6 +437,11 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--numa-node", type=int)
     _common_replay_args(experiment)
     experiment.set_defaults(func=run_experiment)
+    study = subparsers.add_parser("study", help="run a reproducible inference x memory-policy matrix")
+    study.add_argument("config", type=Path)
+    study.set_defaults(func=lambda args: __import__(
+        "clawbox.replay.study", fromlist=["run_study"]
+    ).run_study(args.config))
     return parser
 
 

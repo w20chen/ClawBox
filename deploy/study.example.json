@@ -1,0 +1,42 @@
+{
+  "output": "/experiment/results/paper-study-001",
+  "source": {
+    "workspace": "/experiment/workspace",
+    "base_commit": "COMMIT_SHA",
+    "runtime_rootfs": "/experiment/runtime-agent-rootfs.ext4",
+    "tool_rootfs": "/experiment/runtime-agent-rootfs.ext4",
+    "trace": "/experiment/traces/task.jsonl",
+    "calibration": "/experiment/traces/calibration.jsonl"
+  },
+  "sessions": 8,
+  "repetitions": 3,
+  "seed": 7,
+  "inference_backends": ["replay", "api"],
+  "memory_policies": ["resident", "snapshot"],
+  "resident_slots": 4,
+  "tool_resident_slots": 4,
+  "resources": {
+    "memory_mib": 512,
+    "runtime_touch_mib": 128,
+    "tool_touch_mib": 256,
+    "cpu_first": 0,
+    "numa_node": 0
+  },
+  "policy": {
+    "sleep_scale": 1.0,
+    "tool_time_scale": 1.0,
+    "runtime_threshold_s": 20.0,
+    "tool_threshold_s": 30.0,
+    "estimated_snapshot_s": 0.3,
+    "estimated_restore_s": 0.1,
+    "estimated_refault_s": 0.5,
+    "safety_margin_s": 2.0
+  },
+  "api": {
+    "base_url": "https://PROVIDER_BASE_URL/v1",
+    "model": "PROVIDER_MODEL_ID",
+    "key_env": "OPENAI_API_KEY",
+    "timeout_s": 600,
+    "trust_env": false
+  }
+}
