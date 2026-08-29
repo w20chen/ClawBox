@@ -41,6 +41,10 @@ def main() -> None:
     parser.add_argument("--agent-source", required=True, type=Path)
     parser.add_argument("--output-rootfs", required=True, type=Path)
     parser.add_argument("--output-agent", type=Path)
+    parser.add_argument(
+        "--workspace-source", type=Path,
+        help="optional disposable workspace copied into /workspace in the image",
+    )
     parser.add_argument("--compiler", default="gcc")
     parser.add_argument("--debugfs", default="debugfs")
     args = parser.parse_args()
@@ -60,12 +64,41 @@ def main() -> None:
             str(args.output_rootfs))
         run(args.debugfs, "-w", "-R", "set_inode_field /clawbox-runtime-agent mode 0100755",
             str(args.output_rootfs))
+        if args.workspace_source is not None:
+            copy_workspace(args.debugfs, args.workspace_source, args.output_rootfs)
         run(args.debugfs, "-R", "stat /clawbox-runtime-agent", str(args.output_rootfs))
         shutil.copymode(args.base_image, args.output_rootfs)
     except Exception:
         args.output_rootfs.unlink(missing_ok=True)
         output_agent.unlink(missing_ok=True)
         raise
+
+
+def copy_workspace(debugfs: str, source: Path, rootfs: Path) -> None:
+    """Copy a disposable regular-file workspace into the Tool image.
+
+    The experiment deliberately rejects special files and symlinks rather than
+    silently changing their meaning inside the VM.  A benchmark workspace is
+    expected to be a checked-out repository, so regular files and directories
+    are sufficient and keep this setup path auditable.
+    """
+    source = source.resolve()
+    if not source.is_dir():
+        raise ValueError(f"workspace source is not a directory: {source}")
+    if any(char.isspace() or char in {'"', "'"} for char in str(source)):
+        raise ValueError("workspace source path must not contain whitespace or quotes")
+    run(debugfs, "-w", "-R", "mkdir /workspace", str(rootfs))
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source).as_posix()
+        destination = f"/workspace/{relative}"
+        if any(char.isspace() or char in {'"', "'"} for char in relative):
+            raise ValueError(f"workspace path is not debugfs-safe: {relative!r}")
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise ValueError(f"workspace contains unsupported file type: {path}")
+        if path.is_dir():
+            run(debugfs, "-w", "-R", f"mkdir {destination}", str(rootfs))
+        else:
+            run(debugfs, "-w", "-R", f"write {path} {destination}", str(rootfs))
 
 
 if __name__ == "__main__":

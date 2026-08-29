@@ -102,6 +102,32 @@ python scripts/prepare-high-density-experiment.py \
   --memory-mib 512 --cpu-first 0 --guest-agent --guest-touch-mib 384
 ```
 
+## Self-service paired experiment
+
+`scripts/run-direct-firecracker-experiment.sh` is the shortest reproducible
+entry point. It refuses an existing output directory, builds a fresh agent
+rootfs with a copy of the specified disposable workspace at `/workspace`,
+creates independent Runtime and Tool rootfs copies, and runs one arm. Invoke it
+once per arm with identical inputs; do not reuse either output directory.
+
+```bash
+BASE_COMMIT="$(git -C /experiment/workspace-base rev-parse HEAD)"
+
+bash scripts/run-direct-firecracker-experiment.sh \
+  --mode resident --output /experiment/direct-resident \
+  --base-image /opt/kata/share/kata-containers/kata-containers.img \
+  --workspace /experiment/workspace-base --base-commit "$BASE_COMMIT" \
+  --trace /experiment/trace-747.jsonl --calibration /experiment/calibration-774.jsonl \
+  --sessions 1 --memory-mib 512 --sleep-scale 1 \
+  --snapshot-threshold-s 3 --tool-snapshot-threshold-s 3 \
+  --estimated-snapshot-s 0.3 --estimated-restore-s 0.1 \
+  --estimated-refault-s 0.5 --safety-margin-s 2
+```
+
+Repeat with `--mode snapshot --output /experiment/direct-snapshot` and compare
+the two `results/summary.json` and `results/rss.json` files. The script leaves
+the generated images and event JSONL files in its output directory for audit.
+
 `scripts/firecracker-runtime-continuity-smoke.py` is a fail-closed preflight:
 it snapshots and kills Firecracker, verifies zero process RSS, restores, checks
 the boot nonce and in-flight inference state, and continues the next tool turn.
