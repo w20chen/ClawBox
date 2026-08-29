@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from clawbox.replay._numa_exec import parse_cpu_set
 from clawbox.replay.engine import ReplayEngine, SnapshotPolicy
 from clawbox.replay.guest import RuntimeAgentState, VsockCommandExecutor, VsockRuntimeAgentClient
 from clawbox.replay.inference import TraceReplayInferenceProvider
+from clawbox.replay.inference_service import ReplayInferenceService
 from clawbox.replay.latency import LatencyObservation, LinearLatencyPredictor
 from clawbox.replay.lifecycle import FirecrackerConfig, FirecrackerLifecycle, LocalCommandExecutor, SimulatedLifecycle
 from clawbox.replay.trace import ReplayAction, load_trace
@@ -271,6 +273,33 @@ def test_trace_inference_provider_exposes_future_gpu_metadata() -> None:
         "provider": "trace-replay", "gpu_id": "gpu-sim-0",
         "kv_cache_handle": None, "kv_bytes": 1234,
     }
+
+
+def test_external_inference_service_is_request_idempotent(tmp_path: Path) -> None:
+    service = ReplayInferenceService(tmp_path / "inference.json", time_scale=0)
+    base = service.start()
+    try:
+        payload = json.dumps({
+            "request_id": "request-1", "session_id": "session-1",
+            "content": "prompt", "recorded_latency_ms": 100,
+        }).encode()
+        request = urllib.request.Request(
+            base + "/v1/replay/requests", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 202
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 202
+        for _ in range(20):
+            with urllib.request.urlopen(base + "/v1/replay/requests/request-1") as response:
+                status = json.load(response)
+            if status["ready"]:
+                break
+        assert status == {"request_id": "request-1", "ready": True, "result": "replayed:request-1"}
+        assert json.loads((tmp_path / "inference.json").read_text())[0]["ready"] is True
+    finally:
+        service.close()
 
 
 def test_engine_detects_replay_divergence() -> None:
