@@ -88,8 +88,11 @@ def copy_workspace(debugfs: str, source: Path, rootfs: Path) -> None:
     if any(char.isspace() or char in {'"', "'"} for char in str(source)):
         raise ValueError("workspace source path must not contain whitespace or quotes")
     run(debugfs, "-w", "-R", "mkdir /workspace", str(rootfs))
+    ignored_parts = {".git", ".venv", ".artifacts", ".pytest_cache", "__pycache__"}
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source).as_posix()
+        if ignored_parts.intersection(path.relative_to(source).parts):
+            continue
         destination = f"/workspace/{relative}"
         if any(char.isspace() or char in {'"', "'"} for char in relative):
             raise ValueError(f"workspace path is not debugfs-safe: {relative!r}")

@@ -131,6 +131,13 @@ For a fast functional smoke, generate a two-request/two-tool trace with
 `python3 scripts/make-direct-replay-smoke.py --output /tmp/direct-smoke.jsonl`
 and pass that same file as both `--trace` and `--calibration`.
 
+The invoking account must be able to open `/dev/kvm`; on a standard host an
+administrator can add it to the `kvm` group (`sudo usermod -aG kvm "$USER"`),
+then start a new login session. The workspace copier intentionally omits Git
+metadata, virtual environments, test caches, and artifacts so the guest image
+contains task state rather than host build output. Choose a base rootfs with
+enough free space for the remaining workspace files.
+
 `scripts/firecracker-runtime-continuity-smoke.py` is a fail-closed preflight:
 it snapshots and kills Firecracker, verifies zero process RSS, restores, checks
 the boot nonce and in-flight inference state, and continues the next tool turn.
