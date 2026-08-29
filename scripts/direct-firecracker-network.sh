@@ -56,7 +56,12 @@ for ((index=0; index<SESSIONS; index++)); do
     printf 'session=%d bridge=%s runtime_tap=%s tool_tap=%s inference_host=%s\n' \
       "${index}" "${bridge}" "${runtime_tap}" "${tool_tap}" "${host_ip%/24}"
   else
-    host_command ip link show "${bridge}" >/dev/null 2>&1 || continue
-    host_command ip link del "${bridge}"
+    # A failed `up` can leave a TAP behind before it is enslaved to its bridge.
+    # Remove only the three deterministic names for this session; deleting a
+    # bridge normally removes its ports, and the later checks become no-ops.
+    for device in "${bridge}" "${runtime_tap}" "${tool_tap}"; do
+      host_command ip link show "${device}" >/dev/null 2>&1 || continue
+      host_command ip link del "${device}"
+    done
   fi
 done
