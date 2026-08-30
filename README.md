@@ -649,13 +649,13 @@ python3 -m clawbox.replay.cli run trace.jsonl \
 
 ### What has been verified
 
-On Kunpeng, a single-session recorded run completed two model turns and one
-real SSH tool call. Snapshot mode saved and restored both VMs during each model
-turn (two cycles) and produced the same final-state hash as resident mode. A
-separate single-session run used the configured real model service, completed
-the same SSH tool action, and produced the same hash. These are functional
-checks; publishable density and performance claims still require the configured
-concurrency and repeated trials.
+On Kunpeng, all four single-session combinations passed: recorded and real
+model responses, each with resident and snapshot memory management. Every run
+completed two model turns and one real SSH tool call. Both snapshot runs saved
+and restored both VMs during each model turn (two cycles), retained ClawTune
+traces, and produced the same final-state hash as resident mode. These are
+functional checks; publishable density and performance claims still require
+the configured concurrency and repeated trials.
 
 ## Updating an installed host
 
