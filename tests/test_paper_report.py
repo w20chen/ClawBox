@@ -96,3 +96,22 @@ def test_load_complete_suite_rejects_incorrect_arm(tmp_path: Path) -> None:
     (root / "measurements.csv").write_text(text.replace(",1.0,1.0\n", ",0.0,1.0\n", 1), encoding="utf-8")
     with pytest.raises(ValueError, match="integrity/correctness"):
         load_complete_suite(root)
+
+
+def test_load_complete_suite_rejects_missing_arm(tmp_path: Path) -> None:
+    root = tmp_path / "missing"
+    _suite(root, 1, MAIN_BASELINES)
+    lines = (root / "measurements.csv").read_text(encoding="utf-8").splitlines()
+    (root / "measurements.csv").write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected 6"):
+        load_complete_suite(root)
+
+
+def test_load_complete_suite_rejects_duplicate_arm(tmp_path: Path) -> None:
+    root = tmp_path / "duplicate"
+    _suite(root, 1, MAIN_BASELINES)
+    lines = (root / "measurements.csv").read_text(encoding="utf-8").splitlines()
+    lines[-1] = lines[1]
+    (root / "measurements.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate arm identity"):
+        load_complete_suite(root)
