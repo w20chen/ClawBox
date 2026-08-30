@@ -4,9 +4,13 @@ set -eu
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mkdir -p /run /tmp /dev/pts /dev/shm /testbed/.clawbox
+mkdir -p /run /tmp /dev/pts /dev/shm /testbed/.clawbox /sys/fs/cgroup
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+# cgroup v2 delegation for per-execution tool resource telemetry.
+if ! mountpoint -q /sys/fs/cgroup 2>/dev/null; then
+  mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
+fi
 chmod 1777 /tmp
 hostname tool-vm
 printf '127.0.0.1 localhost tool-vm\n::1 localhost\n' >/etc/hosts
