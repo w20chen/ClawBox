@@ -29,12 +29,18 @@
   time. Confidence intervals use Student's t and independent SWE task IDs as
   the unit. Repeated model trajectories are averaged within their task; with
   this data `n=1`, so a cross-task confidence interval is not estimable.
-- Primary outcomes are completed-agent-runs/min and Firecracker RSS-time.
-  Steps/min and failures/OOM are primary supporting outcomes; peak/P95 RSS,
+- Primary outcomes are correct completed-agent-runs/min and Firecracker
+  RSS-time. Completed sessions/min, steps/min, and failures/OOM are primary
+  supporting outcomes; peak/P95 RSS,
   NUMA observations, cgroup delta, and save/restore service time are secondary.
   Primary comparisons are paired within repetition: P90 versus fixed 4 GiB,
   fixed 2 GiB versus fixed 4 GiB, P90 versus its same-size fixed control,
   checkpoint versus resident, and the sizing-by-checkpoint interaction.
+- Every session in the corrected registered main and density suites runs
+  `PYTHONPATH=/testbed/src /opt/miniconda3/envs/testbed/bin/python -m pytest
+  tests/ -q` after the agent exits. The oracle result is recorded separately
+  from infrastructure success and is included in
+  `throughput_correct_tasks_per_minute`.
 
 ## Prediction training and recording-set holdout
 

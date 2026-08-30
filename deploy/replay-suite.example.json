@@ -44,6 +44,8 @@
   "resume": true,
   "network_prefix": "172.30",
   "validation_command": "cd /testbed && { git -c safe.directory=/testbed diff --binary --no-ext-diff BASE_COMMIT -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig'; git -c safe.directory=/testbed ls-files --others --exclude-standard -z -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig' | sort -z | xargs -0 -r sha256sum; }",
+  "correctness_command": "cd /testbed && python -m pytest -q",
+  "correctness_timeout_s": 300,
   "inference_backends": ["replay"],
   "sizing_policies": ["fixed", "p90_static"],
   "fixed_control_tool_memory_mib": 2048,
