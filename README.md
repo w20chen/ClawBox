@@ -986,6 +986,11 @@ divergent final state, any session failed its correctness command, or a
 registered baseline is missing. Its 95% confidence intervals use independent
 task IDs; with repeated trajectories from only one SWE task it explicitly
 reports that a cross-task interval is not estimable.
+The JSON retains all registered telemetry (correct and completed throughput,
+step throughput, configured memory, RSS/RSS-time, NUMA and cgroup deltas,
+checkpoint counts and service time, admission and session-latency tails, and
+snapshot allocation); the Markdown file renders the primary tables and paired
+effects without discarding the machine-readable secondary outcomes.
 
 An optional `correctness_command` records a separate exit code and output per
 session without conflating a benchmark-oracle failure with infrastructure
