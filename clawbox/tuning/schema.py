@@ -82,6 +82,7 @@ class BridgeRecord(StrictModel):
     system_cpu_ms: int | None = None
     max_rss_kib: int | None = None
     telemetry_state: str | None = None
+    telemetry_error: str | None = None
     telemetry_artifact: str | None = None
     telemetry_eligible_for_kb: bool | None = None
     telemetry_quality: str | None = None
