@@ -168,15 +168,25 @@ def _contrast_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
             percent = payload.get("percent_effect_statistics") or {}
             mean = payload.get("mean")
             half_width = payload.get("ci95_half_width")
+            percent_mean = percent.get("mean")
+            percent_half_width = percent.get("ci95_half_width")
             rows.append({
                 "comparison": comparison,
                 "metric": metric,
                 "independent_task_n": int(payload.get("n", 0)),
                 "paired_arm_count": int(payload.get("pair_count", 0)),
                 "mean_absolute_effect": mean,
-                "mean_percent_effect": percent.get("mean"),
+                "mean_percent_effect": percent_mean,
                 "ci95_low": None if half_width is None else float(mean) - float(half_width),
                 "ci95_high": None if half_width is None else float(mean) + float(half_width),
+                "percent_ci95_low": (
+                    None if percent_half_width is None
+                    else float(percent_mean) - float(percent_half_width)
+                ),
+                "percent_ci95_high": (
+                    None if percent_half_width is None
+                    else float(percent_mean) + float(percent_half_width)
+                ),
             })
     return rows
 
@@ -288,8 +298,9 @@ def markdown_report(report: dict[str, Any]) -> str:
         "",
         "Positive percentages mean treatment > control; interpret direction by metric.",
         "",
-        "| Suite | Comparison | Metric | Pairs | Task n | Mean effect | Mean % | 95% CI |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| Suite | Comparison | Metric | Pairs | Task n | Mean effect | Mean % | "
+        "Absolute 95% CI | Percent 95% CI |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
     ])
     for suite_name in ("main", "density"):
         for row in report[suite_name]["paired_contrasts"]:
@@ -297,10 +308,14 @@ def markdown_report(report: dict[str, Any]) -> str:
                 "not estimable" if row["ci95_low"] is None
                 else f"[{_fmt(row['ci95_low'])}, {_fmt(row['ci95_high'])}]"
             )
+            percent_interval = (
+                "not estimable" if row["percent_ci95_low"] is None
+                else f"[{_fmt(row['percent_ci95_low'])}, {_fmt(row['percent_ci95_high'])}]"
+            )
             lines.append(
                 f"| {suite_name} | {row['comparison']} | {row['metric']} | "
                 f"{row['paired_arm_count']} | {row['independent_task_n']} | "
                 f"{_fmt(row['mean_absolute_effect'])} | {_fmt(row['mean_percent_effect'])} | "
-                f"{interval} |"
+                f"{interval} | {percent_interval} |"
             )
     return "\n".join(lines) + "\n"
