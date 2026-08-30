@@ -264,3 +264,35 @@ def test_openclaw_completion_poll_tolerates_a_torn_serial_log_line(tmp_path):
     assert module.complete(log) == (False, None)
     log.write_text('{"ok":true,"openclaw_exit_code":0}\n', encoding="utf-8")
     assert module.complete(log) == (True, 0)
+
+
+def test_openclaw_pair_checkpoint_and_restore_dependency_order():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_experiment_order", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = []
+
+    class Lifecycle:
+        def __init__(self, name):
+            self.name = name
+
+        def checkpoint_and_evict(self):
+            events.append(f"checkpoint-{self.name}")
+            return 1.0
+
+        def restore(self):
+            events.append(f"restore-{self.name}")
+            return 1.0
+
+    runtime = Lifecycle("runtime")
+    tool = Lifecycle("tool")
+    assert module.checkpoint_runtime_tool_pair(runtime, tool) == 2.0
+    assert module.restore_tool_runtime_pair(
+        tool, runtime, lambda: events.append("tool-ready")
+    ) == 2.0
+    assert events == [
+        "checkpoint-runtime", "checkpoint-tool",
+        "restore-tool", "tool-ready", "restore-runtime",
+    ]

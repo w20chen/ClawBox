@@ -73,6 +73,33 @@ def wait_tcp(host: str, port: int, timeout_s: float) -> None:
     raise TimeoutError(f"timed out waiting for {host}:{port}")
 
 
+def checkpoint_runtime_tool_pair(
+    runtime: FirecrackerLifecycle, tool: FirecrackerLifecycle,
+) -> float:
+    """Quiesce the actor before its Tool dependency.
+
+    The Runtime may receive the model response at any point after the gateway
+    observes a pending request.  Pausing Tool first leaves a race in which a
+    still-running Runtime dispatches commands to an unavailable Tool VM.  The
+    dependency-safe order is therefore Runtime first, then Tool.
+    """
+    elapsed = runtime.checkpoint_and_evict()
+    elapsed += tool.checkpoint_and_evict()
+    return elapsed
+
+
+def restore_tool_runtime_pair(
+    tool: FirecrackerLifecycle,
+    runtime: FirecrackerLifecycle,
+    wait_tool_ready,
+) -> float:
+    """Restore the dependency before resuming the actor."""
+    elapsed = tool.restore()
+    wait_tool_ready()
+    elapsed += runtime.restore()
+    return elapsed
+
+
 def complete(log: Path) -> tuple[bool, int | None]:
     if not log.exists(): return False, None
     for line in reversed(log.read_text(errors="replace").splitlines()):
@@ -384,8 +411,7 @@ def main() -> None:
                            if not item["ready"] and item["request_id"] not in processed]
                 if a.residency_policy == "llm_wait_checkpoint" and pending:
                     request_id = pending[0]["request_id"]
-                    snapshot_s += tool.checkpoint_and_evict()
-                    snapshot_s += runtime.checkpoint_and_evict()
+                    snapshot_s += checkpoint_runtime_tool_pair(runtime, tool)
                     # The memory/CPU-pair lease is released only after both
                     # Firecracker processes have been evicted.
                     release_pair()
@@ -394,8 +420,11 @@ def main() -> None:
                         if current[request_id]["ready"]: break
                         time.sleep(0.02)
                     acquire_pair()
-                    restore_s += tool.restore(); wait_tcp(spec["tool_host"], 2222, 30)
-                    restore_s += runtime.restore(); processed.add(request_id); snapshots += 1
+                    restore_s += restore_tool_runtime_pair(
+                        tool, runtime,
+                        lambda: wait_tcp(spec["tool_host"], 2222, 30),
+                    )
+                    processed.add(request_id); snapshots += 1
                 else: time.sleep(0.05)
             raise TimeoutError("OpenClaw experiment timed out")
         finally:

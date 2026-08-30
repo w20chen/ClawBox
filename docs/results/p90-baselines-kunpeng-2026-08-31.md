@@ -146,6 +146,16 @@ of the 515 GiB NUMA node, not the node's physical capacity limit.
   107-byte Unix-domain limit, so those control VMs could not boot. The shorter
   output label `fixed2` and a fail-fast path-length regression check are used
   for the registered relaunch; no timing from the failed launch is pooled.
+- A later 19-summary partial launch is excluded at
+  `/data/clawbox-paper-suite-001-excluded-checkpoint-order-20260831`. Its first
+  concurrency-8 checkpoint arm completed all eight sessions but split final
+  state 4/4 between the intended patch and an empty diff. The runner had
+  checkpointed Tool before Runtime; under concurrent snapshot I/O, a model
+  response could reach the still-running Runtime while Tool was paused or
+  evicted. The corrected dependency order checkpoints Runtime before Tool and
+  restores Tool before Runtime. A concurrency-8 checkpoint gate must reproduce
+  one final-state hash before the registered suite is relaunched. No timing
+  from this partial launch is pooled.
 - `throughput_tasks_per_minute` is a compatibility field counting completed
   agent sessions. It is not an official SWE-ReBench correctness result. The
   final-state validator is included in wall time and establishes equivalence

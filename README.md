@@ -983,7 +983,10 @@ and LLM-wait checkpoint policy, and requests `[40, 60, 76]` agent runs. At 40,
 all pairs fit; at 60/76, the resident arm runs waves while the checkpoint arm
 can release FIFO admission slots during model waits. One atomic FIFO lease owns
 the Runtime+Tool memory slot and a unique NUMA-local CPU pair; it is released
-only after both VMs are evicted and reacquired before either restore. This is a direct
+only after both VMs are evicted and reacquired before either restore. Runtime
+is paused and checkpointed before Tool so a model response cannot dispatch work
+to an unavailable dependency; restore uses the inverse Tool-then-Runtime order.
+This is a direct
 configured-memory-budget throughput/density test rather than a projection from
 RSS. It uses `cpu_placement=round_robin`; label 60/76 CPU-oversubscribed and
 report the scheduling regime. The disk preflight accounts for one generation per
