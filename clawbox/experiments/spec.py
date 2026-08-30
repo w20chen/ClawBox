@@ -99,6 +99,7 @@ class ExecutionSpec(StrictFrozenModel):
 
 class ResourcesSpec(StrictFrozenModel):
     profile: str | None = Field(default=None, min_length=1)
+    kb_generation: int | None = Field(default=None, ge=1)
     runtime_memory_mib: int | None = Field(default=None, ge=1)
     tool_memory_mib: int | None = Field(default=None, ge=1)
     cpu_first: int | None = Field(default=None, ge=0)

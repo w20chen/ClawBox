@@ -1,0 +1,51 @@
+{
+  "output": "/data/clawbox-paper-suite-001",
+  "source": {
+    "runtime_rootfs": "/data/openclaw-runtime.ext4",
+    "tool_rootfs": "/data/tool-workspace.ext4"
+  },
+  "workloads": [
+    {
+      "name": "short-fix",
+      "repository": "OWNER/REPO",
+      "prompt": "/data/workloads/short-fix.prompt.txt",
+      "trace": "/data/workloads/short-fix.model.jsonl"
+    },
+    {
+      "name": "test-debug",
+      "repository": "OWNER/REPO",
+      "prompt": "/data/workloads/test-debug.prompt.txt",
+      "trace": "/data/workloads/test-debug.model.jsonl"
+    },
+    {
+      "name": "multi-file",
+      "repository": "OWNER/REPO",
+      "prompt": "/data/workloads/multi-file.prompt.txt",
+      "trace": "/data/workloads/multi-file.model.jsonl"
+    }
+  ],
+  "concurrency_levels": [1, 8, 20, 40],
+  "cpu_placement": "exclusive",
+  "numa_host_reserve_mib": 32768,
+  "repetitions": 3,
+  "seed": 7,
+  "network_prefix": "172.30",
+  "validation_command": "cd /testbed && git diff --binary --no-ext-diff HEAD",
+  "inference_backends": ["replay"],
+  "sizing_policies": ["fixed", "p90_static"],
+  "memory_policies": ["resident", "snapshot"],
+  "resources": {
+    "runtime_memory_mib": 2048,
+    "tool_memory_mib": 4096,
+    "cpu_first": 0,
+    "numa_node": 0
+  },
+  "p90_static": {
+    "prediction_file": "/data/workloads/p90-admission-prediction.json",
+    "min_evidence": 5,
+    "headroom_fraction": 0.25,
+    "min_tool_memory_mib": 2048
+  },
+  "replay": {"time_scale": 1.0},
+  "timeout_s": 1800
+}

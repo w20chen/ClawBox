@@ -17,7 +17,7 @@ from clawbox.experiments.capabilities import CapabilityError, WorkflowClassifica
 from clawbox.experiments.results import FailureCategory, RunStatus
 from clawbox.experiments.cli import main as experiments_main
 from clawbox.benchmark.kubernetes import BenchmarkTask, KubernetesBenchmarkLauncher
-from clawbox.replay.study import study_experiment_spec
+from clawbox.replay.study import _p90_prediction, _predictive_tool_memory_mib, study_experiment_spec
 
 
 DIGEST = "registry.example/task@sha256:" + "a" * 64
@@ -97,11 +97,23 @@ def test_matrix_crosses_only_inference_and_baseline_axes():
     assert all(validate_workflow(item).classification == WorkflowClassification.RESEARCH for item in workflows)
 
 
-def test_capability_rules_do_not_claim_future_or_legacy_paths_are_implemented():
-    with pytest.raises(CapabilityError, match="p90_elastic"):
-        expand_matrix(production_spec(scheduling={"baselines": ["p90-elastic"]}))
-    with pytest.raises(CapabilityError, match="legacy Tool-only"):
+def test_capability_rules_accept_safe_p90_cells_but_reject_invalid_generation_use():
+    elastic = expand_matrix(production_spec(
+        scheduling={"baselines": ["p90-elastic"]},
+    ))[0]
+    assert validate_workflow(elastic).classification == WorkflowClassification.RESEARCH
+    static = expand_matrix(production_spec(
+        scheduling={"baselines": ["p90-static"]},
+        resources={"profile": "small", "kb_generation": 7},
+    ))[0]
+    assert validate_workflow(static).classification == WorkflowClassification.RESEARCH
+    with pytest.raises(CapabilityError, match="kb_generation is required"):
         expand_matrix(production_spec(scheduling={"baselines": ["p90-static"]}))
+    with pytest.raises(CapabilityError, match="only valid"):
+        expand_matrix(production_spec(
+            scheduling={"baselines": ["p90-elastic"]},
+            resources={"profile": "small", "kb_generation": 7},
+        ))
     with pytest.raises(CapabilityError, match="resources.profile"):
         expand_matrix(production_spec(resources={}))
 
@@ -124,6 +136,46 @@ def test_legacy_paper_study_translates_snapshot_and_generates_four_workflows():
     workflows = expand_matrix(spec)
     assert len(workflows) == 4
     assert {item.residency_policy for item in workflows} == {"resident", "llm_wait_checkpoint"}
+
+
+def test_replay_factorial_crosses_fixed_predictive_and_residency_without_hidden_inference_change():
+    prediction_payload = {
+        "tenant_id": "tenant-a", "repo_fingerprint": "org/repo", "generation": 4,
+        "pair_digest": "a" * 64, "source_digest": "b" * 64,
+        "artifact_count": 20, "clawtune_revision": "c" * 40,
+        "prediction": {
+            "latency_p90_sec": 12.0, "cpu_p90_cores": 0.7,
+            "memory_p90_bytes": 1024**3, "evidence_count": 10,
+            "scopes": {"memory": "public"}, "fallback_paths": {},
+        },
+    }
+    raw = {
+        "output": "out", "source": {"trace": "trace.jsonl", "prompt": "prompt.txt",
+            "runtime_rootfs": "runtime.ext4", "tool_rootfs": "tool.ext4"},
+        "sessions": 4, "inference_backends": ["replay"],
+        "sizing_policies": ["fixed", "p90_static"],
+        "memory_policies": ["resident", "snapshot"],
+        "resources": {"runtime_memory_mib": 2048, "tool_memory_mib": 4096},
+        "p90_static": {"prediction": prediction_payload, "min_tool_memory_mib": 2048},
+    }
+    workflows = expand_matrix(study_experiment_spec(raw))
+    assert len(workflows) == 4
+    assert {item.baseline for item in workflows} == {
+        "fixed-explicit-resident", "fixed-llm-wait-checkpoint",
+        "p90-static", "p90-static-llm-wait-checkpoint",
+    }
+    assert {item.inference_backend for item in workflows} == {"replay"}
+    prediction = _p90_prediction(raw, None)
+    assert prediction is not None and prediction.generation == 4
+    assert _predictive_tool_memory_mib(raw, prediction) == 2048
+    mismatched = {**raw, "source": {**raw["source"], "repository": "other/repo"}}
+    with pytest.raises(ValueError, match="repository does not match"):
+        _p90_prediction(mismatched, None)
+    insufficient = {**raw, "p90_static": {
+        **raw["p90_static"], "min_evidence": 11,
+    }}
+    with pytest.raises(ValueError, match="at least 11"):
+        _p90_prediction(insufficient, None)
 
 
 def test_result_envelope_and_failure_categories_serialize_distinctly():

@@ -81,6 +81,13 @@ class BridgeRecord(StrictModel):
     user_cpu_ms: int | None = None
     system_cpu_ms: int | None = None
     max_rss_kib: int | None = None
+    telemetry_state: str | None = None
+    telemetry_artifact: str | None = None
+    telemetry_eligible_for_kb: bool | None = None
+    telemetry_quality: str | None = None
+    telemetry_collection_validity: str | None = None
+    telemetry_cleanup: str | None = None
+    telemetry_loss_total: int | None = None
 
 
 class CgroupResource(StrictModel):

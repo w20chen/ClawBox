@@ -27,6 +27,8 @@ class GatewayRequest:
     content_type: str = "application/json"
     response_b64: str = ""
     error: str = ""
+    started_unix_s: float = 0.0
+    completed_unix_s: float = 0.0
 
 
 class ModelGateway:
@@ -119,7 +121,7 @@ class ModelGateway:
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
-                request = GatewayRequest(request_id, index)
+                request = GatewayRequest(request_id, index, started_unix_s=time.time())
                 self._requests[request_id] = request
                 self._persist()
                 threading.Thread(
@@ -169,8 +171,37 @@ class ModelGateway:
             request.response_b64 = base64.b64encode(body).decode()
             request.error = error
             request.ready = True
+            request.completed_unix_s = time.time()
             self._persist()
             self._changed.notify_all()
+
+    def write_replay_trace(self, path: Path) -> None:
+        """Export successful API responses as an ordered replayable v4 trace."""
+        records = []
+        for index, item in enumerate(self.records()):
+            if not item["ready"] or item["error"] or item["status_code"] != 200:
+                raise ValueError("cannot export an incomplete or failed model response")
+            message = _response_message(
+                item["content_type"], base64.b64decode(item["response_b64"])
+            )
+            start = float(item["started_unix_s"])
+            end = float(item["completed_unix_s"])
+            if start <= 0 or end < start:
+                raise ValueError("model response has no valid timing metadata")
+            records.append({
+                "type": "action", "action_type": "llm_call",
+                "action_id": f"model-{index + 1}", "iteration": index,
+                "ts_start": start, "ts_end": end,
+                "data": {"model": self.upstream_model or "recorded-model",
+                         "raw_response": message,
+                         "llm_latency_ms": (end - start) * 1000.0},
+            })
+        temporary = path.with_name(path.name + ".next")
+        temporary.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
 
     def _persist(self) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -201,3 +232,40 @@ def _replay_response(action: ReplayAction, stream: bool) -> tuple[int, str, byte
              "finish_reason": finish}]}
     body = f"data: {json.dumps(chunk, separators=(',', ':'))}\n\ndata: [DONE]\n\n".encode()
     return 200, "text/event-stream", body
+
+
+def _response_message(content_type: str, body: bytes) -> dict[str, Any]:
+    if "text/event-stream" not in content_type.lower():
+        message = json.loads(body)["choices"][0]["message"]
+        if not isinstance(message, dict):
+            raise ValueError("model response message is not an object")
+        return {key: value for key, value in message.items() if key != "role"}
+    content: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+    for raw_line in body.decode("utf-8").splitlines():
+        if not raw_line.startswith("data:"):
+            continue
+        encoded = raw_line[5:].strip()
+        if not encoded or encoded == "[DONE]":
+            continue
+        for choice in json.loads(encoded).get("choices", []):
+            delta = choice.get("delta") or {}
+            if isinstance(delta.get("content"), str):
+                content.append(delta["content"])
+            for fragment in delta.get("tool_calls") or []:
+                index = int(fragment.get("index", 0))
+                target = tool_calls.setdefault(
+                    index, {"id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""}},
+                )
+                if fragment.get("id"):
+                    target["id"] += str(fragment["id"])
+                if fragment.get("type"):
+                    target["type"] = fragment["type"]
+                function = fragment.get("function") or {}
+                target["function"]["name"] += str(function.get("name") or "")
+                target["function"]["arguments"] += str(function.get("arguments") or "")
+    message: dict[str, Any] = {"content": "".join(content)}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
+    return message

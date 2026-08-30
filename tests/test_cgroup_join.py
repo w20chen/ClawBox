@@ -108,6 +108,21 @@ def test_cgroup_artifact_parser_valid():
     assert resource.fallback_used is False
 
 
+def test_bridge_record_accepts_current_clawtune_telemetry_metadata() -> None:
+    from clawbox.tuning.schema import BridgeRecord
+
+    value = BridgeRecord.model_validate({
+        "timestamp": "2026-08-30T00:00:00Z", "execution_id": "exec-1",
+        "duration_ms": 10, "exit_code": 0,
+        "telemetry_state": "complete", "telemetry_artifact": "/tmp/a.json",
+        "telemetry_eligible_for_kb": True, "telemetry_quality": "ok",
+        "telemetry_collection_validity": "valid", "telemetry_cleanup": "ok",
+        "telemetry_loss_total": 0,
+    })
+    assert value.telemetry_eligible_for_kb is True
+    assert value.telemetry_loss_total == 0
+
+
 def test_cgroup_artifact_parser_rejects_invalid():
     assert cgroup_artifact_to_resource({}) is None
     assert cgroup_artifact_to_resource({"schema": "other"}) is None

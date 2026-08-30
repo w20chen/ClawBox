@@ -24,16 +24,17 @@ MAX_LLM_EGRESS_CIDRS = 32
 
 def production_workflow(
     *, profile: str, concurrency: int, timeout_seconds: int, command_timeout_seconds: int,
+    baseline: str = "fixed-resident", kb_generation: int | None = None,
 ):
-    """Describe the accepted Cell without changing the existing launcher mechanics."""
+    """Describe one production-shaped Cell research arm."""
     spec = ExperimentSpec.model_validate({
         "workload": {"source": "swe_rebench", "input": "launcher task list"},
         "agent": {"driver": "openclaw"}, "inference": {"backends": ["api"]},
         "sandbox": {"backend": "kubernetes", "tool_transport": "ssh"},
-        "scheduling": {"baselines": ["fixed-resident"]},
+        "scheduling": {"baselines": [baseline]},
         "execution": {"concurrency": concurrency, "timeout_seconds": timeout_seconds,
                       "command_timeout_seconds": command_timeout_seconds},
-        "resources": {"profile": profile},
+        "resources": {"profile": profile, "kb_generation": kb_generation},
     })
     return expand_matrix(spec)[0]
 
@@ -168,6 +169,8 @@ def render_sandbox_task(
     tool_egress_cidrs: list[str] | None = None, run_id: str = "run",
     llm_egress_cidrs: list[str] | None = None,
     tenant_id: str = "benchmark",
+    baseline: str = "fixed-resident",
+    kb_generation: int | None = None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r".+@sha256:[a-f0-9]{64}", task.image):
         raise ValueError("SandboxTask tool image must be an immutable arm64 digest")
@@ -182,7 +185,7 @@ def render_sandbox_task(
     annotations = {"clawbox.openai.com/original-instance-id": task.instance_id}
     if task.repository:
         annotations["clawbox.openai.com/repository"] = task.repository
-    return {
+    manifest = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SandboxTask",
         "metadata": {
@@ -208,11 +211,15 @@ def render_sandbox_task(
             "llmEgressPort": 443,
             "toolEgressCIDRs": tool_egress_cidrs or [],
             "profile": profile,
+            "baseline": baseline,
             "timeoutSeconds": timeout_seconds,
             "commandTimeoutSeconds": command_timeout_seconds,
             "outputLimitBytes": output_limit_bytes,
         },
     }
+    if kb_generation is not None:
+        manifest["spec"]["kbGeneration"] = kb_generation
+    return manifest
 
 
 class KubernetesBenchmarkLauncher:
@@ -233,6 +240,8 @@ class KubernetesBenchmarkLauncher:
             profile=str(options.get("profile", "small")), concurrency=parallelism,
             timeout_seconds=int(options.get("timeout_seconds", 1800)),
             command_timeout_seconds=int(options.get("command_timeout_seconds", 300)),
+            baseline=str(options.get("baseline", "fixed-resident")),
+            kb_generation=options.get("kb_generation"),
         )
         options["_resolved_workflow"] = workflow
         self._preflight(**options)
@@ -308,10 +317,17 @@ class KubernetesBenchmarkLauncher:
                     }.items() if value},
                     status=standard_status, failure_category=failure_category_for(
                         standard_status, str(status.get("reason", "")),
-                    ), started_at=started_at, completed_at=utcnow(), metrics={},
+                    ), started_at=started_at, completed_at=utcnow(), metrics={
+                        "sizing_decision": status.get("sizingDecision"),
+                    },
                     artifacts={"sandbox_task": name},
                     backend_details={
-                        "topology": "Runtime + Tool", "prediction": "shadow-only",
+                        "topology": "Runtime + Tool",
+                        "prediction": (
+                            "enforced-native-p90"
+                            if workflow.baseline in {"p90-static", "p90-elastic"}
+                            else "shadow-only"
+                        ),
                         "runtime_image_source": "Cell controller configuration",
                         "llm_secret": options["llm_secret"],
                     },
@@ -346,12 +362,21 @@ def main() -> None:
     parser.add_argument("--tool-egress-cidr", action="append", default=[])
     parser.add_argument("--runtime-class", default=os.getenv("KUBERNETES_RUNTIME_CLASS", "kata-fc-arm64"))
     parser.add_argument("--profile", choices=("small", "medium", "large"), default="small")
+    parser.add_argument(
+        "--baseline", choices=("fixed-resident", "p90-static", "p90-elastic"),
+        default="fixed-resident",
+    )
+    parser.add_argument(
+        "--kb-generation", type=int,
+        help="immutable native KB generation; required only for --baseline p90-static",
+    )
     parser.add_argument("--parallelism", type=int, default=1)
     parser.add_argument("--sample", type=int)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--command-timeout-seconds", type=int, default=300)
     parser.add_argument("--output-limit-bytes", type=int, default=4 * 1024**2)
     parser.add_argument("--run-id", help="stable id for an intentional retry; generated when omitted")
+    parser.add_argument("--output", type=Path, help="write the result envelopes as JSON")
     parser.add_argument(
         "--tenant", default=os.getenv("CLAWBOX_BENCHMARK_TENANT", "benchmark"),
         help="stable tenant identity used to isolate and share KB generations",
@@ -363,6 +388,10 @@ def main() -> None:
         parser.error("--timeout-seconds must be >= 1")
     if args.command_timeout_seconds < 1:
         parser.error("--command-timeout-seconds must be >= 1")
+    if args.baseline == "p90-static" and (args.kb_generation is None or args.kb_generation < 1):
+        parser.error("--baseline p90-static requires --kb-generation >= 1")
+    if args.baseline != "p90-static" and args.kb_generation is not None:
+        parser.error("--kb-generation is only valid with --baseline p90-static")
     try:
         tasks = select_arm64_tasks(
             load_tasks(args.tasks), load_arm64_mapping(args.arm64_map), args.sample,
@@ -392,10 +421,18 @@ def main() -> None:
             tool_egress_cidrs=args.tool_egress_cidr,
             run_id=args.run_id,
             tenant_id=args.tenant,
+            baseline=args.baseline,
+            kb_generation=args.kb_generation,
         )
     except RuntimeError as exc:
         parser.error(str(exc))
-    print(json.dumps(results, ensure_ascii=False, indent=2))
+    rendered = json.dumps(results, ensure_ascii=False, indent=2) + "\n"
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = args.output.with_name(args.output.name + ".next")
+        temporary.write_text(rendered, encoding="utf-8")
+        temporary.replace(args.output)
+    print(rendered, end="")
     if any(item["status"] != "succeeded" for item in results):
         raise SystemExit(1)
 

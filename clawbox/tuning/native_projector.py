@@ -62,6 +62,21 @@ def latest_native_snapshot(
     )
 
 
+def native_snapshot_for_generation(
+    db: Session, *, tenant_id: str, repo_fingerprint: str, generation: int,
+) -> TuningNativeSnapshotRow | None:
+    """Return one immutable native generation without falling back to latest."""
+    if generation < 1:
+        raise ValueError("native KB generation must be positive")
+    return db.scalar(
+        select(TuningNativeSnapshotRow).where(
+            TuningNativeSnapshotRow.tenant_id == tenant_id,
+            TuningNativeSnapshotRow.repo_fingerprint == repo_fingerprint,
+            TuningNativeSnapshotRow.generation == generation,
+        )
+    )
+
+
 def _generation(db: Session, tenant_id: str, repo_fingerprint: str) -> int:
     row = latest_native_snapshot(
         db, tenant_id=tenant_id, repo_fingerprint=repo_fingerprint

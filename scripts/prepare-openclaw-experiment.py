@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -22,10 +23,38 @@ def inject(rootfs: Path, source: Path, destination: str, mode: str) -> None:
     debugfs(rootfs, f"set_inode_field {destination} mode {mode}")
 
 
+def clone_disk(source: Path, destination: Path) -> None:
+    """Use copy-on-write clones on Linux; preserve the portable fallback."""
+    try:
+        subprocess.run(
+            ["cp", "--reflink=auto", "--sparse=always", str(source), str(destination)],
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        shutil.copyfile(source, destination)
+
+
 def static_ip(prefix: str, session: int, host: int) -> str:
     address = f"{prefix}.{session + 1}.{host}"
     gateway = f"{prefix}.{session + 1}.1"
     return f"ip={address}::{gateway}:255.255.255.0::eth0:off"
+
+
+def parse_cpu_list(value: str) -> list[int]:
+    cpus: list[int] = []
+    for item in value.split(","):
+        if re.fullmatch(r"\d+-\d+", item):
+            first, last = (int(part) for part in item.split("-", 1))
+            if last < first:
+                raise ValueError("CPU range is reversed")
+            cpus.extend(range(first, last + 1))
+        elif item.isdigit():
+            cpus.append(int(item))
+        else:
+            raise ValueError(f"invalid CPU-list item: {item}")
+    if not cpus or len(cpus) != len(set(cpus)):
+        raise ValueError("CPU list must be non-empty and unique")
+    return cpus
 
 
 def main() -> None:
@@ -40,8 +69,10 @@ def main() -> None:
     p.add_argument("--runtime-memory-mib", type=int, default=2048)
     p.add_argument("--tool-memory-mib", type=int, default=4096)
     p.add_argument("--cpu-first", type=int, default=0)
+    p.add_argument("--cpu-list", help="round-robin Runtime/Tool placement over this CPU list")
     p.add_argument("--numa-node", type=int, default=0)
     a = p.parse_args()
+    shared_cpus = parse_cpu_list(a.cpu_list) if a.cpu_list else None
     ipaddress.ip_network(f"{a.network_prefix}.0.0/16")
     if a.sessions < 1 or a.sessions > 253:
         raise ValueError("sessions must be between 1 and 253")
@@ -51,8 +82,8 @@ def main() -> None:
         directory = a.output / f"session-{index:04d}"
         directory.mkdir()
         runtime_disk, tool_disk = directory / "runtime.ext4", directory / "tool.ext4"
-        shutil.copyfile(a.runtime_rootfs, runtime_disk)
-        shutil.copyfile(a.tool_rootfs, tool_disk)
+        clone_disk(a.runtime_rootfs, runtime_disk)
+        clone_disk(a.tool_rootfs, tool_disk)
         identity = directory / "id_ed25519"
         host_key = directory / "ssh_host_ed25519_key"
         run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(identity))
@@ -81,6 +112,14 @@ def main() -> None:
         inject(tool_disk, host_key, "/etc/clawbox/ssh/ssh_host_ed25519_key", "0100600")
         inject(tool_disk, identity.with_suffix(".pub"), "/etc/clawbox/ssh/id_ed25519.pub", "0100644")
         common = "console=ttyS0 reboot=k panic=1 pci=off rw"
+        runtime_cpu = (
+            shared_cpus[(2 * index) % len(shared_cpus)]
+            if shared_cpus else a.cpu_first + index
+        )
+        tool_cpu = (
+            shared_cpus[(2 * index + 1) % len(shared_cpus)]
+            if shared_cpus else a.cpu_first + a.sessions + index
+        )
         runtime_config = {
             "binary": "/opt/kata/bin/firecracker", "api_socket": str(directory / "runtime.sock"),
             "kernel_image": "/opt/kata/share/kata-containers/vmlinux.container",
@@ -89,7 +128,7 @@ def main() -> None:
             "memory_mib": a.runtime_memory_mib,
             "boot_args": f"{common} init=/usr/local/bin/experiment-runtime-init " + static_ip(a.network_prefix, index, 2),
             "tap_device": f"crt{index:04d}", "guest_mac": f"06:30:{index + 1:02x}:00:00:02",
-            "cpu_set": str(a.cpu_first + index), "numa_node": a.numa_node,
+            "cpu_set": str(runtime_cpu), "numa_node": a.numa_node,
             "log_path": str(directory / "runtime.log"),
         }
         tool_config = {
@@ -100,7 +139,7 @@ def main() -> None:
             "memory_mib": a.tool_memory_mib,
             "boot_args": f"{common} init=/usr/local/bin/experiment-tool-init " + static_ip(a.network_prefix, index, 3),
             "tap_device": f"ctl{index:04d}", "guest_mac": f"06:30:{index + 1:02x}:00:00:03",
-            "cpu_set": str(a.cpu_first + a.sessions + index), "numa_node": a.numa_node,
+            "cpu_set": str(tool_cpu), "numa_node": a.numa_node,
             "log_path": str(directory / "tool.log"),
         }
         runtime_json, tool_json = directory / "runtime.json", directory / "tool.json"

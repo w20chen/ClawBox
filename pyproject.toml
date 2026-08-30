@@ -47,6 +47,7 @@ clawbox = "clawbox.cli:main"
 clawbox-tune-server = "clawbox.tuning.server:main"
 clawbox-arm64-images = "clawbox.images.arm64:main"
 clawbox-swe-rebench-arm64-images = "clawbox.images.swerebench:main"
+clawbox-p90-export = "clawbox.cell.p90:export_main"
 
 [tool.setuptools.packages.find]
 where = ["."]

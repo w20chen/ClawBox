@@ -28,12 +28,14 @@ from clawbox.benchmark.kubernetes import (
 from clawbox.benchmark.concurrency_smoke import build_smoke_tasks
 from clawbox.cell.capacity import (
     AtomicAdmission,
+    ClawTunePredictionSizer,
     FixedProfileSizer,
     KubernetesNodeCapacityProvider,
     ResourceVector,
     StaticCapacityProvider,
     pod_request,
 )
+from clawbox.cell.p90 import AdmissionPrediction, PredictionUnavailable
 from clawbox.cell.controller import CellPhase, CellReconciler
 from clawbox.cell.manifests import (
     credential_secrets,
@@ -247,6 +249,26 @@ def test_cell_profiles_reserve_both_vms_sidecar_overheads_and_safety():
     assert not admission.reserve("two", ResourceVector(1, 1, 1, 1))
 
 
+def test_p90_sizer_changes_only_tool_compute_and_is_safety_bounded():
+    fixed = FixedProfileSizer()
+    predicted = ClawTunePredictionSizer(fixed).size(
+        "small", cpu_p90_cores=0.5, memory_p90_bytes=2 * 1024**3,
+    )
+    baseline = fixed.size("small")
+    assert predicted.runtime == baseline.runtime
+    assert predicted.sidecar == baseline.sidecar
+    assert predicted.tool.storage_bytes == baseline.tool.storage_bytes
+    assert predicted.tool.cpu_millis == 625  # p90 plus 25% Pod-limit headroom
+    assert predicted.tool.memory_bytes == int(2.5 * 1024**3)
+    assert predicted.tool.cpu_millis < baseline.tool.cpu_millis
+    assert predicted.tool.memory_bytes < baseline.tool.memory_bytes
+    capped = ClawTunePredictionSizer(fixed).size(
+        "small", cpu_p90_cores=100, memory_p90_bytes=100 * 1024**3,
+    )
+    assert capped.tool == baseline.tool
+    assert predicted == type(predicted).from_status(predicted.as_status())
+
+
 def test_runtime_manifest_and_reservation_account_for_inprocess_clawtune():
     """CBX-M0-002: admission reservation, Runtime request/limit and the design
     profile math must agree for every profile. The Runtime container (which
@@ -321,6 +343,12 @@ def test_benchmark_manifest_propagates_stable_kb_scope():
     assert manifest["metadata"]["annotations"]["clawbox.openai.com/repository"] == "acme/widget"
 
     manifest["metadata"].update(uid="uid-a", generation=1)
+    tool = tool_pod(manifest, FixedProfileSizer().size("small"))
+    tool_env = {
+        item["name"]: item.get("value")
+        for item in tool["spec"]["containers"][0]["env"]
+    }
+    assert tool_env["CLAWBOX_REPOSITORY"] == "acme/widget"
     job = runtime_job(manifest, FixedProfileSizer().size("small"))
     env = {
         item["name"]: item.get("value")
@@ -667,6 +695,88 @@ class FakeCustom:
         return {"items": []}
     def patch_namespaced_custom_object_status(self, *args): self.statuses.append(args[-1]["status"])
     def patch_namespaced_custom_object(self, *args): pass
+
+
+class FakePredictionProvider:
+    def __init__(self, *, evidence_count: int = 5):
+        self.calls = []
+        self.evidence_count = evidence_count
+
+    def get(self, *, tenant_id, repo_fingerprint, generation):
+        self.calls.append((tenant_id, repo_fingerprint, generation))
+        return AdmissionPrediction(
+            tenant_id=tenant_id,
+            repo_fingerprint=repo_fingerprint,
+            generation=generation or 9,
+            pair_digest="a" * 64,
+            source_digest="b" * 64,
+            artifact_count=10,
+            clawtune_revision="c" * 40,
+            latency_p90_sec=12.0,
+            cpu_p90_cores=0.5,
+            memory_p90_bytes=float(2 * 1024**3),
+            evidence_count=self.evidence_count,
+            scopes={"cpu": "public", "memory": "public", "latency": "public"},
+            fallback_paths={"cpu": ["public:tool_name"]},
+        )
+
+
+def p90_task(baseline: str, *, generation: int | None = None) -> dict:
+    value = task(phase=CellPhase.QUEUED.value)
+    value["metadata"]["labels"] = {"clawbox.openai.com/tenant": "tenant-a"}
+    value["metadata"]["annotations"] = {
+        "clawbox.openai.com/repository": "github.com/acme/foo",
+    }
+    value["spec"]["baseline"] = baseline
+    if generation is not None:
+        value["spec"]["kbGeneration"] = generation
+    return value
+
+
+def test_reconciler_freezes_static_and_elastic_p90_decisions_at_admission():
+    capacity = StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000))
+    for baseline, generation, expected in (
+        ("p90-static", 3, 3), ("p90-elastic", None, 9),
+    ):
+        provider = FakePredictionProvider()
+        custom = FakeCustom()
+        reconciler = CellReconciler(
+            core_api=FakeCore(), batch_api=FakeBatch(), networking_api=FakeNetwork(),
+            custom_api=custom, capacity_provider=capacity,
+            prediction_provider=provider, p90_min_evidence=5,
+        )
+        value = p90_task(baseline, generation=generation)
+        assert reconciler.reconcile(value) is False
+        admitted = custom.statuses[-1]
+        assert admitted["phase"] == "Admitted"
+        decision = admitted["sizingDecision"]
+        assert decision["baseline"] == baseline
+        assert decision["prediction"]["generation"] == expected
+        assert decision["cellSize"]["tool"]["cpuMillis"] == 625
+        assert provider.calls == [("tenant-a", "github.com/acme/foo", generation)]
+
+        # Reconciliation after admission must replay the persisted decision,
+        # never consult a newer elastic generation or change the reservation.
+        provider.calls.clear()
+        admitted_task = p90_task(baseline, generation=generation)
+        admitted_task["status"] = admitted
+        assert reconciler.reconcile(admitted_task, allow_workload_start=False) is False
+        assert provider.calls == []
+
+
+def test_reconciler_keeps_p90_task_queued_until_minimum_evidence_exists():
+    custom = FakeCustom()
+    reconciler = CellReconciler(
+        core_api=FakeCore(), batch_api=FakeBatch(), networking_api=FakeNetwork(),
+        custom_api=custom,
+        capacity_provider=StaticCapacityProvider(ResourceVector(100_000, 10**15, 10**15, 1000)),
+        prediction_provider=FakePredictionProvider(evidence_count=4),
+        p90_min_evidence=5,
+    )
+    assert reconciler.reconcile(p90_task("p90-elastic")) is False
+    assert custom.statuses[-1]["phase"] == "Queued"
+    assert custom.statuses[-1]["reason"] == "PredictionUnavailable"
+    assert "at least 5" in custom.statuses[-1]["message"]
 
 
 def test_reconciler_waits_for_tool_readiness_before_creating_runtime():

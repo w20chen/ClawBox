@@ -9,12 +9,22 @@ from typing import Any, Callable
 
 from clawbox.cell.capacity import (
     AtomicAdmission,
+    CellSize,
+    ClawTunePredictionSizer,
     FixedProfileSizer,
     KubernetesNodeCapacityProvider,
     PlacementPolicy,
     ResourceVector,
     SingleNodePlacementPolicy,
 )
+from clawbox.cell.p90 import (
+    FIXED_BASELINE,
+    HTTPAdmissionPredictionClient,
+    PredictionUnavailable,
+    SUPPORTED_CELL_BASELINES,
+    resolve_p90_decision,
+)
+from clawbox.common.config import settings
 from clawbox.cell.manifests import (
     credential_secrets,
     generate_ssh_credentials,
@@ -100,6 +110,17 @@ def validate_task(task: dict[str, Any]) -> None:
         raise ValueError("spec.toolImage must be an immutable linux/arm64 digest")
     if spec.get("profile", "small") not in FixedProfileSizer.PROFILES:
         raise ValueError("spec.profile must be small, medium, or large")
+    baseline = str(spec.get("baseline", FIXED_BASELINE))
+    if baseline not in SUPPORTED_CELL_BASELINES:
+        raise ValueError(
+            "spec.baseline must be fixed-resident, p90-static, or p90-elastic"
+        )
+    generation = spec.get("kbGeneration")
+    if baseline == "p90-static":
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise ValueError("p90-static requires a positive integer spec.kbGeneration")
+    elif generation is not None:
+        raise ValueError("spec.kbGeneration is only valid with p90-static")
     if not spec.get("problemStatement"):
         raise ValueError("spec.problemStatement is required")
     if not spec.get("llmSecretName"):
@@ -124,6 +145,9 @@ class CellReconciler:
     def __init__(
         self, *, core_api, batch_api, networking_api, custom_api,
         sizer: FixedProfileSizer | None = None,
+        prediction_sizer: ClawTunePredictionSizer | None = None,
+        prediction_provider=None,
+        p90_min_evidence: int | None = None,
         capacity_provider: KubernetesNodeCapacityProvider | None = None,
         placement_policy: PlacementPolicy | None = None,
     ):
@@ -132,6 +156,18 @@ class CellReconciler:
         self.networking = networking_api
         self.custom = custom_api
         self.sizer = sizer or FixedProfileSizer()
+        self.prediction_sizer = prediction_sizer or ClawTunePredictionSizer(self.sizer)
+        self.prediction_provider = prediction_provider
+        if self.prediction_provider is None and settings.kb_endpoint and settings.kb_token:
+            self.prediction_provider = HTTPAdmissionPredictionClient(
+                settings.kb_endpoint, settings.kb_token,
+            )
+        self.p90_min_evidence = (
+            int(os.getenv("CLAWBOX_P90_MIN_EVIDENCE", "5"))
+            if p90_min_evidence is None else p90_min_evidence
+        )
+        if self.p90_min_evidence < 1:
+            raise ValueError("p90_min_evidence must be positive")
         self.capacity_provider = capacity_provider or KubernetesNodeCapacityProvider(
             core_api, devmapper_available_bytes=int(os.getenv("CLAWBOX_DEVMAPPER_AVAILABLE_BYTES", "0")),
         )
@@ -217,6 +253,38 @@ class CellReconciler:
             if held is not None:
                 admission.reserve(item["metadata"]["name"], held)
         return admission
+
+    def _size_for_phase(
+        self, task: dict[str, Any], phase: CellPhase, status: dict[str, Any],
+    ) -> tuple[CellSize, dict[str, Any]] | None:
+        """Resolve once while queued, then replay the persisted exact decision."""
+        baseline = str(task.get("spec", {}).get("baseline", FIXED_BASELINE))
+        persisted = status.get("sizingDecision")
+        if isinstance(persisted, dict):
+            if persisted.get("baseline") != baseline:
+                raise ValueError("persisted sizing baseline does not match immutable task spec")
+            raw_size = persisted.get("cellSize")
+            if not isinstance(raw_size, dict):
+                raise ValueError("persisted sizing decision has no Cell size")
+            return CellSize.from_status(raw_size), persisted
+        if baseline == FIXED_BASELINE:
+            size = self.sizer.size(task["spec"].get("profile", "small"))
+            return size, {
+                "baseline": FIXED_BASELINE,
+                "source": "fixed-profile",
+                "cellSize": size.as_status(),
+            }
+        if phase is not CellPhase.QUEUED:
+            raise ValueError("p90 Cell reached a materialized phase without a frozen sizing decision")
+        if self.prediction_provider is None:
+            raise PredictionUnavailable("ClawTune prediction service is not configured")
+        decision = resolve_p90_decision(
+            task,
+            provider=self.prediction_provider,
+            sizer=self.prediction_sizer,
+            min_evidence=self.p90_min_evidence,
+        )
+        return decision.cell_size, decision.as_status()
 
     def _ensure_secrets(self, task: dict[str, Any], timeout: int) -> None:
         namespace = task["metadata"]["namespace"]
@@ -363,10 +431,41 @@ class CellReconciler:
             self._patch_status(task, CellPhase.TIMED_OUT, outcome="TimedOut", reason="CellDeadlineExceeded")
             return False
 
-        size = self.sizer.size(task["spec"].get("profile", "small"))
         namespace = metadata_value["namespace"]
         name = metadata_value["name"]
         timeout = int(task["spec"].get("timeoutSeconds", 1800))
+
+        try:
+            resolved_sizing = self._size_for_phase(task, phase, status)
+        except PredictionUnavailable as exc:
+            self._patch_status(
+                task, CellPhase.QUEUED, reason="PredictionUnavailable", message=str(exc),
+            )
+            return False
+        except (KeyError, TypeError, ValueError) as exc:
+            self._patch_status(
+                task, CellPhase.FAILED, outcome="Failed", reason="UnsafeSizingDecision",
+                message=str(exc),
+            )
+            return False
+        if resolved_sizing is None:  # pragma: no cover - defensive type boundary
+            return False
+        size, sizing_decision = resolved_sizing
+        if status.get("reservation"):
+            try:
+                persisted_reservation = resource_from_status(status["reservation"])
+            except (KeyError, TypeError, ValueError) as exc:
+                self._patch_status(
+                    task, CellPhase.FAILED, outcome="Failed", reason="UnsafeSizingDecision",
+                    message=f"invalid persisted reservation: {exc}",
+                )
+                return False
+            if persisted_reservation != size.reservation:
+                self._patch_status(
+                    task, CellPhase.FAILED, outcome="Failed", reason="UnsafeSizingDecision",
+                    message="persisted sizing decision does not match the Cell reservation",
+                )
+                return False
 
         if phase == CellPhase.QUEUED:
             admission = self._reservation_set(namespace, name)
@@ -378,6 +477,7 @@ class CellReconciler:
             self._patch_status(
                 task, CellPhase.ADMITTED, reason="CellBudgetReserved", admittedAt=now(),
                 reservation=size.reservation.as_status(), nodeName=node_name or "",
+                sizingDecision=sizing_decision,
             )
             return False
 

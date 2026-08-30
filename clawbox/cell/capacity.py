@@ -40,6 +40,15 @@ class ResourceVector:
             "pods": self.pods,
         }
 
+    @classmethod
+    def from_status(cls, value: dict[str, object]) -> "ResourceVector":
+        return cls(
+            cpu_millis=int(value["cpuMillis"]),
+            memory_bytes=int(value["memoryBytes"]),
+            storage_bytes=int(value["storageBytes"]),
+            pods=int(value.get("pods", 0)),
+        )
+
 
 @dataclass(frozen=True)
 class CellSize:
@@ -53,6 +62,33 @@ class CellSize:
     sidecar: ResourceVector
     vm_overhead: ResourceVector
     reservation: ResourceVector
+
+    def as_status(self) -> dict[str, object]:
+        return {
+            "profile": self.profile,
+            "runtime": self.runtime.as_status(),
+            "tool": self.tool.as_status(),
+            "sidecar": self.sidecar.as_status(),
+            "vmOverhead": self.vm_overhead.as_status(),
+            "reservation": self.reservation.as_status(),
+        }
+
+    @classmethod
+    def from_status(cls, value: dict[str, object]) -> "CellSize":
+        def vector(name: str) -> ResourceVector:
+            raw = value.get(name)
+            if not isinstance(raw, dict):
+                raise ValueError(f"persisted Cell size is missing {name}")
+            return ResourceVector.from_status(raw)
+
+        return cls(
+            profile=str(value["profile"]),
+            runtime=vector("runtime"),
+            tool=vector("tool"),
+            sidecar=vector("sidecar"),
+            vm_overhead=vector("vmOverhead"),
+            reservation=vector("reservation"),
+        )
 
 
 class CellSizer(Protocol):
@@ -95,6 +131,12 @@ class FixedProfileSizer:
         # requests. CBX-M0-002.
         clawtune = ResourceVector(250, 512 * 1024**2, GIB)
         runtime = runtime + clawtune
+        return self._assemble(profile, runtime, tool, clawtune)
+
+    def _assemble(
+        self, profile: str, runtime: ResourceVector, tool: ResourceVector,
+        clawtune: ResourceVector,
+    ) -> CellSize:
         base = runtime + tool + self.overhead + self.overhead
         reservation = ResourceVector(
             math.ceil(base.cpu_millis * (1 + self.safety_fraction)),
@@ -106,10 +148,58 @@ class FixedProfileSizer:
 
 
 class ClawTunePredictionSizer:
-    """Stable extension point; prediction is deliberately disabled for observe-only."""
+    """Turn a validated native p90 prediction into a bounded two-VM Cell.
 
-    def size(self, profile: str) -> CellSize:
-        raise NotImplementedError("ClawTune prediction sizing is not enabled in observe-only mode")
+    ClawTune observes Tool-VM commands, so the Runtime VM stays on the selected
+    fixed profile.  Only the Tool CPU and memory budgets vary.  A prediction is
+    never allowed to exceed the selected fixed profile (the experiment studies
+    safe reclamation, not burst capacity), and floors keep Kata/guest services
+    viable.  Headroom is applied to the Pod limit itself; the separate Cell
+    reservation safety factor continues to protect node admission accounting.
+    """
+
+    def __init__(
+        self,
+        fixed: FixedProfileSizer | None = None,
+        *,
+        prediction_headroom_fraction: float = 0.25,
+        min_tool_cpu_millis: int = 250,
+        min_tool_memory_bytes: int = 2 * GIB,
+    ) -> None:
+        if not 0 <= prediction_headroom_fraction <= 1:
+            raise ValueError("prediction_headroom_fraction must be between 0 and 1")
+        if min_tool_cpu_millis < 1 or min_tool_memory_bytes < 1:
+            raise ValueError("predicted Tool resource floors must be positive")
+        self.fixed = fixed or FixedProfileSizer()
+        self.prediction_headroom_fraction = prediction_headroom_fraction
+        self.min_tool_cpu_millis = min_tool_cpu_millis
+        self.min_tool_memory_bytes = min_tool_memory_bytes
+
+    def size(
+        self, profile: str, *, cpu_p90_cores: float, memory_p90_bytes: float,
+    ) -> CellSize:
+        if not math.isfinite(cpu_p90_cores) or cpu_p90_cores <= 0:
+            raise ValueError("ClawTune CPU p90 must be finite and positive")
+        if not math.isfinite(memory_p90_bytes) or memory_p90_bytes <= 0:
+            raise ValueError("ClawTune memory p90 must be finite and positive")
+        fixed_size = self.fixed.size(profile)
+        factor = 1 + self.prediction_headroom_fraction
+        cpu_millis = math.ceil(cpu_p90_cores * 1000 * factor)
+        memory_bytes = math.ceil(memory_p90_bytes * factor)
+        tool = ResourceVector(
+            cpu_millis=min(
+                fixed_size.tool.cpu_millis,
+                max(self.min_tool_cpu_millis, cpu_millis),
+            ),
+            memory_bytes=min(
+                fixed_size.tool.memory_bytes,
+                max(self.min_tool_memory_bytes, memory_bytes),
+            ),
+            storage_bytes=fixed_size.tool.storage_bytes,
+        )
+        return self.fixed._assemble(
+            profile, fixed_size.runtime, tool, fixed_size.sidecar,
+        )
 
 
 class SingleNodePlacementPolicy:

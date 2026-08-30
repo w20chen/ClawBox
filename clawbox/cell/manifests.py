@@ -133,6 +133,18 @@ def tool_service(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _kb_repository(task: dict[str, Any]) -> str:
+    spec = task.get("spec", {})
+    return str(
+        spec.get("repoKey")
+        or task.get("metadata", {}).get("annotations", {}).get(
+            "clawbox.openai.com/repository", ""
+        )
+        or spec.get("repository")
+        or ""
+    ).strip()
+
+
 def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = None) -> dict[str, Any]:
     name = task["metadata"]["name"]
     spec = task["spec"]
@@ -171,7 +183,7 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
                 {"name": "CLAWTUNE_GUEST_COLLECTOR_HELPER", "value": "/opt/clawtune-guest/tools/guest_collector_server.py"},
                 {"name": "CLAWTUNE_GUEST_COLLECTOR_PYTHON", "value": "/opt/clawtune/venv/bin/python"},
                 {"name": "CLAWTUNE_GUEST_ARTIFACT_ROOT", "value": "/testbed/.clawbox/tool-resource"},
-                {"name": "CLAWBOX_REPOSITORY", "value": str(spec.get("repository", "unknown/unknown"))},
+                {"name": "CLAWBOX_REPOSITORY", "value": _kb_repository(task) or "unknown/unknown"},
                 {"name": "GIT_CONFIG_COUNT", "value": "1"},
                 {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
                 {"name": "GIT_CONFIG_VALUE_0", "value": "*"},
@@ -240,11 +252,7 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             "KB-enabled SandboxTask requires spec.runRef.tenantID or "
             "metadata.labels['clawbox.openai.com/tenant']"
         )
-    kb_repository = str(
-        task.get("metadata", {}).get("annotations", {}).get(
-            "clawbox.openai.com/repository", ""
-        )
-    ).strip()
+    kb_repository = _kb_repository(task)
     llm_secret = spec["llmSecretName"]
     timeout = int(spec.get("timeoutSeconds", 1800))
     # Leave a pipeline margin after the agent's own budget: the agent runs with
@@ -283,6 +291,22 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
             _secret_env(f"{name}-auth", "CLAWBOX_KB_INGEST_SECRET", "kb-ingest-secret"),
         ]
     extra_env: list[dict[str, Any]] = []
+    sizing = (task.get("status") or {}).get("sizingDecision") or {}
+    prediction = sizing.get("prediction") or {}
+    extra_env.append({
+        "name": "CLAWBOX_SIZING_BASELINE",
+        "value": str(spec.get("baseline", "fixed-resident")),
+    })
+    if prediction.get("generation") is not None:
+        extra_env.append({
+            "name": "CLAWBOX_SIZING_KB_GENERATION",
+            "value": str(prediction["generation"]),
+        })
+    if prediction.get("pairDigest"):
+        extra_env.append({
+            "name": "CLAWBOX_SIZING_PAIR_DIGEST",
+            "value": str(prediction["pairDigest"]),
+        })
     if kb_repository:
         extra_env.append({"name": "CLAWBOX_REPO_KEY", "value": kb_repository})
     if spec.get("repoKey"):

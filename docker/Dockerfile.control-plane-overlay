@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+# Fast source-only rebuild on top of a dependency-complete control-plane image.
+# BASE_IMAGE must be an immutable digest (a mutable tag is for local iteration only).
+ARG BASE_IMAGE=clawbox-control-plane:dependency-base
+FROM ${BASE_IMAGE}
+USER root
+COPY clawbox /opt/clawbox/clawbox
+COPY clawbox /usr/local/lib/python3.12/site-packages/clawbox
+COPY alembic.ini /opt/clawbox/alembic.ini
+COPY alembic /opt/clawbox/alembic
+USER 10001:10001

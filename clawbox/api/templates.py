@@ -24,11 +24,25 @@ class TemplatePolicy:
     runtime_image: str
     llm_egress_cidr: str
     profile: str = "small"
+    baseline: str = "fixed-resident"
+    kb_generation: int | None = None
+    repository: str | None = None
     max_deadline_seconds: int = 3600
     min_deadline_seconds: int = 60
     # Allowed reference types/egress buckets if any (empty = task-image only).
     allowed_input_prefixes: tuple[str, ...] = ()
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.baseline not in {"fixed-resident", "p90-static", "p90-elastic"}:
+            raise ValueError(f"unsupported Cell baseline {self.baseline!r}")
+        if self.baseline == "p90-static":
+            if self.kb_generation is None or self.kb_generation < 1:
+                raise ValueError("p90-static template requires kbGeneration >= 1")
+        elif self.kb_generation is not None:
+            raise ValueError("kbGeneration is only valid for p90-static templates")
+        if self.baseline != "fixed-resident" and not self.repository:
+            raise ValueError("p90 template requires a stable repository")
 
 
 class TemplateError(ValueError):
@@ -52,6 +66,11 @@ class TemplateRegistry:
                     runtime_image=cfg["runtimeImage"],
                     llm_egress_cidr=cfg.get("llmEgressCIDR", "0.0.0.0/0"),
                     profile=cfg.get("profile", "small"),
+                    baseline=cfg.get("baseline", "fixed-resident"),
+                    kb_generation=(
+                        int(cfg["kbGeneration"]) if cfg.get("kbGeneration") is not None else None
+                    ),
+                    repository=cfg.get("repository"),
                     max_deadline_seconds=int(cfg.get("maxDeadlineSeconds", 3600)),
                     min_deadline_seconds=int(cfg.get("minDeadlineSeconds", 60)),
                     allowed_input_prefixes=tuple(cfg.get("allowedInputPrefixes", [])),
@@ -84,6 +103,7 @@ DEFAULT_TEMPLATE_JSON = json.dumps(
                 "runtimeImage": "127.0.0.1:5000/clawbox/runtime-arm64:dev",
                 "llmEgressCIDR": "0.0.0.0/0",
                 "profile": "small",
+                "baseline": "fixed-resident",
                 "maxDeadlineSeconds": 3600,
                 "minDeadlineSeconds": 60,
                 "allowedInputPrefixes": [],

@@ -28,8 +28,8 @@ must use those terms rather than an unqualified `snapshot`.
 |---|---|---|---|---|
 | `scripts/run-swe-rebench.sh` → `clawbox.benchmark.kubernetes` | SWE-ReBench / OpenClaw | Kubernetes Kata/Firecracker ARM64, Runtime Job + Tool Pod, SSH | `fixed_profile`, `resident`; SandboxTask outcome JSON plus result envelope | production |
 | `clawbox.benchmark.managed_client` and `clawbox.benchmark.multitenant` | Managed SWE-ReBench intake / dispatcher | Managed API persistence then accepted Cell path | managed run/attempt/event records | production intake |
-| `clawbox.cell.app` | SandboxTask controller | Kubernetes Runtime + Tool Cell | `FixedProfileSizer`; ClawTune prediction is shadow-only | production |
-| `python -m clawbox.replay.cli study` / `clawbox-replay study` | recorded trace / OpenClaw | two direct Firecracker VMs, Runtime + Tool, SSH | fixed explicit resources; `resident` or `llm_wait_checkpoint`; study JSON and envelopes | research |
+| `clawbox.cell.app` | SandboxTask controller | Kubernetes Runtime + Tool Cell | fixed default; opt-in bounded `p90_static`/`p90_elastic` Tool sizing | production default plus research baselines |
+| `python -m clawbox.replay.cli study|suite` / `clawbox-replay` | one or several recorded traces / OpenClaw | two direct Firecracker VMs per task, Runtime + Tool, SSH | fixed/P90 sizing crossed with `resident`/`llm_wait_checkpoint`; study JSON and envelopes | research |
 | `scripts/run-openclaw-experiment.py` | prepared recorded task / OpenClaw | two direct Firecracker VMs, SSH | `--mode snapshot` remains an alias for `llm_wait_checkpoint` | research adapter |
 | `python -m clawbox.replay.cli run|experiment` / `clawbox-replay` | recorded trace / ReplayEngine | direct Firecracker or local; transport is selected explicitly, and paired Tool Firecracker requires `vsock` | its own resident slots, lifecycle and latency-triggered checkpoint policy; JSONL | historical mechanism testing |
 | `clawbox.scheduler`, `clawbox.allocator`, `clawbox.controller` | execution intent / legacy controller | Tool-only subprocess, Docker, or Kubernetes paths | p90 allocation may be used here; not a two-VM Cell | legacy |
@@ -46,13 +46,17 @@ Production run, attempt, event, outbox, and audit persistence is authoritative
 in `clawbox.managed`. The similarly named tables in `clawbox.common.db` are
 legacy/dev-stage storage and are not another production workflow.
 
-The accepted production workflow is exactly: `swe_rebench` + OpenClaw + API +
-Kubernetes + SSH + `fixed_profile` + `resident`. It materializes a Runtime and
-Tool Cell; it does not enforce p90 predictions or Kubernetes checkpointing.
+The default production workflow is: `swe_rebench` + OpenClaw + API +
+Kubernetes + SSH + `fixed_profile` + `resident`. The opt-in research Cell
+baselines use `p90_static` or `p90_elastic` admission with resident VMs. Static
+requires an exact generation. Elastic resolves latest once at admission; both
+persist the exact prediction and full Cell size so reconciliation cannot drift.
+Neither performs Kubernetes checkpointing.
 
-The active paper study crosses only `inference_backend = replay | api` and
-`residency_policy = resident | llm_wait_checkpoint` on the same recorded
-workload and fixed direct-Firecracker resources. Its legacy config spelling
+The active paper study can cross `inference_backend = replay | api`,
+`sizing_policy = fixed | p90_static`, and `residency_policy = resident |
+llm_wait_checkpoint`. The suite additionally crosses workloads and concurrency
+levels under a validated NUMA CPU/memory budget. Its legacy config spelling
 `memory_policies: [resident, snapshot]` remains supported and translates at the
 boundary.
 
@@ -75,13 +79,14 @@ The immutable registry currently exposes:
 | `fixed-resident` | `fixed_profile` | `resident` | accepted production Cell |
 | `fixed-explicit-resident` | `fixed_explicit` | `resident` | direct-Firecracker research |
 | `fixed-llm-wait-checkpoint` | `fixed_explicit` | `llm_wait_checkpoint` | direct-Firecracker research |
-| `p90-static` | `p90_static` | `resident` | legacy-only |
-| `p90-elastic` | `p90_elastic` | `resident` | not implemented |
+| `p90-static` | `p90_static` | `resident` | Kubernetes and direct-Firecracker research |
+| `p90-static-llm-wait-checkpoint` | `p90_static` | `llm_wait_checkpoint` | direct-Firecracker research |
+| `p90-elastic` | `p90_elastic` | `resident` | Kubernetes research; frozen at admission |
 | `p90-elastic-pressure-checkpoint` | `p90_elastic` | `pressure_checkpoint` | not implemented |
 
 Unsupported combinations are rejected before a runner starts: Kubernetes
-checkpoint residency, production Cell p90 enforcement, pressure checkpointing,
-and local Firecracker checkpointing are not claimed. Tool-only legacy execution
+checkpoint residency, pressure checkpointing, and local Firecracker
+checkpointing are not claimed. Tool-only legacy execution
 is likewise never represented as a Runtime + Tool Cell.
 
 All new outer results use `ResultEnvelope`: run/case IDs, complete resolved

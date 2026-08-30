@@ -478,6 +478,13 @@ def build_parser() -> argparse.ArgumentParser:
     study.set_defaults(func=lambda args: __import__(
         "clawbox.replay.study", fromlist=["run_study"]
     ).run_study(args.config))
+    suite = subparsers.add_parser(
+        "suite", help="run a multi-trace, NUMA-bounded concurrency sweep"
+    )
+    suite.add_argument("config", type=Path)
+    suite.set_defaults(func=lambda args: __import__(
+        "clawbox.replay.suite", fromlist=["run_suite"]
+    ).run_suite(args.config))
     return parser
 
 

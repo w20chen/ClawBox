@@ -371,6 +371,36 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
         gateway.close()
 
 
+def test_streaming_model_response_can_be_exported_as_replay_trace(tmp_path: Path) -> None:
+    import base64
+    from clawbox.replay.model_gateway import GatewayRequest
+
+    gateway = ModelGateway(
+        tmp_path / "store.json", mode="api", upstream_base_url="https://model.invalid/v1",
+        upstream_api_key="key", upstream_model="paper-model",
+    )
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1",
+          "type": "function", "function": {"name": "exec", "arguments": "{\"command\":"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0,
+          "function": {"arguments": "\"true\"}"}}]}}]},
+    ]
+    body = "".join(f"data: {json.dumps(item)}\n\n" for item in chunks) + "data: [DONE]\n\n"
+    request = GatewayRequest(
+        "id", None, ready=True, status_code=200, content_type="text/event-stream",
+        response_b64=base64.b64encode(body.encode()).decode(),
+        started_unix_s=10.0, completed_unix_s=11.5,
+    )
+    gateway._requests["id"] = request
+    trace = tmp_path / "recorded.jsonl"
+    gateway.write_replay_trace(trace)
+    action = load_trace(trace)[0]
+    assert action.duration_s == 1.5
+    assert action.output["tool_calls"][0]["function"] == {
+        "name": "exec", "arguments": '{"command":"true"}',
+    }
+
+
 def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> None:
     trace = tmp_path / "trace.jsonl"
     prompt = tmp_path / "prompt.txt"
@@ -418,6 +448,29 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
     assert envelopes[0]["status"] == "succeeded"
     assert envelopes[0]["resolved_workflow"]["residency_policy"] == "llm_wait_checkpoint"
     assert envelopes[0]["metrics"]["vm_checkpoints"] == 0
+
+
+def test_paper_suite_enforces_numa_cpu_and_memory_bounds() -> None:
+    from clawbox.replay.suite import validate_numa_budget
+
+    topology = {"node": 0, "cpulist": "0-79", "cpus": list(range(80)),
+                "memory_mib": 512 * 1024}
+    valid = {
+        "concurrency_levels": [1, 8, 20, 40], "numa_host_reserve_mib": 32768,
+        "resources": {"cpu_first": 0, "runtime_memory_mib": 2048,
+                      "tool_memory_mib": 4096},
+    }
+    validate_numa_budget(valid, topology)
+    invalid_cpu = {**valid, "concurrency_levels": [41]}
+    with pytest.raises(ValueError, match="outside NUMA node"):
+        validate_numa_budget(invalid_cpu, topology)
+    invalid_memory = {
+        **valid, "concurrency_levels": [40],
+        "resources": {"cpu_first": 0, "runtime_memory_mib": 8192,
+                      "tool_memory_mib": 8192},
+    }
+    with pytest.raises(ValueError, match="NUMA-local budget"):
+        validate_numa_budget(invalid_memory, topology)
 
 
 def test_engine_hashes_final_state_validation() -> None:

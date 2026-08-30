@@ -244,6 +244,26 @@ class Dispatcher:
     def _build_manifest(self, run: Run, attempt, policy) -> dict[str, Any]:
         from clawbox.benchmark.kubernetes import dns_label
 
+        execution_spec = {
+            "toolImage": policy.tool_image,
+            "problemStatement": _problem_statement(run),
+            "llmSecretName": policy.secret_name,
+            "llmEgressCIDR": policy.llm_egress_cidr,
+            "profile": policy.profile,
+            "baseline": policy.baseline,
+            "timeoutSeconds": run.deadline_seconds,
+            "commandTimeoutSeconds": 300,
+            "outputLimitBytes": 4 * 1024**2,
+            "toolEgressCIDRs": [],
+        }
+        if policy.kb_generation is not None:
+            execution_spec["kbGeneration"] = policy.kb_generation
+        annotations = {
+            "clawbox.openai.com/input-ref": run.input_ref,
+            "clawbox.openai.com/template": f"{run.template_ref}@{run.template_revision}",
+        }
+        if policy.repository:
+            annotations["clawbox.openai.com/repository"] = policy.repository
         return build_sandboxtask_v1alpha2(
             name=_cr_name(run, attempt),
             namespace=self.namespace,
@@ -255,27 +275,14 @@ class Dispatcher:
             desired_state=(
                 DESIRED_CANCELLED if run.desired_state == "Cancelled" else DESIRED_RUNNING
             ),
-            execution_spec={
-                "toolImage": policy.tool_image,
-                "problemStatement": _problem_statement(run),
-                "llmSecretName": policy.secret_name,
-                "llmEgressCIDR": policy.llm_egress_cidr,
-                "profile": policy.profile,
-                "timeoutSeconds": run.deadline_seconds,
-                "commandTimeoutSeconds": 300,
-                "outputLimitBytes": 4 * 1024**2,
-                "toolEgressCIDRs": [],
-            },
+            execution_spec=execution_spec,
             labels={
                 "app.kubernetes.io/name": "clawbox-managed",
                 "app.kubernetes.io/managed-by": "clawbox-dispatcher",
                 "clawbox.openai.com/tenant": dns_label(run.tenant_id),
                 "clawbox.openai.com/run": dns_label(run.run_id),
             },
-            annotations={
-                "clawbox.openai.com/input-ref": run.input_ref,
-                "clawbox.openai.com/template": f"{run.template_ref}@{run.template_revision}",
-            },
+            annotations=annotations,
         )
 
     def _sync_statuses(self, db: Session) -> None:

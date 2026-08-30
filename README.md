@@ -13,9 +13,9 @@ There is no supported x86, QEMU, runc, or multi-node fallback.
 
 ClawBox owns task isolation and lifecycle: the Cell controller creates, monitors, collects, and cleans up the Runtime and Tool VMs. OpenClaw controls the agent loop inside the Runtime VM and sends commands directly to Tool Bridge over SSH.
 
-ClawTune records model, tool, and clause activity in the Runtime VM. Tool Bridge executes commands in the Tool VM and collects guest-side resource telemetry. At task completion, the Runtime VM pairs these artifacts by execution identity, signs them, and uploads them for validation and storage.
+[ClawTune](https://github.com/w20chen/ClawTune) records model, tool, and clause activity in the Runtime VM. Tool Bridge executes commands in the Tool VM and collects guest-side resource telemetry. At task completion, the Runtime VM pairs these artifacts by execution identity, signs them, and uploads them for validation and storage.
 
-Later tasks from the same tenant and repository may load the resulting knowledge base generation. Its predictions remain shadow-only; `FixedProfileSizer` continues to determine production CPU and memory.
+Later tasks from the same tenant and repository may load the resulting knowledge base generation. `fixed-resident` remains the production default. The opt-in research baselines `p90-static` and `p90-elastic` enforce bounded Tool-VM CPU and memory predictions; Runtime resources remain fixed.
 
 ## Execution architecture
 
@@ -39,7 +39,7 @@ classifies the complete workflow.
 | Inference backend | `api`, `replay` | Both are implemented for the paper path; production uses API. |
 | Sandbox backend | `kubernetes`, `direct_firecracker`, `local` | Kubernetes is production, direct Firecracker is research/historical, local is testing/historical. |
 | Tool transport | `ssh`, `vsock`, `local`, `kubectl` | Production and paper use SSH; the others belong to ReplayEngine/testing paths. |
-| Admission policy | `fixed_profile`, `fixed_explicit`, `p90_static`, `p90_elastic` | Fixed profile and fixed explicit are active; p90 static is legacy-only; p90 elastic is not implemented. |
+| Admission policy | `fixed_profile`, `fixed_explicit`, `p90_static`, `p90_elastic` | All are active. P90 policies require authoritative native ClawTune evidence and are research-only. |
 | Residency policy | `resident`, `llm_wait_checkpoint`, `pressure_checkpoint` | Resident and direct-Firecracker LLM-wait checkpoint are active; pressure checkpoint is not implemented. |
 | Result collection | `ResultEnvelope` plus runner artifacts | Production and paper retain their detailed outputs and add the same outer envelope. |
 
@@ -51,24 +51,25 @@ canonical model today:
 | Classification | Workload / driver | Inference | Sandbox / transport | Admission / residency | Execution status |
 | --- | --- | --- | --- | --- | --- |
 | Production | `swe_rebench` / `openclaw` | `api` | `kubernetes` / `ssh` | `fixed_profile` / `resident` | Implemented and accepted. |
+| Research | `swe_rebench` / `openclaw` | `api` | `kubernetes` / `ssh` | `p90_static` or `p90_elastic` / `resident` | Implemented opt-in Cell sizing baselines. |
 | Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `fixed_explicit` / `resident` | Implemented paper arm. |
 | Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `fixed_explicit` / `llm_wait_checkpoint` | Implemented paper arm. |
+| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `p90_static` / `resident` or `llm_wait_checkpoint` | Implemented predictive-memory paper arms. |
 | Historical | `recorded_trace` / `replay_engine` | existing replay/API providers | `direct_firecracker` or `local` / explicitly selected transport | ReplayEngine's existing policy | Retained for mechanism testing; not comparable with a Cell. |
 | Local-only | `synthetic` or targeted smoke input | as required by the helper | `local` or direct Firecracker | helper-specific | Targeted tests only, not a benchmark baseline. |
 
-The paper experiment therefore has exactly four comparable arms:
+For one inference backend, the sizing/residency factorial has four comparable arms:
 
 ```text
-replay + resident
-replay + llm_wait_checkpoint
-api    + resident
-api    + llm_wait_checkpoint
+fixed      + resident
+fixed      + llm_wait_checkpoint
+p90_static + resident
+p90_static + llm_wait_checkpoint
 ```
 
-The following are explicitly **not implemented**: production Cell p90
-enforcement, `p90_elastic`, `pressure_checkpoint`, Kubernetes checkpoint
-residency, and local Firecracker checkpoint residency. The validator rejects
-them before a runner starts.
+The following remain explicitly **not implemented**: `pressure_checkpoint`,
+Kubernetes checkpoint residency, and local Firecracker checkpoint residency.
+The validator rejects them before a runner starts.
 
 ### Baseline registry
 
@@ -80,8 +81,9 @@ two policy columns below:
 | `fixed-resident` | `fixed_profile` | `resident` | Implemented for the production Cell. |
 | `fixed-explicit-resident` | `fixed_explicit` | `resident` | Implemented for direct-Firecracker research. |
 | `fixed-llm-wait-checkpoint` | `fixed_explicit` | `llm_wait_checkpoint` | Implemented for direct-Firecracker research. |
-| `p90-static` | `p90_static` | `resident` | Legacy Tool-only scheduler path; rejected as a Runtime + Tool workflow. |
-| `p90-elastic` | `p90_elastic` | `resident` | Not implemented. |
+| `p90-static` | `p90_static` | `resident` | Implemented research Cell baseline; requires an exact KB generation. |
+| `p90-static-llm-wait-checkpoint` | `p90_static` | `llm_wait_checkpoint` | Implemented direct-Firecracker research baseline. |
+| `p90-elastic` | `p90_elastic` | `resident` | Implemented research Cell baseline; resolves latest once at admission, then freezes it. |
 | `p90-elastic-pressure-checkpoint` | `p90_elastic` | `pressure_checkpoint` | Not implemented. |
 
 The accepted production workflow is:
@@ -98,9 +100,9 @@ recorded_trace + openclaw + (replay | api) + direct_firecracker + ssh
 + fixed_explicit + (resident | llm_wait_checkpoint)
 ```
 
-Production prediction remains shadow-only. Kubernetes VM checkpointing,
-production p90 enforcement, `p90_elastic`, and `pressure_checkpoint` are not
-implemented and are rejected during validation. The historical ReplayEngine
+Fixed sizing remains the production default; P90 enforcement is explicit and
+research-classified. Kubernetes VM checkpointing and `pressure_checkpoint`
+remain rejected during validation. The historical ReplayEngine
 and Tool-only scheduler/allocator/controller paths remain available but are
 not comparable production Cells.
 
@@ -235,7 +237,8 @@ Use these entry points instead of assembling lower-level commands:
 | Submit one real task | `scripts/clawbox submit ...` |
 | Run a real task batch | `bash scripts/run-swe-rebench.sh ...` |
 | Download a task's traces and reports | `scripts/clawbox traces TASK_ID` |
-| Run the complete paper comparison | `python3 -m clawbox.replay.cli study STUDY.json` |
+| Run one paper matrix | `python3 -m clawbox.replay.cli study STUDY.json` |
+| Run multi-trace NUMA/concurrency sweep | `python3 -m clawbox.replay.cli suite SUITE.json` |
 
 The main documentation flow is:
 
@@ -689,11 +692,12 @@ saved model responses through an OpenAI-compatible endpoint;
 tools, SSH, instrumentation, VM images, and agent settings therefore stay the
 same.
 
-The experiment varies two independent dimensions:
+The experiment varies three independent dimensions:
 
 | Dimension | Baseline | Alternative |
 | --- | --- | --- |
 | Inference backend | `replay` recorded responses and latency | `api` through a real OpenAI-compatible service |
+| Sizing policy | `fixed` Tool memory | `p90_static` immutable ClawTune prediction with bounded headroom |
 | Residency policy | `resident` keeps both VMs in memory | `llm_wait_checkpoint` checkpoints idle VMs and restores them before the next command |
 
 During an outstanding model request, `llm_wait_checkpoint` creates a
@@ -777,11 +781,29 @@ The configuration names correspond to these general experiment concepts:
 | `source` | the two reusable VM disks, prompt, and recorded model trace |
 | `sessions`, `repetitions`, `seed` | concurrent workload size, repeat count, and randomized group order |
 | `inference_backends` | recorded timing, real model API, or both |
+| `sizing_policies` | `fixed`, `p90_static`, or both |
 | `memory_policies` | legacy input spelling for `resident` and `llm_wait_checkpoint`; `snapshot` remains an alias |
 | `resources` | VM memory size, CPU numbering, and NUMA placement |
 | `replay.time_scale` | recorded latency multiplier; use `1.0` for measurements |
 | `validation_command` | command whose output represents the final task state |
 | `api` | OpenAI-compatible endpoint, model, and credential variable |
+
+`p90_static` requires a frozen admission-prediction JSON file. Export it from
+the authoritative Tune-KB service, keep the returned generation and digests
+with the paper artifacts, and never substitute a newer generation mid-study:
+
+```bash
+kubectl -n clawbox-system port-forward service/clawbox-tune-kb 18082:8082
+# In another shell, set CLAWBOX_KB_TOKEN from the installed secret without
+# writing it to the study configuration.
+clawbox-p90-export --endpoint http://127.0.0.1:18082 \
+  --tenant TENANT --repository OWNER/REPO --generation GENERATION \
+  --output /data/workloads/p90-admission-prediction.json
+```
+
+Static sizing pins the exact generation. The Kubernetes `p90-elastic` baseline
+is different: it resolves latest exactly once at admission and persists the
+full decision in `SandboxTask.status.sizingDecision`.
 
 For a recorded-only trial, set `inference_backends` to `["replay"]` and no API
 key is needed. For a real-API comparison, retain both values and export the key
@@ -806,7 +828,7 @@ The runner randomizes group order, creates fresh VM disks for every group, and
 writes intermediate results. The final `study-summary.json` contains:
 
 - completed sessions and failures;
-- wall time and completed sessions per hour;
+- wall time, tasks/min, and model steps/min (one step is one completed model request);
 - average and peak Firecracker process memory;
 - save/restore counts and time;
 - means, standard deviations, and 95% confidence intervals across repetitions;
@@ -819,12 +841,66 @@ inference configuration, VM materialization, resources, concurrency,
 validation, and `vm_checkpoints` metric; existing study files remain the
 authoritative detailed artifacts.
 
+### 5. Multi-trace, full-NUMA throughput sweep
+
+Use `deploy/replay-suite.example.json` for paper throughput results. It crosses
+at least two recorded workloads, concurrency levels, fixed/P90 sizing, and
+resident/checkpoint policy, while each child study randomizes arm order and
+repeats measurements. On the four-node Kunpeng reference host, NUMA 0 contains
+CPUs `0-79`; each task has one Runtime vCPU and one Tool vCPU, so 40 tasks is
+the exclusive-CPU ceiling. The suite reads `/sys` and fails before starting if
+either CPU placement escapes the selected node or configured guest memory
+exceeds node-local memory after `numa_host_reserve_mib`.
+
+```bash
+cp deploy/replay-suite.example.json /data/replay-suite.json
+${EDITOR:-vi} /data/replay-suite.json
+sudo bash scripts/direct-firecracker-network.sh up --sessions 40 --prefix 172.30
+python3 -m clawbox.replay.cli suite /data/replay-suite.json
+sudo bash scripts/direct-firecracker-network.sh down --sessions 40 --prefix 172.30
+```
+
+If a previous verified setup already left some session networks in place, use
+`--reuse-existing`. The helper validates every existing bridge address and TAP
+membership and still fails closed on partial or mismatched state:
+
+```bash
+sudo bash scripts/direct-firecracker-network.sh up --sessions 40 \
+  --prefix 172.30 --reuse-existing
+```
+
+The primary exclusive-CPU sweep is `[1, 8, 20, 40]`, three repetitions,
+`time_scale=1.0`,
+and at least three traces chosen before viewing results: a short localized fix,
+a test/debug task, and a multi-file change. Do not call duplicated copies of
+one trace multiple workloads. Report each workload and concurrency separately,
+then a macro-average across workloads; do not pool individual steps as though
+they were independent samples. `suite-summary.json` records measured NUMA
+topology and links every child `study-summary.json`. The preparation path uses
+XFS copy-on-write clones where supported so fresh 6-16 GiB VM disks do not turn
+the sweep into an avoidable storage benchmark.
+
+For the separate memory-density experiment, set `cpu_placement` to
+`round_robin` and use `[40, 60, 78]`. This deliberately shares the 80 NUMA-local
+CPUs, while 78 fixed-size tasks approach the memory budget: `78 * (2 + 4) GiB
+= 468 GiB`, leaving the configured 32 GiB host reserve. Label this result as
+CPU-oversubscribed. A second P90-only extension may test higher concurrency up
+to `floor((node_memory - reserve) / (runtime_memory + predicted_tool_memory))`;
+it is a capacity result, not a paired fixed/P90 latency comparison.
+
+The latest Kunpeng implementation acceptance and deliberately limited
+single-session replay numbers are documented in
+[`docs/results/p90-baselines-kunpeng-2026-08-30.md`](docs/results/p90-baselines-kunpeng-2026-08-30.md).
+That report also records why a multi-trace concurrency result is not claimed
+without interactive network privileges and approval for real-model trace
+recording.
+
 The example validation command hashes the tracked repository changes. Replace
 it with a command that prints the scientifically relevant final artifact for
 your workload. Identical stdout produces an identical recorded hash; a
 non-zero exit code or different hashes make the study fail.
 
-### 5. Read the result and clean up
+### 6. Read the result and clean up
 
 ```bash
 python3 -m json.tool /data/paper-study-001/study-summary.json | less

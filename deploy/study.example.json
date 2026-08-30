@@ -12,6 +12,7 @@
   "network_prefix": "172.30",
   "validation_command": "cd /testbed && git diff --binary --no-ext-diff HEAD",
   "inference_backends": ["replay", "api"],
+  "sizing_policies": ["fixed", "p90_static"],
   "memory_policies": ["resident", "snapshot"],
   "resources": {
     "runtime_memory_mib": 2048,
@@ -21,6 +22,12 @@
   },
   "replay": {
     "time_scale": 1.0
+  },
+  "p90_static": {
+    "prediction_file": "/data/workloads/p90-admission-prediction.json",
+    "min_evidence": 5,
+    "headroom_fraction": 0.25,
+    "min_tool_memory_mib": 2048
   },
   "timeout_s": 900,
   "api": {

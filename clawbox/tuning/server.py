@@ -16,6 +16,9 @@ the tables are created on startup for the research/dev path.
 from __future__ import annotations
 
 import os
+import json
+import math
+import time
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -32,10 +35,11 @@ from .projector import (
     snapshot_metadata,
     snapshot_row_to_dict,
 )
-from .native import NativeTelemetryManifest
+from .native import NativeTelemetryManifest, _clawtune_api
 from .native_projector import (
     ingest_native_batch,
     latest_native_snapshot,
+    native_snapshot_for_generation,
     native_snapshot_to_dict,
     rollback_native,
 )
@@ -162,6 +166,86 @@ def create_app(db_url: str | None = None) -> FastAPI:
         if row is None:
             raise HTTPException(status_code=404, detail="no native snapshot")
         return native_snapshot_to_dict(row)
+
+    @app.get("/v1/kb/admission-prediction", dependencies=[Depends(require_service_token)])
+    def get_admission_prediction(
+        tenant_id: str,
+        repo: str,
+        generation: int | None = None,
+        db: Session = Depends(get_db),
+    ):
+        """Return an authoritative repository-level p90 for Cell admission.
+
+        A Cell is sized before OpenClaw reveals its future commands.  Querying
+        the native runtime KB with an outer ``exec`` call and no command
+        therefore intentionally selects its repository corpus' coarse
+        tool/global node.  Static studies request an exact immutable
+        generation; elastic studies omit it and receive the latest generation.
+        """
+        try:
+            row = (
+                native_snapshot_for_generation(
+                    db, tenant_id=tenant_id, repo_fingerprint=repo,
+                    generation=generation,
+                )
+                if generation is not None
+                else latest_native_snapshot(
+                    db, tenant_id=tenant_id, repo_fingerprint=repo,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if row is None:
+            qualifier = f" generation {generation}" if generation is not None else ""
+            raise HTTPException(
+                status_code=404,
+                detail=f"no native snapshot{qualifier} for (tenant, repo)",
+            )
+        _, _, RuntimeToolResourceKB, ToolCallQuery, _, _ = _clawtune_api()
+        runtime_snapshot = json.loads(row.runtime_snapshot)
+        kb = RuntimeToolResourceKB.from_json_obj(runtime_snapshot)
+        predictions = kb.query(ToolCallQuery(
+            repo=repo,
+            tool_name="exec",
+            command=None,
+            ts_start=max(
+                time.time(), float(runtime_snapshot.get("last_query_ts") or 0.0),
+            ),
+            ambient_before_mb=0.0,
+        ))
+        latency = predictions["latency_ms"]
+        cpu = predictions["peak_cpu_cores"]
+        memory = predictions["peak_memory_mb"]
+        values = (latency.conditional_p90, cpu.conditional_p90, memory.conditional_p90)
+        if any(value is None or not math.isfinite(float(value)) or float(value) <= 0 for value in values):
+            raise HTTPException(status_code=409, detail="native snapshot has no safe positive p90")
+        return {
+            "tenant_id": row.tenant_id,
+            "repo_fingerprint": row.repo_fingerprint,
+            "generation": row.generation,
+            "pair_digest": row.pair_digest,
+            "source_digest": row.source_digest,
+            "artifact_count": row.artifact_count,
+            "clawtune_revision": row.clawtune_revision,
+            "prediction": {
+                "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
+                "cpu_p90_cores": float(cpu.conditional_p90),
+                "memory_p90_bytes": float(memory.conditional_p90) * 1024.0 * 1024.0,
+                "evidence_count": min(
+                    latency.evidence_count, cpu.evidence_count, memory.evidence_count,
+                ),
+                "scopes": {
+                    "latency": latency.scope,
+                    "cpu": cpu.scope,
+                    "memory": memory.scope,
+                },
+                "fallback_paths": {
+                    "latency": list(latency.fallback_path),
+                    "cpu": list(cpu.fallback_path),
+                    "memory": list(memory.fallback_path),
+                },
+            },
+        }
 
     @app.post("/v1/kb/native-rollback", dependencies=[Depends(require_service_token)])
     def post_native_rollback(body: RollbackRequest, db: Session = Depends(get_db)):

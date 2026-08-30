@@ -44,23 +44,26 @@ def validate_workflow(workflow: ResolvedWorkflow) -> CapabilityResult:
     if workflow.residency_policy is ResidencyPolicy.PRESSURE_CHECKPOINT:
         return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
             "residency_policy=pressure_checkpoint is not implemented")
-    if workflow.admission_policy is AdmissionPolicy.P90_ELASTIC:
-        return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
-            "admission_policy=p90_elastic is not implemented by any runner")
-    if workflow.admission_policy is AdmissionPolicy.P90_STATIC:
-        return CapabilityResult(False, WorkflowClassification.LEGACY,
-            "admission_policy=p90_static exists only in the legacy Tool-only "
-            "scheduler/allocator/controller path; it is not a Runtime + Tool workflow")
     if workflow.sandbox_backend is SandboxBackend.KUBERNETES:
         if workflow.residency_policy is not ResidencyPolicy.RESIDENT:
             return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
                 "sandbox_backend=kubernetes does not implement VM checkpoint residency")
-        if workflow.admission_policy is not AdmissionPolicy.FIXED_PROFILE:
+        if workflow.admission_policy not in {
+            AdmissionPolicy.FIXED_PROFILE, AdmissionPolicy.P90_STATIC, AdmissionPolicy.P90_ELASTIC,
+        }:
             return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
-                "production Cell p90 admission is not connected or safety-gated")
+                "Kubernetes Cell admission policy is not implemented")
         if workflow.resources.profile is None:
             return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
-                "resources.profile is required when admission_policy=fixed_profile")
+                "resources.profile is required for Kubernetes Cell admission")
+        if (workflow.admission_policy is AdmissionPolicy.P90_STATIC
+                and workflow.resources.kb_generation is None):
+            return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
+                "resources.kb_generation is required when admission_policy=p90_static")
+        if (workflow.admission_policy is not AdmissionPolicy.P90_STATIC
+                and workflow.resources.kb_generation is not None):
+            return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
+                "resources.kb_generation is only valid when admission_policy=p90_static")
     if (workflow.sandbox_backend is SandboxBackend.LOCAL
             and workflow.residency_policy is not ResidencyPolicy.RESIDENT):
         return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
@@ -74,18 +77,35 @@ def validate_workflow(workflow: ResolvedWorkflow) -> CapabilityResult:
             and workflow.residency_policy is ResidencyPolicy.RESIDENT):
         return CapabilityResult(True, WorkflowClassification.PRODUCTION,
             "accepted Runtime + Tool Kubernetes Cell; ClawTune remains shadow-only")
+    if (workflow.workload.source is WorkloadSource.SWE_REBENCH
+            and workflow.agent_driver is AgentDriver.OPENCLAW
+            and workflow.inference_backend.value == "api"
+            and workflow.sandbox_backend is SandboxBackend.KUBERNETES
+            and workflow.tool_transport is ToolTransport.SSH
+            and workflow.admission_policy in {
+                AdmissionPolicy.P90_STATIC, AdmissionPolicy.P90_ELASTIC,
+            }
+            and workflow.residency_policy is ResidencyPolicy.RESIDENT):
+        return CapabilityResult(True, WorkflowClassification.RESEARCH,
+            "two-VM Kubernetes Cell with frozen, safety-bounded native ClawTune p90 admission")
     if (workflow.workload.source is WorkloadSource.RECORDED_TRACE
             and workflow.agent_driver is AgentDriver.OPENCLAW
             and workflow.sandbox_backend is SandboxBackend.DIRECT_FIRECRACKER
             and workflow.tool_transport is ToolTransport.SSH
-            and workflow.admission_policy is AdmissionPolicy.FIXED_EXPLICIT
+            and workflow.admission_policy in {
+                AdmissionPolicy.FIXED_EXPLICIT, AdmissionPolicy.P90_STATIC,
+            }
             and workflow.residency_policy in {ResidencyPolicy.RESIDENT, ResidencyPolicy.LLM_WAIT_CHECKPOINT}):
         if workflow.resources.runtime_memory_mib is None:
             return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
-                "resources.runtime_memory_mib is required when admission_policy=fixed_explicit")
+                "resources.runtime_memory_mib is required for direct-Firecracker admission")
         if workflow.resources.tool_memory_mib is None:
             return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
-                "resources.tool_memory_mib is required when admission_policy=fixed_explicit")
+                "resources.tool_memory_mib is required for direct-Firecracker admission")
+        if (workflow.admission_policy is AdmissionPolicy.P90_STATIC
+                and workflow.resources.kb_generation is None):
+            return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,
+                "resources.kb_generation is required for direct-Firecracker p90_static")
         required = {"runtime_rootfs", "tool_rootfs", "prompt"}
         if missing := sorted(required - workflow.sandbox.materialization.keys()):
             return CapabilityResult(False, WorkflowClassification.UNSUPPORTED,

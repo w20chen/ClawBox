@@ -46,6 +46,9 @@ spec:
             # Admission remains concurrent, while VM materialization (and a
             # future resume path) is paced on the single audited ARM64 node.
             - {name: CLAWBOX_MAX_WORKLOAD_STARTS_PER_CYCLE, value: "1"}
+            # Native p90 admission is research-only and fails closed until a
+            # repository snapshot has enough paired, valid executions.
+            - {name: CLAWBOX_P90_MIN_EVIDENCE, value: "5"}
             - {name: RUNTIME_IMAGE, value: 127.0.0.1:5000/clawbox/runtime-arm64:dev}
             - {name: TOOL_BRIDGE_IMAGE, value: 127.0.0.1:5000/clawbox/tool-bridge-arm64:dev}
             - {name: TRACE_INGESTER_URL, value: http://clawbox-ingester.clawbox-system.svc:8084}

@@ -128,6 +128,10 @@ def main() -> None:
                 finished, exit_code = complete(Path(runtime_config.log_path))
                 if finished:
                     if exit_code != 0: raise RuntimeError(f"OpenClaw exited with {exit_code}")
+                    if a.inference == "api":
+                        gateway.write_replay_trace(
+                            a.output / f"model-trace-session-{index:04d}.jsonl"
+                        )
                     return {"session": index, "snapshots": snapshots,
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
                             "validation_sha256": ssh_validate(spec, a.validation_command),
@@ -168,11 +172,15 @@ def main() -> None:
     finally:
         stop.set(); sampler.join(timeout=2)
     wall_s = time.monotonic() - started
+    model_steps = sum(len(item.get("model_requests", [])) for item in results)
     report = {"mode": "snapshot" if a.residency_policy == "llm_wait_checkpoint" else "resident",
               "residency_policy": a.residency_policy, "inference": a.inference,
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
               "failures": failures, "wall_s": wall_s,
               "throughput_sessions_per_hour": len(results) * 3600 / wall_s,
+              "throughput_tasks_per_minute": len(results) * 60 / wall_s,
+              "model_steps_completed": model_steps,
+              "throughput_steps_per_minute": model_steps * 60 / wall_s,
               "mean_firecracker_rss_bytes": (
                   sum(x["firecracker_rss_bytes"] for x in samples) / len(samples) if samples else 0
               ),

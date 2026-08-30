@@ -30,10 +30,16 @@ BASELINES = MappingProxyType({
         ResidencyPolicy.LLM_WAIT_CHECKPOINT, "implemented-direct-firecracker",
     ),
     "p90-static": Baseline(
-        "p90-static", AdmissionPolicy.P90_STATIC, ResidencyPolicy.RESIDENT, "legacy-only",
+        "p90-static", AdmissionPolicy.P90_STATIC, ResidencyPolicy.RESIDENT,
+        "implemented-kubernetes-research",
     ),
     "p90-elastic": Baseline(
-        "p90-elastic", AdmissionPolicy.P90_ELASTIC, ResidencyPolicy.RESIDENT, "not-implemented",
+        "p90-elastic", AdmissionPolicy.P90_ELASTIC, ResidencyPolicy.RESIDENT,
+        "implemented-kubernetes-research",
+    ),
+    "p90-static-llm-wait-checkpoint": Baseline(
+        "p90-static-llm-wait-checkpoint", AdmissionPolicy.P90_STATIC,
+        ResidencyPolicy.LLM_WAIT_CHECKPOINT, "implemented-direct-firecracker-research",
     ),
     "p90-elastic-pressure-checkpoint": Baseline(
         "p90-elastic-pressure-checkpoint", AdmissionPolicy.P90_ELASTIC,
