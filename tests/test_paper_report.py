@@ -31,7 +31,11 @@ def _suite(root: Path, concurrency: int, baselines: tuple[str, ...]) -> None:
         "runs": [{
             "status": 0,
             "final_state_equal": True,
-            "groups": {baseline: {"runs": 1} for baseline in baselines},
+            "concurrency": concurrency,
+            "groups": {
+                baseline: {"runs": 1, "configured_tool_memory_mib": [2048]}
+                for baseline in baselines
+            },
         }],
         "macro_statistics": macro,
         "paired_contrasts": {
@@ -83,6 +87,8 @@ def test_build_report_uses_registered_macro_statistics(tmp_path: Path) -> None:
     assert len(report["main"]["rows"]) == 6
     assert len(report["density"]["rows"]) == 2
     assert report["main"]["rows"][0]["correct_tasks_per_min"] == 1.0
+    assert report["main"]["rows"][0]["configured_tool_memory_mib"] == 2048
+    assert set(report["main"]["rows"][0]["raw_metrics"]) == set(METRICS)
     assert report["main"]["rows"][0]["mean_rss_gib"] == pytest.approx(1 / 2**30)
     rendered = markdown_report(report)
     assert "Independent task n = 1" in rendered

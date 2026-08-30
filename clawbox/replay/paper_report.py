@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .suite import SUITE_METRICS
+
 
 MAIN_BASELINES = (
     "replay-fixed-resident",
@@ -21,24 +23,7 @@ DENSITY_BASELINES = (
     "replay-fixed2-snapshot",
 )
 
-METRICS = (
-    "throughput_correct_tasks_per_minute",
-    "throughput_tasks_per_minute",
-    "throughput_steps_per_minute",
-    "wall_s",
-    "correctness_pass_fraction",
-    "mean_firecracker_rss_bytes",
-    "p95_firecracker_rss_bytes",
-    "peak_firecracker_rss_bytes",
-    "firecracker_rss_time_byte_seconds",
-    "p50_session_wall_s",
-    "p95_session_wall_s",
-    "p99_session_wall_s",
-    "max_admission_wait_event_s",
-    "checkpoint_snapshot_service_s",
-    "checkpoint_restore_service_s",
-    "snapshot_allocated_bytes",
-)
+METRICS = tuple(SUITE_METRICS)
 
 
 def _number(value: str | None) -> float | None:
@@ -107,11 +92,33 @@ def _macro_mean(summary: dict[str, Any], concurrency: int, baseline: str, metric
     return float(value)
 
 
+def _configured_tool_memory_mib(
+    summary: dict[str, Any], concurrency: int, baseline: str,
+) -> int:
+    values = {
+        int(value)
+        for run in summary.get("runs", [])
+        if int(run.get("concurrency", -1)) == concurrency
+        for value in (run.get("groups", {}).get(baseline, {}).get(
+            "configured_tool_memory_mib", []
+        ))
+    }
+    if len(values) != 1:
+        raise ValueError(
+            f"expected one configured Tool-memory value for c{concurrency:02d}/{baseline}; "
+            f"found {sorted(values)}"
+        )
+    return values.pop()
+
+
 def _group_row(summary: dict[str, Any], concurrency: int, baseline: str) -> dict[str, Any]:
     raw = {metric: _macro_mean(summary, concurrency, baseline, metric) for metric in METRICS}
     return {
         "concurrency": concurrency,
         "baseline": baseline,
+        "configured_tool_memory_mib": _configured_tool_memory_mib(
+            summary, concurrency, baseline
+        ),
         "correct_tasks_per_min": raw["throughput_correct_tasks_per_minute"],
         "completed_tasks_per_min": raw["throughput_tasks_per_minute"],
         "steps_per_min": raw["throughput_steps_per_minute"],
@@ -121,6 +128,17 @@ def _group_row(summary: dict[str, Any], concurrency: int, baseline: str) -> dict
         "p95_rss_gib": raw["p95_firecracker_rss_bytes"] / 2**30,
         "peak_rss_gib": raw["peak_firecracker_rss_bytes"] / 2**30,
         "rss_time_gib_hours": raw["firecracker_rss_time_byte_seconds"] / 2**30 / 3600,
+        "mean_numa_memory_delta_gib": raw["mean_numa_memory_delta_bytes"] / 2**30,
+        "peak_numa_memory_delta_gib": raw["peak_numa_memory_delta_bytes"] / 2**30,
+        "mean_cgroup_memory_delta_gib": raw["mean_cgroup_memory_delta_bytes"] / 2**30,
+        "peak_cgroup_memory_delta_gib": raw["peak_cgroup_memory_delta_bytes"] / 2**30,
+        "peak_resident_vms": raw["peak_resident_vms"],
+        "checkpoint_cycles": raw["checkpoint_cycles"],
+        "vm_snapshot_operations": raw["vm_snapshot_operations"],
+        "vm_restore_operations": raw["vm_restore_operations"],
+        "admission_wait_total_s": raw["admission_wait_s"],
+        "mean_admission_wait_s": raw["mean_admission_wait_event_s"],
+        "p95_admission_wait_s": raw["p95_admission_wait_event_s"],
         "p50_session_s": raw["p50_session_wall_s"],
         "p95_session_s": raw["p95_session_wall_s"],
         "p99_session_s": raw["p99_session_wall_s"],
@@ -128,6 +146,7 @@ def _group_row(summary: dict[str, Any], concurrency: int, baseline: str) -> dict
         "snapshot_service_s": raw["checkpoint_snapshot_service_s"],
         "restore_service_s": raw["checkpoint_restore_service_s"],
         "snapshot_allocated_gib": raw["snapshot_allocated_bytes"] / 2**30,
+        "raw_metrics": raw,
     }
 
 
@@ -230,32 +249,37 @@ def markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Main six-arm sweep",
         "",
-        "| c | Baseline | Correct tasks/min | Steps/min | Wall s | Mean RSS GiB | "
-        "RSS-time GiB-h | P95 session s | Correct |",
-        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| c | Baseline | Tool MiB | Correct tasks/min | Steps/min | Wall s | "
+        "Mean/peak RSS GiB | RSS-time GiB-h | P95 session s | Checkpoint cycles | Correct |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in report["main"]["rows"]:
         lines.append(
             f"| {row['concurrency']} | {row['baseline']} | "
+            f"{row['configured_tool_memory_mib']} | "
             f"{_fmt(row['correct_tasks_per_min'])} | {_fmt(row['steps_per_min'])} | "
-            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_rss_gib'])} | "
+            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_rss_gib'])}/"
+            f"{_fmt(row['peak_rss_gib'])} | "
             f"{_fmt(row['rss_time_gib_hours'])} | {_fmt(row['p95_session_s'], 2)} | "
+            f"{_fmt(row['checkpoint_cycles'], 1)} | "
             f"{_fmt(row['correctness_percent'], 1)}% |"
         )
     lines.extend([
         "",
         "## Configured-budget density sweep",
         "",
-        "| c | Baseline | Correct tasks/min | Steps/min | Wall s | Mean RSS GiB | "
-        "P95 session s | Max admission wait s | Snapshot GiB |",
-        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| c | Baseline | Correct tasks/min | Steps/min | Wall s | Mean/peak RSS GiB | "
+        "Peak resident VMs | P95 session s | P95/max wait s | Snapshot GiB |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     for row in report["density"]["rows"]:
         lines.append(
             f"| {row['concurrency']} | {row['baseline']} | "
             f"{_fmt(row['correct_tasks_per_min'])} | {_fmt(row['steps_per_min'])} | "
-            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_rss_gib'])} | "
-            f"{_fmt(row['p95_session_s'], 2)} | {_fmt(row['max_admission_wait_s'], 2)} | "
+            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_rss_gib'])}/"
+            f"{_fmt(row['peak_rss_gib'])} | {_fmt(row['peak_resident_vms'], 1)} | "
+            f"{_fmt(row['p95_session_s'], 2)} | {_fmt(row['p95_admission_wait_s'], 2)}/"
+            f"{_fmt(row['max_admission_wait_s'], 2)} | "
             f"{_fmt(row['snapshot_allocated_gib'])} |"
         )
     lines.extend([
