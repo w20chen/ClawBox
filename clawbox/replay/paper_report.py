@@ -66,7 +66,23 @@ def load_complete_suite(root: Path) -> tuple[dict[str, Any], list[dict[str, str]
         rows = list(csv.DictReader(handle))
     if not rows:
         raise ValueError(f"{root}: measurements.csv is empty")
+    expected_rows = sum(
+        int(group.get("runs", 0))
+        for run in runs for group in (run.get("groups") or {}).values()
+    )
+    if expected_rows <= 0 or len(rows) != expected_rows:
+        raise ValueError(
+            f"{root}: measurements.csv has {len(rows)} arms; expected {expected_rows}"
+        )
+    seen: set[tuple[str, ...]] = set()
     for index, row in enumerate(rows, 2):
+        identity = tuple(
+            row.get(field, "")
+            for field in ("workload", "concurrency", "baseline", "repetition", "inference_backend")
+        )
+        if identity in seen:
+            raise ValueError(f"{measurements_path}:{index}: duplicate arm identity {identity}")
+        seen.add(identity)
         if (
             int(row.get("failure_count") or -1) != 0
             or int(row.get("sessions_completed") or -1)

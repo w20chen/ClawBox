@@ -28,7 +28,11 @@ def _suite(root: Path, concurrency: int, baselines: tuple[str, ...]) -> None:
         "all_successful": True,
         "concurrency_levels": [concurrency],
         "independent_units": ["owner/repo#1"],
-        "runs": [{"status": 0, "final_state_equal": True}],
+        "runs": [{
+            "status": 0,
+            "final_state_equal": True,
+            "groups": {baseline: {"runs": 1} for baseline in baselines},
+        }],
         "macro_statistics": macro,
         "paired_contrasts": {
             f"c{concurrency:02d}/checkpoint_vs_resident/fixed2": {
@@ -44,7 +48,8 @@ def _suite(root: Path, concurrency: int, baselines: tuple[str, ...]) -> None:
     }
     (root / "suite-summary.json").write_text(json.dumps(summary), encoding="utf-8")
     fields = (
-        "baseline", "failure_count", "sessions_requested", "sessions_completed",
+        "workload", "concurrency", "baseline", "repetition", "inference_backend",
+        "failure_count", "sessions_requested", "sessions_completed",
         "block_final_state_equal", "correctness_pass_fraction",
         "throughput_correct_tasks_per_minute",
     )
@@ -54,6 +59,10 @@ def _suite(root: Path, concurrency: int, baselines: tuple[str, ...]) -> None:
         for baseline in baselines:
             writer.writerow({
                 "baseline": baseline,
+                "workload": "trace-a",
+                "concurrency": concurrency,
+                "repetition": 0,
+                "inference_backend": "replay",
                 "failure_count": 0,
                 "sessions_requested": concurrency,
                 "sessions_completed": concurrency,
