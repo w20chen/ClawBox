@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,38 @@ def _number(value: str | None) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _suite_provenance(root: Path) -> dict[str, Any]:
+    manifest_path = root / "suite-manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"{root}: suite-manifest.json is required")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    required = ("repository_commit", "source_tree_sha256", "config_sha256")
+    if any(not manifest.get(field) for field in required):
+        raise ValueError(f"{manifest_path}: source/config identity is incomplete")
+    return {
+        "repository_commit": manifest["repository_commit"],
+        "source_tree_sha256": manifest["source_tree_sha256"],
+        "config_sha256": manifest["config_sha256"],
+        "host": manifest.get("host"),
+        "machine": manifest.get("machine"),
+        "numa_topology": manifest.get("numa_topology"),
+        "process_placement": manifest.get("process_placement"),
+        "artifact_sha256": {
+            "suite_manifest": _sha256(manifest_path),
+            "suite_summary": _sha256(root / "suite-summary.json"),
+            "measurements_csv": _sha256(root / "measurements.csv"),
+        },
+    }
 
 
 def load_complete_suite(root: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -194,6 +227,11 @@ def _contrast_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
 def build_report(main_root: Path, density_root: Path) -> dict[str, Any]:
     main, main_measurements = load_complete_suite(main_root)
     density, density_measurements = load_complete_suite(density_root)
+    main_provenance = _suite_provenance(main_root)
+    density_provenance = _suite_provenance(density_root)
+    for field in ("repository_commit", "source_tree_sha256"):
+        if main_provenance[field] != density_provenance[field]:
+            raise ValueError(f"main and density suites have different {field}")
     main_levels = [int(value) for value in main["concurrency_levels"]]
     density_levels = [int(value) for value in density["concurrency_levels"]]
     for level in main_levels:
@@ -216,6 +254,10 @@ def build_report(main_root: Path, density_root: Path) -> dict[str, Any]:
                 "Trajectories and repetitions are robustness repeats, not independent samples."
             ),
         },
+        "experiment_source": {
+            "repository_commit": main_provenance["repository_commit"],
+            "source_tree_sha256": main_provenance["source_tree_sha256"],
+        },
         "main": {
             "root": str(main_root),
             "block_count": len(main["runs"]),
@@ -227,6 +269,7 @@ def build_report(main_root: Path, density_root: Path) -> dict[str, Any]:
             "paired_contrasts": _contrast_rows(main),
             "artifact_provenance": main.get("artifact_provenance"),
             "prediction_provenance": main.get("prediction_provenance"),
+            "suite_provenance": main_provenance,
         },
         "density": {
             "root": str(density_root),
@@ -238,6 +281,7 @@ def build_report(main_root: Path, density_root: Path) -> dict[str, Any]:
             ],
             "paired_contrasts": _contrast_rows(density),
             "artifact_provenance": density.get("artifact_provenance"),
+            "suite_provenance": density_provenance,
         },
     }
 

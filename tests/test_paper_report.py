@@ -51,6 +51,15 @@ def _suite(root: Path, concurrency: int, baselines: tuple[str, ...]) -> None:
         },
     }
     (root / "suite-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (root / "suite-manifest.json").write_text(json.dumps({
+        "repository_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "config_sha256": "c" * 64,
+        "host": "test-host",
+        "machine": "aarch64",
+        "numa_topology": {"node": 0, "cpulist": "0-79"},
+        "process_placement": {"cpu_affinity": list(range(80))},
+    }), encoding="utf-8")
     fields = (
         "workload", "concurrency", "baseline", "repetition", "inference_backend",
         "failure_count", "sessions_requested", "sessions_completed",
@@ -89,6 +98,8 @@ def test_build_report_uses_registered_macro_statistics(tmp_path: Path) -> None:
     assert report["main"]["rows"][0]["correct_tasks_per_min"] == 1.0
     assert report["main"]["rows"][0]["configured_tool_memory_mib"] == 2048
     assert set(report["main"]["rows"][0]["raw_metrics"]) == set(METRICS)
+    assert report["experiment_source"]["repository_commit"] == "a" * 40
+    assert len(report["main"]["suite_provenance"]["artifact_sha256"]["measurements_csv"]) == 64
     assert report["main"]["rows"][0]["mean_rss_gib"] == pytest.approx(1 / 2**30)
     rendered = markdown_report(report)
     assert "Independent task n = 1" in rendered
@@ -121,3 +132,16 @@ def test_load_complete_suite_rejects_duplicate_arm(tmp_path: Path) -> None:
     (root / "measurements.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate arm identity"):
         load_complete_suite(root)
+
+
+def test_build_report_rejects_mixed_source_trees(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    density = tmp_path / "density"
+    _suite(main, 1, MAIN_BASELINES)
+    _suite(density, 40, DENSITY_BASELINES)
+    manifest_path = density / "suite-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_tree_sha256"] = "d" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="different source_tree_sha256"):
+        build_report(main, density)
