@@ -38,6 +38,7 @@ def test_progress_summary_includes_partial_arm_correctness(tmp_path: Path) -> No
     assert report["completed_arm_correct_sessions"] == 8
     assert report["completed_arm_model_steps"] == 216
     assert report["all_completed_arms_valid"] is True
+    assert report["all_completed_blocks_valid"] is None
     assert report["arms"][0]["workload"] == "trace-a"
     assert report["arms"][0]["concurrency"] == 8
 
@@ -57,3 +58,9 @@ def test_progress_summary_flags_incorrect_completed_arm(tmp_path: Path) -> None:
     report = _run(root)
     assert report["all_completed_arms_valid"] is False
     assert len(report["invalid_completed_arms"]) == 1
+
+
+def test_progress_summary_does_not_claim_empty_outputs_are_valid(tmp_path: Path) -> None:
+    report = _run(tmp_path / "empty")
+    assert report["all_completed_arms_valid"] is None
+    assert report["all_completed_blocks_valid"] is None

@@ -69,10 +69,13 @@ def main() -> None:
             item["correct_sessions_completed"] for item in arms
         ),
         "completed_arm_model_steps": sum(item["model_steps_completed"] for item in arms),
-        "all_completed_arms_valid": all(item["valid"] for item in arms),
+        "all_completed_arms_valid": (
+            all(item["valid"] for item in arms) if arms else None
+        ),
         "invalid_completed_arms": [item for item in arms if not item["valid"]],
-        "all_completed_blocks_valid": all(
-            item["final_state_equal"] and item["failures"] == 0 for item in blocks
+        "all_completed_blocks_valid": (
+            all(item["final_state_equal"] and item["failures"] == 0 for item in blocks)
+            if blocks else None
         ),
         "blocks": blocks,
         "arms": arms,
