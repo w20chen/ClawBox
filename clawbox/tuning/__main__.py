@@ -31,12 +31,24 @@ from clawbox.tuning.schema import ToolObservation
 def find_run_traces(run_dir: Path) -> tuple[Path, Path]:
     """Locate (trace_dir, bridge_path) for one run directory."""
     candidates = [
-        run_dir,
         run_dir / "traces",
-        run_dir / "state",
         run_dir / "state" / "traces",
+        run_dir / "state",
+        run_dir,
     ]
-    trace_dir = next((c for c in candidates if c.is_dir() and list(c.glob("*.jsonl"))), None)
+    # A collected run commonly stores ``tool-bridge.jsonl`` at its root and
+    # span traces below ``traces/``.  Treating the bridge itself as proof that
+    # the root is a trace directory silently yields zero spans, so require at
+    # least one non-bridge JSONL and prefer the conventional nested layouts.
+    trace_dir = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.is_dir()
+            and any(path.name != "tool-bridge.jsonl" for path in candidate.glob("*.jsonl"))
+        ),
+        None,
+    )
     if trace_dir is None:
         raise FileNotFoundError(f"no trace JSONL under {run_dir}")
     bridge = next(

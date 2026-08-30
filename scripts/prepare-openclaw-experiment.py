@@ -77,7 +77,20 @@ def main() -> None:
     if a.sessions < 1 or a.sessions > 253:
         raise ValueError("sessions must be between 1 and 253")
     a.output.mkdir(parents=True, exist_ok=False)
-    manifest = {"model_id": a.model_id, "network_prefix": a.network_prefix, "sessions": []}
+    cpu_pairs = None
+    if shared_cpus is not None:
+        if len(shared_cpus) < 2 or len(shared_cpus) % 2:
+            raise ValueError("round-robin CPU list must contain an even number of CPUs")
+        cpu_pairs = [
+            {"runtime": shared_cpus[index], "tool": shared_cpus[index + 1]}
+            for index in range(0, len(shared_cpus), 2)
+        ]
+    manifest = {
+        "model_id": a.model_id,
+        "network_prefix": a.network_prefix,
+        "sessions": [],
+        "cpu_pairs": cpu_pairs,
+    }
     for index in range(a.sessions):
         directory = a.output / f"session-{index:04d}"
         directory.mkdir()
@@ -113,12 +126,12 @@ def main() -> None:
         inject(tool_disk, identity.with_suffix(".pub"), "/etc/clawbox/ssh/id_ed25519.pub", "0100644")
         common = "console=ttyS0 reboot=k panic=1 pci=off rw"
         runtime_cpu = (
-            shared_cpus[(2 * index) % len(shared_cpus)]
-            if shared_cpus else a.cpu_first + index
+            cpu_pairs[index % len(cpu_pairs)]["runtime"]
+            if cpu_pairs else a.cpu_first + index
         )
         tool_cpu = (
-            shared_cpus[(2 * index + 1) % len(shared_cpus)]
-            if shared_cpus else a.cpu_first + a.sessions + index
+            cpu_pairs[index % len(cpu_pairs)]["tool"]
+            if cpu_pairs else a.cpu_first + a.sessions + index
         )
         runtime_config = {
             "binary": "/opt/kata/bin/firecracker", "api_socket": str(directory / "runtime.sock"),

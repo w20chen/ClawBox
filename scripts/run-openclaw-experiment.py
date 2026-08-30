@@ -2,10 +2,12 @@
 """Run OpenClaw+ClawTune in the Runtime VM with SSH tools and one model gateway."""
 from __future__ import annotations
 import argparse
+from dataclasses import replace
 import hashlib
 import json
 import os
 import socket
+import statistics
 import subprocess
 import sys
 import threading
@@ -13,8 +15,53 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from clawbox.replay.lifecycle import FirecrackerConfig, FirecrackerLifecycle
+from clawbox.replay.lifecycle import (
+    FairResourcePool, FirecrackerConfig, FirecrackerLifecycle,
+)
 from clawbox.replay.model_gateway import ModelGateway
+
+
+def numa_memory_used_bytes(node: int) -> int | None:
+    path = Path(f"/sys/devices/system/node/node{node}/meminfo")
+    try:
+        values: dict[str, int] = {}
+        for line in path.read_text(encoding="ascii").splitlines():
+            fields = line.split()
+            if len(fields) >= 4 and fields[0] == "Node" and fields[1] == str(node):
+                values[fields[2].rstrip(":")] = int(fields[3]) * 1024
+        if "MemUsed" in values:
+            return values["MemUsed"]
+        if "MemTotal" in values and "MemFree" in values:
+            return values["MemTotal"] - values["MemFree"]
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def cgroup_v2_path() -> Path | None:
+    try:
+        for line in Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines():
+            fields = line.split(":", 2)
+            if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
+                return Path("/sys/fs/cgroup") / fields[2].lstrip("/")
+    except OSError:
+        return None
+    return None
+
+
+def cgroup_memory_used_bytes() -> int | None:
+    try:
+        path = cgroup_v2_path()
+        return None if path is None else int((path / "memory.current").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def percentile(values: list[float | int], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return float(ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))])
 
 
 def wait_tcp(host: str, port: int, timeout_s: float) -> None:
@@ -30,7 +77,12 @@ def complete(log: Path) -> tuple[bool, int | None]:
     if not log.exists(): return False, None
     for line in reversed(log.read_text(errors="replace").splitlines()):
         if line.startswith('{"ok":') and "openclaw_exit_code" in line:
-            value = json.loads(line)
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                # The serial-log writer may still be appending its final line.
+                # Treat a torn tail as incomplete and poll again.
+                return False, None
             return True, int(value["openclaw_exit_code"])
     return False, None
 
@@ -39,12 +91,15 @@ def request_summaries(gateway: ModelGateway) -> list[dict]:
     summaries = []
     for item in gateway.records():
         encoded = item.pop("response_b64", "")
+        item.pop("request_payload", None)
         item["response_bytes"] = (len(encoded) * 3 // 4 - encoded.count("=")) if encoded else 0
         summaries.append(item)
     return summaries
 
 
-def ssh_validate(spec: dict, command: str) -> str:
+def ssh_capture(
+    spec: dict, command: str, timeout_s: float,
+) -> tuple[int, bytes, bytes, bool]:
     marker = b"\n__CLAWBOX_VALIDATION_EXIT__:"
     remote = f"{command}; status=$?; printf '\\n__CLAWBOX_VALIDATION_EXIT__:%d\\n' \"$status\""
     process = subprocess.Popen([
@@ -54,17 +109,34 @@ def ssh_validate(spec: dict, command: str) -> str:
         f"executor@{spec['tool_host']}", remote,
     ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        stdout, stderr = process.communicate(timeout=15)
+        stdout, stderr = process.communicate(timeout=timeout_s)
+        timed_out = False
     except subprocess.TimeoutExpired:
         process.kill()
         stdout, stderr = process.communicate()
+        timed_out = True
     before, found, after = stdout.rpartition(marker)
     if not found:
-        raise RuntimeError(f"validation did not return a completion marker: {stderr.decode(errors='replace')}")
+        if timed_out:
+            return 124, stdout, stderr, True
+        raise RuntimeError(
+            f"remote command did not return a completion marker: {stderr.decode(errors='replace')}"
+        )
     exit_text = after.splitlines()[0]
-    if exit_text != b"0":
-        raise RuntimeError(f"validation command exited with {exit_text.decode(errors='replace')}")
-    return hashlib.sha256(before).hexdigest()
+    try:
+        exit_code = int(exit_text)
+    except ValueError as exc:
+        raise RuntimeError("remote command returned a malformed exit marker") from exc
+    return exit_code, before, stderr, timed_out
+
+
+def ssh_validate(spec: dict, command: str) -> bytes:
+    exit_code, stdout, stderr, _ = ssh_capture(spec, command, 15)
+    if exit_code != 0:
+        raise RuntimeError(
+            f"validation command exited with {exit_code}: {stderr.decode(errors='replace')}"
+        )
+    return stdout
 
 
 def main() -> None:
@@ -81,12 +153,22 @@ def main() -> None:
     p.add_argument("--api-base-url"); p.add_argument("--api-model")
     p.add_argument("--api-key-env", default="OPENAI_API_KEY")
     p.add_argument("--validation-command", default="cd /testbed && git diff --binary --no-ext-diff HEAD")
+    p.add_argument("--correctness-command")
+    p.add_argument("--correctness-timeout-s", type=float, default=300)
     p.add_argument("--timeout-s", type=float, default=900)
+    p.add_argument(
+        "--resident-memory-budget-mib", type=int,
+        help="configured Runtime+Tool resident-memory admission budget",
+    )
     a = p.parse_args()
     if a.timeout_s <= 0:
         p.error("--timeout-s must be positive")
+    if a.correctness_timeout_s <= 0:
+        p.error("--correctness-timeout-s must be positive")
     if a.time_scale < 0:
         p.error("--time-scale must be non-negative")
+    if a.resident_memory_budget_mib is not None and a.resident_memory_budget_mib <= 0:
+        p.error("--resident-memory-budget-mib must be positive")
     if a.inference == "replay" and a.trace is None:
         p.error("--trace is required when --inference=replay")
     if a.inference == "api" and (not a.api_base_url or not a.api_model):
@@ -97,31 +179,144 @@ def main() -> None:
         "llm_wait_checkpoint" if a.mode == "snapshot" else a.mode
     )
     raw = json.loads(a.manifest.read_text())
+    configured_nodes = {
+        FirecrackerConfig.from_json(Path(session[field])).numa_node
+        for session in raw["sessions"] for field in ("runtime", "tool")
+    }
+    if len(configured_nodes) != 1 or None in configured_nodes:
+        raise ValueError("all Runtime and Tool VMs must use one explicit NUMA node")
+    numa_node = int(next(iter(configured_nodes)))
+    memory_splits = {
+        (
+            FirecrackerConfig.from_json(Path(session["runtime"])).memory_mib,
+            FirecrackerConfig.from_json(Path(session["tool"])).memory_mib,
+        )
+        for session in raw["sessions"]
+    }
+    if len(memory_splits) != 1:
+        raise ValueError("all sessions must use the same Runtime/Tool memory split")
+    runtime_memory_mib, tool_memory_mib = next(iter(memory_splits))
+    pair_memory_mib = int(runtime_memory_mib + tool_memory_mib)
+    resident_pair_slots = len(raw["sessions"])
+    if a.resident_memory_budget_mib is not None:
+        resident_pair_slots = a.resident_memory_budget_mib // pair_memory_mib
+        if resident_pair_slots < 1:
+            raise ValueError(
+                "resident-memory budget is smaller than one Runtime+Tool VM pair"
+            )
+        resident_pair_slots = min(resident_pair_slots, len(raw["sessions"]))
+    configured_cpu_pairs = raw.get("cpu_pairs")
+    if configured_cpu_pairs is not None:
+        if not isinstance(configured_cpu_pairs, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("runtime"), int)
+            or not isinstance(item.get("tool"), int)
+            for item in configured_cpu_pairs
+        ):
+            raise ValueError("manifest cpu_pairs must contain integer Runtime/Tool pairs")
+        cpu_pairs = [
+            (int(item["runtime"]), int(item["tool"]))
+            for item in configured_cpu_pairs
+        ]
+        if resident_pair_slots > len(cpu_pairs):
+            raise ValueError("resident pair budget exceeds the available CPU-pair leases")
+        pair_resources: list[object] = list(cpu_pairs[:resident_pair_slots])
+    else:
+        pair_resources = list(range(resident_pair_slots))
+    pair_slots = FairResourcePool(pair_resources)
     a.output.mkdir(parents=True, exist_ok=False)
     lifecycles: list[FirecrackerLifecycle] = []
     lifecycle_lock = threading.Lock()
     samples: list[dict] = []
     stop = threading.Event()
     started = time.monotonic()
+    cgroup_baseline = cgroup_memory_used_bytes()
+    cgroup_path = cgroup_v2_path()
+    numa_baseline = numa_memory_used_bytes(numa_node)
     def sample() -> None:
         while not stop.wait(0.1):
-            with lifecycle_lock: rss = sum(item.rss_bytes() for item in lifecycles)
-            samples.append({"elapsed_s": time.monotonic() - started, "firecracker_rss_bytes": rss})
+            with lifecycle_lock:
+                rss = sum(item.rss_bytes() for item in lifecycles)
+                resident_vms = sum(1 for item in lifecycles if item.resident)
+            cgroup_memory = cgroup_memory_used_bytes()
+            numa_memory = numa_memory_used_bytes(numa_node)
+            samples.append({
+                "elapsed_s": time.monotonic() - started,
+                "firecracker_rss_bytes": rss,
+                "resident_vms": resident_vms,
+                "numa_memory_used_bytes": numa_memory,
+                "numa_memory_delta_bytes": (
+                    None if numa_baseline is None or numa_memory is None
+                    else max(0, numa_memory - numa_baseline)
+                ),
+                "cgroup_memory_used_bytes": cgroup_memory,
+                "cgroup_memory_delta_bytes": (
+                    None if cgroup_memory is None or cgroup_baseline is None
+                    else max(0, cgroup_memory - cgroup_baseline)
+                ),
+            })
     sampler = threading.Thread(target=sample, daemon=True); sampler.start()
 
     def run_one(index: int, spec: dict) -> dict:
+        session_started_elapsed_s = time.monotonic() - started
         gateway = ModelGateway(
             Path(spec["store"]), mode=a.inference, trace=a.trace, time_scale=a.time_scale,
             upstream_base_url=a.api_base_url,
             upstream_api_key=os.environ.get(a.api_key_env), upstream_model=a.api_model,
         )
         tool_config, runtime_config = FirecrackerConfig.from_json(Path(spec["tool"])), FirecrackerConfig.from_json(Path(spec["runtime"]))
-        tool, runtime = FirecrackerLifecycle(tool_config), FirecrackerLifecycle(runtime_config)
+        remaining = lambda: max(0.0, deadline - time.monotonic())
+        tool = FirecrackerLifecycle(tool_config)
+        runtime = FirecrackerLifecycle(runtime_config)
         with lifecycle_lock: lifecycles.extend([tool, runtime])
         snapshots = 0; snapshot_s = restore_s = 0.0
+        admission_wait_s = 0.0
+        admission_acquisitions = 0
+        admission_wait_events_s: list[float] = []
+        admission_leases: list[dict] = []
+        pair_lease: object | None = None
+        current_lease_event: dict | None = None
+
+        def acquire_pair() -> None:
+            nonlocal admission_wait_s, admission_acquisitions, pair_lease, current_lease_event
+            if pair_lease is not None:
+                raise RuntimeError("resident VM pair already owns an admission lease")
+            wait_started = time.monotonic()
+            lease = pair_slots.acquire(timeout=remaining())
+            waited_s = time.monotonic() - wait_started
+            admission_wait_s += waited_s
+            admission_wait_events_s.append(waited_s)
+            if lease is None:
+                raise TimeoutError("timed out waiting for resident-pair admission")
+            pair_lease = lease
+            admission_acquisitions += 1
+            current_lease_event = {
+                "acquired_elapsed_s": time.monotonic() - started,
+                "released_elapsed_s": None,
+                "wait_s": waited_s,
+                "runtime_cpu": lease[0] if isinstance(lease, tuple) else runtime.config.cpu_set,
+                "tool_cpu": lease[1] if isinstance(lease, tuple) else tool.config.cpu_set,
+            }
+            admission_leases.append(current_lease_event)
+            if isinstance(lease, tuple):
+                runtime_cpu, tool_cpu = lease
+                runtime.config = replace(runtime.config, cpu_set=str(runtime_cpu))
+                tool.config = replace(tool.config, cpu_set=str(tool_cpu))
+
+        def release_pair() -> None:
+            nonlocal pair_lease, current_lease_event
+            if pair_lease is None:
+                return
+            lease, pair_lease = pair_lease, None
+            if current_lease_event is not None:
+                current_lease_event["released_elapsed_s"] = time.monotonic() - started
+                current_lease_event = None
+            pair_slots.release(lease)
+
         gateway.start(spec["gateway_host"], 18081)
         deadline = time.monotonic() + a.timeout_s
         try:
+            acquire_pair()
             tool.start(); wait_tcp(spec["tool_host"], 2222, 30); runtime.start()
             processed: set[str] = set()
             while time.monotonic() < deadline:
@@ -132,9 +327,52 @@ def main() -> None:
                         gateway.write_replay_trace(
                             a.output / f"model-trace-session-{index:04d}.jsonl"
                         )
+                    correctness_exit_code = None
+                    correctness_timed_out = False
+                    correctness_path = None
+                    if a.correctness_command:
+                        (correctness_exit_code, correctness_stdout,
+                         correctness_stderr, correctness_timed_out) = ssh_capture(
+                            spec, a.correctness_command, a.correctness_timeout_s,
+                        )
+                        correctness_path = (
+                            a.output / f"correctness-session-{index:04d}.out"
+                        )
+                        correctness_path.write_bytes(
+                            correctness_stdout
+                            + b"\n__CLAWBOX_STDERR__\n"
+                            + correctness_stderr
+                        )
+                    validation = ssh_validate(spec, a.validation_command)
+                    validation_path = a.output / f"validation-session-{index:04d}.out"
+                    validation_path.write_bytes(validation)
+                    session_completed_elapsed_s = time.monotonic() - started
                     return {"session": index, "snapshots": snapshots,
+                            "checkpoint_cycles": snapshots,
+                            "vm_snapshot_operations": snapshots * 2,
+                            "vm_restore_operations": snapshots * 2,
+                            "admission_wait_s": admission_wait_s,
+                            "admission_acquisitions": admission_acquisitions,
+                            "admission_wait_events_s": admission_wait_events_s,
+                            "admission_leases": admission_leases,
+                            "session_started_elapsed_s": session_started_elapsed_s,
+                            "session_completed_elapsed_s": session_completed_elapsed_s,
+                            "session_wall_s": (
+                                session_completed_elapsed_s - session_started_elapsed_s
+                            ),
+                            "snapshot_allocated_bytes": (
+                                tool.snapshot_allocated_bytes()
+                                + runtime.snapshot_allocated_bytes()
+                            ),
+                            "correctness_evaluated": bool(a.correctness_command),
+                            "correctness_exit_code": correctness_exit_code,
+                            "correctness_timed_out": correctness_timed_out,
+                            "correctness_artifact": (
+                                str(correctness_path) if correctness_path else None
+                            ),
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
-                            "validation_sha256": ssh_validate(spec, a.validation_command),
+                            "validation_sha256": hashlib.sha256(validation).hexdigest(),
+                            "validation_artifact": str(validation_path),
                             "model_requests": request_summaries(gateway)}
                 runtime_exit = runtime.process_exit_code()
                 tool_exit = tool.process_exit_code()
@@ -148,19 +386,29 @@ def main() -> None:
                     request_id = pending[0]["request_id"]
                     snapshot_s += tool.checkpoint_and_evict()
                     snapshot_s += runtime.checkpoint_and_evict()
+                    # The memory/CPU-pair lease is released only after both
+                    # Firecracker processes have been evicted.
+                    release_pair()
                     while time.monotonic() < deadline:
                         current = {item["request_id"]: item for item in gateway.records()}
                         if current[request_id]["ready"]: break
                         time.sleep(0.02)
+                    acquire_pair()
                     restore_s += tool.restore(); wait_tcp(spec["tool_host"], 2222, 30)
                     restore_s += runtime.restore(); processed.add(request_id); snapshots += 1
                 else: time.sleep(0.05)
             raise TimeoutError("OpenClaw experiment timed out")
         finally:
-            try: runtime.close()
+            try:
+                runtime.close()
             finally:
-                try: tool.close()
-                finally: gateway.close()
+                try:
+                    tool.close()
+                finally:
+                    try:
+                        release_pair()
+                    finally:
+                        gateway.close()
 
     results, failures = [], []
     try:
@@ -173,18 +421,103 @@ def main() -> None:
         stop.set(); sampler.join(timeout=2)
     wall_s = time.monotonic() - started
     model_steps = sum(len(item.get("model_requests", [])) for item in results)
+    correct_sessions = sum(
+        item.get("correctness_evaluated") is True
+        and item.get("correctness_exit_code") == 0
+        for item in results
+    )
+    model_requests = [request for item in results for request in item.get("model_requests", [])]
+    validated_requests = sum(request.get("replay_input_match") is not None for request in model_requests)
+    rss_values = [int(item["firecracker_rss_bytes"]) for item in samples]
+    numa_values = [int(item["numa_memory_used_bytes"]) for item in samples
+                   if item["numa_memory_used_bytes"] is not None]
+    numa_deltas = [int(item["numa_memory_delta_bytes"]) for item in samples
+                   if item["numa_memory_delta_bytes"] is not None]
+    cgroup_deltas = [int(item["cgroup_memory_delta_bytes"]) for item in samples
+                     if item["cgroup_memory_delta_bytes"] is not None]
+    session_wall_values = [float(item["session_wall_s"]) for item in results]
+    admission_wait_events = [
+        float(wait_s) for item in results
+        for wait_s in item.get("admission_wait_events_s", [])
+    ]
+    rss_time = sum(
+        rss_values[index] * max(
+            0.0, float(samples[index]["elapsed_s"]) - float(samples[index - 1]["elapsed_s"])
+        )
+        for index in range(1, len(samples))
+    )
     report = {"mode": "snapshot" if a.residency_policy == "llm_wait_checkpoint" else "resident",
               "residency_policy": a.residency_policy, "inference": a.inference,
+              "numa_node": numa_node,
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
+              "configured_pair_memory_mib": pair_memory_mib,
+              "resident_memory_budget_mib": a.resident_memory_budget_mib,
+              "resident_pair_slots": resident_pair_slots,
+              "cpu_pair_leasing": configured_cpu_pairs is not None,
+              "cpu_pair_pool": configured_cpu_pairs,
               "failures": failures, "wall_s": wall_s,
               "throughput_sessions_per_hour": len(results) * 3600 / wall_s,
               "throughput_tasks_per_minute": len(results) * 60 / wall_s,
-              "model_steps_completed": model_steps,
-              "throughput_steps_per_minute": model_steps * 60 / wall_s,
-              "mean_firecracker_rss_bytes": (
-                  sum(x["firecracker_rss_bytes"] for x in samples) / len(samples) if samples else 0
+              "correctness_command": a.correctness_command,
+              "correctness_evaluated": bool(a.correctness_command),
+              "correct_sessions_completed": correct_sessions,
+              "correctness_pass_fraction": (
+                  correct_sessions / len(results)
+                  if a.correctness_command and results else None
               ),
+              "throughput_correct_tasks_per_minute": (
+                  correct_sessions * 60 / wall_s if a.correctness_command else None
+              ),
+              "model_steps_completed": model_steps,
+              "replay_requests_input_validated": validated_requests,
+              "replay_requests_input_unvalidated": model_steps - validated_requests,
+              "replay_input_validation_complete": validated_requests == model_steps,
+              "checkpoint_cycles": sum(int(item.get("checkpoint_cycles", 0)) for item in results),
+              "vm_snapshot_operations": sum(int(item.get("vm_snapshot_operations", 0)) for item in results),
+              "vm_restore_operations": sum(int(item.get("vm_restore_operations", 0)) for item in results),
+              "checkpoint_snapshot_service_s": sum(float(item.get("snapshot_s", 0.0)) for item in results),
+              "checkpoint_restore_service_s": sum(float(item.get("restore_s", 0.0)) for item in results),
+              "admission_wait_s": sum(float(item.get("admission_wait_s", 0.0)) for item in results),
+              "admission_acquisitions": sum(int(item.get("admission_acquisitions", 0)) for item in results),
+              "mean_admission_wait_event_s": (
+                  statistics.fmean(admission_wait_events) if admission_wait_events else None
+              ),
+              "p95_admission_wait_event_s": (
+                  percentile(admission_wait_events, 0.95) if admission_wait_events else None
+              ),
+              "max_admission_wait_event_s": max(admission_wait_events, default=None),
+              "mean_session_wall_s": (
+                  statistics.fmean(session_wall_values) if session_wall_values else None
+              ),
+              "p50_session_wall_s": (
+                  percentile(session_wall_values, 0.50) if session_wall_values else None
+              ),
+              "p95_session_wall_s": (
+                  percentile(session_wall_values, 0.95) if session_wall_values else None
+              ),
+              "p99_session_wall_s": (
+                  percentile(session_wall_values, 0.99) if session_wall_values else None
+              ),
+              "snapshot_allocated_bytes": sum(
+                  int(item.get("snapshot_allocated_bytes", 0)) for item in results
+              ),
+              "throughput_steps_per_minute": model_steps * 60 / wall_s,
+              "mean_firecracker_rss_bytes": statistics.fmean(rss_values) if rss_values else 0,
               "peak_firecracker_rss_bytes": max((x["firecracker_rss_bytes"] for x in samples), default=0),
+              "p95_firecracker_rss_bytes": percentile(rss_values, 0.95),
+              "firecracker_rss_time_byte_seconds": rss_time,
+              "peak_resident_vms": max((x["resident_vms"] for x in samples), default=0),
+              "numa_memory_baseline_bytes": numa_baseline,
+              "mean_numa_memory_used_bytes": statistics.fmean(numa_values) if numa_values else None,
+              "peak_numa_memory_used_bytes": max(numa_values, default=None),
+              "mean_numa_memory_delta_bytes": statistics.fmean(numa_deltas) if numa_deltas else None,
+              "peak_numa_memory_delta_bytes": max(numa_deltas, default=None),
+              "cgroup_v2_path": str(cgroup_path) if cgroup_path is not None else None,
+              "cgroup_memory_baseline_bytes": cgroup_baseline,
+              "mean_cgroup_memory_delta_bytes": (
+                  statistics.fmean(cgroup_deltas) if cgroup_deltas else None
+              ),
+              "peak_cgroup_memory_delta_bytes": max(cgroup_deltas, default=None),
               "sessions": results}
     (a.output / "memory.json").write_text(json.dumps(samples, indent=2) + "\n")
     (a.output / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

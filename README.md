@@ -67,6 +67,13 @@ p90_static + resident
 p90_static + llm_wait_checkpoint
 ```
 
+Paper studies should add `fixed_control_tool_memory_mib` when the prediction
+hits a safety floor. This creates an untrained fixed-size control at that same
+memory limit under both residency policies, separating the value of the sizing
+decision from the value of merely choosing a smaller VM. Its compact output
+label is `fixed2` (the configured MiB value remains authoritative); compact arm
+labels keep Firecracker API socket paths within the Unix-domain limit.
+
 The following remain explicitly **not implemented**: `pressure_checkpoint`,
 Kubernetes checkpoint residency, and local Firecracker checkpoint residency.
 The validator rejects them before a runner starts.
@@ -754,6 +761,11 @@ python3 -m clawbox.replay.cli inspect /data/workloads/model-trace.jsonl
 Replay is faithful at the OpenClaw API boundary, not merely a sleep schedule:
 OpenClaw receives recorded assistant text and tool calls, executes tools over
 SSH, sends tool results into the next request, and waits for recorded latency.
+Newly recorded traces also retain the model request payload. Replay compares
+each live OpenClaw request with the recorded request and fails closed on
+divergence. Legacy response-only traces remain usable, but their manifests
+must disclose that request equality could not be checked; final-state equality
+is still enforced.
 
 ### 3. Create the private VM networks
 
@@ -784,6 +796,14 @@ The configuration names correspond to these general experiment concepts:
 | `sizing_policies` | `fixed`, `p90_static`, or both |
 | `memory_policies` | legacy input spelling for `resident` and `llm_wait_checkpoint`; `snapshot` remains an alias |
 | `resources` | VM memory size, CPU numbering, and NUMA placement |
+| `fixed_control_tool_memory_mib` | optional untrained fixed-size control below the conservative fixed size |
+| `resident_memory_budget_mib` | optional configured admission budget; excess sessions queue until a VM pair is resident or checkpointed |
+| `workloads[].independent_unit` | independent task ID used for inference; repeated trajectories share one ID |
+| `numa_host_reserve_mib`, `max_numa_cpu_busy_fraction`, `require_no_firecracker` | clean-host admission bounds for timing runs |
+| `require_parent_numa_binding` | reject a suite whose parent/helpers were not launched on the selected NUMA node |
+| `snapshot_disk_reserve_mib` | free space retained beyond two full alternating snapshot generations |
+| `require_held_out_predictions` | require the prediction artifact to name and hash held-out evaluation traces; the research report must state whether separation is by task or only by recording set |
+| `resume` | reuse only completed child studies in a long suite |
 | `replay.time_scale` | recorded latency multiplier; use `1.0` for measurements |
 | `validation_command` | command whose output represents the final task state |
 | `api` | OpenAI-compatible endpoint, model, and credential variable |
@@ -804,6 +824,32 @@ clawbox-p90-export --endpoint http://127.0.0.1:18082 \
 Static sizing pins the exact generation. The Kubernetes `p90-elastic` baseline
 is different: it resolves latest exactly once at admission and persists the
 full decision in `SandboxTask.status.sizingDecision`.
+
+For offline paper evidence, train from recovered, independently measured
+ClawTune span/bridge/cgroup artifacts. Keep training recordings disjoint from
+the replay recordings. This command embeds evidence counts, join diagnostics,
+source digests, recording-set identities, and evaluation-trace digests in the
+prediction file:
+
+```bash
+python3 scripts/train-p90-from-runs.py \
+  /data/train-recording/session-0000 \
+  /data/train-recording/session-0001 \
+  /data/train-recording/session-0002 \
+  --repository OWNER/REPO \
+  --observed-repo-fingerprint TRACE_REPO_FIELD \
+  --training-set-id recording-train \
+  --evaluation-set-id recording-eval \
+  --evaluation-trace short-fix=/data/eval/short-fix.model.jsonl \
+  --evaluation-trace test-debug=/data/eval/test-debug.model.jsonl \
+  --evaluation-trace multi-file=/data/eval/multi-file.model.jsonl \
+  --output /data/workloads/p90-independent-eval.json
+```
+
+The trainer rejects unexpected raw trace repository identities and hashes the
+span, bridge, and cgroup inputs, including incomplete artifacts, into immutable
+provenance. The suite can require the independent recording-set protocol with
+`require_held_out_predictions: true`.
 
 For a recorded-only trial, set `inference_backends` to `["replay"]` and no API
 key is needed. For a real-API comparison, retain both values and export the key
@@ -828,10 +874,16 @@ The runner randomizes group order, creates fresh VM disks for every group, and
 writes intermediate results. The final `study-summary.json` contains:
 
 - completed sessions and failures;
-- wall time, tasks/min, and model steps/min (one step is one completed model request);
+- wall time, completed agent runs/min (the compatibility field is
+  `throughput_tasks_per_minute`), and model steps/min (one step is one
+  completed model request); this is not a correctness score;
 - average and peak Firecracker process memory;
-- save/restore counts and time;
-- means, standard deviations, and 95% confidence intervals across repetitions;
+- P95 Firecracker RSS, RSS-time integral, resident-VM peak, NUMA-local memory,
+  and experiment-cgroup memory deltas;
+- paired checkpoint cycles, individual VM save/restore operation counts, and
+  summed VM service time (not critical-path overhead);
+- means, sample standard deviations, and two-sided 95% Student-t confidence
+  intervals across repetitions;
 - commit, source-tree hash, trace hash, host identity, and full configuration;
 - hashes produced by `validation_command` for cross-group final-state checks.
 
@@ -852,12 +904,36 @@ the exclusive-CPU ceiling. The suite reads `/sys` and fails before starting if
 either CPU placement escapes the selected node or configured guest memory
 exceeds node-local memory after `numa_host_reserve_mib`.
 
+Before allocating an output directory, `--validate-only` checks every input
+file and prediction digest, held-out recording provenance, NUMA CPU/memory
+bounds, current node-local free memory, pre-existing Firecracker processes,
+and a sampled NUMA-local CPU-busy limit. It performs no experiment writes:
+
+```bash
+numactl --cpunodebind=0 --membind=0 \
+  python3 -m clawbox.replay.cli suite /data/replay-suite.json --validate-only
+```
+
 ```bash
 cp deploy/replay-suite.example.json /data/replay-suite.json
 ${EDITOR:-vi} /data/replay-suite.json
 sudo bash scripts/direct-firecracker-network.sh up --sessions 40 --prefix 172.30
-python3 -m clawbox.replay.cli suite /data/replay-suite.json
+numactl --cpunodebind=0 --membind=0 \
+  python3 -m clawbox.replay.cli suite /data/replay-suite.json
 sudo bash scripts/direct-firecracker-network.sh down --sessions 40 --prefix 172.30
+```
+
+Set `resume: true` for long experiments. A rerun reuses only child studies
+that already contain a complete `study-summary.json`; it fails closed on a
+partial child directory or changed generated configuration. Each
+workload/concurrency block receives a deterministic derived seed, so arm order
+varies between blocks while remaining reproducible. Clean-host CPU and
+Firecracker checks repeat before every new block.
+
+Progress inspection is read-only and safe while the suite is running:
+
+```bash
+python3 scripts/summarize-replay-suite.py /data/clawbox-paper-suite-001
 ```
 
 If a previous verified setup already left some session networks in place, use
@@ -871,34 +947,62 @@ sudo bash scripts/direct-firecracker-network.sh up --sessions 40 \
 
 The primary exclusive-CPU sweep is `[1, 8, 20, 40]`, three repetitions,
 `time_scale=1.0`,
-and at least three traces chosen before viewing results: a short localized fix,
-a test/debug task, and a multi-file change. Do not call duplicated copies of
-one trace multiple workloads. Report each workload and concurrency separately,
-then a macro-average across workloads; do not pool individual steps as though
-they were independent samples. `suite-summary.json` records measured NUMA
-topology and links every child `study-summary.json`. The preparation path uses
+and at least three traces chosen before viewing results. Prefer distinct tasks:
+a short localized fix, a test/debug task, and a multi-file change. Multiple
+model trajectories from one task must share the same `independent_unit`; they
+are robustness repeats, not independent workloads. Report each trajectory and
+concurrency separately, then average trajectories within each independent task
+before macro inference; do not pool individual steps. With only one independent
+task, the confidence interval is explicitly not estimable. `suite-summary.json` records measured NUMA
+topology, clean-host preflight samples, frozen prediction provenance, and links
+every child `study-summary.json`. The preparation path uses
 XFS copy-on-write clones where supported so fresh 6-16 GiB VM disks do not turn
 the sweep into an avoidable storage benchmark.
 
-For the separate memory-density experiment, set `cpu_placement` to
-`round_robin` and use `[40, 60, 78]`. This deliberately shares the 80 NUMA-local
-CPUs, while 78 fixed-size tasks approach the memory budget: `78 * (2 + 4) GiB
-= 468 GiB`, leaving the configured 32 GiB host reserve. Label this result as
-CPU-oversubscribed. A second P90-only extension may test higher concurrency up
-to `floor((node_memory - reserve) / (runtime_memory + predicted_tool_memory))`;
-it is a capacity result, not a paired fixed/P90 latency comparison.
+Preflight hashes both reusable rootfs images plus every prompt and replay
+trace, and records the pinned Tool-repository commit. This takes noticeable
+time for multi-gigabyte images but prevents silently mixing image builds.
 
-The latest Kunpeng implementation acceptance and deliberately limited
-single-session replay numbers are documented in
-[`docs/results/p90-baselines-kunpeng-2026-08-30.md`](docs/results/p90-baselines-kunpeng-2026-08-30.md).
-That report also records why a multi-trace concurrency result is not claimed
-without interactive network privileges and approval for real-model trace
-recording.
+The suite also writes `measurements.csv`, one row per randomized arm
+repetition, and `macro_statistics` in `suite-summary.json`. Macro confidence
+intervals use one mean per pre-registered independent task as the unit; model
+steps and repeated trajectories are never treated as independent replicates.
+`paired_contrasts` reports within-repetition sizing, checkpoint, and interaction
+effects instead of drawing conclusions from overlapping marginal intervals.
 
-The example validation command hashes the tracked repository changes. Replace
-it with a command that prints the scientifically relevant final artifact for
-your workload. Identical stdout produces an identical recorded hash; a
-non-zero exit code or different hashes make the study fail.
+An optional `correctness_command` records a separate exit code and output per
+session without conflating a benchmark-oracle failure with infrastructure
+failure. When configured, reports include `correctness_pass_fraction` and
+`throughput_correct_tasks_per_minute`; otherwise "tasks/min" means completed
+agent sessions/min, not correct SWE tasks/min.
+
+For the separate checkpoint-density experiment, use
+`deploy/replay-density.example.json`. It holds a 160 GiB configured resident
+admission budget constant, uses a 2+2 GiB Runtime/Tool pair, crosses resident
+and LLM-wait checkpoint policy, and requests `[40, 60, 76]` agent runs. At 40,
+all pairs fit; at 60/76, the resident arm runs waves while the checkpoint arm
+can release FIFO admission slots during model waits. One atomic FIFO lease owns
+the Runtime+Tool memory slot and a unique NUMA-local CPU pair; it is released
+only after both VMs are evicted and reacquired before either restore. This is a direct
+configured-memory-budget throughput/density test rather than a projection from
+RSS. It uses `cpu_placement=round_robin`; label 60/76 CPU-oversubscribed and
+report the scheduling regime. The disk preflight accounts for one generation per
+evicted session plus the prior generation mapped by each resident slot. Extend
+the network first with `--sessions 76 --reuse-existing`, and launch the suite
+itself through `numactl` as shown above.
+
+The registered Kunpeng protocol and current paper artifacts are documented in
+[`docs/results/p90-baselines-kunpeng-2026-08-31.md`](docs/results/p90-baselines-kunpeng-2026-08-31.md).
+The earlier implementation-acceptance smoke result remains in
+[`docs/results/p90-baselines-kunpeng-2026-08-30.md`](docs/results/p90-baselines-kunpeng-2026-08-30.md)
+and is not pooled with the paper suite.
+
+The example validator prints the Git diff plus hashes of non-ignored untracked
+files. It excludes transient ignored caches without missing newly created task
+files. Replace it with a command that prints the scientifically relevant final
+artifact for your workload. Identical stdout produces an identical recorded
+hash; the raw output is retained as `validation-session-NNNN.out`. A non-zero
+exit code or different hashes make the study fail.
 
 ### 6. Read the result and clean up
 

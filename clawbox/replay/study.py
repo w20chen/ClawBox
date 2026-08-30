@@ -6,7 +6,6 @@ import math
 import os
 import platform
 import random
-import statistics
 import subprocess
 import sys
 import time
@@ -23,6 +22,7 @@ from clawbox.experiments.results import (
 )
 from clawbox.experiments.spec_types import AdmissionPolicy
 from clawbox.cell.p90 import AdmissionPrediction
+from clawbox.replay.stats import summary_stats
 
 
 def _path(base: Path, value: object) -> Path:
@@ -38,13 +38,9 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _stats(rows: list[dict[str, Any]], field: str) -> dict[str, float | int | None]:
+def _stats(rows: list[dict[str, Any]], field: str) -> dict[str, float | int | str | None]:
     values = [float(row[field]) for row in rows if row.get(field) is not None]
-    if not values:
-        return {"n": 0, "mean": None, "stdev": None, "ci95_half_width": None}
-    deviation = statistics.stdev(values) if len(values) > 1 else 0.0
-    return {"n": len(values), "mean": statistics.fmean(values), "stdev": deviation,
-            "ci95_half_width": 1.96 * deviation / math.sqrt(len(values))}
+    return summary_stats(values)
 
 
 def _source_hash(root: Path) -> str:
@@ -63,8 +59,11 @@ def _source_hash(root: Path) -> str:
 
 def _discard_heavy_vm_artifacts(prepared: Path) -> None:
     """Remove only reproducible large files below a newly-created arm input."""
-    names = {"runtime.ext4", "tool.ext4", "runtime.mem", "tool.mem",
-             "runtime.vmstate", "tool.vmstate"}
+    names = {
+        "runtime.ext4", "tool.ext4", "runtime.mem", "tool.mem",
+        "runtime.vmstate", "tool.vmstate", "runtime.mem.next", "tool.mem.next",
+        "runtime.vmstate.next", "tool.vmstate.next",
+    }
     for session in prepared.glob("session-*"):
         if session.parent != prepared:
             continue
@@ -72,6 +71,18 @@ def _discard_heavy_vm_artifacts(prepared: Path) -> None:
             path = session / name
             if path.is_file():
                 path.unlink()
+
+
+def _validate_firecracker_socket_paths(arm: Path, *, force: bool = False) -> None:
+    if os.name == "nt" and not force:
+        return
+    for name in ("runtime.sock", "tool.sock"):
+        path = arm / "input" / "session-0000" / name
+        size = len(os.fsencode(str(path)))
+        if size > 107:
+            raise ValueError(
+                f"Firecracker Unix socket path is {size} bytes (maximum 107): {path}"
+            )
 
 
 def _sizing_baselines(raw: dict[str, Any]) -> list[str]:
@@ -203,7 +214,18 @@ def run_study(config_path: Path) -> int:
     predictive_tool_memory_mib = (
         _predictive_tool_memory_mib(raw, prediction) if prediction is not None else None
     )
-    workflows = []
+    arm_workflows: list[tuple[str, Any]] = []
+    fixed_control_mib = raw.get("fixed_control_tool_memory_mib")
+    if fixed_control_mib is not None:
+        if "fixed" not in raw.get("sizing_policies", ["fixed"]):
+            raise ValueError("fixed_control_tool_memory_mib requires the fixed sizing policy")
+        fixed_control_mib = int(fixed_control_mib)
+        fixed_tool_mib = int(resources.get("tool_memory_mib", 4096))
+        if fixed_control_mib < 256 or fixed_control_mib >= fixed_tool_mib:
+            raise ValueError(
+                "fixed_control_tool_memory_mib must be at least 256 and below "
+                "resources.tool_memory_mib"
+            )
     for workflow in expand_matrix(spec):
         predictive = workflow.admission_policy is AdmissionPolicy.P90_STATIC
         resources_for_arm = workflow.resources.model_copy(update={
@@ -214,7 +236,14 @@ def run_study(config_path: Path) -> int:
         })
         resolved = workflow.model_copy(update={"resources": resources_for_arm})
         validate_workflow(resolved)
-        workflows.append(resolved)
+        arm_workflows.append(("p90_static" if predictive else "fixed", resolved))
+        if fixed_control_mib is not None and not predictive:
+            control_resources = resolved.resources.model_copy(
+                update={"tool_memory_mib": fixed_control_mib, "kb_generation": None}
+            )
+            control = resolved.model_copy(update={"resources": control_resources})
+            validate_workflow(control)
+            arm_workflows.append(("fixed2", control))
     sessions, repetitions = int(raw.get("sessions", 1)), int(raw.get("repetitions", 1))
     if sessions < 1 or repetitions < 1:
         raise ValueError("sessions and repetitions must be positive")
@@ -239,10 +268,10 @@ def run_study(config_path: Path) -> int:
 
     arms = [(
         workflow.inference_backend.value,
-        "p90_static" if workflow.admission_policy is AdmissionPolicy.P90_STATIC else "fixed",
+        sizing_label,
         workflow.residency_policy.value,
         workflow,
-    ) for workflow in workflows]
+    ) for sizing_label, workflow in arm_workflows]
     explicit_sizing_matrix = "sizing_policies" in raw
 
     def arm_label(model: str, sizing_policy: str, residency: str) -> str:
@@ -256,9 +285,10 @@ def run_study(config_path: Path) -> int:
     for repetition in range(repetitions):
         shuffled = list(arms)
         order.shuffle(shuffled)
-        for model, sizing_policy, residency, workflow in shuffled:
+        for arm_position, (model, sizing_policy, residency, workflow) in enumerate(shuffled):
             legacy_residency = "snapshot" if residency == "llm_wait_checkpoint" else residency
             arm = output / f"r{repetition:02d}-{arm_label(model, sizing_policy, residency)}"
+            _validate_firecracker_socket_paths(arm)
             prepared, results = arm / "input", arm / "results"
             arm.mkdir()
             exposed_model = str(raw.get("exposed_model", "experiment-model"))
@@ -273,28 +303,55 @@ def run_study(config_path: Path) -> int:
                        "--numa-node", str(resources.get("numa_node", 0))]
             if resources.get("cpu_list"):
                 prepare += ["--cpu-list", str(resources["cpu_list"])]
-            subprocess.run(prepare, cwd=root, check=True)
+            try:
+                subprocess.run(prepare, cwd=root, check=True)
+            except Exception:
+                if not bool(raw.get("retain_vm_artifacts", True)):
+                    _discard_heavy_vm_artifacts(prepared)
+                raise
             command = [sys.executable, str(root / "scripts" / "run-openclaw-experiment.py"),
                        str(prepared / "manifest.json"), "--output", str(results),
                        "--residency-policy", residency, "--inference", model,
                        "--validation-command", str(raw.get("validation_command",
                                                            "cd /testbed && git diff --binary --no-ext-diff HEAD")),
                        "--timeout-s", str(raw.get("timeout_s", 900))]
+            if raw.get("correctness_command"):
+                command += [
+                    "--correctness-command", str(raw["correctness_command"]),
+                    "--correctness-timeout-s",
+                    str(raw.get("correctness_timeout_s", 300)),
+                ]
             if model == "replay":
                 command += ["--trace", str(trace), "--time-scale", str(replay.get("time_scale", 1.0))]
             else:
                 command += ["--api-base-url", str(api["base_url"]), "--api-model", str(api["model"]),
                             "--api-key-env", key_env]
+            if raw.get("resident_memory_budget_mib") is not None:
+                command += [
+                    "--resident-memory-budget-mib",
+                    str(int(raw["resident_memory_budget_mib"])),
+                ]
             arm_started_at = utcnow()
-            completed = subprocess.run(command, cwd=root, check=False)
+            try:
+                completed = subprocess.run(command, cwd=root, check=False)
+            except Exception:
+                if not bool(raw.get("retain_vm_artifacts", True)):
+                    _discard_heavy_vm_artifacts(prepared)
+                raise
             arm_completed_at = utcnow()
             summary_path = results / "summary.json"
             if not summary_path.is_file():
+                if not bool(raw.get("retain_vm_artifacts", True)):
+                    _discard_heavy_vm_artifacts(prepared)
                 raise subprocess.CalledProcessError(getattr(completed, "returncode", 1), command)
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             if getattr(completed, "returncode", 0) not in (0, 1):
+                if not bool(raw.get("retain_vm_artifacts", True)):
+                    _discard_heavy_vm_artifacts(prepared)
                 raise subprocess.CalledProcessError(completed.returncode, command)
             if getattr(completed, "returncode", 0) == 1 and not summary.get("failures"):
+                if not bool(raw.get("retain_vm_artifacts", True)):
+                    _discard_heavy_vm_artifacts(prepared)
                 raise subprocess.CalledProcessError(completed.returncode, command)
             capability = validate_workflow(workflow)
             provenance = {"commit": commit, "source_tree_sha256": manifest["source_tree_sha256"],
@@ -308,6 +365,9 @@ def run_study(config_path: Path) -> int:
                 started_at=arm_started_at, completed_at=arm_completed_at,
                 metrics={"validation_sha256": session.get("validation_sha256"),
                          "vm_checkpoints": session.get("snapshots", 0),
+                         "correctness_evaluated": session.get("correctness_evaluated", False),
+                         "correctness_exit_code": session.get("correctness_exit_code"),
+                         "session_wall_s": session.get("session_wall_s"),
                          "configured_tool_memory_mib": workflow.resources.tool_memory_mib,
                          "sizing_kb_generation": workflow.resources.kb_generation},
                 artifacts={"summary": str(summary_path)},
@@ -337,6 +397,7 @@ def run_study(config_path: Path) -> int:
                 json.dumps(envelopes, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
             runs.append({"repetition": repetition, "inference_backend": model,
+                         "arm_order_position": arm_position,
                          "sizing_policy": sizing_policy,
                          "memory_policy": legacy_residency, "residency_policy": residency,
                          "configured_tool_memory_mib": workflow.resources.tool_memory_mib,
@@ -349,25 +410,68 @@ def run_study(config_path: Path) -> int:
     grouped: dict[str, dict[str, Any]] = {}
     for model, sizing_policy, residency, _workflow in arms:
         legacy_residency = "snapshot" if residency == "llm_wait_checkpoint" else residency
-        rows = [row for row in runs if row["inference_backend"] == model
-                and row["sizing_policy"] == sizing_policy
-                and row["residency_policy"] == residency]
+        all_rows = [row for row in runs if row["inference_backend"] == model
+                    and row["sizing_policy"] == sizing_policy
+                    and row["residency_policy"] == residency]
+        rows = [row for row in all_rows if not row.get("failures")
+                and int(row.get("sessions_completed", -1))
+                == int(row.get("sessions_requested", -2))]
         grouped[arm_label(model, sizing_policy, residency)] = {
-            "runs": len(rows), "sessions_completed": sum(row["sessions_completed"] for row in rows),
-            "failures": sum(len(row["failures"]) for row in rows),
+            "runs": len(all_rows), "valid_runs": len(rows),
+            "sessions_completed": sum(row["sessions_completed"] for row in all_rows),
+            "failures": sum(len(row["failures"]) for row in all_rows),
             "configured_tool_memory_mib": sorted({row["configured_tool_memory_mib"] for row in rows}),
             "validation_hashes": sorted({session["validation_sha256"] for row in rows
                                           for session in row.get("sessions", [])}),
             "statistics": {field: _stats(rows, field) for field in
                            ("wall_s", "throughput_sessions_per_hour",
-                            "throughput_tasks_per_minute", "throughput_steps_per_minute",
-                            "mean_firecracker_rss_bytes", "peak_firecracker_rss_bytes")},
+                            "throughput_tasks_per_minute",
+                            "throughput_correct_tasks_per_minute",
+                            "correctness_pass_fraction",
+                            "throughput_steps_per_minute",
+                            "mean_firecracker_rss_bytes", "peak_firecracker_rss_bytes",
+                            "p95_firecracker_rss_bytes", "firecracker_rss_time_byte_seconds",
+                            "mean_numa_memory_used_bytes", "peak_numa_memory_used_bytes",
+                            "mean_numa_memory_delta_bytes", "peak_numa_memory_delta_bytes",
+                            "mean_cgroup_memory_delta_bytes", "peak_cgroup_memory_delta_bytes",
+                            "peak_resident_vms", "checkpoint_cycles",
+                            "vm_snapshot_operations", "vm_restore_operations",
+                            "checkpoint_snapshot_service_s",
+                            "checkpoint_restore_service_s", "admission_wait_s",
+                            "admission_acquisitions",
+                            "mean_admission_wait_event_s",
+                            "p95_admission_wait_event_s",
+                            "max_admission_wait_event_s",
+                            "mean_session_wall_s", "p50_session_wall_s",
+                            "p95_session_wall_s", "p99_session_wall_s",
+                            "snapshot_allocated_bytes")},
         }
-    validation_sets = {tuple(value["validation_hashes"]) for value in grouped.values()}
+    validation_hashes = {
+        session["validation_sha256"]
+        for row in runs
+        for session in row.get("sessions", [])
+        if session.get("validation_sha256")
+    }
+    expected_successes = sum(int(row.get("sessions_completed", 0)) for row in runs)
+    represented_successes = sum(
+        1 for row in runs for session in row.get("sessions", [])
+        if session.get("validation_sha256")
+    )
+    final_state_equal = (
+        expected_successes > 0
+        and represented_successes == expected_successes
+        and len(validation_hashes) == 1
+    )
+    sizing_factors = list(raw.get("sizing_policies", ["fixed"]))
+    if fixed_control_mib is not None:
+        sizing_factors.insert(sizing_factors.index("fixed") + 1, "fixed2")
     final = {"schema_version": 3, "manifest": manifest, "groups": grouped,
-             "factorial_design": {"sizing": list(raw.get("sizing_policies", ["fixed"])),
+             "factorial_design": {"sizing": sizing_factors,
                                   "residency": list(raw.get("memory_policies", ["resident", "snapshot"]))},
-             "runs": runs, "final_state_equal": len(validation_sets) == 1}
+             "runs": runs, "final_state_equal": final_state_equal,
+             "validation_hashes": sorted(validation_hashes),
+             "validation_results_represented": represented_successes,
+             "validation_results_expected": expected_successes}
     (output / "study-summary.json").write_text(json.dumps(final, indent=2, sort_keys=True) + "\n")
     print(json.dumps(final, indent=2, sort_keys=True))
     return 0 if all(not row["failures"] for row in runs) and final["final_state_equal"] else 1

@@ -120,6 +120,21 @@ def test_join_matches_canonical_pipeline(tmp_path):
     assert by_id["exec-0001"]["status_code"] == "ok"
 
 
+def test_runtime_and_canonical_duration_fallback_use_nanoseconds(tmp_path):
+    kb_flush = load_kb_flush()
+    record = span_end("exec-duration-fallback", duration_sec=5.0)
+    record.pop("duration_sec")
+    record.pop("duration_ns")
+
+    canonical = span_end_to_observation(record)
+    runtime = kb_flush.span_end_to_obs(record)
+
+    assert canonical is not None
+    assert runtime is not None
+    assert canonical.duration_sec == 5.0
+    assert runtime["duration_sec"] == 5.0
+
+
 def test_cgroup_artifact_overrides_span_estimates(tmp_path):
     """The Tool-VM collector artifact must replace the span-side proxy values
     (cpu/rss/quality) before the observation is signed and trusted."""

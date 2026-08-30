@@ -120,11 +120,15 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
         )
     except (KeyError, TypeError, ValueError):
         start_time = end_time
-    duration_sec = as_float(record.get("duration_sec")) or as_float(resources.get("action_duration_ns"))
+    duration_sec = as_float(record.get("duration_sec"))
     if duration_sec is None:
-        duration_sec = as_float(record.get("duration_ns"))
-        if duration_sec is not None:
-            duration_sec = duration_sec / 1e9
+        action_duration_ns = as_float(resources.get("action_duration_ns"))
+        if action_duration_ns is not None:
+            duration_sec = action_duration_ns / 1e9
+    if duration_sec is None:
+        duration_ns = as_float(record.get("duration_ns"))
+        if duration_ns is not None:
+            duration_sec = duration_ns / 1e9
     coverage_ratio = as_float(resources.get("coverage_ratio"))
     status_code = status.get("code")
     exit_code = output.get("exit_code")

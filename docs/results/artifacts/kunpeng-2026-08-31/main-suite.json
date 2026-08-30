@@ -1,0 +1,66 @@
+{
+  "output": "/data/clawbox-paper-suite-001",
+  "source": {
+    "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
+    "tool_rootfs": "/data/openclaw-experiment-tool-cgroup.ext4",
+    "tool_repository_commit": "08c32462831d3849a70241ac9fea946b6b1884a6"
+  },
+  "workloads": [
+    {
+      "name": "rec-a",
+      "independent_unit": "15five/scim2-filter-parser#13",
+      "repository": "15five/scim2-filter-parser",
+      "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
+      "trace": "/data/recording-output/model-trace-session-0000.jsonl",
+      "prediction_file": "/data/workloads/p90-recording2-train-recording1-eval.json"
+    },
+    {
+      "name": "rec-b",
+      "independent_unit": "15five/scim2-filter-parser#13",
+      "repository": "15five/scim2-filter-parser",
+      "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
+      "trace": "/data/recording-output/model-trace-session-0001.jsonl",
+      "prediction_file": "/data/workloads/p90-recording2-train-recording1-eval.json"
+    },
+    {
+      "name": "rec-c",
+      "independent_unit": "15five/scim2-filter-parser#13",
+      "repository": "15five/scim2-filter-parser",
+      "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
+      "trace": "/data/recording-output/model-trace-session-0002.jsonl",
+      "prediction_file": "/data/workloads/p90-recording2-train-recording1-eval.json"
+    }
+  ],
+  "concurrency_levels": [1, 8, 20, 40],
+  "cpu_placement": "exclusive",
+  "require_held_out_predictions": true,
+  "numa_host_reserve_mib": 32768,
+  "snapshot_disk_reserve_mib": 32768,
+  "max_numa_cpu_busy_fraction": 0.10,
+  "require_no_firecracker": true,
+  "require_parent_numa_binding": true,
+  "repetitions": 3,
+  "seed": 7,
+  "resume": true,
+  "network_prefix": "172.30",
+  "validation_command": "cd /testbed && { git -c safe.directory=/testbed diff --binary --no-ext-diff 08c32462831d3849a70241ac9fea946b6b1884a6 -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig'; git -c safe.directory=/testbed ls-files --others --exclude-standard -z -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig' | sort -z | xargs -0 -r sha256sum; }",
+  "inference_backends": ["replay"],
+  "sizing_policies": ["fixed", "p90_static"],
+  "fixed_control_tool_memory_mib": 2048,
+  "memory_policies": ["resident", "snapshot"],
+  "resources": {
+    "runtime_memory_mib": 2048,
+    "tool_memory_mib": 4096,
+    "cpu_first": 0,
+    "numa_node": 0
+  },
+  "p90_static": {
+    "prediction_file": "/data/workloads/p90-recording2-train-recording1-eval.json",
+    "min_evidence": 5,
+    "headroom_fraction": 0.25,
+    "min_tool_memory_mib": 2048
+  },
+  "replay": {"time_scale": 1.0},
+  "timeout_s": 1800
+}
+

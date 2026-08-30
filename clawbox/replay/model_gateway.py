@@ -7,7 +7,7 @@ import hashlib
 import json
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +29,8 @@ class GatewayRequest:
     error: str = ""
     started_unix_s: float = 0.0
     completed_unix_s: float = 0.0
+    request_payload: dict[str, Any] = field(default_factory=dict)
+    replay_input_match: bool | None = None
 
 
 class ModelGateway:
@@ -121,7 +123,20 @@ class ModelGateway:
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
-                request = GatewayRequest(request_id, index, started_unix_s=time.time())
+                replay_input_match = None
+                if index is not None:
+                    expected = self.actions[index].input
+                    if isinstance(expected, list):
+                        replay_input_match = expected == canonical.get("messages")
+                    elif isinstance(expected, dict) and expected:
+                        replay_input_match = expected == canonical
+                    if replay_input_match is False:
+                        raise ValueError(f"replay request diverged at model step {index}")
+                request = GatewayRequest(
+                    request_id, index, started_unix_s=time.time(),
+                    request_payload=canonical,
+                    replay_input_match=replay_input_match,
+                )
                 self._requests[request_id] = request
                 self._persist()
                 threading.Thread(
@@ -193,6 +208,7 @@ class ModelGateway:
                 "action_id": f"model-{index + 1}", "iteration": index,
                 "ts_start": start, "ts_end": end,
                 "data": {"model": self.upstream_model or "recorded-model",
+                         "raw_request": item["request_payload"],
                          "raw_response": message,
                          "llm_latency_ms": (end - start) * 1000.0},
             })

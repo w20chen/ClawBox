@@ -1,0 +1,110 @@
+{
+  "artifact_count": 58,
+  "clawtune_revision": "76eab6fa5c6333f4e80901c030f10cab0e4ce605",
+  "evaluation": {
+    "protocol": "independent-recording-set",
+    "recording_set_id": "recording1",
+    "traces": {
+      "rec-a": {
+        "path": "/data/recording-output/model-trace-session-0000.jsonl",
+        "sha256": "8be4a7a6affe1f316e585cf7bdef170cd6e48ba43bf844a923045a1793d28b47"
+      },
+      "rec-b": {
+        "path": "/data/recording-output/model-trace-session-0001.jsonl",
+        "sha256": "0489dc897444bf1b26175f76ffbf69541ebca6a2f0e791a1168e8c8d89b9e801"
+      },
+      "rec-c": {
+        "path": "/data/recording-output/model-trace-session-0002.jsonl",
+        "sha256": "38f95c281e3d1884bd52802fb4d80956ed4b2600269a495beea1f6243de37ddb"
+      }
+    }
+  },
+  "generation": 1,
+  "pair_digest": "ddda46de2518a20934cadba240a5f587c2c5cde985d1f1ae0f52e75ed674a17d",
+  "prediction": {
+    "cpu_p90_cores": 0.8998095238095237,
+    "evidence_count": 51,
+    "fallback_paths": {
+      "cpu": [
+        "repo:tool_name"
+      ],
+      "latency": [
+        "repo:tool_name"
+      ],
+      "memory": [
+        "repo:tool_name"
+      ]
+    },
+    "latency_p90_sec": 9.054413080215454,
+    "memory_p90_bytes": 1531904.0,
+    "scopes": {
+      "cpu": "repo",
+      "latency": "repo",
+      "memory": "repo"
+    }
+  },
+  "repo_fingerprint": "15five/scim2-filter-parser",
+  "source_digest": "da53b4317caa5183411e757d2f536c704e11b7e75ebadfeae0771c1f70a26497",
+  "tenant_id": "benchmark",
+  "training": {
+    "completed_calls": 58,
+    "expected_observed_repo_fingerprint": "openclaw",
+    "recording_set_id": "recording2",
+    "run_count": 3,
+    "runs": [
+      {
+        "bridge_records": 115,
+        "cgroup_files": 131,
+        "cgroup_invalid_or_incomplete": 32,
+        "cgroup_valid": 99,
+        "join_rate": 0.8333333333333334,
+        "joined": 40,
+        "observed_repo_fingerprints": [
+          "openclaw"
+        ],
+        "run_id": "recording2/session-0000",
+        "source_path": "/data/recording-evidence2/session-0000",
+        "spans": 48,
+        "trace_files": 2,
+        "trainer_eligible": 13,
+        "trusted": 13
+      },
+      {
+        "bridge_records": 115,
+        "cgroup_files": 127,
+        "cgroup_invalid_or_incomplete": 32,
+        "cgroup_valid": 95,
+        "join_rate": 0.8695652173913043,
+        "joined": 40,
+        "observed_repo_fingerprints": [
+          "openclaw"
+        ],
+        "run_id": "recording2/session-0001",
+        "source_path": "/data/recording-evidence2/session-0001",
+        "spans": 46,
+        "trace_files": 2,
+        "trainer_eligible": 14,
+        "trusted": 14
+      },
+      {
+        "bridge_records": 159,
+        "cgroup_files": 180,
+        "cgroup_invalid_or_incomplete": 24,
+        "cgroup_valid": 156,
+        "join_rate": 0.8064516129032258,
+        "joined": 50,
+        "observed_repo_fingerprints": [
+          "openclaw"
+        ],
+        "run_id": "recording2/session-0002",
+        "source_path": "/data/recording-evidence2/session-0002",
+        "spans": 62,
+        "trace_files": 2,
+        "trainer_eligible": 31,
+        "trusted": 31
+      }
+    ],
+    "target_repository": "15five/scim2-filter-parser"
+  }
+}
+

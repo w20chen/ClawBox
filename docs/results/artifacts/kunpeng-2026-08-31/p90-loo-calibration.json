@@ -1,0 +1,228 @@
+{
+  "pooled_descriptive_only": {
+    "cpu": {
+      "actual": {
+        "max": 0.9867659574468085,
+        "mean": 0.5426607674722157,
+        "median": 0.47200000000000003,
+        "min": 0.05403652392947104,
+        "n": 58,
+        "p90_nearest_rank": 0.8998095238095237
+      },
+      "coverage": {
+        "covered": 51,
+        "fraction": 0.8793103448275862,
+        "n": 58
+      }
+    },
+    "latency": {
+      "actual": {
+        "max": 9.627298,
+        "mean": 2.031764327586207,
+        "median": 1.1661705,
+        "min": 0.0,
+        "n": 58,
+        "p90_nearest_rank": 9.054413
+      },
+      "coverage": {
+        "covered": 53,
+        "fraction": 0.9137931034482759,
+        "n": 58
+      }
+    },
+    "memory": {
+      "actual": {
+        "max": 1531904.0,
+        "mean": 1524912.551724138,
+        "median": 1527808.0,
+        "min": 1507328.0,
+        "n": 58,
+        "p90_nearest_rank": 1531904.0
+      },
+      "coverage": {
+        "covered": 58,
+        "fraction": 1.0,
+        "n": 58
+      }
+    }
+  },
+  "protocol": "leave-one-recording-out",
+  "runs": [
+    {
+      "actual": {
+        "cpu": {
+          "max": 0.8843752093802345,
+          "mean": 0.5262976119914533,
+          "median": 0.536,
+          "min": 0.05403652392947104,
+          "n": 13,
+          "p90_nearest_rank": 0.8748260869565218
+        },
+        "latency": {
+          "max": 9.117573,
+          "mean": 2.4789269999999997,
+          "median": 1.182704,
+          "min": 1.098019,
+          "n": 13,
+          "p90_nearest_rank": 9.079609
+        },
+        "memory": {
+          "max": 1531904.0,
+          "mean": 1525917.5384615385,
+          "median": 1527808.0,
+          "min": 1507328.0,
+          "n": 13,
+          "p90_nearest_rank": 1531904.0
+        }
+      },
+      "command_classes": {
+        "<empty>": 13
+      },
+      "coverage": {
+        "cpu": {
+          "covered": 13,
+          "fraction": 1.0,
+          "n": 13
+        },
+        "latency": {
+          "covered": 11,
+          "fraction": 0.8461538461538461,
+          "n": 13
+        },
+        "memory": {
+          "covered": 13,
+          "fraction": 1.0,
+          "n": 13
+        }
+      },
+      "held_out_session": "session-0000",
+      "join_rate": 0.8333333333333334,
+      "prediction": {
+        "cpu": 0.9224890016920474,
+        "latency": 9.054413080215454,
+        "memory": 1531904.0
+      },
+      "trusted_exec_observations": 13,
+      "workload": "rec-a"
+    },
+    {
+      "actual": {
+        "cpu": {
+          "max": 0.9346000000000001,
+          "mean": 0.5709528427886983,
+          "median": 0.5277260844306739,
+          "min": 0.05805490786009778,
+          "n": 14,
+          "p90_nearest_rank": 0.9224890016920474
+        },
+        "latency": {
+          "max": 9.216406,
+          "mean": 2.037428357142857,
+          "median": 1.1661705,
+          "min": 1.098925,
+          "n": 14,
+          "p90_nearest_rank": 3.715724
+        },
+        "memory": {
+          "max": 1531904.0,
+          "mean": 1526345.142857143,
+          "median": 1527808.0,
+          "min": 1507328.0,
+          "n": 14,
+          "p90_nearest_rank": 1531904.0
+        }
+      },
+      "command_classes": {
+        "<empty>": 14
+      },
+      "coverage": {
+        "cpu": {
+          "covered": 12,
+          "fraction": 0.8571428571428571,
+          "n": 14
+        },
+        "latency": {
+          "covered": 13,
+          "fraction": 0.9285714285714286,
+          "n": 14
+        },
+        "memory": {
+          "covered": 14,
+          "fraction": 1.0,
+          "n": 14
+        }
+      },
+      "held_out_session": "session-0001",
+      "join_rate": 0.8695652173913043,
+      "prediction": {
+        "cpu": 0.8998095238095237,
+        "latency": 9.079608917236328,
+        "memory": 1531904.0
+      },
+      "trusted_exec_observations": 14,
+      "workload": "rec-b"
+    },
+    {
+      "actual": {
+        "cpu": {
+          "max": 0.9867659574468085,
+          "mean": 0.5367456696276725,
+          "median": 0.42516666666666664,
+          "min": 0.0552912316014593,
+          "n": 31,
+          "p90_nearest_rank": 0.8998095238095237
+        },
+        "latency": {
+          "max": 9.627298,
+          "mean": 1.8416865483870968,
+          "median": 1.157966,
+          "min": 0.0,
+          "n": 31,
+          "p90_nearest_rank": 3.521715
+        },
+        "memory": {
+          "max": 1531904.0,
+          "mean": 1523844.1290322582,
+          "median": 1523712.0,
+          "min": 1511424.0,
+          "n": 31,
+          "p90_nearest_rank": 1531904.0
+        }
+      },
+      "command_classes": {
+        "<empty>": 24,
+        "cat": 2,
+        "cd": 3,
+        "nl": 1,
+        "sed": 1
+      },
+      "coverage": {
+        "cpu": {
+          "covered": 26,
+          "fraction": 0.8387096774193549,
+          "n": 31
+        },
+        "latency": {
+          "covered": 29,
+          "fraction": 0.9354838709677419,
+          "n": 31
+        },
+        "memory": {
+          "covered": 31,
+          "fraction": 1.0,
+          "n": 31
+        }
+      },
+      "held_out_session": "session-0002",
+      "join_rate": 0.8064516129032258,
+      "prediction": {
+        "cpu": 0.8843752093802345,
+        "latency": 9.079608917236328,
+        "memory": 1531904.0
+      },
+      "trusted_exec_observations": 31,
+      "workload": "rec-c"
+    }
+  ],
+  "scope": "trusted held-out exec observations from recording2"
+}

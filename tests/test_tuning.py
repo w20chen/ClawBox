@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
+from clawbox.tuning.__main__ import find_run_traces
 from clawbox.tuning.dataset import build_joined_dataset, export_dataset, read_bridge_jsonl, read_trace_jsonl
 from clawbox.tuning.estimators import (
     LatencyBucketClassifier,
@@ -152,6 +153,17 @@ def test_span_end_to_observation_valid():
     assert result.latency_bucket == "medium"
     assert result.cpu_utilization_avg_cores == 1.5
     assert result.rss_peak_bytes == 1024**2
+
+
+def test_span_end_duration_falls_back_from_action_nanoseconds():
+    record = span_end("exec-duration-fallback", duration_sec=5.0)
+    record.pop("duration_sec")
+    record.pop("duration_ns")
+
+    result = span_end_to_observation(record)
+
+    assert result is not None
+    assert result.duration_sec == 5.0
 
 
 def test_span_end_to_observation_ignores_non_tool_and_missing_id():
@@ -483,3 +495,14 @@ def test_ablation_known_command_kb_beats_global_only():
     summary = result.summary()
     assert summary["n_total"] == 60
     assert summary["known_command"]["kb_mae_delta_pct"] >= summary["cold_start"]["kb_mae_delta_pct"]
+
+
+def test_find_run_traces_does_not_mistake_root_bridge_for_trace(tmp_path):
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    bridge = tmp_path / "tool-bridge.jsonl"
+    bridge.write_text('{"execution_id":"exec-1"}\n', encoding="utf-8")
+    span = traces / "session.jsonl"
+    span.write_text('{"record_type":"trace_metadata"}\n', encoding="utf-8")
+
+    assert find_run_traces(tmp_path) == (traces, bridge)

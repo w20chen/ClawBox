@@ -271,11 +271,15 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
         )
     except (KeyError, TypeError, ValueError):
         start_time = end_time
-    duration_sec = _as_float(record.get("duration_sec")) or _as_float(resources.get("action_duration_ns"))
+    duration_sec = _as_float(record.get("duration_sec"))
     if duration_sec is None:
-        duration_sec = _as_float(record.get("duration_ns"))
-        if duration_sec is not None:
-            duration_sec = duration_sec / 1e9
+        action_duration_ns = _as_float(resources.get("action_duration_ns"))
+        if action_duration_ns is not None:
+            duration_sec = action_duration_ns / 1e9
+    if duration_sec is None:
+        duration_ns = _as_float(record.get("duration_ns"))
+        if duration_ns is not None:
+            duration_sec = duration_ns / 1e9
     coverage_ratio = _as_float(resources.get("coverage_ratio"))
     status_code = status.get("code")
     exit_code = output.get("exit_code")

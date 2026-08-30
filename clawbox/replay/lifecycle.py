@@ -8,9 +8,10 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Condition, Lock
 from typing import Any, Protocol
 
 
@@ -462,6 +463,18 @@ class FirecrackerLifecycle:
         except (OSError, IndexError, ValueError):
             return 0
 
+    def snapshot_allocated_bytes(self) -> int:
+        """Allocated disk blocks for the currently retained snapshot pair."""
+        total = 0
+        for path in (self._snapshot_state_path, self._snapshot_memory_path):
+            if path is None:
+                continue
+            try:
+                total += path.stat().st_blocks * 512
+            except OSError:
+                continue
+        return total
+
     def _spawn(self) -> None:
         socket_path = self.config.api_socket
         socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -542,15 +555,25 @@ class FirecrackerLifecycle:
 class ResidentSlotLifecycle:
     """Apply the same explicit resident-memory budget to both experiment arms."""
 
-    def __init__(self, inner: SandboxLifecycle, slots: BoundedSemaphore) -> None:
+    def __init__(
+        self, inner: SandboxLifecycle, slots: BoundedSemaphore,
+        acquire_timeout_s: Callable[[], float | None] | None = None,
+    ) -> None:
         self.inner = inner
         self.slots = slots
+        self.acquire_timeout_s = acquire_timeout_s
         self._owns_slot = False
         self._lock = Lock()
+        self.admission_wait_s = 0.0
+        self.admission_acquisitions = 0
 
     @property
     def resident(self) -> bool:
         return self.inner.resident
+
+    def process_exit_code(self) -> int | None:
+        checker = getattr(self.inner, "process_exit_code", None)
+        return checker() if callable(checker) else None
 
     def start(self) -> float:
         self._acquire()
@@ -587,9 +610,15 @@ class ResidentSlotLifecycle:
         with self._lock:
             if self._owns_slot:
                 raise LifecycleError("resident slot is already held")
-        self.slots.acquire()
+        started = time.monotonic()
+        timeout = self.acquire_timeout_s() if self.acquire_timeout_s is not None else None
+        acquired = self.slots.acquire(timeout=timeout) if timeout is not None else self.slots.acquire()
+        self.admission_wait_s += time.monotonic() - started
+        if acquired is False:
+            raise TimeoutError("timed out waiting for resident-memory admission")
         with self._lock:
             self._owns_slot = True
+            self.admission_acquisitions += 1
 
     def _release(self) -> None:
         with self._lock:
@@ -597,3 +626,112 @@ class ResidentSlotLifecycle:
                 return
             self._owns_slot = False
         self.slots.release()
+
+
+class FairSemaphore:
+    """FIFO counting semaphore for reproducible admission/restore ordering."""
+
+    def __init__(self, value: int) -> None:
+        if value < 1:
+            raise ValueError("semaphore value must be positive")
+        self._capacity = value
+        self._available = value
+        self._next_ticket = 0
+        self._serving_ticket = 0
+        self._cancelled: set[int] = set()
+        self._condition = Condition()
+
+    def acquire(self, timeout: float | None = None) -> bool:
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            while ticket != self._serving_ticket or self._available <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    self._cancelled.add(ticket)
+                    self._advance_cancelled()
+                    self._condition.notify_all()
+                    return False
+                self._condition.wait(remaining)
+            self._available -= 1
+            self._serving_ticket += 1
+            self._advance_cancelled()
+            self._condition.notify_all()
+            return True
+
+    def release(self) -> None:
+        with self._condition:
+            if self._available >= self._capacity:
+                raise ValueError("semaphore released too many times")
+            self._available += 1
+            self._condition.notify_all()
+
+    def _advance_cancelled(self) -> None:
+        while self._serving_ticket in self._cancelled:
+            self._cancelled.remove(self._serving_ticket)
+            self._serving_ticket += 1
+
+
+class FairResourcePool:
+    """FIFO admission that atomically leases one concrete resource.
+
+    A counting semaphore is insufficient when admission also determines CPU
+    placement: two admitted sessions could otherwise retain colliding static
+    CPU assignments.  This pool couples the resident-memory slot and CPU pair
+    into one lease, so at most one resident VM pair owns each CPU pair.
+    """
+
+    def __init__(self, resources: list[Any]) -> None:
+        if not resources:
+            raise ValueError("resource pool must not be empty")
+        try:
+            unique = set(resources)
+        except TypeError as exc:
+            raise ValueError("resource pool entries must be hashable") from exc
+        if len(unique) != len(resources):
+            raise ValueError("resource pool entries must be unique")
+        self._resources = tuple(resources)
+        self._available = list(resources)
+        self._leased: set[Any] = set()
+        self._next_ticket = 0
+        self._serving_ticket = 0
+        self._cancelled: set[int] = set()
+        self._condition = Condition()
+
+    def acquire(self, timeout: float | None = None) -> Any | None:
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            while ticket != self._serving_ticket or not self._available:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    self._cancelled.add(ticket)
+                    self._advance_cancelled()
+                    self._condition.notify_all()
+                    return None
+                self._condition.wait(remaining)
+            resource = self._available.pop(0)
+            self._leased.add(resource)
+            self._serving_ticket += 1
+            self._advance_cancelled()
+            self._condition.notify_all()
+            return resource
+
+    def release(self, resource: Any) -> None:
+        with self._condition:
+            if resource not in self._leased:
+                raise ValueError("resource was not leased from this pool")
+            self._leased.remove(resource)
+            # Stable order prevents the resource selection itself from adding
+            # run-to-run randomness after FIFO waiter ordering is established.
+            self._available.append(resource)
+            order = {item: index for index, item in enumerate(self._resources)}
+            self._available.sort(key=order.__getitem__)
+            self._condition.notify_all()
+
+    def _advance_cancelled(self) -> None:
+        while self._serving_ticket in self._cancelled:
+            self._cancelled.remove(self._serving_ticket)
+            self._serving_ticket += 1

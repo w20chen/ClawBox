@@ -435,6 +435,16 @@ def _common_replay_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--allow-exit-mismatch", action="store_true")
 
 
+def run_suite_command(args: argparse.Namespace) -> int:
+    module = __import__(
+        "clawbox.replay.suite", fromlist=["run_suite", "validate_suite_config"]
+    )
+    if args.validate_only:
+        print(json.dumps(module.validate_suite_config(args.config), indent=2, sort_keys=True))
+        return 0
+    return module.run_suite(args.config)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Replay agent traces with optional Firecracker eviction")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -482,9 +492,11 @@ def build_parser() -> argparse.ArgumentParser:
         "suite", help="run a multi-trace, NUMA-bounded concurrency sweep"
     )
     suite.add_argument("config", type=Path)
-    suite.set_defaults(func=lambda args: __import__(
-        "clawbox.replay.suite", fromlist=["run_suite"]
-    ).run_suite(args.config))
+    suite.add_argument(
+        "--validate-only", action="store_true",
+        help="validate files, held-out provenance, NUMA, CPU, and memory bounds without running",
+    )
+    suite.set_defaults(func=run_suite_command)
     return parser
 
 

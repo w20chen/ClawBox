@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -250,3 +251,16 @@ def test_openclaw_adapter_keeps_legacy_mode_alias():
     )
     assert "--mode {resident,snapshot}" in completed.stdout
     assert "--residency-policy {resident,llm_wait_checkpoint}" in completed.stdout
+
+
+def test_openclaw_completion_poll_tolerates_a_torn_serial_log_line(tmp_path):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_experiment", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    log = tmp_path / "runtime.log"
+    log.write_text('{"ok":true,"openclaw_exit_code":"', encoding="utf-8")
+    assert module.complete(log) == (False, None)
+    log.write_text('{"ok":true,"openclaw_exit_code":0}\n', encoding="utf-8")
+    assert module.complete(log) == (True, 0)

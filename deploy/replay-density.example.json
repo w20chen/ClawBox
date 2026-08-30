@@ -1,5 +1,5 @@
 {
-  "output": "/data/clawbox-paper-suite-001",
+  "output": "/data/clawbox-paper-density-001",
   "source": {
     "runtime_rootfs": "/data/openclaw-runtime.ext4",
     "tool_rootfs": "/data/tool-workspace.ext4",
@@ -11,55 +11,48 @@
       "independent_unit": "OWNER/REPO#TASK-A",
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/short-fix.prompt.txt",
-      "trace": "/data/workloads/short-fix.model.jsonl",
-      "prediction_file": "/data/workloads/p90-independent-eval.json"
+      "trace": "/data/workloads/short-fix.model.jsonl"
     },
     {
       "name": "test-debug",
       "independent_unit": "OWNER/REPO#TASK-B",
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/test-debug.prompt.txt",
-      "trace": "/data/workloads/test-debug.model.jsonl",
-      "prediction_file": "/data/workloads/p90-independent-eval.json"
+      "trace": "/data/workloads/test-debug.model.jsonl"
     },
     {
       "name": "multi-file",
       "independent_unit": "OWNER/REPO#TASK-C",
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/multi-file.prompt.txt",
-      "trace": "/data/workloads/multi-file.model.jsonl",
-      "prediction_file": "/data/workloads/p90-independent-eval.json"
+      "trace": "/data/workloads/multi-file.model.jsonl"
     }
   ],
-  "concurrency_levels": [1, 8, 20, 40],
-  "cpu_placement": "exclusive",
+  "concurrency_levels": [40, 60, 76],
+  "cpu_placement": "round_robin",
   "numa_host_reserve_mib": 32768,
   "snapshot_disk_reserve_mib": 32768,
   "max_numa_cpu_busy_fraction": 0.10,
   "require_no_firecracker": true,
   "require_parent_numa_binding": true,
-  "require_held_out_predictions": true,
   "repetitions": 3,
-  "seed": 7,
+  "seed": 17,
   "resume": true,
   "network_prefix": "172.30",
   "validation_command": "cd /testbed && { git -c safe.directory=/testbed diff --binary --no-ext-diff BASE_COMMIT -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig'; git -c safe.directory=/testbed ls-files --others --exclude-standard -z -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig' | sort -z | xargs -0 -r sha256sum; }",
+  "correctness_command": "cd /testbed && python -m pytest -q",
+  "correctness_timeout_s": 300,
   "inference_backends": ["replay"],
-  "sizing_policies": ["fixed", "p90_static"],
-  "fixed_control_tool_memory_mib": 2048,
+  "sizing_policies": ["fixed"],
   "memory_policies": ["resident", "snapshot"],
+  "resident_memory_budget_mib": 163840,
   "resources": {
     "runtime_memory_mib": 2048,
-    "tool_memory_mib": 4096,
+    "tool_memory_mib": 2048,
     "cpu_first": 0,
     "numa_node": 0
   },
-  "p90_static": {
-    "prediction_file": "/data/workloads/p90-independent-eval.json",
-    "min_evidence": 5,
-    "headroom_fraction": 0.25,
-    "min_tool_memory_mib": 2048
-  },
   "replay": {"time_scale": 1.0},
+  "retain_vm_artifacts": false,
   "timeout_s": 1800
 }

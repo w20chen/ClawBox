@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import importlib.util
+import threading
+import time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +19,7 @@ from clawbox.replay.inference_service import ReplayInferenceService
 from clawbox.replay.model_gateway import ModelGateway
 from clawbox.replay.latency import LatencyObservation, LinearLatencyPredictor
 from clawbox.replay.lifecycle import FirecrackerConfig, FirecrackerLifecycle, LocalCommandExecutor, SimulatedLifecycle
-from clawbox.replay.study import run_study
+from clawbox.replay.study import _validate_firecracker_socket_paths, run_study
 from clawbox.replay.trace import ReplayAction, load_trace
 
 
@@ -371,6 +373,23 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
         gateway.close()
 
 
+def test_replay_gateway_rejects_recorded_request_divergence(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    _write_jsonl(trace, [{
+        "type": "action", "action_type": "llm_call", "action_id": "model-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0,
+        "data": {
+            "raw_request": {"messages": [{"role": "user", "content": "expected"}]},
+            "raw_response": {"content": "ok"}, "llm_latency_ms": 0,
+        },
+    }])
+    gateway = ModelGateway(tmp_path / "store.json", mode="replay", trace=trace)
+    with pytest.raises(ValueError, match="diverged at model step 0"):
+        gateway.complete({"model": "ignored", "messages": [
+            {"role": "user", "content": "different"},
+        ]})
+
+
 def test_streaming_model_response_can_be_exported_as_replay_trace(tmp_path: Path) -> None:
     import base64
     from clawbox.replay.model_gateway import GatewayRequest
@@ -415,7 +434,10 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
         },
         "sessions": 2, "repetitions": 1,
         "inference_backends": ["replay"],
+        "sizing_policies": ["fixed"],
+        "fixed_control_tool_memory_mib": 2048,
         "memory_policies": ["resident", "snapshot"],
+        "resources": {"runtime_memory_mib": 2048, "tool_memory_mib": 4096},
     }), encoding="utf-8")
 
     def fake_run(argv, **_kwargs):
@@ -433,21 +455,48 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
                 "throughput_sessions_per_hour": 720,
                 "peak_firecracker_rss_bytes": 100,
                 "mean_firecracker_rss_bytes": 80,
-                "sessions": [{"validation_sha256": "same-state"}],
+                "sessions": [
+                    {"validation_sha256": "same-state"},
+                    {"validation_sha256": "same-state"},
+                ],
             }), encoding="utf-8")
         return SimpleNamespace(stdout="")
 
     monkeypatch.setattr("clawbox.replay.study.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "clawbox.replay.study._validate_firecracker_socket_paths", lambda _arm: None,
+    )
     assert run_study(config) == 0
     summary = json.loads((tmp_path / "out" / "study-summary.json").read_text())
-    assert set(summary["groups"]) == {"replay-resident", "replay-snapshot"}
-    assert summary["groups"]["replay-snapshot"]["sessions_completed"] == 2
+    assert set(summary["groups"]) == {
+        "replay-fixed-resident", "replay-fixed-snapshot",
+        "replay-fixed2-resident", "replay-fixed2-snapshot",
+    }
+    assert summary["groups"]["replay-fixed-snapshot"]["sessions_completed"] == 2
     assert summary["final_state_equal"] is True
-    envelopes = json.loads((tmp_path / "out" / "r00-replay-snapshot" / "results"
+    fixed_snapshot = next((tmp_path / "out").glob("r00-replay-fixed-snapshot"))
+    envelopes = json.loads((fixed_snapshot / "results"
                             / "result-envelopes.json").read_text())
     assert envelopes[0]["status"] == "succeeded"
     assert envelopes[0]["resolved_workflow"]["residency_policy"] == "llm_wait_checkpoint"
     assert envelopes[0]["metrics"]["vm_checkpoints"] == 0
+
+
+def test_study_rejects_firecracker_socket_paths_over_sun_len(tmp_path: Path) -> None:
+    safe = Path("/tmp/short-arm")
+    _validate_firecracker_socket_paths(safe, force=True)
+    too_long = Path("/tmp") / ("x" * 100)
+    with pytest.raises(ValueError, match="maximum 107"):
+        _validate_firecracker_socket_paths(too_long, force=True)
+
+
+def test_registered_fixed2_arm_socket_path_fits_firecracker_limit() -> None:
+    arm = Path(
+        "/data/clawbox-paper-suite-001/runs/rec-a/c01/"
+        "r00-replay-fixed2-snapshot"
+    )
+    _validate_firecracker_socket_paths(arm, force=True)
+    assert len(os.fsencode(str(arm / "input/session-0000/runtime.sock"))) <= 107
 
 
 def test_paper_suite_enforces_numa_cpu_and_memory_bounds() -> None:
@@ -471,6 +520,228 @@ def test_paper_suite_enforces_numa_cpu_and_memory_bounds() -> None:
     }
     with pytest.raises(ValueError, match="NUMA-local budget"):
         validate_numa_budget(invalid_memory, topology)
+
+
+def test_paper_suite_rejects_a_busy_numa_node(monkeypatch) -> None:
+    from clawbox.replay.suite import validate_host_readiness
+
+    ticks = iter([(1000, 800), (2000, 1500)])
+    monkeypatch.setattr("clawbox.replay.suite._cpu_ticks", lambda _cpus: next(ticks))
+    monkeypatch.setattr("clawbox.replay.suite._running_firecracker_pids", lambda: [])
+    raw = {
+        "concurrency_levels": [40], "numa_host_reserve_mib": 32768,
+        "max_numa_cpu_busy_fraction": 0.1,
+        "resources": {"runtime_memory_mib": 2048, "tool_memory_mib": 4096},
+    }
+    topology = {
+        "node": 0, "cpus": list(range(80)), "free_memory_mib": 500_000,
+    }
+    with pytest.raises(ValueError, match="CPU busy fraction"):
+        validate_host_readiness(raw, topology, sample_seconds=0)
+
+
+def test_small_sample_confidence_interval_uses_student_t() -> None:
+    from clawbox.replay.stats import summary_stats
+
+    result = summary_stats([1.0, 2.0, 3.0])
+    assert result["ci95_method"] == "student-t"
+    assert result["degrees_of_freedom"] == 2
+    assert result["ci95_half_width"] == pytest.approx(4.303 / 3**0.5)
+
+
+def test_one_independent_unit_has_no_estimable_confidence_interval() -> None:
+    from clawbox.replay.stats import summary_stats
+
+    result = summary_stats([4.0])
+    assert result["n"] == 1
+    assert result["stdev"] is None
+    assert result["ci95_half_width"] is None
+    assert result["ci95_method"] == "not-estimable"
+
+
+def test_macro_statistics_average_trajectories_within_independent_unit() -> None:
+    from clawbox.replay.suite import SUITE_METRICS, _macro_statistics
+
+    def group(value: float) -> dict:
+        return {"statistics": {
+            metric: {"mean": value if metric == "wall_s" else None}
+            for metric in SUITE_METRICS
+        }}
+
+    runs = [
+        {"workload": "trajectory-a", "independent_unit": "task-1", "concurrency": 1,
+         "status": 0, "final_state_equal": True, "groups": {"baseline": group(2.0)}},
+        {"workload": "trajectory-b", "independent_unit": "task-1", "concurrency": 1,
+         "status": 0, "final_state_equal": True, "groups": {"baseline": group(4.0)}},
+        {"workload": "trajectory-c", "independent_unit": "task-2", "concurrency": 1,
+         "status": 0, "final_state_equal": True, "groups": {"baseline": group(9.0)}},
+        {"workload": "failed", "independent_unit": "task-3", "concurrency": 1,
+         "status": 1, "final_state_equal": False, "groups": {"baseline": group(100.0)}},
+    ]
+    result = _macro_statistics(runs, [1])["c01/baseline"]["wall_s"]
+    assert result["n"] == 2
+    assert result["trajectory_count"] == 3
+    assert [row["mean"] for row in result["independent_unit_means"]] == [3.0, 9.0]
+    assert result["mean"] == 6.0
+
+
+def test_paired_contrasts_pair_repetition_and_task() -> None:
+    from clawbox.replay.suite import SUITE_METRICS, _paired_contrasts
+
+    def row(residency: str, wall: float) -> dict:
+        result = {
+            "workload": "trajectory-a", "independent_unit": "task-1",
+            "concurrency": 8, "repetition": 0, "inference_backend": "replay",
+            "sizing_policy": "fixed", "residency_policy": residency,
+            "sessions_requested": 1, "sessions_completed": 1,
+            "failure_count": 0, "block_final_state_equal": True,
+        }
+        result.update({metric: None for metric in SUITE_METRICS})
+        result["wall_s"] = wall
+        return result
+
+    result = _paired_contrasts([
+        row("resident", 10.0), row("llm_wait_checkpoint", 12.0),
+    ])["c08/checkpoint_vs_resident/fixed"]["wall_s"]
+    assert result["n"] == 1
+    assert result["mean"] == 2.0
+    assert result["ci95_half_width"] is None
+    assert result["pairs"][0]["percent_effect"] == pytest.approx(20.0)
+
+
+def test_checkpoint_suite_reserves_two_snapshot_generations(monkeypatch, tmp_path) -> None:
+    from clawbox.replay.suite import validate_disk_readiness
+
+    monkeypatch.setattr(
+        "clawbox.replay.suite.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024 * 1024),
+    )
+    raw = {
+        "concurrency_levels": [2], "memory_policies": ["snapshot"],
+        "snapshot_disk_reserve_mib": 10,
+        "resources": {"runtime_memory_mib": 20, "tool_memory_mib": 30},
+    }
+    with pytest.raises(ValueError, match="bounded concurrent snapshot generations"):
+        validate_disk_readiness(raw, tmp_path)
+
+
+def test_checkpoint_disk_bound_uses_resident_admission_budget(monkeypatch, tmp_path) -> None:
+    from clawbox.replay.suite import validate_disk_readiness
+
+    monkeypatch.setattr(
+        "clawbox.replay.suite.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=500 * 1024 * 1024),
+    )
+    raw = {
+        "concurrency_levels": [76], "memory_policies": ["snapshot"],
+        "resident_memory_budget_mib": 160,
+        "snapshot_disk_reserve_mib": 4,
+        "resources": {"runtime_memory_mib": 2, "tool_memory_mib": 2},
+    }
+    result = validate_disk_readiness(raw, tmp_path)
+    assert result["snapshot_generation_bound"] == 116
+    assert result["required_mib"] == 468
+
+
+def test_fair_semaphore_times_out_without_stranding_next_ticket() -> None:
+    from clawbox.replay.lifecycle import FairSemaphore
+
+    slots = FairSemaphore(1)
+    assert slots.acquire() is True
+    outcomes: list[bool] = []
+
+    first = threading.Thread(target=lambda: outcomes.append(slots.acquire(timeout=0.02)))
+    first.start()
+    first.join(timeout=1)
+    assert outcomes == [False]
+    slots.release()
+    assert slots.acquire(timeout=0.1) is True
+    slots.release()
+
+
+def test_fair_resource_pool_leases_unique_cpu_pairs_fifo() -> None:
+    from clawbox.replay.lifecycle import FairResourcePool
+
+    pool = FairResourcePool([(0, 1), (2, 3)])
+    first = pool.acquire()
+    second = pool.acquire()
+    assert {first, second} == {(0, 1), (2, 3)}
+    outcomes: list[tuple[int, int] | None] = []
+
+    waiter = threading.Thread(
+        target=lambda: outcomes.append(pool.acquire(timeout=1.0))
+    )
+    waiter.start()
+    time.sleep(0.02)
+    assert outcomes == []
+    pool.release(first)
+    waiter.join(timeout=1)
+    assert outcomes == [first]
+    pool.release(second)
+    pool.release(outcomes[0])
+
+
+def test_fair_resource_pool_timeout_does_not_strand_next_ticket() -> None:
+    from clawbox.replay.lifecycle import FairResourcePool
+
+    pool = FairResourcePool([(0, 1)])
+    lease = pool.acquire()
+    assert pool.acquire(timeout=0.01) is None
+    pool.release(lease)
+    assert pool.acquire(timeout=0.1) == lease
+
+
+def test_resident_slot_lifecycle_releases_budget_after_checkpoint() -> None:
+    from clawbox.replay.lifecycle import FairSemaphore, ResidentSlotLifecycle, SimulatedLifecycle
+
+    slots = FairSemaphore(1)
+    first = ResidentSlotLifecycle(SimulatedLifecycle(), slots)
+    second = ResidentSlotLifecycle(SimulatedLifecycle(), slots)
+    first.start()
+    completed = threading.Event()
+
+    def start_second() -> None:
+        second.start()
+        completed.set()
+
+    waiter = threading.Thread(target=start_second)
+    waiter.start()
+    time.sleep(0.02)
+    assert not completed.is_set()
+    first.checkpoint_and_evict()
+    assert completed.wait(1)
+    second.close()
+    first.close()
+
+
+def test_suite_requires_prediction_for_the_exact_held_out_trace(tmp_path: Path) -> None:
+    from clawbox.replay.suite import _prediction_provenance
+
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text('{"type":"action"}\n', encoding="utf-8")
+    trace_digest = __import__("hashlib").sha256(trace.read_bytes()).hexdigest()
+    prediction = tmp_path / "prediction.json"
+    prediction.write_text(json.dumps({
+        "source_digest": "a" * 64,
+        "pair_digest": "b" * 64,
+        "artifact_count": 20,
+        "training": {"runs": [{"run_id": "session-0001"}]},
+        "evaluation": {
+            "protocol": "leave-one-recording-out",
+            "held_out_workload": "rec-a",
+            "held_out_run_id": "session-0000",
+            "held_out_trace_sha256": trace_digest,
+        },
+    }), encoding="utf-8")
+
+    provenance = _prediction_provenance(
+        prediction, workload_name="rec-a", trace_path=trace, require_held_out=True,
+    )
+    assert provenance["evaluation"]["held_out_run_id"] == "session-0000"
+    with pytest.raises(ValueError, match="another workload"):
+        _prediction_provenance(
+            prediction, workload_name="rec-b", trace_path=trace, require_held_out=True,
+        )
 
 
 def test_engine_hashes_final_state_validation() -> None:
