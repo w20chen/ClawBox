@@ -970,6 +970,23 @@ steps and repeated trajectories are never treated as independent replicates.
 `paired_contrasts` reports within-repetition sizing, checkpoint, and interaction
 effects instead of drawing conclusions from overlapping marginal intervals.
 
+After both registered suites finish, generate paper tables directly from their
+validated macro statistics and paired contrasts:
+
+```bash
+python3 scripts/report-replay-paper.py \
+  --main /data/clawbox-paper-suite-001 \
+  --density /data/clawbox-paper-checkpoint-density-001 \
+  --json-out /data/clawbox-paper-report.json \
+  --markdown-out /data/clawbox-paper-report.md
+```
+
+The report command fails closed if either suite is incomplete, any block has a
+divergent final state, any session failed its correctness command, or a
+registered baseline is missing. Its 95% confidence intervals use independent
+task IDs; with repeated trajectories from only one SWE task it explicitly
+reports that a cross-task interval is not estimable.
+
 An optional `correctness_command` records a separate exit code and output per
 session without conflating a benchmark-oracle failure with infrastructure
 failure. When configured, reports include `correctness_pass_fraction` and
