@@ -71,7 +71,10 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("manifest", type=Path)
     p.add_argument("--output", required=True, type=Path)
-    p.add_argument("--mode", choices=("resident", "snapshot"), required=True)
+    residency = p.add_mutually_exclusive_group(required=True)
+    residency.add_argument("--residency-policy", choices=("resident", "llm_wait_checkpoint"))
+    residency.add_argument("--mode", choices=("resident", "snapshot"),
+                           help="legacy alias; snapshot means llm_wait_checkpoint")
     p.add_argument("--inference", choices=("replay", "api"), required=True)
     p.add_argument("--trace", type=Path)
     p.add_argument("--time-scale", type=float, default=1.0)
@@ -80,6 +83,19 @@ def main() -> None:
     p.add_argument("--validation-command", default="cd /testbed && git diff --binary --no-ext-diff HEAD")
     p.add_argument("--timeout-s", type=float, default=900)
     a = p.parse_args()
+    if a.timeout_s <= 0:
+        p.error("--timeout-s must be positive")
+    if a.time_scale < 0:
+        p.error("--time-scale must be non-negative")
+    if a.inference == "replay" and a.trace is None:
+        p.error("--trace is required when --inference=replay")
+    if a.inference == "api" and (not a.api_base_url or not a.api_model):
+        p.error("--api-base-url and --api-model are required when --inference=api")
+    if a.inference == "api" and not os.environ.get(a.api_key_env):
+        p.error(f"environment variable {a.api_key_env!r} is required when --inference=api")
+    a.residency_policy = a.residency_policy or (
+        "llm_wait_checkpoint" if a.mode == "snapshot" else a.mode
+    )
     raw = json.loads(a.manifest.read_text())
     a.output.mkdir(parents=True, exist_ok=False)
     lifecycles: list[FirecrackerLifecycle] = []
@@ -124,7 +140,7 @@ def main() -> None:
                     raise RuntimeError(f"Tool VM exited unexpectedly ({tool_exit})")
                 pending = [item for item in gateway.records()
                            if not item["ready"] and item["request_id"] not in processed]
-                if a.mode == "snapshot" and pending:
+                if a.residency_policy == "llm_wait_checkpoint" and pending:
                     request_id = pending[0]["request_id"]
                     snapshot_s += tool.checkpoint_and_evict()
                     snapshot_s += runtime.checkpoint_and_evict()
@@ -152,7 +168,8 @@ def main() -> None:
     finally:
         stop.set(); sampler.join(timeout=2)
     wall_s = time.monotonic() - started
-    report = {"mode": a.mode, "inference": a.inference,
+    report = {"mode": "snapshot" if a.residency_policy == "llm_wait_checkpoint" else "resident",
+              "residency_policy": a.residency_policy, "inference": a.inference,
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
               "failures": failures, "wall_s": wall_s,
               "throughput_sessions_per_hour": len(results) * 3600 / wall_s,

@@ -413,6 +413,11 @@ def test_study_runs_the_inference_memory_matrix(tmp_path: Path, monkeypatch) -> 
     assert set(summary["groups"]) == {"replay-resident", "replay-snapshot"}
     assert summary["groups"]["replay-snapshot"]["sessions_completed"] == 2
     assert summary["final_state_equal"] is True
+    envelopes = json.loads((tmp_path / "out" / "r00-replay-snapshot" / "results"
+                            / "result-envelopes.json").read_text())
+    assert envelopes[0]["status"] == "succeeded"
+    assert envelopes[0]["resolved_workflow"]["residency_policy"] == "llm_wait_checkpoint"
+    assert envelopes[0]["metrics"]["vm_checkpoints"] == 0
 
 
 def test_engine_hashes_final_state_validation() -> None:

@@ -15,9 +15,27 @@ from typing import Any
 
 from clawbox.cell.controller import GROUP, PLURAL, VERSION
 from clawbox.controller.kubernetes_backend import dns_label
+from clawbox.experiments import ExperimentSpec, expand_matrix, validate_workflow
+from clawbox.experiments.results import ResultEnvelope, RunStatus, failure_category_for, utcnow
 
 
 MAX_LLM_EGRESS_CIDRS = 32
+
+
+def production_workflow(
+    *, profile: str, concurrency: int, timeout_seconds: int, command_timeout_seconds: int,
+):
+    """Describe the accepted Cell without changing the existing launcher mechanics."""
+    spec = ExperimentSpec.model_validate({
+        "workload": {"source": "swe_rebench", "input": "launcher task list"},
+        "agent": {"driver": "openclaw"}, "inference": {"backends": ["api"]},
+        "sandbox": {"backend": "kubernetes", "tool_transport": "ssh"},
+        "scheduling": {"baselines": ["fixed-resident"]},
+        "execution": {"concurrency": concurrency, "timeout_seconds": timeout_seconds,
+                      "command_timeout_seconds": command_timeout_seconds},
+        "resources": {"profile": profile},
+    })
+    return expand_matrix(spec)[0]
 
 
 def normalize_llm_egress_cidrs(cidrs: list[str]) -> list[str]:
@@ -211,6 +229,12 @@ class KubernetesBenchmarkLauncher:
         self.core, self.custom, self.node_api = core, custom, node_api
 
     def run(self, tasks: list[BenchmarkTask], *, parallelism: int, **options: Any) -> list[dict[str, Any]]:
+        workflow = production_workflow(
+            profile=str(options.get("profile", "small")), concurrency=parallelism,
+            timeout_seconds=int(options.get("timeout_seconds", 1800)),
+            command_timeout_seconds=int(options.get("command_timeout_seconds", 300)),
+        )
+        options["_resolved_workflow"] = workflow
         self._preflight(**options)
         if not options.get("run_id"):
             options["run_id"] = f"{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
@@ -243,8 +267,12 @@ class KubernetesBenchmarkLauncher:
             raise RuntimeError(f"Kubernetes SandboxTask preflight failed: {type(exc).__name__}: {exc}") from exc
 
     def _run_one(self, task: BenchmarkTask, **options: Any) -> dict[str, Any]:
+        started_at = utcnow()
         namespace = options["namespace"]
-        manifest_options = {key: value for key, value in options.items() if key != "runtime_class"}
+        manifest_options = {
+            key: value for key, value in options.items()
+            if key != "runtime_class" and not key.startswith("_")
+        }
         manifest = render_sandbox_task(task, **manifest_options)
         name = manifest["metadata"]["name"]
         try:
@@ -261,11 +289,40 @@ class KubernetesBenchmarkLauncher:
             status = current.get("status") or {}
             if status.get("phase") == "Cleaned":
                 outcome = str(status.get("outcome", "Failed"))
+                legacy_status = outcome.lower().replace("timedout", "timed-out")
+                standard_status = {
+                    "succeeded": RunStatus.SUCCEEDED, "failed": RunStatus.FAILED,
+                    "timed-out": RunStatus.TIMED_OUT, "cancelled": RunStatus.CANCELLED,
+                }.get(legacy_status, RunStatus.FAILED)
+                base_workflow = options["_resolved_workflow"]
+                workflow = base_workflow.model_copy(update={
+                    "sandbox": base_workflow.sandbox.model_copy(update={"tool_image": task.image}),
+                })
+                capability = validate_workflow(workflow)
+                envelope = ResultEnvelope(
+                    run_id=str(options["run_id"]), case_id=task.instance_id, baseline=workflow.baseline,
+                    classification=capability.classification, resolved_workflow=workflow,
+                    provenance={key: value for key, value in {
+                        "repository": task.repository, "base_commit": task.base_commit,
+                        "tool_image": task.image,
+                    }.items() if value},
+                    status=standard_status, failure_category=failure_category_for(
+                        standard_status, str(status.get("reason", "")),
+                    ), started_at=started_at, completed_at=utcnow(), metrics={},
+                    artifacts={"sandbox_task": name},
+                    backend_details={
+                        "topology": "Runtime + Tool", "prediction": "shadow-only",
+                        "runtime_image_source": "Cell controller configuration",
+                        "llm_secret": options["llm_secret"],
+                    },
+                )
                 return {
                     "task_id": task.instance_id,
                     "sandbox_task": name,
-                    "status": outcome.lower().replace("timedout", "timed-out"),
+                    "status": legacy_status,
                     "reason": status.get("reason", ""),
+                    "resolved_workflow": workflow.model_dump(mode="json"),
+                    "result_envelope": envelope.model_dump(mode="json"),
                 }
             time.sleep(2)
         raise TimeoutError(f"SandboxTask {namespace}/{name} did not reach Cleaned")
@@ -302,6 +359,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")
+    if args.timeout_seconds < 1:
+        parser.error("--timeout-seconds must be >= 1")
+    if args.command_timeout_seconds < 1:
+        parser.error("--command-timeout-seconds must be >= 1")
     try:
         tasks = select_arm64_tasks(
             load_tasks(args.tasks), load_arm64_mapping(args.arm64_map), args.sample,

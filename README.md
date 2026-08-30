@@ -1,43 +1,213 @@
 # ClawBox
 
-![ClawBox architecture overview](docs/images/clawbox-overview.png)
+ClawBox runs coding agent tasks on one native ARM64 Kubernetes node. Each task is represented by a custom Kubernetes object `SandboxTask` and backed by two isolated Kata/Firecracker virtual machines:
 
-ClawBox runs coding-agent tasks on one native ARM64 Kubernetes node. Each
-task is represented by a custom Kubernetes object (named `SandboxTask` in the
-API) and backed by two isolated Kata/Firecracker virtual machines:
+- the **Runtime VM** runs OpenClaw and ClawTune;
+- the **Tool VM** contains the repository and executes commands;
+- the Cell controller creates, monitors, collects, and cleans up both VMs.
 
-- the **agent virtual machine** runs OpenClaw and calls the language model;
-- the **tool virtual machine** contains the repository and executes commands;
-- the Kubernetes controller starts, monitors, and cleans up both VMs.
-
-The supported production target is a dedicated ARM64 host such as Kunpeng.
+The supported production target is a dedicated ARM64 host (e.g., Kunpeng).
 There is no supported x86, QEMU, runc, or multi-node fallback.
 
-## ClawBox and ClawTune
+## ClawBox & ClawTune
 
-![ClawBox and ClawTune relationship](docs/images/clawbox-clawtune-relationship.png)
+ClawBox owns task isolation and lifecycle: the Cell controller creates, monitors, collects, and cleans up the Runtime and Tool VMs. OpenClaw controls the agent loop inside the Runtime VM and sends commands directly to Tool Bridge over SSH.
 
-ClawBox creates and manages the isolated virtual machines. ClawTune is the
-instrumentation library inside the agent virtual machine; it records model
-calls, tool calls, and resource use. ClawBox stores those
-records and makes them available to later tasks from the same tenant and
-repository.
+ClawTune records model, tool, and clause activity in the Runtime VM. Tool Bridge executes commands in the Tool VM and collects guest-side resource telemetry. At task completion, the Runtime VM pairs these artifacts by execution identity, signs them, and uploads them for validation and storage.
 
-The current flow is:
+Later tasks from the same tenant and repository may load the resulting knowledge base generation. Its predictions remain shadow-only; `FixedProfileSizer` continues to determine production CPU and memory.
 
-1. An agent virtual machine downloads the latest signed measurements for its
-   tenant and repository.
-2. ClawTune records LLM and tool activity.
-3. ClawBox forwards each command to the isolated tool virtual machine and
-   measures its CPU and memory use.
-4. ClawBox checks that the records refer to the same tool execution, signs the
-   combined result, and stores a new version.
-5. Later tasks can load that version for reporting and prediction.
+## Execution architecture
 
-Predictions currently do not change the CPU or memory assigned to production
-tasks. Production task sizes still come from fixed profiles. The trace-replay
-experiment described later in this README is the first place where an LLM
-duration estimate controls VM memory reclamation.
+A workflow explicitly selects independent axes: workload source, agent driver,
+inference backend, sandbox backend, tool transport, admission policy,
+residency policy, and result collection. A baseline resolves only admission
+and residency policy; it never changes workload, provider, backend, image,
+timeout, or concurrency.
+
+### Canonical axes
+
+The schema names all currently relevant values, including values retained for
+historical code or future work. A name appearing here does **not** mean every
+combination containing it is executable; the centralized capability validator
+classifies the complete workflow.
+
+| Axis | Values | Current boundary |
+| --- | --- | --- |
+| Workload source | `swe_rebench`, `recorded_trace`, `synthetic` | All three parse into `WorkloadCase`; `synthetic` has no comparable production/paper runner. |
+| Agent driver | `openclaw`, `replay_engine` | OpenClaw is the comparable production/paper driver; ReplayEngine is historical mechanism testing. |
+| Inference backend | `api`, `replay` | Both are implemented for the paper path; production uses API. |
+| Sandbox backend | `kubernetes`, `direct_firecracker`, `local` | Kubernetes is production, direct Firecracker is research/historical, local is testing/historical. |
+| Tool transport | `ssh`, `vsock`, `local`, `kubectl` | Production and paper use SSH; the others belong to ReplayEngine/testing paths. |
+| Admission policy | `fixed_profile`, `fixed_explicit`, `p90_static`, `p90_elastic` | Fixed profile and fixed explicit are active; p90 static is legacy-only; p90 elastic is not implemented. |
+| Residency policy | `resident`, `llm_wait_checkpoint`, `pressure_checkpoint` | Resident and direct-Firecracker LLM-wait checkpoint are active; pressure checkpoint is not implemented. |
+| Result collection | `ResultEnvelope` plus runner artifacts | Production and paper retain their detailed outputs and add the same outer envelope. |
+
+### Implemented workflow combinations
+
+These are the combinations that are represented or recognized by the
+canonical model today:
+
+| Classification | Workload / driver | Inference | Sandbox / transport | Admission / residency | Execution status |
+| --- | --- | --- | --- | --- | --- |
+| Production | `swe_rebench` / `openclaw` | `api` | `kubernetes` / `ssh` | `fixed_profile` / `resident` | Implemented and accepted. |
+| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `fixed_explicit` / `resident` | Implemented paper arm. |
+| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `fixed_explicit` / `llm_wait_checkpoint` | Implemented paper arm. |
+| Historical | `recorded_trace` / `replay_engine` | existing replay/API providers | `direct_firecracker` or `local` / explicitly selected transport | ReplayEngine's existing policy | Retained for mechanism testing; not comparable with a Cell. |
+| Local-only | `synthetic` or targeted smoke input | as required by the helper | `local` or direct Firecracker | helper-specific | Targeted tests only, not a benchmark baseline. |
+
+The paper experiment therefore has exactly four comparable arms:
+
+```text
+replay + resident
+replay + llm_wait_checkpoint
+api    + resident
+api    + llm_wait_checkpoint
+```
+
+The following are explicitly **not implemented**: production Cell p90
+enforcement, `p90_elastic`, `pressure_checkpoint`, Kubernetes checkpoint
+residency, and local Firecracker checkpoint residency. The validator rejects
+them before a runner starts.
+
+### Baseline registry
+
+A baseline is immutable policy data, not a runner. It controls only the final
+two policy columns below:
+
+| Baseline | Admission policy | Residency policy | Status |
+| --- | --- | --- | --- |
+| `fixed-resident` | `fixed_profile` | `resident` | Implemented for the production Cell. |
+| `fixed-explicit-resident` | `fixed_explicit` | `resident` | Implemented for direct-Firecracker research. |
+| `fixed-llm-wait-checkpoint` | `fixed_explicit` | `llm_wait_checkpoint` | Implemented for direct-Firecracker research. |
+| `p90-static` | `p90_static` | `resident` | Legacy Tool-only scheduler path; rejected as a Runtime + Tool workflow. |
+| `p90-elastic` | `p90_elastic` | `resident` | Not implemented. |
+| `p90-elastic-pressure-checkpoint` | `p90_elastic` | `pressure_checkpoint` | Not implemented. |
+
+The accepted production workflow is:
+
+```text
+swe_rebench + openclaw + api + kubernetes + ssh
++ fixed_profile + resident
+```
+
+The active paper workflow is:
+
+```text
+recorded_trace + openclaw + (replay | api) + direct_firecracker + ssh
++ fixed_explicit + (resident | llm_wait_checkpoint)
+```
+
+Production prediction remains shadow-only. Kubernetes VM checkpointing,
+production p90 enforcement, `p90_elastic`, and `pressure_checkpoint` are not
+implemented and are rejected during validation. The historical ReplayEngine
+and Tool-only scheduler/allocator/controller paths remain available but are
+not comparable production Cells.
+
+See [Execution architecture](docs/execution-architecture.md) for the complete
+runner inventory, canonical vocabulary, baseline registry, capability table,
+and authoritative/legacy persistence boundary.
+
+### Complete canonical examples
+
+This production specification resolves to one workflow. The existing
+SWE-ReBench launcher obtains the case-specific Tool image from the ARM64
+mapping and the Runtime image/provider configuration from the installed Cell
+configuration.
+
+```json
+{
+  "schema_version": 1,
+  "workload": {
+    "source": "swe_rebench",
+    "input": "/data/tasks.json",
+    "repetitions": 1
+  },
+  "agent": {"driver": "openclaw"},
+  "inference": {"backends": ["api"]},
+  "sandbox": {
+    "backend": "kubernetes",
+    "tool_transport": "ssh"
+  },
+  "scheduling": {"baselines": ["fixed-resident"]},
+  "execution": {
+    "concurrency": 8,
+    "timeout_seconds": 1800,
+    "command_timeout_seconds": 300
+  },
+  "resources": {"profile": "small"},
+  "validation": {
+    "command": "cd /testbed && git diff --binary --no-ext-diff HEAD"
+  },
+  "output": {"directory": "/data/production-run"}
+}
+```
+
+This paper specification resolves to the four arms listed above. Rootfs and
+prompt paths are backend materialization fields, not workload fields.
+
+```json
+{
+  "schema_version": 1,
+  "workload": {
+    "source": "recorded_trace",
+    "input": "/data/workloads/model-trace.jsonl",
+    "repetitions": 3
+  },
+  "agent": {"driver": "openclaw"},
+  "inference": {
+    "backends": ["replay", "api"],
+    "configuration": {
+      "replay": {"time_scale": 1.0},
+      "api": {
+        "base_url": "https://PROVIDER_BASE_URL/v1",
+        "model": "PROVIDER_MODEL_ID",
+        "key_env": "OPENAI_API_KEY"
+      }
+    }
+  },
+  "sandbox": {
+    "backend": "direct_firecracker",
+    "tool_transport": "ssh",
+    "materialization": {
+      "runtime_rootfs": "/data/openclaw-runtime.ext4",
+      "tool_rootfs": "/data/tool-workspace.ext4",
+      "prompt": "/data/workloads/prompt.txt",
+      "network_prefix": "172.30",
+      "exposed_model": "experiment-model"
+    }
+  },
+  "scheduling": {
+    "baselines": [
+      "fixed-explicit-resident",
+      "fixed-llm-wait-checkpoint"
+    ]
+  },
+  "execution": {
+    "concurrency": 8,
+    "timeout_seconds": 900,
+    "command_timeout_seconds": 300
+  },
+  "resources": {
+    "runtime_memory_mib": 2048,
+    "tool_memory_mib": 4096,
+    "cpu_first": 0,
+    "numa_node": 0
+  },
+  "validation": {
+    "command": "cd /testbed && git diff --binary --no-ext-diff HEAD"
+  },
+  "output": {"directory": "/data/paper-study-001"}
+}
+```
+
+The canonical CLI is a read-only planner: it parses, resolves, validates, and
+prints workflows but never starts Kubernetes or Firecracker. Execution remains
+in the existing runners. The production launcher constructs the production
+workflow adapter automatically; the paper runner currently translates the
+backward-compatible `deploy/study.example.json` format into the canonical
+model. There is intentionally no generic runner for arbitrary axis
+combinations.
 
 ## Start here
 
@@ -47,15 +217,14 @@ has two independent workflows:
 1. **Run real coding tasks:** Kubernetes creates two isolated virtual machines
    per task, OpenClaw drives the task, and ClawTune records the execution.
 2. **Run the paper experiment:** previously recorded actions are executed in
-   directly managed Firecracker virtual machines. The experiment compares
-   recorded timing with a real model API, and compares keeping virtual machines
-   in memory with saving idle virtual machines to disk.
+   directly managed Firecracker VMs. The experiment compares recorded timing
+   with a real model API, and compares keeping VMs in memory with saving idle
+   VMs to disk.
 
-The paper workflow is ready for experimental use. In both recorded and real
-model modes, OpenClaw and ClawTune run inside the agent virtual machine, while
-commands run in the repository-holding virtual machine over SSH. Only the
-source of model responses changes. This exact path has passed short resident,
-save/restore, and real-API runs on Kunpeng.
+The paper workflow is ready for experimental use. With either replay or API
+inference, OpenClaw and ClawTune run inside the Runtime VM, while commands run
+in the Tool VM over SSH. Only the source of model responses changes. This exact path has passed short resident,
+checkpoint/restore, and real-API runs on Kunpeng.
 
 Use these entry points instead of assembling lower-level commands:
 
@@ -370,10 +539,10 @@ devmapper pressure without reducing steady-state concurrency. A task may stay
 
 `--llm-egress-host` resolves every current public IPv4 address immediately
 before submission. The launcher rejects private, loopback, malformed, empty,
-or excessive results, records the canonical `/32` snapshot in every
-`SandboxTask`, and limits Runtime egress to those addresses on port 443. This
-removes per-run CIDR input while remaining fail-closed. Re-run the launcher for
-each batch so provider DNS changes are captured; never replace this with
+or excessive results, records the canonical `/32` egress address snapshot in
+every `SandboxTask`, and limits Runtime egress to those addresses on port 443.
+This removes per-run CIDR input while remaining fail-closed. Re-run the
+launcher for each batch so provider DNS changes are captured; never replace this with
 `0.0.0.0/0`.
 
 The runner clears inherited HTTP(S)/SOCKS proxy variables only in its own
@@ -470,11 +639,10 @@ submission after an uncertain client/network failure.
 
 ### 4. Retrieve task results
 
-Set `TASK_ID` to the Kubernetes task-object name:
-
-Export all archived trace files with one host command. It obtains the
-cluster credential, creates a temporary local connection, downloads and checks
-the files, and closes the connection automatically:
+Set `TASK_ID` to the Kubernetes task-object name, then export all archived
+trace files with one host command. The command obtains the cluster credential,
+creates a temporary local connection, downloads and checks the files, and
+closes the connection automatically:
 
 ```bash
 TASK_ID='swe-run-id-instance-hash'
@@ -487,36 +655,59 @@ reports when the task uploaded them. Pass a second argument to choose another
 output directory. The command creates and closes its temporary local
 connection automatically.
 
+Each batch item retains its existing SandboxTask result fields and now also
+contains `resolved_workflow` plus a versioned `result_envelope`. The envelope
+records the actual batch concurrency, case-specific Tool image, stable status,
+failure category, provenance, artifacts, and backend details.
+
+## Plan an experiment
+
+The canonical experiment CLI is read-only. It validates and expands JSON
+configuration but never starts a sandbox:
+
+```bash
+python3 -m clawbox.experiments.cli list-baselines
+python3 -m clawbox.experiments.cli validate experiment.json
+python3 -m clawbox.experiments.cli resolve experiment.json
+python3 -m clawbox.experiments.cli matrix experiment.json
+```
+
+`resolve` accepts one implemented workflow; `matrix` expands explicitly
+selected inference backends and scheduling baselines. Unsupported combinations
+fail before a runner is started.
+
 ## Paper experiment: save idle virtual machines
 
 This experiment is separate from the Kubernetes task service, but preserves
 the task architecture. Every session has two Firecracker virtual machines: the
-agent VM runs OpenClaw and ClawTune; the tool VM owns `/testbed` and executes
+Runtime VM runs OpenClaw and ClawTune; the Tool VM owns `/testbed` and executes
 commands received over SSH.
 
-OpenClaw always controls the agent loop. Recorded mode supplies saved model
-responses through an OpenAI-compatible endpoint; real mode forwards the same
-requests to a real service. Prompts, tools, SSH, instrumentation, VM images,
-and agent settings therefore stay the same.
+OpenClaw always controls the agent loop. `inference_backend=replay` supplies
+saved model responses through an OpenAI-compatible endpoint;
+`inference_backend=api` forwards the same requests to a real service. Prompts,
+tools, SSH, instrumentation, VM images, and agent settings therefore stay the
+same.
 
 The experiment varies two independent dimensions:
 
 | Dimension | Baseline | Alternative |
 | --- | --- | --- |
-| Model source | replay recorded responses and latency | call a real OpenAI-compatible API |
-| Memory management | keep both virtual machines in memory | save idle machines to disk and restore them before the next command |
+| Inference backend | `replay` recorded responses and latency | `api` through a real OpenAI-compatible service |
+| Residency policy | `resident` keeps both VMs in memory | `llm_wait_checkpoint` checkpoints idle VMs and restores them before the next command |
 
-During an outstanding model request, snapshot mode saves the tool VM and then
-the agent VM, exits their Firecracker processes, and restores them in the
-opposite order before the response is consumed. The model gateway identifies
-requests by content and stores responses, so retrying an interrupted HTTP
-connection cannot duplicate a real API call.
+During an outstanding model request, `llm_wait_checkpoint` creates a
+Firecracker `vm_checkpoint` for the Tool VM and then the Runtime VM, exits their
+Firecracker processes, restores Tool before Runtime, and consumes the response
+only afterward. The model gateway identifies requests by content and stores
+responses, so retrying an interrupted HTTP connection cannot duplicate a real
+API call.
 
 ### What this experiment does not do
 
 - It does not suspend a Kubernetes Pod. The experimental virtual machines are
   managed directly through the Firecracker API.
-- Recorded mode does not run a model, but it runs the real OpenClaw loop, tool
+- Replay inference does not run a model, but it runs the real OpenClaw loop, tool
   calls, SSH backend, and ClawTune instrumentation.
 - API mode forwards model traffic through a host gateway so request identity
   survives save/restore. GPU placement and provider-side cache management are
@@ -586,7 +777,7 @@ The configuration names correspond to these general experiment concepts:
 | `source` | the two reusable VM disks, prompt, and recorded model trace |
 | `sessions`, `repetitions`, `seed` | concurrent workload size, repeat count, and randomized group order |
 | `inference_backends` | recorded timing, real model API, or both |
-| `memory_policies` | keep virtual machines in memory, save idle machines, or both |
+| `memory_policies` | legacy input spelling for `resident` and `llm_wait_checkpoint`; `snapshot` remains an alias |
 | `resources` | VM memory size, CPU numbering, and NUMA placement |
 | `replay.time_scale` | recorded latency multiplier; use `1.0` for measurements |
 | `validation_command` | command whose output represents the final task state |
@@ -622,6 +813,12 @@ writes intermediate results. The final `study-summary.json` contains:
 - commit, source-tree hash, trace hash, host identity, and full configuration;
 - hashes produced by `validation_command` for cross-group final-state checks.
 
+Each arm also writes `result-envelopes.json`, with one envelope for every
+successful or failed session. The resolved workflow records the selected
+inference configuration, VM materialization, resources, concurrency,
+validation, and `vm_checkpoints` metric; existing study files remain the
+authoritative detailed artifacts.
+
 The example validation command hashes the tracked repository changes. Replace
 it with a command that prints the scientifically relevant final artifact for
 your workload. Identical stdout produces an identical recorded hash; a
@@ -649,13 +846,25 @@ python3 -m clawbox.replay.cli run trace.jsonl \
 
 ### What has been verified
 
-On Kunpeng, all four single-session combinations passed: recorded and real
-model responses, each with resident and snapshot memory management. Every run
-completed two model turns and one real SSH tool call. Both snapshot runs saved
-and restored both VMs during each model turn (two cycles), retained ClawTune
-traces, and produced the same final-state hash as resident mode. These are
-functional checks; publishable density and performance claims still require
-the configured concurrency and repeated trials.
+On Kunpeng, all four single-session combinations passed: replay and API
+inference, each with `resident` and `llm_wait_checkpoint` residency. Every run
+completed two model turns and one real SSH tool call. Both checkpoint runs
+saved and restored both VMs during each model turn (two cycles), retained
+ClawTune traces, and produced the same final-state hash as resident runs. These
+are functional checks; publishable density and performance claims still
+require the configured concurrency and repeated trials.
+
+## Terminology and compatibility
+
+- `vm_checkpoint`: Firecracker execution state;
+- `kb_snapshot`: ClawTune knowledge state;
+- `egress_address_snapshot`: resolved provider addresses;
+- `storage_snapshot`: containerd/devmapper state.
+
+Legacy `memory_policies: [resident, snapshot]` and
+`--mode resident|snapshot` remain accepted at runner boundaries. New
+configuration and result fields use `inference_backend`, `sandbox_backend`,
+`admission_policy`, `residency_policy`, and `agent_driver`.
 
 ## Updating an installed host
 

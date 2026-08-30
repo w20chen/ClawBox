@@ -94,6 +94,11 @@ shadow-only and `FixedProfileSizer` remains authoritative.
 
 ## Current boundaries
 
+The canonical execution axes, capability rules, runner classification, and
+baseline registry are summarized in
+[Execution architecture](execution-architecture.md). New production or paper
+metadata must resolve through that model; legacy runners remain separate.
+
 - The accepted deployment is single-node ARM64. Multi-node scheduling, leader
   election, and HA reservation consistency are not production-accepted.
 - The managed API, dispatcher, terminal projection, and cancellation
