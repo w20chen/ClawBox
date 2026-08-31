@@ -58,13 +58,17 @@ the main output directory was created.
 
 ### Source
 
-- Local, `origin/main`, and remote HEAD were all:
+- The last implementation commit deployed to the remote checkout was
   `2e82306b429f75a480a58b169239269ebff34334`.
+- This handoff was subsequently committed and pushed from the local checkout.
+  The next session should run `git pull --ff-only origin main` on Kunpeng
+  before changing code; do not expect the remote checkout to contain this
+  document until then.
 - Remote Git worktree was clean at handoff.
 - The last full local and remote test runs passed. The local run had six
   environment-dependent skips.
-- This handoff document is the only new tracked file created after that
-  commit; commit it if desired after reviewing it.
+- This handoff document is the only tracked content change after the last
+  implementation commit.
 
 Important recent commits:
 
@@ -630,4 +634,3 @@ restarted for the revised Kubernetes scope.
 - No Kubernetes NUMA-0 placement guarantee exists yet.
 - Only one independent ARM64 SWE-ReBench task is currently available.
 - Therefore the requested full paper evaluation is **not finished**.
-
