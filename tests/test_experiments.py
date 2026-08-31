@@ -281,6 +281,21 @@ def test_openclaw_adapter_keeps_legacy_mode_alias():
     assert "--residency-policy {resident,llm_wait_checkpoint}" in completed.stdout
 
 
+def test_direct_tool_init_reconstructs_guest_collector_environment():
+    script = (
+        Path(__file__).parents[1] / "scripts" / "experiment-tool-init.sh"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "CLAWTUNE_GUEST_COLLECTOR_HELPER",
+        "CLAWTUNE_GUEST_COLLECTOR_PYTHON",
+        "CLAWTUNE_GUEST_COLLECTOR_SOCKET",
+        "CLAWTUNE_GUEST_ARTIFACT_ROOT",
+        "BCC_KERNEL_SOURCE",
+        "/testbed/.clawbox/tool-resource",
+    ):
+        assert required in script
+
+
 def test_openclaw_completion_poll_tolerates_a_torn_serial_log_line(tmp_path):
     script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
     spec = importlib.util.spec_from_file_location("run_openclaw_experiment", script)
