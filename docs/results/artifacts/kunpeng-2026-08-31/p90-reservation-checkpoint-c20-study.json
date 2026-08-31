@@ -1,5 +1,5 @@
 {
-  "output": "/data/prc20-telemetry",
+  "output": "/data/prc20-telemetry-fixed2",
   "source": {
     "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
     "tool_rootfs": "/data/openclaw-experiment-tool-telemetry-v2.ext4",
@@ -22,7 +22,7 @@
   "tool_reservation_budget_mib": 16384,
   "tool_admission_safety_headroom_mib": 1024,
   "idle_tool_vm_rss_mib": 256,
-  "resources": {"runtime_memory_mib": 2048, "tool_memory_mib": 4096, "cpu_first": 0, "numa_node": 0},
+  "resources": {"runtime_memory_mib": 2048, "tool_memory_mib": 2048, "cpu_first": 0, "numa_node": 0},
   "p90_reservation": {
     "prediction_file": "/data/workloads/p90-per-tool-recording2-train-recording1-eval.json",
     "min_evidence": 5,
