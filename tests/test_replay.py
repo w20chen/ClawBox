@@ -737,6 +737,45 @@ def test_fair_weighted_pool_accounts_heterogeneous_fifo_reservations() -> None:
     pool.release(outcomes[0])
 
 
+def test_feedback_memory_admission_remeasures_instead_of_reclaiming_prediction() -> None:
+    from clawbox.replay.lifecycle import FeedbackMemoryAdmission
+
+    resident = [100]
+    admission = FeedbackMemoryAdmission(
+        1000, 100, lambda: resident[0], poll_s=0.001,
+    )
+    first = admission.acquire(300, timeout=0.1)
+    assert first is not None
+    first_lease, first_status = first
+    assert first_status["admission_charge_bytes"] == 500
+
+    # Runtime growth above the prediction is charged immediately.  It prevents
+    # a later admission even though the first tool has not completed yet.
+    resident[0] = 450
+    observed = admission.observe()
+    assert observed["admission_charge_bytes"] == 850
+    assert admission.acquire(100, timeout=0.01) is not None
+    assert admission.acquire(100, timeout=0.01) is None
+    assert admission.metrics()["prediction_exceeded_leases"] >= 1
+
+    # Completion remeasures 500 bytes of persistent RSS before dropping only
+    # the first tool's future-growth commitment.
+    resident[0] = 500
+    released = admission.release(first_lease)
+    assert released["resident_bytes"] == 500
+    assert released["admission_charge_bytes"] == 700
+
+
+def test_feedback_memory_admission_observes_checkpoint_reclamation() -> None:
+    from clawbox.replay.lifecycle import FeedbackMemoryAdmission
+
+    resident = [600]
+    admission = FeedbackMemoryAdmission(1000, 100, lambda: resident[0])
+    assert admission.observe()["admission_charge_bytes"] == 700
+    resident[0] = 0  # Firecracker stopped after a verified checkpoint.
+    assert admission.observe()["admission_charge_bytes"] == 100
+
+
 def test_resident_slot_lifecycle_releases_budget_after_checkpoint() -> None:
     from clawbox.replay.lifecycle import FairSemaphore, ResidentSlotLifecycle, SimulatedLifecycle
 

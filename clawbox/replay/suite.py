@@ -42,6 +42,10 @@ SUITE_METRICS = (
     "vm_restore_operations",
     "checkpoint_snapshot_service_s",
     "checkpoint_restore_service_s",
+    "checkpoint_reclamation_observations",
+    "checkpoint_verified_firecracker_rss_released_bytes",
+    "checkpoint_cgroup_memory_released_bytes",
+    "checkpoint_numa_memory_released_bytes",
     "admission_wait_s",
     "admission_acquisitions",
     "mean_admission_wait_event_s",
@@ -65,6 +69,10 @@ SUITE_METRICS = (
     "prediction_observations",
     "prediction_memory_coverage_fraction",
     "mean_prediction_error_mib",
+    "peak_tool_resident_rss_bytes",
+    "peak_tool_admission_charge_bytes",
+    "tool_admission_over_budget_observations",
+    "tool_prediction_exceeded_leases",
 )
 
 RATIO_EFFECT_METRICS = {
@@ -81,6 +89,7 @@ RATIO_EFFECT_METRICS = {
     "tool_reservation_time_mib_s",
     "max_actual_tool_command_memory_mib", "mean_actual_tool_command_memory_mib",
     "max_actual_tool_working_set_mib", "mean_prediction_error_mib",
+    "peak_tool_resident_rss_bytes", "peak_tool_admission_charge_bytes",
 }
 
 EXECUTION_ARTIFACTS = {

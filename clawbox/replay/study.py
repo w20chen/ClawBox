@@ -157,7 +157,10 @@ def _predictive_tool_memory_mib(
         selected = workloads.get(workload_name) if isinstance(workloads, dict) else None
         if not isinstance(selected, dict):
             raise ValueError("per-tool memory plan does not contain the configured workload")
-        reservations = selected.get("reservation_distinct_kib")
+        reservations = (
+            selected.get("incremental_p90_distinct_kib")
+            or selected.get("reservation_distinct_kib")
+        )
         if not isinstance(reservations, list) or len(reservations) < 2:
             raise ValueError("per-tool predictive arm requires heterogeneous reservations")
         selected_mib = int(selected.get("selected_vm_size_class_mib", 0))
@@ -368,6 +371,8 @@ def run_study(config_path: Path) -> int:
                 command += [
                     "--tool-reservation-budget-mib",
                     str(int(raw["tool_reservation_budget_mib"])),
+                    "--tool-admission-safety-headroom-mib",
+                    str(int(raw.get("tool_admission_safety_headroom_mib", 1024))),
                     "--idle-tool-vm-rss-mib",
                     str(float(raw["idle_tool_vm_rss_mib"])),
                 ]

@@ -5,6 +5,7 @@ import argparse
 from dataclasses import replace
 import hashlib
 import json
+import math
 import os
 import socket
 import statistics
@@ -16,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clawbox.replay.lifecycle import (
-    FairResourcePool, FairWeightedResourcePool, FirecrackerConfig, FirecrackerLifecycle,
+    FairResourcePool, FeedbackMemoryAdmission, FirecrackerConfig, FirecrackerLifecycle,
 )
 from clawbox.replay.model_gateway import ModelGateway
 
@@ -288,6 +289,7 @@ def main() -> None:
         help="configured Runtime+Tool resident-memory admission budget",
     )
     p.add_argument("--tool-reservation-budget-mib", type=int)
+    p.add_argument("--tool-admission-safety-headroom-mib", type=int, default=1024)
     p.add_argument("--idle-tool-vm-rss-mib", type=float)
     p.add_argument("--static-tool-reservation-mib", type=int)
     p.add_argument("--tool-memory-plan", type=Path)
@@ -311,6 +313,9 @@ def main() -> None:
         if (a.static_tool_reservation_mib is not None
                 and a.static_tool_reservation_mib > a.tool_reservation_budget_mib):
             p.error("static Tool reservation exceeds the reservation budget")
+        if (a.tool_admission_safety_headroom_mib < 0
+                or a.tool_admission_safety_headroom_mib >= a.tool_reservation_budget_mib):
+            p.error("Tool admission safety headroom must be non-negative and below budget")
     if a.tool_memory_plan is not None and not a.tool_memory_workload:
         p.error("--tool-memory-workload is required with --tool-memory-plan")
     if a.inference == "replay" and a.trace is None:
@@ -368,28 +373,41 @@ def main() -> None:
     else:
         pair_resources = list(range(resident_pair_slots))
     pair_slots = FairResourcePool(pair_resources)
-    tool_reservation_pool = (
-        FairWeightedResourcePool(a.tool_reservation_budget_mib * 1024)
-        if a.tool_reservation_budget_mib is not None else None
-    )
     predictive_steps: dict[int, dict] = {}
     if a.tool_memory_plan is not None:
         plan_payload = json.loads(a.tool_memory_plan.read_text(encoding="utf-8"))
+        command_headroom = float(
+            plan_payload["per_tool_memory"].get("command_headroom_fraction", 0.0)
+        )
         workload_plan = plan_payload["per_tool_memory"]["workloads"][a.tool_memory_workload]
         for invocation in workload_plan["tool_invocations"]:
             step = int(invocation["model_step"])
             current = predictive_steps.setdefault(step, {
-                "reservation_kib": 0, "tool_invocations": [],
+                "incremental_p90_kib": 0, "tool_invocations": [],
             })
-            current["reservation_kib"] = max(
-                current["reservation_kib"], int(invocation["reservation_kib"])
+            incremental_kib = int(invocation.get("incremental_p90_kib") or math.ceil(
+                float(invocation["predicted_command_memory_p90_mib"])
+                * (1.0 + command_headroom) * 1024.0
+            ))
+            current["incremental_p90_kib"] = max(
+                current["incremental_p90_kib"], incremental_kib
             )
             current["tool_invocations"].append(invocation)
-        if max(item["reservation_kib"] for item in predictive_steps.values()) > a.tool_reservation_budget_mib * 1024:
-            p.error("per-tool reservation exceeds the Tool reservation budget")
     a.output.mkdir(parents=True, exist_ok=False)
     lifecycles: list[FirecrackerLifecycle] = []
+    tool_lifecycles: list[FirecrackerLifecycle] = []
     lifecycle_lock = threading.Lock()
+    def measure_tool_resident_bytes() -> int:
+        with lifecycle_lock:
+            return sum(item.rss_bytes() for item in tool_lifecycles)
+    tool_admission = (
+        FeedbackMemoryAdmission(
+            a.tool_reservation_budget_mib * 1024 * 1024,
+            a.tool_admission_safety_headroom_mib * 1024 * 1024,
+            measure_tool_resident_bytes,
+        )
+        if a.tool_reservation_budget_mib is not None else None
+    )
     samples: list[dict] = []
     stop = threading.Event()
     started = time.monotonic()
@@ -400,12 +418,17 @@ def main() -> None:
         while not stop.wait(0.1):
             with lifecycle_lock:
                 rss = sum(item.rss_bytes() for item in lifecycles)
+                tool_rss = sum(item.rss_bytes() for item in tool_lifecycles)
                 resident_vms = sum(1 for item in lifecycles if item.resident)
+            admission_status = (
+                tool_admission.observe(tool_rss) if tool_admission is not None else None
+            )
             cgroup_memory = cgroup_memory_used_bytes()
             numa_memory = numa_memory_used_bytes(numa_node)
             samples.append({
                 "elapsed_s": time.monotonic() - started,
                 "firecracker_rss_bytes": rss,
+                "tool_firecracker_rss_bytes": tool_rss,
                 "resident_vms": resident_vms,
                 "numa_memory_used_bytes": numa_memory,
                 "numa_memory_delta_bytes": (
@@ -417,6 +440,7 @@ def main() -> None:
                     None if cgroup_memory is None or cgroup_baseline is None
                     else max(0, cgroup_memory - cgroup_baseline)
                 ),
+                "tool_admission": admission_status,
             })
     sampler = threading.Thread(target=sample, daemon=True); sampler.start()
 
@@ -426,7 +450,9 @@ def main() -> None:
         remaining = lambda: max(0.0, deadline - time.monotonic())
         tool = FirecrackerLifecycle(tool_config)
         runtime = FirecrackerLifecycle(runtime_config)
-        with lifecycle_lock: lifecycles.extend([tool, runtime])
+        with lifecycle_lock:
+            lifecycles.extend([tool, runtime])
+            tool_lifecycles.append(tool)
         snapshots = 0; snapshot_s = restore_s = 0.0
         admission_wait_s = 0.0
         admission_acquisitions = 0
@@ -436,13 +462,14 @@ def main() -> None:
         current_lease_event: dict | None = None
         tool_reservation_lease: int | None = None
         tool_reservation_events: list[dict] = []
+        checkpoint_reclamation_events: list[dict] = []
         current_tool_reservation_event: dict | None = None
 
         def release_tool_reservation() -> None:
             nonlocal tool_reservation_lease, current_tool_reservation_event
             if tool_reservation_lease is not None:
-                assert tool_reservation_pool is not None
-                tool_reservation_pool.release(tool_reservation_lease)
+                assert tool_admission is not None
+                released_status = tool_admission.release(tool_reservation_lease)
                 tool_reservation_lease = None
                 if current_tool_reservation_event is not None:
                     released = time.monotonic() - started
@@ -450,15 +477,21 @@ def main() -> None:
                     current_tool_reservation_event["held_s"] = (
                         released - current_tool_reservation_event["acquired_elapsed_s"]
                     )
+                    current_tool_reservation_event["resident_tool_rss_after_mib"] = (
+                        released_status["resident_bytes"] / (1024.0 * 1024.0)
+                    )
+                    current_tool_reservation_event["remaining_headroom_after_mib"] = (
+                        released_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                    )
                     current_tool_reservation_event = None
 
         def before_response_ready(step: int | None, message: dict) -> dict:
             nonlocal tool_reservation_lease, current_tool_reservation_event
             tool_calls = message.get("tool_calls") or []
-            if not tool_calls or tool_reservation_pool is None:
+            if not tool_calls or tool_admission is None:
                 return {}
             if a.static_tool_reservation_mib is not None:
-                reservation_kib = int(a.static_tool_reservation_mib) * 1024
+                incremental_kib = int(a.static_tool_reservation_mib) * 1024
                 provenance = {"policy": "static",
                               "tool_invocations": tool_call_descriptors(message)}
             else:
@@ -467,18 +500,34 @@ def main() -> None:
                 planned = predictive_steps[step]
                 if len(planned["tool_invocations"]) != len(tool_calls):
                     raise RuntimeError(f"predictive plan diverged at model step {step}")
-                reservation_kib = int(planned["reservation_kib"])
-                provenance = {"policy": "per_tool_p90", **planned}
+                incremental_kib = int(planned["incremental_p90_kib"])
+                provenance = {"policy": "per_tool_incremental_p90", **planned}
             wait_started = time.monotonic()
-            lease = tool_reservation_pool.acquire(reservation_kib, timeout=remaining())
+            acquired = tool_admission.acquire(
+                incremental_kib * 1024, timeout=remaining()
+            )
             wait_s = time.monotonic() - wait_started
-            if lease is None:
-                raise TimeoutError("timed out waiting for Tool accounting reservation")
+            if acquired is None:
+                raise TimeoutError("timed out waiting for live-RSS Tool admission")
+            lease, admission_status = acquired
             tool_reservation_lease = lease
             event = {
                 "model_step": step,
-                "reservation_kib": reservation_kib,
-                "reservation_mib": reservation_kib / 1024.0,
+                "reservation_kib": incremental_kib,
+                "reservation_mib": incremental_kib / 1024.0,
+                "predicted_incremental_p90_mib": incremental_kib / 1024.0,
+                "resident_tool_rss_before_mib": (
+                    admission_status["resident_bytes"] / (1024.0 * 1024.0)
+                ),
+                "outstanding_incremental_mib": (
+                    admission_status["outstanding_incremental_bytes"] / (1024.0 * 1024.0)
+                ),
+                "admission_charge_mib": (
+                    admission_status["admission_charge_bytes"] / (1024.0 * 1024.0)
+                ),
+                "remaining_headroom_mib": (
+                    admission_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                ),
                 "wait_s": wait_s,
                 "acquired_elapsed_s": time.monotonic() - started,
                 "released_elapsed_s": None,
@@ -596,6 +645,7 @@ def main() -> None:
                             ),
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
                             "tool_reservation_events": tool_reservation_events,
+                            "checkpoint_reclamation_events": checkpoint_reclamation_events,
                             "tool_working_sets": tool_working_sets,
                             "tool_working_set_artifact": str(working_set_path),
                             "validation_sha256": hashlib.sha256(validation).hexdigest(),
@@ -611,7 +661,37 @@ def main() -> None:
                            if not item["ready"] and item["request_id"] not in processed]
                 if a.residency_policy == "llm_wait_checkpoint" and pending:
                     request_id = pending[0]["request_id"]
+                    pair_rss_before = runtime.rss_bytes() + tool.rss_bytes()
+                    cgroup_before = cgroup_memory_used_bytes()
+                    numa_before = numa_memory_used_bytes(numa_node)
                     snapshot_s += checkpoint_runtime_tool_pair(runtime, tool)
+                    pair_rss_after = runtime.rss_bytes() + tool.rss_bytes()
+                    if pair_rss_after != 0:
+                        raise RuntimeError(
+                            "checkpoint did not release the Runtime/Tool Firecracker RSS"
+                        )
+                    cgroup_after = cgroup_memory_used_bytes()
+                    numa_after = numa_memory_used_bytes(numa_node)
+                    checkpoint_reclamation_events.append({
+                        "request_id": request_id,
+                        "pair_firecracker_rss_before_bytes": pair_rss_before,
+                        "pair_firecracker_rss_after_bytes": pair_rss_after,
+                        "verified_pair_firecracker_rss_released_bytes": (
+                            pair_rss_before - pair_rss_after
+                        ),
+                        "cgroup_memory_before_bytes": cgroup_before,
+                        "cgroup_memory_after_bytes": cgroup_after,
+                        "cgroup_memory_released_bytes": (
+                            None if cgroup_before is None or cgroup_after is None
+                            else max(0, cgroup_before - cgroup_after)
+                        ),
+                        "numa_memory_before_bytes": numa_before,
+                        "numa_memory_after_bytes": numa_after,
+                        "numa_memory_released_bytes": (
+                            None if numa_before is None or numa_after is None
+                            else max(0, numa_before - numa_after)
+                        ),
+                    })
                     # The memory/CPU-pair lease is released only after both
                     # Firecracker processes have been evicted.
                     release_pair()
@@ -694,11 +774,18 @@ def main() -> None:
         row for row in tool_working_sets
         if row.get("predicted_command_memory_p90_mib") is not None
     ]
+    reclamation_events = [
+        row for item in results
+        for row in item.get("checkpoint_reclamation_events", [])
+    ]
     rss_time = sum(
         rss_values[index] * max(
             0.0, float(samples[index]["elapsed_s"]) - float(samples[index - 1]["elapsed_s"])
         )
         for index in range(1, len(samples))
+    )
+    tool_admission_metrics = (
+        tool_admission.metrics() if tool_admission is not None else None
     )
     report = {"mode": "snapshot" if a.residency_policy == "llm_wait_checkpoint" else "resident",
               "residency_policy": a.residency_policy, "inference": a.inference,
@@ -711,8 +798,31 @@ def main() -> None:
               "cpu_pair_pool": configured_cpu_pairs,
               "tool_reservation_budget_mib": a.tool_reservation_budget_mib,
               "tool_reservation_policy": (
-                  "per_tool_p90" if a.tool_memory_plan is not None
+                  "per_tool_incremental_p90_with_rss_feedback" if a.tool_memory_plan is not None
                   else "static" if a.static_tool_reservation_mib is not None else None
+              ),
+              "tool_admission_safety_headroom_mib": (
+                  a.tool_admission_safety_headroom_mib
+                  if tool_admission is not None else None
+              ),
+              "tool_admission_feedback": (
+                  tool_admission_metrics
+              ),
+              "peak_tool_resident_rss_bytes": (
+                  tool_admission_metrics["peak_resident_bytes"]
+                  if tool_admission_metrics is not None else None
+              ),
+              "peak_tool_admission_charge_bytes": (
+                  tool_admission_metrics["peak_admission_charge_bytes"]
+                  if tool_admission_metrics is not None else None
+              ),
+              "tool_admission_over_budget_observations": (
+                  tool_admission_metrics["over_budget_observations"]
+                  if tool_admission_metrics is not None else None
+              ),
+              "tool_prediction_exceeded_leases": (
+                  tool_admission_metrics["prediction_exceeded_leases"]
+                  if tool_admission_metrics is not None else None
               ),
               "tool_reservation_events": len(tool_reservation_events),
               "tool_reservation_distinct_mib": sorted(set(tool_reservation_amounts)),
@@ -769,6 +879,21 @@ def main() -> None:
               "vm_restore_operations": sum(int(item.get("vm_restore_operations", 0)) for item in results),
               "checkpoint_snapshot_service_s": sum(float(item.get("snapshot_s", 0.0)) for item in results),
               "checkpoint_restore_service_s": sum(float(item.get("restore_s", 0.0)) for item in results),
+              "checkpoint_reclamation_observations": len(reclamation_events),
+              "checkpoint_verified_firecracker_rss_released_bytes": sum(
+                  int(row["verified_pair_firecracker_rss_released_bytes"])
+                  for row in reclamation_events
+              ),
+              "checkpoint_cgroup_memory_released_bytes": sum(
+                  int(row["cgroup_memory_released_bytes"])
+                  for row in reclamation_events
+                  if row.get("cgroup_memory_released_bytes") is not None
+              ),
+              "checkpoint_numa_memory_released_bytes": sum(
+                  int(row["numa_memory_released_bytes"])
+                  for row in reclamation_events
+                  if row.get("numa_memory_released_bytes") is not None
+              ),
               "admission_wait_s": sum(float(item.get("admission_wait_s", 0.0)) for item in results),
               "admission_acquisitions": sum(int(item.get("admission_acquisitions", 0)) for item in results),
               "mean_admission_wait_event_s": (

@@ -796,3 +796,140 @@ class FairWeightedResourcePool:
         while self._serving_ticket in self._cancelled:
             self._cancelled.remove(self._serving_ticket)
             self._serving_ticket += 1
+
+
+class FeedbackMemoryAdmission:
+    """FIFO memory admission against live resident RSS plus future growth.
+
+    A prediction is an incremental commitment, not reclaimed memory.  While a
+    tool is running, its commitment remains in addition to measured resident
+    RSS so concurrent admissions cannot race ahead of RSS materialization.  At
+    tool completion we remeasure RSS before removing only the no-longer-needed
+    future-growth commitment; persistent pages remain charged by live RSS.
+    """
+
+    def __init__(self, budget_bytes: int, safety_headroom_bytes: int,
+                 measure_resident_bytes: Callable[[], int], *, poll_s: float = 0.1) -> None:
+        if budget_bytes <= 0:
+            raise ValueError("memory admission budget must be positive")
+        if safety_headroom_bytes < 0 or safety_headroom_bytes >= budget_bytes:
+            raise ValueError("memory safety headroom must be non-negative and below budget")
+        if poll_s <= 0:
+            raise ValueError("memory admission poll interval must be positive")
+        self.budget_bytes = int(budget_bytes)
+        self.safety_headroom_bytes = int(safety_headroom_bytes)
+        self._measure = measure_resident_bytes
+        self._poll_s = float(poll_s)
+        self._leased: dict[int, dict[str, int | bool]] = {}
+        self._next_lease = 0
+        self._next_ticket = 0
+        self._serving_ticket = 0
+        self._cancelled: set[int] = set()
+        self._last_resident_bytes = 0
+        self._peak_resident_bytes = 0
+        self._peak_charge_bytes = 0
+        self._over_budget_observations = 0
+        self._prediction_exceeded_leases = 0
+        self._condition = Condition()
+
+    def _read_locked(self, measured_bytes: int | None = None) -> int:
+        resident = int(self._measure() if measured_bytes is None else measured_bytes)
+        resident = max(0, resident)
+        self._last_resident_bytes = resident
+        self._peak_resident_bytes = max(self._peak_resident_bytes, resident)
+        outstanding = sum(int(item["incremental_bytes"]) for item in self._leased.values())
+        charge = resident + outstanding + self.safety_headroom_bytes
+        self._peak_charge_bytes = max(self._peak_charge_bytes, charge)
+        if charge > self.budget_bytes:
+            self._over_budget_observations += 1
+        for item in self._leased.values():
+            if not bool(item["exceeded"]):
+                growth = max(0, resident - int(item["resident_at_admit_bytes"]))
+                if growth > int(item["incremental_bytes"]):
+                    item["exceeded"] = True
+                    self._prediction_exceeded_leases += 1
+        return resident
+
+    def _status_locked(self, resident: int) -> dict[str, int]:
+        outstanding = sum(int(item["incremental_bytes"]) for item in self._leased.values())
+        charge = resident + outstanding + self.safety_headroom_bytes
+        return {
+            "resident_bytes": resident,
+            "outstanding_incremental_bytes": outstanding,
+            "safety_headroom_bytes": self.safety_headroom_bytes,
+            "admission_charge_bytes": charge,
+            "remaining_headroom_bytes": max(0, self.budget_bytes - charge),
+            "budget_bytes": self.budget_bytes,
+        }
+
+    def acquire(self, incremental_bytes: int, timeout: float | None = None
+                ) -> tuple[int, dict[str, int]] | None:
+        if incremental_bytes <= 0:
+            raise ValueError("predicted incremental memory must be positive")
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            while True:
+                resident = self._read_locked()
+                status = self._status_locked(resident)
+                projected = status["admission_charge_bytes"] + int(incremental_bytes)
+                if ticket == self._serving_ticket and projected <= self.budget_bytes:
+                    lease = self._next_lease
+                    self._next_lease += 1
+                    self._leased[lease] = {
+                        "incremental_bytes": int(incremental_bytes),
+                        "resident_at_admit_bytes": resident,
+                        "exceeded": False,
+                    }
+                    self._serving_ticket += 1
+                    self._advance_cancelled()
+                    admitted = self._status_locked(resident)
+                    self._condition.notify_all()
+                    return lease, admitted
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    self._cancelled.add(ticket)
+                    self._advance_cancelled()
+                    self._condition.notify_all()
+                    return None
+                self._condition.wait(
+                    self._poll_s if remaining is None else min(self._poll_s, remaining)
+                )
+
+    def release(self, lease: int) -> dict[str, int]:
+        with self._condition:
+            # Remeasure first.  Removing the speculative growth commitment can
+            # never erase resident pages that survived tool completion.
+            resident = self._read_locked()
+            if lease not in self._leased:
+                raise ValueError("memory admission lease is unknown")
+            self._leased.pop(lease)
+            status = self._status_locked(resident)
+            self._condition.notify_all()
+            return status
+
+    def observe(self, resident_bytes: int | None = None) -> dict[str, int]:
+        """Refresh live RSS so prediction overruns immediately reduce headroom."""
+        with self._condition:
+            resident = self._read_locked(resident_bytes)
+            status = self._status_locked(resident)
+            self._condition.notify_all()
+            return status
+
+    def metrics(self) -> dict[str, int]:
+        with self._condition:
+            resident = self._read_locked()
+            return {
+                **self._status_locked(resident),
+                "peak_resident_bytes": self._peak_resident_bytes,
+                "peak_admission_charge_bytes": self._peak_charge_bytes,
+                "over_budget_observations": self._over_budget_observations,
+                "prediction_exceeded_leases": self._prediction_exceeded_leases,
+                "active_leases": len(self._leased),
+            }
+
+    def _advance_cancelled(self) -> None:
+        while self._serving_ticket in self._cancelled:
+            self._cancelled.remove(self._serving_ticket)
+            self._serving_ticket += 1

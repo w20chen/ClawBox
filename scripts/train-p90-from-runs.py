@@ -106,9 +106,11 @@ def _per_tool_memory_plan(
             if prediction.conditional_p90 is None:
                 raise ValueError("per-tool memory prediction is unavailable")
             command_p90_mib = float(prediction.conditional_p90)
+            incremental_p90_kib = math.ceil(
+                command_p90_mib * (1 + command_headroom_fraction) * 1024.0
+            )
             reservation_kib = math.ceil(
-                (idle_floor_mib + command_p90_mib * (1 + command_headroom_fraction))
-                * 1024.0
+                idle_floor_mib * 1024.0 + incremental_p90_kib
             )
             reservation_mib = reservation_kib / 1024.0
             reservations.append({
@@ -118,6 +120,8 @@ def _per_tool_memory_plan(
                     if call["command"] is not None else None
                 ),
                 "predicted_command_memory_p90_mib": command_p90_mib,
+                "incremental_p90_kib": incremental_p90_kib,
+                "incremental_p90_mib": incremental_p90_kib / 1024.0,
                 "reservation_kib": reservation_kib,
                 "reservation_mib": reservation_mib,
                 "scope": prediction.scope,
@@ -147,10 +151,17 @@ def _per_tool_memory_plan(
             "reservation_distinct_kib": sorted({
                 item["reservation_kib"] for item in reservations
             }),
+            "incremental_p90_distinct_kib": sorted({
+                item["incremental_p90_kib"] for item in reservations
+            }),
             "selected_vm_size_class_mib": selected_class,
         }
     return {
-        "semantics": "per-tool accounting reservations; persistent VM uses max-required size class",
+        "semantics": (
+            "admission uses live resident Tool-Firecracker RSS plus per-tool "
+            "incremental P90 commitments and global safety headroom; tool completion "
+            "remeasures RSS and checkpointing is the only assumed reclamation"
+        ),
         "idle_tool_vm_rss_mib": idle_tool_vm_rss_mib,
         "idle_safety_margin_fraction": idle_safety_margin_fraction,
         "derived_idle_floor_mib": idle_floor_mib,

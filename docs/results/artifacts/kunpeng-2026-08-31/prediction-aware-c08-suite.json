@@ -43,7 +43,8 @@
   "sizing_policies": ["fixed", "p90_reservation"],
   "fixed_control_tool_memory_mib": 2048,
   "memory_policies": ["resident", "snapshot"],
-  "tool_reservation_budget_mib": 8192,
+  "tool_reservation_budget_mib": 16384,
+  "tool_admission_safety_headroom_mib": 1024,
   "idle_tool_vm_rss_mib": 256,
   "resources": {
     "runtime_memory_mib": 2048,

@@ -726,13 +726,19 @@ fresh disks instead of recovering it in place.
 
 Tool VM capacity is fixed for an arm; the runner does not resize a persistent
 Firecracker VM between commands. `p90_reservation` instead gates each concrete
-tool invocation against a shared FIFO accounting budget. It resolves memory by
-the frozen KB hierarchy (exact/prefix command, program, tool, then global
-fallback), acquires before releasing the tool call to OpenClaw, and releases
-when the next model request proves that tool execution ended. Static controls
-reserve their full 4 GiB or 2 GiB Tool capacity. Actual per-command cgroup peak
-memory and whole-host Firecracker RSS are measured separately. Checkpointing,
-not reservation accounting, is what actually evicts idle VM memory.
+tool invocation against a shared FIFO accounting budget. It resolves an
+incremental P90 by the frozen KB hierarchy (exact/prefix command, program,
+tool, then global fallback). Before releasing a tool call, admission requires
+`live Tool-Firecracker RSS + outstanding incremental commitments + the new
+incremental P90 + safety headroom <= budget`. A 100 ms host sampler feeds RSS
+growth back into the gate and blocks later admissions after an overrun. At
+tool completion the gate remeasures RSS before dropping only the future-growth
+commitment; it never assumes that guest-free pages left Firecracker RSS.
+Static controls use their full 4 GiB or 2 GiB Tool capacity as the incremental
+commitment. Actual per-command cgroup peaks are measured separately.
+Checkpointing is the only assumed reclamation mechanism, and every eviction
+records that both Firecracker process RSS values reached zero plus the observed
+cgroup and NUMA-local memory change.
 
 ### What this experiment does not do
 
@@ -817,8 +823,9 @@ The configuration names correspond to these general experiment concepts:
 | `memory_policies` | legacy input spelling for `resident` and `llm_wait_checkpoint`; `snapshot` remains an alias |
 | `resources` | VM memory size, CPU numbering, and NUMA placement |
 | `fixed_control_tool_memory_mib` | optional untrained fixed-capacity/static-reservation control below the conservative fixed size |
-| `tool_reservation_budget_mib` | shared accounting budget for concurrently active tool invocations |
-| `idle_tool_vm_rss_mib` | measured idle Tool-VM RSS anchor used to evaluate capacity and derive the reservation floor |
+| `tool_reservation_budget_mib` | NUMA-local Tool admission budget applied to live RSS plus outstanding incremental demand |
+| `tool_admission_safety_headroom_mib` | unallocatable safety margin retained below the Tool admission budget |
+| `idle_tool_vm_rss_mib` | measured idle Tool-VM RSS anchor used for capacity and oracle analysis, not subtracted at tool completion |
 | `resident_memory_budget_mib` | optional configured admission budget; excess sessions queue until a VM pair is resident or checkpointed |
 | `workloads[].independent_unit` | independent task ID used for inference; repeated trajectories share one ID |
 | `numa_host_reserve_mib`, `max_numa_cpu_busy_fraction`, `require_no_firecracker` | clean-host admission bounds for timing runs |
