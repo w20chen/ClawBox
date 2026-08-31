@@ -1,5 +1,5 @@
 {
-  "output": "/data/cb-p90-rss-sweep-20260831",
+  "output": "/data/cb-static-rss-sweep-20260831",
   "source": {
     "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
     "tool_rootfs": "/data/openclaw-experiment-tool-cgroup.ext4",
@@ -11,21 +11,18 @@
       "independent_unit": "15five/scim2-filter-parser#13",
       "repository": "15five/scim2-filter-parser",
       "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
-      "trace": "/data/recording-output/model-trace-session-0000.jsonl",
-      "prediction_file": "/data/workloads/p90-per-tool-recording2-train-recording1-eval.json"
+      "trace": "/data/recording-output/model-trace-session-0000.jsonl"
     },
     {
       "name": "rec-b",
       "independent_unit": "15five/scim2-filter-parser#13",
       "repository": "15five/scim2-filter-parser",
       "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
-      "trace": "/data/recording-output/model-trace-session-0001.jsonl",
-      "prediction_file": "/data/workloads/p90-per-tool-recording2-train-recording1-eval.json"
+      "trace": "/data/recording-output/model-trace-session-0001.jsonl"
     }
   ],
   "concurrency_levels": [1, 20, 40],
   "cpu_placement": "exclusive",
-  "require_held_out_predictions": true,
   "numa_host_reserve_mib": 32768,
   "snapshot_disk_reserve_mib": 32768,
   "max_numa_cpu_busy_fraction": 0.10,
@@ -40,7 +37,8 @@
   "correctness_command": "cd /testbed && PYTHONPATH=/testbed/src /opt/miniconda3/envs/testbed/bin/python -m pytest tests/ -q",
   "correctness_timeout_s": 300,
   "inference_backends": ["replay"],
-  "sizing_policies": ["p90_reservation"],
+  "sizing_policies": ["fixed"],
+  "fixed_control_tool_memory_mib": 2048,
   "memory_policies": ["resident", "snapshot"],
   "tool_reservation_budget_mib": 16384,
   "tool_admission_safety_headroom_mib": 1024,
@@ -50,11 +48,6 @@
     "tool_memory_mib": 4096,
     "cpu_first": 0,
     "numa_node": 0
-  },
-  "p90_reservation": {
-    "prediction_file": "/data/workloads/p90-per-tool-recording2-train-recording1-eval.json",
-    "min_evidence": 5,
-    "use_per_tool_memory_plan": true
   },
   "replay": {"time_scale": 1.0},
   "firecracker_api_timeout_s": 15,
