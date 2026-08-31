@@ -1,5 +1,5 @@
 {
-  "output": "/data/cb-static-resident-sweep-20260831",
+  "output": "/data/cb-static-checkpoint-sweep-20260831",
   "source": {
     "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
     "tool_rootfs": "/data/openclaw-experiment-tool-cgroup.ext4",
@@ -39,7 +39,7 @@
   "inference_backends": ["replay"],
   "sizing_policies": ["fixed"],
   "fixed_control_tool_memory_mib": 2048,
-  "memory_policies": ["resident"],
+  "memory_policies": ["snapshot"],
   "tool_reservation_budget_mib": 16384,
   "tool_admission_safety_headroom_mib": 1024,
   "idle_tool_vm_rss_mib": 256,

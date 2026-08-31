@@ -23,7 +23,7 @@
       "prediction_file": "/data/workloads/p90-per-tool-recording2-train-recording1-eval.json"
     }
   ],
-  "concurrency_levels": [1, 20, 40],
+  "concurrency_levels": [20, 40],
   "cpu_placement": "exclusive",
   "require_held_out_predictions": true,
   "numa_host_reserve_mib": 32768,
