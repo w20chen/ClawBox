@@ -141,6 +141,13 @@ def _p90_prediction(raw: dict[str, Any], base: Path | None) -> AdmissionPredicti
 def _predictive_tool_memory_mib(
     raw: dict[str, Any], prediction: AdmissionPrediction, base: Path | None = None,
 ) -> int:
+    """Return the fixed Tool-VM capacity used by a predictive arm.
+
+    Per-tool P90 values are admission commitments only.  They must never be
+    translated into per-run or per-invocation Firecracker RAM resizing.  The
+    selected size class in an exported plan is retained only as a capacity
+    sufficiency check for older plan files.
+    """
     resources = raw.get("resources", {})
     fixed_mib = int(resources.get("tool_memory_mib", 4096))
     config = raw.get("p90_reservation") or raw.get("p90_static") or {}
@@ -164,9 +171,12 @@ def _predictive_tool_memory_mib(
         if not isinstance(reservations, list) or len(reservations) < 2:
             raise ValueError("per-tool predictive arm requires heterogeneous reservations")
         selected_mib = int(selected.get("selected_vm_size_class_mib", 0))
-        if selected_mib < 256 or selected_mib >= fixed_mib:
-            raise ValueError("per-tool Tool size class must be between 256 MiB and fixed baseline")
-        return selected_mib
+        if selected_mib < 256 or selected_mib > fixed_mib:
+            raise ValueError(
+                "per-tool Tool size class must be between 256 MiB and the "
+                "fixed Tool-VM capacity"
+            )
+        return fixed_mib
     headroom = float(config.get("headroom_fraction", 0.25))
     floor_mib = int(config.get("min_tool_memory_mib", 2048))
     if not 0 <= headroom <= 1:

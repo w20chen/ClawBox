@@ -179,7 +179,7 @@ def test_replay_factorial_crosses_fixed_predictive_and_residency_without_hidden_
         _p90_prediction(insufficient, None)
 
 
-def test_per_tool_plan_requires_heterogeneous_reservations_and_selects_fixed_capacity():
+def test_per_tool_plan_requires_heterogeneous_reservations_and_keeps_fixed_capacity():
     payload = {
         "tenant_id": "tenant-a", "repo_fingerprint": "org/repo", "generation": 4,
         "pair_digest": "a" * 64, "source_digest": "b" * 64,
@@ -201,9 +201,34 @@ def test_per_tool_plan_requires_heterogeneous_reservations_and_selects_fixed_cap
     }
     prediction = _p90_prediction(raw, None)
     assert prediction is not None
-    assert _predictive_tool_memory_mib(raw, prediction) == 2048
+    assert _predictive_tool_memory_mib(raw, prediction) == 4096
     payload["per_tool_memory"]["workloads"]["rec-a"]["reservation_distinct_kib"] = [329728]
     with pytest.raises(ValueError, match="heterogeneous"):
+        _predictive_tool_memory_mib(raw, prediction)
+
+
+def test_per_tool_plan_rejects_size_class_above_fixed_capacity():
+    payload = {
+        "tenant_id": "tenant-a", "repo_fingerprint": "org/repo", "generation": 4,
+        "pair_digest": "a" * 64, "source_digest": "b" * 64,
+        "artifact_count": 20, "clawtune_revision": "c" * 40,
+        "prediction": {"latency_p90_sec": 1, "cpu_p90_cores": 1,
+                       "memory_p90_bytes": 1024**2, "evidence_count": 10},
+        "per_tool_memory": {"workloads": {"rec-a": {
+            "incremental_p90_distinct_kib": [1024, 2048],
+            "selected_vm_size_class_mib": 4096,
+        }}},
+    }
+    raw = {
+        "source": {"repository": "org/repo"},
+        "sizing_policies": ["p90_reservation"],
+        "resources": {"tool_memory_mib": 2048},
+        "p90_reservation": {"prediction": payload, "use_per_tool_memory_plan": True,
+                            "workload_name": "rec-a"},
+    }
+    prediction = _p90_prediction(raw, None)
+    assert prediction is not None
+    with pytest.raises(ValueError, match="fixed Tool-VM capacity"):
         _predictive_tool_memory_mib(raw, prediction)
 
 
