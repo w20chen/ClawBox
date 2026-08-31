@@ -699,16 +699,17 @@ The study is split into three independent configurations:
 | Temporal reclaim | 4 GiB Tool VM, one admission policy, reactive restore | `resident`, `balloon`, `checkpoint`, `hybrid` | `deploy/replay-temporal.example.json` |
 | Reclaim decision | 4 GiB Tool VM, one admission policy, `hybrid` reclaim | `eager`, `fixed_delay`, `predicted_pressure_aware`; reactive and prefetch restore | `deploy/replay-decision.example.json` |
 
-The admission gate uses live aggregate Tool-Firecracker RSS. Each running Tool
-lease also has its own RSS baseline, so already-realized growth is subtracted
-from that lease's prediction:
+The Tool admission gate uses the larger of live aggregate Tool-Firecracker RSS
+and the Tool cgroup's `memory.current`, so charged snapshot cache or VMM memory
+cannot bypass admission. Each running Tool lease also has its own RSS baseline,
+so already-realized growth is subtracted from that lease's prediction:
 
 ```text
 RSSnow + sum(max(0, predicted_growth - realized_growth))
        + new_predicted_growth + headroom <= Whigh
 ```
 
-On Tool completion the runner reads RSS again before removing the remaining
+On Tool completion the runner reads charged memory and RSS again before removing the remaining
 unrealized reservation. Resident pages are never assumed to disappear because
 a command exited. The old fixed-capacity materialization semaphore has been
 removed; it would have silently restored full 4 GiB reservation and defeated
@@ -716,24 +717,35 @@ the oversubscription treatment.
 
 ### Fixed safety envelope
 
-Create one dedicated cgroup-v2 Tool pool before a run and configure its
-`memory.max` to exactly the `hard_limit_mib` in the study. Runtime VMs, the
-runner, snapshot page cache, and host overhead stay outside this Tool cgroup.
-Their resident memory must be covered by `numa_host_reserve_mib` and the host
-preflight even though Runtime RSS is reclaimed during pair checkpointing.
+Create a dedicated cgroup-v2 VM pool with separate Runtime and Tool children.
+The parent `memory.max` is the physical limit for all experiment VMMs; the Tool
+child also has the fixed Tool-pool hard limit. The parent must not contain VMM
+processes directly because it supplies the memory controller to its children.
+The runner stays outside the VM pool and is covered by `numa_host_reserve_mib`.
 
 ```bash
-sudo mkdir -p /sys/fs/cgroup/clawbox-tool-pool
+echo +memory | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+sudo mkdir -p /sys/fs/cgroup/clawbox-vm-pool
+echo $((212992 * 1024 * 1024)) | sudo tee \
+  /sys/fs/cgroup/clawbox-vm-pool/memory.max
+echo +memory | sudo tee \
+  /sys/fs/cgroup/clawbox-vm-pool/cgroup.subtree_control
+sudo mkdir -p /sys/fs/cgroup/clawbox-vm-pool/runtime \
+  /sys/fs/cgroup/clawbox-vm-pool/tool
 echo $((131072 * 1024 * 1024)) | sudo tee \
-  /sys/fs/cgroup/clawbox-tool-pool/memory.max
+  /sys/fs/cgroup/clawbox-vm-pool/tool/memory.max
 ```
 
 `tool_pool_memory.high_watermark_mib` is `Whigh`; it stops new Tool-call
-admission. `low_watermark_mib` is `Wlow`; pressure-aware hybrid eviction keeps
-selecting only sessions currently waiting for an LLM until Tool RSS falls to
-that level. `hard_limit_mib` is `H` and must satisfy
-`Wlow < Whigh < H`. Any increase in the Tool cgroup's `oom_kill` counter is
-reported as `OversubscriptionPolicyFailure`, never as a normal tenant OOM.
+admission. `vm_pool_memory` supplies a second H/Whigh/Wlow envelope for Runtime
+plus Tool memory. Initial Runtime and Tool boot use configurable incremental-RSS
+reservations. Restore reserves the measured pre-eviction RSS of the selected
+pair plus `restore_transient_headroom_mib`; the reservation is removed only
+after restore completes and the newly resident memory has been measured.
+Pressure-aware hybrid eviction selects idle LLM waiters in deterministic LRU
+order until both pools fall below their low watermarks. Both configurations
+must satisfy `Wlow < Whigh < H`. Any increase in either pool's `oom_kill`
+counter is reported as `OversubscriptionPolicyFailure`, never as a normal tenant OOM.
 Guest OOM within the fixed 4 GiB VM means the workload exceeded its purchased
 capacity.
 

@@ -594,6 +594,51 @@ def test_tool_only_checkpoint_scope_is_an_explicit_ablation():
     assert events == ["checkpoint-tool", "restore-tool", "tool-ready"]
 
 
+def test_pair_restore_is_guarded_by_measured_pre_eviction_rss():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_restore_memory", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = []
+
+    class Lifecycle:
+        def __init__(self, name, rss):
+            self.name, self.rss, self.resident = name, rss, True
+
+        def rss_bytes(self):
+            return self.rss if self.resident else 0
+
+        def checkpoint_and_evict(self):
+            self.resident = False
+            return 0
+
+        def restore(self):
+            events.append(f"restore-{self.name}")
+            self.resident = True
+            return 0
+
+    runtime, tool = Lifecycle("runtime", 700), Lifecycle("tool", 100)
+    coordinator = module.PairCheckpointCoordinator(runtime, tool, lambda: None)
+    coordinator.start_request()
+    assert coordinator.evict(lambda: {}) is not None
+
+    def admission(total_bytes, tool_bytes, operation):
+        events.append(("admit", total_bytes, tool_bytes))
+        operation()
+        events.append(("release", total_bytes, tool_bytes))
+
+    restored = coordinator.restore(admission)
+    assert restored["restore_total_reservation_bytes"] == 800
+    assert restored["restore_tool_reservation_bytes"] == 100
+    assert events == [
+        ("admit", 800, 100),
+        "restore-tool",
+        "restore-runtime",
+        ("release", 800, 100),
+    ]
+
+
 def test_pair_checkpoint_coordinator_restores_exactly_once_under_prefetch_race():
     script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
     spec = importlib.util.spec_from_file_location("run_openclaw_restore_race", script)

@@ -734,6 +734,45 @@ def test_paper_checkpoint_disk_bound_defaults_to_whole_pair(monkeypatch, tmp_pat
     assert tool["required_mib"] == 2 * 4096 + 10
 
 
+def test_paper_vm_pool_requires_parent_and_distinct_runtime_tool_children(tmp_path):
+    from clawbox.replay.suite import (
+        validate_tool_pool_memory,
+        validate_vm_pool_memory,
+    )
+
+    parent = tmp_path / "vm"
+    runtime = parent / "runtime"
+    tool = parent / "tool"
+    for path in (parent, runtime, tool):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "cgroup.procs").write_text("", encoding="ascii")
+    (parent / "memory.max").write_text(str(1000 * 1024 * 1024), encoding="ascii")
+    (tool / "memory.max").write_text(str(700 * 1024 * 1024), encoding="ascii")
+    raw = {
+        "paper_experiment": {"dimension": "spatial"},
+        "tool_pool_memory": {
+            "cgroup": str(tool), "hard_limit_mib": 700,
+            "high_watermark_mib": 600, "low_watermark_mib": 500,
+            "headroom_mib": 50,
+        },
+        "vm_pool_memory": {
+            "cgroup": str(parent), "runtime_cgroup": str(runtime),
+            "hard_limit_mib": 1000, "high_watermark_mib": 900,
+            "low_watermark_mib": 800, "headroom_mib": 50,
+            "initial_runtime_rss_mib": 10, "initial_tool_rss_mib": 20,
+            "restore_transient_headroom_mib": 30,
+        },
+    }
+    tool_config = validate_tool_pool_memory(raw, tmp_path)
+    vm_config = validate_vm_pool_memory(raw, tmp_path, tool_config)
+    assert vm_config["runtime_cgroup"] == str(runtime)
+    assert vm_config["restore_transient_headroom_mib"] == 30
+
+    raw["vm_pool_memory"]["runtime_cgroup"] = str(tool)
+    with pytest.raises(ValueError, match="distinct"):
+        validate_vm_pool_memory(raw, tmp_path, tool_config)
+
+
 def test_fair_semaphore_times_out_without_stranding_next_ticket() -> None:
     from clawbox.replay.lifecycle import FairSemaphore
 

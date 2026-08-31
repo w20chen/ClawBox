@@ -79,6 +79,11 @@ SUITE_METRICS = (
     "peak_tool_admission_charge_bytes",
     "tool_admission_over_budget_observations",
     "tool_prediction_exceeded_leases",
+    "peak_vm_resident_rss_bytes",
+    "peak_vm_admission_charge_bytes",
+    "vm_admission_over_budget_observations",
+    "vm_materialization_admission_wait_s",
+    "checkpoint_vm_cgroup_memory_released_bytes",
     "tool_balloon_verified_rss_released_bytes",
     "host_oom_kill_events",
     "oversubscription_policy_failures",
@@ -212,9 +217,8 @@ def validate_host_readiness(
     resources = raw.get("resources", {})
     max_sessions = max(int(value) for value in raw["concurrency_levels"])
     if "paper_experiment" in raw:
-        configured_mib = (
-            max_sessions * int(resources.get("runtime_memory_mib", 2048))
-            + int((raw.get("tool_pool_memory") or {}).get("hard_limit_mib", 0))
+        configured_mib = int(
+            (raw.get("vm_pool_memory") or {}).get("hard_limit_mib", 0)
         )
     else:
         configured_mib = max_sessions * (
@@ -326,9 +330,8 @@ def validate_numa_budget(raw: dict[str, Any], topology: dict[str, Any]) -> None:
         if "paper_experiment" in raw:
             if tool_mib != 4096:
                 raise ValueError("paper experiments require fixed 4096 MiB Tool VMs")
-            configured_mib = (
-                sessions * runtime_mib
-                + int((raw.get("tool_pool_memory") or {}).get("hard_limit_mib", 0))
+            configured_mib = int(
+                (raw.get("vm_pool_memory") or {}).get("hard_limit_mib", 0)
             )
         resident_budget = raw.get("resident_memory_budget_mib")
         if resident_budget is not None:
@@ -375,6 +378,69 @@ def validate_tool_pool_memory(raw: dict[str, Any], base: Path) -> dict[str, Any]
         "cgroup": str(path), "hard_limit_mib": hard,
         "high_watermark_mib": high, "low_watermark_mib": low,
         "headroom_mib": headroom,
+    }
+
+
+def validate_vm_pool_memory(
+    raw: dict[str, Any],
+    base: Path,
+    tool_pool_memory: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if "paper_experiment" not in raw:
+        return None
+    memory = raw.get("vm_pool_memory")
+    if not isinstance(memory, dict):
+        raise ValueError("vm_pool_memory configuration is required")
+    hard = int(memory.get("hard_limit_mib", 0))
+    high = int(memory.get("high_watermark_mib", 0))
+    low = int(memory.get("low_watermark_mib", 0))
+    headroom = int(memory.get("headroom_mib", 0))
+    if not 0 < low < high < hard:
+        raise ValueError("VM pool watermarks must satisfy 0 < Wlow < Whigh < H")
+    if headroom < 0 or headroom >= high:
+        raise ValueError("VM-pool headroom must be non-negative and below Whigh")
+    if not memory.get("cgroup") or not memory.get("runtime_cgroup"):
+        raise ValueError("vm_pool_memory requires cgroup and runtime_cgroup")
+    path = Path(_absolute(base, memory["cgroup"]))
+    runtime_path = Path(_absolute(base, memory["runtime_cgroup"]))
+    for label, candidate in (("VM pool", path), ("Runtime pool", runtime_path)):
+        if not (candidate / "cgroup.procs").is_file():
+            raise ValueError(f"{label} is not a cgroup v2 directory: {candidate}")
+    expected = hard * 1024 * 1024
+    value = (path / "memory.max").read_text(encoding="ascii").strip()
+    if value == "max" or int(value) != expected:
+        raise ValueError(f"VM pool memory.max must equal {expected} bytes")
+    if runtime_path.parent != path:
+        raise ValueError("Runtime pool cgroup must be a direct child of the VM pool")
+    if tool_pool_memory is None or Path(tool_pool_memory["cgroup"]).parent != path:
+        raise ValueError("Tool pool cgroup must be a direct child of the VM pool")
+    if Path(tool_pool_memory["cgroup"]) == runtime_path:
+        raise ValueError("Runtime and Tool pools must be distinct")
+    initial_runtime = int(memory.get("initial_runtime_rss_mib", 256))
+    initial_tool = int(memory.get("initial_tool_rss_mib", 256))
+    restore_headroom = int(memory.get("restore_transient_headroom_mib", 256))
+    if initial_runtime <= 0 or initial_tool <= 0:
+        raise ValueError("initial VM RSS reservations must be positive")
+    if restore_headroom < 0:
+        raise ValueError("restore transient headroom must be non-negative")
+    if tool_pool_memory is None or hard <= int(tool_pool_memory["hard_limit_mib"]):
+        raise ValueError("VM-pool hard limit must exceed the Tool-pool hard limit")
+    if initial_tool + int(tool_pool_memory["headroom_mib"]) > int(
+        tool_pool_memory["high_watermark_mib"]
+    ):
+        raise ValueError("initial Tool RSS reservation does not fit Tool Whigh")
+    if max(initial_runtime, initial_tool) + headroom > high:
+        raise ValueError("initial VM RSS reservation does not fit VM Whigh")
+    return {
+        "cgroup": str(path),
+        "runtime_cgroup": str(runtime_path),
+        "hard_limit_mib": hard,
+        "high_watermark_mib": high,
+        "low_watermark_mib": low,
+        "headroom_mib": headroom,
+        "initial_runtime_rss_mib": initial_runtime,
+        "initial_tool_rss_mib": initial_tool,
+        "restore_transient_headroom_mib": restore_headroom,
     }
 
 
@@ -762,11 +828,13 @@ def _preflight_suite(
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     base = config_path.resolve().parent
     tool_pool_memory = validate_tool_pool_memory(raw, base)
+    vm_pool_memory = validate_vm_pool_memory(raw, base, tool_pool_memory)
     node = int(raw.get("resources", {}).get("numa_node", 0))
     topology = numa_topology(node)
     validate_numa_budget(raw, topology)
     host_state = validate_host_readiness(raw, topology)
     host_state["tool_pool_memory"] = tool_pool_memory
+    host_state["vm_pool_memory"] = vm_pool_memory
     parent_placement = _process_placement()
     host_state["parent_process_placement"] = parent_placement
     if bool(raw.get("require_parent_numa_binding", False)):
@@ -993,6 +1061,10 @@ def run_suite(config_path: Path) -> int:
                 memory = child.get("tool_pool_memory") or {}
                 if memory.get("cgroup"):
                     memory["cgroup"] = _absolute(base, memory["cgroup"])
+                vm_memory = child.get("vm_pool_memory") or {}
+                for field in ("cgroup", "runtime_cgroup"):
+                    if vm_memory.get(field):
+                        vm_memory[field] = _absolute(base, vm_memory[field])
             p90 = child.get("p90_reservation") or child.get("p90_static")
             if "paper_experiment" not in child and isinstance(p90, dict):
                 p90["workload_name"] = name

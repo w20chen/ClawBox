@@ -351,10 +351,13 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
     source = raw["source"]
     resources = raw.get("resources") or {}
     memory = raw.get("tool_pool_memory")
+    vm_memory = raw.get("vm_pool_memory")
     tuning = raw.get("reclamation") or {}
     experiment = raw["paper_experiment"]
     if not isinstance(memory, dict):
         raise ValueError("tool_pool_memory configuration is required")
+    if not isinstance(vm_memory, dict):
+        raise ValueError("vm_pool_memory configuration is required")
     checkpoint_scope = str(tuning.get("checkpoint_scope", "pair"))
     if checkpoint_scope not in {"pair", "tool"}:
         raise ValueError("reclamation.checkpoint_scope must be pair or tool")
@@ -368,6 +371,31 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
         raise ValueError("Tool admission headroom must be non-negative and below Whigh")
     if not memory.get("cgroup"):
         raise ValueError("tool_pool_memory.cgroup is required")
+    vm_hard = int(vm_memory.get("hard_limit_mib", 0))
+    vm_high = int(vm_memory.get("high_watermark_mib", 0))
+    vm_low = int(vm_memory.get("low_watermark_mib", 0))
+    vm_headroom = int(vm_memory.get("headroom_mib", 0))
+    if not 0 < vm_low < vm_high < vm_hard:
+        raise ValueError("VM pool watermarks must satisfy 0 < Wlow < Whigh < H")
+    if vm_headroom < 0 or vm_headroom >= vm_high:
+        raise ValueError("VM-pool headroom must be non-negative and below Whigh")
+    if not vm_memory.get("cgroup") or not vm_memory.get("runtime_cgroup"):
+        raise ValueError("vm_pool_memory requires cgroup and runtime_cgroup")
+    initial_runtime_mib = int(vm_memory.get("initial_runtime_rss_mib", 256))
+    initial_tool_mib = int(vm_memory.get("initial_tool_rss_mib", 256))
+    restore_transient_mib = int(
+        vm_memory.get("restore_transient_headroom_mib", 256)
+    )
+    if initial_runtime_mib <= 0 or initial_tool_mib <= 0:
+        raise ValueError("initial VM RSS reservations must be positive")
+    if restore_transient_mib < 0:
+        raise ValueError("restore transient headroom must be non-negative")
+    if vm_hard <= hard:
+        raise ValueError("VM-pool hard limit must exceed the Tool-pool hard limit")
+    if initial_tool_mib + headroom > high:
+        raise ValueError("initial Tool RSS reservation does not fit Tool Whigh")
+    if max(initial_runtime_mib, initial_tool_mib) + vm_headroom > vm_high:
+        raise ValueError("initial VM RSS reservation does not fit VM Whigh")
     static_mib = int(experiment.get("static_reservation_mib", 2048))
     if not 0 < static_mib <= 4096:
         raise ValueError("static_reservation_mib must be in (0, 4096]")
@@ -445,6 +473,15 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
                 "--tool-pool-cgroup", str(memory["cgroup"]),
                 "--tool-pool-hard-limit-mib", str(hard),
                 "--tool-pool-low-watermark-mib", str(low),
+                "--vm-pool-cgroup", str(vm_memory["cgroup"]),
+                "--runtime-pool-cgroup", str(vm_memory["runtime_cgroup"]),
+                "--vm-pool-hard-limit-mib", str(vm_hard),
+                "--vm-pool-high-watermark-mib", str(vm_high),
+                "--vm-pool-low-watermark-mib", str(vm_low),
+                "--vm-pool-headroom-mib", str(vm_headroom),
+                "--initial-runtime-rss-reservation-mib", str(initial_runtime_mib),
+                "--initial-tool-rss-reservation-mib", str(initial_tool_mib),
+                "--restore-transient-headroom-mib", str(restore_transient_mib),
             ]
             if raw.get("correctness_command"):
                 command += [
@@ -505,10 +542,13 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
         "mean_runtime_firecracker_rss_bytes", "peak_runtime_firecracker_rss_bytes",
         "mean_tool_firecracker_rss_bytes", "peak_tool_firecracker_rss_bytes",
         "firecracker_rss_time_byte_seconds", "peak_tool_resident_rss_bytes",
-        "peak_tool_admission_charge_bytes", "tool_reservation_wait_s",
+        "peak_tool_admission_charge_bytes", "peak_vm_resident_rss_bytes",
+        "peak_vm_admission_charge_bytes", "tool_reservation_wait_s",
+        "vm_materialization_admission_wait_s",
         "checkpoint_verified_firecracker_rss_released_bytes",
         "checkpoint_verified_runtime_rss_released_bytes",
         "checkpoint_verified_tool_rss_released_bytes",
+        "checkpoint_vm_cgroup_memory_released_bytes",
         "tool_balloon_verified_rss_released_bytes", "checkpoint_snapshot_service_s",
         "checkpoint_restore_service_s", "host_oom_kill_events",
         "oversubscription_policy_failures", "tenant_guest_oom_events",

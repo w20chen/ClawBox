@@ -48,11 +48,22 @@
     "restore_policies": ["reactive", "prefetch"]
   },
   "tool_pool_memory": {
-    "cgroup": "/sys/fs/cgroup/clawbox-tool-pool",
+    "cgroup": "/sys/fs/cgroup/clawbox-vm-pool/tool",
     "hard_limit_mib": 131072,
     "high_watermark_mib": 114688,
     "low_watermark_mib": 98304,
     "headroom_mib": 8192
+  },
+  "vm_pool_memory": {
+    "cgroup": "/sys/fs/cgroup/clawbox-vm-pool",
+    "runtime_cgroup": "/sys/fs/cgroup/clawbox-vm-pool/runtime",
+    "hard_limit_mib": 212992,
+    "high_watermark_mib": 196608,
+    "low_watermark_mib": 180224,
+    "headroom_mib": 8192,
+    "initial_runtime_rss_mib": 256,
+    "initial_tool_rss_mib": 256,
+    "restore_transient_headroom_mib": 256
   },
   "reclamation": {
     "checkpoint_scope": "pair",
