@@ -31,6 +31,7 @@ class GatewayRequest:
     error: str = ""
     started_unix_s: float = 0.0
     completed_unix_s: float = 0.0
+    delivered_unix_s: float = 0.0
     request_payload: dict[str, Any] = field(default_factory=dict)
     replay_input_match: bool | None = None
     admission: dict[str, Any] = field(default_factory=dict)
@@ -38,6 +39,7 @@ class GatewayRequest:
     reconnect_attempts: int = 0
     delivery_failures: int = 0
     delivered: bool = False
+    production_attempts: int = 0
 
 
 class ModelGateway:
@@ -145,11 +147,14 @@ class ModelGateway:
         fingerprint = hashlib.sha256(json.dumps(
             canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode()).hexdigest()
-        request_id = hashlib.sha256(
-            f"{self.request_namespace}\0{fingerprint}".encode()
-        ).hexdigest()
         with self._changed:
-            request = self._requests.get(request_id)
+            matching = [
+                item for item in self._requests.values()
+                if item.request_fingerprint == fingerprint
+            ]
+            # An undelivered response may be retried after a broken connection.
+            # Once delivered, an identical payload is a new logical model step.
+            request = matching[-1] if matching and not matching[-1].delivered else None
             if request is None:
                 if self.on_request_started is not None:
                     self.on_request_started()
@@ -165,6 +170,10 @@ class ModelGateway:
                         replay_input_match = expected == canonical
                     if replay_input_match is False:
                         raise ValueError(f"replay request diverged at model step {index}")
+                occurrence = len(matching)
+                request_id = hashlib.sha256(
+                    f"{self.request_namespace}\0{fingerprint}\0{occurrence}".encode()
+                ).hexdigest()
                 request = GatewayRequest(
                     request_id, index, started_unix_s=time.time(),
                     request_namespace=self.request_namespace,
@@ -177,8 +186,8 @@ class ModelGateway:
                 threading.Thread(
                     target=self._produce, args=(request_id, payload), daemon=True,
                 ).start()
-            elif request.request_fingerprint and request.request_fingerprint != fingerprint:
-                raise RuntimeError("request identity collision")
+            else:
+                request_id = request.request_id
             if http_attempt:
                 request.http_attempts += 1
                 if request.http_attempts > 1:
@@ -205,6 +214,8 @@ class ModelGateway:
                 raise KeyError(f"unknown gateway request {request_id}")
             if delivered:
                 request.delivered = True
+                if request.delivered_unix_s <= 0:
+                    request.delivered_unix_s = time.time()
             else:
                 request.delivery_failures += 1
             self._persist()
@@ -214,6 +225,9 @@ class ModelGateway:
             return [asdict(item) for item in self._requests.values()]
 
     def _produce(self, request_id: str, payload: dict[str, Any]) -> None:
+        with self._changed:
+            self._requests[request_id].production_attempts += 1
+            self._persist()
         try:
             if self.mode == "replay":
                 request = self._requests[request_id]

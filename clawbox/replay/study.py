@@ -243,24 +243,32 @@ def study_experiment_spec(raw: dict[str, Any], *, base: Path | None = None) -> E
     })
 
 
-_PAPER_ADMISSION_POLICIES = {"full_reservation", "static", "p90", "oracle"}
+_PAPER_ADMISSION_POLICIES = {
+    "static_lifetime", "full_reservation", "static", "p90", "oracle",
+}
 _PAPER_RECLAMATION_POLICIES = {"resident", "balloon", "checkpoint", "hybrid"}
-_PAPER_DECISION_POLICIES = {"eager", "fixed_delay", "predicted_pressure_aware"}
-_PAPER_RESTORE_POLICIES = {"reactive", "prefetch"}
+_PAPER_DECISION_POLICIES = {
+    "eager", "fixed_delay", "wait_aware_pressure", "predicted_pressure_aware",
+}
+_PAPER_RESTORE_POLICIES = {"reactive", "proactive", "prefetch"}
 
 
 def _paper_arm_slug(model: str, arm: dict[str, str]) -> str:
     admission = {
-        "full_reservation": "full", "static": "static", "p90": "p90", "oracle": "oracle",
+        "static_lifetime": "lifetime", "full_reservation": "full",
+        "static": "static", "p90": "p90", "oracle": "oracle",
     }[arm["admission_policy"]]
     reclamation = {
         "resident": "res", "balloon": "bal", "checkpoint": "ckpt", "hybrid": "hyb",
     }[arm["reclamation_policy"]]
     decision = {
         "none": "none", "eager": "eager", "fixed_delay": "delay",
+        "wait_aware_pressure": "pressure",
         "predicted_pressure_aware": "pressure",
     }[arm["decision_policy"]]
-    restore = {"reactive": "react", "prefetch": "pref"}[arm["restore_policy"]]
+    restore = {
+        "reactive": "react", "proactive": "proactive", "prefetch": "proactive",
+    }[arm["restore_policy"]]
     return f"{model}-{admission}-{reclamation}-{decision}-{restore}"
 
 
@@ -289,6 +297,11 @@ def expand_paper_policy_matrix(raw: dict[str, Any]) -> list[dict[str, str]]:
     reclamation = list(experiment.get("reclamation_policies") or [])
     decisions = list(experiment.get("decision_policies") or [])
     restores = list(experiment.get("restore_policies") or ["reactive"])
+    decisions = [
+        "wait_aware_pressure" if value == "predicted_pressure_aware" else value
+        for value in decisions
+    ]
+    restores = ["proactive" if value == "prefetch" else value for value in restores]
     if not admission or not set(admission) <= _PAPER_ADMISSION_POLICIES:
         raise ValueError("paper admission_policies are empty or invalid")
     if len(admission) != len(set(admission)):
@@ -324,6 +337,26 @@ def expand_paper_policy_matrix(raw: dict[str, Any]) -> list[dict[str, str]]:
             ),
             "restore_policy": "reactive",
         } for policy in reclamation]
+    elif dimension == "mechanism":
+        if len(admission) != 1:
+            raise ValueError("mechanism experiment fixes exactly one admission policy")
+        if not reclamation or not set(reclamation) <= {
+            "resident", "balloon", "checkpoint",
+        }:
+            raise ValueError(
+                "mechanism reclamation_policies must use resident, balloon, or checkpoint"
+            )
+        if decisions and decisions != ["fixed_delay"]:
+            raise ValueError("mechanism experiment fixes the idle trigger to fixed_delay")
+        if restores != ["reactive"]:
+            raise ValueError("mechanism experiment fixes restore_policies to reactive")
+        arms = [{
+            "admission_policy": admission[0], "reclamation_policy": policy,
+            "decision_policy": (
+                "fixed_delay" if policy == "checkpoint" else "none"
+            ),
+            "restore_policy": "reactive",
+        } for policy in reclamation]
     elif dimension == "decision":
         if len(admission) != 1:
             raise ValueError("decision experiment fixes exactly one admission policy")
@@ -336,7 +369,9 @@ def expand_paper_policy_matrix(raw: dict[str, Any]) -> list[dict[str, str]]:
             "decision_policy": decision, "restore_policy": restore,
         } for decision in decisions for restore in restores]
     else:
-        raise ValueError("paper_experiment.dimension must be spatial, temporal, or decision")
+        raise ValueError(
+            "paper_experiment.dimension must be spatial, mechanism, temporal, or decision"
+        )
 
     for arm in arms:
         arm["label"] = "-".join((
@@ -363,6 +398,8 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
     checkpoint_scope = str(tuning.get("checkpoint_scope", "pair"))
     if checkpoint_scope not in {"pair", "tool"}:
         raise ValueError("reclamation.checkpoint_scope must be pair or tool")
+    if experiment.get("dimension") == "mechanism" and checkpoint_scope != "tool":
+        raise ValueError("mechanism experiments require checkpoint_scope=tool")
     hard = int(memory.get("hard_limit_mib", 0))
     high = int(memory.get("high_watermark_mib", 0))
     low = int(memory.get("low_watermark_mib", 0))
@@ -388,6 +425,10 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
     restore_transient_mib = int(
         vm_memory.get("restore_transient_headroom_mib", 256)
     )
+    checkpoint_parent_mib = int(
+        tuning.get("checkpoint_transient_parent_mib", 0)
+    )
+    checkpoint_tool_mib = int(tuning.get("checkpoint_transient_tool_mib", 0))
     if initial_runtime_mib <= 0 or initial_tool_mib <= 0:
         raise ValueError("initial VM RSS reservations must be positive")
     if restore_transient_mib < 0:
@@ -402,6 +443,19 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
     if not 0 < static_mib <= 4096:
         raise ValueError("static_reservation_mib must be in (0, 4096]")
     arms = expand_paper_policy_matrix(raw)
+    has_checkpoint = any(
+        arm["reclamation_policy"] in {"checkpoint", "hybrid"} for arm in arms
+    )
+    if has_checkpoint and (checkpoint_parent_mib <= 0 or checkpoint_tool_mib <= 0):
+        raise ValueError(
+            "formal checkpoint arms require positive calibrated reclamation."
+            "checkpoint_transient_parent_mib and checkpoint_transient_tool_mib"
+        )
+    full_incremental_mib = int(
+        experiment.get("full_incremental_growth_mib", 4096)
+    )
+    if full_incremental_mib <= 0:
+        raise ValueError("full_incremental_growth_mib must be positive")
     sessions = int(raw.get("sessions", 1))
     repetitions = int(raw.get("repetitions", 1))
     if sessions < 1 or repetitions < 1:
@@ -486,6 +540,9 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
                 "--initial-runtime-rss-reservation-mib", str(initial_runtime_mib),
                 "--initial-tool-rss-reservation-mib", str(initial_tool_mib),
                 "--restore-transient-headroom-mib", str(restore_transient_mib),
+                "--checkpoint-transient-parent-mib", str(checkpoint_parent_mib),
+                "--checkpoint-transient-tool-mib", str(checkpoint_tool_mib),
+                "--full-tool-incremental-mib", str(full_incremental_mib),
             ]
             if raw.get("correctness_command"):
                 command += [
@@ -512,16 +569,31 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
                     "--tool-balloon-idle-floor-mib", str(tuning.get("balloon_idle_floor_mib", 256)),
                     "--tool-balloon-settle-timeout-s", str(tuning.get("balloon_settle_timeout_s", 5.0)),
                 ]
+                if experiment.get("dimension") == "mechanism":
+                    command += [
+                        "--tool-balloon-idle-delay-s",
+                        str(tuning.get("fixed_delay_s", 20.0)),
+                    ]
             if arm_spec["reclamation_policy"] in {"checkpoint", "hybrid"}:
                 command += [
                     "--checkpoint-scope", checkpoint_scope,
                     "--eviction-policy", arm_spec["decision_policy"],
                     "--eviction-delay-s", str(tuning.get("fixed_delay_s", 20.0)),
                     "--predicted-llm-wait-s", str(tuning.get("predicted_llm_wait_s", 20.0)),
+                    "--wait-estimator", str(tuning.get("wait_estimator", "fixed")),
+                    "--wait-error-fraction", str(tuning.get("wait_error_fraction", 0.0)),
                     "--checkpoint-break-even-s", str(tuning.get("checkpoint_break_even_s", 4.0)),
                     "--restore-policy", arm_spec["restore_policy"],
                     "--restore-prefetch-lead-s", str(tuning.get("restore_prefetch_lead_s", 2.0)),
                 ]
+                if tuning.get("wait_estimator") == "heldout":
+                    if not tuning.get("wait_estimates"):
+                        raise ValueError(
+                            "heldout wait_estimator requires reclamation.wait_estimates"
+                        )
+                    command += [
+                        "--wait-estimates", str(_path(base, tuning["wait_estimates"])),
+                    ]
             started_at = utcnow()
             completed = subprocess.run(command, cwd=root, check=False)
             completed_at = utcnow()
@@ -529,12 +601,34 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
             if not summary_path.is_file():
                 raise subprocess.CalledProcessError(getattr(completed, "returncode", 1), command)
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            gate_path = results / "validity-gates.json"
+            gate_command = [
+                sys.executable, str(root / "scripts" / "validate-replay-gates.py"),
+                str(summary_path), "--mode", "formal", "--output", str(gate_path),
+            ]
+            gate_completed = subprocess.run(gate_command, cwd=root, check=False)
+            if not gate_path.is_file():
+                raise subprocess.CalledProcessError(
+                    getattr(gate_completed, "returncode", 1), gate_command,
+                )
+            validity_gates = json.loads(gate_path.read_text(encoding="utf-8"))
+            if not validity_gates.get("passed"):
+                summary.setdefault("failures", []).append({
+                    "session": None,
+                    "type": "FormalValidityGateFailure",
+                    "error": "one or more formal validity gates failed",
+                    "failed_gates": [
+                        item["gate"] for item in validity_gates.get("checks", [])
+                        if not item.get("passed")
+                    ],
+                })
             runs.append({
                 "repetition": repetition, "arm_order_position": arm_position,
                 "inference_backend": model, **arm_spec,
                 "configured_tool_memory_mib": 4096,
                 "started_at": started_at.isoformat(), "completed_at": completed_at.isoformat(),
-                "result_dir": str(results), **summary,
+                "result_dir": str(results), "validity_gates": validity_gates,
+                **summary,
             })
             if not bool(raw.get("retain_vm_artifacts", True)):
                 _discard_heavy_vm_artifacts(prepared)
@@ -546,6 +640,13 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
         "mean_runtime_firecracker_rss_bytes", "peak_runtime_firecracker_rss_bytes",
         "mean_tool_firecracker_rss_bytes", "peak_tool_firecracker_rss_bytes",
         "firecracker_rss_time_byte_seconds", "peak_tool_resident_rss_bytes",
+        "mean_vm_pool_memory_current_bytes", "p95_vm_pool_memory_current_bytes",
+        "peak_sampled_vm_pool_memory_current_bytes",
+        "kernel_peak_vm_pool_memory_bytes", "vm_pool_memory_time_byte_seconds",
+        "mean_tool_pool_memory_current_bytes",
+        "peak_sampled_tool_pool_memory_current_bytes",
+        "kernel_peak_tool_pool_memory_bytes", "tool_pool_memory_time_byte_seconds",
+        "mean_arm_memory_current_bytes", "peak_sampled_arm_memory_current_bytes",
         "peak_tool_admission_charge_bytes", "peak_vm_resident_rss_bytes",
         "peak_vm_admission_charge_bytes", "tool_reservation_wait_s",
         "vm_materialization_admission_wait_s",
@@ -555,9 +656,22 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
         "checkpoint_vm_cgroup_memory_released_bytes",
         "tool_balloon_verified_rss_released_bytes", "checkpoint_snapshot_service_s",
         "checkpoint_restore_service_s", "host_oom_kill_events",
+        "checkpoint_queue_wait_s", "restore_queue_wait_s",
+        "checkpoint_transient_peak_growth_bytes",
+        "checkpoint_kernel_operation_peak_bytes",
+        "checkpoint_snapshot_logical_bytes",
+        "checkpoint_snapshot_allocated_bytes_created",
+        "checkpoint_process_write_bytes", "checkpoint_page_cache_growth_bytes",
+        "cancelled_checkpoint_attempts",
         "oversubscription_policy_failures", "tenant_guest_oom_events",
         "model_gateway_http_attempts", "model_gateway_reconnect_attempts",
         "model_gateway_delivery_failures", "model_gateway_responses_delivered",
+        "duplicate_model_request_attempts", "tool_execution_count_mismatch_events",
+        "mean_model_step_latency_s", "p50_model_step_latency_s",
+        "p95_model_step_latency_s", "p99_model_step_latency_s",
+        "response_ready_to_delivery_delay_s",
+        "p95_response_ready_to_delivery_delay_s",
+        "mean_first_tool_after_restore_wall_s",
     )
     for model, arm_spec in matrix:
         label = f"{model}-{arm_spec['label']}"

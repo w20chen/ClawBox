@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clawbox.replay.lifecycle import (
-    FeedbackMemoryAdmission, FirecrackerConfig, FirecrackerLifecycle,
+    AtomicMemoryAdmission, FirecrackerConfig, FirecrackerLifecycle,
 )
+from clawbox.replay._numa_exec import parse_cpu_set
 from clawbox.replay.model_gateway import ModelGateway
 
 
@@ -70,15 +71,98 @@ def cgroup_value(path: Path, name: str) -> int | None:
         return None
 
 
+def reset_cgroup_peak(path: Path) -> bool:
+    try:
+        (path / "memory.peak").write_text("0", encoding="ascii")
+    except OSError:
+        return False
+    return True
+
+
 def cgroup_memory_events(path: Path) -> dict[str, int]:
+    events = cgroup_key_values(path, "memory.events.local")
+    return events or cgroup_key_values(path, "memory.events")
+
+
+def cgroup_key_values(path: Path, name: str) -> dict[str, int]:
     try:
         return {
             fields[0]: int(fields[1])
-            for line in (path / "memory.events").read_text(encoding="ascii").splitlines()
+            for line in (path / name).read_text(encoding="ascii").splitlines()
             if len(fields := line.split()) == 2
         }
     except (OSError, ValueError):
         return {}
+
+
+def cgroup_memory_numa_stat(path: Path) -> dict[str, dict[str, int]]:
+    try:
+        result: dict[str, dict[str, int]] = {}
+        for line in (path / "memory.numa_stat").read_text(
+            encoding="ascii"
+        ).splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            result[fields[0]] = {
+                key: int(value)
+                for field in fields[1:]
+                if "=" in field
+                for key, value in (field.split("=", 1),)
+            }
+        return result
+    except (OSError, ValueError):
+        return {}
+
+
+def pressure_stall(path: Path) -> dict[str, dict[str, float]]:
+    try:
+        result: dict[str, dict[str, float]] = {}
+        for line in path.read_text(encoding="ascii").splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            result[fields[0]] = {
+                key: float(value)
+                for field in fields[1:]
+                if "=" in field
+                for key, value in (field.split("=", 1),)
+            }
+        return result
+    except (OSError, ValueError):
+        return {}
+
+
+def cgroup_pressure(path: Path, resource: str) -> dict[str, dict[str, float]]:
+    return pressure_stall(path / f"{resource}.pressure")
+
+
+def cgroup_memory_snapshot(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    stat = cgroup_key_values(path, "memory.stat")
+    events_local = cgroup_key_values(path, "memory.events.local")
+    if not events_local:
+        events_local = cgroup_key_values(path, "memory.events")
+    return {
+        "current_bytes": cgroup_value(path, "memory.current"),
+        "peak_bytes": cgroup_value(path, "memory.peak"),
+        "swap_current_bytes": cgroup_value(path, "memory.swap.current"),
+        "stat": {
+            key: stat.get(key)
+            for key in (
+                "anon", "file", "kernel", "kernel_stack", "pagetables",
+                "percpu", "sock", "shmem", "file_dirty", "file_writeback",
+                "pgfault", "pgmajfault",
+            )
+            if key in stat
+        },
+        "events_local": events_local,
+        "numa_stat": cgroup_memory_numa_stat(path),
+        "pressure": cgroup_pressure(path, "memory"),
+        "io_pressure": cgroup_pressure(path, "io"),
+        "cpu_pressure": cgroup_pressure(path, "cpu"),
+    }
 
 
 def guest_oom_observed(log_path: Path | None) -> bool:
@@ -119,11 +203,176 @@ def validate_tool_pool_cgroup(path: Path, hard_limit_mib: int) -> Path:
     return validate_memory_cgroup(path, hard_limit_mib, "Tool pool")
 
 
+def create_cgroup_leaf(
+    parent: Path, name: str, *, numa_node: int, cpu_set: str,
+) -> Path:
+    """Create an empty per-arm/session leaf before spawning its Firecracker."""
+    leaf = parent / name
+    leaf.mkdir()
+    try:
+        if not (leaf / "memory.current").is_file():
+            raise ValueError(
+                f"memory controller is not delegated to cgroup {leaf}; "
+                f"enable +memory in {parent}/cgroup.subtree_control"
+            )
+        for file_name, value in (
+            ("cpuset.mems", str(numa_node)),
+            ("cpuset.cpus", cpu_set),
+            ("memory.swap.max", "0"),
+        ):
+            target = leaf / file_name
+            if not target.is_file():
+                raise ValueError(f"required cgroup control {target} is unavailable")
+            target.write_text(value, encoding="ascii")
+        effective_mems = (leaf / "cpuset.mems.effective").read_text(
+            encoding="ascii"
+        ).strip()
+        if effective_mems != str(numa_node):
+            raise ValueError(
+                f"{leaf} permits memory nodes {effective_mems!r}; expected only {numa_node}"
+            )
+        effective_cpus = (leaf / "cpuset.cpus.effective").read_text(
+            encoding="ascii"
+        ).strip()
+        if set(parse_cpu_set(effective_cpus)) != set(parse_cpu_set(cpu_set)):
+            raise ValueError(
+                f"{leaf} permits CPUs {effective_cpus!r}; expected {cpu_set!r}"
+            )
+        return leaf
+    except Exception:
+        leaf.rmdir()
+        raise
+
+
+def remove_empty_cgroup(path: Path) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        return
+
+
+def delegate_session_controllers(path: Path) -> None:
+    available = set(
+        (path / "cgroup.controllers").read_text(encoding="ascii").split()
+    )
+    required = {"memory", "cpuset"}
+    if not required <= available:
+        raise ValueError(
+            f"{path} cannot delegate required controllers: "
+            f"missing {sorted(required - available)}"
+        )
+    (path / "cgroup.subtree_control").write_text(
+        "+memory +cpuset", encoding="ascii"
+    )
+
+
 def percentile(values: list[float | int], fraction: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
     return float(ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))])
+
+
+def sampled_time_integral(samples: list[dict], key: str) -> float:
+    """Trapezoidal byte-seconds for a sampled numeric field."""
+    total = 0.0
+    for previous, current in zip(samples, samples[1:]):
+        left = previous.get(key)
+        right = current.get(key)
+        if left is None or right is None:
+            continue
+        elapsed = max(
+            0.0, float(current["elapsed_s"]) - float(previous["elapsed_s"]),
+        )
+        total += (float(left) + float(right)) * 0.5 * elapsed
+    return total
+
+
+def psi_summary(samples: list[dict], sample_key: str) -> dict[str, dict[str, float]]:
+    """Summarize PSI averages and cumulative stall deltas."""
+    result: dict[str, dict[str, float]] = {}
+    for resource in ("cpu", "memory", "io"):
+        rows = [
+            item.get(sample_key, {}).get(resource, {})
+            for item in samples
+        ]
+        some_rows = [row.get("some", {}) for row in rows if row.get("some")]
+        full_rows = [row.get("full", {}) for row in rows if row.get("full")]
+        summary: dict[str, float] = {}
+        for label, values in (("some", some_rows), ("full", full_rows)):
+            avg10 = [float(item["avg10"]) for item in values if "avg10" in item]
+            totals = [float(item["total"]) for item in values if "total" in item]
+            if avg10:
+                summary[f"max_{label}_avg10"] = max(avg10)
+            if len(totals) >= 2:
+                summary[f"{label}_stall_us"] = max(0.0, totals[-1] - totals[0])
+        result[resource] = summary
+    return result
+
+
+def cgroup_psi_summary(
+    samples: list[dict], snapshot_key: str,
+) -> dict[str, dict[str, float]]:
+    """Summarize CPU, memory, and I/O PSI embedded in cgroup snapshots."""
+    normalized = []
+    for item in samples:
+        snapshot = item.get(snapshot_key) or {}
+        normalized.append({
+            "pressure": {
+                "cpu": snapshot.get("cpu_pressure") or {},
+                "memory": snapshot.get("pressure") or {},
+                "io": snapshot.get("io_pressure") or {},
+            },
+        })
+    return psi_summary(normalized, "pressure")
+
+
+def off_numa_ratio(snapshot: dict[str, Any] | None, numa_node: int) -> float | None:
+    if not snapshot:
+        return None
+    totals: dict[str, int] = {}
+    for nodes in (snapshot.get("numa_stat") or {}).values():
+        for node, value in nodes.items():
+            totals[node] = totals.get(node, 0) + int(value)
+    total = sum(totals.values())
+    if total <= 0:
+        return None
+    local = totals.get(f"N{numa_node}", 0)
+    return max(0.0, min(1.0, (total - local) / total))
+
+
+def load_wait_estimates(path: Path) -> dict[int, float]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw = payload.get("steps", payload) if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        raise ValueError("wait estimates must be a JSON object or contain steps")
+    estimates: dict[int, float] = {}
+    for key, value in raw.items():
+        step = int(key)
+        seconds = float(value)
+        if step < 0 or not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"invalid wait estimate for step {key!r}")
+        estimates[step] = seconds
+    if not estimates:
+        raise ValueError("wait estimates are empty")
+    return estimates
+
+
+def fixed_incremental_growth_mib(
+    policy: str, *, full_mib: int, static_mib: int | None,
+) -> int:
+    """Return a host incremental-growth target, never capacity minus RSS."""
+    if policy == "full_reservation":
+        value = int(full_mib)
+    elif policy == "static":
+        if static_mib is None:
+            raise ValueError("static incremental growth is not configured")
+        value = int(static_mib)
+    else:
+        raise ValueError(f"{policy} is not a fixed incremental policy")
+    if value <= 0:
+        raise ValueError("incremental growth target must be positive")
+    return value
 
 
 def wait_tcp(host: str, port: int, timeout_s: float) -> None:
@@ -171,6 +420,8 @@ class CheckpointTransition(NamedTuple):
     tool_rss_after_bytes: int
     host_before: dict[str, int | None]
     host_after: dict[str, int | None]
+    runtime_checkpoint_metrics: dict[str, Any] | None
+    tool_checkpoint_metrics: dict[str, Any] | None
 
 
 class PairCheckpointCoordinator:
@@ -233,6 +484,7 @@ class PairCheckpointCoordinator:
         runtime_before = self.runtime.rss_bytes()
         tool_before = self.tool.rss_bytes()
         host_before = observe_host()
+        started_unix_s = time.time()
         started = time.monotonic()
         try:
             if self.checkpoint_scope == "pair":
@@ -249,6 +501,7 @@ class PairCheckpointCoordinator:
                     f"{self.checkpoint_scope} checkpoint did not release expected Firecracker RSS"
                 )
             host_after = observe_host()
+            completed_unix_s = time.time()
         except Exception as exc:
             with self._condition:
                 self._failure = exc
@@ -265,6 +518,14 @@ class PairCheckpointCoordinator:
             tool_rss_after_bytes=tool_after,
             host_before=host_before,
             host_after=host_after,
+            runtime_checkpoint_metrics=(
+                self.runtime.last_checkpoint_metrics()
+                if hasattr(self.runtime, "last_checkpoint_metrics") else None
+            ),
+            tool_checkpoint_metrics=(
+                self.tool.last_checkpoint_metrics()
+                if hasattr(self.tool, "last_checkpoint_metrics") else None
+            ),
         )
         with self._condition:
             self._restore_total_bytes = (
@@ -274,6 +535,12 @@ class PairCheckpointCoordinator:
             self._restore_tool_bytes = tool_before
             self._state = "evicted"
             self._condition.notify_all()
+        if transition.runtime_checkpoint_metrics is not None:
+            transition.runtime_checkpoint_metrics["pair_started_unix_s"] = started_unix_s
+            transition.runtime_checkpoint_metrics["pair_completed_unix_s"] = completed_unix_s
+        if transition.tool_checkpoint_metrics is not None:
+            transition.tool_checkpoint_metrics["pair_started_unix_s"] = started_unix_s
+            transition.tool_checkpoint_metrics["pair_completed_unix_s"] = completed_unix_s
         return transition
 
     def restore(
@@ -291,16 +558,38 @@ class PairCheckpointCoordinator:
                 raise RuntimeError(f"cannot restore checkpoint state {self._state}")
             self._state = "restoring"
 
+        started_unix_s = time.time()
         started = time.monotonic()
+        restore_metrics: dict[str, Any] = {}
         try:
             def restore_operation() -> None:
                 if self.checkpoint_scope == "pair":
-                    restore_tool_runtime_pair(
-                        self.tool, self.runtime, self.wait_tool_ready,
+                    tool_started = time.monotonic()
+                    self.tool.restore()
+                    restore_metrics["tool_restore_call_s"] = (
+                        time.monotonic() - tool_started
+                    )
+                    ready_started = time.monotonic()
+                    self.wait_tool_ready()
+                    restore_metrics["tool_service_ready_s"] = (
+                        time.monotonic() - ready_started
+                    )
+                    runtime_started = time.monotonic()
+                    self.runtime.restore()
+                    restore_metrics["runtime_restore_call_s"] = (
+                        time.monotonic() - runtime_started
                     )
                 else:
+                    tool_started = time.monotonic()
                     self.tool.restore()
+                    restore_metrics["tool_restore_call_s"] = (
+                        time.monotonic() - tool_started
+                    )
+                    ready_started = time.monotonic()
                     self.wait_tool_ready()
+                    restore_metrics["tool_service_ready_s"] = (
+                        time.monotonic() - ready_started
+                    )
 
             if admission is None:
                 restore_operation()
@@ -312,6 +601,7 @@ class PairCheckpointCoordinator:
                 )
             runtime_restored = self.checkpoint_scope == "pair"
             elapsed = time.monotonic() - started
+            completed_unix_s = time.time()
         except Exception as exc:
             with self._condition:
                 self._failure = exc
@@ -325,10 +615,26 @@ class PairCheckpointCoordinator:
         return {
             "checkpoint_scope": self.checkpoint_scope,
             "restore_s": elapsed,
+            "restore_started_unix_s": started_unix_s,
+            "restore_completed_unix_s": completed_unix_s,
             "runtime_restored": runtime_restored,
             "tool_restored": True,
             "restore_total_reservation_bytes": self._restore_total_bytes,
             "restore_tool_reservation_bytes": self._restore_tool_bytes,
+            "restore_metrics": {
+                **restore_metrics,
+                "tool_lifecycle": (
+                    self.tool.last_restore_metrics()
+                    if hasattr(self.tool, "last_restore_metrics") else None
+                ),
+                "runtime_lifecycle": (
+                    self.runtime.last_restore_metrics()
+                    if (
+                        self.checkpoint_scope == "pair"
+                        and hasattr(self.runtime, "last_restore_metrics")
+                    ) else None
+                ),
+            },
         }
 
 
@@ -352,7 +658,9 @@ class LruIdleSandboxRegistry:
         pressure_active: Callable[[], bool],
         poll_s: float = 0.05,
     ) -> None:
-        if eviction_policy not in {"eager", "fixed_delay", "predicted_pressure_aware"}:
+        if eviction_policy == "predicted_pressure_aware":
+            eviction_policy = "wait_aware_pressure"
+        if eviction_policy not in {"eager", "fixed_delay", "wait_aware_pressure"}:
             raise ValueError("invalid eviction policy")
         self.eviction_policy = eviction_policy
         self.fixed_delay_s = max(0.0, float(fixed_delay_s))
@@ -603,6 +911,17 @@ def collect_tool_working_sets(
                 int(item["actual_command_peak_memory_bytes"]) for item in executions
             ),
             "actual_execution_count": len(executions),
+            "first_execution_started_unix_s": min(
+                float(item["ts_start"]) for item in executions
+            ),
+            "last_execution_completed_unix_s": max(
+                float(item["ts_end"]) for item in executions
+            ),
+            "tool_batch_wall_s": max(
+                0.0,
+                max(float(item["ts_end"]) for item in executions)
+                - min(float(item["ts_start"]) for item in executions),
+            ),
             "execution_ids": [item["execution_id"] for item in executions],
             "command_sha256s": [item["command_sha256"] for item in executions],
             "join_method": join_method,
@@ -773,10 +1092,19 @@ def main() -> None:
     p.add_argument("--tool-admission-safety-headroom-mib", type=int, default=1024)
     p.add_argument(
         "--admission-policy",
-        choices=("full_reservation", "static", "p90", "oracle"),
+        choices=(
+            "static_lifetime", "full_reservation", "static", "p90", "oracle",
+        ),
     )
     p.add_argument("--idle-tool-vm-rss-mib", type=float)
     p.add_argument("--static-tool-reservation-mib", type=int)
+    p.add_argument(
+        "--full-tool-incremental-mib", type=int, default=TOOL_VM_CONTRACT_MIB,
+        help=(
+            "calibrated worst-case host incremental growth for Full active-call "
+            "admission; this is not guest capacity minus process RSS"
+        ),
+    )
     p.add_argument("--tool-memory-plan", type=Path)
     p.add_argument("--tool-memory-workload")
     p.add_argument("--tool-pool-cgroup", type=Path)
@@ -791,19 +1119,47 @@ def main() -> None:
     p.add_argument("--initial-runtime-rss-reservation-mib", type=int, default=256)
     p.add_argument("--initial-tool-rss-reservation-mib", type=int, default=256)
     p.add_argument("--restore-transient-headroom-mib", type=int, default=256)
+    p.add_argument(
+        "--checkpoint-transient-parent-mib", type=int, default=0,
+        help="calibrated P99 parent-cgroup growth while creating a checkpoint",
+    )
+    p.add_argument(
+        "--checkpoint-transient-tool-mib", type=int, default=0,
+        help="calibrated P99 Tool-cgroup growth while creating a checkpoint",
+    )
     p.add_argument("--tool-balloon-reclamation", action="store_true")
     p.add_argument("--tool-balloon-idle-floor-mib", type=int)
     p.add_argument("--tool-balloon-settle-timeout-s", type=float, default=5.0)
     p.add_argument(
+        "--tool-balloon-idle-delay-s", type=float, default=0.0,
+        help="idle delay before balloon inflation; use the checkpoint delay for mechanism ablations",
+    )
+    p.add_argument(
         "--eviction-policy",
-        choices=("eager", "fixed_delay", "predicted_pressure_aware"),
+        choices=(
+            "eager", "fixed_delay", "wait_aware_pressure",
+            "predicted_pressure_aware",
+        ),
         default="fixed_delay",
     )
     p.add_argument("--eviction-delay-s", type=float, default=20.0)
     p.add_argument("--predicted-llm-wait-s", type=float, default=20.0)
+    p.add_argument(
+        "--wait-estimator", choices=("fixed", "heldout", "oracle"),
+        default="fixed",
+    )
+    p.add_argument(
+        "--wait-estimates", type=Path,
+        help="held-out JSON mapping from replay step to predicted wait seconds",
+    )
+    p.add_argument(
+        "--wait-error-fraction", type=float, default=0.0,
+        help="deterministic sensitivity multiplier; 0.25 means 25 percent late",
+    )
     p.add_argument("--checkpoint-break-even-s", type=float, default=4.0)
     p.add_argument(
-        "--restore-policy", choices=("reactive", "prefetch"), default="reactive",
+        "--restore-policy", choices=("reactive", "proactive", "prefetch"),
+        default="reactive",
     )
     p.add_argument("--restore-prefetch-lead-s", type=float, default=2.0)
     p.add_argument(
@@ -811,12 +1167,22 @@ def main() -> None:
         help="checkpoint Runtime+Tool by default; tool is a secondary ablation",
     )
     a = p.parse_args()
+    if a.eviction_policy == "predicted_pressure_aware":
+        a.eviction_policy = "wait_aware_pressure"
+    if a.restore_policy == "prefetch":
+        a.restore_policy = "proactive"
     if a.timeout_s <= 0:
         p.error("--timeout-s must be positive")
     if a.correctness_timeout_s <= 0:
         p.error("--correctness-timeout-s must be positive")
     if a.time_scale < 0:
         p.error("--time-scale must be non-negative")
+    if a.wait_error_fraction <= -1:
+        p.error("--wait-error-fraction must be greater than -1")
+    if a.wait_estimator == "heldout" and a.wait_estimates is None:
+        p.error("--wait-estimator=heldout requires --wait-estimates")
+    if a.wait_estimator != "heldout" and a.wait_estimates is not None:
+        p.error("--wait-estimates is only valid with --wait-estimator=heldout")
     vm_pool_values = (
         a.vm_pool_cgroup,
         a.runtime_pool_cgroup,
@@ -849,6 +1215,11 @@ def main() -> None:
             p.error("initial Tool RSS reservation must be positive")
         if a.restore_transient_headroom_mib < 0:
             p.error("restore transient headroom must be non-negative")
+        if (
+            a.checkpoint_transient_parent_mib < 0
+            or a.checkpoint_transient_tool_mib < 0
+        ):
+            p.error("checkpoint transient reservations must be non-negative")
     if a.tool_reservation_budget_mib is not None and a.tool_reservation_budget_mib <= 0:
         p.error("--tool-reservation-budget-mib must be positive")
     if a.tool_reservation_budget_mib is not None:
@@ -859,9 +1230,11 @@ def main() -> None:
             p.error(f"{a.admission_policy} admission requires --tool-memory-plan")
         if a.admission_policy == "static" and a.static_tool_reservation_mib is None:
             p.error("static admission requires --static-tool-reservation-mib")
-        if a.admission_policy == "full_reservation":
-            a.static_tool_reservation_mib = TOOL_VM_CONTRACT_MIB
-        if a.admission_policy in {"full_reservation", "static"} and a.tool_memory_plan is not None:
+        if a.full_tool_incremental_mib <= 0:
+            p.error("--full-tool-incremental-mib must be positive")
+        if a.admission_policy in {
+            "static_lifetime", "full_reservation", "static",
+        } and a.tool_memory_plan is not None:
             p.error(f"{a.admission_policy} admission does not use a Tool memory plan")
         if (a.static_tool_reservation_mib is not None
                 and a.static_tool_reservation_mib > TOOL_VM_CONTRACT_MIB):
@@ -914,12 +1287,28 @@ def main() -> None:
             p.error("Tool balloon reclamation requires a positive idle floor")
         if a.tool_balloon_settle_timeout_s <= 0:
             p.error("Tool balloon settle timeout must be positive")
+        if a.tool_balloon_idle_delay_s < 0:
+            p.error("Tool balloon idle delay must be non-negative")
     if a.reclamation_policy in {"checkpoint", "hybrid"}:
         if a.eviction_delay_s < 0 or a.predicted_llm_wait_s < 0:
             p.error("eviction delay and predicted LLM wait must be non-negative")
         if a.checkpoint_break_even_s < 0 or a.restore_prefetch_lead_s < 0:
             p.error("checkpoint break-even and prefetch lead must be non-negative")
+        if a.checkpoint_transient_parent_mib <= 0:
+            p.error(
+                "checkpoint/hybrid runs require a positive calibrated "
+                "--checkpoint-transient-parent-mib"
+            )
+        if a.checkpoint_transient_tool_mib <= 0:
+            p.error(
+                "checkpoint/hybrid runs require a positive calibrated "
+                "--checkpoint-transient-tool-mib"
+            )
     raw = json.loads(a.manifest.read_text())
+    wait_estimates = (
+        load_wait_estimates(a.wait_estimates)
+        if a.wait_estimator == "heldout" else {}
+    )
     configured_nodes = {
         FirecrackerConfig.from_json(Path(session[field])).numa_node
         for session in raw["sessions"] for field in ("runtime", "tool")
@@ -977,7 +1366,39 @@ def main() -> None:
         if runtime_pool_cgroup == tool_pool_cgroup:
             raise ValueError("Runtime and Tool pools must use distinct child cgroups")
         vm_pool_events_before = cgroup_memory_events(vm_pool_cgroup)
+        if not reset_cgroup_peak(vm_pool_cgroup):
+            raise ValueError("VM pool memory.peak cannot be reset for this arm")
+        if not reset_cgroup_peak(tool_pool_cgroup):
+            raise ValueError("Tool pool memory.peak cannot be reset for this arm")
     a.output.mkdir(parents=True, exist_ok=False)
+    tool_arm_cgroup: Path | None = None
+    runtime_arm_cgroup: Path | None = None
+    if tool_pool_cgroup is not None and runtime_pool_cgroup is not None:
+        arm_name = "arm-" + hashlib.sha256(
+            str(a.output.resolve()).encode()
+        ).hexdigest()[:12]
+        tool_cpus = (tool_pool_cgroup / "cpuset.cpus.effective").read_text(
+            encoding="ascii"
+        ).strip()
+        runtime_cpus = (
+            runtime_pool_cgroup / "cpuset.cpus.effective"
+        ).read_text(encoding="ascii").strip()
+        tool_arm_cgroup = create_cgroup_leaf(
+            tool_pool_cgroup, arm_name,
+            numa_node=numa_node, cpu_set=tool_cpus,
+        )
+        try:
+            runtime_arm_cgroup = create_cgroup_leaf(
+                runtime_pool_cgroup, arm_name,
+                numa_node=numa_node, cpu_set=runtime_cpus,
+            )
+            delegate_session_controllers(tool_arm_cgroup)
+            delegate_session_controllers(runtime_arm_cgroup)
+        except Exception:
+            if runtime_arm_cgroup is not None:
+                remove_empty_cgroup(runtime_arm_cgroup)
+            remove_empty_cgroup(tool_arm_cgroup)
+            raise
     lifecycles: list[FirecrackerLifecycle] = []
     tool_lifecycles: list[FirecrackerLifecycle] = []
     runtime_lifecycles: list[FirecrackerLifecycle] = []
@@ -989,7 +1410,11 @@ def main() -> None:
             cgroup_value(tool_pool_cgroup, "memory.current")
             if tool_pool_cgroup is not None else None
         )
-        return max(rss, int(charged or 0))
+        # memory.current is authoritative when the paper cgroup exists. RSS is
+        # retained as a diagnostic fallback only; mixing the two into one
+        # primary metric gives checkpointed and resident variants different
+        # accounting semantics.
+        return int(charged) if charged is not None else rss
     def measure_vm_resident_bytes() -> int:
         with lifecycle_lock:
             rss = sum(item.rss_bytes() for item in lifecycles)
@@ -997,22 +1422,21 @@ def main() -> None:
             cgroup_value(vm_pool_cgroup, "memory.current")
             if vm_pool_cgroup is not None else None
         )
-        return max(rss, int(charged or 0))
-    tool_admission = (
-        FeedbackMemoryAdmission(
-            a.tool_reservation_budget_mib * 1024 * 1024,
-            a.tool_admission_safety_headroom_mib * 1024 * 1024,
-            measure_tool_resident_bytes,
+        return int(charged) if charged is not None else rss
+    memory_admission = (
+        AtomicMemoryAdmission(
+            parent_high_bytes=a.vm_pool_high_watermark_mib * 1024 * 1024,
+            parent_hard_bytes=a.vm_pool_hard_limit_mib * 1024 * 1024,
+            parent_headroom_bytes=a.vm_pool_headroom_mib * 1024 * 1024,
+            tool_high_bytes=a.tool_reservation_budget_mib * 1024 * 1024,
+            tool_hard_bytes=a.tool_pool_hard_limit_mib * 1024 * 1024,
+            tool_headroom_bytes=(
+                a.tool_admission_safety_headroom_mib * 1024 * 1024
+            ),
+            measure_parent_bytes=measure_vm_resident_bytes,
+            measure_tool_bytes=measure_tool_resident_bytes,
         )
         if a.tool_reservation_budget_mib is not None else None
-    )
-    vm_admission = (
-        FeedbackMemoryAdmission(
-            a.vm_pool_high_watermark_mib * 1024 * 1024,
-            a.vm_pool_headroom_mib * 1024 * 1024,
-            measure_vm_resident_bytes,
-        )
-        if a.vm_pool_high_watermark_mib is not None else None
     )
     samples: list[dict] = []
     stop = threading.Event()
@@ -1045,16 +1469,23 @@ def main() -> None:
                 cgroup_value(vm_pool_cgroup, "memory.current")
                 if vm_pool_cgroup is not None else None
             )
-            tool_charged = max(tool_rss, int(tool_pool_current or 0))
-            vm_charged = max(rss, int(vm_pool_current or 0))
+            tool_pool_snapshot = cgroup_memory_snapshot(tool_pool_cgroup)
+            vm_pool_snapshot = cgroup_memory_snapshot(vm_pool_cgroup)
+            runtime_pool_snapshot = cgroup_memory_snapshot(runtime_pool_cgroup)
+            tool_arm_snapshot = cgroup_memory_snapshot(tool_arm_cgroup)
+            runtime_arm_snapshot = cgroup_memory_snapshot(runtime_arm_cgroup)
+            tool_charged = (
+                int(tool_pool_current)
+                if tool_pool_current is not None else tool_rss
+            )
+            vm_charged = (
+                int(vm_pool_current) if vm_pool_current is not None else rss
+            )
             admission_status = (
-                tool_admission.observe(tool_charged)
-                if tool_admission is not None else None
+                memory_admission.observe()
+                if memory_admission is not None else None
             )
-            vm_admission_status = (
-                vm_admission.observe(vm_charged) if vm_admission is not None else None
-            )
-            if tool_admission is not None:
+            if memory_admission is not None:
                 tool_high_bytes = int(a.tool_reservation_budget_mib) * 1024 * 1024
                 tool_low_bytes = int(a.tool_pool_low_watermark_mib) * 1024 * 1024
                 vm_high_bytes = int(a.vm_pool_high_watermark_mib) * 1024 * 1024
@@ -1072,11 +1503,28 @@ def main() -> None:
                 "runtime_firecracker_rss_bytes": runtime_rss,
                 "tool_pool_memory_current_bytes": tool_pool_current,
                 "vm_pool_memory_current_bytes": vm_pool_current,
+                "tool_pool_memory": tool_pool_snapshot,
+                "runtime_pool_memory": runtime_pool_snapshot,
+                "vm_pool_memory": vm_pool_snapshot,
+                "tool_arm_memory": tool_arm_snapshot,
+                "runtime_arm_memory": runtime_arm_snapshot,
+                "arm_memory_current_bytes": (
+                    None
+                    if tool_arm_snapshot is None or runtime_arm_snapshot is None
+                    or tool_arm_snapshot.get("current_bytes") is None
+                    or runtime_arm_snapshot.get("current_bytes") is None
+                    else int(tool_arm_snapshot["current_bytes"])
+                    + int(runtime_arm_snapshot["current_bytes"])
+                ),
+                "host_pressure": {
+                    resource: pressure_stall(Path(f"/proc/pressure/{resource}"))
+                    for resource in ("cpu", "memory", "io")
+                },
                 "resident_vms": resident_vms,
                 "numa_memory_used_bytes": numa_memory,
                 "numa_memory_delta_bytes": (
                     None if numa_baseline is None or numa_memory is None
-                    else max(0, numa_memory - numa_baseline)
+                    else numa_memory - numa_baseline
                 ),
                 "cgroup_memory_used_bytes": cgroup_memory,
                 "cgroup_memory_delta_bytes": (
@@ -1084,16 +1532,18 @@ def main() -> None:
                     else max(0, cgroup_memory - cgroup_baseline)
                 ),
                 "tool_admission": admission_status,
-                "vm_admission": vm_admission_status,
+                "vm_admission": admission_status,
                 "tool_resident_plus_headroom_over_budget": (
                     admission_status is not None
-                    and tool_charged + admission_status["safety_headroom_bytes"]
-                    > admission_status["budget_bytes"]
+                    and tool_charged
+                    + int(a.tool_admission_safety_headroom_mib) * 1024 * 1024
+                    > admission_status["tool_high_bytes"]
                 ),
                 "vm_resident_plus_headroom_over_budget": (
-                    vm_admission_status is not None
-                    and vm_charged + vm_admission_status["safety_headroom_bytes"]
-                    > vm_admission_status["budget_bytes"]
+                    admission_status is not None
+                    and vm_charged
+                    + int(a.vm_pool_headroom_mib) * 1024 * 1024
+                    > admission_status["parent_high_bytes"]
                 ),
             })
     sampler = threading.Thread(target=sample, daemon=True); sampler.start()
@@ -1102,20 +1552,39 @@ def main() -> None:
         session_started_elapsed_s = time.monotonic() - started
         tool_config, runtime_config = FirecrackerConfig.from_json(Path(spec["tool"])), FirecrackerConfig.from_json(Path(spec["runtime"]))
         remaining = lambda: max(0.0, deadline - time.monotonic())
+        tool_session_cgroup: Path | None = None
+        runtime_session_cgroup: Path | None = None
+        if tool_arm_cgroup is not None and runtime_arm_cgroup is not None:
+            if not tool_config.cpu_set or not runtime_config.cpu_set:
+                raise ValueError("paper VM configs require explicit CPU sets")
+            session_name = f"session-{index:04d}"
+            tool_session_cgroup = create_cgroup_leaf(
+                tool_arm_cgroup, session_name,
+                numa_node=numa_node, cpu_set=tool_config.cpu_set,
+            )
+            try:
+                runtime_session_cgroup = create_cgroup_leaf(
+                    runtime_arm_cgroup, session_name,
+                    numa_node=numa_node, cpu_set=runtime_config.cpu_set,
+                )
+            except Exception:
+                remove_empty_cgroup(tool_session_cgroup)
+                raise
+            tool_config = replace(tool_config, cgroup_path=tool_session_cgroup)
+            runtime_config = replace(
+                runtime_config, cgroup_path=runtime_session_cgroup,
+            )
         tool = FirecrackerLifecycle(tool_config)
         runtime = FirecrackerLifecycle(runtime_config)
-        if tool_pool_cgroup is not None:
-            tool.config = replace(tool.config, cgroup_path=tool_pool_cgroup)
-            runtime.config = replace(runtime.config, cgroup_path=runtime_pool_cgroup)
         if a.tool_balloon_reclamation:
             tool.config = replace(tool.config, balloon_enabled=True)
         with lifecycle_lock:
             lifecycles.extend([tool, runtime])
             tool_lifecycles.append(tool)
             runtime_lifecycles.append(runtime)
-        snapshots = 0; snapshot_s = restore_s = 0.0
+        snapshots = 0; cancelled_checkpoints = 0; snapshot_s = restore_s = 0.0
         tool_reservation_lease: int | None = None
-        vm_tool_growth_lease: int | None = None
+        lifetime_reservation_lease: int | None = None
         tool_reservation_events: list[dict] = []
         checkpoint_reclamation_events: list[dict] = []
         balloon_events: list[dict] = []
@@ -1128,10 +1597,39 @@ def main() -> None:
         idle_reclaim_complete.set()
         idle_reclaim_errors: list[Exception] = []
         session_closing = threading.Event()
+        idle_reclaim_cancel = threading.Event()
+        balloon_inflated = threading.Event()
+
+        def measure_session_tool_bytes() -> int:
+            if tool_session_cgroup is not None:
+                value = cgroup_value(tool_session_cgroup, "memory.current")
+                if value is None:
+                    raise RuntimeError("session Tool cgroup memory.current is unavailable")
+                return int(value)
+            return tool.rss_bytes()
+
+        def measure_session_parent_bytes() -> int:
+            if tool_session_cgroup is not None and runtime_session_cgroup is not None:
+                tool_value = cgroup_value(tool_session_cgroup, "memory.current")
+                runtime_value = cgroup_value(runtime_session_cgroup, "memory.current")
+                if tool_value is None or runtime_value is None:
+                    raise RuntimeError("session VM cgroup memory.current is unavailable")
+                return int(tool_value) + int(runtime_value)
+            return tool.rss_bytes() + runtime.rss_bytes()
+
+        def wait_tool_service_ready() -> None:
+            wait_tcp(spec["tool_host"], 2222, 30)
+            exit_code, _stdout, stderr, timed_out = ssh_capture(spec, "true", 30)
+            if timed_out or exit_code != 0:
+                raise RuntimeError(
+                    "restored Tool service did not pass authenticated readiness: "
+                    + stderr.decode(errors="replace")
+                )
+
         checkpoint_coordinator = PairCheckpointCoordinator(
             runtime,
             tool,
-            lambda: wait_tcp(spec["tool_host"], 2222, 30),
+            wait_tool_service_ready,
             checkpoint_scope=a.checkpoint_scope,
         )
 
@@ -1140,38 +1638,32 @@ def main() -> None:
             total_incremental_bytes: int,
             tool_incremental_bytes: int,
             operation: Callable[[], Any],
+            *,
+            request_class: str,
+            observed_growth: Callable[[Any], tuple[int, int]] | None = None,
         ) -> Any:
-            """Reserve transient RSS growth, then fall back to measured RSS."""
+            """Atomically reserve parent and Tool growth for one operation."""
             total_incremental_bytes = max(1, int(total_incremental_bytes))
             tool_incremental_bytes = max(0, int(tool_incremental_bytes))
             wait_started = time.monotonic()
-            vm_acquired = (
-                vm_admission.acquire(
-                    total_incremental_bytes,
+            acquired = (
+                memory_admission.acquire(
+                    parent_increment_bytes=total_incremental_bytes,
+                    tool_increment_bytes=tool_incremental_bytes,
+                    request_class=request_class,
                     timeout=remaining(),
-                    measure_resident_bytes=lambda: (
-                        runtime.rss_bytes() + tool.rss_bytes()
-                    ),
+                    measure_parent_bytes=measure_session_parent_bytes,
+                    measure_tool_bytes=measure_session_tool_bytes,
                 )
-                if vm_admission is not None else None
+                if memory_admission is not None else None
             )
-            if vm_admission is not None and vm_acquired is None:
-                raise TimeoutError(f"timed out waiting for VM-pool {reason} admission")
-            vm_lease = vm_acquired[0] if vm_acquired is not None else None
-            tool_acquired = None
+            if memory_admission is not None and acquired is None:
+                raise TimeoutError(f"timed out waiting for atomic {reason} admission")
+            lease = acquired[0] if acquired is not None else None
             try:
-                if tool_admission is not None and tool_incremental_bytes > 0:
-                    tool_acquired = tool_admission.acquire(
-                        tool_incremental_bytes,
-                        timeout=remaining(),
-                        measure_resident_bytes=tool.rss_bytes,
-                    )
-                    if tool_acquired is None:
-                        raise TimeoutError(
-                            f"timed out waiting for Tool-pool {reason} admission"
-                        )
                 event = {
                     "reason": reason,
+                    "request_class": request_class,
                     "predicted_total_growth_mib": (
                         total_incremental_bytes / (1024.0 * 1024.0)
                     ),
@@ -1183,30 +1675,74 @@ def main() -> None:
                     "released_elapsed_s": None,
                 }
                 vm_materialization_events.append(event)
+                operation_baseline_parent = measure_session_parent_bytes()
+                operation_baseline_tool = measure_session_tool_bytes()
+                operation_peak = {"parent": 0, "tool": 0, "samples": 0}
+                operation_monitor_stop = threading.Event()
+
+                def monitor_operation_growth() -> None:
+                    while not operation_monitor_stop.wait(0.005):
+                        try:
+                            parent_current = measure_session_parent_bytes()
+                            tool_current = measure_session_tool_bytes()
+                        except RuntimeError:
+                            continue
+                        operation_peak["parent"] = max(
+                            operation_peak["parent"],
+                            max(0, parent_current - operation_baseline_parent),
+                        )
+                        operation_peak["tool"] = max(
+                            operation_peak["tool"],
+                            max(0, tool_current - operation_baseline_tool),
+                        )
+                        operation_peak["samples"] += 1
+
+                operation_monitor = threading.Thread(
+                    target=monitor_operation_growth, daemon=True,
+                )
+                operation_monitor.start()
                 try:
-                    return operation()
+                    result = operation()
+                    if lease is not None and observed_growth is not None:
+                        parent_growth, tool_growth = observed_growth(result)
+                        memory_admission.record_lease_growth(
+                            lease,
+                            parent_growth_bytes=parent_growth,
+                            tool_growth_bytes=tool_growth,
+                        )
+                    return result
                 finally:
-                    if tool_acquired is not None:
-                        tool_status = tool_admission.release(tool_acquired[0])
-                        tool_acquired = None
+                    operation_monitor_stop.set()
+                    operation_monitor.join(timeout=1)
+                    event["transient_sample_count"] = operation_peak["samples"]
+                    event["observed_parent_peak_growth_mib"] = (
+                        operation_peak["parent"] / (1024.0 * 1024.0)
+                    )
+                    event["observed_tool_peak_growth_mib"] = (
+                        operation_peak["tool"] / (1024.0 * 1024.0)
+                    )
+                    if lease is not None:
+                        memory_admission.record_lease_growth(
+                            lease,
+                            parent_growth_bytes=operation_peak["parent"],
+                            tool_growth_bytes=operation_peak["tool"],
+                        )
+                        status = memory_admission.release(lease)
+                        lease = None
                         event["tool_resident_after_mib"] = (
-                            tool_status["resident_bytes"] / (1024.0 * 1024.0)
+                            status["tool_resident_bytes"] / (1024.0 * 1024.0)
                         )
-                    if vm_lease is not None:
-                        vm_status = vm_admission.release(vm_lease)
-                        vm_lease = None
                         event["vm_resident_after_mib"] = (
-                            vm_status["resident_bytes"] / (1024.0 * 1024.0)
+                            status["parent_resident_bytes"] / (1024.0 * 1024.0)
                         )
+                        event["completed_lease"] = status["completed_lease"]
                     event["released_elapsed_s"] = time.monotonic() - started
                     event["held_s"] = (
                         event["released_elapsed_s"] - event["acquired_elapsed_s"]
                     )
             except Exception:
-                if tool_acquired is not None:
-                    tool_admission.release(tool_acquired[0])
-                if vm_lease is not None:
-                    vm_admission.release(vm_lease)
+                if lease is not None:
+                    memory_admission.release(lease)
                 raise
 
         def restore_with_memory_admission(
@@ -1220,24 +1756,54 @@ def main() -> None:
                 total_restore_bytes + transient,
                 tool_restore_bytes + transient,
                 operation,
+                request_class="restore",
             )
 
-        def release_tool_reservation() -> None:
-            nonlocal tool_reservation_lease, vm_tool_growth_lease
+        def checkpoint_with_memory_admission(
+            operation: Callable[[], CheckpointTransition | None],
+        ) -> CheckpointTransition | None:
+            def measured_growth(
+                transition: CheckpointTransition | None,
+            ) -> tuple[int, int]:
+                if transition is None:
+                    return 0, 0
+                runtime_growth = int(
+                    (transition.runtime_checkpoint_metrics or {}).get(
+                        "cgroup_memory_transient_growth_bytes"
+                    ) or 0
+                )
+                tool_growth = int(
+                    (transition.tool_checkpoint_metrics or {}).get(
+                        "cgroup_memory_transient_growth_bytes"
+                    ) or 0
+                )
+                # Runtime and Tool snapshots are serialized. Their local peaks
+                # therefore do not overlap; the parent operation peak is the
+                # larger local increment, while Tool admission sees Tool only.
+                return max(runtime_growth, tool_growth), tool_growth
+
+            return with_memory_growth_admission(
+                "checkpoint_create",
+                int(a.checkpoint_transient_parent_mib) * 1024 * 1024,
+                int(a.checkpoint_transient_tool_mib) * 1024 * 1024,
+                operation,
+                request_class="checkpoint",
+                observed_growth=measured_growth,
+            )
+
+        def release_tool_reservation(*, reclaim_balloon: bool = True) -> dict | None:
+            nonlocal tool_reservation_lease
             nonlocal current_tool_reservation_event
             with tool_reservation_lock:
                 lease = tool_reservation_lease
                 tool_reservation_lease = None
-                vm_lease = vm_tool_growth_lease
-                vm_tool_growth_lease = None
                 event = current_tool_reservation_event
                 current_tool_reservation_event = None
             if lease is not None:
-                assert tool_admission is not None
+                assert memory_admission is not None
                 released_status = None
-                vm_released_status = None
                 try:
-                    if a.tool_balloon_reclamation and tool.resident:
+                    if reclaim_balloon and a.tool_balloon_reclamation and tool.resident:
                         with tool_state_lock:
                             balloon_event = adjust_balloon(
                                 tool,
@@ -1246,39 +1812,49 @@ def main() -> None:
                                 a.tool_balloon_settle_timeout_s,
                             )
                         balloon_events.append(balloon_event)
+                        balloon_inflated.set()
                         if event is not None:
                             event["balloon_reclamation"] = balloon_event
                 finally:
-                    try:
-                        released_status = tool_admission.release(lease)
-                    finally:
-                        if vm_admission is not None and vm_lease is not None:
-                            vm_released_status = vm_admission.release(vm_lease)
+                    released_status = memory_admission.release(lease)
                 if event is not None:
                     released = time.monotonic() - started
                     event["released_elapsed_s"] = released
                     event["held_s"] = (
                         released - event["acquired_elapsed_s"]
                     )
-                    event["resident_tool_rss_after_mib"] = (
-                        released_status["resident_bytes"] / (1024.0 * 1024.0)
+                    event["resident_tool_memory_after_mib"] = (
+                        released_status["tool_resident_bytes"]
+                        / (1024.0 * 1024.0)
                     )
                     event["remaining_headroom_after_mib"] = (
-                        released_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                        max(
+                            0,
+                            released_status["tool_high_bytes"]
+                            - int(a.tool_admission_safety_headroom_mib)
+                            * 1024 * 1024
+                            - released_status["tool_admission_charge_bytes"],
+                        ) / (1024.0 * 1024.0)
                     )
-                    if vm_released_status is not None:
-                        event["vm_remaining_headroom_after_mib"] = (
-                            vm_released_status["remaining_headroom_bytes"]
-                            / (1024.0 * 1024.0)
-                        )
+                    event["vm_remaining_headroom_after_mib"] = (
+                        max(
+                            0,
+                            released_status["parent_high_bytes"]
+                            - int(a.vm_pool_headroom_mib) * 1024 * 1024
+                            - released_status["parent_admission_charge_bytes"],
+                        ) / (1024.0 * 1024.0)
+                    )
+                    event["completed_lease"] = released_status["completed_lease"]
+            return event
 
         def before_response_ready(step: int | None, message: dict) -> dict:
-            nonlocal tool_reservation_lease, vm_tool_growth_lease
+            nonlocal tool_reservation_lease
             nonlocal current_tool_reservation_event, restore_s
             # Mark delivery before waiting.  The coordinator then either
             # cancels an eviction that has not started or waits for an in-flight
             # snapshot and restores the dependency-safe pair before bytes are
             # written to the Runtime's HTTP connection.
+            idle_reclaim_cancel.set()
             idle_sandboxes.unregister(index)
             checkpoint_coordinator.begin_response_delivery()
             if not idle_reclaim_complete.wait(timeout=remaining()):
@@ -1294,20 +1870,42 @@ def main() -> None:
                     **restored,
                 })
             tool_calls = message.get("tool_calls") or []
-            if not tool_calls or tool_admission is None:
+            if not tool_calls or memory_admission is None:
                 return {}
             if session_closing.is_set():
                 raise RuntimeError("session closed before Tool admission")
+            if a.admission_policy == "static_lifetime":
+                event = {
+                    "model_step": step,
+                    "policy": "static_lifetime_capacity",
+                    "reservation_mib": float(tool_memory_mib),
+                    "wait_s": 0.0,
+                    "acquired_elapsed_s": None,
+                    "released_elapsed_s": None,
+                    "held_s": None,
+                    "tool_invocations": tool_call_descriptors(message),
+                }
+                tool_reservation_events.append(event)
+                return event
             if a.admission_policy in {"full_reservation", "static"}:
-                current_tool_rss_kib = math.ceil(tool.rss_bytes() / 1024.0)
-                incremental_kib = max(
-                    1,
-                    int(a.static_tool_reservation_mib) * 1024 - current_tool_rss_kib,
+                incremental_mib = fixed_incremental_growth_mib(
+                    a.admission_policy,
+                    full_mib=a.full_tool_incremental_mib,
+                    static_mib=a.static_tool_reservation_mib,
                 )
-                provenance = {"policy": a.admission_policy,
-                              "static_capacity_mib": int(a.static_tool_reservation_mib),
-                              "session_tool_rss_before_mib": current_tool_rss_kib / 1024.0,
-                              "tool_invocations": tool_call_descriptors(message)}
+                incremental_kib = incremental_mib * 1024
+                provenance = {
+                    "policy": (
+                        "calibrated_full_incremental_growth"
+                        if a.admission_policy == "full_reservation"
+                        else "global_static_incremental_growth"
+                    ),
+                    "incremental_growth_target_mib": incremental_mib,
+                    "session_tool_memory_before_mib": (
+                        measure_session_tool_bytes() / (1024.0 * 1024.0)
+                    ),
+                    "tool_invocations": tool_call_descriptors(message),
+                }
             else:
                 if step is None or step not in predictive_steps:
                     raise RuntimeError(
@@ -1323,26 +1921,18 @@ def main() -> None:
                     incremental_kib = int(planned["incremental_p90_kib"])
                     provenance = {"policy": "per_tool_incremental_p90", **planned}
             wait_started = time.monotonic()
-            vm_acquired = vm_admission.acquire(
-                incremental_kib * 1024,
+            acquired = memory_admission.acquire(
+                parent_increment_bytes=incremental_kib * 1024,
+                tool_increment_bytes=incremental_kib * 1024,
+                request_class="continuation",
                 timeout=remaining(),
-                measure_resident_bytes=lambda: (
-                    runtime.rss_bytes() + tool.rss_bytes()
-                ),
-            )
-            if vm_acquired is None:
-                raise TimeoutError("timed out waiting for VM-pool Tool admission")
-            acquired = tool_admission.acquire(
-                incremental_kib * 1024,
-                timeout=remaining(),
-                measure_resident_bytes=tool.rss_bytes,
+                measure_parent_bytes=measure_session_parent_bytes,
+                measure_tool_bytes=measure_session_tool_bytes,
             )
             wait_s = time.monotonic() - wait_started
             if acquired is None:
-                vm_admission.release(vm_acquired[0])
-                raise TimeoutError("timed out waiting for live-RSS Tool admission")
+                raise TimeoutError("timed out waiting for atomic Tool admission")
             lease, admission_status = acquired
-            vm_lease, vm_admission_status = vm_acquired
             event = {
                 "model_step": step,
                 "reservation_kib": incremental_kib,
@@ -1353,26 +1943,36 @@ def main() -> None:
                 "oracle_incremental_mib": (
                     incremental_kib / 1024.0 if a.admission_policy == "oracle" else None
                 ),
-                "resident_tool_rss_before_mib": (
-                    admission_status["resident_bytes"] / (1024.0 * 1024.0)
+                "resident_tool_memory_before_mib": (
+                    admission_status["tool_resident_bytes"] / (1024.0 * 1024.0)
                 ),
                 "outstanding_unrealized_growth_mib": (
-                    admission_status["outstanding_unrealized_growth_bytes"]
+                    admission_status["tool_outstanding_unrealized_bytes"]
                     / (1024.0 * 1024.0)
                 ),
                 "admission_charge_mib": (
-                    admission_status["admission_charge_bytes"] / (1024.0 * 1024.0)
+                    admission_status["tool_admission_charge_bytes"]
+                    / (1024.0 * 1024.0)
                 ),
                 "remaining_headroom_mib": (
-                    admission_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                    max(
+                        0,
+                        admission_status["tool_high_bytes"]
+                        - int(a.tool_admission_safety_headroom_mib) * 1024 * 1024
+                        - admission_status["tool_admission_charge_bytes"],
+                    ) / (1024.0 * 1024.0)
                 ),
                 "vm_admission_charge_mib": (
-                    vm_admission_status["admission_charge_bytes"]
+                    admission_status["parent_admission_charge_bytes"]
                     / (1024.0 * 1024.0)
                 ),
                 "vm_remaining_headroom_mib": (
-                    vm_admission_status["remaining_headroom_bytes"]
-                    / (1024.0 * 1024.0)
+                    max(
+                        0,
+                        admission_status["parent_high_bytes"]
+                        - int(a.vm_pool_headroom_mib) * 1024 * 1024
+                        - admission_status["parent_admission_charge_bytes"],
+                    ) / (1024.0 * 1024.0)
                 ),
                 "wait_s": wait_s,
                 "acquired_elapsed_s": time.monotonic() - started,
@@ -1388,14 +1988,12 @@ def main() -> None:
                 else:
                     reject_reason = None
                     tool_reservation_lease = lease
-                    vm_tool_growth_lease = vm_lease
                     tool_reservation_events.append(event)
                     current_tool_reservation_event = event
             if reject_reason is not None:
-                tool_admission.release(lease)
-                vm_admission.release(vm_lease)
+                memory_admission.release(lease)
                 raise RuntimeError(reject_reason)
-            if a.tool_balloon_reclamation:
+            if a.tool_balloon_reclamation and balloon_inflated.is_set():
                 try:
                     balloon_event = adjust_balloon(
                         tool, 0, "tool_start_expand", a.tool_balloon_settle_timeout_s,
@@ -1404,24 +2002,43 @@ def main() -> None:
                     with tool_reservation_lock:
                         if tool_reservation_lease == lease:
                             tool_reservation_lease = None
-                            vm_tool_growth_lease = None
                             current_tool_reservation_event = None
-                    try:
-                        tool_admission.release(lease)
-                    finally:
-                        vm_admission.release(vm_lease)
+                    memory_admission.release(lease)
                     raise
                 balloon_events.append(balloon_event)
+                balloon_inflated.clear()
                 event["balloon_expansion"] = balloon_event
             return event
 
         def on_request_started() -> None:
             idle_sandboxes.unregister(index)
             checkpoint_coordinator.start_request()
+            idle_reclaim_cancel.clear()
             idle_reclaim_complete.clear()
             def reclaim_during_wait() -> None:
                 try:
-                    release_tool_reservation()
+                    if (
+                        a.tool_balloon_reclamation
+                        and a.tool_balloon_idle_delay_s > 0
+                    ):
+                        event = release_tool_reservation(reclaim_balloon=False)
+                        if idle_reclaim_cancel.wait(a.tool_balloon_idle_delay_s):
+                            return
+                        if tool.resident and not session_closing.is_set():
+                            with tool_state_lock:
+                                balloon_event = adjust_balloon(
+                                    tool,
+                                    tool_memory_mib
+                                    - int(a.tool_balloon_idle_floor_mib),
+                                    "tool_end_idle_reclaim",
+                                    a.tool_balloon_settle_timeout_s,
+                                )
+                            balloon_events.append(balloon_event)
+                            balloon_inflated.set()
+                            if event is not None:
+                                event["balloon_reclamation"] = balloon_event
+                    else:
+                        release_tool_reservation()
                 except Exception as exc:
                     idle_reclaim_errors.append(exc)
                 finally:
@@ -1439,36 +2056,54 @@ def main() -> None:
 
         def predicted_wait_s(record: dict) -> float:
             replay_index = record.get("replay_index")
-            if (a.inference == "replay" and replay_index is not None
-                    and 0 <= int(replay_index) < len(gateway.actions)):
-                return float(gateway.actions[int(replay_index)].duration_s) * a.time_scale
-            return float(a.predicted_llm_wait_s)
+            if a.wait_estimator == "oracle":
+                if not (
+                    a.inference == "replay" and replay_index is not None
+                    and 0 <= int(replay_index) < len(gateway.actions)
+                ):
+                    raise RuntimeError("oracle wait is only defined for replay steps")
+                estimate = (
+                    float(gateway.actions[int(replay_index)].duration_s)
+                    * a.time_scale
+                )
+            elif a.wait_estimator == "heldout":
+                if replay_index is None or int(replay_index) not in wait_estimates:
+                    raise RuntimeError(
+                        f"held-out wait predictor has no estimate for step {replay_index}"
+                    )
+                estimate = float(wait_estimates[int(replay_index)]) * a.time_scale
+            else:
+                estimate = float(a.predicted_llm_wait_s)
+            return estimate * (1.0 + float(a.wait_error_fraction))
 
         def prefetch_due(record: dict) -> bool:
-            if a.restore_policy != "prefetch":
+            if a.restore_policy != "proactive":
                 return False
             elapsed = max(0.0, time.time() - float(record.get("started_unix_s") or time.time()))
             return predicted_wait_s(record) - elapsed <= a.restore_prefetch_lead_s
 
         def evict_idle_candidate(record: dict) -> None:
-            nonlocal snapshot_s, snapshots
+            nonlocal snapshot_s, snapshots, cancelled_checkpoints
             request_id = str(record["request_id"])
             try:
                 with reclaim_accounting_lock:
                     if session_closing.is_set() or request_id in processed:
                         return
-                    transition = checkpoint_coordinator.evict(lambda: {
-                        "cgroup_memory_bytes": (
-                            cgroup_value(tool_pool_cgroup, "memory.current")
-                            if tool_pool_cgroup is not None else None
-                        ),
-                        "vm_cgroup_memory_bytes": (
-                            cgroup_value(vm_pool_cgroup, "memory.current")
-                            if vm_pool_cgroup is not None else None
-                        ),
-                        "numa_memory_bytes": numa_memory_used_bytes(numa_node),
-                    })
+                    transition = checkpoint_with_memory_admission(
+                        lambda: checkpoint_coordinator.evict(lambda: {
+                            "cgroup_memory_bytes": (
+                                cgroup_value(tool_pool_cgroup, "memory.current")
+                                if tool_pool_cgroup is not None else None
+                            ),
+                            "vm_cgroup_memory_bytes": (
+                                cgroup_value(vm_pool_cgroup, "memory.current")
+                                if vm_pool_cgroup is not None else None
+                            ),
+                            "numa_memory_bytes": numa_memory_used_bytes(numa_node),
+                        })
+                    )
                     if transition is None:
+                        cancelled_checkpoints += 1
                         return
                     snapshot_s += transition.elapsed_s
                     runtime_released = max(
@@ -1544,6 +2179,10 @@ def main() -> None:
                             else max(0, numa_before - numa_after)
                         ),
                         "snapshot_s": transition.elapsed_s,
+                        "runtime_checkpoint_metrics": (
+                            transition.runtime_checkpoint_metrics
+                        ),
+                        "tool_checkpoint_metrics": transition.tool_checkpoint_metrics,
                     })
                     processed.add(request_id)
                     snapshots += 1
@@ -1565,18 +2204,44 @@ def main() -> None:
                 elapsed = tool.start()
                 wait_tcp(spec["tool_host"], 2222, 30)
                 return elapsed
-            with_memory_growth_admission(
-                "initial_tool_boot",
-                int(a.initial_tool_rss_reservation_mib) * 1024 * 1024,
-                int(a.initial_tool_rss_reservation_mib) * 1024 * 1024,
-                start_tool,
-            )
-            with_memory_growth_admission(
-                "initial_runtime_boot",
-                int(a.initial_runtime_rss_reservation_mib) * 1024 * 1024,
-                0,
-                runtime.start,
-            )
+            if a.admission_policy == "static_lifetime" and memory_admission is not None:
+                lifetime = memory_admission.acquire(
+                    parent_increment_bytes=pair_memory_mib * 1024 * 1024,
+                    tool_increment_bytes=tool_memory_mib * 1024 * 1024,
+                    request_class="lifetime",
+                    timeout=remaining(),
+                    measure_parent_bytes=measure_session_parent_bytes,
+                    measure_tool_bytes=measure_session_tool_bytes,
+                )
+                if lifetime is None:
+                    raise TimeoutError("timed out waiting for static lifetime capacity")
+                lifetime_reservation_lease = lifetime[0]
+                vm_materialization_events.append({
+                    "reason": "static_lifetime_capacity",
+                    "request_class": "lifetime",
+                    "predicted_total_growth_mib": float(pair_memory_mib),
+                    "predicted_tool_growth_mib": float(tool_memory_mib),
+                    "wait_s": float(lifetime[1]["wait_s"]),
+                    "acquired_elapsed_s": time.monotonic() - started,
+                    "released_elapsed_s": None,
+                })
+                start_tool()
+                runtime.start()
+            else:
+                with_memory_growth_admission(
+                    "initial_tool_boot",
+                    int(a.initial_tool_rss_reservation_mib) * 1024 * 1024,
+                    int(a.initial_tool_rss_reservation_mib) * 1024 * 1024,
+                    start_tool,
+                    request_class="boot",
+                )
+                with_memory_growth_admission(
+                    "initial_runtime_boot",
+                    int(a.initial_runtime_rss_reservation_mib) * 1024 * 1024,
+                    0,
+                    runtime.start,
+                    request_class="boot",
+                )
             processed: set[str] = set()
             while time.monotonic() < deadline:
                 finished, exit_code = complete(Path(runtime_config.log_path))
@@ -1614,15 +2279,18 @@ def main() -> None:
                     correctness_timed_out = False
                     correctness_path = None
                     working_set_path = a.output / f"tool-working-set-session-{index:04d}.out"
-                    if a.tool_balloon_reclamation:
+                    if a.tool_balloon_reclamation and balloon_inflated.is_set():
                         balloon_events.append(adjust_balloon(
                             tool, 0, "validation_expand",
                             a.tool_balloon_settle_timeout_s,
                         ))
+                        balloon_inflated.clear()
                     tool_working_sets = collect_tool_working_sets(
                         spec, tool_reservation_events, working_set_path,
                         arm_started_unix_s=started_unix_s,
                     )
+                    for row in tool_working_sets:
+                        row["session"] = index
                     if a.correctness_command:
                         (correctness_exit_code, correctness_stdout,
                          correctness_stderr, correctness_timed_out) = ssh_capture(
@@ -1645,6 +2313,7 @@ def main() -> None:
                     )
                     return {"session": index, "snapshots": snapshots,
                             "checkpoint_cycles": snapshots,
+                            "cancelled_checkpoint_attempts": cancelled_checkpoints,
                             "checkpoint_scope": a.checkpoint_scope,
                             "vm_snapshot_operations": checkpoint_vm_operations,
                             "vm_restore_operations": checkpoint_vm_operations,
@@ -1709,13 +2378,14 @@ def main() -> None:
                             restore_s += float(restored["restore_s"])
                             checkpoint_reclamation_events.append({
                                 "request_id": pending_all[0]["request_id"],
-                                "reason": "prefetch_restore",
+                                "reason": "proactive_restore",
                                 **restored,
                             })
                 time.sleep(0.05)
             raise TimeoutError("OpenClaw experiment timed out")
         finally:
             session_closing.set()
+            idle_reclaim_cancel.set()
             idle_sandboxes.unregister(index)
             with reclaim_accounting_lock:
                 pass
@@ -1726,7 +2396,30 @@ def main() -> None:
                 try:
                     release_tool_reservation()
                 finally:
-                    gateway.close()
+                    try:
+                        if lifetime_reservation_lease is not None:
+                            status = memory_admission.release(
+                                lifetime_reservation_lease
+                            )
+                            lifetime_reservation_lease = None
+                            event = next(
+                                item for item in vm_materialization_events
+                                if item["reason"] == "static_lifetime_capacity"
+                            )
+                            event["released_elapsed_s"] = time.monotonic() - started
+                            event["held_s"] = (
+                                event["released_elapsed_s"]
+                                - event["acquired_elapsed_s"]
+                            )
+                            event["completed_lease"] = status["completed_lease"]
+                    finally:
+                        try:
+                            gateway.close()
+                        finally:
+                            if tool_session_cgroup is not None:
+                                remove_empty_cgroup(tool_session_cgroup)
+                            if runtime_session_cgroup is not None:
+                                remove_empty_cgroup(runtime_session_cgroup)
 
     results, failures = [], []
     try:
@@ -1739,29 +2432,20 @@ def main() -> None:
         idle_sandboxes.close()
         victim_selector.join(timeout=5)
         stop.set(); sampler.join(timeout=2)
-    if tool_admission is not None:
+    if memory_admission is not None:
         cleanup_deadline = time.monotonic() + 2.0
-        while tool_admission.metrics()["active_leases"] and time.monotonic() < cleanup_deadline:
-            tool_admission.observe()
+        while (
+            memory_admission.metrics()["active_leases"]
+            and time.monotonic() < cleanup_deadline
+        ):
+            memory_admission.observe()
             time.sleep(0.01)
-        leaked = tool_admission.metrics()["active_leases"]
+        leaked = memory_admission.metrics()["active_leases"]
         if leaked:
             failures.append({
                 "session": None,
-                "type": "ToolAdmissionLeak",
-                "error": f"{leaked} Tool admission leases remained after session cleanup",
-            })
-    if vm_admission is not None:
-        cleanup_deadline = time.monotonic() + 2.0
-        while vm_admission.metrics()["active_leases"] and time.monotonic() < cleanup_deadline:
-            vm_admission.observe()
-            time.sleep(0.01)
-        leaked = vm_admission.metrics()["active_leases"]
-        if leaked:
-            failures.append({
-                "session": None,
-                "type": "VmAdmissionLeak",
-                "error": f"{leaked} VM-pool admission leases remained after cleanup",
+                "type": "AtomicAdmissionLeak",
+                "error": f"{leaked} atomic memory leases remained after cleanup",
             })
     tool_pool_events_after = (
         cgroup_memory_events(tool_pool_cgroup) if tool_pool_cgroup is not None else {}
@@ -1872,11 +2556,118 @@ def main() -> None:
         )
         for index in range(1, len(samples))
     )
-    tool_admission_metrics = (
-        tool_admission.metrics() if tool_admission is not None else None
+    vm_pool_values = [
+        int(item["vm_pool_memory_current_bytes"])
+        for item in samples if item.get("vm_pool_memory_current_bytes") is not None
+    ]
+    tool_pool_values = [
+        int(item["tool_pool_memory_current_bytes"])
+        for item in samples if item.get("tool_pool_memory_current_bytes") is not None
+    ]
+    arm_memory_values = [
+        int(item["arm_memory_current_bytes"])
+        for item in samples if item.get("arm_memory_current_bytes") is not None
+    ]
+    vm_pool_off_numa_ratios = [
+        ratio for item in samples
+        if (ratio := off_numa_ratio(item.get("vm_pool_memory"), numa_node))
+        is not None
+    ]
+    vm_pool_peak_sample = max(
+        (
+            item for item in samples
+            if item.get("vm_pool_memory_current_bytes") is not None
+        ),
+        key=lambda item: int(item["vm_pool_memory_current_bytes"]),
+        default=None,
     )
-    vm_admission_metrics = (
-        vm_admission.metrics() if vm_admission is not None else None
+    vm_pool_final = cgroup_memory_snapshot(vm_pool_cgroup)
+    tool_pool_final = cgroup_memory_snapshot(tool_pool_cgroup)
+    peak_vm_pool_swap_bytes = max(
+        (
+            int(item["vm_pool_memory"]["swap_current_bytes"])
+            for item in samples
+            if item.get("vm_pool_memory")
+            and item["vm_pool_memory"].get("swap_current_bytes") is not None
+        ),
+        default=None,
+    )
+    if peak_vm_pool_swap_bytes:
+        failures.append({
+            "session": None,
+            "type": "SwapPolicyFailure",
+            "error": (
+                f"VM pool used {peak_vm_pool_swap_bytes} bytes of swap despite "
+                "the no-swap experiment contract"
+            ),
+        })
+    checkpoint_lifecycle_metrics = [
+        metrics
+        for event in reclamation_events
+        for metrics in (
+            event.get("runtime_checkpoint_metrics"),
+            event.get("tool_checkpoint_metrics"),
+        )
+        if isinstance(metrics, dict)
+    ]
+    restore_events = [
+        {**event, "session": item["session"]} for item in results
+        for event in item.get("checkpoint_reclamation_events", [])
+        if isinstance(event.get("restore_metrics"), dict)
+    ]
+    response_delivery_delays = [
+        max(
+            0.0,
+            float(request["delivered_unix_s"])
+            - float(request["completed_unix_s"]),
+        )
+        for request in model_requests
+        if float(request.get("delivered_unix_s") or 0.0) > 0
+        and float(request.get("completed_unix_s") or 0.0) > 0
+    ]
+    model_step_latencies = [
+        max(
+            0.0,
+            float(request["completed_unix_s"])
+            - float(request["started_unix_s"]),
+        )
+        for request in model_requests
+        if float(request.get("completed_unix_s") or 0.0) > 0
+    ]
+    first_tool_after_restore = []
+    for event in restore_events:
+        restored_at = float(event.get("restore_completed_unix_s") or 0.0)
+        candidates = [
+            row for row in tool_working_sets
+            if row.get("session") == event.get("session")
+            and float(row.get("first_execution_started_unix_s") or 0.0) >= restored_at > 0
+        ]
+        if candidates:
+            first = min(
+                candidates,
+                key=lambda row: float(row["first_execution_started_unix_s"]),
+            )
+            first_tool_after_restore.append({
+                "restore_completed_to_tool_start_s": max(
+                    0.0,
+                    float(first["first_execution_started_unix_s"]) - restored_at,
+                ),
+                "tool_batch_wall_s": float(first.get("tool_batch_wall_s") or 0.0),
+            })
+    tool_execution_count_mismatches = sum(
+        int(row.get("actual_execution_count") or 0)
+        != len(next(
+            (
+                event.get("tool_invocations") or []
+                for event in item.get("tool_reservation_events", [])
+                if event.get("model_step") == row.get("model_step")
+            ),
+            [],
+        ))
+        for item in results for row in item.get("tool_working_sets", [])
+    )
+    admission_metrics = (
+        memory_admission.metrics() if memory_admission is not None else None
     )
     report = {"mode": "snapshot" if a.reclamation_policy in {"checkpoint", "hybrid"} else "resident",
               "reclamation_policy": a.reclamation_policy,
@@ -1905,11 +2696,70 @@ def main() -> None:
               "vm_pool_low_watermark_mib": a.vm_pool_low_watermark_mib,
               "vm_pool_headroom_mib": a.vm_pool_headroom_mib,
               "vm_pool_memory_events": vm_pool_event_deltas,
+              "primary_memory_metric": "vm_pool_cgroup_memory.current",
+              "mean_vm_pool_memory_current_bytes": (
+                  statistics.fmean(vm_pool_values) if vm_pool_values else None
+              ),
+              "p95_vm_pool_memory_current_bytes": (
+                  percentile(vm_pool_values, 0.95) if vm_pool_values else None
+              ),
+              "peak_sampled_vm_pool_memory_current_bytes": max(
+                  vm_pool_values, default=None,
+              ),
+              "kernel_peak_vm_pool_memory_bytes": (
+                  vm_pool_final.get("peak_bytes") if vm_pool_final else None
+              ),
+              "vm_pool_memory_time_byte_seconds": sampled_time_integral(
+                  samples, "vm_pool_memory_current_bytes",
+              ),
+              "mean_tool_pool_memory_current_bytes": (
+                  statistics.fmean(tool_pool_values) if tool_pool_values else None
+              ),
+              "peak_sampled_tool_pool_memory_current_bytes": max(
+                  tool_pool_values, default=None,
+              ),
+              "kernel_peak_tool_pool_memory_bytes": (
+                  tool_pool_final.get("peak_bytes") if tool_pool_final else None
+              ),
+              "tool_pool_memory_time_byte_seconds": sampled_time_integral(
+                  samples, "tool_pool_memory_current_bytes",
+              ),
+              "mean_arm_memory_current_bytes": (
+                  statistics.fmean(arm_memory_values) if arm_memory_values else None
+              ),
+              "peak_sampled_arm_memory_current_bytes": max(
+                  arm_memory_values, default=None,
+              ),
+              "vm_pool_memory_breakdown_final": (
+                  vm_pool_final.get("stat") if vm_pool_final else None
+              ),
+              "vm_pool_memory_breakdown_at_sampled_peak": (
+                  vm_pool_peak_sample["vm_pool_memory"].get("stat")
+                  if vm_pool_peak_sample else None
+              ),
+              "tool_pool_memory_breakdown_final": (
+                  tool_pool_final.get("stat") if tool_pool_final else None
+              ),
+              "vm_pool_off_numa_ratio_final": off_numa_ratio(
+                  vm_pool_final, numa_node,
+              ),
+              "max_vm_pool_off_numa_ratio": max(
+                  vm_pool_off_numa_ratios, default=None,
+              ),
+              "tool_pool_off_numa_ratio_final": off_numa_ratio(
+                  tool_pool_final, numa_node,
+              ),
+              "peak_vm_pool_swap_current_bytes": peak_vm_pool_swap_bytes,
+              "host_psi": psi_summary(samples, "host_pressure"),
+              "vm_pool_psi": cgroup_psi_summary(samples, "vm_pool_memory"),
+              "tool_pool_psi": cgroup_psi_summary(samples, "tool_pool_memory"),
               "initial_runtime_rss_reservation_mib": (
                   a.initial_runtime_rss_reservation_mib
               ),
               "initial_tool_rss_reservation_mib": a.initial_tool_rss_reservation_mib,
               "restore_transient_headroom_mib": a.restore_transient_headroom_mib,
+              "checkpoint_transient_parent_mib": a.checkpoint_transient_parent_mib,
+              "checkpoint_transient_tool_mib": a.checkpoint_transient_tool_mib,
               "host_oom_kill_events": host_oom_kills,
               "oversubscription_policy_failures": host_oom_kills,
               "tenant_guest_oom_events": tenant_guest_ooms,
@@ -1929,6 +2779,17 @@ def main() -> None:
                   a.checkpoint_break_even_s
                   if a.reclamation_policy in {"checkpoint", "hybrid"} else None
               ),
+              "wait_estimator": (
+                  a.wait_estimator
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
+              "wait_estimator_role": (
+                  "upper_bound" if a.wait_estimator == "oracle" else "deployable"
+              ) if a.reclamation_policy in {"checkpoint", "hybrid"} else None,
+              "wait_error_fraction": (
+                  a.wait_error_fraction
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
               "restore_policy": (
                   a.restore_policy
                   if a.reclamation_policy in {"checkpoint", "hybrid"} else None
@@ -1937,7 +2798,7 @@ def main() -> None:
                   a.restore_prefetch_lead_s
                   if (
                       a.reclamation_policy in {"checkpoint", "hybrid"}
-                      and a.restore_policy == "prefetch"
+                      and a.restore_policy == "proactive"
                   ) else None
               ),
               "checkpoint_scope": (
@@ -1946,48 +2807,47 @@ def main() -> None:
               ),
               "tool_admission_safety_headroom_mib": (
                   a.tool_admission_safety_headroom_mib
-                  if tool_admission is not None else None
+                  if memory_admission is not None else None
               ),
-              "tool_admission_feedback": (
-                  tool_admission_metrics
-              ),
+              "atomic_memory_admission": admission_metrics,
+              "tool_admission_feedback": admission_metrics,
               "peak_tool_resident_rss_bytes": (
-                  tool_admission_metrics["peak_resident_bytes"]
-                  if tool_admission_metrics is not None else None
+                  admission_metrics["peak_tool_resident_bytes"]
+                  if admission_metrics is not None else None
               ),
               "peak_tool_admission_charge_bytes": (
-                  tool_admission_metrics["peak_admission_charge_bytes"]
-                  if tool_admission_metrics is not None else None
+                  admission_metrics["peak_tool_admission_charge_bytes"]
+                  if admission_metrics is not None else None
               ),
               "tool_admission_over_budget_observations": (
-                  tool_admission_metrics["over_budget_observations"]
-                  if tool_admission_metrics is not None else None
+                  admission_metrics["tool_over_high_observations"]
+                  if admission_metrics is not None else None
               ),
               "tool_resident_plus_headroom_over_budget_observations": sum(
                   bool(sample.get("tool_resident_plus_headroom_over_budget"))
                   for sample in samples
-              ) if tool_admission_metrics is not None else None,
+              ) if admission_metrics is not None else None,
               "tool_prediction_exceeded_leases": (
-                  tool_admission_metrics["prediction_exceeded_leases"]
-                  if tool_admission_metrics is not None else None
+                  admission_metrics["tool_prediction_exceeded_leases"]
+                  if admission_metrics is not None else None
               ),
-              "vm_admission_feedback": vm_admission_metrics,
+              "vm_admission_feedback": admission_metrics,
               "peak_vm_resident_rss_bytes": (
-                  vm_admission_metrics["peak_resident_bytes"]
-                  if vm_admission_metrics is not None else None
+                  admission_metrics["peak_parent_resident_bytes"]
+                  if admission_metrics is not None else None
               ),
               "peak_vm_admission_charge_bytes": (
-                  vm_admission_metrics["peak_admission_charge_bytes"]
-                  if vm_admission_metrics is not None else None
+                  admission_metrics["peak_parent_admission_charge_bytes"]
+                  if admission_metrics is not None else None
               ),
               "vm_admission_over_budget_observations": (
-                  vm_admission_metrics["over_budget_observations"]
-                  if vm_admission_metrics is not None else None
+                  admission_metrics["parent_over_high_observations"]
+                  if admission_metrics is not None else None
               ),
               "vm_resident_plus_headroom_over_budget_observations": sum(
                   bool(sample.get("vm_resident_plus_headroom_over_budget"))
                   for sample in samples
-              ) if vm_admission_metrics is not None else None,
+              ) if admission_metrics is not None else None,
               "tool_reservation_events": len(tool_reservation_events),
               "vm_materialization_admission_events": len(vm_materialization_events),
               "vm_materialization_admission_wait_s": sum(
@@ -2011,6 +2871,10 @@ def main() -> None:
               "tool_balloon_reclamation": a.tool_balloon_reclamation,
               "tool_balloon_idle_floor_mib": (
                   a.tool_balloon_idle_floor_mib
+                  if a.tool_balloon_reclamation else None
+              ),
+              "tool_balloon_idle_delay_s": (
+                  a.tool_balloon_idle_delay_s
                   if a.tool_balloon_reclamation else None
               ),
               "tool_balloon_events": len(balloon_events),
@@ -2074,14 +2938,121 @@ def main() -> None:
               "model_gateway_responses_delivered": sum(
                   bool(item.get("delivered")) for item in model_requests
               ),
+              "duplicate_model_request_attempts": sum(
+                  max(0, int(item.get("http_attempts", 0)) - 1)
+                  for item in model_requests
+              ),
+              "model_production_attempts": sum(
+                  int(item.get("production_attempts", 0))
+                  for item in model_requests
+              ),
+              "duplicate_model_executions": sum(
+                  max(0, int(item.get("production_attempts", 0)) - 1)
+                  for item in model_requests
+              ),
+              "tool_execution_count_mismatch_events": (
+                  tool_execution_count_mismatches
+              ),
+              "mean_model_step_latency_s": (
+                  statistics.fmean(model_step_latencies)
+                  if model_step_latencies else None
+              ),
+              "p50_model_step_latency_s": (
+                  percentile(model_step_latencies, 0.50)
+                  if model_step_latencies else None
+              ),
+              "p95_model_step_latency_s": (
+                  percentile(model_step_latencies, 0.95)
+                  if model_step_latencies else None
+              ),
+              "p99_model_step_latency_s": (
+                  percentile(model_step_latencies, 0.99)
+                  if model_step_latencies else None
+              ),
+              "response_ready_to_delivery_delay_s": sum(
+                  response_delivery_delays
+              ),
+              "p95_response_ready_to_delivery_delay_s": (
+                  percentile(response_delivery_delays, 0.95)
+                  if response_delivery_delays else None
+              ),
+              "first_tool_after_restore_observations": first_tool_after_restore,
+              "mean_first_tool_after_restore_wall_s": (
+                  statistics.fmean(
+                      item["tool_batch_wall_s"] for item in first_tool_after_restore
+                  ) if first_tool_after_restore else None
+              ),
               "replay_requests_input_validated": validated_requests,
               "replay_requests_input_unvalidated": model_steps - validated_requests,
-              "replay_input_validation_complete": validated_requests == model_steps,
+              "replay_input_validation_complete": (
+                  validated_requests == model_steps
+                  if a.inference == "replay" else None
+              ),
               "checkpoint_cycles": sum(int(item.get("checkpoint_cycles", 0)) for item in results),
+              "cancelled_checkpoint_attempts": sum(
+                  int(item.get("cancelled_checkpoint_attempts", 0))
+                  for item in results
+              ),
               "vm_snapshot_operations": sum(int(item.get("vm_snapshot_operations", 0)) for item in results),
               "vm_restore_operations": sum(int(item.get("vm_restore_operations", 0)) for item in results),
               "checkpoint_snapshot_service_s": sum(float(item.get("snapshot_s", 0.0)) for item in results),
               "checkpoint_restore_service_s": sum(float(item.get("restore_s", 0.0)) for item in results),
+              "checkpoint_queue_wait_s": sum(
+                  float(event.get("wait_s") or 0.0)
+                  for event in vm_materialization_events
+                  if event.get("reason") == "checkpoint_create"
+              ),
+              "restore_queue_wait_s": sum(
+                  float(event.get("wait_s") or 0.0)
+                  for event in vm_materialization_events
+                  if event.get("reason") == "checkpoint_restore"
+              ),
+              "checkpoint_transient_peak_growth_bytes": max(
+                  (
+                      int(metric["cgroup_memory_transient_growth_bytes"])
+                      for metric in checkpoint_lifecycle_metrics
+                      if metric.get("cgroup_memory_transient_growth_bytes") is not None
+                  ),
+                  default=None,
+              ),
+              "checkpoint_kernel_operation_peak_bytes": max(
+                  (
+                      int(metric["cgroup_kernel_memory_peak_during_checkpoint_bytes"])
+                      for metric in checkpoint_lifecycle_metrics
+                      if metric.get(
+                          "cgroup_kernel_memory_peak_during_checkpoint_bytes"
+                      ) is not None
+                  ),
+                  default=None,
+              ),
+              "checkpoint_snapshot_logical_bytes": sum(
+                  int(metric.get("snapshot_logical_bytes") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
+              "checkpoint_snapshot_allocated_bytes_created": sum(
+                  int(metric.get("snapshot_allocated_bytes") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
+              "checkpoint_process_write_bytes": sum(
+                  int(metric.get("process_write_bytes") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
+              "checkpoint_process_logical_write_bytes": sum(
+                  int(metric.get("process_logical_write_bytes") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
+              "checkpoint_page_cache_growth_bytes": sum(
+                  int(metric.get("page_cache_growth_during_snapshot_bytes") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
+              "checkpoint_minor_faults": sum(
+                  int(metric.get("minor_faults") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
+              "checkpoint_major_faults": sum(
+                  int(metric.get("major_faults") or 0)
+                  for metric in checkpoint_lifecycle_metrics
+              ),
               "checkpoint_reclamation_observations": len(reclamation_events),
               "checkpoint_verified_firecracker_rss_released_bytes": sum(
                   int(row["verified_pair_firecracker_rss_released_bytes"])
@@ -2164,9 +3135,17 @@ def main() -> None:
               ),
               "peak_cgroup_memory_delta_bytes": max(cgroup_deltas, default=None),
               "sessions": results}
-    (a.output / "memory.json").write_text(json.dumps(samples, indent=2) + "\n")
-    (a.output / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(report, indent=2, sort_keys=True))
+    try:
+        (a.output / "memory.json").write_text(json.dumps(samples, indent=2) + "\n")
+        (a.output / "summary.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n"
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+    finally:
+        if tool_arm_cgroup is not None:
+            remove_empty_cgroup(tool_arm_cgroup)
+        if runtime_arm_cgroup is not None:
+            remove_empty_cgroup(runtime_arm_cgroup)
     raise SystemExit(1 if failures else 0)
 
 

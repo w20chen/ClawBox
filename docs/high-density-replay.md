@@ -258,6 +258,12 @@ numactl --cpunodebind=0 --membind=0 python -m clawbox.replay.cli run trace.jsonl
 
 ## Controlled capacity experiment
 
+Formal direct-Firecracker paper runs must also follow
+[`experimental-evaluation-audit.md`](experimental-evaluation-audit.md). In
+particular, use parent-cgroup `memory.current`/`memory.peak` as the primary
+memory outcomes, calibrate checkpoint transients before the suite, and run the
+fail-closed validity gate on every arm. Firecracker RSS remains diagnostic.
+
 An experiment manifest has one independently provisioned session per entry:
 
 ```json
@@ -279,8 +285,9 @@ numactl --cpunodebind=0 --membind=0 python -m clawbox.replay.cli experiment snap
 
 Use CPUs and memory from one `numactl --hardware` node only. The same slot
 count, VM size, trace population, rootfs source, calibration data, and threshold
-must be used for both arms. Report completed sessions/hour, peak summed
-Firecracker RSS, peak resident VMs, snapshot/restore overhead, failures, and
+must be used for both arms. Report correct tasks/min, parent-cgroup mean/peak
+memory and memory-time, Firecracker RSS diagnostics, peak resident VMs,
+snapshot/restore overhead and I/O, failures, and
 tool exit mismatches. Run at least three repetitions after one warm-up and
 report medians plus ranges. Keep host page cache policy identical across arms;
 the lifecycle applies `POSIX_FADV_DONTNEED` to snapshot files after eviction.

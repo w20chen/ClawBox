@@ -11,8 +11,63 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from threading import BoundedSemaphore, Condition, Lock
+from threading import BoundedSemaphore, Condition, Event, Lock, Thread
 from typing import Any, Protocol
+
+
+def _read_int_file(path: Path) -> int | None:
+    try:
+        value = path.read_text(encoding="ascii").strip()
+        return None if value == "max" else int(value)
+    except (OSError, ValueError):
+        return None
+
+
+def _read_key_value_file(path: Path) -> dict[str, int]:
+    try:
+        return {
+            fields[0]: int(fields[1])
+            for line in path.read_text(encoding="ascii").splitlines()
+            if len(fields := line.split()) == 2
+        }
+    except (OSError, ValueError):
+        return {}
+
+
+def _process_io(pid: int) -> dict[str, int]:
+    return _read_key_value_file(Path(f"/proc/{pid}/io"))
+
+
+def _process_faults(pid: int) -> dict[str, int | None]:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
+        return {"minor_faults": int(fields[9]), "major_faults": int(fields[11])}
+    except (OSError, IndexError, ValueError):
+        return {"minor_faults": None, "major_faults": None}
+
+
+def _read_memory_numa_stat(path: Path) -> dict[str, dict[str, int]]:
+    try:
+        result: dict[str, dict[str, int]] = {}
+        for line in path.read_text(encoding="ascii").splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            result[fields[0]] = {
+                key: int(value)
+                for field in fields[1:]
+                if "=" in field
+                for key, value in (field.split("=", 1),)
+            }
+        return result
+    except (OSError, ValueError):
+        return {}
+
+
+def _counter_delta(after: dict[str, int], before: dict[str, int], key: str) -> int | None:
+    if key not in after or key not in before:
+        return None
+    return max(0, int(after[key]) - int(before[key]))
 
 
 class LifecycleError(RuntimeError):
@@ -331,6 +386,8 @@ class FirecrackerLifecycle:
         self._log_handle: Any = None
         self._snapshot_state_path: Path | None = None
         self._snapshot_memory_path: Path | None = None
+        self._last_checkpoint_metrics: dict[str, Any] | None = None
+        self._last_restore_metrics: dict[str, Any] | None = None
 
     @property
     def resident(self) -> bool:
@@ -340,6 +397,16 @@ class FirecrackerLifecycle:
         """Return the Firecracker exit code, or None while it is running."""
         process = self._process
         return None if process is None or process.poll() is None else process.returncode
+
+    def last_checkpoint_metrics(self) -> dict[str, Any] | None:
+        return None if self._last_checkpoint_metrics is None else dict(
+            self._last_checkpoint_metrics
+        )
+
+    def last_restore_metrics(self) -> dict[str, Any] | None:
+        return None if self._last_restore_metrics is None else dict(
+            self._last_restore_metrics
+        )
 
     def start(self) -> float:
         if self._resident or self._process is not None:
@@ -392,33 +459,89 @@ class FirecrackerLifecycle:
         if not self._resident or self._process is None:
             raise LifecycleError("cannot checkpoint a non-resident VM")
         started = time.monotonic()
+        process = self._process
+        pid = int(getattr(process, "pid", -1))
+        cgroup_before = self._cgroup_memory_snapshot()
+        peak_reset = self._reset_cgroup_memory_peak()
+        io_before = _process_io(pid)
+        faults_before = _process_faults(pid)
+        rss_before = self.rss_bytes()
+        monitor_stop = Event()
+        monitor = {
+            "peak_cgroup_memory_current_bytes": cgroup_before.get("memory_current_bytes"),
+            "peak_firecracker_rss_bytes": rss_before,
+            "sample_count": 0,
+        }
+
+        def sample_transient() -> None:
+            while not monitor_stop.wait(0.005):
+                current = self._cgroup_memory_snapshot().get("memory_current_bytes")
+                rss = self.rss_bytes()
+                if current is not None:
+                    prior = monitor["peak_cgroup_memory_current_bytes"]
+                    monitor["peak_cgroup_memory_current_bytes"] = max(
+                        int(prior or 0), int(current),
+                    )
+                monitor["peak_firecracker_rss_bytes"] = max(
+                    int(monitor["peak_firecracker_rss_bytes"] or 0), rss,
+                )
+                monitor["sample_count"] = int(monitor["sample_count"]) + 1
+
+        monitor_thread = Thread(target=sample_transient, daemon=True)
+        monitor_thread.start()
         api = _UnixHttpClient(
             self.config.api_socket, self.config.snapshot_api_timeout_s,
         )
-        api.request("PATCH", "/vm", {"state": "Paused"})
-        next_state, next_memory = self._next_snapshot_paths()
-        next_state.parent.mkdir(parents=True, exist_ok=True)
-        next_memory.parent.mkdir(parents=True, exist_ok=True)
+        paused = False
+        next_state: Path | None = None
+        next_memory: Path | None = None
         try:
+            pause_started = time.monotonic()
+            api.request("PATCH", "/vm", {"state": "Paused"})
+            paused = True
+            pause_s = time.monotonic() - pause_started
+            next_state, next_memory = self._next_snapshot_paths()
+            next_state.parent.mkdir(parents=True, exist_ok=True)
+            next_memory.parent.mkdir(parents=True, exist_ok=True)
+            create_started = time.monotonic()
             api.request("PUT", "/snapshot/create", {
                 "snapshot_type": "Full",
                 "snapshot_path": str(next_state),
                 "mem_file_path": str(next_memory),
             })
+            create_s = time.monotonic() - create_started
         except Exception:
             # Snapshot failure must not strand a healthy agent in Paused state.
             try:
-                api.request("PATCH", "/vm", {"state": "Resumed"})
+                if paused:
+                    api.request("PATCH", "/vm", {"state": "Resumed"})
             finally:
-                next_state.unlink(missing_ok=True)
-                next_memory.unlink(missing_ok=True)
+                if next_state is not None:
+                    next_state.unlink(missing_ok=True)
+                if next_memory is not None:
+                    next_memory.unlink(missing_ok=True)
             raise
+        finally:
+            # Cover failures before CreateSnapshot too (pause, directory setup,
+            # or API construction changes) so the 5 ms sampler never leaks.
+            monitor_stop.set()
+            monitor_thread.join(timeout=1)
+        assert next_state is not None and next_memory is not None
+        cgroup_after_create = self._cgroup_memory_snapshot()
+        io_after = _process_io(pid)
+        faults_after = _process_faults(pid)
+        rss_after_create = self.rss_bytes()
+        snapshot_files = self._snapshot_file_metrics(next_state, next_memory)
         previous_state = self._snapshot_state_path
         previous_memory = self._snapshot_memory_path
+        stop_started = time.monotonic()
         self._stop_process()
+        stop_s = time.monotonic() - stop_started
         self._snapshot_state_path = next_state
         self._snapshot_memory_path = next_memory
+        cache_drop_started = time.monotonic()
         self._drop_snapshot_page_cache(next_state, next_memory)
+        cache_drop_s = time.monotonic() - cache_drop_started
         # A restored VM MAP_PRIVATE-maps its memory snapshot. Reusing that path
         # as the output of the next snapshot can corrupt both the VM and file.
         # Alternate paths, stop the mapping process, then retire the old pair.
@@ -427,7 +550,83 @@ class FirecrackerLifecycle:
                 old_path.unlink(missing_ok=True)
         self._resident = False
         self._has_snapshot = True
-        return time.monotonic() - started
+        elapsed = time.monotonic() - started
+        cgroup_after_evict = self._cgroup_memory_snapshot()
+        before_current = cgroup_before.get("memory_current_bytes")
+        peak_current = monitor.get("peak_cgroup_memory_current_bytes")
+        kernel_operation_peak = (
+            cgroup_after_create.get("memory_peak_bytes") if peak_reset else None
+        )
+        effective_peak = max(
+            int(peak_current or 0), int(kernel_operation_peak or 0),
+        ) or None
+        after_current = cgroup_after_evict.get("memory_current_bytes")
+        file_before = int(cgroup_before.get("stat_file_bytes") or 0)
+        file_after_create = int(cgroup_after_create.get("stat_file_bytes") or 0)
+        self._last_checkpoint_metrics = {
+            "elapsed_s": elapsed,
+            "pause_s": pause_s,
+            # Firecracker 1.12.x synchronously flushes full-snapshot files as
+            # part of CreateSnapshot and exposes no supported API switch for
+            # separating write and fsync time.
+            "snapshot_create_and_fsync_s": create_s,
+            "snapshot_fsync_s": None,
+            "process_stop_s": stop_s,
+            "page_cache_drop_s": cache_drop_s,
+            "firecracker_rss_before_bytes": rss_before,
+            "firecracker_rss_after_snapshot_create_bytes": rss_after_create,
+            "peak_firecracker_rss_bytes": monitor["peak_firecracker_rss_bytes"],
+            "transient_sample_count": monitor["sample_count"],
+            "cgroup_before": cgroup_before,
+            "cgroup_operation_peak_reset": peak_reset,
+            "cgroup_after_snapshot_create": cgroup_after_create,
+            "cgroup_after_evict": cgroup_after_evict,
+            "cgroup_memory_peak_during_checkpoint_bytes": effective_peak,
+            "cgroup_kernel_memory_peak_during_checkpoint_bytes": kernel_operation_peak,
+            "cgroup_memory_transient_growth_bytes": (
+                None if before_current is None or effective_peak is None
+                else max(0, int(effective_peak) - int(before_current))
+            ),
+            "cgroup_memory_released_bytes": (
+                None if before_current is None or after_current is None
+                else max(0, int(before_current) - int(after_current))
+            ),
+            "page_cache_growth_during_snapshot_bytes": max(
+                0, file_after_create - file_before,
+            ),
+            "snapshot_files": snapshot_files,
+            "snapshot_logical_bytes": sum(
+                int(item["logical_bytes"]) for item in snapshot_files.values()
+            ),
+            "snapshot_allocated_bytes": sum(
+                int(item["allocated_bytes"]) for item in snapshot_files.values()
+            ),
+            "process_io_before": io_before,
+            "process_io_after_snapshot_create": io_after,
+            "process_write_bytes": _counter_delta(io_after, io_before, "write_bytes"),
+            "process_logical_write_bytes": _counter_delta(io_after, io_before, "wchar"),
+            "minor_faults": (
+                None
+                if faults_before["minor_faults"] is None
+                or faults_after["minor_faults"] is None
+                else max(
+                    0,
+                    int(faults_after["minor_faults"])
+                    - int(faults_before["minor_faults"]),
+                )
+            ),
+            "major_faults": (
+                None
+                if faults_before["major_faults"] is None
+                or faults_after["major_faults"] is None
+                else max(
+                    0,
+                    int(faults_after["major_faults"])
+                    - int(faults_before["major_faults"]),
+                )
+            ),
+        }
+        return elapsed
 
     def restore(self) -> float:
         if self._resident or self._process is not None:
@@ -437,7 +636,14 @@ class FirecrackerLifecycle:
         if self._snapshot_state_path is None or self._snapshot_memory_path is None:
             raise LifecycleError("snapshot paths are unavailable")
         started = time.monotonic()
+        cgroup_before = self._cgroup_memory_snapshot()
+        spawn_started = time.monotonic()
         self._spawn()
+        spawn_s = time.monotonic() - spawn_started
+        assert self._process is not None
+        pid = int(getattr(self._process, "pid", -1))
+        faults_before = _process_faults(pid)
+        io_before = _process_io(pid)
         try:
             api = _UnixHttpClient(
                 self.config.api_socket, self.config.snapshot_api_timeout_s,
@@ -453,6 +659,7 @@ class FirecrackerLifecycle:
             }
             if self.config.vsock_uds:
                 request["vsock_override"] = {"uds_path": str(self.config.vsock_uds)}
+            load_started = time.monotonic()
             try:
                 api.request("PUT", "/snapshot/load", request)
             except LifecycleError as exc:
@@ -463,11 +670,47 @@ class FirecrackerLifecycle:
                     raise
                 request.pop("vsock_override", None)
                 api.request("PUT", "/snapshot/load", request)
+            load_s = time.monotonic() - load_started
         except Exception:
             self._stop_process()
             raise
         self._resident = True
-        return time.monotonic() - started
+        elapsed = time.monotonic() - started
+        faults_after = _process_faults(pid)
+        io_after = _process_io(pid)
+        self._last_restore_metrics = {
+            "elapsed_s": elapsed,
+            "process_spawn_s": spawn_s,
+            "snapshot_load_s": load_s,
+            "firecracker_rss_after_load_bytes": self.rss_bytes(),
+            "cgroup_before": cgroup_before,
+            "cgroup_after_load": self._cgroup_memory_snapshot(),
+            "process_io_before": io_before,
+            "process_io_after_load": io_after,
+            "process_read_bytes": _counter_delta(io_after, io_before, "read_bytes"),
+            "process_logical_read_bytes": _counter_delta(io_after, io_before, "rchar"),
+            "minor_faults_during_load": (
+                None
+                if faults_before["minor_faults"] is None
+                or faults_after["minor_faults"] is None
+                else max(
+                    0,
+                    int(faults_after["minor_faults"])
+                    - int(faults_before["minor_faults"]),
+                )
+            ),
+            "major_faults_during_load": (
+                None
+                if faults_before["major_faults"] is None
+                or faults_after["major_faults"] is None
+                else max(
+                    0,
+                    int(faults_after["major_faults"])
+                    - int(faults_before["major_faults"]),
+                )
+            ),
+        }
+        return elapsed
 
     def close(self) -> None:
         self._stop_process()
@@ -498,8 +741,11 @@ class FirecrackerLifecycle:
         process = self._process
         if process is None or process.poll() is not None:
             return 0
+        pid = getattr(process, "pid", None)
+        if pid is None:
+            return 0
         try:
-            fields = Path(f"/proc/{process.pid}/statm").read_text(encoding="ascii").split()
+            fields = Path(f"/proc/{pid}/statm").read_text(encoding="ascii").split()
             return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
         except (OSError, IndexError, ValueError):
             return 0
@@ -576,6 +822,63 @@ class FirecrackerLifecycle:
         if not path.is_socket():
             raise LifecycleError(f"refusing to remove non-socket vsock path: {path}")
         path.unlink()
+
+    def _cgroup_memory_snapshot(self) -> dict[str, Any]:
+        path = self.config.cgroup_path
+        if path is None:
+            return {
+                "memory_current_bytes": None,
+                "memory_peak_bytes": None,
+                "memory_stat": {},
+                "memory_events_local": {},
+                "memory_numa_stat": {},
+            }
+        stat = _read_key_value_file(path / "memory.stat")
+        events_local = _read_key_value_file(path / "memory.events.local")
+        if not events_local:
+            events_local = _read_key_value_file(path / "memory.events")
+        numa_stat = _read_memory_numa_stat(path / "memory.numa_stat")
+        return {
+            "memory_current_bytes": _read_int_file(path / "memory.current"),
+            "memory_peak_bytes": _read_int_file(path / "memory.peak"),
+            "memory_stat": stat,
+            "memory_events_local": events_local,
+            "memory_numa_stat": numa_stat,
+            "stat_anon_bytes": stat.get("anon"),
+            "stat_file_bytes": stat.get("file"),
+            "stat_kernel_bytes": stat.get("kernel"),
+            "stat_sock_bytes": stat.get("sock"),
+        }
+
+    def _reset_cgroup_memory_peak(self) -> bool:
+        """Reset the per-session peak so the kernel captures short spikes.
+
+        Parent pool peaks remain untouched and are the authoritative arm-level
+        peak. This reset is only for operation-local checkpoint diagnostics.
+        """
+        path = self.config.cgroup_path
+        if path is None:
+            return False
+        try:
+            (path / "memory.peak").write_text("0", encoding="ascii")
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _snapshot_file_metrics(state_path: Path, memory_path: Path) -> dict[str, dict[str, int]]:
+        metrics: dict[str, dict[str, int]] = {}
+        for label, path in (("state", state_path), ("memory", memory_path)):
+            try:
+                stat = path.stat()
+            except OSError:
+                metrics[label] = {"logical_bytes": 0, "allocated_bytes": 0}
+                continue
+            metrics[label] = {
+                "logical_bytes": int(stat.st_size),
+                "allocated_bytes": int(stat.st_blocks * 512),
+            }
+        return metrics
 
     def _next_snapshot_paths(self) -> tuple[Path, Path]:
         if self._snapshot_memory_path == self.config.snapshot_memory:
@@ -995,3 +1298,367 @@ class FeedbackMemoryAdmission:
         while self._serving_ticket in self._cancelled:
             self._cancelled.remove(self._serving_ticket)
             self._serving_ticket += 1
+
+
+class AtomicMemoryAdmission:
+    """Priority-aware all-or-nothing admission across parent and Tool pools.
+
+    Formal paper runs must never hold capacity in one pool while waiting for
+    the other. Normal work is bounded by application admission watermarks;
+    calibrated checkpoint/restore transients may use the emergency interval
+    below the kernel-enforced hard limits.
+    """
+
+    _PRIORITY = {
+        "restore": 0,
+        "checkpoint": 1,
+        "continuation": 2,
+        "lifetime": 3,
+        "boot": 4,
+    }
+    _EMERGENCY = {"restore", "checkpoint"}
+
+    def __init__(
+        self,
+        *,
+        parent_high_bytes: int,
+        parent_hard_bytes: int,
+        parent_headroom_bytes: int,
+        tool_high_bytes: int,
+        tool_hard_bytes: int,
+        tool_headroom_bytes: int,
+        measure_parent_bytes: Callable[[], int],
+        measure_tool_bytes: Callable[[], int],
+        emergency_parent_headroom_bytes: int = 0,
+        emergency_tool_headroom_bytes: int = 0,
+        poll_s: float = 0.05,
+    ) -> None:
+        for label, high, hard, headroom, emergency in (
+            (
+                "parent", parent_high_bytes, parent_hard_bytes,
+                parent_headroom_bytes, emergency_parent_headroom_bytes,
+            ),
+            (
+                "tool", tool_high_bytes, tool_hard_bytes,
+                tool_headroom_bytes, emergency_tool_headroom_bytes,
+            ),
+        ):
+            if not 0 < int(high) < int(hard):
+                raise ValueError(f"{label} memory limits must satisfy 0 < high < hard")
+            if not 0 <= int(headroom) < int(high):
+                raise ValueError(f"{label} normal headroom is invalid")
+            if not 0 <= int(emergency) < int(hard):
+                raise ValueError(f"{label} emergency headroom is invalid")
+        if poll_s <= 0:
+            raise ValueError("memory admission poll interval must be positive")
+        self.parent_high_bytes = int(parent_high_bytes)
+        self.parent_hard_bytes = int(parent_hard_bytes)
+        self.parent_headroom_bytes = int(parent_headroom_bytes)
+        self.tool_high_bytes = int(tool_high_bytes)
+        self.tool_hard_bytes = int(tool_hard_bytes)
+        self.tool_headroom_bytes = int(tool_headroom_bytes)
+        self.emergency_parent_headroom_bytes = int(
+            emergency_parent_headroom_bytes
+        )
+        self.emergency_tool_headroom_bytes = int(emergency_tool_headroom_bytes)
+        self._measure_parent = measure_parent_bytes
+        self._measure_tool = measure_tool_bytes
+        self._poll_s = float(poll_s)
+        self._condition = Condition()
+        self._next_ticket = 0
+        self._next_lease = 0
+        self._waiters: dict[int, dict[str, Any]] = {}
+        self._leased: dict[int, dict[str, Any]] = {}
+        self._completed: list[dict[str, Any]] = []
+        self._timed_out: list[dict[str, Any]] = []
+        self._peak_parent_charge = 0
+        self._peak_tool_charge = 0
+        self._peak_parent_resident = 0
+        self._peak_tool_resident = 0
+        self._parent_over_high_observations = 0
+        self._tool_over_high_observations = 0
+        self._parent_over_hard_observations = 0
+        self._tool_over_hard_observations = 0
+
+    def acquire(
+        self,
+        *,
+        parent_increment_bytes: int,
+        tool_increment_bytes: int,
+        request_class: str,
+        timeout: float | None = None,
+        measure_parent_bytes: Callable[[], int] | None = None,
+        measure_tool_bytes: Callable[[], int] | None = None,
+    ) -> tuple[int, dict[str, Any]] | None:
+        if request_class not in self._PRIORITY:
+            raise ValueError(f"unknown memory request class: {request_class}")
+        parent_increment = int(parent_increment_bytes)
+        tool_increment = int(tool_increment_bytes)
+        if parent_increment < 0 or tool_increment < 0 or not (
+            parent_increment or tool_increment
+        ):
+            raise ValueError("at least one non-negative memory increment is required")
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            enqueued = time.monotonic()
+            waiter = {
+                "ticket": ticket,
+                "request_class": request_class,
+                "priority": self._PRIORITY[request_class],
+                "parent_increment_bytes": parent_increment,
+                "tool_increment_bytes": tool_increment,
+            }
+            self._waiters[ticket] = waiter
+            deadline = None if timeout is None else enqueued + max(0.0, timeout)
+            try:
+                while True:
+                    status = self._status_locked()
+                    selected = self._selected_waiter_locked(status)
+                    if selected is waiter:
+                        lease_id = self._next_lease
+                        self._next_lease += 1
+                        parent_measure = measure_parent_bytes or self._measure_parent
+                        tool_measure = measure_tool_bytes or self._measure_tool
+                        lease = {
+                            **waiter,
+                            "lease": lease_id,
+                            "admitted_monotonic": time.monotonic(),
+                            "wait_s": time.monotonic() - enqueued,
+                            "parent_at_admit_bytes": max(0, int(parent_measure())),
+                            "tool_at_admit_bytes": max(0, int(tool_measure())),
+                            "parent_realized_growth_bytes": 0,
+                            "tool_realized_growth_bytes": 0,
+                            "parent_unrealized_growth_bytes": parent_increment,
+                            "tool_unrealized_growth_bytes": tool_increment,
+                            "parent_peak_growth_bytes": 0,
+                            "tool_peak_growth_bytes": 0,
+                            "measure_parent_bytes": parent_measure,
+                            "measure_tool_bytes": tool_measure,
+                        }
+                        self._leased[lease_id] = lease
+                        self._waiters.pop(ticket, None)
+                        admitted = self._status_locked()
+                        self._condition.notify_all()
+                        return lease_id, {
+                            **admitted,
+                            "request_class": request_class,
+                            "wait_s": lease["wait_s"],
+                        }
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        self._waiters.pop(ticket, None)
+                        self._timed_out.append({
+                            **waiter,
+                            "wait_s": time.monotonic() - enqueued,
+                        })
+                        self._condition.notify_all()
+                        return None
+                    self._condition.wait(
+                        self._poll_s
+                        if remaining is None else min(self._poll_s, remaining)
+                    )
+            except BaseException:
+                self._waiters.pop(ticket, None)
+                self._condition.notify_all()
+                raise
+
+    def release(self, lease_id: int) -> dict[str, Any]:
+        with self._condition:
+            self._refresh_locked()
+            lease = self._leased.pop(lease_id, None)
+            if lease is None:
+                raise ValueError("memory admission lease is unknown")
+            completed = {
+                key: value
+                for key, value in lease.items()
+                if not key.startswith("measure_")
+            }
+            completed["released_monotonic"] = time.monotonic()
+            completed["held_s"] = (
+                completed["released_monotonic"]
+                - float(completed["admitted_monotonic"])
+            )
+            completed["parent_prediction_error_bytes"] = (
+                int(completed["parent_peak_growth_bytes"])
+                - int(completed["parent_increment_bytes"])
+            )
+            completed["tool_prediction_error_bytes"] = (
+                int(completed["tool_peak_growth_bytes"])
+                - int(completed["tool_increment_bytes"])
+            )
+            completed["parent_underprediction_bytes"] = max(
+                0, int(completed["parent_prediction_error_bytes"])
+            )
+            completed["tool_underprediction_bytes"] = max(
+                0, int(completed["tool_prediction_error_bytes"])
+            )
+            self._completed.append(completed)
+            status = self._status_locked()
+            self._condition.notify_all()
+            return {**status, "completed_lease": completed}
+
+    def observe(self) -> dict[str, Any]:
+        with self._condition:
+            status = self._status_locked()
+            self._condition.notify_all()
+            return status
+
+    def record_lease_growth(
+        self, lease_id: int, *, parent_growth_bytes: int, tool_growth_bytes: int,
+    ) -> None:
+        """Merge an operation-local kernel peak into one admission lease."""
+        with self._condition:
+            lease = self._leased.get(lease_id)
+            if lease is None:
+                raise ValueError("memory admission lease is unknown")
+            parent_growth = max(0, int(parent_growth_bytes))
+            tool_growth = max(0, int(tool_growth_bytes))
+            lease["parent_peak_growth_bytes"] = max(
+                int(lease["parent_peak_growth_bytes"]), parent_growth,
+            )
+            lease["tool_peak_growth_bytes"] = max(
+                int(lease["tool_peak_growth_bytes"]), tool_growth,
+            )
+            self._condition.notify_all()
+
+    def metrics(self) -> dict[str, Any]:
+        with self._condition:
+            status = self._status_locked()
+            return {
+                **status,
+                "active_leases": len(self._leased),
+                "queued_requests": len(self._waiters),
+                "peak_parent_admission_charge_bytes": self._peak_parent_charge,
+                "peak_tool_admission_charge_bytes": self._peak_tool_charge,
+                "peak_parent_resident_bytes": self._peak_parent_resident,
+                "peak_tool_resident_bytes": self._peak_tool_resident,
+                "parent_over_high_observations": self._parent_over_high_observations,
+                "tool_over_high_observations": self._tool_over_high_observations,
+                "parent_over_hard_observations": self._parent_over_hard_observations,
+                "tool_over_hard_observations": self._tool_over_hard_observations,
+                "parent_prediction_exceeded_leases": sum(
+                    int(item["parent_underprediction_bytes"]) > 0
+                    for item in self._completed
+                ),
+                "tool_prediction_exceeded_leases": sum(
+                    int(item["tool_underprediction_bytes"]) > 0
+                    for item in self._completed
+                ),
+                "timed_out_requests": [dict(item) for item in self._timed_out],
+                "queued_by_class": {
+                    request_class: sum(
+                        item["request_class"] == request_class
+                        for item in self._waiters.values()
+                    )
+                    for request_class in self._PRIORITY
+                },
+                "completed_leases": [dict(item) for item in self._completed],
+            }
+
+    def _refresh_locked(self) -> tuple[int, int]:
+        parent_resident = max(0, int(self._measure_parent()))
+        tool_resident = max(0, int(self._measure_tool()))
+        for lease in self._leased.values():
+            parent_growth = max(
+                0,
+                int(lease["measure_parent_bytes"]())
+                - int(lease["parent_at_admit_bytes"]),
+            )
+            tool_growth = max(
+                0,
+                int(lease["measure_tool_bytes"]())
+                - int(lease["tool_at_admit_bytes"]),
+            )
+            lease["parent_realized_growth_bytes"] = parent_growth
+            lease["tool_realized_growth_bytes"] = tool_growth
+            lease["parent_peak_growth_bytes"] = max(
+                int(lease["parent_peak_growth_bytes"]), parent_growth,
+            )
+            lease["tool_peak_growth_bytes"] = max(
+                int(lease["tool_peak_growth_bytes"]), tool_growth,
+            )
+            lease["parent_unrealized_growth_bytes"] = max(
+                0, int(lease["parent_increment_bytes"]) - parent_growth,
+            )
+            lease["tool_unrealized_growth_bytes"] = max(
+                0, int(lease["tool_increment_bytes"]) - tool_growth,
+            )
+        return parent_resident, tool_resident
+
+    def _status_locked(self) -> dict[str, Any]:
+        parent_resident, tool_resident = self._refresh_locked()
+        parent_unrealized = sum(
+            int(item["parent_unrealized_growth_bytes"])
+            for item in self._leased.values()
+        )
+        tool_unrealized = sum(
+            int(item["tool_unrealized_growth_bytes"])
+            for item in self._leased.values()
+        )
+        parent_charge = parent_resident + parent_unrealized
+        tool_charge = tool_resident + tool_unrealized
+        self._peak_parent_resident = max(
+            self._peak_parent_resident, parent_resident,
+        )
+        self._peak_tool_resident = max(self._peak_tool_resident, tool_resident)
+        self._peak_parent_charge = max(self._peak_parent_charge, parent_charge)
+        self._peak_tool_charge = max(self._peak_tool_charge, tool_charge)
+        self._parent_over_high_observations += parent_resident > self.parent_high_bytes
+        self._tool_over_high_observations += tool_resident > self.tool_high_bytes
+        self._parent_over_hard_observations += parent_resident > self.parent_hard_bytes
+        self._tool_over_hard_observations += tool_resident > self.tool_hard_bytes
+        return {
+            "parent_resident_bytes": parent_resident,
+            "tool_resident_bytes": tool_resident,
+            "parent_outstanding_unrealized_bytes": parent_unrealized,
+            "tool_outstanding_unrealized_bytes": tool_unrealized,
+            "parent_admission_charge_bytes": parent_charge,
+            "tool_admission_charge_bytes": tool_charge,
+            "parent_high_bytes": self.parent_high_bytes,
+            "tool_high_bytes": self.tool_high_bytes,
+            "parent_hard_bytes": self.parent_hard_bytes,
+            "tool_hard_bytes": self.tool_hard_bytes,
+        }
+
+    def _fits_locked(self, waiter: dict[str, Any], status: dict[str, Any]) -> bool:
+        emergency = waiter["request_class"] in self._EMERGENCY
+        parent_limit = (
+            self.parent_hard_bytes - self.emergency_parent_headroom_bytes
+            if emergency else self.parent_high_bytes - self.parent_headroom_bytes
+        )
+        tool_limit = (
+            self.tool_hard_bytes - self.emergency_tool_headroom_bytes
+            if emergency else self.tool_high_bytes - self.tool_headroom_bytes
+        )
+        return (
+            int(status["parent_admission_charge_bytes"])
+            + int(waiter["parent_increment_bytes"])
+            <= parent_limit
+            and int(status["tool_admission_charge_bytes"])
+            + int(waiter["tool_increment_bytes"])
+            <= tool_limit
+        )
+
+    def _selected_waiter_locked(
+        self, status: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        ordered = sorted(
+            self._waiters.values(),
+            key=lambda item: (int(item["priority"]), int(item["ticket"])),
+        )
+        if not ordered:
+            return None
+        first = ordered[0]
+        if self._fits_locked(first, status):
+            return first
+        # Only a reclaiming checkpoint may bypass an infeasible higher-priority
+        # request. Letting ordinary work bypass it could consume the very memory
+        # needed by a response-critical restore.
+        for waiter in ordered[1:]:
+            if (
+                waiter["request_class"] == "checkpoint"
+                and self._fits_locked(waiter, status)
+            ):
+                return waiter
+        return None

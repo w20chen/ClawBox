@@ -60,9 +60,9 @@ The current paper studies do not use a sizing/residency factorial. They keep
 Tool capacity at 4 GiB and isolate one question at a time:
 
 ```text
-spatial:  full_reservation | static | p90 | oracle
+spatial:  static_lifetime | full_reservation | static | p90 | oracle
 temporal: resident | balloon | checkpoint | hybrid
-decision: eager | fixed_delay | predicted_pressure_aware
+decision: eager | fixed_delay | wait_aware_pressure
 ```
 
 The canonical baseline registry below still describes product and compatibility
@@ -72,7 +72,7 @@ and do not change the product baseline registry.
 The following remain explicitly **not implemented**: `pressure_checkpoint`,
 Kubernetes checkpoint residency, and local Firecracker checkpoint residency.
 The product-workflow validator rejects them before a runner starts. The
-paper-only direct-Firecracker `predicted_pressure_aware` hybrid decision is a
+paper-only direct-Firecracker `wait_aware_pressure` hybrid decision is a
 different, implemented mechanism and does not register a production baseline.
 
 ### Baseline registry
@@ -691,18 +691,20 @@ Firecracker maps that capacity lazily, so the host is charged for resident
 pages as they are touched rather than reserving 4 GiB of physical RAM at VM
 creation.
 
-The study is split into three independent configurations:
+The study is split into independent configurations:
 
 | Dimension | Fixed factors | Compared policies | Example |
 | --- | --- | --- | --- |
-| Spatial admission | 4 GiB Tool VM, resident reclaim | `full_reservation`, fixed 2 GiB `static`, per-tool `p90`, `oracle` | `deploy/replay-suite.example.json` |
+| Spatial admission | 4 GiB Tool VM, resident reclaim | lifetime-static, calibrated `full_reservation`, fixed `static`, per-tool `p90`, `oracle` | `deploy/replay-suite.example.json` |
+| Mechanism ablation | Tool-only scope, same fixed idle trigger | resident Tool, balloon, Tool-only checkpoint | create from the temporal example with `dimension: "mechanism"` and `checkpoint_scope: "tool"` |
 | Temporal reclaim | 4 GiB Tool VM, one admission policy, reactive restore | `resident`, `balloon`, `checkpoint`, `hybrid` | `deploy/replay-temporal.example.json` |
-| Reclaim decision | 4 GiB Tool VM, one admission policy, `hybrid` reclaim | `eager`, `fixed_delay`, `predicted_pressure_aware`; reactive and prefetch restore | `deploy/replay-decision.example.json` |
+| Reclaim decision | 4 GiB Tool VM, one admission policy, `hybrid` reclaim | `eager`, `fixed_delay`, `wait_aware_pressure`; reactive and proactive restore | `deploy/replay-decision.example.json` |
 
-The Tool admission gate uses the larger of live aggregate Tool-Firecracker RSS
-and the Tool cgroup's `memory.current`, so charged snapshot cache or VMM memory
-cannot bypass admission. Each running Tool lease also has its own RSS baseline,
-so already-realized growth is subtracted from that lease's prediction:
+The admission gate atomically checks both the parent VM-pool and Tool child
+cgroups. `memory.current` is authoritative; Firecracker RSS is diagnostic only,
+so charged snapshot cache, kernel memory, and VMM memory cannot bypass admission.
+Each running lease has an operation-local cgroup baseline, so already-realized
+growth is subtracted from that lease's prediction:
 
 ```text
 RSSnow + sum(max(0, predicted_growth - realized_growth))
@@ -772,10 +774,10 @@ The main paper controls are all explicit configuration parameters:
 | `tool_pool_memory.{hard_limit_mib,high_watermark_mib,low_watermark_mib,headroom_mib}` | Tool-only H, Whigh, Wlow, and admission headroom |
 | `vm_pool_memory.{hard_limit_mib,high_watermark_mib,low_watermark_mib,headroom_mib}` | parent Runtime+Tool physical-memory envelope |
 | `vm_pool_memory.{initial_runtime_rss_mib,initial_tool_rss_mib,restore_transient_headroom_mib}` | boot and snapshot re-launch growth reservations |
-| `paper_experiment.admission_policies` | `full_reservation`, `static`, `p90`, or `oracle` |
+| `paper_experiment.admission_policies` | `static_lifetime`, `full_reservation`, `static`, `p90`, or `oracle` |
 | `paper_experiment.reclamation_policies` | `resident`, `balloon`, `checkpoint`, or `hybrid` |
-| `paper_experiment.decision_policies` | `eager`, `fixed_delay`, or `predicted_pressure_aware` |
-| `paper_experiment.restore_policies` | `reactive` or `prefetch` |
+| `paper_experiment.decision_policies` | `eager`, `fixed_delay`, or `wait_aware_pressure` |
+| `paper_experiment.restore_policies` | `reactive` or `proactive` |
 | `reclamation.checkpoint_scope` | `pair` by default; `tool` only for the secondary ablation |
 | `cpu_placement` | `round_robin` by default; `exclusive` for CPU isolation |
 | `network_cidr` | parent range for per-session `/29` allocation |
@@ -789,17 +791,18 @@ numactl --cpunodebind=0 --membind=0 \
   python3 -m clawbox.replay.cli suite /data/spatial.json
 ```
 
-The primary outcomes are correct-task throughput, admission wait, separate
-Runtime and Tool RSS, total RSS-time, pair/Runtime/Tool reclaimed bytes,
-save/restore service time, gateway reconnect and delivery-failure counts,
-prediction coverage, and zero host OOM policy failures. Snapshot disk preflight
+The primary outcomes are correct-task throughput, admission wait, parent and
+Tool cgroup `memory.current`, kernel `memory.peak`, memory-time,
+pair/Runtime/Tool reclaimed bytes, save/restore service time and I/O, gateway
+reconnect and delivery-failure counts, prediction coverage, and zero host OOM
+policy failures. Firecracker RSS remains a diagnostic. Snapshot disk preflight
 budgets two alternating generations of both VM memory files for pair scope. Do
 not use the historical 2 GiB versus 4 GiB measurements as evidence for
 oversubscription; they measure guest capacity and snapshot-size effects.
 Suite `paired_contrasts` follows the selected dimension: admission arms are
 paired against full reservation (plus P90-versus-static and oracle-versus-P90),
 reclamation arms are paired against resident, and hybrid decision/restore arms
-are paired across eager, fixed-delay, predicted-pressure-aware, and prefetch
+are paired across eager, fixed-delay, wait-aware, and proactive-restore
 controls within the same task, repetition, concurrency, and inference backend.
 
 `sessions`/`concurrency_levels` is offered agent concurrency: the runner starts
@@ -1057,9 +1060,8 @@ writes intermediate results. The final `study-summary.json` contains:
 - wall time, completed agent runs/min (the compatibility field is
   `throughput_tasks_per_minute`), and model steps/min (one step is one
   completed model request); this is not a correctness score;
-- average and peak Firecracker process memory;
-- P95 Firecracker RSS, RSS-time integral, resident-VM peak, NUMA-local memory,
-  and experiment-cgroup memory deltas;
+- mean/P95 sampled `memory.current`, kernel `memory.peak`, memory-time, memory
+  breakdown, swap, and NUMA locality; Firecracker RSS is diagnostic;
 - paired checkpoint cycles, individual VM save/restore operation counts, and
   summed VM service time (not critical-path overhead);
 - means, sample standard deviations, and two-sided 95% Student-t confidence

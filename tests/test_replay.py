@@ -28,6 +28,15 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
 
+def _load_openclaw_experiment_script(name: str = "run_openclaw_test"):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location(name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_load_v4_actions_and_extract_shell_command(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     _write_jsonl(trace, [
@@ -342,9 +351,9 @@ def test_external_inference_service_is_request_idempotent(tmp_path: Path) -> Non
         service.close()
 
 
-def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: Path) -> None:
+def test_openai_replay_gateway_preserves_identical_consecutive_steps(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
-    _write_jsonl(trace, [{
+    action = {
         "type": "action", "action_type": "llm_call", "action_id": "model-1",
         "iteration": 0, "ts_start": 0, "ts_end": 1,
         "data": {"messages_in": [{"role": "user", "content": "run it"}],
@@ -352,7 +361,11 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
                      "id": "call-1", "type": "function",
                      "function": {"name": "exec", "arguments": "{\"command\":\"true\"}"},
                  }]}, "llm_latency_ms": 0},
-    }])
+    }
+    second_action = dict(action)
+    second_action["action_id"] = "model-2"
+    second_action["iteration"] = 1
+    _write_jsonl(trace, [action, second_action])
     gateway = ModelGateway(tmp_path / "store.json", mode="replay", trace=trace, time_scale=0)
     base = gateway.start("127.0.0.1", 0)
     try:
@@ -367,11 +380,13 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
             first = json.load(response)
         with urllib.request.urlopen(request) as response:
             second = json.load(response)
-        assert first == second
+        assert first["choices"] == second["choices"]
+        assert first["id"] != second["id"]
         assert first["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "exec"
-        assert len(gateway.records()) == 1
-        assert gateway.records()[0]["delivered"] is True
-        assert gateway.records()[0]["http_attempts"] == 2
+        assert len(gateway.records()) == 2
+        assert all(record["delivered"] for record in gateway.records())
+        assert [record["http_attempts"] for record in gateway.records()] == [1, 1]
+        assert [record["production_attempts"] for record in gateway.records()] == [1, 1]
     finally:
         gateway.close()
 
@@ -1000,6 +1015,315 @@ def test_feedback_memory_admission_observes_checkpoint_reclamation() -> None:
     assert admission.observe()["admission_charge_bytes"] == 700
     resident[0] = 0  # Firecracker stopped after a verified checkpoint.
     assert admission.observe()["admission_charge_bytes"] == 100
+
+
+def test_atomic_memory_admission_never_partially_acquires_parent_pool() -> None:
+    from clawbox.replay.lifecycle import AtomicMemoryAdmission
+
+    parent = [100]
+    tool = [850]
+    admission = AtomicMemoryAdmission(
+        parent_high_bytes=1000,
+        parent_hard_bytes=1200,
+        parent_headroom_bytes=100,
+        tool_high_bytes=1000,
+        tool_hard_bytes=1200,
+        tool_headroom_bytes=100,
+        measure_parent_bytes=lambda: parent[0],
+        measure_tool_bytes=lambda: tool[0],
+        poll_s=0.001,
+    )
+    assert admission.acquire(
+        parent_increment_bytes=100,
+        tool_increment_bytes=100,
+        request_class="continuation",
+        timeout=0.01,
+    ) is None
+    metrics = admission.metrics()
+    assert metrics["active_leases"] == 0
+    assert metrics["parent_outstanding_unrealized_bytes"] == 0
+    assert metrics["tool_outstanding_unrealized_bytes"] == 0
+
+
+def test_atomic_memory_admission_prioritizes_restore_over_boot() -> None:
+    from clawbox.replay.lifecycle import AtomicMemoryAdmission
+
+    parent = [850]
+    tool = [850]
+    admission = AtomicMemoryAdmission(
+        parent_high_bytes=1000,
+        parent_hard_bytes=1200,
+        parent_headroom_bytes=100,
+        tool_high_bytes=1000,
+        tool_hard_bytes=1200,
+        tool_headroom_bytes=100,
+        measure_parent_bytes=lambda: parent[0],
+        measure_tool_bytes=lambda: tool[0],
+        poll_s=0.001,
+    )
+    acquired: list[tuple[str, int]] = []
+
+    def wait(kind: str) -> None:
+        result = admission.acquire(
+            parent_increment_bytes=100,
+            tool_increment_bytes=100,
+            request_class=kind,
+            timeout=1,
+        )
+        assert result is not None
+        lease, _status = result
+        acquired.append((kind, lease))
+
+    boot = threading.Thread(target=wait, args=("boot",))
+    restore = threading.Thread(target=wait, args=("restore",))
+    boot.start()
+    time.sleep(0.01)
+    restore.start()
+    time.sleep(0.02)
+    parent[0] = tool[0] = 700
+    admission.observe()
+    restore.join(1)
+    assert acquired and acquired[0][0] == "restore"
+    admission.release(acquired[0][1])
+    boot.join(1)
+    assert [kind for kind, _lease in acquired] == ["restore", "boot"]
+    admission.release(acquired[1][1])
+
+
+def test_checkpoint_can_bypass_an_infeasible_restore_to_make_progress() -> None:
+    from clawbox.replay.lifecycle import AtomicMemoryAdmission
+
+    parent = [1050]
+    tool = [1050]
+    admission = AtomicMemoryAdmission(
+        parent_high_bytes=1000,
+        parent_hard_bytes=1400,
+        parent_headroom_bytes=100,
+        tool_high_bytes=1000,
+        tool_hard_bytes=1400,
+        tool_headroom_bytes=100,
+        measure_parent_bytes=lambda: parent[0],
+        measure_tool_bytes=lambda: tool[0],
+        poll_s=0.001,
+    )
+    restore_result: list[tuple[int, dict] | None] = []
+    restore = threading.Thread(target=lambda: restore_result.append(
+        admission.acquire(
+            parent_increment_bytes=400,
+            tool_increment_bytes=400,
+            request_class="restore",
+            timeout=0.2,
+        )
+    ))
+    restore.start()
+    time.sleep(0.01)
+    checkpoint = admission.acquire(
+        parent_increment_bytes=100,
+        tool_increment_bytes=100,
+        request_class="checkpoint",
+        timeout=0.1,
+    )
+    assert checkpoint is not None
+    admission.release(checkpoint[0])
+    restore.join(1)
+    assert restore_result == [None]
+
+
+def test_atomic_memory_admission_records_host_increment_prediction_error() -> None:
+    from clawbox.replay.lifecycle import AtomicMemoryAdmission
+
+    parent = [100]
+    tool = [100]
+    admission = AtomicMemoryAdmission(
+        parent_high_bytes=1000,
+        parent_hard_bytes=1200,
+        parent_headroom_bytes=100,
+        tool_high_bytes=1000,
+        tool_hard_bytes=1200,
+        tool_headroom_bytes=100,
+        measure_parent_bytes=lambda: parent[0],
+        measure_tool_bytes=lambda: tool[0],
+        poll_s=0.001,
+    )
+    acquired = admission.acquire(
+        parent_increment_bytes=200,
+        tool_increment_bytes=150,
+        request_class="continuation",
+        timeout=0.1,
+    )
+    assert acquired is not None
+    parent[0] = 350
+    tool[0] = 300
+    admission.observe()
+    released = admission.release(acquired[0])
+    completed = released["completed_lease"]
+    assert completed["parent_underprediction_bytes"] == 50
+    assert completed["tool_underprediction_bytes"] == 50
+
+
+def test_atomic_memory_admission_keeps_normal_work_out_of_emergency_reserve() -> None:
+    from clawbox.replay.lifecycle import AtomicMemoryAdmission
+
+    parent = [850]
+    tool = [850]
+    admission = AtomicMemoryAdmission(
+        parent_high_bytes=1000,
+        parent_hard_bytes=1400,
+        parent_headroom_bytes=100,
+        tool_high_bytes=1000,
+        tool_hard_bytes=1400,
+        tool_headroom_bytes=100,
+        measure_parent_bytes=lambda: parent[0],
+        measure_tool_bytes=lambda: tool[0],
+        poll_s=0.001,
+    )
+    assert admission.acquire(
+        parent_increment_bytes=100,
+        tool_increment_bytes=100,
+        request_class="boot",
+        timeout=0.01,
+    ) is None
+    restored = admission.acquire(
+        parent_increment_bytes=100,
+        tool_increment_bytes=100,
+        request_class="restore",
+        timeout=0.01,
+    )
+    assert restored is not None
+    admission.release(restored[0])
+
+
+def test_full_and_static_reservations_share_incremental_growth_semantics() -> None:
+    module = _load_openclaw_experiment_script("run_openclaw_incremental")
+    assert module.fixed_incremental_growth_mib(
+        "full_reservation", full_mib=3500, static_mib=None,
+    ) == 3500
+    assert module.fixed_incremental_growth_mib(
+        "static", full_mib=4096, static_mib=1800,
+    ) == 1800
+    with pytest.raises(ValueError, match="not configured"):
+        module.fixed_incremental_growth_mib(
+            "static", full_mib=4096, static_mib=None,
+        )
+
+
+def test_wait_estimates_and_primary_memory_metrics_are_strict(tmp_path: Path) -> None:
+    module = _load_openclaw_experiment_script("run_openclaw_metrics")
+    estimates = tmp_path / "wait.json"
+    estimates.write_text(json.dumps({"steps": {"0": 1.5, "2": 4}}))
+    assert module.load_wait_estimates(estimates) == {0: 1.5, 2: 4.0}
+    samples = [
+        {"elapsed_s": 0.0, "memory": 100},
+        {"elapsed_s": 2.0, "memory": 300},
+    ]
+    assert module.sampled_time_integral(samples, "memory") == 400
+    assert module.off_numa_ratio(
+        {"numa_stat": {"anon": {"N0": 75, "N1": 25}}}, 0,
+    ) == pytest.approx(0.25)
+    psi_samples = [
+        {"vm": {"pressure": {"some": {"avg10": 1, "total": 10}}}},
+        {"vm": {"pressure": {"some": {"avg10": 3, "total": 25}}}},
+    ]
+    memory_psi = module.cgroup_psi_summary(psi_samples, "vm")["memory"]
+    assert memory_psi["max_some_avg10"] == 3
+    assert memory_psi["some_stall_us"] == 15
+
+
+def test_formal_replay_gate_rejects_uncovered_checkpoint_transient() -> None:
+    script = Path(__file__).parents[1] / "scripts" / "validate-replay-gates.py"
+    spec = importlib.util.spec_from_file_location("validate_replay_gates", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    summary = {
+        "sessions_requested": 1,
+        "sessions_completed": 1,
+        "failures": [],
+        "correctness_evaluated": True,
+        "correctness_pass_fraction": 1.0,
+        "duplicate_model_executions": 0,
+        "model_gateway_delivery_failures": 0,
+        "model_production_attempts": 1,
+        "model_gateway_responses_delivered": 1,
+        "model_steps_completed": 1,
+        "replay_input_validation_complete": True,
+        "tool_execution_count_mismatch_events": 0,
+        "host_oom_kill_events": 0,
+        "tenant_guest_oom_events": 0,
+        "peak_vm_pool_swap_current_bytes": 0,
+        "max_vm_pool_off_numa_ratio": 0,
+        "kernel_peak_vm_pool_memory_bytes": 1024,
+        "reclamation_policy": "checkpoint",
+        "checkpoint_cycles": 1,
+        "checkpoint_process_write_bytes": 4096,
+        "checkpoint_snapshot_logical_bytes": 4096,
+        "checkpoint_kernel_operation_peak_bytes": 2048,
+        "wait_estimator": "oracle",
+        "wait_estimator_role": "upper_bound",
+        "admission_policy": "full_reservation",
+        "vm_pool_memory_events": {"max": 0},
+        "atomic_memory_admission": {"completed_leases": [
+            {
+                "request_class": "checkpoint",
+                "parent_underprediction_bytes": 1,
+                "tool_underprediction_bytes": 0,
+            },
+            {
+                "request_class": "restore",
+                "parent_underprediction_bytes": 0,
+                "tool_underprediction_bytes": 0,
+            },
+        ]},
+    }
+    result = module.validate_summary(summary, formal=True)
+    assert result["passed"] is False
+    failed = {item["gate"] for item in result["checks"] if not item["passed"]}
+    assert failed == {"checkpoint_reservation_covered_peak"}
+
+
+def test_memory_calibration_uses_operation_peaks_and_aggregate_residual() -> None:
+    script = Path(__file__).parents[1] / "scripts" / "calibrate-replay-memory.py"
+    spec = importlib.util.spec_from_file_location("calibrate_replay_memory", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    lease = lambda kind, parent, tool: {
+        "request_class": kind,
+        "parent_peak_growth_bytes": parent,
+        "tool_peak_growth_bytes": tool,
+        "parent_increment_bytes": parent,
+        "tool_increment_bytes": tool,
+    }
+    summary = {
+        "restore_transient_headroom_mib": 1,
+        "atomic_memory_admission": {"completed_leases": [
+            lease("boot", 2 * 2**20, 1 * 2**20),
+            lease("restore", 4 * 2**20, 3 * 2**20),
+        ]},
+        "sessions": [{
+            "checkpoint_reclamation_events": [{
+                "runtime_checkpoint_metrics": {
+                    "cgroup_memory_transient_growth_bytes": 5 * 2**20,
+                },
+                "tool_checkpoint_metrics": {
+                    "cgroup_memory_transient_growth_bytes": 6 * 2**20,
+                },
+            }],
+            "tool_working_sets": [{
+                "predicted_command_memory_p90_mib": 2,
+                "actual_command_peak_memory_bytes": 5 * 2**20,
+                "first_execution_started_unix_s": 1,
+                "last_execution_completed_unix_s": 2,
+            }],
+        }],
+    }
+    result = module.calibrate([summary], 0.99)
+    assert result["formal_ready"] is True
+    assert result["checkpoint_parent"]["recommended_mib"] == 6
+    assert result["checkpoint_tool"]["recommended_mib"] == 6
+    assert result["restore_transient_parent"]["recommended_mib"] == 1
+    assert result["restore_transient_tool"]["recommended_mib"] == 1
+    assert result["aggregate_positive_prediction_residual"]["recommended_mib"] == 3
 
 
 def test_resident_slot_lifecycle_releases_budget_after_checkpoint() -> None:

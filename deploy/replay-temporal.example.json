@@ -67,6 +67,9 @@
   },
   "reclamation": {
     "checkpoint_scope": "pair",
+    "checkpoint_transient_parent_mib": 0,
+    "checkpoint_transient_tool_mib": 0,
+    "calibration_required": "replace both zero checkpoint reservations with target-host P99 values",
     "balloon_idle_floor_mib": 256,
     "balloon_settle_timeout_s": 5.0,
     "fixed_delay_s": 20.0,

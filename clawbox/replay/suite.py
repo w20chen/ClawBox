@@ -35,6 +35,17 @@ SUITE_METRICS = (
     "peak_runtime_firecracker_rss_bytes",
     "peak_tool_firecracker_rss_bytes",
     "firecracker_rss_time_byte_seconds",
+    "mean_vm_pool_memory_current_bytes",
+    "p95_vm_pool_memory_current_bytes",
+    "peak_sampled_vm_pool_memory_current_bytes",
+    "kernel_peak_vm_pool_memory_bytes",
+    "vm_pool_memory_time_byte_seconds",
+    "mean_tool_pool_memory_current_bytes",
+    "peak_sampled_tool_pool_memory_current_bytes",
+    "kernel_peak_tool_pool_memory_bytes",
+    "tool_pool_memory_time_byte_seconds",
+    "mean_arm_memory_current_bytes",
+    "peak_sampled_arm_memory_current_bytes",
     "mean_numa_memory_used_bytes",
     "peak_numa_memory_used_bytes",
     "mean_numa_memory_delta_bytes",
@@ -47,6 +58,15 @@ SUITE_METRICS = (
     "vm_restore_operations",
     "checkpoint_snapshot_service_s",
     "checkpoint_restore_service_s",
+    "checkpoint_queue_wait_s",
+    "restore_queue_wait_s",
+    "checkpoint_transient_peak_growth_bytes",
+    "checkpoint_kernel_operation_peak_bytes",
+    "checkpoint_snapshot_logical_bytes",
+    "checkpoint_snapshot_allocated_bytes_created",
+    "checkpoint_process_write_bytes",
+    "checkpoint_page_cache_growth_bytes",
+    "cancelled_checkpoint_attempts",
     "checkpoint_reclamation_observations",
     "checkpoint_verified_firecracker_rss_released_bytes",
     "checkpoint_verified_runtime_rss_released_bytes",
@@ -93,6 +113,15 @@ SUITE_METRICS = (
     "model_gateway_reconnect_attempts",
     "model_gateway_delivery_failures",
     "model_gateway_responses_delivered",
+    "duplicate_model_request_attempts",
+    "tool_execution_count_mismatch_events",
+    "mean_model_step_latency_s",
+    "p50_model_step_latency_s",
+    "p95_model_step_latency_s",
+    "p99_model_step_latency_s",
+    "response_ready_to_delivery_delay_s",
+    "p95_response_ready_to_delivery_delay_s",
+    "mean_first_tool_after_restore_wall_s",
 )
 
 RATIO_EFFECT_METRICS = {
@@ -100,6 +129,10 @@ RATIO_EFFECT_METRICS = {
     "throughput_steps_per_minute",
     "mean_firecracker_rss_bytes", "p95_firecracker_rss_bytes",
     "peak_firecracker_rss_bytes", "firecracker_rss_time_byte_seconds",
+    "mean_vm_pool_memory_current_bytes", "p95_vm_pool_memory_current_bytes",
+    "peak_sampled_vm_pool_memory_current_bytes", "kernel_peak_vm_pool_memory_bytes",
+    "vm_pool_memory_time_byte_seconds", "mean_arm_memory_current_bytes",
+    "peak_sampled_arm_memory_current_bytes",
     "mean_runtime_firecracker_rss_bytes", "mean_tool_firecracker_rss_bytes",
     "peak_runtime_firecracker_rss_bytes", "peak_tool_firecracker_rss_bytes",
     "checkpoint_verified_firecracker_rss_released_bytes",
@@ -787,7 +820,7 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
         # Redesigned fixed-capacity paper dimensions. Missing arms are normal:
         # every suite intentionally varies only one dimension.
-        for treatment in ("static", "p90", "oracle"):
+        for treatment in ("static_lifetime", "static", "p90", "oracle"):
             compare(
                 f"admission_{treatment}_vs_full_reservation/resident",
                 arm(treatment, "resident"),
@@ -806,7 +839,7 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
         paper_admissions = {admission for admission, *_rest in arms}
         for admission in paper_admissions.intersection(
-            {"full_reservation", "static", "p90", "oracle"}
+            {"static_lifetime", "full_reservation", "static", "p90", "oracle"}
         ):
             for reclamation in ("balloon", "checkpoint", "hybrid"):
                 decision = (
@@ -840,12 +873,31 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
                     ),
                     arm(admission, "hybrid", "fixed_delay", restore),
                 )
+            for restore in ("reactive", "proactive"):
+                if restore == "proactive":
+                    compare(
+                        f"decision_fixed_delay_vs_eager/{admission}/{restore}",
+                        arm(admission, "hybrid", "fixed_delay", restore),
+                        arm(admission, "hybrid", "eager", restore),
+                    )
+                compare(
+                    f"decision_wait_aware_pressure_vs_fixed_delay/"
+                    f"{admission}/{restore}",
+                    arm(admission, "hybrid", "wait_aware_pressure", restore),
+                    arm(admission, "hybrid", "fixed_delay", restore),
+                )
             for decision in (
                 "eager", "fixed_delay", "predicted_pressure_aware",
             ):
                 compare(
                     f"restore_prefetch_vs_reactive/{admission}/{decision}",
                     arm(admission, "hybrid", decision, "prefetch"),
+                    arm(admission, "hybrid", decision, "reactive"),
+                )
+            for decision in ("eager", "fixed_delay", "wait_aware_pressure"):
+                compare(
+                    f"restore_proactive_vs_reactive/{admission}/{decision}",
+                    arm(admission, "hybrid", decision, "proactive"),
                     arm(admission, "hybrid", decision, "reactive"),
                 )
 

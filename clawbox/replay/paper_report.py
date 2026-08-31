@@ -161,6 +161,11 @@ def _group_row(summary: dict[str, Any], concurrency: int, baseline: str) -> dict
         "p95_rss_gib": raw["p95_firecracker_rss_bytes"] / 2**30,
         "peak_rss_gib": raw["peak_firecracker_rss_bytes"] / 2**30,
         "rss_time_gib_hours": raw["firecracker_rss_time_byte_seconds"] / 2**30 / 3600,
+        "mean_memory_gib": raw["mean_vm_pool_memory_current_bytes"] / 2**30,
+        "peak_memory_gib": raw["kernel_peak_vm_pool_memory_bytes"] / 2**30,
+        "memory_time_gib_hours": (
+            raw["vm_pool_memory_time_byte_seconds"] / 2**30 / 3600
+        ),
         "mean_numa_memory_delta_gib": raw["mean_numa_memory_delta_bytes"] / 2**30,
         "peak_numa_memory_delta_gib": raw["peak_numa_memory_delta_bytes"] / 2**30,
         "mean_cgroup_memory_delta_gib": raw["mean_cgroup_memory_delta_bytes"] / 2**30,
@@ -188,8 +193,8 @@ def _contrast_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
         "throughput_correct_tasks_per_minute",
         "throughput_steps_per_minute",
         "wall_s",
-        "firecracker_rss_time_byte_seconds",
-        "mean_firecracker_rss_bytes",
+        "vm_pool_memory_time_byte_seconds",
+        "mean_vm_pool_memory_current_bytes",
         "p95_session_wall_s",
     )
     rows: list[dict[str, Any]] = []
@@ -304,7 +309,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         "## Main six-arm sweep",
         "",
         "| c | Baseline | Tool MiB | Correct tasks/min | Steps/min | Wall s | "
-        "Mean/peak RSS GiB | RSS-time GiB-h | P95 session s | Checkpoint cycles | Correct |",
+        "Mean/peak memory.current GiB | Memory-time GiB-h | P95 session s | Checkpoint cycles | Correct |",
         "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in report["main"]["rows"]:
@@ -312,9 +317,9 @@ def markdown_report(report: dict[str, Any]) -> str:
             f"| {row['concurrency']} | {row['baseline']} | "
             f"{row['configured_tool_memory_mib']} | "
             f"{_fmt(row['correct_tasks_per_min'])} | {_fmt(row['steps_per_min'])} | "
-            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_rss_gib'])}/"
-            f"{_fmt(row['peak_rss_gib'])} | "
-            f"{_fmt(row['rss_time_gib_hours'])} | {_fmt(row['p95_session_s'], 2)} | "
+            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_memory_gib'])}/"
+            f"{_fmt(row['peak_memory_gib'])} | "
+            f"{_fmt(row['memory_time_gib_hours'])} | {_fmt(row['p95_session_s'], 2)} | "
             f"{_fmt(row['checkpoint_cycles'], 1)} | "
             f"{_fmt(row['correctness_percent'], 1)}% |"
         )
@@ -322,7 +327,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Configured-budget density sweep",
         "",
-        "| c | Baseline | Correct tasks/min | Steps/min | Wall s | Mean/peak RSS GiB | "
+        "| c | Baseline | Correct tasks/min | Steps/min | Wall s | Mean/peak memory.current GiB | "
         "Peak resident VMs | P95 session s | P95/max wait s | Snapshot GiB |",
         "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
@@ -330,8 +335,8 @@ def markdown_report(report: dict[str, Any]) -> str:
         lines.append(
             f"| {row['concurrency']} | {row['baseline']} | "
             f"{_fmt(row['correct_tasks_per_min'])} | {_fmt(row['steps_per_min'])} | "
-            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_rss_gib'])}/"
-            f"{_fmt(row['peak_rss_gib'])} | {_fmt(row['peak_resident_vms'], 1)} | "
+            f"{_fmt(row['wall_s'], 2)} | {_fmt(row['mean_memory_gib'])}/"
+            f"{_fmt(row['peak_memory_gib'])} | {_fmt(row['peak_resident_vms'], 1)} | "
             f"{_fmt(row['p95_session_s'], 2)} | {_fmt(row['p95_admission_wait_s'], 2)}/"
             f"{_fmt(row['max_admission_wait_s'], 2)} | "
             f"{_fmt(row['snapshot_allocated_gib'])} |"

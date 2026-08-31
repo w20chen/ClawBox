@@ -44,10 +44,11 @@
   "inference_backends": ["replay"],
   "paper_experiment": {
     "dimension": "spatial",
-    "admission_policies": ["full_reservation", "static", "p90", "oracle"],
+    "admission_policies": ["static_lifetime", "full_reservation", "static", "p90", "oracle"],
     "reclamation_policies": ["resident"],
     "restore_policies": ["reactive"],
-    "static_reservation_mib": 2048
+    "static_reservation_mib": 2048,
+    "full_incremental_growth_mib": 4096
   },
   "tool_pool_memory": {
     "cgroup": "/sys/fs/cgroup/clawbox-vm-pool/tool",

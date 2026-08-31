@@ -44,8 +44,8 @@
     "dimension": "decision",
     "admission_policies": ["p90"],
     "reclamation_policies": ["hybrid"],
-    "decision_policies": ["eager", "fixed_delay", "predicted_pressure_aware"],
-    "restore_policies": ["reactive", "prefetch"]
+    "decision_policies": ["eager", "fixed_delay", "wait_aware_pressure"],
+    "restore_policies": ["reactive", "proactive"]
   },
   "tool_pool_memory": {
     "cgroup": "/sys/fs/cgroup/clawbox-vm-pool/tool",
@@ -67,10 +67,14 @@
   },
   "reclamation": {
     "checkpoint_scope": "pair",
+    "checkpoint_transient_parent_mib": 0,
+    "checkpoint_transient_tool_mib": 0,
+    "calibration_required": "replace both zero checkpoint reservations with target-host P99 values",
     "balloon_idle_floor_mib": 256,
     "balloon_settle_timeout_s": 5.0,
     "fixed_delay_s": 20.0,
     "predicted_llm_wait_s": 20.0,
+    "wait_estimator": "fixed",
     "checkpoint_break_even_s": 4.0,
     "restore_prefetch_lead_s": 2.0
   },

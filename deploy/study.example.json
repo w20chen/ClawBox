@@ -13,7 +13,7 @@
   "inference_backends": ["replay"],
   "paper_experiment": {
     "dimension": "spatial",
-    "admission_policies": ["full_reservation", "static", "p90", "oracle"],
+    "admission_policies": ["static_lifetime", "full_reservation", "static", "p90", "oracle"],
     "reclamation_policies": ["resident"],
     "restore_policies": ["reactive"],
     "static_reservation_mib": 2048,
