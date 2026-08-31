@@ -62,6 +62,24 @@ reservation queueing, predicted and actual command memory, peak/mean
 Firecracker RSS, Firecracker RSS-time, NUMA/cgroup memory, checkpoint-reclaimed
 memory, checkpoint save/restore service time, OOM/failures, and correctness.
 
+### Resident live-reclamation extension
+
+The separate resident-balloon arm keeps the same fixed 2 GiB Tool-VM capacity
+and per-tool P90 admission. It adds a pre-boot virtio-balloon device with
+`deflate_on_oom=true`: `tool_start` deflates the balloon to zero, and
+`tool_end` inflates it to 1,728 MiB, leaving the measured 320 MiB idle floor
+available while keeping the VM alive. Each transition records target/actual
+balloon size, service time, and before/after Tool-Firecracker RSS. Correctness
+and host RSS, rather than guest-reported statistics alone, remain authoritative.
+
+The installed Firecracker is v1.12.1. It supports the traditional live balloon
+target API and statistics, and the 6.18.28 guest kernel has
+`CONFIG_MEMORY_BALLOON`, `CONFIG_VIRTIO_BALLOON`, and `CONFIG_PAGE_REPORTING`.
+This Firecracker version does not expose the newer free-page-reporting API, so
+the first arm uses traditional balloon inflation. A future binary-upgrade arm
+may enable continuous free-page reporting; virtio-mem hot-unplug is not part of
+the main experiment.
+
 ## Results
 
 Results are accepted only from completed, internally valid arm summaries. The

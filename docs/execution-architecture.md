@@ -29,7 +29,7 @@ must use those terms rather than an unqualified `snapshot`.
 | `scripts/run-swe-rebench.sh` → `clawbox.benchmark.kubernetes` | SWE-ReBench / OpenClaw | Kubernetes Kata/Firecracker ARM64, Runtime Job + Tool Pod, SSH | `fixed_profile`, `resident`; SandboxTask outcome JSON plus result envelope | production |
 | `clawbox.benchmark.managed_client` and `clawbox.benchmark.multitenant` | Managed SWE-ReBench intake / dispatcher | Managed API persistence then accepted Cell path | managed run/attempt/event records | production intake |
 | `clawbox.cell.app` | SandboxTask controller | Kubernetes Runtime + Tool Cell | fixed default; opt-in bounded `p90_static`/`p90_elastic` Tool sizing | production default plus research baselines |
-| `python -m clawbox.replay.cli study|suite` / `clawbox-replay` | one or several recorded traces / OpenClaw | two direct Firecracker VMs per task, Runtime + Tool, SSH | fixed/P90 sizing crossed with `resident`/`llm_wait_checkpoint`; study JSON and envelopes | research |
+| `python -m clawbox.replay.cli study|suite` / `clawbox-replay` | one or several recorded traces / OpenClaw | two direct Firecracker VMs per task, Runtime + Tool, SSH | fixed-capacity controls or per-tool P90 admission crossed with `resident`/`llm_wait_checkpoint`; optional resident virtio-balloon reclamation; study JSON and envelopes | research |
 | `scripts/run-openclaw-experiment.py` | prepared recorded task / OpenClaw | two direct Firecracker VMs, SSH | `--mode snapshot` remains an alias for `llm_wait_checkpoint` | research adapter |
 | `python -m clawbox.replay.cli run|experiment` / `clawbox-replay` | recorded trace / ReplayEngine | direct Firecracker or local; transport is selected explicitly, and paired Tool Firecracker requires `vsock` | its own resident slots, lifecycle and latency-triggered checkpoint policy; JSONL | historical mechanism testing |
 | `clawbox.scheduler`, `clawbox.allocator`, `clawbox.controller` | execution intent / legacy controller | Tool-only subprocess, Docker, or Kubernetes paths | p90 allocation may be used here; not a two-VM Cell | legacy |
@@ -53,12 +53,15 @@ requires an exact generation. Elastic resolves latest once at admission; both
 persist the exact prediction and full Cell size so reconciliation cannot drift.
 Neither performs Kubernetes checkpointing.
 
-The active paper study can cross `inference_backend = replay | api`,
-`sizing_policy = fixed | p90_static`, and `residency_policy = resident |
-llm_wait_checkpoint`. The suite additionally crosses workloads and concurrency
-levels under a validated NUMA CPU/memory budget. Its legacy config spelling
-`memory_policies: [resident, snapshot]` remains supported and translates at the
-boundary.
+The active paper study can cross `inference_backend = replay | api`, static or
+per-tool P90 admission, and `residency_policy = resident |
+llm_wait_checkpoint`. The Tool-VM capacity is fixed within an arm; direct-runner
+P90 values gate live-RSS admission and do not resize Firecracker RAM. A separate
+resident arm may use virtio-balloon for guest-cooperative live reclamation. The
+suite additionally crosses workloads and concurrency levels under a validated
+NUMA CPU/memory budget. Its legacy config spellings `p90_static` and
+`memory_policies: [resident, snapshot]` remain supported at the schema boundary
+but must not be interpreted as per-invocation VM sizing.
 
 ## Canonical planning interface
 
@@ -88,6 +91,23 @@ Unsupported combinations are rejected before a runner starts: Kubernetes
 checkpoint residency, pressure checkpointing, and local Firecracker
 checkpointing are not claimed. Tool-only legacy execution
 is likewise never represented as a Runtime + Tool Cell.
+
+## Kubernetes and direct-Firecracker system boundary
+
+These backends are complementary, not competing reimplementations. Kubernetes
+is the accepted long-running production control plane: API persistence, RBAC,
+image and Secret distribution, multi-tenant reconciliation, and normal Cell
+lifecycle. The direct-Firecracker runner is the paper mechanism executor: one
+host, explicit NUMA/vCPU placement, replay timing, live RSS admission,
+snapshot/restore ordering, balloon experiments, and fail-stop evidence output.
+
+Kubernetes is not required to establish the checkpoint, prediction-admission,
+or balloon mechanisms and currently cannot provide the same NUMA-controlled
+checkpoint path without new Kata/containerd coordination. Conversely, the
+direct runner is not promoted as a production replacement for Kubernetes. The
+shared workflow schema, Runtime/Tool image boundary, prediction artifacts,
+correctness oracle, and `ResultEnvelope` keep both paths part of one ClawBox
+system while their lifecycle claims remain explicit.
 
 All new outer results use `ResultEnvelope`: run/case IDs, complete resolved
 workflow, classification, stable status, failure category, metrics, artifacts,

@@ -736,9 +736,11 @@ tool completion the gate remeasures RSS before dropping only the future-growth
 commitment; it never assumes that guest-free pages left Firecracker RSS.
 Static controls use their full 4 GiB or 2 GiB Tool capacity as the incremental
 commitment. Actual per-command cgroup peaks are measured separately.
-Checkpointing is the only assumed reclamation mechanism, and every eviction
+Checkpointing is the main long-idle reclamation mechanism, and every eviction
 records that both Firecracker process RSS values reached zero plus the observed
-cgroup and NUMA-local memory change.
+cgroup and NUMA-local memory change. An optional resident-only virtio-balloon
+baseline reclaims guest-cooperative free pages at tool completion while keeping
+the VM alive; it reports host RSS separately from guest balloon statistics.
 
 ### What this experiment does not do
 
@@ -826,6 +828,7 @@ The configuration names correspond to these general experiment concepts:
 | `tool_reservation_budget_mib` | NUMA-local Tool admission budget applied to live RSS plus outstanding incremental demand |
 | `tool_admission_safety_headroom_mib` | unallocatable safety margin retained below the Tool admission budget |
 | `idle_tool_vm_rss_mib` | measured idle Tool-VM RSS anchor used for capacity and oracle analysis, not subtracted at tool completion |
+| `tool_balloon_reclamation`, `tool_balloon_idle_floor_mib` | optional resident predictive baseline that deflates before tool execution and inflates back to the measured idle floor after tool completion; fixed VM capacity is unchanged |
 | `resident_memory_budget_mib` | optional configured admission budget; excess sessions queue until a VM pair is resident or checkpointed |
 | `workloads[].independent_unit` | independent task ID used for inference; repeated trajectories share one ID |
 | `numa_host_reserve_mib`, `max_numa_cpu_busy_fraction`, `require_no_firecracker` | clean-host admission bounds for timing runs |

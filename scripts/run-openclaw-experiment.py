@@ -601,6 +601,8 @@ def main() -> None:
         balloon_events: list[dict] = []
         tool_materialization_events: list[dict] = []
         current_tool_reservation_event: dict | None = None
+        tool_materialization_lease: int | None = None
+        current_tool_materialization_event: dict | None = None
         tool_reservation_lock = threading.Lock()
         session_closing = threading.Event()
 
@@ -718,7 +720,9 @@ def main() -> None:
             Path(spec["store"]), mode=a.inference, trace=a.trace, time_scale=a.time_scale,
             upstream_base_url=a.api_base_url,
             upstream_api_key=os.environ.get(a.api_key_env), upstream_model=a.api_model,
-            on_request_started=release_tool_reservation,
+            on_request_started=lambda: (
+                release_tool_reservation(), release_tool_materialization()
+            ),
             before_response_ready=before_response_ready,
         )
 
@@ -748,8 +752,33 @@ def main() -> None:
                 runtime.config = replace(runtime.config, cpu_set=str(runtime_cpu))
                 tool.config = replace(tool.config, cpu_set=str(tool_cpu))
 
+        def release_tool_materialization() -> None:
+            nonlocal tool_materialization_lease, current_tool_materialization_event
+            with tool_reservation_lock:
+                lease = tool_materialization_lease
+                tool_materialization_lease = None
+                event = current_tool_materialization_event
+                current_tool_materialization_event = None
+            if lease is None:
+                return
+            assert tool_admission is not None
+            released = tool_admission.release(lease)
+            if event is not None:
+                released_elapsed_s = time.monotonic() - started
+                event["released_elapsed_s"] = released_elapsed_s
+                event["held_s"] = (
+                    released_elapsed_s - event["acquired_elapsed_s"]
+                )
+                event["resident_tool_rss_after_mib"] = (
+                    released["resident_bytes"] / (1024.0 * 1024.0)
+                )
+                event["remaining_headroom_after_mib"] = (
+                    released["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                )
+
         def with_tool_materialization_admission(reason: str, operation):
-            """Gate boot/restore RSS materialization against the Tool budget."""
+            """Hold boot/restore commitment until the restored guest progresses."""
+            nonlocal tool_materialization_lease, current_tool_materialization_event
             if tool_admission is None:
                 return operation()
             wait_started = time.monotonic()
@@ -773,17 +802,19 @@ def main() -> None:
                 "released_elapsed_s": None,
             }
             tool_materialization_events.append(event)
+            with tool_reservation_lock:
+                if tool_materialization_lease is not None:
+                    tool_admission.release(lease)
+                    raise RuntimeError(
+                        "session already owns a Tool materialization admission"
+                    )
+                tool_materialization_lease = lease
+                current_tool_materialization_event = event
             try:
                 return operation()
-            finally:
-                released = tool_admission.release(lease)
-                event["released_elapsed_s"] = time.monotonic() - started
-                event["resident_tool_rss_after_mib"] = (
-                    released["resident_bytes"] / (1024.0 * 1024.0)
-                )
-                event["remaining_headroom_after_mib"] = (
-                    released["remaining_headroom_bytes"] / (1024.0 * 1024.0)
-                )
+            except Exception:
+                release_tool_materialization()
+                raise
 
         def release_pair() -> None:
             nonlocal pair_lease, current_lease_event
@@ -961,7 +992,10 @@ def main() -> None:
                 try:
                     release_tool_reservation()
                 finally:
-                    gateway.close()
+                    try:
+                        release_tool_materialization()
+                    finally:
+                        gateway.close()
 
     results, failures = [], []
     try:

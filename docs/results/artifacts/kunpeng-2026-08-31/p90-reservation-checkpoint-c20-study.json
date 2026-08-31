@@ -1,5 +1,5 @@
 {
-  "output": "/data/prc20-telemetry-fixed2-v2",
+  "output": "/data/prc20-telemetry-fixed2-v3",
   "source": {
     "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
     "tool_rootfs": "/data/openclaw-experiment-tool-telemetry-v2.ext4",
