@@ -8,6 +8,7 @@ import ctypes
 import errno
 import os
 import platform
+from pathlib import Path
 
 
 _SET_MEMPOLICY_NR = {"aarch64": 237, "x86_64": 238}
@@ -47,10 +48,20 @@ def bind_memory(node: int) -> None:
         raise OSError(error, os.strerror(error))
 
 
+def join_cgroup(path: Path) -> None:
+    """Join an existing cgroup before exec so all Firecracker memory is charged."""
+    resolved = path.resolve(strict=True)
+    controllers = resolved / "cgroup.procs"
+    if not controllers.is_file():
+        raise ValueError(f"not a cgroup v2 directory: {resolved}")
+    controllers.write_text(f"{os.getpid()}\n", encoding="ascii")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--numa-node", required=True, type=int)
     parser.add_argument("--cpu-set", required=True)
+    parser.add_argument("--cgroup", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -58,6 +69,8 @@ def main() -> None:
         parser.error("a command is required after --")
     bind_memory(args.numa_node)
     os.sched_setaffinity(0, parse_cpu_set(args.cpu_set))
+    if args.cgroup is not None:
+        join_cgroup(args.cgroup)
     os.execvp(command[0], command)
 
 

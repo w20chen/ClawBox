@@ -160,7 +160,8 @@ def _per_tool_memory_plan(
         "semantics": (
             "admission uses live resident Tool-Firecracker RSS plus per-tool "
             "incremental P90 commitments and global safety headroom; tool completion "
-            "remeasures RSS and checkpointing is the only assumed reclamation"
+            "remeasures RSS; ballooning or checkpoint eviction must be measured "
+            "explicitly before reclaimed host memory is credited"
         ),
         "idle_tool_vm_rss_mib": idle_tool_vm_rss_mib,
         "idle_safety_margin_fraction": idle_safety_margin_fraction,

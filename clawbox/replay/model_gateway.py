@@ -22,6 +22,8 @@ from .trace import ReplayAction, load_trace
 class GatewayRequest:
     request_id: str
     replay_index: int | None
+    request_namespace: str = "default"
+    request_fingerprint: str = ""
     ready: bool = False
     status_code: int = 0
     content_type: str = "application/json"
@@ -32,6 +34,10 @@ class GatewayRequest:
     request_payload: dict[str, Any] = field(default_factory=dict)
     replay_input_match: bool | None = None
     admission: dict[str, Any] = field(default_factory=dict)
+    http_attempts: int = 0
+    reconnect_attempts: int = 0
+    delivery_failures: int = 0
+    delivered: bool = False
 
 
 class ModelGateway:
@@ -41,6 +47,7 @@ class ModelGateway:
                  time_scale: float = 1.0, upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None, upstream_model: str | None = None,
                  timeout_s: float = 600.0,
+                 request_namespace: str = "default",
                  on_request_started: Callable[[], None] | None = None,
                  before_response_ready: Callable[[int | None, dict[str, Any]], dict[str, Any]] | None = None) -> None:
         if mode not in {"replay", "api"}:
@@ -59,6 +66,9 @@ class ModelGateway:
         self.upstream_api_key = upstream_api_key or ""
         self.upstream_model = upstream_model or ""
         self.timeout_s = timeout_s
+        self.request_namespace = str(request_namespace).strip()
+        if not self.request_namespace:
+            raise ValueError("request_namespace must not be empty")
         self.on_request_started = on_request_started
         self.before_response_ready = before_response_ready
         self._requests: dict[str, GatewayRequest] = {}
@@ -81,14 +91,19 @@ class ModelGateway:
                 if self.path.rstrip("/") != "/v1/chat/completions":
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
+                request_id: str | None = None
                 try:
                     payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                    status, content_type, body = gateway.complete(payload)
+                    status, content_type, body, request_id = gateway._complete_with_identity(
+                        payload, http_attempt=True,
+                    )
                     self._send(status, content_type, body)
+                    gateway.mark_delivery(request_id, delivered=True)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     self._send(HTTPStatus.BAD_REQUEST, "application/json", json.dumps({"error": str(exc)}).encode())
                 except (BrokenPipeError, ConnectionResetError):
-                    pass
+                    if request_id is not None:
+                        gateway.mark_delivery(request_id, delivered=False)
 
             def _send(self, status: int, content_type: str, body: bytes) -> None:
                 self.send_response(status)
@@ -115,13 +130,24 @@ class ModelGateway:
             self._thread = None
 
     def complete(self, payload: dict[str, Any]) -> tuple[int, str, bytes]:
+        status, content_type, body, _request_id = self._complete_with_identity(
+            payload, http_attempt=False,
+        )
+        return status, content_type, body
+
+    def _complete_with_identity(
+        self, payload: dict[str, Any], *, http_attempt: bool,
+    ) -> tuple[int, str, bytes, str]:
         if not isinstance(payload.get("messages"), list):
             raise ValueError("messages must be an array")
         canonical = dict(payload)
         canonical.pop("model", None)
-        request_id = hashlib.sha256(json.dumps(
+        fingerprint = hashlib.sha256(json.dumps(
             canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode()).hexdigest()
+        request_id = hashlib.sha256(
+            f"{self.request_namespace}\0{fingerprint}".encode()
+        ).hexdigest()
         with self._changed:
             request = self._requests.get(request_id)
             if request is None:
@@ -141,6 +167,8 @@ class ModelGateway:
                         raise ValueError(f"replay request diverged at model step {index}")
                 request = GatewayRequest(
                     request_id, index, started_unix_s=time.time(),
+                    request_namespace=self.request_namespace,
+                    request_fingerprint=fingerprint,
                     request_payload=canonical,
                     replay_input_match=replay_input_match,
                 )
@@ -149,6 +177,13 @@ class ModelGateway:
                 threading.Thread(
                     target=self._produce, args=(request_id, payload), daemon=True,
                 ).start()
+            elif request.request_fingerprint and request.request_fingerprint != fingerprint:
+                raise RuntimeError("request identity collision")
+            if http_attempt:
+                request.http_attempts += 1
+                if request.http_attempts > 1:
+                    request.reconnect_attempts += 1
+                self._persist()
             deadline = time.monotonic() + self.timeout_s
             while not request.ready:
                 remaining = deadline - time.monotonic()
@@ -157,7 +192,22 @@ class ModelGateway:
                 self._changed.wait(timeout=remaining)
             if request.error:
                 raise RuntimeError(request.error)
-            return request.status_code, request.content_type, base64.b64decode(request.response_b64)
+            return (
+                request.status_code, request.content_type,
+                base64.b64decode(request.response_b64), request_id,
+            )
+
+    def mark_delivery(self, request_id: str, *, delivered: bool) -> None:
+        """Record whether a host response write survived a guest disconnect."""
+        with self._changed:
+            request = self._requests.get(request_id)
+            if request is None:
+                raise KeyError(f"unknown gateway request {request_id}")
+            if delivered:
+                request.delivered = True
+            else:
+                request.delivery_failures += 1
+            self._persist()
 
     def records(self) -> list[dict[str, Any]]:
         with self._lock:

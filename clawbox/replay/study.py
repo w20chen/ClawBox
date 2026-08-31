@@ -241,8 +241,319 @@ def study_experiment_spec(raw: dict[str, Any], *, base: Path | None = None) -> E
     })
 
 
+_PAPER_ADMISSION_POLICIES = {"full_reservation", "static", "p90", "oracle"}
+_PAPER_RECLAMATION_POLICIES = {"resident", "balloon", "checkpoint", "hybrid"}
+_PAPER_DECISION_POLICIES = {"eager", "fixed_delay", "predicted_pressure_aware"}
+_PAPER_RESTORE_POLICIES = {"reactive", "prefetch"}
+
+
+def _paper_arm_slug(model: str, arm: dict[str, str]) -> str:
+    admission = {
+        "full_reservation": "full", "static": "static", "p90": "p90", "oracle": "oracle",
+    }[arm["admission_policy"]]
+    reclamation = {
+        "resident": "res", "balloon": "bal", "checkpoint": "ckpt", "hybrid": "hyb",
+    }[arm["reclamation_policy"]]
+    decision = {
+        "none": "none", "eager": "eager", "fixed_delay": "delay",
+        "predicted_pressure_aware": "pressure",
+    }[arm["decision_policy"]]
+    restore = {"reactive": "react", "prefetch": "pref"}[arm["restore_policy"]]
+    return f"{model}-{admission}-{reclamation}-{decision}-{restore}"
+
+
+def expand_paper_policy_matrix(raw: dict[str, Any]) -> list[dict[str, str]]:
+    """Expand one paper dimension without crossing unrelated mechanisms."""
+    experiment = raw.get("paper_experiment")
+    if not isinstance(experiment, dict):
+        raise ValueError("paper_experiment configuration is required")
+    legacy_fields = {
+        "sizing_policies", "memory_policies", "fixed_control_tool_memory_mib",
+        "resident_memory_budget_mib", "tool_balloon_reclamation",
+        "tool_reservation_budget_mib", "tool_admission_safety_headroom_mib",
+        "idle_tool_vm_rss_mib",
+    }
+    if present := sorted(legacy_fields.intersection(raw)):
+        raise ValueError(
+            "paper_experiment cannot be combined with legacy experiment fields: "
+            + ", ".join(present)
+        )
+    resources = raw.get("resources") or {}
+    tool_memory_mib = int(resources.get("tool_memory_mib", 4096))
+    if tool_memory_mib != 4096:
+        raise ValueError("paper experiments require resources.tool_memory_mib = 4096")
+    dimension = str(experiment.get("dimension") or "")
+    admission = list(experiment.get("admission_policies") or [])
+    reclamation = list(experiment.get("reclamation_policies") or [])
+    decisions = list(experiment.get("decision_policies") or [])
+    restores = list(experiment.get("restore_policies") or ["reactive"])
+    if not admission or not set(admission) <= _PAPER_ADMISSION_POLICIES:
+        raise ValueError("paper admission_policies are empty or invalid")
+    if len(admission) != len(set(admission)):
+        raise ValueError("paper admission_policies must be unique")
+    if not restores or not set(restores) <= _PAPER_RESTORE_POLICIES:
+        raise ValueError("paper restore_policies are empty or invalid")
+
+    arms: list[dict[str, str]] = []
+    if dimension == "spatial":
+        if reclamation not in ([], ["resident"]):
+            raise ValueError("spatial experiment fixes reclamation_policies to resident")
+        if decisions:
+            raise ValueError("spatial experiment does not vary decision_policies")
+        if restores != ["reactive"]:
+            raise ValueError("spatial experiment fixes restore_policies to reactive")
+        arms = [{
+            "admission_policy": policy, "reclamation_policy": "resident",
+            "decision_policy": "none", "restore_policy": "reactive",
+        } for policy in admission]
+    elif dimension == "temporal":
+        if len(admission) != 1:
+            raise ValueError("temporal experiment fixes exactly one admission policy")
+        if not reclamation or not set(reclamation) <= _PAPER_RECLAMATION_POLICIES:
+            raise ValueError("temporal reclamation_policies are empty or invalid")
+        if decisions and decisions != ["fixed_delay"]:
+            raise ValueError("temporal experiment fixes checkpoint decisions to fixed_delay")
+        if restores != ["reactive"]:
+            raise ValueError("temporal experiment fixes restore_policies to reactive")
+        arms = [{
+            "admission_policy": admission[0], "reclamation_policy": policy,
+            "decision_policy": (
+                "fixed_delay" if policy in {"checkpoint", "hybrid"} else "none"
+            ),
+            "restore_policy": "reactive",
+        } for policy in reclamation]
+    elif dimension == "decision":
+        if len(admission) != 1:
+            raise ValueError("decision experiment fixes exactly one admission policy")
+        if reclamation != ["hybrid"]:
+            raise ValueError("decision experiment fixes reclamation_policies to hybrid")
+        if not decisions or not set(decisions) <= _PAPER_DECISION_POLICIES:
+            raise ValueError("decision_policies are empty or invalid")
+        arms = [{
+            "admission_policy": admission[0], "reclamation_policy": "hybrid",
+            "decision_policy": decision, "restore_policy": restore,
+        } for decision in decisions for restore in restores]
+    else:
+        raise ValueError("paper_experiment.dimension must be spatial, temporal, or decision")
+
+    for arm in arms:
+        arm["label"] = "-".join((
+            arm["admission_policy"], arm["reclamation_policy"],
+            arm["decision_policy"], arm["restore_policy"],
+        ))
+    return arms
+
+
+def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
+    """Run the redesigned fixed-4-GiB paper matrix."""
+    base = config_path.resolve().parent
+    root = Path(__file__).resolve().parents[2]
+    source = raw["source"]
+    resources = raw.get("resources") or {}
+    memory = raw.get("tool_pool_memory")
+    tuning = raw.get("reclamation") or {}
+    experiment = raw["paper_experiment"]
+    if not isinstance(memory, dict):
+        raise ValueError("tool_pool_memory configuration is required")
+    checkpoint_scope = str(tuning.get("checkpoint_scope", "pair"))
+    if checkpoint_scope not in {"pair", "tool"}:
+        raise ValueError("reclamation.checkpoint_scope must be pair or tool")
+    hard = int(memory.get("hard_limit_mib", 0))
+    high = int(memory.get("high_watermark_mib", 0))
+    low = int(memory.get("low_watermark_mib", 0))
+    headroom = int(memory.get("headroom_mib", 0))
+    if not 0 < low < high < hard:
+        raise ValueError("Tool pool watermarks must satisfy 0 < Wlow < Whigh < H")
+    if headroom < 0 or headroom >= high:
+        raise ValueError("Tool admission headroom must be non-negative and below Whigh")
+    if not memory.get("cgroup"):
+        raise ValueError("tool_pool_memory.cgroup is required")
+    static_mib = int(experiment.get("static_reservation_mib", 2048))
+    if not 0 < static_mib <= 4096:
+        raise ValueError("static_reservation_mib must be in (0, 4096]")
+    arms = expand_paper_policy_matrix(raw)
+    sessions = int(raw.get("sessions", 1))
+    repetitions = int(raw.get("repetitions", 1))
+    if sessions < 1 or repetitions < 1:
+        raise ValueError("sessions and repetitions must be positive")
+    inference = list(raw.get("inference_backends", ["replay"]))
+    if not inference or not set(inference) <= {"replay", "api"}:
+        raise ValueError("unsupported inference backend")
+    api = raw.get("api") or {}
+    key_env = str(api.get("key_env", "OPENAI_API_KEY"))
+    if "api" in inference and (not api.get("base_url") or not api.get("model") or not os.getenv(key_env)):
+        raise ValueError("api mode requires api.base_url, api.model, and its key environment variable")
+
+    runtime_rootfs = _path(base, source["runtime_rootfs"])
+    tool_rootfs = _path(base, source["tool_rootfs"])
+    prompt = _path(base, source["prompt"])
+    trace = _path(base, source["trace"])
+    output = _path(base, raw["output"])
+    output.mkdir(parents=True, exist_ok=False)
+    commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    manifest = {
+        "schema_version": 4, "started_unix_s": time.time(), "commit": commit,
+        "source_tree_sha256": _source_hash(root), "host": platform.node(),
+        "machine": platform.machine(), "trace_sha256": _sha256(trace), "config": raw,
+        "tool_vm_contract_mib": 4096,
+    }
+    (output / "study-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+    )
+
+    matrix = [(model, arm) for model in inference for arm in arms]
+    order = random.Random(int(raw.get("seed", 0)))
+    runs: list[dict[str, Any]] = []
+    for repetition in range(repetitions):
+        shuffled = list(matrix)
+        order.shuffle(shuffled)
+        for arm_position, (model, arm_spec) in enumerate(shuffled):
+            arm_name = _paper_arm_slug(model, arm_spec)
+            arm = output / f"r{repetition:02d}-{arm_name}"
+            _validate_firecracker_socket_paths(arm)
+            prepared, results = arm / "input", arm / "results"
+            arm.mkdir()
+            prepare = [
+                sys.executable, str(root / "scripts" / "prepare-openclaw-experiment.py"),
+                "--output", str(prepared), "--sessions", str(sessions),
+                "--runtime-rootfs", str(runtime_rootfs), "--tool-rootfs", str(tool_rootfs),
+                "--prompt", str(prompt), "--model-id", str(raw.get("exposed_model", "experiment-model")),
+                "--network-prefix", str(raw.get("network_prefix", "172.30")),
+                "--runtime-memory-mib", str(resources.get("runtime_memory_mib", 2048)),
+                "--tool-memory-mib", "4096", "--cpu-first", str(resources.get("cpu_first", 0)),
+                "--numa-node", str(resources.get("numa_node", 0)),
+                "--firecracker-api-timeout-s", str(raw.get("firecracker_api_timeout_s", 15.0)),
+                "--firecracker-snapshot-api-timeout-s",
+                str(raw.get("firecracker_snapshot_api_timeout_s", 300.0)),
+            ]
+            if resources.get("cpu_list"):
+                prepare += ["--cpu-list", str(resources["cpu_list"])]
+            subprocess.run(prepare, cwd=root, check=True)
+            command = [
+                sys.executable, str(root / "scripts" / "run-openclaw-experiment.py"),
+                str(prepared / "manifest.json"), "--output", str(results),
+                "--reclamation-policy", arm_spec["reclamation_policy"],
+                "--admission-policy", arm_spec["admission_policy"],
+                "--inference", model, "--validation-command", str(raw.get(
+                    "validation_command", "cd /testbed && git diff --binary --no-ext-diff HEAD",
+                )), "--timeout-s", str(raw.get("timeout_s", 900)),
+                "--tool-reservation-budget-mib", str(high),
+                "--tool-admission-safety-headroom-mib", str(headroom),
+                "--tool-pool-cgroup", str(memory["cgroup"]),
+                "--tool-pool-hard-limit-mib", str(hard),
+                "--tool-pool-low-watermark-mib", str(low),
+            ]
+            if raw.get("correctness_command"):
+                command += [
+                    "--correctness-command", str(raw["correctness_command"]),
+                    "--correctness-timeout-s", str(raw.get("correctness_timeout_s", 300)),
+                ]
+            if model == "replay":
+                command += ["--trace", str(trace), "--time-scale", str((raw.get("replay") or {}).get("time_scale", 1.0))]
+            else:
+                command += ["--api-base-url", str(api["base_url"]), "--api-model", str(api["model"]), "--api-key-env", key_env]
+            admission = arm_spec["admission_policy"]
+            if admission == "static":
+                command += ["--static-tool-reservation-mib", str(static_mib)]
+            elif admission in {"p90", "oracle"}:
+                plan_key = "p90_plan" if admission == "p90" else "oracle_plan"
+                if not experiment.get(plan_key) or not experiment.get("workload_name"):
+                    raise ValueError(f"{admission} admission requires {plan_key} and workload_name")
+                command += [
+                    "--tool-memory-plan", str(_path(base, experiment[plan_key])),
+                    "--tool-memory-workload", str(experiment["workload_name"]),
+                ]
+            if arm_spec["reclamation_policy"] in {"balloon", "hybrid"}:
+                command += [
+                    "--tool-balloon-idle-floor-mib", str(tuning.get("balloon_idle_floor_mib", 256)),
+                    "--tool-balloon-settle-timeout-s", str(tuning.get("balloon_settle_timeout_s", 5.0)),
+                ]
+            if arm_spec["reclamation_policy"] in {"checkpoint", "hybrid"}:
+                command += [
+                    "--checkpoint-scope", checkpoint_scope,
+                    "--eviction-policy", arm_spec["decision_policy"],
+                    "--eviction-delay-s", str(tuning.get("fixed_delay_s", 20.0)),
+                    "--predicted-llm-wait-s", str(tuning.get("predicted_llm_wait_s", 20.0)),
+                    "--checkpoint-break-even-s", str(tuning.get("checkpoint_break_even_s", 4.0)),
+                    "--restore-policy", arm_spec["restore_policy"],
+                    "--restore-prefetch-lead-s", str(tuning.get("restore_prefetch_lead_s", 2.0)),
+                ]
+            started_at = utcnow()
+            completed = subprocess.run(command, cwd=root, check=False)
+            completed_at = utcnow()
+            summary_path = results / "summary.json"
+            if not summary_path.is_file():
+                raise subprocess.CalledProcessError(getattr(completed, "returncode", 1), command)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            runs.append({
+                "repetition": repetition, "arm_order_position": arm_position,
+                "inference_backend": model, **arm_spec,
+                "configured_tool_memory_mib": 4096,
+                "started_at": started_at.isoformat(), "completed_at": completed_at.isoformat(),
+                "result_dir": str(results), **summary,
+            })
+            if not bool(raw.get("retain_vm_artifacts", True)):
+                _discard_heavy_vm_artifacts(prepared)
+
+    grouped: dict[str, dict[str, Any]] = {}
+    statistic_fields = (
+        "wall_s", "throughput_tasks_per_minute", "throughput_correct_tasks_per_minute",
+        "mean_firecracker_rss_bytes", "peak_firecracker_rss_bytes",
+        "mean_runtime_firecracker_rss_bytes", "peak_runtime_firecracker_rss_bytes",
+        "mean_tool_firecracker_rss_bytes", "peak_tool_firecracker_rss_bytes",
+        "firecracker_rss_time_byte_seconds", "peak_tool_resident_rss_bytes",
+        "peak_tool_admission_charge_bytes", "tool_reservation_wait_s",
+        "checkpoint_verified_firecracker_rss_released_bytes",
+        "checkpoint_verified_runtime_rss_released_bytes",
+        "checkpoint_verified_tool_rss_released_bytes",
+        "tool_balloon_verified_rss_released_bytes", "checkpoint_snapshot_service_s",
+        "checkpoint_restore_service_s", "host_oom_kill_events",
+        "oversubscription_policy_failures", "tenant_guest_oom_events",
+        "model_gateway_http_attempts", "model_gateway_reconnect_attempts",
+        "model_gateway_delivery_failures", "model_gateway_responses_delivered",
+    )
+    for model, arm_spec in matrix:
+        label = f"{model}-{arm_spec['label']}"
+        all_rows = [row for row in runs if row["inference_backend"] == model and row["label"] == arm_spec["label"]]
+        valid = [row for row in all_rows if not row.get("failures") and row.get("sessions_completed") == row.get("sessions_requested")]
+        grouped[label] = {
+            "runs": len(all_rows), "valid_runs": len(valid),
+            "configured_tool_memory_mib": [4096],
+            "failures": sum(len(row.get("failures") or []) for row in all_rows),
+            "statistics": {field: _stats(valid, field) for field in statistic_fields},
+        }
+    validation_hashes = {
+        session["validation_sha256"] for row in runs for session in row.get("sessions", [])
+        if session.get("validation_sha256")
+    }
+    expected = sum(int(row.get("sessions_completed", 0)) for row in runs)
+    represented = sum(
+        1 for row in runs for session in row.get("sessions", [])
+        if session.get("validation_sha256")
+    )
+    final_state_equal = expected > 0 and represented == expected and len(validation_hashes) == 1
+    final = {
+        "schema_version": 4, "manifest": manifest, "groups": grouped,
+        "paper_experiment": experiment, "tool_vm_contract_mib": 4096,
+        "runs": runs, "final_state_equal": final_state_equal,
+        "validation_hashes": sorted(validation_hashes),
+        "validation_results_represented": represented,
+        "validation_results_expected": expected,
+    }
+    (output / "study-summary.json").write_text(
+        json.dumps(final, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+    )
+    print(json.dumps(final, indent=2, sort_keys=True))
+    return 0 if all(not row.get("failures") for row in runs) and final_state_equal else 1
+
+
 def run_study(config_path: Path) -> int:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
+    if "paper_experiment" in raw:
+        return _run_policy_study(config_path, raw)
     base = config_path.resolve().parent
     root = Path(__file__).resolve().parents[2]
     source, resources = raw["source"], raw.get("resources", {})

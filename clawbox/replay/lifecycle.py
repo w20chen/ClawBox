@@ -303,6 +303,7 @@ class FirecrackerConfig:
     balloon_enabled: bool = False
     balloon_deflate_on_oom: bool = True
     balloon_stats_polling_interval_s: int = 1
+    cgroup_path: Path | None = None
 
     @classmethod
     def from_json(cls, path: Path) -> "FirecrackerConfig":
@@ -310,6 +311,7 @@ class FirecrackerConfig:
         path_fields = {
             "binary", "api_socket", "kernel_image", "rootfs",
             "snapshot_state", "snapshot_memory", "log_path", "vsock_uds",
+            "cgroup_path",
         }
         values = {
             key: (None if value is None else Path(value)) if key in path_fields else value
@@ -523,14 +525,18 @@ class FirecrackerLifecycle:
             socket_path.unlink()
         self._remove_stale_vsock()
         argv: list[str] = []
-        if self.config.numa_node is not None or self.config.cpu_set:
+        if (self.config.numa_node is not None or self.config.cpu_set
+                or self.config.cgroup_path is not None):
             if self.config.numa_node is None or not self.config.cpu_set:
                 raise LifecycleError("NUMA node and CPU set must be configured together")
             argv.extend([
                 sys.executable, str(Path(__file__).with_name("_numa_exec.py")),
                 "--numa-node", str(self.config.numa_node),
-                "--cpu-set", self.config.cpu_set, "--",
+                "--cpu-set", self.config.cpu_set,
             ])
+            if self.config.cgroup_path is not None:
+                argv.extend(["--cgroup", str(self.config.cgroup_path)])
+            argv.append("--")
         argv.extend([str(self.config.binary), "--api-sock", str(socket_path)])
         log_target: Any = subprocess.DEVNULL
         if self.config.log_path:
@@ -852,7 +858,7 @@ class FeedbackMemoryAdmission:
         self.safety_headroom_bytes = int(safety_headroom_bytes)
         self._measure = measure_resident_bytes
         self._poll_s = float(poll_s)
-        self._leased: dict[int, dict[str, int | bool]] = {}
+        self._leased: dict[int, dict[str, Any]] = {}
         self._next_lease = 0
         self._next_ticket = 0
         self._serving_ticket = 0
@@ -869,24 +875,35 @@ class FeedbackMemoryAdmission:
         resident = max(0, resident)
         self._last_resident_bytes = resident
         self._peak_resident_bytes = max(self._peak_resident_bytes, resident)
-        outstanding = sum(int(item["incremental_bytes"]) for item in self._leased.values())
+        for item in self._leased.values():
+            lease_measure = item["measure_resident_bytes"]
+            lease_resident = max(0, int(lease_measure()))
+            realized = max(0, lease_resident - int(item["resident_at_admit_bytes"]))
+            prediction = int(item["predicted_incremental_bytes"])
+            item["realized_growth_bytes"] = realized
+            item["unrealized_growth_bytes"] = max(0, prediction - realized)
+            if realized > prediction and not bool(item["exceeded"]):
+                item["exceeded"] = True
+                self._prediction_exceeded_leases += 1
+        outstanding = sum(
+            int(item["unrealized_growth_bytes"]) for item in self._leased.values()
+        )
         charge = resident + outstanding + self.safety_headroom_bytes
         self._peak_charge_bytes = max(self._peak_charge_bytes, charge)
         if charge > self.budget_bytes:
             self._over_budget_observations += 1
-        for item in self._leased.values():
-            if not bool(item["exceeded"]):
-                growth = max(0, resident - int(item["resident_at_admit_bytes"]))
-                if growth > int(item["incremental_bytes"]):
-                    item["exceeded"] = True
-                    self._prediction_exceeded_leases += 1
         return resident
 
     def _status_locked(self, resident: int) -> dict[str, int]:
-        outstanding = sum(int(item["incremental_bytes"]) for item in self._leased.values())
+        outstanding = sum(
+            int(item["unrealized_growth_bytes"]) for item in self._leased.values()
+        )
         charge = resident + outstanding + self.safety_headroom_bytes
         return {
             "resident_bytes": resident,
+            "outstanding_unrealized_growth_bytes": outstanding,
+            # Compatibility alias for old result readers. The value now has the
+            # corrected meaning: only prediction that has not materialized yet.
             "outstanding_incremental_bytes": outstanding,
             "safety_headroom_bytes": self.safety_headroom_bytes,
             "admission_charge_bytes": charge,
@@ -894,8 +911,9 @@ class FeedbackMemoryAdmission:
             "budget_bytes": self.budget_bytes,
         }
 
-    def acquire(self, incremental_bytes: int, timeout: float | None = None
-                ) -> tuple[int, dict[str, int]] | None:
+    def acquire(self, incremental_bytes: int, timeout: float | None = None,
+                *, measure_resident_bytes: Callable[[], int] | None = None,
+                 ) -> tuple[int, dict[str, int]] | None:
         if incremental_bytes <= 0:
             raise ValueError("predicted incremental memory must be positive")
         with self._condition:
@@ -909,9 +927,14 @@ class FeedbackMemoryAdmission:
                 if ticket == self._serving_ticket and projected <= self.budget_bytes:
                     lease = self._next_lease
                     self._next_lease += 1
+                    lease_measure = measure_resident_bytes or self._measure
+                    lease_resident = max(0, int(lease_measure()))
                     self._leased[lease] = {
-                        "incremental_bytes": int(incremental_bytes),
-                        "resident_at_admit_bytes": resident,
+                        "predicted_incremental_bytes": int(incremental_bytes),
+                        "resident_at_admit_bytes": lease_resident,
+                        "realized_growth_bytes": 0,
+                        "unrealized_growth_bytes": int(incremental_bytes),
+                        "measure_resident_bytes": lease_measure,
                         "exceeded": False,
                     }
                     self._serving_ticket += 1
@@ -958,6 +981,13 @@ class FeedbackMemoryAdmission:
                 "peak_admission_charge_bytes": self._peak_charge_bytes,
                 "over_budget_observations": self._over_budget_observations,
                 "prediction_exceeded_leases": self._prediction_exceeded_leases,
+                "realized_predicted_growth_bytes": sum(
+                    min(
+                        int(item["realized_growth_bytes"]),
+                        int(item["predicted_incremental_bytes"]),
+                    )
+                    for item in self._leased.values()
+                ),
                 "active_leases": len(self._leased),
             }
 

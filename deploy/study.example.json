@@ -1,39 +1,39 @@
 {
-  "output": "/data/paper-study-001",
+  "output": "/data/clawbox-paper-spatial-smoke",
   "source": {
     "runtime_rootfs": "/data/openclaw-runtime.ext4",
     "tool_rootfs": "/data/tool-workspace.ext4",
-    "prompt": "/data/workloads/prompt.txt",
-    "trace": "/data/workloads/model-trace.jsonl"
+    "trace": "/data/workloads/short-fix.model.jsonl",
+    "prompt": "/data/workloads/short-fix.prompt.txt",
+    "repository": "OWNER/REPO"
   },
   "sessions": 8,
-  "repetitions": 3,
+  "repetitions": 1,
   "seed": 7,
-  "network_prefix": "172.30",
-  "validation_command": "cd /testbed && { git -c safe.directory=/testbed diff --binary --no-ext-diff BASE_COMMIT -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig'; git -c safe.directory=/testbed ls-files --others --exclude-standard -z -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig' | sort -z | xargs -0 -r sha256sum; }",
-  "inference_backends": ["replay", "api"],
-  "sizing_policies": ["fixed", "p90_static"],
-  "fixed_control_tool_memory_mib": 2048,
-  "memory_policies": ["resident", "snapshot"],
+  "inference_backends": ["replay"],
+  "paper_experiment": {
+    "dimension": "spatial",
+    "admission_policies": ["full_reservation", "static", "p90", "oracle"],
+    "reclamation_policies": ["resident"],
+    "restore_policies": ["reactive"],
+    "static_reservation_mib": 2048,
+    "workload_name": "short-fix",
+    "p90_plan": "/data/workloads/p90-independent-eval.json",
+    "oracle_plan": "/data/workloads/oracle-independent-eval.json"
+  },
+  "tool_pool_memory": {
+    "cgroup": "/sys/fs/cgroup/clawbox-tool-pool",
+    "hard_limit_mib": 131072,
+    "high_watermark_mib": 114688,
+    "low_watermark_mib": 98304,
+    "headroom_mib": 8192
+  },
   "resources": {
     "runtime_memory_mib": 2048,
     "tool_memory_mib": 4096,
     "cpu_first": 0,
     "numa_node": 0
   },
-  "replay": {
-    "time_scale": 1.0
-  },
-  "p90_static": {
-    "prediction_file": "/data/workloads/p90-admission-prediction.json",
-    "min_evidence": 5,
-    "headroom_fraction": 0.25,
-    "min_tool_memory_mib": 2048
-  },
-  "timeout_s": 900,
-  "api": {
-    "base_url": "https://PROVIDER_BASE_URL/v1",
-    "model": "PROVIDER_MODEL_ID",
-    "key_env": "OPENAI_API_KEY"
-  }
+  "replay": {"time_scale": 1.0},
+  "timeout_s": 7200
 }

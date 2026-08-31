@@ -1,5 +1,5 @@
 {
-  "output": "/data/clawbox-paper-spatial-001",
+  "output": "/data/clawbox-paper-decision-001",
   "source": {
     "runtime_rootfs": "/data/openclaw-runtime.ext4",
     "tool_rootfs": "/data/tool-workspace.ext4",
@@ -12,8 +12,7 @@
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/short-fix.prompt.txt",
       "trace": "/data/workloads/short-fix.model.jsonl",
-      "prediction_file": "/data/workloads/p90-independent-eval.json",
-      "oracle_file": "/data/workloads/oracle-independent-eval.json"
+      "prediction_file": "/data/workloads/p90-independent-eval.json"
     },
     {
       "name": "test-debug",
@@ -21,11 +20,10 @@
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/test-debug.prompt.txt",
       "trace": "/data/workloads/test-debug.model.jsonl",
-      "prediction_file": "/data/workloads/p90-independent-eval.json",
-      "oracle_file": "/data/workloads/oracle-independent-eval.json"
+      "prediction_file": "/data/workloads/p90-independent-eval.json"
     }
   ],
-  "concurrency_levels": [1, 8, 20, 40],
+  "concurrency_levels": [20, 40],
   "cpu_placement": "exclusive",
   "numa_host_reserve_mib": 32768,
   "snapshot_disk_reserve_mib": 32768,
@@ -34,7 +32,7 @@
   "require_parent_numa_binding": true,
   "require_held_out_predictions": true,
   "repetitions": 3,
-  "seed": 7,
+  "seed": 19,
   "resume": true,
   "continue_after_block_failure": false,
   "network_prefix": "172.30",
@@ -43,11 +41,11 @@
   "correctness_timeout_s": 300,
   "inference_backends": ["replay"],
   "paper_experiment": {
-    "dimension": "spatial",
-    "admission_policies": ["full_reservation", "static", "p90", "oracle"],
-    "reclamation_policies": ["resident"],
-    "restore_policies": ["reactive"],
-    "static_reservation_mib": 2048
+    "dimension": "decision",
+    "admission_policies": ["p90"],
+    "reclamation_policies": ["hybrid"],
+    "decision_policies": ["eager", "fixed_delay", "predicted_pressure_aware"],
+    "restore_policies": ["reactive", "prefetch"]
   },
   "tool_pool_memory": {
     "cgroup": "/sys/fs/cgroup/clawbox-tool-pool",
@@ -55,6 +53,15 @@
     "high_watermark_mib": 114688,
     "low_watermark_mib": 98304,
     "headroom_mib": 8192
+  },
+  "reclamation": {
+    "checkpoint_scope": "pair",
+    "balloon_idle_floor_mib": 256,
+    "balloon_settle_timeout_s": 5.0,
+    "fixed_delay_s": 20.0,
+    "predicted_llm_wait_s": 20.0,
+    "checkpoint_break_even_s": 4.0,
+    "restore_prefetch_lead_s": 2.0
   },
   "resources": {
     "runtime_memory_mib": 2048,

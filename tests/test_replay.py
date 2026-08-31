@@ -370,6 +370,8 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
         assert first == second
         assert first["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "exec"
         assert len(gateway.records()) == 1
+        assert gateway.records()[0]["delivered"] is True
+        assert gateway.records()[0]["http_attempts"] == 2
     finally:
         gateway.close()
 
@@ -402,6 +404,38 @@ def test_openai_gateway_gates_each_new_tool_response_once(tmp_path: Path) -> Non
     assert first == second
     assert events == ["request"]
     assert gateway.records()[0]["admission"] == {"step": 0, "calls": 2}
+
+
+def test_gateway_request_identity_is_namespaced_and_tracks_reconnects(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    _write_jsonl(trace, [{
+        "type": "action", "action_type": "llm_call", "action_id": "model-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0,
+        "data": {"raw_response": {"content": "done"}, "llm_latency_ms": 0},
+    }])
+    payload = {"model": "ignored", "messages": [{"role": "user", "content": "go"}]}
+    first = ModelGateway(
+        tmp_path / "first.json", mode="replay", trace=trace, time_scale=0,
+        request_namespace="session-a",
+    )
+    second = ModelGateway(
+        tmp_path / "second.json", mode="replay", trace=trace, time_scale=0,
+        request_namespace="session-b",
+    )
+    *_response, first_id = first._complete_with_identity(payload, http_attempt=True)
+    first.mark_delivery(first_id, delivered=False)
+    *_retry, retry_id = first._complete_with_identity(payload, http_attempt=True)
+    first.mark_delivery(retry_id, delivered=True)
+    *_other, second_id = second._complete_with_identity(payload, http_attempt=True)
+
+    assert first_id == retry_id
+    assert first_id != second_id
+    record = first.records()[0]
+    assert record["request_namespace"] == "session-a"
+    assert record["http_attempts"] == 2
+    assert record["reconnect_attempts"] == 1
+    assert record["delivery_failures"] == 1
+    assert record["delivered"] is True
 
 
 def test_replay_gateway_rejects_recorded_request_divergence(tmp_path: Path) -> None:
@@ -674,6 +708,32 @@ def test_checkpoint_disk_bound_uses_resident_admission_budget(monkeypatch, tmp_p
     assert result["required_mib"] == 468
 
 
+def test_paper_checkpoint_disk_bound_defaults_to_whole_pair(monkeypatch, tmp_path) -> None:
+    from clawbox.replay.suite import validate_disk_readiness
+
+    monkeypatch.setattr(
+        "clawbox.replay.suite.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=100_000 * 1024 * 1024),
+    )
+    raw = {
+        "concurrency_levels": [1],
+        "snapshot_disk_reserve_mib": 10,
+        "resources": {"runtime_memory_mib": 2048, "tool_memory_mib": 4096},
+        "paper_experiment": {
+            "dimension": "temporal", "admission_policies": ["p90"],
+            "reclamation_policies": ["checkpoint"],
+            "decision_policies": ["fixed_delay"],
+        },
+    }
+    pair = validate_disk_readiness(raw, tmp_path)
+    assert pair["snapshot_generation_bound"] == 2
+    assert pair["required_mib"] == 2 * (2048 + 4096) + 10
+
+    raw["reclamation"] = {"checkpoint_scope": "tool"}
+    tool = validate_disk_readiness(raw, tmp_path)
+    assert tool["required_mib"] == 2 * 4096 + 10
+
+
 def test_fair_semaphore_times_out_without_stranding_next_ticket() -> None:
     from clawbox.replay.lifecycle import FairSemaphore
 
@@ -753,21 +813,40 @@ def test_feedback_memory_admission_remeasures_instead_of_reclaiming_prediction()
     first_lease, first_status = first
     assert first_status["admission_charge_bytes"] == 500
 
-    # Runtime growth above the prediction is charged immediately.  It prevents
-    # a later admission even though the first tool has not completed yet.
+    # Realized growth is already present in live RSS, so only the unrealized
+    # remainder remains reserved. Growth beyond the prediction is counted once.
     resident[0] = 450
     observed = admission.observe()
-    assert observed["admission_charge_bytes"] == 850
-    assert admission.acquire(100, timeout=0.01) is not None
-    assert admission.acquire(100, timeout=0.01) is None
+    assert observed["outstanding_unrealized_growth_bytes"] == 0
+    assert observed["admission_charge_bytes"] == 550
+    assert admission.acquire(300, timeout=0.01) is not None
+    assert admission.acquire(200, timeout=0.01) is None
     assert admission.metrics()["prediction_exceeded_leases"] >= 1
 
-    # Completion remeasures 500 bytes of persistent RSS before dropping only
-    # the first tool's future-growth commitment.
+    # Completion remeasures persistent RSS before dropping only this lease's
+    # remaining unrealized commitment.
     resident[0] = 500
     released = admission.release(first_lease)
     assert released["resident_bytes"] == 500
-    assert released["admission_charge_bytes"] == 700
+    assert released["admission_charge_bytes"] == 850
+
+
+def test_feedback_memory_admission_tracks_realization_per_tool_vm() -> None:
+    from clawbox.replay.lifecycle import FeedbackMemoryAdmission
+
+    tool_a = [100]
+    tool_b = [100]
+    admission = FeedbackMemoryAdmission(
+        1000, 100, lambda: tool_a[0] + tool_b[0], poll_s=0.001,
+    )
+    first = admission.acquire(200, timeout=0.1, measure_resident_bytes=lambda: tool_a[0])
+    second = admission.acquire(200, timeout=0.1, measure_resident_bytes=lambda: tool_b[0])
+    assert first is not None and second is not None
+    tool_a[0] = 250
+    status = admission.observe()
+    assert status["resident_bytes"] == 350
+    assert status["outstanding_unrealized_growth_bytes"] == 250
+    assert status["admission_charge_bytes"] == 700
 
 
 def test_feedback_memory_admission_observes_checkpoint_reclamation() -> None:

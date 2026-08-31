@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .study import _source_hash, run_study
+from .study import _source_hash, expand_paper_policy_matrix, run_study
 from .stats import summary_stats
 
 
@@ -27,8 +27,12 @@ SUITE_METRICS = (
     "correctness_pass_fraction",
     "throughput_steps_per_minute",
     "mean_firecracker_rss_bytes",
+    "mean_runtime_firecracker_rss_bytes",
+    "mean_tool_firecracker_rss_bytes",
     "p95_firecracker_rss_bytes",
     "peak_firecracker_rss_bytes",
+    "peak_runtime_firecracker_rss_bytes",
+    "peak_tool_firecracker_rss_bytes",
     "firecracker_rss_time_byte_seconds",
     "mean_numa_memory_used_bytes",
     "peak_numa_memory_used_bytes",
@@ -44,6 +48,8 @@ SUITE_METRICS = (
     "checkpoint_restore_service_s",
     "checkpoint_reclamation_observations",
     "checkpoint_verified_firecracker_rss_released_bytes",
+    "checkpoint_verified_runtime_rss_released_bytes",
+    "checkpoint_verified_tool_rss_released_bytes",
     "checkpoint_cgroup_memory_released_bytes",
     "checkpoint_numa_memory_released_bytes",
     "admission_wait_s",
@@ -73,6 +79,14 @@ SUITE_METRICS = (
     "peak_tool_admission_charge_bytes",
     "tool_admission_over_budget_observations",
     "tool_prediction_exceeded_leases",
+    "tool_balloon_verified_rss_released_bytes",
+    "host_oom_kill_events",
+    "oversubscription_policy_failures",
+    "tenant_guest_oom_events",
+    "model_gateway_http_attempts",
+    "model_gateway_reconnect_attempts",
+    "model_gateway_delivery_failures",
+    "model_gateway_responses_delivered",
 )
 
 RATIO_EFFECT_METRICS = {
@@ -80,6 +94,11 @@ RATIO_EFFECT_METRICS = {
     "throughput_steps_per_minute",
     "mean_firecracker_rss_bytes", "p95_firecracker_rss_bytes",
     "peak_firecracker_rss_bytes", "firecracker_rss_time_byte_seconds",
+    "mean_runtime_firecracker_rss_bytes", "mean_tool_firecracker_rss_bytes",
+    "peak_runtime_firecracker_rss_bytes", "peak_tool_firecracker_rss_bytes",
+    "checkpoint_verified_firecracker_rss_released_bytes",
+    "checkpoint_verified_runtime_rss_released_bytes",
+    "checkpoint_verified_tool_rss_released_bytes",
     "mean_admission_wait_event_s", "p95_admission_wait_event_s",
     "max_admission_wait_event_s", "mean_session_wall_s",
     "p50_session_wall_s", "p95_session_wall_s", "p99_session_wall_s",
@@ -99,6 +118,8 @@ EXECUTION_ARTIFACTS = {
 
 
 def _baseline_label(row: dict[str, Any]) -> str:
+    if row.get("label"):
+        return f"{row.get('inference_backend', 'replay')}-{row['label']}"
     memory = "snapshot" if row.get("residency_policy") == "llm_wait_checkpoint" else "resident"
     return f"{row.get('inference_backend', 'replay')}-{row['sizing_policy']}-{memory}"
 
@@ -190,10 +211,16 @@ def validate_host_readiness(
         )
     resources = raw.get("resources", {})
     max_sessions = max(int(value) for value in raw["concurrency_levels"])
-    configured_mib = max_sessions * (
-        int(resources.get("runtime_memory_mib", 2048))
-        + int(resources.get("tool_memory_mib", 4096))
-    )
+    if "paper_experiment" in raw:
+        configured_mib = (
+            max_sessions * int(resources.get("runtime_memory_mib", 2048))
+            + int((raw.get("tool_pool_memory") or {}).get("hard_limit_mib", 0))
+        )
+    else:
+        configured_mib = max_sessions * (
+            int(resources.get("runtime_memory_mib", 2048))
+            + int(resources.get("tool_memory_mib", 4096))
+        )
     if raw.get("resident_memory_budget_mib") is not None:
         configured_mib = min(configured_mib, int(raw["resident_memory_budget_mib"]))
     required_free_mib = configured_mib + int(raw.get("numa_host_reserve_mib", 32768))
@@ -221,9 +248,14 @@ def validate_host_readiness(
 def validate_disk_readiness(raw: dict[str, Any], filesystem_path: Path) -> dict[str, Any]:
     resources = raw.get("resources", {})
     max_sessions = max(int(value) for value in raw["concurrency_levels"])
-    checkpoint_enabled = any(
-        value in {"snapshot", "llm_wait_checkpoint"}
-        for value in raw.get("memory_policies", [])
+    checkpoint_enabled = (
+        any(
+            arm["reclamation_policy"] in {"checkpoint", "hybrid"}
+            for arm in expand_paper_policy_matrix(raw)
+        ) if "paper_experiment" in raw else any(
+            value in {"snapshot", "llm_wait_checkpoint"}
+            for value in raw.get("memory_policies", [])
+        )
     )
     pair_mib = (
         int(resources.get("runtime_memory_mib", 2048))
@@ -237,7 +269,17 @@ def validate_disk_readiness(raw: dict[str, Any], filesystem_path: Path) -> dict[
         snapshot_generations = max_sessions + resident_slots
     else:
         snapshot_generations = max_sessions * 2 if checkpoint_enabled else 0
-    snapshot_mib = snapshot_generations * pair_mib
+    checkpoint_scope = str(
+        (raw.get("reclamation") or {}).get("checkpoint_scope", "pair")
+    )
+    if checkpoint_scope not in {"pair", "tool"}:
+        raise ValueError("reclamation.checkpoint_scope must be pair or tool")
+    snapshot_unit_mib = (
+        int(resources.get("tool_memory_mib", 4096))
+        if "paper_experiment" in raw and checkpoint_scope == "tool"
+        else pair_mib
+    )
+    snapshot_mib = snapshot_generations * snapshot_unit_mib
     reserve_mib = int(raw.get("snapshot_disk_reserve_mib", 32768))
     required_mib = snapshot_mib + reserve_mib
     available_mib = shutil.disk_usage(filesystem_path).free // (1024 * 1024)
@@ -281,6 +323,13 @@ def validate_numa_budget(raw: dict[str, Any], topology: dict[str, Any]) -> None:
                 f"outside NUMA node {topology['node']} ({topology['cpulist']})"
             )
         configured_mib = sessions * (runtime_mib + tool_mib)
+        if "paper_experiment" in raw:
+            if tool_mib != 4096:
+                raise ValueError("paper experiments require fixed 4096 MiB Tool VMs")
+            configured_mib = (
+                sessions * runtime_mib
+                + int((raw.get("tool_pool_memory") or {}).get("hard_limit_mib", 0))
+            )
         resident_budget = raw.get("resident_memory_budget_mib")
         if resident_budget is not None:
             if int(resident_budget) < runtime_mib + tool_mib:
@@ -297,6 +346,36 @@ def validate_numa_budget(raw: dict[str, Any], topology: dict[str, Any]) -> None:
 def _absolute(base: Path, value: object) -> str:
     path = Path(str(value))
     return str(path if path.is_absolute() else (base / path).resolve())
+
+
+def validate_tool_pool_memory(raw: dict[str, Any], base: Path) -> dict[str, Any] | None:
+    if "paper_experiment" not in raw:
+        return None
+    memory = raw.get("tool_pool_memory")
+    if not isinstance(memory, dict):
+        raise ValueError("tool_pool_memory configuration is required")
+    hard = int(memory.get("hard_limit_mib", 0))
+    high = int(memory.get("high_watermark_mib", 0))
+    low = int(memory.get("low_watermark_mib", 0))
+    headroom = int(memory.get("headroom_mib", 0))
+    if not 0 < low < high < hard:
+        raise ValueError("Tool pool watermarks must satisfy 0 < Wlow < Whigh < H")
+    if headroom < 0 or headroom >= high:
+        raise ValueError("Tool admission headroom must be non-negative and below Whigh")
+    if not memory.get("cgroup"):
+        raise ValueError("tool_pool_memory.cgroup is required")
+    path = Path(_absolute(base, memory.get("cgroup")))
+    if not (path / "cgroup.procs").is_file():
+        raise ValueError(f"Tool pool is not a cgroup v2 directory: {path}")
+    value = (path / "memory.max").read_text(encoding="ascii").strip()
+    expected = hard * 1024 * 1024
+    if value == "max" or int(value) != expected:
+        raise ValueError(f"Tool pool memory.max must equal {expected} bytes")
+    return {
+        "cgroup": str(path), "hard_limit_mib": hard,
+        "high_watermark_mib": high, "low_watermark_mib": low,
+        "headroom_mib": headroom,
+    }
 
 
 def _existing_ancestor(path: Path) -> Path:
@@ -415,10 +494,15 @@ def _validate_resumed_study(
     expected_runs = (
         int(child.get("repetitions", 1))
         * len(child.get("inference_backends", ["replay"]))
-        * len(child.get("memory_policies", ["resident", "snapshot"]))
         * (
-            len(child.get("sizing_policies", ["fixed"]))
-            + (1 if child.get("fixed_control_tool_memory_mib") is not None else 0)
+            len(expand_paper_policy_matrix(child))
+            if "paper_experiment" in child else (
+                len(child.get("memory_policies", ["resident", "snapshot"]))
+                * (
+                    len(child.get("sizing_policies", ["fixed"]))
+                    + (1 if child.get("fixed_control_tool_memory_mib") is not None else 0)
+                )
+            )
         )
     )
     runs = summary.get("runs") or []
@@ -459,14 +543,16 @@ def _macro_statistics(
                     {
                         "trajectory": run["workload"],
                         "independent_unit": run["independent_unit"],
-                        "mean": float(run["groups"][baseline]["statistics"][metric]["mean"]),
+                        "mean": float(
+                            run["groups"][baseline]["statistics"][metric]["mean"]
+                        ),
                     }
                     for run in suite_runs
                     if run["concurrency"] == concurrency
                     and int(run.get("status", 1)) == 0
                     and bool(run.get("final_state_equal"))
                     and baseline in run["groups"]
-                    and run["groups"][baseline]["statistics"].get(metric, {}).get("mean") is not None
+                    and run["groups"][baseline].get("statistics", {}).get(metric, {}).get("mean") is not None
                 ]
                 units = sorted({row["independent_unit"] for row in trajectory_rows})
                 unit_means = [
@@ -675,10 +761,12 @@ def _preflight_suite(
 ]:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     base = config_path.resolve().parent
+    tool_pool_memory = validate_tool_pool_memory(raw, base)
     node = int(raw.get("resources", {}).get("numa_node", 0))
     topology = numa_topology(node)
     validate_numa_budget(raw, topology)
     host_state = validate_host_readiness(raw, topology)
+    host_state["tool_pool_memory"] = tool_pool_memory
     parent_placement = _process_placement()
     host_state["parent_process_placement"] = parent_placement
     if bool(raw.get("require_parent_numa_binding", False)):
@@ -739,6 +827,8 @@ def _preflight_suite(
             + ", ".join(missing_execution_artifacts)
         )
     predictions: dict[str, dict[str, Any]] = {}
+    paper_arms = expand_paper_policy_matrix(raw) if "paper_experiment" in raw else []
+    paper_admission = {arm["admission_policy"] for arm in paper_arms}
     for workload in workloads:
         if not isinstance(workload, dict) or not workload.get("name"):
             raise ValueError("each workload requires a name")
@@ -766,7 +856,26 @@ def _preflight_suite(
         artifact_provenance["workloads"][name]["independent_unit"] = str(
             workload["independent_unit"]
         )
-        if {"p90_static", "p90_reservation"}.intersection(raw.get("sizing_policies", [])):
+        if "paper_experiment" in raw and paper_admission.intersection({"p90", "oracle"}):
+            provenance: dict[str, Any] = {}
+            experiment = raw["paper_experiment"]
+            for policy, field, workload_field in (
+                ("p90", "p90_plan", "prediction_file"),
+                ("oracle", "oracle_plan", "oracle_file"),
+            ):
+                if policy not in paper_admission:
+                    continue
+                configured = workload.get(workload_field) or experiment.get(field)
+                if not configured:
+                    raise ValueError(f"{name}: {workload_field} is required for {policy} admission")
+                plan_path = Path(_absolute(base, configured))
+                provenance[policy] = _prediction_provenance(
+                    plan_path, workload_name=name,
+                    trace_path=Path(_absolute(base, workload["trace"])),
+                    require_held_out=bool(raw.get("require_held_out_predictions", False)),
+                )
+            predictions[name] = provenance
+        elif {"p90_static", "p90_reservation"}.intersection(raw.get("sizing_policies", [])):
             p90 = raw.get("p90_reservation") or raw.get("p90_static")
             if not isinstance(p90, dict):
                 raise ValueError("p90_reservation configuration is required")
@@ -865,8 +974,27 @@ def run_suite(config_path: Path) -> int:
             child["output"] = str(child_output)
             if workload.get("validation_command"):
                 child["validation_command"] = workload["validation_command"]
+            if "paper_experiment" in child:
+                paper = child["paper_experiment"]
+                paper["workload_name"] = name
+                selected_admission = {
+                    arm["admission_policy"] for arm in expand_paper_policy_matrix(child)
+                }
+                for policy, field, workload_field in (
+                    ("p90", "p90_plan", "prediction_file"),
+                    ("oracle", "oracle_plan", "oracle_file"),
+                ):
+                    if policy not in selected_admission:
+                        continue
+                    configured = workload.get(workload_field) or paper.get(field)
+                    paper[field] = _absolute(base, configured)
+                    if _sha256(Path(paper[field])) != prediction_provenance[name][policy]["sha256"]:
+                        raise ValueError(f"{name}: {policy} plan changed while the suite was running")
+                memory = child.get("tool_pool_memory") or {}
+                if memory.get("cgroup"):
+                    memory["cgroup"] = _absolute(base, memory["cgroup"])
             p90 = child.get("p90_reservation") or child.get("p90_static")
-            if isinstance(p90, dict):
+            if "paper_experiment" not in child and isinstance(p90, dict):
                 p90["workload_name"] = name
                 configured_prediction = workload.get("prediction_file") or p90.get("prediction_file")
                 if configured_prediction:
@@ -911,8 +1039,13 @@ def run_suite(config_path: Path) -> int:
                     "repetition": arm.get("repetition"),
                     "arm_order_position": arm.get("arm_order_position"),
                     "inference_backend": arm.get("inference_backend", "replay"),
-                    "sizing_policy": arm.get("sizing_policy"),
-                    "residency_policy": arm.get("residency_policy"),
+                    "sizing_policy": arm.get("admission_policy", arm.get("sizing_policy")),
+                    "admission_policy": arm.get("admission_policy"),
+                    "residency_policy": arm.get("reclamation_policy", arm.get("residency_policy")),
+                    "reclamation_policy": arm.get("reclamation_policy"),
+                    "decision_policy": arm.get("decision_policy"),
+                    "restore_policy": arm.get("restore_policy"),
+                    "checkpoint_scope": arm.get("checkpoint_scope"),
                     "configured_tool_memory_mib": arm.get("configured_tool_memory_mib"),
                     "sessions_requested": arm.get("sessions_requested"),
                     "sessions_completed": arm.get("sessions_completed"),

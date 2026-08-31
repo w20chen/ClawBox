@@ -4,6 +4,7 @@ import json
 import importlib.util
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -18,7 +19,10 @@ from clawbox.experiments.capabilities import CapabilityError, WorkflowClassifica
 from clawbox.experiments.results import FailureCategory, RunStatus
 from clawbox.experiments.cli import main as experiments_main
 from clawbox.benchmark.kubernetes import BenchmarkTask, KubernetesBenchmarkLauncher
-from clawbox.replay.study import _p90_prediction, _predictive_tool_memory_mib, study_experiment_spec
+from clawbox.replay.study import (
+    _p90_prediction, _predictive_tool_memory_mib, expand_paper_policy_matrix,
+    study_experiment_spec,
+)
 
 
 DIGEST = "registry.example/task@sha256:" + "a" * 64
@@ -179,6 +183,45 @@ def test_replay_factorial_crosses_fixed_predictive_and_residency_without_hidden_
         _p90_prediction(insufficient, None)
 
 
+def test_paper_policy_matrices_keep_4_gib_capacity_and_axes_separate():
+    base = {"resources": {"tool_memory_mib": 4096}}
+    spatial = expand_paper_policy_matrix({**base, "paper_experiment": {
+        "dimension": "spatial",
+        "admission_policies": ["full_reservation", "static", "p90", "oracle"],
+        "reclamation_policies": ["resident"],
+        "restore_policies": ["reactive"],
+    }})
+    assert [arm["admission_policy"] for arm in spatial] == [
+        "full_reservation", "static", "p90", "oracle",
+    ]
+    assert {arm["reclamation_policy"] for arm in spatial} == {"resident"}
+
+    temporal = expand_paper_policy_matrix({**base, "paper_experiment": {
+        "dimension": "temporal", "admission_policies": ["p90"],
+        "reclamation_policies": ["resident", "balloon", "checkpoint", "hybrid"],
+        "decision_policies": ["fixed_delay"],
+    }})
+    assert len(temporal) == 4
+    assert {arm["admission_policy"] for arm in temporal} == {"p90"}
+
+    decision = expand_paper_policy_matrix({**base, "paper_experiment": {
+        "dimension": "decision", "admission_policies": ["p90"],
+        "reclamation_policies": ["hybrid"],
+        "decision_policies": ["eager", "fixed_delay", "predicted_pressure_aware"],
+        "restore_policies": ["reactive", "prefetch"],
+    }})
+    assert len(decision) == 6
+    assert {arm["reclamation_policy"] for arm in decision} == {"hybrid"}
+
+    with pytest.raises(ValueError, match="4096"):
+        expand_paper_policy_matrix({
+            "resources": {"tool_memory_mib": 2048},
+            "paper_experiment": {
+                "dimension": "spatial", "admission_policies": ["p90"],
+            },
+        })
+
+
 def test_per_tool_plan_requires_heterogeneous_reservations_and_keeps_fixed_capacity():
     payload = {
         "tenant_id": "tenant-a", "repo_fingerprint": "org/repo", "generation": 4,
@@ -304,6 +347,7 @@ def test_openclaw_adapter_keeps_legacy_mode_alias():
     )
     assert "--mode {resident,snapshot}" in completed.stdout
     assert "--residency-policy {resident,llm_wait_checkpoint}" in completed.stdout
+    assert "--checkpoint-scope {pair,tool}" in completed.stdout
 
 
 def test_direct_tool_init_reconstructs_guest_collector_environment():
@@ -364,6 +408,219 @@ def test_openclaw_pair_checkpoint_and_restore_dependency_order():
         "checkpoint-runtime", "checkpoint-tool",
         "restore-tool", "tool-ready", "restore-runtime",
     ]
+
+
+def test_pair_checkpoint_coordinator_blocks_response_until_pair_is_restored():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_pair_race", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = []
+    runtime_checkpoint_started = threading.Event()
+    allow_checkpoint = threading.Event()
+
+    class Lifecycle:
+        def __init__(self, name, rss):
+            self.name, self.rss, self.resident = name, rss, True
+
+        def rss_bytes(self):
+            return self.rss if self.resident else 0
+
+        def checkpoint_and_evict(self):
+            events.append(f"checkpoint-{self.name}")
+            if self.name == "runtime":
+                runtime_checkpoint_started.set()
+                assert allow_checkpoint.wait(1)
+            self.resident = False
+            return 0.01
+
+        def restore(self):
+            events.append(f"restore-{self.name}")
+            self.resident = True
+            return 0.01
+
+    runtime, tool = Lifecycle("runtime", 700), Lifecycle("tool", 100)
+    coordinator = module.PairCheckpointCoordinator(
+        runtime, tool, lambda: events.append("tool-ready"),
+    )
+    coordinator.start_request()
+    transitions = []
+    eviction = threading.Thread(target=lambda: transitions.append(
+        coordinator.evict(lambda: {"numa_memory_bytes": 1, "cgroup_memory_bytes": 2})
+    ))
+    eviction.start()
+    assert runtime_checkpoint_started.wait(1)
+
+    restored = []
+    response = threading.Thread(target=lambda: (
+        coordinator.begin_response_delivery(), restored.append(coordinator.restore())
+    ))
+    response.start()
+    response.join(0.02)
+    assert response.is_alive()
+    allow_checkpoint.set()
+    eviction.join(1)
+    response.join(1)
+
+    assert not eviction.is_alive() and not response.is_alive()
+    assert coordinator.state == "running"
+    assert transitions[0].runtime_rss_before_bytes == 700
+    assert transitions[0].runtime_rss_after_bytes == 0
+    assert restored[0]["runtime_restored"] is True
+    assert events == [
+        "checkpoint-runtime", "checkpoint-tool",
+        "restore-tool", "tool-ready", "restore-runtime",
+    ]
+
+
+def test_pair_checkpoint_coordinator_response_wins_before_eviction():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_pair_cancel", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Lifecycle:
+        resident = True
+
+        def rss_bytes(self):
+            return 1
+
+        def checkpoint_and_evict(self):
+            raise AssertionError("response should cancel checkpoint")
+
+    coordinator = module.PairCheckpointCoordinator(
+        Lifecycle(), Lifecycle(), lambda: None,
+    )
+    coordinator.start_request()
+    coordinator.begin_response_delivery()
+    assert coordinator.evict(lambda: {}) is None
+    assert coordinator.restore() is None
+    assert coordinator.state == "running"
+
+
+def test_tool_only_checkpoint_scope_is_an_explicit_ablation():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_tool_scope", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = []
+
+    class Lifecycle:
+        def __init__(self, name):
+            self.name, self.resident = name, True
+
+        def rss_bytes(self):
+            return 10 if self.resident else 0
+
+        def checkpoint_and_evict(self):
+            events.append(f"checkpoint-{self.name}")
+            self.resident = False
+            return 0
+
+        def restore(self):
+            events.append(f"restore-{self.name}")
+            self.resident = True
+            return 0
+
+
+    runtime, tool = Lifecycle("runtime"), Lifecycle("tool")
+    coordinator = module.PairCheckpointCoordinator(
+        runtime, tool, lambda: events.append("tool-ready"), checkpoint_scope="tool",
+    )
+    coordinator.start_request()
+    transition = coordinator.evict(lambda: {})
+    assert transition is not None and transition.scope == "tool"
+    assert runtime.resident and not tool.resident
+    coordinator.begin_response_delivery()
+    restored = coordinator.restore()
+    assert restored is not None and restored["runtime_restored"] is False
+    assert events == ["checkpoint-tool", "restore-tool", "tool-ready"]
+
+
+def test_pair_checkpoint_coordinator_restores_exactly_once_under_prefetch_race():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_restore_race", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = []
+    restore_started = threading.Event()
+    allow_restore = threading.Event()
+
+    class Lifecycle:
+        def __init__(self, name):
+            self.name, self.resident = name, True
+
+        def rss_bytes(self):
+            return 10 if self.resident else 0
+
+        def checkpoint_and_evict(self):
+            self.resident = False
+            return 0
+
+        def restore(self):
+            events.append(f"restore-{self.name}")
+            if self.name == "tool":
+                restore_started.set()
+                assert allow_restore.wait(1)
+            self.resident = True
+            return 0
+
+    runtime, tool = Lifecycle("runtime"), Lifecycle("tool")
+    coordinator = module.PairCheckpointCoordinator(
+        runtime, tool, lambda: events.append("tool-ready"),
+    )
+    coordinator.start_request()
+    assert coordinator.evict(lambda: {}) is not None
+    outcomes = []
+    prefetch = threading.Thread(target=lambda: outcomes.append(coordinator.restore()))
+    reactive = threading.Thread(target=lambda: outcomes.append(coordinator.restore()))
+    prefetch.start()
+    assert restore_started.wait(1)
+    reactive.start()
+    reactive.join(0.02)
+    assert reactive.is_alive()
+    allow_restore.set()
+    prefetch.join(1)
+    reactive.join(1)
+
+    assert events == ["restore-tool", "tool-ready", "restore-runtime"]
+    assert sum(item is not None for item in outcomes) == 1
+    assert coordinator.state == "running"
+
+
+def test_pair_checkpoint_coordinator_fails_closed_after_partial_checkpoint():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_partial_failure", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Lifecycle:
+        def __init__(self, fail=False):
+            self.fail, self.resident = fail, True
+
+        def rss_bytes(self):
+            return 10 if self.resident else 0
+
+        def checkpoint_and_evict(self):
+            if self.fail:
+                raise RuntimeError("injected checkpoint failure")
+            self.resident = False
+            return 0
+
+    runtime, tool = Lifecycle(), Lifecycle(fail=True)
+    coordinator = module.PairCheckpointCoordinator(runtime, tool, lambda: None)
+    coordinator.start_request()
+    with pytest.raises(RuntimeError, match="injected checkpoint failure"):
+        coordinator.evict(lambda: {})
+    assert coordinator.state == "failed"
+    coordinator.begin_response_delivery()
+    with pytest.raises(RuntimeError, match="checkpoint coordinator failed"):
+        coordinator.restore()
 
 
 def test_openclaw_tool_checkpoint_failure_fails_session_and_releases_pair_lease():

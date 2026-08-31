@@ -15,11 +15,15 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, Callable, NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clawbox.replay.lifecycle import (
     FairResourcePool, FeedbackMemoryAdmission, FirecrackerConfig, FirecrackerLifecycle,
 )
 from clawbox.replay.model_gateway import ModelGateway
+
+
+TOOL_VM_CONTRACT_MIB = 4096
 
 
 def numa_memory_used_bytes(node: int) -> int | None:
@@ -56,6 +60,52 @@ def cgroup_memory_used_bytes() -> int | None:
         return None if path is None else int((path / "memory.current").read_text().strip())
     except (OSError, ValueError):
         return None
+
+
+def cgroup_value(path: Path, name: str) -> int | None:
+    try:
+        value = (path / name).read_text(encoding="ascii").strip()
+        return None if value == "max" else int(value)
+    except (OSError, ValueError):
+        return None
+
+
+def cgroup_memory_events(path: Path) -> dict[str, int]:
+    try:
+        return {
+            fields[0]: int(fields[1])
+            for line in (path / "memory.events").read_text(encoding="ascii").splitlines()
+            if len(fields := line.split()) == 2
+        }
+    except (OSError, ValueError):
+        return {}
+
+
+def guest_oom_observed(log_path: Path | None) -> bool:
+    if log_path is None:
+        return False
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return any(marker in text for marker in (
+        "out of memory: killed process", "oom-kill:",
+        "kernel panic - not syncing: system is deadlocked on memory",
+    ))
+
+
+def validate_tool_pool_cgroup(path: Path, hard_limit_mib: int) -> Path:
+    resolved = path.resolve(strict=True)
+    if not (resolved / "cgroup.procs").is_file():
+        raise ValueError(f"Tool pool is not a cgroup v2 directory: {resolved}")
+    configured = cgroup_value(resolved, "memory.max")
+    expected = int(hard_limit_mib) * 1024 * 1024
+    if configured != expected:
+        rendered = "max" if configured is None else str(configured)
+        raise ValueError(
+            f"Tool pool memory.max is {rendered}; expected exactly {expected} bytes"
+        )
+    return resolved
 
 
 def percentile(values: list[float | int], fraction: float) -> float:
@@ -99,6 +149,155 @@ def restore_tool_runtime_pair(
     wait_tool_ready()
     elapsed += runtime.restore()
     return elapsed
+
+
+class CheckpointTransition(NamedTuple):
+    scope: str
+    elapsed_s: float
+    runtime_rss_before_bytes: int
+    runtime_rss_after_bytes: int
+    tool_rss_before_bytes: int
+    tool_rss_after_bytes: int
+    host_before: dict[str, int | None]
+    host_after: dict[str, int | None]
+
+
+class PairCheckpointCoordinator:
+    """Serialize response delivery, checkpoint, and restore for one sandbox.
+
+    Firecracker snapshots preserve guest process and network-device state.  The
+    coordinator supplies the missing host-side atomicity: response delivery can
+    either win before eviction begins or wait until the dependency-safe restore
+    has completed, but it can never race a partially evicted pair.
+    """
+
+    def __init__(
+        self,
+        runtime: FirecrackerLifecycle,
+        tool: FirecrackerLifecycle,
+        wait_tool_ready: Callable[[], None],
+        *,
+        checkpoint_scope: str = "pair",
+    ) -> None:
+        if checkpoint_scope not in {"pair", "tool"}:
+            raise ValueError("checkpoint_scope must be pair or tool")
+        self.runtime = runtime
+        self.tool = tool
+        self.wait_tool_ready = wait_tool_ready
+        self.checkpoint_scope = checkpoint_scope
+        self._condition = threading.Condition()
+        self._state = "running"
+        self._response_delivery_started = False
+        self._failure: Exception | None = None
+
+    @property
+    def state(self) -> str:
+        with self._condition:
+            return self._state
+
+    def start_request(self) -> None:
+        with self._condition:
+            if self._state != "running":
+                raise RuntimeError(
+                    f"new model request started while checkpoint state is {self._state}"
+                )
+            self._response_delivery_started = False
+
+    def begin_response_delivery(self) -> None:
+        with self._condition:
+            self._response_delivery_started = True
+            self._condition.notify_all()
+
+    def evict(
+        self,
+        observe_host: Callable[[], dict[str, int | None]],
+    ) -> CheckpointTransition | None:
+        with self._condition:
+            if self._state != "running" or self._response_delivery_started:
+                return None
+            self._state = "evicting"
+
+        runtime_before = self.runtime.rss_bytes()
+        tool_before = self.tool.rss_bytes()
+        host_before = observe_host()
+        started = time.monotonic()
+        try:
+            if self.checkpoint_scope == "pair":
+                checkpoint_runtime_tool_pair(self.runtime, self.tool)
+            else:
+                self.tool.checkpoint_and_evict()
+            elapsed = time.monotonic() - started
+            runtime_after = self.runtime.rss_bytes()
+            tool_after = self.tool.rss_bytes()
+            if tool_after != 0 or (
+                self.checkpoint_scope == "pair" and runtime_after != 0
+            ):
+                raise RuntimeError(
+                    f"{self.checkpoint_scope} checkpoint did not release expected Firecracker RSS"
+                )
+            host_after = observe_host()
+        except Exception as exc:
+            with self._condition:
+                self._failure = exc
+                self._state = "failed"
+                self._condition.notify_all()
+            raise
+
+        transition = CheckpointTransition(
+            scope=self.checkpoint_scope,
+            elapsed_s=elapsed,
+            runtime_rss_before_bytes=runtime_before,
+            runtime_rss_after_bytes=runtime_after,
+            tool_rss_before_bytes=tool_before,
+            tool_rss_after_bytes=tool_after,
+            host_before=host_before,
+            host_after=host_after,
+        )
+        with self._condition:
+            self._state = "evicted"
+            self._condition.notify_all()
+        return transition
+
+    def restore(self) -> dict[str, Any] | None:
+        with self._condition:
+            while self._state in {"evicting", "restoring"}:
+                self._condition.wait()
+            if self._state == "failed":
+                raise RuntimeError("checkpoint coordinator failed") from self._failure
+            if self._state == "running":
+                return None
+            if self._state != "evicted":
+                raise RuntimeError(f"cannot restore checkpoint state {self._state}")
+            self._state = "restoring"
+
+        started = time.monotonic()
+        try:
+            if self.checkpoint_scope == "pair":
+                restore_tool_runtime_pair(
+                    self.tool, self.runtime, self.wait_tool_ready,
+                )
+                runtime_restored = True
+            else:
+                self.tool.restore()
+                self.wait_tool_ready()
+                runtime_restored = False
+            elapsed = time.monotonic() - started
+        except Exception as exc:
+            with self._condition:
+                self._failure = exc
+                self._state = "failed"
+                self._condition.notify_all()
+            raise
+
+        with self._condition:
+            self._state = "running"
+            self._condition.notify_all()
+        return {
+            "checkpoint_scope": self.checkpoint_scope,
+            "restore_s": elapsed,
+            "runtime_restored": runtime_restored,
+            "tool_restored": True,
+        }
 
 
 def close_runtime_tool_pair_and_release(
@@ -319,6 +518,28 @@ def predictive_steps_from_plan(plan_payload: dict, workload: str) -> dict[int, d
     return steps
 
 
+def oracle_steps_from_plan(plan_payload: dict, workload: str) -> dict[int, dict]:
+    """Load held-out actual incremental working sets for the oracle upper bound."""
+    workload_plan = plan_payload["per_tool_memory"]["workloads"][workload]
+    steps: dict[int, dict] = {}
+    for invocation in workload_plan["tool_invocations"]:
+        step = int(invocation["model_step"])
+        actual_kib = invocation.get("actual_incremental_kib")
+        if actual_kib is None and invocation.get("actual_command_peak_memory_bytes") is not None:
+            actual_kib = math.ceil(int(invocation["actual_command_peak_memory_bytes"]) / 1024.0)
+        if actual_kib is None:
+            raise ValueError(
+                "oracle plan requires actual_incremental_kib or "
+                "actual_command_peak_memory_bytes for every Tool invocation"
+            )
+        current = steps.setdefault(step, {
+            "incremental_oracle_kib": 0, "tool_invocations": [],
+        })
+        current["incremental_oracle_kib"] += max(1, int(actual_kib))
+        current["tool_invocations"].append(invocation)
+    return steps
+
+
 def ssh_capture(
     spec: dict, command: str, timeout_s: float,
 ) -> tuple[int, bytes, bytes, bool]:
@@ -410,6 +631,10 @@ def main() -> None:
     p.add_argument("manifest", type=Path)
     p.add_argument("--output", required=True, type=Path)
     residency = p.add_mutually_exclusive_group(required=True)
+    residency.add_argument(
+        "--reclamation-policy",
+        choices=("resident", "balloon", "checkpoint", "hybrid"),
+    )
     residency.add_argument("--residency-policy", choices=("resident", "llm_wait_checkpoint"))
     residency.add_argument("--mode", choices=("resident", "snapshot"),
                            help="legacy alias; snapshot means llm_wait_checkpoint")
@@ -428,13 +653,36 @@ def main() -> None:
     )
     p.add_argument("--tool-reservation-budget-mib", type=int)
     p.add_argument("--tool-admission-safety-headroom-mib", type=int, default=1024)
+    p.add_argument(
+        "--admission-policy",
+        choices=("full_reservation", "static", "p90", "oracle"),
+    )
     p.add_argument("--idle-tool-vm-rss-mib", type=float)
     p.add_argument("--static-tool-reservation-mib", type=int)
     p.add_argument("--tool-memory-plan", type=Path)
     p.add_argument("--tool-memory-workload")
+    p.add_argument("--tool-pool-cgroup", type=Path)
+    p.add_argument("--tool-pool-hard-limit-mib", type=int)
+    p.add_argument("--tool-pool-low-watermark-mib", type=int)
     p.add_argument("--tool-balloon-reclamation", action="store_true")
     p.add_argument("--tool-balloon-idle-floor-mib", type=int)
     p.add_argument("--tool-balloon-settle-timeout-s", type=float, default=5.0)
+    p.add_argument(
+        "--eviction-policy",
+        choices=("eager", "fixed_delay", "predicted_pressure_aware"),
+        default="fixed_delay",
+    )
+    p.add_argument("--eviction-delay-s", type=float, default=20.0)
+    p.add_argument("--predicted-llm-wait-s", type=float, default=20.0)
+    p.add_argument("--checkpoint-break-even-s", type=float, default=4.0)
+    p.add_argument(
+        "--restore-policy", choices=("reactive", "prefetch"), default="reactive",
+    )
+    p.add_argument("--restore-prefetch-lead-s", type=float, default=2.0)
+    p.add_argument(
+        "--checkpoint-scope", choices=("pair", "tool"), default="pair",
+        help="checkpoint Runtime+Tool by default; tool is a secondary ablation",
+    )
     a = p.parse_args()
     if a.timeout_s <= 0:
         p.error("--timeout-s must be positive")
@@ -447,16 +695,30 @@ def main() -> None:
     if a.tool_reservation_budget_mib is not None and a.tool_reservation_budget_mib <= 0:
         p.error("--tool-reservation-budget-mib must be positive")
     if a.tool_reservation_budget_mib is not None:
-        if (a.static_tool_reservation_mib is None) == (a.tool_memory_plan is None):
-            p.error("reservation budget requires exactly one static reservation or tool plan")
-        if a.idle_tool_vm_rss_mib is None or a.idle_tool_vm_rss_mib <= 0:
-            p.error("reservation budget requires positive --idle-tool-vm-rss-mib")
+        if a.admission_policy is None:
+            # Compatibility for older direct invocations.
+            a.admission_policy = "p90" if a.tool_memory_plan is not None else "full_reservation"
+        if a.admission_policy in {"p90", "oracle"} and a.tool_memory_plan is None:
+            p.error(f"{a.admission_policy} admission requires --tool-memory-plan")
+        if a.admission_policy == "static" and a.static_tool_reservation_mib is None:
+            p.error("static admission requires --static-tool-reservation-mib")
+        if a.admission_policy == "full_reservation":
+            a.static_tool_reservation_mib = TOOL_VM_CONTRACT_MIB
+        if a.admission_policy in {"full_reservation", "static"} and a.tool_memory_plan is not None:
+            p.error(f"{a.admission_policy} admission does not use a Tool memory plan")
         if (a.static_tool_reservation_mib is not None
-                and a.static_tool_reservation_mib > a.tool_reservation_budget_mib):
-            p.error("static Tool reservation exceeds the reservation budget")
+                and a.static_tool_reservation_mib > TOOL_VM_CONTRACT_MIB):
+            p.error("static Tool reservation exceeds the 4 GiB tenant contract")
         if (a.tool_admission_safety_headroom_mib < 0
                 or a.tool_admission_safety_headroom_mib >= a.tool_reservation_budget_mib):
             p.error("Tool admission safety headroom must be non-negative and below budget")
+        if a.tool_pool_cgroup is None or a.tool_pool_hard_limit_mib is None:
+            p.error("Tool admission requires a cgroup and its fixed hard limit")
+        if a.tool_pool_hard_limit_mib <= a.tool_reservation_budget_mib:
+            p.error("Tool pool hard limit must be above the high admission watermark")
+        if (a.tool_pool_low_watermark_mib is None
+                or not 0 < a.tool_pool_low_watermark_mib < a.tool_reservation_budget_mib):
+            p.error("Tool pool low watermark must be positive and below the high watermark")
     if a.tool_memory_plan is not None and not a.tool_memory_workload:
         p.error("--tool-memory-workload is required with --tool-memory-plan")
     if a.inference == "replay" and a.trace is None:
@@ -468,16 +730,23 @@ def main() -> None:
     a.residency_policy = a.residency_policy or (
         "llm_wait_checkpoint" if a.mode == "snapshot" else a.mode
     )
+    a.reclamation_policy = a.reclamation_policy or (
+        "checkpoint" if a.residency_policy == "llm_wait_checkpoint" else "resident"
+    )
+    a.tool_balloon_reclamation = a.tool_balloon_reclamation or (
+        a.reclamation_policy in {"balloon", "hybrid"}
+    )
     if a.tool_balloon_reclamation:
-        if a.residency_policy != "resident":
-            p.error("Tool balloon reclamation is a resident-only baseline")
-        if a.tool_memory_plan is None:
-            p.error("Tool balloon reclamation requires a per-tool memory plan")
         if (a.tool_balloon_idle_floor_mib is None
                 or a.tool_balloon_idle_floor_mib <= 0):
             p.error("Tool balloon reclamation requires a positive idle floor")
         if a.tool_balloon_settle_timeout_s <= 0:
             p.error("Tool balloon settle timeout must be positive")
+    if a.reclamation_policy in {"checkpoint", "hybrid"}:
+        if a.eviction_delay_s < 0 or a.predicted_llm_wait_s < 0:
+            p.error("eviction delay and predicted LLM wait must be non-negative")
+        if a.checkpoint_break_even_s < 0 or a.restore_prefetch_lead_s < 0:
+            p.error("checkpoint break-even and prefetch lead must be non-negative")
     raw = json.loads(a.manifest.read_text())
     configured_nodes = {
         FirecrackerConfig.from_json(Path(session[field])).numa_node
@@ -496,6 +765,11 @@ def main() -> None:
     if len(memory_splits) != 1:
         raise ValueError("all sessions must use the same Runtime/Tool memory split")
     runtime_memory_mib, tool_memory_mib = next(iter(memory_splits))
+    if tool_memory_mib != TOOL_VM_CONTRACT_MIB:
+        raise ValueError(
+            f"paper experiments require every Tool VM to expose exactly "
+            f"{TOOL_VM_CONTRACT_MIB} MiB; got {tool_memory_mib} MiB"
+        )
     if (a.tool_balloon_reclamation
             and a.tool_balloon_idle_floor_mib >= tool_memory_mib):
         p.error("Tool balloon idle floor must be below fixed Tool-VM capacity")
@@ -530,12 +804,22 @@ def main() -> None:
     predictive_steps: dict[int, dict] = {}
     if a.tool_memory_plan is not None:
         plan_payload = json.loads(a.tool_memory_plan.read_text(encoding="utf-8"))
-        predictive_steps = predictive_steps_from_plan(
-            plan_payload, a.tool_memory_workload
+        predictive_steps = (
+            oracle_steps_from_plan(plan_payload, a.tool_memory_workload)
+            if a.admission_policy == "oracle"
+            else predictive_steps_from_plan(plan_payload, a.tool_memory_workload)
         )
+    tool_pool_cgroup = None
+    tool_pool_events_before: dict[str, int] = {}
+    if a.tool_reservation_budget_mib is not None:
+        tool_pool_cgroup = validate_tool_pool_cgroup(
+            a.tool_pool_cgroup, a.tool_pool_hard_limit_mib,
+        )
+        tool_pool_events_before = cgroup_memory_events(tool_pool_cgroup)
     a.output.mkdir(parents=True, exist_ok=False)
     lifecycles: list[FirecrackerLifecycle] = []
     tool_lifecycles: list[FirecrackerLifecycle] = []
+    runtime_lifecycles: list[FirecrackerLifecycle] = []
     lifecycle_lock = threading.Lock()
     def measure_tool_resident_bytes() -> int:
         with lifecycle_lock:
@@ -548,29 +832,15 @@ def main() -> None:
         )
         if a.tool_reservation_budget_mib is not None else None
     )
+    # There is deliberately no fixed-capacity Tool materialization semaphore.
+    # A 4 GiB guest mapping is a tenant contract, not 4 GiB of pre-resident host
+    # memory. Live RSS plus unrealized growth is the sole Tool admission charge.
     tool_materialization_slots = None
     tool_materialization_pool = None
-    if tool_admission is not None:
-        usable_tool_memory_mib = (
-            int(a.tool_reservation_budget_mib)
-            - int(a.tool_admission_safety_headroom_mib)
-        )
-        tool_materialization_slots = usable_tool_memory_mib // tool_memory_mib
-        if tool_materialization_slots < 1:
-            raise ValueError(
-                "Tool memory budget after safety headroom is smaller than one "
-                "fixed-capacity Tool VM"
-            )
-        # A per-command prediction describes incremental command working set; it
-        # cannot predict lazy first-touch materialization of the VM's fixed RAM.
-        # Bound that separate risk conservatively by fixed-capacity slots.  A
-        # slot is released only after close/checkpoint or verified balloon
-        # reclamation, while FeedbackMemoryAdmission remains the per-tool gate.
-        tool_materialization_pool = FairResourcePool(
-            list(range(tool_materialization_slots))
-        )
     samples: list[dict] = []
     stop = threading.Event()
+    pressure_reclaim_active = threading.Event()
+    pressure_reclaim_lock = threading.Lock()
     started_unix_s = time.time()
     started = time.monotonic()
     cgroup_baseline = cgroup_memory_used_bytes()
@@ -581,16 +851,25 @@ def main() -> None:
             with lifecycle_lock:
                 rss = sum(item.rss_bytes() for item in lifecycles)
                 tool_rss = sum(item.rss_bytes() for item in tool_lifecycles)
+                runtime_rss = sum(item.rss_bytes() for item in runtime_lifecycles)
                 resident_vms = sum(1 for item in lifecycles if item.resident)
             admission_status = (
                 tool_admission.observe(tool_rss) if tool_admission is not None else None
             )
+            if tool_admission is not None:
+                high_bytes = int(a.tool_reservation_budget_mib) * 1024 * 1024
+                low_bytes = int(a.tool_pool_low_watermark_mib) * 1024 * 1024
+                if tool_rss >= high_bytes:
+                    pressure_reclaim_active.set()
+                elif tool_rss <= low_bytes:
+                    pressure_reclaim_active.clear()
             cgroup_memory = cgroup_memory_used_bytes()
             numa_memory = numa_memory_used_bytes(numa_node)
             samples.append({
                 "elapsed_s": time.monotonic() - started,
                 "firecracker_rss_bytes": rss,
                 "tool_firecracker_rss_bytes": tool_rss,
+                "runtime_firecracker_rss_bytes": runtime_rss,
                 "resident_vms": resident_vms,
                 "numa_memory_used_bytes": numa_memory,
                 "numa_memory_delta_bytes": (
@@ -617,11 +896,14 @@ def main() -> None:
         remaining = lambda: max(0.0, deadline - time.monotonic())
         tool = FirecrackerLifecycle(tool_config)
         runtime = FirecrackerLifecycle(runtime_config)
+        if tool_pool_cgroup is not None:
+            tool.config = replace(tool.config, cgroup_path=tool_pool_cgroup)
         if a.tool_balloon_reclamation:
             tool.config = replace(tool.config, balloon_enabled=True)
         with lifecycle_lock:
             lifecycles.extend([tool, runtime])
             tool_lifecycles.append(tool)
+            runtime_lifecycles.append(runtime)
         snapshots = 0; snapshot_s = restore_s = 0.0
         admission_wait_s = 0.0
         admission_acquisitions = 0
@@ -638,7 +920,17 @@ def main() -> None:
         tool_materialization_lease: int | None = None
         current_tool_materialization_event: dict | None = None
         tool_reservation_lock = threading.Lock()
+        tool_state_lock = threading.Lock()
+        idle_reclaim_complete = threading.Event()
+        idle_reclaim_complete.set()
+        idle_reclaim_errors: list[Exception] = []
         session_closing = threading.Event()
+        checkpoint_coordinator = PairCheckpointCoordinator(
+            runtime,
+            tool,
+            lambda: wait_tcp(spec["tool_host"], 2222, 30),
+            checkpoint_scope=a.checkpoint_scope,
+        )
 
         def release_tool_reservation() -> None:
             nonlocal tool_reservation_lease, current_tool_reservation_event
@@ -650,12 +942,13 @@ def main() -> None:
             if lease is not None:
                 assert tool_admission is not None
                 if a.tool_balloon_reclamation and tool.resident:
-                    balloon_event = adjust_balloon(
-                        tool,
-                        tool_memory_mib - int(a.tool_balloon_idle_floor_mib),
-                        "tool_end_idle_reclaim",
-                        a.tool_balloon_settle_timeout_s,
-                    )
+                    with tool_state_lock:
+                        balloon_event = adjust_balloon(
+                            tool,
+                            tool_memory_mib - int(a.tool_balloon_idle_floor_mib),
+                            "tool_end_idle_reclaim",
+                            a.tool_balloon_settle_timeout_s,
+                        )
                     balloon_events.append(balloon_event)
                     if event is not None:
                         event["balloon_reclamation"] = balloon_event
@@ -672,7 +965,7 @@ def main() -> None:
                     event["remaining_headroom_after_mib"] = (
                         released_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
                     )
-                if a.tool_balloon_reclamation:
+                if a.tool_balloon_reclamation and tool_materialization_pool is not None:
                     # Fail closed: a guest target alone is not proof of host
                     # reclamation.  Release the worst-case slot only when the
                     # balloon reached its target and host Firecracker RSS is
@@ -692,7 +985,24 @@ def main() -> None:
                         release_tool_materialization()
 
         def before_response_ready(step: int | None, message: dict) -> dict:
-            nonlocal tool_reservation_lease, current_tool_reservation_event
+            nonlocal tool_reservation_lease, current_tool_reservation_event, restore_s
+            # Mark delivery before waiting.  The coordinator then either
+            # cancels an eviction that has not started or waits for an in-flight
+            # snapshot and restores the dependency-safe pair before bytes are
+            # written to the Runtime's HTTP connection.
+            checkpoint_coordinator.begin_response_delivery()
+            if not idle_reclaim_complete.wait(timeout=remaining()):
+                raise TimeoutError("timed out waiting for idle sandbox reclamation")
+            if idle_reclaim_errors:
+                raise RuntimeError("idle sandbox reclamation failed") from idle_reclaim_errors[0]
+            restored = checkpoint_coordinator.restore()
+            if restored is not None:
+                restore_s += float(restored["restore_s"])
+                checkpoint_reclamation_events.append({
+                    "reason": "reactive_response_restore",
+                    "model_step": step,
+                    **restored,
+                })
             tool_calls = message.get("tool_calls") or []
             if not tool_calls or tool_admission is None:
                 return {}
@@ -702,27 +1012,34 @@ def main() -> None:
                 with_tool_materialization_admission(
                     "balloon_expand", lambda: None
                 )
-            if a.static_tool_reservation_mib is not None:
+            if a.admission_policy in {"full_reservation", "static"}:
                 current_tool_rss_kib = math.ceil(tool.rss_bytes() / 1024.0)
                 incremental_kib = max(
                     1,
                     int(a.static_tool_reservation_mib) * 1024 - current_tool_rss_kib,
                 )
-                provenance = {"policy": "static",
+                provenance = {"policy": a.admission_policy,
                               "static_capacity_mib": int(a.static_tool_reservation_mib),
                               "session_tool_rss_before_mib": current_tool_rss_kib / 1024.0,
                               "tool_invocations": tool_call_descriptors(message)}
             else:
                 if step is None or step not in predictive_steps:
-                    raise RuntimeError(f"predictive plan has no tool reservation for model step {step}")
+                    raise RuntimeError(
+                        f"{a.admission_policy} plan has no Tool reservation for model step {step}"
+                    )
                 planned = predictive_steps[step]
                 if len(planned["tool_invocations"]) != len(tool_calls):
-                    raise RuntimeError(f"predictive plan diverged at model step {step}")
-                incremental_kib = int(planned["incremental_p90_kib"])
-                provenance = {"policy": "per_tool_incremental_p90", **planned}
+                    raise RuntimeError(f"{a.admission_policy} plan diverged at model step {step}")
+                if a.admission_policy == "oracle":
+                    incremental_kib = int(planned["incremental_oracle_kib"])
+                    provenance = {"policy": "oracle_incremental_working_set", **planned}
+                else:
+                    incremental_kib = int(planned["incremental_p90_kib"])
+                    provenance = {"policy": "per_tool_incremental_p90", **planned}
             wait_started = time.monotonic()
             acquired = tool_admission.acquire(
-                incremental_kib * 1024, timeout=remaining()
+                incremental_kib * 1024, timeout=remaining(),
+                measure_resident_bytes=tool.rss_bytes,
             )
             wait_s = time.monotonic() - wait_started
             if acquired is None:
@@ -732,12 +1049,18 @@ def main() -> None:
                 "model_step": step,
                 "reservation_kib": incremental_kib,
                 "reservation_mib": incremental_kib / 1024.0,
-                "predicted_incremental_p90_mib": incremental_kib / 1024.0,
+                "predicted_incremental_p90_mib": (
+                    incremental_kib / 1024.0 if a.admission_policy == "p90" else None
+                ),
+                "oracle_incremental_mib": (
+                    incremental_kib / 1024.0 if a.admission_policy == "oracle" else None
+                ),
                 "resident_tool_rss_before_mib": (
                     admission_status["resident_bytes"] / (1024.0 * 1024.0)
                 ),
-                "outstanding_incremental_mib": (
-                    admission_status["outstanding_incremental_bytes"] / (1024.0 * 1024.0)
+                "outstanding_unrealized_growth_mib": (
+                    admission_status["outstanding_unrealized_growth_bytes"]
+                    / (1024.0 * 1024.0)
                 ),
                 "admission_charge_mib": (
                     admission_status["admission_charge_bytes"] / (1024.0 * 1024.0)
@@ -772,11 +1095,24 @@ def main() -> None:
                 raise RuntimeError("session closed while waiting for Tool admission")
             return event
 
+        def on_request_started() -> None:
+            checkpoint_coordinator.start_request()
+            idle_reclaim_complete.clear()
+            def reclaim_during_wait() -> None:
+                try:
+                    release_tool_reservation()
+                except Exception as exc:
+                    idle_reclaim_errors.append(exc)
+                finally:
+                    idle_reclaim_complete.set()
+            threading.Thread(target=reclaim_during_wait, daemon=True).start()
+
         gateway = ModelGateway(
             Path(spec["store"]), mode=a.inference, trace=a.trace, time_scale=a.time_scale,
             upstream_base_url=a.api_base_url,
             upstream_api_key=os.environ.get(a.api_key_env), upstream_model=a.api_model,
-            on_request_started=release_tool_reservation,
+            request_namespace=f"session-{index:04d}",
+            on_request_started=on_request_started,
             before_response_ready=before_response_ready,
         )
 
@@ -883,6 +1219,31 @@ def main() -> None:
                 current_lease_event = None
             pair_slots.release(lease)
 
+        def predicted_wait_s(record: dict) -> float:
+            replay_index = record.get("replay_index")
+            if (a.inference == "replay" and replay_index is not None
+                    and 0 <= int(replay_index) < len(gateway.actions)):
+                return float(gateway.actions[int(replay_index)].duration_s) * a.time_scale
+            return float(a.predicted_llm_wait_s)
+
+        def eviction_due(record: dict) -> bool:
+            elapsed = max(0.0, time.time() - float(record.get("started_unix_s") or time.time()))
+            predicted = predicted_wait_s(record)
+            if a.eviction_policy == "eager":
+                return True
+            if a.eviction_policy == "fixed_delay":
+                return elapsed >= a.eviction_delay_s
+            return (
+                pressure_reclaim_active.is_set()
+                or predicted - elapsed >= a.checkpoint_break_even_s
+            )
+
+        def prefetch_due(record: dict) -> bool:
+            if a.restore_policy != "prefetch":
+                return False
+            elapsed = max(0.0, time.time() - float(record.get("started_unix_s") or time.time()))
+            return predicted_wait_s(record) - elapsed <= a.restore_prefetch_lead_s
+
         gateway.start(spec["gateway_host"], 18081)
         deadline = time.monotonic() + a.timeout_s
         try:
@@ -952,10 +1313,14 @@ def main() -> None:
                     validation_path = a.output / f"validation-session-{index:04d}.out"
                     validation_path.write_bytes(validation)
                     session_completed_elapsed_s = time.monotonic() - started
+                    checkpoint_vm_operations = snapshots * (
+                        2 if a.checkpoint_scope == "pair" else 1
+                    )
                     return {"session": index, "snapshots": snapshots,
                             "checkpoint_cycles": snapshots,
-                            "vm_snapshot_operations": snapshots * 2,
-                            "vm_restore_operations": snapshots * 2,
+                            "checkpoint_scope": a.checkpoint_scope,
+                            "vm_snapshot_operations": checkpoint_vm_operations,
+                            "vm_restore_operations": checkpoint_vm_operations,
                             "admission_wait_s": admission_wait_s,
                             "admission_acquisitions": admission_acquisitions,
                             "admission_wait_events_s": admission_wait_events_s,
@@ -989,64 +1354,108 @@ def main() -> None:
                 tool_exit = tool.process_exit_code()
                 if runtime_exit is not None:
                     raise RuntimeError(f"Runtime VM exited unexpectedly ({runtime_exit})")
-                if tool_exit is not None:
+                if tool.resident and tool_exit is not None:
                     raise RuntimeError(f"Tool VM exited unexpectedly ({tool_exit})")
-                pending = [item for item in gateway.records()
-                           if not item["ready"] and item["request_id"] not in processed]
-                if a.residency_policy == "llm_wait_checkpoint" and pending:
+                pending_all = [item for item in gateway.records() if not item["ready"]]
+                pending = [
+                    item for item in pending_all if item["request_id"] not in processed
+                ]
+                evicting = a.reclamation_policy in {"checkpoint", "hybrid"}
+                if (evicting and pending and idle_reclaim_complete.is_set()
+                        and eviction_due(pending[0])):
                     request_id = pending[0]["request_id"]
-                    pair_rss_before = runtime.rss_bytes() + tool.rss_bytes()
-                    cgroup_before = cgroup_memory_used_bytes()
-                    numa_before = numa_memory_used_bytes(numa_node)
-                    snapshot_s += checkpoint_runtime_tool_pair(runtime, tool)
-                    pair_rss_after = runtime.rss_bytes() + tool.rss_bytes()
-                    if pair_rss_after != 0:
-                        raise RuntimeError(
-                            "checkpoint did not release the Runtime/Tool Firecracker RSS"
-                        )
-                    cgroup_after = cgroup_memory_used_bytes()
-                    numa_after = numa_memory_used_bytes(numa_node)
-                    checkpoint_reclamation_events.append({
-                        "request_id": request_id,
-                        "pair_firecracker_rss_before_bytes": pair_rss_before,
-                        "pair_firecracker_rss_after_bytes": pair_rss_after,
-                        "verified_pair_firecracker_rss_released_bytes": (
-                            pair_rss_before - pair_rss_after
-                        ),
-                        "cgroup_memory_before_bytes": cgroup_before,
-                        "cgroup_memory_after_bytes": cgroup_after,
-                        "cgroup_memory_released_bytes": (
-                            None if cgroup_before is None or cgroup_after is None
-                            else max(0, cgroup_before - cgroup_after)
-                        ),
-                        "numa_memory_before_bytes": numa_before,
-                        "numa_memory_after_bytes": numa_after,
-                        "numa_memory_released_bytes": (
-                            None if numa_before is None or numa_after is None
-                            else max(0, numa_before - numa_after)
-                        ),
-                    })
-                    # The memory/CPU-pair lease is released only after both
-                    # Firecracker processes have been evicted.
-                    release_tool_materialization()
-                    release_pair()
-                    while time.monotonic() < deadline:
-                        current = {item["request_id"]: item for item in gateway.records()}
-                        if current[request_id]["ready"]: break
-                        time.sleep(0.02)
-                    acquire_pair()
-                    restore_s += with_tool_materialization_admission(
-                        "snapshot_restore",
-                        lambda: restore_tool_runtime_pair(
-                            tool, runtime,
-                            lambda: wait_tcp(spec["tool_host"], 2222, 30),
-                        ),
-                    )
-                    processed.add(request_id); snapshots += 1
+                    with pressure_reclaim_lock:
+                        # Pressure-triggered reclaim continues only to W_low.
+                        if (a.eviction_policy == "predicted_pressure_aware"
+                                and pressure_reclaim_active.is_set()
+                                and measure_tool_resident_bytes()
+                                <= int(a.tool_pool_low_watermark_mib) * 1024 * 1024):
+                            pressure_reclaim_active.clear()
+                        transition = checkpoint_coordinator.evict(lambda: {
+                            "cgroup_memory_bytes": (
+                                cgroup_value(tool_pool_cgroup, "memory.current")
+                                if tool_pool_cgroup is not None else None
+                            ),
+                            "numa_memory_bytes": numa_memory_used_bytes(numa_node),
+                        })
+                        if transition is not None:
+                            snapshot_s += transition.elapsed_s
+                            runtime_released = max(
+                                0,
+                                transition.runtime_rss_before_bytes
+                                - transition.runtime_rss_after_bytes,
+                            )
+                            tool_released = max(
+                                0,
+                                transition.tool_rss_before_bytes
+                                - transition.tool_rss_after_bytes,
+                            )
+                            pair_released = runtime_released + tool_released
+                            cgroup_before = transition.host_before["cgroup_memory_bytes"]
+                            cgroup_after = transition.host_after["cgroup_memory_bytes"]
+                            numa_before = transition.host_before["numa_memory_bytes"]
+                            numa_after = transition.host_after["numa_memory_bytes"]
+                            checkpoint_reclamation_events.append({
+                                "request_id": request_id,
+                                "reason": a.eviction_policy,
+                                "checkpoint_scope": transition.scope,
+                                "predicted_llm_wait_s": predicted_wait_s(pending[0]),
+                                "runtime_firecracker_rss_before_bytes": (
+                                    transition.runtime_rss_before_bytes
+                                ),
+                                "runtime_firecracker_rss_after_bytes": (
+                                    transition.runtime_rss_after_bytes
+                                ),
+                                "verified_runtime_firecracker_rss_released_bytes": (
+                                    runtime_released
+                                ),
+                                "tool_firecracker_rss_before_bytes": (
+                                    transition.tool_rss_before_bytes
+                                ),
+                                "tool_firecracker_rss_after_bytes": (
+                                    transition.tool_rss_after_bytes
+                                ),
+                                "verified_tool_firecracker_rss_released_bytes": tool_released,
+                                "pair_firecracker_rss_before_bytes": (
+                                    transition.runtime_rss_before_bytes
+                                    + transition.tool_rss_before_bytes
+                                ),
+                                "pair_firecracker_rss_after_bytes": (
+                                    transition.runtime_rss_after_bytes
+                                    + transition.tool_rss_after_bytes
+                                ),
+                                "verified_pair_firecracker_rss_released_bytes": pair_released,
+                                "cgroup_memory_before_bytes": cgroup_before,
+                                "cgroup_memory_after_bytes": cgroup_after,
+                                "cgroup_memory_released_bytes": (
+                                    None if cgroup_before is None or cgroup_after is None
+                                    else max(0, cgroup_before - cgroup_after)
+                                ),
+                                "numa_memory_before_bytes": numa_before,
+                                "numa_memory_after_bytes": numa_after,
+                                "numa_memory_released_bytes": (
+                                    None if numa_before is None or numa_after is None
+                                    else max(0, numa_before - numa_after)
+                                ),
+                                "snapshot_s": transition.elapsed_s,
+                            })
+                            processed.add(request_id)
+                            snapshots += 1
+                elif evicting and pending_all and pending_all[0]["request_id"] in processed:
+                    if prefetch_due(pending_all[0]):
+                        restored = checkpoint_coordinator.restore()
+                        if restored is not None:
+                            restore_s += float(restored["restore_s"])
+                            checkpoint_reclamation_events.append({
+                                "request_id": pending_all[0]["request_id"],
+                                "reason": "prefetch_restore",
+                                **restored,
+                            })
                 else: time.sleep(0.05)
             raise TimeoutError("OpenClaw experiment timed out")
         finally:
             session_closing.set()
+            idle_reclaim_complete.wait(timeout=30.0)
             try:
                 close_runtime_tool_pair_and_release(runtime, tool, release_pair)
             finally:
@@ -1079,6 +1488,26 @@ def main() -> None:
                 "type": "ToolAdmissionLeak",
                 "error": f"{leaked} Tool admission leases remained after session cleanup",
             })
+    tool_pool_events_after = (
+        cgroup_memory_events(tool_pool_cgroup) if tool_pool_cgroup is not None else {}
+    )
+    tool_pool_event_deltas = {
+        key: int(value) - int(tool_pool_events_before.get(key, 0))
+        for key, value in tool_pool_events_after.items()
+    }
+    host_oom_kills = max(0, int(tool_pool_event_deltas.get("oom_kill", 0)))
+    tenant_guest_ooms = sum(
+        guest_oom_observed(item.config.log_path) for item in tool_lifecycles
+    )
+    if host_oom_kills:
+        failures.append({
+            "session": None,
+            "type": "OversubscriptionPolicyFailure",
+            "error": (
+                f"Tool pool cgroup recorded {host_oom_kills} host OOM kill(s); "
+                "this is an admission/reclaim policy failure"
+            ),
+        })
     wall_s = time.monotonic() - started
     model_steps = sum(len(item.get("model_requests", [])) for item in results)
     correct_sessions = sum(
@@ -1089,6 +1518,10 @@ def main() -> None:
     model_requests = [request for item in results for request in item.get("model_requests", [])]
     validated_requests = sum(request.get("replay_input_match") is not None for request in model_requests)
     rss_values = [int(item["firecracker_rss_bytes"]) for item in samples]
+    runtime_rss_values = [
+        int(item["runtime_firecracker_rss_bytes"]) for item in samples
+    ]
+    tool_rss_values = [int(item["tool_firecracker_rss_bytes"]) for item in samples]
     numa_values = [int(item["numa_memory_used_bytes"]) for item in samples
                    if item["numa_memory_used_bytes"] is not None]
     numa_deltas = [int(item["numa_memory_delta_bytes"]) for item in samples
@@ -1135,6 +1568,7 @@ def main() -> None:
     reclamation_events = [
         row for item in results
         for row in item.get("checkpoint_reclamation_events", [])
+        if row.get("verified_tool_firecracker_rss_released_bytes") is not None
     ]
     balloon_events = [
         row for item in results for row in item.get("balloon_events", [])
@@ -1152,7 +1586,8 @@ def main() -> None:
     tool_admission_metrics = (
         tool_admission.metrics() if tool_admission is not None else None
     )
-    report = {"mode": "snapshot" if a.residency_policy == "llm_wait_checkpoint" else "resident",
+    report = {"mode": "snapshot" if a.reclamation_policy in {"checkpoint", "hybrid"} else "resident",
+              "reclamation_policy": a.reclamation_policy,
               "residency_policy": a.residency_policy, "inference": a.inference,
               "numa_node": numa_node,
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
@@ -1163,9 +1598,28 @@ def main() -> None:
               "cpu_pair_pool": configured_cpu_pairs,
               "tool_reservation_budget_mib": a.tool_reservation_budget_mib,
               "tool_materialization_slots": tool_materialization_slots,
-              "tool_reservation_policy": (
-                  "per_tool_incremental_p90_with_rss_feedback" if a.tool_memory_plan is not None
-                  else "static" if a.static_tool_reservation_mib is not None else None
+              "tool_reservation_policy": a.admission_policy,
+              "admission_policy": a.admission_policy,
+              "tool_vm_contract_mib": TOOL_VM_CONTRACT_MIB,
+              "tool_pool_cgroup": str(tool_pool_cgroup) if tool_pool_cgroup else None,
+              "tool_pool_hard_limit_mib": a.tool_pool_hard_limit_mib,
+              "tool_pool_high_watermark_mib": a.tool_reservation_budget_mib,
+              "tool_pool_low_watermark_mib": a.tool_pool_low_watermark_mib,
+              "tool_pool_memory_events": tool_pool_event_deltas,
+              "host_oom_kill_events": host_oom_kills,
+              "oversubscription_policy_failures": host_oom_kills,
+              "tenant_guest_oom_events": tenant_guest_ooms,
+              "eviction_policy": (
+                  a.eviction_policy
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
+              "restore_policy": (
+                  a.restore_policy
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
+              "checkpoint_scope": (
+                  a.checkpoint_scope
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
               ),
               "tool_admission_safety_headroom_mib": (
                   a.tool_admission_safety_headroom_mib
@@ -1272,6 +1726,18 @@ def main() -> None:
                   correct_sessions * 60 / wall_s if a.correctness_command else None
               ),
               "model_steps_completed": model_steps,
+              "model_gateway_http_attempts": sum(
+                  int(item.get("http_attempts", 0)) for item in model_requests
+              ),
+              "model_gateway_reconnect_attempts": sum(
+                  int(item.get("reconnect_attempts", 0)) for item in model_requests
+              ),
+              "model_gateway_delivery_failures": sum(
+                  int(item.get("delivery_failures", 0)) for item in model_requests
+              ),
+              "model_gateway_responses_delivered": sum(
+                  bool(item.get("delivered")) for item in model_requests
+              ),
               "replay_requests_input_validated": validated_requests,
               "replay_requests_input_unvalidated": model_steps - validated_requests,
               "replay_input_validation_complete": validated_requests == model_steps,
@@ -1283,6 +1749,14 @@ def main() -> None:
               "checkpoint_reclamation_observations": len(reclamation_events),
               "checkpoint_verified_firecracker_rss_released_bytes": sum(
                   int(row["verified_pair_firecracker_rss_released_bytes"])
+                  for row in reclamation_events
+              ),
+              "checkpoint_verified_runtime_rss_released_bytes": sum(
+                  int(row["verified_runtime_firecracker_rss_released_bytes"])
+                  for row in reclamation_events
+              ),
+              "checkpoint_verified_tool_rss_released_bytes": sum(
+                  int(row["verified_tool_firecracker_rss_released_bytes"])
                   for row in reclamation_events
               ),
               "checkpoint_cgroup_memory_released_bytes": sum(
@@ -1323,6 +1797,14 @@ def main() -> None:
               "mean_firecracker_rss_bytes": statistics.fmean(rss_values) if rss_values else 0,
               "peak_firecracker_rss_bytes": max((x["firecracker_rss_bytes"] for x in samples), default=0),
               "p95_firecracker_rss_bytes": percentile(rss_values, 0.95),
+              "mean_runtime_firecracker_rss_bytes": (
+                  statistics.fmean(runtime_rss_values) if runtime_rss_values else 0
+              ),
+              "peak_runtime_firecracker_rss_bytes": max(runtime_rss_values, default=0),
+              "mean_tool_firecracker_rss_bytes": (
+                  statistics.fmean(tool_rss_values) if tool_rss_values else 0
+              ),
+              "peak_tool_firecracker_rss_bytes": max(tool_rss_values, default=0),
               "firecracker_rss_time_byte_seconds": rss_time,
               "peak_resident_vms": max((x["resident_vms"] for x in samples), default=0),
               "numa_memory_baseline_bytes": numa_baseline,

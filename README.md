@@ -52,31 +52,28 @@ canonical model today:
 | --- | --- | --- | --- | --- | --- |
 | Production | `swe_rebench` / `openclaw` | `api` | `kubernetes` / `ssh` | `fixed_profile` / `resident` | Implemented and accepted. |
 | Research | `swe_rebench` / `openclaw` | `api` | `kubernetes` / `ssh` | `p90_static` or `p90_elastic` / `resident` | Implemented opt-in Cell sizing baselines. |
-| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `fixed_explicit` / `resident` | Implemented paper arm. |
-| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `fixed_explicit` / `llm_wait_checkpoint` | Implemented paper arm. |
-| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | `p90_static` / `resident` or `llm_wait_checkpoint` | Implemented predictive-memory paper arms. |
+| Research | `recorded_trace` / `openclaw` | `replay` or `api` | `direct_firecracker` / `ssh` | fixed-4-GiB paper policy matrix | Implemented by the dedicated spatial/temporal/decision study runner. |
 | Historical | `recorded_trace` / `replay_engine` | existing replay/API providers | `direct_firecracker` or `local` / explicitly selected transport | ReplayEngine's existing policy | Retained for mechanism testing; not comparable with a Cell. |
 | Local-only | `synthetic` or targeted smoke input | as required by the helper | `local` or direct Firecracker | helper-specific | Targeted tests only, not a benchmark baseline. |
 
-For one inference backend, the sizing/residency factorial has four comparable arms:
+The current paper studies do not use a sizing/residency factorial. They keep
+Tool capacity at 4 GiB and isolate one question at a time:
 
 ```text
-fixed      + resident
-fixed      + llm_wait_checkpoint
-p90_static + resident
-p90_static + llm_wait_checkpoint
+spatial:  full_reservation | static | p90 | oracle
+temporal: resident | balloon | checkpoint | hybrid
+decision: eager | fixed_delay | predicted_pressure_aware
 ```
 
-Paper studies should add `fixed_control_tool_memory_mib` when the prediction
-hits a safety floor. This creates an untrained fixed-size control at that same
-memory limit under both residency policies, separating the value of the sizing
-decision from the value of merely choosing a smaller VM. Its compact output
-label is `fixed2` (the configured MiB value remains authoritative); compact arm
-labels keep Firecracker API socket paths within the Unix-domain limit.
+The canonical baseline registry below still describes product and compatibility
+workflows. Dedicated paper policies are configured through `paper_experiment`
+and do not change the product baseline registry.
 
 The following remain explicitly **not implemented**: `pressure_checkpoint`,
 Kubernetes checkpoint residency, and local Firecracker checkpoint residency.
-The validator rejects them before a runner starts.
+The product-workflow validator rejects them before a runner starts. The
+paper-only direct-Firecracker `predicted_pressure_aware` hybrid decision is a
+different, implemented mechanism and does not register a production baseline.
 
 ### Baseline registry
 
@@ -104,7 +101,7 @@ The active paper workflow is:
 
 ```text
 recorded_trace + openclaw + (replay | api) + direct_firecracker + ssh
-+ fixed_explicit + (resident | llm_wait_checkpoint)
++ fixed 4096 MiB Tool capacity + one isolated paper policy dimension
 ```
 
 Fixed sizing remains the production default; P90 enforcement is explicit and
@@ -251,7 +248,7 @@ The main documentation flow is:
 
 - [Install a new host](#new-host-one-time-installation)
 - [Run real tasks on an installed host](#existing-host-start-and-run-tasks)
-- [Run the paper experiment](#paper-experiment-save-idle-virtual-machines)
+- [Run the paper experiments](#paper-experiments-fixed-4-gib-tool-vm-contract)
 - [Update an installation](#updating-an-installed-host)
 - [Troubleshoot](#troubleshooting)
 
@@ -686,7 +683,101 @@ python3 -m clawbox.experiments.cli matrix experiment.json
 selected inference backends and scheduling baselines. Unsupported combinations
 fail before a runner is started.
 
-## Paper experiment: save idle virtual machines
+## Paper experiments: fixed 4 GiB Tool-VM contract
+
+The current paper design treats 4 GiB as the tenant-visible Tool-VM contract,
+not as a factor. Every arm passes `--tool-memory-mib 4096` to Firecracker.
+Firecracker maps that capacity lazily, so the host is charged for resident
+pages as they are touched rather than reserving 4 GiB of physical RAM at VM
+creation.
+
+The study is split into three independent configurations:
+
+| Dimension | Fixed factors | Compared policies | Example |
+| --- | --- | --- | --- |
+| Spatial admission | 4 GiB Tool VM, resident reclaim | `full_reservation`, fixed 2 GiB `static`, per-tool `p90`, `oracle` | `deploy/replay-suite.example.json` |
+| Temporal reclaim | 4 GiB Tool VM, one admission policy, reactive restore | `resident`, `balloon`, `checkpoint`, `hybrid` | `deploy/replay-temporal.example.json` |
+| Reclaim decision | 4 GiB Tool VM, one admission policy, `hybrid` reclaim | `eager`, `fixed_delay`, `predicted_pressure_aware`; reactive and prefetch restore | `deploy/replay-decision.example.json` |
+
+The admission gate uses live aggregate Tool-Firecracker RSS. Each running Tool
+lease also has its own RSS baseline, so already-realized growth is subtracted
+from that lease's prediction:
+
+```text
+RSSnow + sum(max(0, predicted_growth - realized_growth))
+       + new_predicted_growth + headroom <= Whigh
+```
+
+On Tool completion the runner reads RSS again before removing the remaining
+unrealized reservation. Resident pages are never assumed to disappear because
+a command exited. The old fixed-capacity materialization semaphore has been
+removed; it would have silently restored full 4 GiB reservation and defeated
+the oversubscription treatment.
+
+### Fixed safety envelope
+
+Create one dedicated cgroup-v2 Tool pool before a run and configure its
+`memory.max` to exactly the `hard_limit_mib` in the study. Runtime VMs, the
+runner, snapshot page cache, and host overhead stay outside this Tool cgroup.
+Their resident memory must be covered by `numa_host_reserve_mib` and the host
+preflight even though Runtime RSS is reclaimed during pair checkpointing.
+
+```bash
+sudo mkdir -p /sys/fs/cgroup/clawbox-tool-pool
+echo $((131072 * 1024 * 1024)) | sudo tee \
+  /sys/fs/cgroup/clawbox-tool-pool/memory.max
+```
+
+`tool_pool_memory.high_watermark_mib` is `Whigh`; it stops new Tool-call
+admission. `low_watermark_mib` is `Wlow`; pressure-aware hybrid eviction keeps
+selecting only sessions currently waiting for an LLM until Tool RSS falls to
+that level. `hard_limit_mib` is `H` and must satisfy
+`Wlow < Whigh < H`. Any increase in the Tool cgroup's `oom_kill` counter is
+reported as `OversubscriptionPolicyFailure`, never as a normal tenant OOM.
+Guest OOM within the fixed 4 GiB VM means the workload exceeded its purchased
+capacity.
+
+Balloon policy inflates after Tool execution and deflates before the next Tool
+call. Checkpoint and hybrid use `reclamation.checkpoint_scope: "pair"` by
+default: Runtime is paused and checkpointed before Tool, then Tool is restored
+and confirmed reachable before Runtime resumes. The host model gateway retains
+the response and gates delivery across the entire transition. If the guest HTTP
+connection does reconnect, the session-scoped request identity returns the
+stored response and records the reconnect and failed-delivery counters.
+`checkpoint_scope: "tool"` is available only as a secondary mechanism ablation.
+Hybrid balloons first and checkpoints the pair later according to the decision
+policy.
+
+The oracle plan has the same per-workload/per-invocation structure as the P90
+plan, but every invocation must contain `actual_incremental_kib` or
+`actual_command_peak_memory_bytes` from held-out telemetry. Oracle data is an
+offline upper bound and is never learned from the measured arm itself.
+
+Run a single-workload smoke with `deploy/study.example.json`, or validate and
+run one of the multi-workload suites:
+
+```bash
+python3 -m clawbox.replay.cli validate-suite /data/spatial.json
+numactl --cpunodebind=0 --membind=0 \
+  python3 -m clawbox.replay.cli suite /data/spatial.json
+```
+
+The primary outcomes are correct-task throughput, admission wait, separate
+Runtime and Tool RSS, total RSS-time, pair/Runtime/Tool reclaimed bytes,
+save/restore service time, gateway reconnect and delivery-failure counts,
+prediction coverage, and zero host OOM policy failures. Snapshot disk preflight
+budgets two alternating generations of both VM memory files for pair scope. Do
+not use the historical 2 GiB versus 4 GiB measurements as evidence for
+oversubscription; they measure guest capacity and snapshot-size effects.
+
+## Historical pre-rethink experiment (superseded)
+
+The remaining notes and archived files below describe the earlier mechanism
+bring-up and Kunpeng measurements. They are retained only as historical
+evidence. Their `sizing_policies`, `fixed_control_tool_memory_mib`,
+`resident_memory_budget_mib`, and 2 GiB Tool arms are not part of the current
+paper matrix, and the removed legacy example configurations should not be
+reused.
 
 This experiment is separate from the Kubernetes task service, but preserves
 the task architecture. Every session has two Firecracker virtual machines: the
@@ -1045,45 +1136,17 @@ failure. When configured, reports include `correctness_pass_fraction` and
 `throughput_correct_tasks_per_minute`; otherwise "tasks/min" means completed
 agent sessions/min, not correct SWE tasks/min.
 
-For the separate checkpoint-density experiment, use
-`deploy/replay-density.example.json`. It holds a 160 GiB configured resident
-admission budget constant, uses a 2+2 GiB Runtime/Tool pair, crosses resident
-and LLM-wait checkpoint policy, and requests `[40, 60, 76]` agent runs. At 40,
-all pairs fit; at 60/76, the resident arm runs waves while the checkpoint arm
-can release FIFO admission slots during model waits. One atomic FIFO lease owns
-the Runtime+Tool memory slot and a unique NUMA-local CPU pair; it is released
-only after both VMs are evicted and reacquired before either restore. Runtime
-is paused and checkpointed before Tool so a model response cannot dispatch work
-to an unavailable dependency; restore uses the inverse Tool-then-Runtime order.
-This is a direct
-configured-memory-budget throughput/density test rather than a projection from
-RSS. It uses `cpu_placement=round_robin`; label 60/76 CPU-oversubscribed and
-report the scheduling regime. The disk preflight accounts for one generation per
-evicted session plus the prior generation mapped by each resident slot. Extend
-the network first with `--sessions 76 --reuse-existing`, and launch the suite
-itself through `numactl` as shown above.
+The removed `replay-density.example.json` crossed 2 GiB guest capacity with
+checkpointing and a configured pair-slot budget. That setup is retained only
+in archived result artifacts. It is not runnable through the fixed-contract
+paper path and must not be cited as an oversubscription/admission experiment.
 
-The registered Kunpeng protocol and current paper artifacts are documented in
+The historical Kunpeng protocol and artifacts are documented in
 [`docs/results/p90-baselines-kunpeng-2026-08-31.md`](docs/results/p90-baselines-kunpeng-2026-08-31.md).
-The bounded, directly reproducible c8 result uses the tracked
-[`two-hour-direct-c08-suite.json`](docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json):
-
-```bash
-numactl --cpunodebind=0 --membind=0 \
-  python3 -m clawbox.replay.cli suite \
-  docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json \
-  --validate-only
-
-numactl --cpunodebind=0 --membind=0 \
-  python3 -m clawbox.replay.cli suite \
-  docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json
-```
-
-The prediction-aware admission sweep uses fixed 2 GiB Tool VM capacity for its
-P90 arms and gates each tool-bearing model response with a heterogeneous,
-per-invocation reservation. The tracked `[1, 8, 20, 40]` NUMA-0 suite is
+The old prediction-aware sweep is tracked as
 [`prediction-aware-sweep-suite.json`](docs/results/artifacts/kunpeng-2026-08-31/prediction-aware-sweep-suite.json).
-Its 4 GiB and 2 GiB arms are static controls; neither is a predictive arm.
+Its 4 GiB and 2 GiB arms are capacity/static controls and are explicitly
+excluded from the redesigned main matrix.
 
 Its output directory is frozen in the configuration. Remove or rename a prior
 output only after preserving its evidence; `resume: true` accepts completed

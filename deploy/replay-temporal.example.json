@@ -1,5 +1,5 @@
 {
-  "output": "/data/clawbox-paper-density-001",
+  "output": "/data/clawbox-paper-temporal-001",
   "source": {
     "runtime_rootfs": "/data/openclaw-runtime.ext4",
     "tool_rootfs": "/data/tool-workspace.ext4",
@@ -11,50 +11,63 @@
       "independent_unit": "OWNER/REPO#TASK-A",
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/short-fix.prompt.txt",
-      "trace": "/data/workloads/short-fix.model.jsonl"
+      "trace": "/data/workloads/short-fix.model.jsonl",
+      "prediction_file": "/data/workloads/p90-independent-eval.json"
     },
     {
       "name": "test-debug",
       "independent_unit": "OWNER/REPO#TASK-B",
       "repository": "OWNER/REPO",
       "prompt": "/data/workloads/test-debug.prompt.txt",
-      "trace": "/data/workloads/test-debug.model.jsonl"
-    },
-    {
-      "name": "multi-file",
-      "independent_unit": "OWNER/REPO#TASK-C",
-      "repository": "OWNER/REPO",
-      "prompt": "/data/workloads/multi-file.prompt.txt",
-      "trace": "/data/workloads/multi-file.model.jsonl"
+      "trace": "/data/workloads/test-debug.model.jsonl",
+      "prediction_file": "/data/workloads/p90-independent-eval.json"
     }
   ],
-  "concurrency_levels": [40, 60, 76],
-  "cpu_placement": "round_robin",
+  "concurrency_levels": [8, 20, 40],
+  "cpu_placement": "exclusive",
   "numa_host_reserve_mib": 32768,
   "snapshot_disk_reserve_mib": 32768,
   "max_numa_cpu_busy_fraction": 0.10,
   "require_no_firecracker": true,
   "require_parent_numa_binding": true,
+  "require_held_out_predictions": true,
   "repetitions": 3,
-  "seed": 17,
+  "seed": 11,
   "resume": true,
   "continue_after_block_failure": false,
   "network_prefix": "172.30",
-  "validation_command": "cd /testbed && { git -c safe.directory=/testbed diff --binary --no-ext-diff BASE_COMMIT -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig'; git -c safe.directory=/testbed ls-files --others --exclude-standard -z -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig' | sort -z | xargs -0 -r sha256sum; }",
+  "validation_command": "cd /testbed && git diff --binary --no-ext-diff HEAD",
   "correctness_command": "cd /testbed && python -m pytest -q",
   "correctness_timeout_s": 300,
   "inference_backends": ["replay"],
-  "sizing_policies": ["fixed"],
-  "memory_policies": ["resident", "snapshot"],
-  "resident_memory_budget_mib": 163840,
+  "paper_experiment": {
+    "dimension": "temporal",
+    "admission_policies": ["p90"],
+    "reclamation_policies": ["resident", "balloon", "checkpoint", "hybrid"],
+    "decision_policies": ["fixed_delay"],
+    "restore_policies": ["reactive"]
+  },
+  "tool_pool_memory": {
+    "cgroup": "/sys/fs/cgroup/clawbox-tool-pool",
+    "hard_limit_mib": 131072,
+    "high_watermark_mib": 114688,
+    "low_watermark_mib": 98304,
+    "headroom_mib": 8192
+  },
+  "reclamation": {
+    "checkpoint_scope": "pair",
+    "balloon_idle_floor_mib": 256,
+    "balloon_settle_timeout_s": 5.0,
+    "fixed_delay_s": 20.0,
+    "checkpoint_break_even_s": 4.0
+  },
   "resources": {
     "runtime_memory_mib": 2048,
-    "tool_memory_mib": 2048,
+    "tool_memory_mib": 4096,
     "cpu_first": 0,
     "numa_node": 0
   },
   "replay": {"time_scale": 1.0},
-  "retain_vm_artifacts": false,
   "firecracker_api_timeout_s": 15,
   "firecracker_snapshot_api_timeout_s": 300,
   "timeout_s": 7200
