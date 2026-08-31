@@ -166,7 +166,29 @@ def tool_call_descriptors(message: dict) -> list[dict]:
     return descriptors
 
 
-def collect_tool_working_sets(spec: dict, events: list[dict], output: Path) -> list[dict]:
+def peak_overlapping_memory_bytes(executions: list[dict]) -> int:
+    """Conservative peak for commands attributed to one admitted Tool batch."""
+    if not executions:
+        return 0
+    points = sorted({
+        float(value)
+        for item in executions
+        for value in (item["ts_start"], item["ts_end"])
+    })
+    return max(
+        sum(
+            int(item["actual_command_peak_memory_bytes"])
+            for item in executions
+            if float(item["ts_start"]) <= point <= float(item["ts_end"])
+        )
+        for point in points
+    )
+
+
+def collect_tool_working_sets(
+    spec: dict, events: list[dict], output: Path,
+    *, arm_started_unix_s: float | None = None,
+) -> list[dict]:
     command = (
         "cd /testbed && { printf '__CLAWBOX_BRIDGE__\\n'; "
         "cat .clawbox/tool-bridge.jsonl 2>/dev/null || true; "
@@ -198,31 +220,103 @@ def collect_tool_working_sets(spec: dict, events: list[dict], output: Path) -> l
         actual.append({
             "command_sha256": bridge.get("command_sha256"),
             "execution_id": bridge.get("execution_id"),
+            "execution_source": bridge.get("execution_source"),
             "actual_command_peak_memory_bytes": int(resource["memory_rss_peak_bytes"]),
+            "ts_start": float(resource.get("ts_start", 0.0)),
+            "ts_end": float(resource.get("ts_end", resource.get("ts_start", 0.0))),
+            "memory_source": resource.get("memory_source"),
+            "monitor_source": resource.get("monitor_source"),
+            "fallback_used": bool(resource.get("fallback_used")),
         })
-    cursor = 0
+    used: set[int] = set()
     joined = []
     for event in events:
-        for invocation in event.get("tool_invocations") or []:
-            digest = invocation.get("command_sha256")
-            match = None
-            for actual_index in range(cursor, len(actual)):
-                if actual[actual_index]["command_sha256"] == digest:
-                    match = actual[actual_index]
-                    cursor = actual_index + 1
-                    break
-            if match is None:
-                continue
-            predicted = invocation.get("predicted_command_memory_p90_mib")
-            actual_mib = match["actual_command_peak_memory_bytes"] / (1024.0 * 1024.0)
-            row = {**match, "model_step": event.get("model_step"),
-                   "reservation_mib": event.get("reservation_mib"),
-                   "predicted_command_memory_p90_mib": predicted}
-            if predicted is not None:
-                row["prediction_error_mib"] = float(predicted) - actual_mib
-                row["prediction_covered_actual"] = float(predicted) >= actual_mib
-            joined.append(row)
+        matches: list[tuple[int, dict]] = []
+        join_method = "command_sha256"
+        acquired = event.get("acquired_elapsed_s")
+        released = event.get("released_elapsed_s")
+        if arm_started_unix_s is not None and acquired is not None and released is not None:
+            window_start = arm_started_unix_s + float(acquired)
+            window_end = arm_started_unix_s + float(released)
+            matches = [
+                (index, item) for index, item in enumerate(actual)
+                if index not in used
+                and item.get("execution_source") == "runtime-envelope"
+                and window_start <= float(item["ts_start"]) <= window_end
+            ]
+            join_method = "admission_time_window"
+        if not matches:
+            digests = {
+                invocation.get("command_sha256")
+                for invocation in event.get("tool_invocations") or []
+                if invocation.get("command_sha256")
+            }
+            matches = [
+                (index, item) for index, item in enumerate(actual)
+                if index not in used and item.get("command_sha256") in digests
+            ]
+            join_method = "command_sha256"
+        if not matches:
+            continue
+        used.update(index for index, _item in matches)
+        executions = [item for _index, item in matches]
+        actual_peak = peak_overlapping_memory_bytes(executions)
+        actual_mib = actual_peak / (1024.0 * 1024.0)
+        predicted = event.get("predicted_incremental_p90_mib")
+        if predicted is None and join_method == "command_sha256":
+            invocation_predictions = [
+                invocation.get("predicted_command_memory_p90_mib")
+                for invocation in event.get("tool_invocations") or []
+                if invocation.get("predicted_command_memory_p90_mib") is not None
+            ]
+            if len(invocation_predictions) == 1:
+                predicted = invocation_predictions[0]
+        if predicted is None:
+            predicted = event.get("reservation_mib")
+        row = {
+            "model_step": event.get("model_step"),
+            "reservation_mib": event.get("reservation_mib"),
+            "predicted_command_memory_p90_mib": predicted,
+            "actual_command_peak_memory_bytes": actual_peak,
+            "actual_individual_peak_memory_bytes": max(
+                int(item["actual_command_peak_memory_bytes"]) for item in executions
+            ),
+            "actual_execution_count": len(executions),
+            "execution_ids": [item["execution_id"] for item in executions],
+            "command_sha256s": [item["command_sha256"] for item in executions],
+            "join_method": join_method,
+            "memory_sources": sorted({str(item["memory_source"]) for item in executions}),
+            "monitor_sources": sorted({str(item["monitor_source"]) for item in executions}),
+            "fallback_used": any(item["fallback_used"] for item in executions),
+        }
+        if predicted is not None:
+            row["prediction_error_mib"] = float(predicted) - actual_mib
+            row["prediction_covered_actual"] = float(predicted) >= actual_mib
+        joined.append(row)
     return joined
+
+
+def predictive_steps_from_plan(plan_payload: dict, workload: str) -> dict[int, dict]:
+    command_headroom = float(
+        plan_payload["per_tool_memory"].get("command_headroom_fraction", 0.0)
+    )
+    workload_plan = plan_payload["per_tool_memory"]["workloads"][workload]
+    steps: dict[int, dict] = {}
+    for invocation in workload_plan["tool_invocations"]:
+        step = int(invocation["model_step"])
+        current = steps.setdefault(step, {
+            "incremental_p90_kib": 0, "tool_invocations": [],
+        })
+        incremental_kib = int(invocation.get("incremental_p90_kib") or math.ceil(
+            float(invocation["predicted_command_memory_p90_mib"])
+            * (1.0 + command_headroom) * 1024.0
+        ))
+        # The gateway releases a response containing the whole Tool batch. It
+        # cannot gate individual calls inside the guest, so concurrent demand
+        # is conservatively additive rather than the maximum single call.
+        current["incremental_p90_kib"] += incremental_kib
+        current["tool_invocations"].append(invocation)
+    return steps
 
 
 def ssh_capture(
@@ -376,23 +470,9 @@ def main() -> None:
     predictive_steps: dict[int, dict] = {}
     if a.tool_memory_plan is not None:
         plan_payload = json.loads(a.tool_memory_plan.read_text(encoding="utf-8"))
-        command_headroom = float(
-            plan_payload["per_tool_memory"].get("command_headroom_fraction", 0.0)
+        predictive_steps = predictive_steps_from_plan(
+            plan_payload, a.tool_memory_workload
         )
-        workload_plan = plan_payload["per_tool_memory"]["workloads"][a.tool_memory_workload]
-        for invocation in workload_plan["tool_invocations"]:
-            step = int(invocation["model_step"])
-            current = predictive_steps.setdefault(step, {
-                "incremental_p90_kib": 0, "tool_invocations": [],
-            })
-            incremental_kib = int(invocation.get("incremental_p90_kib") or math.ceil(
-                float(invocation["predicted_command_memory_p90_mib"])
-                * (1.0 + command_headroom) * 1024.0
-            ))
-            current["incremental_p90_kib"] = max(
-                current["incremental_p90_kib"], incremental_kib
-            )
-            current["tool_invocations"].append(invocation)
     a.output.mkdir(parents=True, exist_ok=False)
     lifecycles: list[FirecrackerLifecycle] = []
     tool_lifecycles: list[FirecrackerLifecycle] = []
@@ -410,6 +490,7 @@ def main() -> None:
     )
     samples: list[dict] = []
     stop = threading.Event()
+    started_unix_s = time.time()
     started = time.monotonic()
     cgroup_baseline = cgroup_memory_used_bytes()
     cgroup_path = cgroup_v2_path()
@@ -642,6 +723,7 @@ def main() -> None:
                     working_set_path = a.output / f"tool-working-set-session-{index:04d}.out"
                     tool_working_sets = collect_tool_working_sets(
                         spec, tool_reservation_events, working_set_path,
+                        arm_started_unix_s=started_unix_s,
                     )
                     if a.correctness_command:
                         (correctness_exit_code, correctness_stdout,

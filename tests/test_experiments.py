@@ -404,3 +404,59 @@ def test_openclaw_collects_actual_tool_working_set_and_joins_prediction(tmp_path
     assert rows[0]["actual_command_peak_memory_bytes"] == 64 * 1024**2
     assert rows[0]["prediction_error_mib"] == 16.0
     assert rows[0]["prediction_covered_actual"] is True
+
+
+def test_openclaw_joins_transformed_commands_by_admission_window(tmp_path, monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_window_join", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    bridges = [
+        {"execution_id": "exec-a", "command_sha256": "transformed-a",
+         "execution_source": "runtime-envelope"},
+        {"execution_id": "exec-b", "command_sha256": "transformed-b",
+         "execution_source": "runtime-envelope"},
+    ]
+    resources = [
+        {"execution_id": "exec-a", "memory_rss_peak_bytes": 20 * 1024**2,
+         "sampling_quality": "valid", "ts_start": 101.2, "ts_end": 101.8,
+         "memory_source": "procfs-process-tree", "monitor_source": "cgroup-v2"},
+        {"execution_id": "exec-b", "memory_rss_peak_bytes": 30 * 1024**2,
+         "sampling_quality": "valid", "ts_start": 101.4, "ts_end": 101.9,
+         "memory_source": "procfs-process-tree", "monitor_source": "cgroup-v2"},
+    ]
+    stdout = (
+        "__CLAWBOX_BRIDGE__\n" + "\n".join(map(json.dumps, bridges))
+        + "\n__CLAWBOX_CGROUP__\n" + "\n".join(map(json.dumps, resources)) + "\n"
+    ).encode()
+    monkeypatch.setattr(module, "ssh_capture", lambda *_args: (0, stdout, b"", False))
+    events = [{"model_step": 3, "acquired_elapsed_s": 1.0,
+               "released_elapsed_s": 2.0, "reservation_mib": 64.0,
+               "predicted_incremental_p90_mib": 64.0,
+               "tool_invocations": [{"command_sha256": "raw-command"}]}]
+    rows = module.collect_tool_working_sets(
+        {}, events, tmp_path / "window.out", arm_started_unix_s=100.0,
+    )
+    assert rows[0]["join_method"] == "admission_time_window"
+    assert rows[0]["actual_execution_count"] == 2
+    assert rows[0]["actual_command_peak_memory_bytes"] == 50 * 1024**2
+    assert rows[0]["prediction_error_mib"] == 14.0
+    assert rows[0]["prediction_covered_actual"] is True
+
+
+def test_predictive_batch_reservation_sums_concurrent_tool_calls():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_batch_plan", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    payload = {"per_tool_memory": {"command_headroom_fraction": 0.25,
+        "workloads": {"rec-a": {"tool_invocations": [
+            {"model_step": 1, "incremental_p90_kib": 100},
+            {"model_step": 1, "incremental_p90_kib": 200},
+            {"model_step": 2, "predicted_command_memory_p90_mib": 1.0},
+        ]}}}}
+    steps = module.predictive_steps_from_plan(payload, "rec-a")
+    assert steps[1]["incremental_p90_kib"] == 300
+    assert steps[2]["incremental_p90_kib"] == 1280
