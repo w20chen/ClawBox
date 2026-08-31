@@ -587,6 +587,30 @@ def test_paper_suite_enforces_numa_cpu_and_memory_bounds() -> None:
         validate_numa_budget(invalid_memory, topology)
 
 
+def test_paper_round_robin_cpu_placement_does_not_cap_agent_concurrency() -> None:
+    from clawbox.replay.suite import validate_numa_budget
+
+    topology = {
+        "node": 0, "cpulist": "0-3", "cpus": list(range(4)),
+        "memory_mib": 128 * 1024,
+    }
+    raw = {
+        "concurrency_levels": [200],
+        "numa_host_reserve_mib": 16 * 1024,
+        "paper_experiment": {"dimension": "spatial"},
+        "vm_pool_memory": {"hard_limit_mib": 96 * 1024},
+        "resources": {
+            "cpu_first": 0, "runtime_memory_mib": 2048,
+            "tool_memory_mib": 4096,
+        },
+    }
+    validate_numa_budget(raw, topology)
+
+    raw["cpu_placement"] = "exclusive"
+    with pytest.raises(ValueError, match="outside NUMA node"):
+        validate_numa_budget(raw, topology)
+
+
 def test_paper_suite_rejects_a_busy_numa_node(monkeypatch) -> None:
     from clawbox.replay.suite import validate_host_readiness
 

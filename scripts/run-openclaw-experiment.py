@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clawbox.replay.lifecycle import (
-    FairResourcePool, FeedbackMemoryAdmission, FirecrackerConfig, FirecrackerLifecycle,
+    FeedbackMemoryAdmission, FirecrackerConfig, FirecrackerLifecycle,
 )
 from clawbox.replay.model_gateway import ModelGateway
 
@@ -426,24 +426,20 @@ class LruIdleSandboxRegistry:
         return pressure or candidate.predicted_wait_s - elapsed >= self.checkpoint_break_even_s
 
 
-def close_runtime_tool_pair_and_release(
+def close_runtime_tool_pair(
     runtime: FirecrackerLifecycle,
     tool: FirecrackerLifecycle,
-    release_pair,
 ) -> None:
-    """Close both VMs before returning their atomic pair lease.
+    """Close both VMs even after a partial pair-checkpoint failure.
 
     In particular, a Tool checkpoint failure can happen after Runtime has
-    already been evicted.  Cleanup must still stop the Tool VM and make the
-    pair lease reusable; the failed session itself remains failed.
+    already been evicted. Cleanup must still stop the Tool VM; the failed
+    session itself remains failed.
     """
     try:
         runtime.close()
     finally:
-        try:
-            tool.close()
-        finally:
-            release_pair()
+        tool.close()
 
 
 def complete(log: Path) -> tuple[bool, int | None]:
@@ -773,10 +769,6 @@ def main() -> None:
     p.add_argument("--correctness-command")
     p.add_argument("--correctness-timeout-s", type=float, default=300)
     p.add_argument("--timeout-s", type=float, default=900)
-    p.add_argument(
-        "--resident-memory-budget-mib", type=int,
-        help="configured Runtime+Tool resident-memory admission budget",
-    )
     p.add_argument("--tool-reservation-budget-mib", type=int)
     p.add_argument("--tool-admission-safety-headroom-mib", type=int, default=1024)
     p.add_argument(
@@ -825,8 +817,6 @@ def main() -> None:
         p.error("--correctness-timeout-s must be positive")
     if a.time_scale < 0:
         p.error("--time-scale must be non-negative")
-    if a.resident_memory_budget_mib is not None and a.resident_memory_budget_mib <= 0:
-        p.error("--resident-memory-budget-mib must be positive")
     vm_pool_values = (
         a.vm_pool_cgroup,
         a.runtime_pool_cgroup,
@@ -956,33 +946,6 @@ def main() -> None:
             and a.tool_balloon_idle_floor_mib >= tool_memory_mib):
         p.error("Tool balloon idle floor must be below fixed Tool-VM capacity")
     pair_memory_mib = int(runtime_memory_mib + tool_memory_mib)
-    resident_pair_slots = len(raw["sessions"])
-    if a.resident_memory_budget_mib is not None:
-        resident_pair_slots = a.resident_memory_budget_mib // pair_memory_mib
-        if resident_pair_slots < 1:
-            raise ValueError(
-                "resident-memory budget is smaller than one Runtime+Tool VM pair"
-            )
-        resident_pair_slots = min(resident_pair_slots, len(raw["sessions"]))
-    configured_cpu_pairs = raw.get("cpu_pairs")
-    if configured_cpu_pairs is not None:
-        if not isinstance(configured_cpu_pairs, list) or any(
-            not isinstance(item, dict)
-            or not isinstance(item.get("runtime"), int)
-            or not isinstance(item.get("tool"), int)
-            for item in configured_cpu_pairs
-        ):
-            raise ValueError("manifest cpu_pairs must contain integer Runtime/Tool pairs")
-        cpu_pairs = [
-            (int(item["runtime"]), int(item["tool"]))
-            for item in configured_cpu_pairs
-        ]
-        if resident_pair_slots > len(cpu_pairs):
-            raise ValueError("resident pair budget exceeds the available CPU-pair leases")
-        pair_resources: list[object] = list(cpu_pairs[:resident_pair_slots])
-    else:
-        pair_resources = list(range(resident_pair_slots))
-    pair_slots = FairResourcePool(pair_resources)
     predictive_steps: dict[int, dict] = {}
     if a.tool_memory_plan is not None:
         plan_payload = json.loads(a.tool_memory_plan.read_text(encoding="utf-8"))
@@ -1151,12 +1114,6 @@ def main() -> None:
             tool_lifecycles.append(tool)
             runtime_lifecycles.append(runtime)
         snapshots = 0; snapshot_s = restore_s = 0.0
-        admission_wait_s = 0.0
-        admission_acquisitions = 0
-        admission_wait_events_s: list[float] = []
-        admission_leases: list[dict] = []
-        pair_lease: object | None = None
-        current_lease_event: dict | None = None
         tool_reservation_lease: int | None = None
         vm_tool_growth_lease: int | None = None
         tool_reservation_events: list[dict] = []
@@ -1468,42 +1425,6 @@ def main() -> None:
             before_response_ready=before_response_ready,
         )
 
-        def acquire_pair() -> None:
-            nonlocal admission_wait_s, admission_acquisitions, pair_lease, current_lease_event
-            if pair_lease is not None:
-                raise RuntimeError("resident VM pair already owns an admission lease")
-            wait_started = time.monotonic()
-            lease = pair_slots.acquire(timeout=remaining())
-            waited_s = time.monotonic() - wait_started
-            admission_wait_s += waited_s
-            admission_wait_events_s.append(waited_s)
-            if lease is None:
-                raise TimeoutError("timed out waiting for resident-pair admission")
-            pair_lease = lease
-            admission_acquisitions += 1
-            current_lease_event = {
-                "acquired_elapsed_s": time.monotonic() - started,
-                "released_elapsed_s": None,
-                "wait_s": waited_s,
-                "runtime_cpu": lease[0] if isinstance(lease, tuple) else runtime.config.cpu_set,
-                "tool_cpu": lease[1] if isinstance(lease, tuple) else tool.config.cpu_set,
-            }
-            admission_leases.append(current_lease_event)
-            if isinstance(lease, tuple):
-                runtime_cpu, tool_cpu = lease
-                runtime.config = replace(runtime.config, cpu_set=str(runtime_cpu))
-                tool.config = replace(tool.config, cpu_set=str(tool_cpu))
-
-        def release_pair() -> None:
-            nonlocal pair_lease, current_lease_event
-            if pair_lease is None:
-                return
-            lease, pair_lease = pair_lease, None
-            if current_lease_event is not None:
-                current_lease_event["released_elapsed_s"] = time.monotonic() - started
-                current_lease_event = None
-            pair_slots.release(lease)
-
         def predicted_wait_s(record: dict) -> float:
             replay_index = record.get("replay_index")
             if (a.inference == "replay" and replay_index is not None
@@ -1628,7 +1549,6 @@ def main() -> None:
         gateway.start(spec["gateway_host"], 18081)
         deadline = time.monotonic() + a.timeout_s
         try:
-            acquire_pair()
             def start_tool():
                 elapsed = tool.start()
                 wait_tcp(spec["tool_host"], 2222, 30)
@@ -1716,10 +1636,6 @@ def main() -> None:
                             "checkpoint_scope": a.checkpoint_scope,
                             "vm_snapshot_operations": checkpoint_vm_operations,
                             "vm_restore_operations": checkpoint_vm_operations,
-                            "admission_wait_s": admission_wait_s,
-                            "admission_acquisitions": admission_acquisitions,
-                            "admission_wait_events_s": admission_wait_events_s,
-                            "admission_leases": admission_leases,
                             "session_started_elapsed_s": session_started_elapsed_s,
                             "session_completed_elapsed_s": session_completed_elapsed_s,
                             "session_wall_s": (
@@ -1793,7 +1709,7 @@ def main() -> None:
                 pass
             idle_reclaim_complete.wait(timeout=30.0)
             try:
-                close_runtime_tool_pair_and_release(runtime, tool, release_pair)
+                close_runtime_tool_pair(runtime, tool)
             finally:
                 try:
                     release_tool_reservation()
@@ -1887,10 +1803,6 @@ def main() -> None:
     cgroup_deltas = [int(item["cgroup_memory_delta_bytes"]) for item in samples
                      if item["cgroup_memory_delta_bytes"] is not None]
     session_wall_values = [float(item["session_wall_s"]) for item in results]
-    admission_wait_events = [
-        float(wait_s) for item in results
-        for wait_s in item.get("admission_wait_events_s", [])
-    ]
     tool_reservation_events = [
         event for item in results for event in item.get("tool_reservation_events", [])
     ]
@@ -1903,6 +1815,13 @@ def main() -> None:
     ]
     tool_reservation_waits = [
         float(event["wait_s"]) for event in tool_reservation_events
+    ]
+    memory_admission_wait_events = [
+        *tool_reservation_waits,
+        *(
+            float(event.get("wait_s") or 0.0)
+            for event in vm_materialization_events
+        ),
     ]
     tool_reservation_time_mib_s = sum(
         float(event["reservation_mib"]) * float(event.get("held_s") or 0.0)
@@ -1953,10 +1872,9 @@ def main() -> None:
               "numa_node": numa_node,
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
               "configured_pair_memory_mib": pair_memory_mib,
-              "resident_memory_budget_mib": a.resident_memory_budget_mib,
-              "resident_pair_slots": resident_pair_slots,
-              "cpu_pair_leasing": configured_cpu_pairs is not None,
-              "cpu_pair_pool": configured_cpu_pairs,
+              "worker_concurrency": len(raw["sessions"]),
+              "resident_pair_slot_limit": None,
+              "cpu_pair_lease_limit": None,
               "tool_reservation_budget_mib": a.tool_reservation_budget_mib,
               "tool_reservation_policy": a.admission_policy,
               "admission_policy": a.admission_policy,
@@ -2161,15 +2079,19 @@ def main() -> None:
                   for row in reclamation_events
                   if row.get("numa_memory_released_bytes") is not None
               ),
-              "admission_wait_s": sum(float(item.get("admission_wait_s", 0.0)) for item in results),
-              "admission_acquisitions": sum(int(item.get("admission_acquisitions", 0)) for item in results),
+              "admission_wait_s": sum(memory_admission_wait_events),
+              "admission_acquisitions": len(memory_admission_wait_events),
               "mean_admission_wait_event_s": (
-                  statistics.fmean(admission_wait_events) if admission_wait_events else None
+                  statistics.fmean(memory_admission_wait_events)
+                  if memory_admission_wait_events else None
               ),
               "p95_admission_wait_event_s": (
-                  percentile(admission_wait_events, 0.95) if admission_wait_events else None
+                  percentile(memory_admission_wait_events, 0.95)
+                  if memory_admission_wait_events else None
               ),
-              "max_admission_wait_event_s": max(admission_wait_events, default=None),
+              "max_admission_wait_event_s": max(
+                  memory_admission_wait_events, default=None
+              ),
               "mean_session_wall_s": (
                   statistics.fmean(session_wall_values) if session_wall_values else None
               ),

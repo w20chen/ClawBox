@@ -26,7 +26,7 @@
     }
   ],
   "concurrency_levels": [1, 8, 20, 40],
-  "cpu_placement": "exclusive",
+  "cpu_placement": "round_robin",
   "numa_host_reserve_mib": 32768,
   "snapshot_disk_reserve_mib": 32768,
   "max_numa_cpu_busy_fraction": 0.10,

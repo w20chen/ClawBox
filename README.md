@@ -782,6 +782,16 @@ budgets two alternating generations of both VM memory files for pair scope. Do
 not use the historical 2 GiB versus 4 GiB measurements as evidence for
 oversubscription; they measure guest capacity and snapshot-size effects.
 
+`sessions`/`concurrency_levels` is offered agent concurrency: the runner starts
+that many workers and has no resident-pair slot semaphore or unique CPU-pair
+lease pool. Paper suites default to `cpu_placement: "round_robin"`, which
+reuses NUMA-local CPU pairs and therefore does not cap agents at half the NUMA
+CPU count. Set `cpu_placement: "exclusive"` only for a CPU-isolated ablation;
+that mode necessarily requires two distinct CPUs per session and the preflight
+rejects a larger sweep. The managed-service tenant `concurrency_quota` is not
+used by this direct-Firecracker runner. Under the default paper setup, VM-pool
+and Tool-pool memory admission are the dynamic concurrency limit.
+
 ## Historical pre-rethink experiment (superseded)
 
 The remaining notes and archived files below describe the earlier mechanism
@@ -936,7 +946,7 @@ The configuration names correspond to these general experiment concepts:
 | `tool_admission_safety_headroom_mib` | unallocatable safety margin retained below the Tool admission budget |
 | `idle_tool_vm_rss_mib` | measured idle Tool-VM RSS anchor used for capacity and oracle analysis, not subtracted at tool completion |
 | `tool_balloon_reclamation`, `tool_balloon_idle_floor_mib` | optional resident predictive baseline that deflates before tool execution and inflates back to the measured idle floor after tool completion; fixed VM capacity is unchanged |
-| `resident_memory_budget_mib` | optional configured admission budget; excess sessions queue until a VM pair is resident or checkpointed |
+| `resident_memory_budget_mib` | removed legacy pair-slot gate; current paper runs use the VM/Tool cgroup watermarks instead |
 | `workloads[].independent_unit` | independent task ID used for inference; repeated trajectories share one ID |
 | `numa_host_reserve_mib`, `max_numa_cpu_busy_fraction`, `require_no_firecracker` | clean-host admission bounds for timing runs |
 | `require_parent_numa_binding` | reject a suite whose parent/helpers were not launched on the selected NUMA node |

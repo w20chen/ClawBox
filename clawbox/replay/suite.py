@@ -309,7 +309,10 @@ def validate_numa_budget(raw: dict[str, Any], topology: dict[str, Any]) -> None:
     tool_mib = int(resources.get("tool_memory_mib", 4096))
     reserve_mib = int(raw.get("numa_host_reserve_mib", 32768))
     levels = [int(item) for item in raw.get("concurrency_levels", [])]
-    placement = str(raw.get("cpu_placement", "exclusive"))
+    placement = str(raw.get(
+        "cpu_placement",
+        "round_robin" if "paper_experiment" in raw else "exclusive",
+    ))
     if placement not in {"exclusive", "round_robin"}:
         raise ValueError("cpu_placement must be exclusive or round_robin")
     if not levels or any(item < 1 for item in levels):
@@ -968,7 +971,10 @@ def validate_suite_config(config_path: Path) -> dict[str, Any]:
         "numa_topology": topology,
         "host_preflight": host_state,
         "concurrency_levels": raw["concurrency_levels"],
-        "cpu_placement": raw.get("cpu_placement", "exclusive"),
+        "cpu_placement": raw.get(
+            "cpu_placement",
+            "round_robin" if "paper_experiment" in raw else "exclusive",
+        ),
         "workloads": [str(item["name"]) for item in workloads],
         "independent_units": sorted({str(item["independent_unit"]) for item in workloads}),
         "prediction_provenance": predictions,
@@ -1037,7 +1043,10 @@ def run_suite(config_path: Path) -> int:
                 f"{int(raw.get('seed', 0))}:{name}:{concurrency}".encode()
             ).digest()[:4], "big")
             child.setdefault("retain_vm_artifacts", False)
-            if raw.get("cpu_placement", "exclusive") == "round_robin":
+            if raw.get(
+                "cpu_placement",
+                "round_robin" if "paper_experiment" in raw else "exclusive",
+            ) == "round_robin":
                 child.setdefault("resources", {})["cpu_list"] = topology["cpulist"]
             child["output"] = str(child_output)
             if workload.get("validation_command"):
@@ -1173,7 +1182,10 @@ def run_suite(config_path: Path) -> int:
              "host_preflight": host_state,
              "numa_host_reserve_mib": int(raw.get("numa_host_reserve_mib", 32768)),
              "concurrency_levels": raw["concurrency_levels"],
-             "cpu_placement": raw.get("cpu_placement", "exclusive"),
+             "cpu_placement": raw.get(
+                 "cpu_placement",
+                 "round_robin" if "paper_experiment" in raw else "exclusive",
+             ),
              "require_held_out_predictions": bool(raw.get("require_held_out_predictions", False)),
              "resume_enabled": resume,
              "prediction_provenance": prediction_provenance,

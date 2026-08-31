@@ -348,6 +348,7 @@ def test_openclaw_adapter_keeps_legacy_mode_alias():
     assert "--mode {resident,snapshot}" in completed.stdout
     assert "--residency-policy {resident,llm_wait_checkpoint}" in completed.stdout
     assert "--checkpoint-scope {pair,tool}" in completed.stdout
+    assert "--resident-memory-budget-mib" not in completed.stdout
 
 
 def test_direct_tool_init_reconstructs_guest_collector_environment():
@@ -722,14 +723,12 @@ def test_pair_checkpoint_coordinator_fails_closed_after_partial_checkpoint():
         coordinator.restore()
 
 
-def test_openclaw_tool_checkpoint_failure_fails_session_and_releases_pair_lease():
+def test_openclaw_tool_checkpoint_failure_still_closes_both_vms():
     script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
     spec = importlib.util.spec_from_file_location("run_openclaw_experiment_failure", script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    pool = module.FairResourcePool([(0, 1)])
-    lease = pool.acquire(timeout=0)
     events = []
 
     class Lifecycle:
@@ -752,14 +751,11 @@ def test_openclaw_tool_checkpoint_failure_fails_session_and_releases_pair_lease(
         try:
             module.checkpoint_runtime_tool_pair(runtime, tool)
         finally:
-            module.close_runtime_tool_pair_and_release(
-                runtime, tool, lambda: pool.release(lease)
-            )
+            module.close_runtime_tool_pair(runtime, tool)
 
     assert events == [
         "checkpoint-runtime", "checkpoint-tool", "close-runtime", "close-tool",
     ]
-    assert pool.acquire(timeout=0) == lease
 
 
 def test_openclaw_collects_actual_tool_working_set_and_joins_prediction(tmp_path, monkeypatch):

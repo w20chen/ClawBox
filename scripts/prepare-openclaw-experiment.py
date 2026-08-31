@@ -93,7 +93,8 @@ def main() -> None:
         "model_id": a.model_id,
         "network_prefix": a.network_prefix,
         "sessions": [],
-        "cpu_pairs": cpu_pairs,
+        "cpu_placement": "round_robin" if cpu_pairs else "exclusive",
+        "cpu_pair_count": len(cpu_pairs) if cpu_pairs else a.sessions,
     }
     for index in range(a.sessions):
         directory = a.output / f"session-{index:04d}"
