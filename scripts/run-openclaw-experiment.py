@@ -392,6 +392,19 @@ def adjust_balloon(
     }
 
 
+def balloon_materialization_reclaim_verified(
+    event: dict, idle_tool_vm_rss_mib: float,
+) -> tuple[bool, int]:
+    """Require both guest progress and bounded host RSS before slot release."""
+    release_limit_mib = math.ceil(float(idle_tool_vm_rss_mib) * 1.5)
+    verified = (
+        bool(event.get("target_reached"))
+        and int(event.get("tool_firecracker_rss_after_bytes") or 0)
+        <= release_limit_mib * 1024 * 1024
+    )
+    return verified, release_limit_mib
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("manifest", type=Path)
@@ -660,10 +673,23 @@ def main() -> None:
                         released_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
                     )
                 if a.tool_balloon_reclamation:
-                    # Guest-cooperative balloon reclaim is the evidence that
-                    # this fixed-capacity VM no longer needs a worst-case
-                    # materialization slot.  P90 release alone is insufficient.
-                    release_tool_materialization()
+                    # Fail closed: a guest target alone is not proof of host
+                    # reclamation.  Release the worst-case slot only when the
+                    # balloon reached its target and host Firecracker RSS is
+                    # below a measured-idle anchor with 50% margin.
+                    release_verified, release_limit_mib = (
+                        balloon_materialization_reclaim_verified(
+                            balloon_event, float(a.idle_tool_vm_rss_mib)
+                        )
+                    )
+                    balloon_event["materialization_release_rss_limit_mib"] = (
+                        release_limit_mib
+                    )
+                    balloon_event["materialization_release_verified"] = (
+                        release_verified
+                    )
+                    if release_verified:
+                        release_tool_materialization()
 
         def before_response_ready(step: int | None, message: dict) -> dict:
             nonlocal tool_reservation_lease, current_tool_reservation_event
@@ -1197,6 +1223,10 @@ def main() -> None:
               "tool_balloon_reclamation_events": len(balloon_reclamation_events),
               "tool_balloon_target_reached_events": sum(
                   bool(row.get("target_reached")) for row in balloon_events
+              ),
+              "tool_balloon_materialization_release_verified_events": sum(
+                  bool(row.get("materialization_release_verified"))
+                  for row in balloon_reclamation_events
               ),
               "tool_balloon_operation_s": sum(
                   float(row.get("operation_s") or 0.0) for row in balloon_events

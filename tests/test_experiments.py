@@ -517,3 +517,28 @@ def test_balloon_adjustment_waits_for_guest_and_records_rss_reclamation(monkeypa
     assert event["target_reached"] is True
     assert event["statistics"]["actual_mib"] == 1536
     assert event["tool_firecracker_rss_released_bytes"] == 400 * 1024**2
+
+
+def test_balloon_materialization_release_requires_guest_target_and_low_host_rss():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_balloon_gate", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    verified, limit = module.balloon_materialization_reclaim_verified(
+        {"target_reached": True,
+         "tool_firecracker_rss_after_bytes": 326 * 1024**2},
+        256,
+    )
+    assert (verified, limit) == (True, 384)
+    assert module.balloon_materialization_reclaim_verified(
+        {"target_reached": False,
+         "tool_firecracker_rss_after_bytes": 100 * 1024**2},
+        256,
+    )[0] is False
+    assert module.balloon_materialization_reclaim_verified(
+        {"target_reached": True,
+         "tool_firecracker_rss_after_bytes": 385 * 1024**2},
+        256,
+    )[0] is False

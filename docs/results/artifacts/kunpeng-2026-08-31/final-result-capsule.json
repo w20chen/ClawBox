@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "host": "hostname-txyuq.foreman.pxe",
+  "numa_node": 0,
+  "tool_repository_commit": "08c32462831d3849a70241ac9fea946b6b1884a6",
+  "trace_sha256": "8be4a7a6affe1f316e585cf7bdef170cd6e48ba43bf844a923045a1793d28b47",
+  "p90_plan_sha256": "aeb621756df1bd014c1ea6ea53ef68279f9167a875fddfde45ca271ec52a3b8c",
+  "corrected_runner_commit": "af31b1585f2d128009b973df7d5b9bd1b3109c50",
+  "corrected_source_tree_sha256": "9868731e16af3a1e2f63ae655201d071a500ad9e33ae445905d54527ff3cb7ca",
+  "full_trace_c20": {
+    "remote_study_summary": "/data/prc20-telemetry-fixed2-v4/study-summary.json",
+    "common": {
+      "sessions": 20,
+      "model_steps": 540,
+      "tool_vm_capacity_mib": 2048,
+      "tool_budget_mib": 16384,
+      "safety_headroom_mib": 1024,
+      "materialization_slots": 7,
+      "correctness_pass_fraction": 1.0,
+      "failures": 0,
+      "final_state_equal": true
+    },
+    "resident": {
+      "wall_s": 612.7221823650179,
+      "tasks_per_minute": 1.9584732437271581,
+      "steps_per_minute": 52.87877758063327,
+      "mean_firecracker_rss_bytes": 7011277067.644263,
+      "peak_firecracker_rss_bytes": 9468616704,
+      "firecracker_rss_time_byte_seconds": 4308643080818.9805,
+      "tool_materialization_wait_s": 1225.359745259222,
+      "prediction_observations": 247,
+      "prediction_coverage_fraction": 1.0,
+      "mean_prediction_error_mib": 0.7872358932186235,
+      "max_actual_tool_command_memory_mib": 2.9296875,
+      "tool_budget_violations": 0
+    },
+    "llm_wait_checkpoint": {
+      "wall_s": 1043.5298830269603,
+      "tasks_per_minute": 1.1499431108950784,
+      "steps_per_minute": 31.04846399416712,
+      "mean_firecracker_rss_bytes": 10002431236.690838,
+      "peak_firecracker_rss_bytes": 16181366784,
+      "firecracker_rss_time_byte_seconds": 10403017151477.262,
+      "tool_materialization_wait_s": 3062.169310032623,
+      "prediction_observations": 106,
+      "prediction_coverage_fraction": 0.9056603773584906,
+      "mean_prediction_error_mib": 0.8677402712264151,
+      "checkpoint_cycles": 540,
+      "verified_firecracker_rss_released_bytes": 278590517248,
+      "snapshot_service_s": 4984.195732454769,
+      "restore_service_s": 54.2750404192484,
+      "tool_budget_violations": 0
+    }
+  },
+  "resident_balloon_c20": {
+    "remote_study_summary": "/data/p90-balloon-c20/study-summary.json",
+    "sessions": 20,
+    "correct_sessions": 20,
+    "model_steps": 540,
+    "failures": 0,
+    "wall_s": 467.9055951690534,
+    "tasks_per_minute": 2.5646198985212867,
+    "steps_per_minute": 69.24473726007474,
+    "mean_firecracker_rss_bytes": 9577711773.538462,
+    "peak_firecracker_rss_bytes": 12724813824,
+    "firecracker_rss_time_byte_seconds": 4514408109341.185,
+    "tool_materialization_wait_s": 162.96454604010796,
+    "balloon_events": 1060,
+    "balloon_target_reached_events": 1060,
+    "balloon_reclamation_events": 520,
+    "balloon_operation_s": 142.03669951640768,
+    "observed_firecracker_rss_released_bytes": 1324580864,
+    "tool_budget_violations": 0,
+    "final_state_equal": true
+  },
+  "checkpoint_density_micro": {
+    "c20_remote_study_summary": "/data/cm20/study-summary.json",
+    "c20": {
+      "resident_tasks_per_minute": 2.5851537831570623,
+      "checkpoint_tasks_per_minute": 4.246328610934022,
+      "resident_wall_s": 464.1890195540036,
+      "checkpoint_wall_s": 282.5970644170302,
+      "checkpoint_cycles": 60,
+      "correct_sessions_each_arm": 20,
+      "failures_each_arm": 0
+    },
+    "c40_remote_study_summary": "/data/cm40/study-summary.json",
+    "c40": {
+      "resident_tasks_per_minute": 2.636173973647164,
+      "checkpoint_tasks_per_minute": 6.398391328123257,
+      "resident_wall_s": 910.4103234429494,
+      "checkpoint_wall_s": 375.09428181598196,
+      "checkpoint_cycles": 120,
+      "correct_sessions_each_arm": 40,
+      "failures_each_arm": 0
+    }
+  }
+}

@@ -1,5 +1,16 @@
 # ClawBox paper-evaluation handoff: Kubernetes, replay, and NUMA 0
 
+> **Superseded scope note (later on 2026-08-31):** This handoff records the
+> state of an earlier session, but its requirement that Kubernetes be the
+> primary checkpoint-study path is no longer current. The subsequent design
+> review accepted the direct-Firecracker runner as the paper's single-host,
+> NUMA-controlled, fail-stop mechanism executor. Kubernetes remains the
+> production control plane and is not claimed to provide the evaluated
+> checkpoint/balloon lifecycle. The current design and accepted/excluded
+> results are maintained in
+> `prediction-aware-admission-kunpeng-2026-08-31.md`; do not use sections 1--2
+> below as current experiment instructions.
+
 Date: 2026-08-31 (Asia/Shanghai)  
 Local workspace: `C:\Users\29068\Desktop\ClawBox`  
 Remote host: `ssh kunpeng` (`hostname-txyuq.foreman.pxe`)  

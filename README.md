@@ -734,6 +734,10 @@ incremental P90 + safety headroom <= budget`. A 100 ms host sampler feeds RSS
 growth back into the gate and blocks later admissions after an overrun. At
 tool completion the gate remeasures RSS before dropping only the future-growth
 commitment; it never assumes that guest-free pages left Firecracker RSS.
+Because command-working-set P90 does not cover lazy first-touch of the VM's
+fixed RAM mapping, predictive arms also use a conservative fixed-capacity
+materialization pool. Its slot is released only after VM close or verified
+checkpoint/balloon reclamation; it is separate from the per-tool P90 charge.
 Static controls use their full 4 GiB or 2 GiB Tool capacity as the incremental
 commitment. Actual per-command cgroup peaks are measured separately.
 Checkpointing is the main long-idle reclamation mechanism, and every eviction

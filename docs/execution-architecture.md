@@ -57,7 +57,10 @@ The active paper study can cross `inference_backend = replay | api`, static or
 per-tool P90 admission, and `residency_policy = resident |
 llm_wait_checkpoint`. The Tool-VM capacity is fixed within an arm; direct-runner
 P90 values gate live-RSS admission and do not resize Firecracker RAM. A separate
-resident arm may use virtio-balloon for guest-cooperative live reclamation. The
+fixed-capacity materialization pool bounds lazy guest first-touch that is not
+represented by command-working-set P90; its slot is released only after VM
+close or verified physical reclaim. A resident extension may use
+virtio-balloon for guest-cooperative live reclamation. The
 suite additionally crosses workloads and concurrency levels under a validated
 NUMA CPU/memory budget. Its legacy config spellings `p90_static` and
 `memory_policies: [resident, snapshot]` remain supported at the schema boundary
