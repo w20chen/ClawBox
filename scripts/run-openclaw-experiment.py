@@ -535,6 +535,27 @@ def main() -> None:
         )
         if a.tool_reservation_budget_mib is not None else None
     )
+    tool_materialization_slots = None
+    tool_materialization_pool = None
+    if tool_admission is not None:
+        usable_tool_memory_mib = (
+            int(a.tool_reservation_budget_mib)
+            - int(a.tool_admission_safety_headroom_mib)
+        )
+        tool_materialization_slots = usable_tool_memory_mib // tool_memory_mib
+        if tool_materialization_slots < 1:
+            raise ValueError(
+                "Tool memory budget after safety headroom is smaller than one "
+                "fixed-capacity Tool VM"
+            )
+        # A per-command prediction describes incremental command working set; it
+        # cannot predict lazy first-touch materialization of the VM's fixed RAM.
+        # Bound that separate risk conservatively by fixed-capacity slots.  A
+        # slot is released only after close/checkpoint or verified balloon
+        # reclamation, while FeedbackMemoryAdmission remains the per-tool gate.
+        tool_materialization_pool = FairResourcePool(
+            list(range(tool_materialization_slots))
+        )
     samples: list[dict] = []
     stop = threading.Event()
     started_unix_s = time.time()
@@ -638,6 +659,11 @@ def main() -> None:
                     event["remaining_headroom_after_mib"] = (
                         released_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
                     )
+                if a.tool_balloon_reclamation:
+                    # Guest-cooperative balloon reclaim is the evidence that
+                    # this fixed-capacity VM no longer needs a worst-case
+                    # materialization slot.  P90 release alone is insufficient.
+                    release_tool_materialization()
 
         def before_response_ready(step: int | None, message: dict) -> dict:
             nonlocal tool_reservation_lease, current_tool_reservation_event
@@ -646,6 +672,10 @@ def main() -> None:
                 return {}
             if session_closing.is_set():
                 raise RuntimeError("session closed before Tool admission")
+            if a.tool_balloon_reclamation and tool_materialization_lease is None:
+                with_tool_materialization_admission(
+                    "balloon_expand", lambda: None
+                )
             if a.static_tool_reservation_mib is not None:
                 current_tool_rss_kib = math.ceil(tool.rss_bytes() / 1024.0)
                 incremental_kib = max(
@@ -720,9 +750,7 @@ def main() -> None:
             Path(spec["store"]), mode=a.inference, trace=a.trace, time_scale=a.time_scale,
             upstream_base_url=a.api_base_url,
             upstream_api_key=os.environ.get(a.api_key_env), upstream_model=a.api_model,
-            on_request_started=lambda: (
-                release_tool_reservation(), release_tool_materialization()
-            ),
+            on_request_started=release_tool_reservation,
             before_response_ready=before_response_ready,
         )
 
@@ -761,42 +789,45 @@ def main() -> None:
                 current_tool_materialization_event = None
             if lease is None:
                 return
-            assert tool_admission is not None
-            released = tool_admission.release(lease)
+            assert tool_materialization_pool is not None
+            tool_materialization_pool.release(lease)
             if event is not None:
                 released_elapsed_s = time.monotonic() - started
                 event["released_elapsed_s"] = released_elapsed_s
                 event["held_s"] = (
                     released_elapsed_s - event["acquired_elapsed_s"]
                 )
+                resident_bytes = measure_tool_resident_bytes()
                 event["resident_tool_rss_after_mib"] = (
-                    released["resident_bytes"] / (1024.0 * 1024.0)
+                    resident_bytes / (1024.0 * 1024.0)
                 )
                 event["remaining_headroom_after_mib"] = (
-                    released["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                    (
+                        int(a.tool_reservation_budget_mib) * 1024 * 1024
+                        - int(a.tool_admission_safety_headroom_mib) * 1024 * 1024
+                        - resident_bytes
+                    ) / (1024.0 * 1024.0)
                 )
 
         def with_tool_materialization_admission(reason: str, operation):
-            """Hold boot/restore commitment until the restored guest progresses."""
+            """Hold a fixed-capacity slot until physical reclaim is verified."""
             nonlocal tool_materialization_lease, current_tool_materialization_event
-            if tool_admission is None:
+            if tool_materialization_pool is None:
                 return operation()
             wait_started = time.monotonic()
-            acquired = tool_admission.acquire(
-                tool_memory_mib * 1024 * 1024, timeout=remaining(),
-            )
+            lease = tool_materialization_pool.acquire(timeout=remaining())
             wait_s = time.monotonic() - wait_started
-            if acquired is None:
+            if lease is None:
                 raise TimeoutError(
                     f"timed out waiting for Tool {reason} memory admission"
                 )
-            lease, admitted = acquired
+            resident_bytes = measure_tool_resident_bytes()
             event = {
                 "reason": reason,
                 "reservation_mib": tool_memory_mib,
                 "wait_s": wait_s,
                 "resident_tool_rss_before_mib": (
-                    admitted["resident_bytes"] / (1024.0 * 1024.0)
+                    resident_bytes / (1024.0 * 1024.0)
                 ),
                 "acquired_elapsed_s": time.monotonic() - started,
                 "released_elapsed_s": None,
@@ -804,7 +835,7 @@ def main() -> None:
             tool_materialization_events.append(event)
             with tool_reservation_lock:
                 if tool_materialization_lease is not None:
-                    tool_admission.release(lease)
+                    tool_materialization_pool.release(lease)
                     raise RuntimeError(
                         "session already owns a Tool materialization admission"
                     )
@@ -867,10 +898,13 @@ def main() -> None:
                     correctness_path = None
                     working_set_path = a.output / f"tool-working-set-session-{index:04d}.out"
                     if a.tool_balloon_reclamation:
-                        balloon_events.append(adjust_balloon(
-                            tool, 0, "validation_expand",
-                            a.tool_balloon_settle_timeout_s,
-                        ))
+                        with_tool_materialization_admission(
+                            "validation_expand",
+                            lambda: balloon_events.append(adjust_balloon(
+                                tool, 0, "validation_expand",
+                                a.tool_balloon_settle_timeout_s,
+                            )),
+                        )
                     tool_working_sets = collect_tool_working_sets(
                         spec, tool_reservation_events, working_set_path,
                         arm_started_unix_s=started_unix_s,
@@ -968,6 +1002,7 @@ def main() -> None:
                     })
                     # The memory/CPU-pair lease is released only after both
                     # Firecracker processes have been evicted.
+                    release_tool_materialization()
                     release_pair()
                     while time.monotonic() < deadline:
                         current = {item["request_id"]: item for item in gateway.records()}
@@ -1101,6 +1136,7 @@ def main() -> None:
               "cpu_pair_leasing": configured_cpu_pairs is not None,
               "cpu_pair_pool": configured_cpu_pairs,
               "tool_reservation_budget_mib": a.tool_reservation_budget_mib,
+              "tool_materialization_slots": tool_materialization_slots,
               "tool_reservation_policy": (
                   "per_tool_incremental_p90_with_rss_feedback" if a.tool_memory_plan is not None
                   else "static" if a.static_tool_reservation_mib is not None else None
