@@ -464,32 +464,39 @@ def main() -> None:
         tool_reservation_events: list[dict] = []
         checkpoint_reclamation_events: list[dict] = []
         current_tool_reservation_event: dict | None = None
+        tool_reservation_lock = threading.Lock()
+        session_closing = threading.Event()
 
         def release_tool_reservation() -> None:
             nonlocal tool_reservation_lease, current_tool_reservation_event
-            if tool_reservation_lease is not None:
-                assert tool_admission is not None
-                released_status = tool_admission.release(tool_reservation_lease)
+            with tool_reservation_lock:
+                lease = tool_reservation_lease
                 tool_reservation_lease = None
-                if current_tool_reservation_event is not None:
+                event = current_tool_reservation_event
+                current_tool_reservation_event = None
+            if lease is not None:
+                assert tool_admission is not None
+                released_status = tool_admission.release(lease)
+                if event is not None:
                     released = time.monotonic() - started
-                    current_tool_reservation_event["released_elapsed_s"] = released
-                    current_tool_reservation_event["held_s"] = (
-                        released - current_tool_reservation_event["acquired_elapsed_s"]
+                    event["released_elapsed_s"] = released
+                    event["held_s"] = (
+                        released - event["acquired_elapsed_s"]
                     )
-                    current_tool_reservation_event["resident_tool_rss_after_mib"] = (
+                    event["resident_tool_rss_after_mib"] = (
                         released_status["resident_bytes"] / (1024.0 * 1024.0)
                     )
-                    current_tool_reservation_event["remaining_headroom_after_mib"] = (
+                    event["remaining_headroom_after_mib"] = (
                         released_status["remaining_headroom_bytes"] / (1024.0 * 1024.0)
                     )
-                    current_tool_reservation_event = None
 
         def before_response_ready(step: int | None, message: dict) -> dict:
             nonlocal tool_reservation_lease, current_tool_reservation_event
             tool_calls = message.get("tool_calls") or []
             if not tool_calls or tool_admission is None:
                 return {}
+            if session_closing.is_set():
+                raise RuntimeError("session closed before Tool admission")
             if a.static_tool_reservation_mib is not None:
                 current_tool_rss_kib = math.ceil(tool.rss_bytes() / 1024.0)
                 incremental_kib = max(
@@ -516,7 +523,6 @@ def main() -> None:
             if acquired is None:
                 raise TimeoutError("timed out waiting for live-RSS Tool admission")
             lease, admission_status = acquired
-            tool_reservation_lease = lease
             event = {
                 "model_step": step,
                 "reservation_kib": incremental_kib,
@@ -540,8 +546,19 @@ def main() -> None:
                 "held_s": None,
                 **provenance,
             }
-            tool_reservation_events.append(event)
-            current_tool_reservation_event = event
+            with tool_reservation_lock:
+                if session_closing.is_set():
+                    reject = True
+                else:
+                    if tool_reservation_lease is not None:
+                        raise RuntimeError("session already owns a Tool admission")
+                    reject = False
+                    tool_reservation_lease = lease
+                    tool_reservation_events.append(event)
+                    current_tool_reservation_event = event
+            if reject:
+                tool_admission.release(lease)
+                raise RuntimeError("session closed while waiting for Tool admission")
             return event
 
         gateway = ModelGateway(
@@ -714,6 +731,7 @@ def main() -> None:
                 else: time.sleep(0.05)
             raise TimeoutError("OpenClaw experiment timed out")
         finally:
+            session_closing.set()
             try:
                 close_runtime_tool_pair_and_release(runtime, tool, release_pair)
             finally:
@@ -731,6 +749,18 @@ def main() -> None:
                 except Exception as exc: failures.append({"session": futures[future], "type": type(exc).__name__, "error": str(exc)})
     finally:
         stop.set(); sampler.join(timeout=2)
+    if tool_admission is not None:
+        cleanup_deadline = time.monotonic() + 2.0
+        while tool_admission.metrics()["active_leases"] and time.monotonic() < cleanup_deadline:
+            tool_admission.observe()
+            time.sleep(0.01)
+        leaked = tool_admission.metrics()["active_leases"]
+        if leaked:
+            failures.append({
+                "session": None,
+                "type": "ToolAdmissionLeak",
+                "error": f"{leaked} Tool admission leases remained after session cleanup",
+            })
     wall_s = time.monotonic() - started
     model_steps = sum(len(item.get("model_requests", [])) for item in results)
     correct_sessions = sum(
