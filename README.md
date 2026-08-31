@@ -1065,6 +1065,12 @@ numactl --cpunodebind=0 --membind=0 \
   docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json
 ```
 
+The prediction-aware admission sweep uses fixed 2 GiB Tool VM capacity for its
+P90 arms and gates each tool-bearing model response with a heterogeneous,
+per-invocation reservation. The tracked `[1, 8, 20, 40]` NUMA-0 suite is
+[`prediction-aware-sweep-suite.json`](docs/results/artifacts/kunpeng-2026-08-31/prediction-aware-sweep-suite.json).
+Its 4 GiB and 2 GiB arms are static controls; neither is a predictive arm.
+
 Its output directory is frozen in the configuration. Remove or rename a prior
 output only after preserving its evidence; `resume: true` accepts completed
 child studies with the same immutable suite identity and rejects partial or
