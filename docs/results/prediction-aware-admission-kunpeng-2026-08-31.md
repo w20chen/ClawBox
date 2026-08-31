@@ -132,7 +132,50 @@ peak RSS (115.7%); mean RSS fell 9.3%. The aggregate snapshot and restore
 service times were 1,048.8 s and 11.8 s respectively, overlapped across the
 40 sessions.
 
-<!-- DENSITY_RESULTS -->
+### Full-trace c=20 prediction-aware admission
+
+The full 27-step rec-a trace was then run with 20 resident 2 GiB Tool VMs.
+Both arms used the live-RSS feedback gate, 16 GiB Tool budget, 1 GiB safety
+headroom, identical images/timing/NUMA placement, and the same correctness and
+final-state oracles. Static admission charged the remaining gap to each VM's
+2 GiB capacity; prediction-aware admission charged the per-tool incremental
+P90. All 20 sessions and all 540 model steps completed in each arm.
+
+| Admission | Correct | Wall s | Agents/min | Steps/min | Mean/peak FC RSS GiB | RSS-time GiB-h | Aggregate / max Tool wait s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| static 2 GiB capacity charge | 20/20 | 614.6 | 1.953 | 52.72 | 17.09 / 25.15 | 3.668 | 6,455.0 / 55.65 |
+| per-tool P90 reservation | 20/20 | 291.5 | 4.117 | 111.16 | 16.69 / 25.18 | 1.574 | 443.5 / 4.41 |
+
+Prediction-aware admission improved correct-agent and step throughput by
+110.8%, reduced wall time by 52.6%, reduced Firecracker RSS-time by 57.1%,
+and reduced aggregate Tool-admission wait by 93.1%. Mean Firecracker RSS fell
+2.4%; peak RSS was effectively unchanged. There were zero failures, OOMs,
+over-budget observations, or leaked leases, and final state matched within
+each study.
+
+The predictive arm made 520 gated Tool admissions using four distinct
+reservations: 1.802, 1.812, 1.821, and 1.826 MiB. Its peak live-RSS admission
+charge was 7.98 GiB, versus 15.84 GiB for static admission. Runtime feedback
+observed growth beyond the small incremental prediction in 238 leases and
+automatically reduced later headroom; the total charge nevertheless remained
+below budget.
+
+Guest cgroup working-set telemetry was unavailable in this image
+(`guest collector helper is not configured`), so per-command cgroup prediction
+error, formal coverage, oracle opportunity, and spare capacity below 2 GiB are
+not reported. The bridge's process `max_rss` fallback recorded a 1,487 KiB
+mean and 1,496 KiB maximum across 560 runtime-envelope commands, but this is
+not substituted for the missing cgroup metric. Operationally, fixed 2 GiB was
+sufficient for this held-out run because all 40 arm-sessions completed without
+OOM and passed correctness; the safety margin cannot be quantified from this
+run.
+
+An earlier `/data/pr20` attempt is excluded: a replay SSE parser merged
+multiple unindexed Tool calls and stopped after two steps. Commit `ead7e16`
+fixes the parser and makes gateway errors or incomplete traces fail the arm;
+the accepted predictive result is `/data/pr20-fixed`. The matched static result
+is `/data/sf20-fixed` at `a8e5346`, whose only change from `ead7e16` is adding
+the static study configuration; experiment runner code is identical.
 
 ## Reproduction
 
@@ -140,3 +183,7 @@ The static c=8 control suite is
 [`two-hour-direct-c08-suite.json`](artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json).
 The prediction-aware sweep is
 [`prediction-aware-sweep-suite.json`](artifacts/kunpeng-2026-08-31/prediction-aware-sweep-suite.json).
+The accepted full-trace c=20 arms use
+[`p90-reservation-rec-a-c20-study.json`](artifacts/kunpeng-2026-08-31/p90-reservation-rec-a-c20-study.json)
+and
+[`static-fixed2-rec-a-c20-study.json`](artifacts/kunpeng-2026-08-31/static-fixed2-rec-a-c20-study.json).
