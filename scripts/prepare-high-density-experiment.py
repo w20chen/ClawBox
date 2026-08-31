@@ -4,10 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from clawbox.replay.network import (
+    guest_mac,
+    parse_network,
+    session_capacity,
+    session_network,
+    static_ip_argument,
+)
 
 
 def run(*argv: str) -> None:
@@ -40,8 +49,8 @@ def main() -> None:
     )
     parser.add_argument("--tool-guest-touch-mib", type=int, default=0)
     parser.add_argument(
-        "--network-prefix", metavar="A.B",
-        help="use per-session bridge/TAP names and static guest IPv4 addresses under A.B.0.0/16",
+        "--network-cidr", metavar="CIDR",
+        help="allocate one per-session /29 and matching bridge/TAP names",
     )
     parser.add_argument("--runtime-init", default="/clawbox-runtime-agent")
     parser.add_argument("--tool-init", default="/clawbox-runtime-agent")
@@ -58,19 +67,22 @@ def main() -> None:
         parser.error("--tool-rootfs-source requires --guest-agent")
     if args.tool_guest_touch_mib and args.tool_rootfs_source is None:
         parser.error("--tool-guest-touch-mib requires --tool-rootfs-source")
-    if args.network_prefix:
+    if args.network_cidr:
         try:
-            prefix = ipaddress.ip_network(f"{args.network_prefix}.0.0/16", strict=True)
+            network = parse_network(args.network_cidr)
         except ValueError as exc:
-            parser.error(f"--network-prefix must be two IPv4 octets: {exc}")
-        if args.sessions > 253:
-            parser.error("--network-prefix supports at most 253 sessions")
+            parser.error(str(exc))
+        if args.sessions > session_capacity(network):
+            parser.error(
+                f"--network-cidr supports at most {session_capacity(network)} sessions"
+            )
     else:
-        prefix = None
+        network = None
     args.output.mkdir(parents=True, exist_ok=False)
 
     sessions: list[dict[str, object]] = []
     for index in range(args.sessions):
+        allocated = session_network(network, index) if network is not None else None
         session = args.output / f"session-{index:04d}"
         workspace = session / "workspace"
         session.mkdir()
@@ -104,12 +116,13 @@ def main() -> None:
                 "guest_cid": 3 + index,
                 "guest_agent_port": 18080,
             })
-        if prefix is not None:
-            subnet = index + 1
+        if allocated is not None:
             config.update({
                 "tap_device": f"crt{index:04d}",
-                "guest_mac": f"06:30:{subnet:02x}:00:00:02",
-                "boot_args": config["boot_args"] + " " + static_ip(prefix, subnet, 2),
+                "guest_mac": guest_mac(index, 2),
+                "boot_args": config["boot_args"] + " " + static_ip_argument(
+                    allocated.runtime, allocated.gateway,
+                ),
             })
         config_path = session / "firecracker.json"
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
@@ -145,12 +158,13 @@ def main() -> None:
                 "numa_node": args.numa_node,
                 "log_path": str(session / "tool-firecracker.log"),
             }
-            if prefix is not None:
-                subnet = index + 1
+            if allocated is not None:
                 tool_config.update({
                     "tap_device": f"ctl{index:04d}",
-                    "guest_mac": f"06:30:{subnet:02x}:00:00:03",
-                    "boot_args": tool_config["boot_args"] + " " + static_ip(prefix, subnet, 3),
+                    "guest_mac": guest_mac(index, 3),
+                    "boot_args": tool_config["boot_args"] + " " + static_ip_argument(
+                        allocated.tool, allocated.gateway,
+                    ),
                 })
             tool_config_path = session / "tool-firecracker.json"
             tool_config_path.write_text(
@@ -159,16 +173,11 @@ def main() -> None:
             session_spec["tool_firecracker_config"] = str(tool_config_path)
         sessions.append(session_spec)
     (args.output / "manifest.json").write_text(
-        json.dumps({"sessions": sessions}, indent=2) + "\n", encoding="utf-8"
+        json.dumps({
+            "sessions": sessions,
+            "network_cidr": str(network) if network is not None else None,
+        }, indent=2) + "\n", encoding="utf-8"
     )
-
-
-def static_ip(prefix: ipaddress.IPv4Network, subnet: int, host: int) -> str:
-    """Linux kernel ip= syntax; network setup happens before guest PID 1."""
-    base = str(prefix.network_address).split(".")[:2]
-    address = ".".join([*base, str(subnet), str(host)])
-    gateway = ".".join([*base, str(subnet), "1"])
-    return f"ip={address}::{gateway}:255.255.255.0::eth0:off"
 
 
 if __name__ == "__main__":

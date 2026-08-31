@@ -611,6 +611,42 @@ def test_paper_round_robin_cpu_placement_does_not_cap_agent_concurrency() -> Non
         validate_numa_budget(raw, topology)
 
 
+def test_session_network_allocation_scales_beyond_253_sessions() -> None:
+    from clawbox.replay.network import (
+        guest_mac,
+        parse_network,
+        session_capacity,
+        session_network,
+        static_ip_argument,
+    )
+
+    parent = parse_network("172.30.0.0/16")
+    assert session_capacity(parent) == 8192
+    allocated = session_network(parent, 300)
+    assert str(allocated.network) == "172.30.9.96/29"
+    assert str(allocated.gateway) == "172.30.9.97"
+    assert str(allocated.runtime) == "172.30.9.98"
+    assert str(allocated.tool) == "172.30.9.99"
+    assert static_ip_argument(allocated.tool, allocated.gateway) == (
+        "ip=172.30.9.99::172.30.9.97:255.255.255.248::eth0:off"
+    )
+    assert guest_mac(255, 2) != guest_mac(256, 2)
+    assert len(guest_mac(8191, 3).split(":")) == 6
+
+    with pytest.raises(ValueError, match="outside"):
+        session_network(parent, session_capacity(parent))
+
+    from clawbox.replay.suite import validate_network_capacity
+
+    assert validate_network_capacity({
+        "network_cidr": "10.0.0.0/20", "concurrency_levels": [1, 300],
+    })["session_capacity"] == 512
+    with pytest.raises(ValueError, match="largest requested concurrency"):
+        validate_network_capacity({
+            "network_cidr": "10.0.0.0/29", "concurrency_levels": [2],
+        })
+
+
 def test_paper_suite_rejects_a_busy_numa_node(monkeypatch) -> None:
     from clawbox.replay.suite import validate_host_readiness
 

@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .network import parse_network, session_capacity
 from .study import _source_hash, expand_paper_policy_matrix, run_study
 from .stats import summary_stats
 
@@ -347,6 +348,18 @@ def validate_numa_budget(raw: dict[str, Any], topology: dict[str, Any]) -> None:
                 f"concurrency {sessions} configures {configured_mib} MiB of guest memory, "
                 f"above the {available_mib} MiB NUMA-local budget after host reserve"
             )
+
+
+def validate_network_capacity(raw: dict[str, Any]) -> dict[str, Any]:
+    network = parse_network(str(raw.get("network_cidr", "172.30.0.0/16")))
+    capacity = session_capacity(network)
+    requested = max(int(value) for value in raw["concurrency_levels"])
+    if requested > capacity:
+        raise ValueError(
+            f"network {network} provides {capacity} session /29s; "
+            f"largest requested concurrency is {requested}"
+        )
+    return {"network_cidr": str(network), "session_capacity": capacity}
 
 
 def _absolute(base: Path, value: object) -> str:
@@ -830,6 +843,7 @@ def _preflight_suite(
 ]:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     base = config_path.resolve().parent
+    network_capacity = validate_network_capacity(raw)
     tool_pool_memory = validate_tool_pool_memory(raw, base)
     vm_pool_memory = validate_vm_pool_memory(raw, base, tool_pool_memory)
     node = int(raw.get("resources", {}).get("numa_node", 0))
@@ -838,6 +852,7 @@ def _preflight_suite(
     host_state = validate_host_readiness(raw, topology)
     host_state["tool_pool_memory"] = tool_pool_memory
     host_state["vm_pool_memory"] = vm_pool_memory
+    host_state["network"] = network_capacity
     parent_placement = _process_placement()
     host_state["parent_process_placement"] = parent_placement
     if bool(raw.get("require_parent_numa_binding", False)):

@@ -37,7 +37,7 @@
   "seed": 7,
   "resume": true,
   "continue_after_block_failure": false,
-  "network_prefix": "172.30",
+  "network_cidr": "172.30.0.0/16",
   "validation_command": "cd /testbed && git diff --binary --no-ext-diff HEAD",
   "correctness_command": "cd /testbed && python -m pytest -q",
   "correctness_timeout_s": 300,

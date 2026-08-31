@@ -179,7 +179,7 @@ prompt paths are backend materialization fields, not workload fields.
       "runtime_rootfs": "/data/openclaw-runtime.ext4",
       "tool_rootfs": "/data/tool-workspace.ext4",
       "prompt": "/data/workloads/prompt.txt",
-      "network_prefix": "172.30",
+      "network_cidr": "172.30.0.0/16",
       "exposed_model": "experiment-model"
     }
   },
@@ -792,6 +792,13 @@ rejects a larger sweep. The managed-service tenant `concurrency_quota` is not
 used by this direct-Firecracker runner. Under the default paper setup, VM-pool
 and Tool-pool memory admission are the dynamic concurrency limit.
 
+`network_cidr` is divided into one isolated `/29` per session. Within each
+subnet the bridge, Runtime, and Tool use addresses `+1`, `+2`, and `+3`.
+Consequently the default `172.30.0.0/16` supports 8192 session networks; the
+preparation and bridge helpers validate the requested count against the CIDR
+before creating anything. The old one-`/24`-per-session 253-session ceiling is
+removed.
+
 ## Historical pre-rethink experiment (superseded)
 
 The remaining notes and archived files below describe the earlier mechanism
@@ -918,7 +925,8 @@ Create one isolated bridge and two TAP devices per concurrent session. Keep
 them up for all experiment groups and remove them only after every VM exits.
 
 ```bash
-sudo bash scripts/direct-firecracker-network.sh up --sessions 8 --prefix 172.30
+sudo bash scripts/direct-firecracker-network.sh up --sessions 8 \
+  --network 172.30.0.0/16
 ```
 
 ### 4. Configure and run the comparison
@@ -941,6 +949,7 @@ The configuration names correspond to these general experiment concepts:
 | `sizing_policies` | `fixed`, `p90_reservation`, or both (`p90_static` is a legacy config alias) |
 | `memory_policies` | legacy input spelling for `resident` and `llm_wait_checkpoint`; `snapshot` remains an alias |
 | `resources` | VM memory size, CPU numbering, and NUMA placement |
+| `network_cidr` | parent IPv4 range divided into one isolated `/29` per session |
 | `fixed_control_tool_memory_mib` | optional untrained fixed-capacity/static-reservation control below the conservative fixed size |
 | `tool_reservation_budget_mib` | NUMA-local Tool admission budget applied to live RSS plus outstanding incremental demand |
 | `tool_admission_safety_headroom_mib` | unallocatable safety margin retained below the Tool admission budget |
@@ -1068,10 +1077,12 @@ numactl --cpunodebind=0 --membind=0 \
 ```bash
 cp deploy/replay-suite.example.json /data/replay-suite.json
 ${EDITOR:-vi} /data/replay-suite.json
-sudo bash scripts/direct-firecracker-network.sh up --sessions 40 --prefix 172.30
+sudo bash scripts/direct-firecracker-network.sh up --sessions 40 \
+  --network 172.30.0.0/16
 numactl --cpunodebind=0 --membind=0 \
   python3 -m clawbox.replay.cli suite /data/replay-suite.json
-sudo bash scripts/direct-firecracker-network.sh down --sessions 40 --prefix 172.30
+sudo bash scripts/direct-firecracker-network.sh down --sessions 40 \
+  --network 172.30.0.0/16
 ```
 
 Set `resume: true` for long experiments. A rerun reuses only child studies
@@ -1102,7 +1113,7 @@ membership and still fails closed on partial or mismatched state:
 
 ```bash
 sudo bash scripts/direct-firecracker-network.sh up --sessions 40 \
-  --prefix 172.30 --reuse-existing
+  --network 172.30.0.0/16 --reuse-existing
 ```
 
 The primary exclusive-CPU sweep is `[1, 8, 20, 40]`, three repetitions,
@@ -1189,7 +1200,8 @@ exit code or different hashes make the study fail.
 
 ```bash
 python3 -m json.tool /data/paper-study-001/study-summary.json | less
-sudo bash scripts/direct-firecracker-network.sh down --sessions 8 --prefix 172.30
+sudo bash scripts/direct-firecracker-network.sh down --sessions 8 \
+  --network 172.30.0.0/16
 ```
 
 Do not draw conclusions from a single repetition. Use the same session count

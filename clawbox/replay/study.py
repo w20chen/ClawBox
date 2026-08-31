@@ -223,7 +223,9 @@ def study_experiment_spec(raw: dict[str, Any], *, base: Path | None = None) -> E
             "materialization": {"runtime_rootfs": configured_path(source["runtime_rootfs"]),
                                 "tool_rootfs": configured_path(source["tool_rootfs"]),
                                 "prompt": configured_path(source["prompt"]),
-                                "network_prefix": raw.get("network_prefix", "172.30"),
+                                "network_cidr": raw.get(
+                                    "network_cidr", "172.30.0.0/16"
+                                ),
                                 "exposed_model": raw.get("exposed_model", "experiment-model")},
         },
         "scheduling": {"baselines": baselines},
@@ -449,7 +451,9 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
                 "--output", str(prepared), "--sessions", str(sessions),
                 "--runtime-rootfs", str(runtime_rootfs), "--tool-rootfs", str(tool_rootfs),
                 "--prompt", str(prompt), "--model-id", str(raw.get("exposed_model", "experiment-model")),
-                "--network-prefix", str(raw.get("network_prefix", "172.30")),
+                "--network-cidr", str(
+                    raw.get("network_cidr", "172.30.0.0/16")
+                ),
                 "--runtime-memory-mib", str(resources.get("runtime_memory_mib", 2048)),
                 "--tool-memory-mib", "4096", "--cpu-first", str(resources.get("cpu_first", 0)),
                 "--numa-node", str(resources.get("numa_node", 0)),
@@ -689,7 +693,9 @@ def run_study(config_path: Path) -> int:
                        "--output", str(prepared), "--sessions", str(sessions),
                        "--runtime-rootfs", str(runtime_rootfs), "--tool-rootfs", str(tool_rootfs),
                        "--prompt", str(prompt), "--model-id", exposed_model,
-                       "--network-prefix", str(raw.get("network_prefix", "172.30")),
+                       "--network-cidr", str(
+                           raw.get("network_cidr", "172.30.0.0/16")
+                       ),
                        "--runtime-memory-mib", str(resources.get("runtime_memory_mib", 2048)),
                        "--tool-memory-mib", str(workflow.resources.tool_memory_mib),
                        "--cpu-first", str(resources.get("cpu_first", 0)),

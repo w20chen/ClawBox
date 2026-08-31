@@ -5,12 +5,12 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: direct-firecracker-network.sh up|down --sessions N [--prefix A.B] [--reuse-existing]
+usage: direct-firecracker-network.sh up|down --sessions N [--network CIDR] [--reuse-existing]
 
 For session i (zero based), creates bridge cbrIIII and TAPs crtIIII/ctlIIII.
-Runtime is A.B.(i+1).2, Tool is A.B.(i+1).3, and the host inference service
-binds A.B.(i+1).1.  The generated Firecracker config must use matching taps
-and kernel ip= boot arguments.  Requires root or passwordless sudo.
+Each session receives one /29 from the parent CIDR: host, Runtime, and Tool use
+addresses +1, +2, and +3. The generated Firecracker config must use matching
+taps and kernel ip= boot arguments. Requires root or passwordless sudo.
 
 --reuse-existing is valid only with `up`. It reuses a session only after
 validating its bridge address and both TAP-to-bridge memberships.
@@ -21,22 +21,23 @@ EOF
 [[ $# -ge 1 ]] || usage
 ACTION="$1"; shift
 SESSIONS=""
-PREFIX="172.30"
+NETWORK="172.30.0.0/16"
 REUSE_EXISTING=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NETWORK_HELPER="${SCRIPT_DIR}/../clawbox/replay/network.py"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sessions) SESSIONS="${2:-}"; shift 2 ;;
-    --prefix) PREFIX="${2:-}"; shift 2 ;;
+    --network) NETWORK="${2:-}"; shift 2 ;;
     --reuse-existing) REUSE_EXISTING=1; shift ;;
     *) usage ;;
   esac
 done
 [[ "${ACTION}" == up || "${ACTION}" == down ]] || usage
 (( REUSE_EXISTING == 0 )) || [[ "${ACTION}" == up ]] || usage
-[[ "${SESSIONS}" =~ ^[1-9][0-9]*$ && "${SESSIONS}" -le 253 ]] || usage
-[[ "${PREFIX}" =~ ^([0-9]{1,3})\.([0-9]{1,3})$ ]] || usage
-IFS=. read -r FIRST SECOND <<<"${PREFIX}"
-(( FIRST <= 255 && SECOND <= 255 )) || usage
+[[ "${SESSIONS}" =~ ^[1-9][0-9]*$ ]] || usage
+CAPACITY="$(python3 "${NETWORK_HELPER}" capacity "${NETWORK}")" || usage
+(( SESSIONS <= CAPACITY )) || usage
 
 host_command() {
   if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi
@@ -61,15 +62,18 @@ validate_existing_session() {
 for ((index=0; index<SESSIONS; index++)); do
   tag="$(printf '%04d' "${index}")"
   bridge="cbr${tag}"; runtime_tap="crt${tag}"; tool_tap="ctl${tag}"
-  subnet=$((index + 1))
-  host_ip="${PREFIX}.${subnet}.1/24"
+  mapfile -t addresses < <(
+    python3 "${NETWORK_HELPER}" session "${NETWORK}" "${index}"
+  )
+  [[ "${#addresses[@]}" -eq 4 ]] || exit 1
+  host_ip="${addresses[0]}"
   if [[ "${ACTION}" == up ]]; then
     if device_exists "${bridge}" || device_exists "${runtime_tap}" \
         || device_exists "${tool_tap}"; then
       if (( REUSE_EXISTING == 1 )) \
           && validate_existing_session "${bridge}" "${runtime_tap}" "${tool_tap}" "${host_ip}"; then
         printf 'session=%d bridge=%s runtime_tap=%s tool_tap=%s inference_host=%s reused=true\n' \
-          "${index}" "${bridge}" "${runtime_tap}" "${tool_tap}" "${host_ip%/24}"
+          "${index}" "${bridge}" "${runtime_tap}" "${tool_tap}" "${host_ip%/*}"
         continue
       fi
       echo "refusing incomplete, mismatched, or unapproved existing session ${tag}" >&2
@@ -84,7 +88,7 @@ for ((index=0; index<SESSIONS; index++)); do
       host_command ip link set "${tap}" up
     done
     printf 'session=%d bridge=%s runtime_tap=%s tool_tap=%s inference_host=%s\n' \
-      "${index}" "${bridge}" "${runtime_tap}" "${tool_tap}" "${host_ip%/24}"
+      "${index}" "${bridge}" "${runtime_tap}" "${tool_tap}" "${host_ip%/*}"
   else
     # A failed `up` can leave a TAP behind before it is enslaved to its bridge.
     # Remove only the three deterministic names for this session; deleting a

@@ -2,12 +2,21 @@
 """Create fresh per-session disks for OpenClaw+ClawTune+SSH experiments."""
 from __future__ import annotations
 import argparse
-import ipaddress
 import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from clawbox.replay.network import (
+    guest_mac,
+    parse_network,
+    session_capacity,
+    session_network,
+    static_ip_argument,
+)
 
 
 def run(*argv: str, quiet: bool = False) -> None:
@@ -32,12 +41,6 @@ def clone_disk(source: Path, destination: Path) -> None:
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         shutil.copyfile(source, destination)
-
-
-def static_ip(prefix: str, session: int, host: int) -> str:
-    address = f"{prefix}.{session + 1}.{host}"
-    gateway = f"{prefix}.{session + 1}.1"
-    return f"ip={address}::{gateway}:255.255.255.0::eth0:off"
 
 
 def parse_cpu_list(value: str) -> list[int]:
@@ -65,7 +68,7 @@ def main() -> None:
     p.add_argument("--tool-rootfs", required=True, type=Path)
     p.add_argument("--prompt", required=True, type=Path)
     p.add_argument("--model-id", required=True)
-    p.add_argument("--network-prefix", default="172.30")
+    p.add_argument("--network-cidr", default="172.30.0.0/16")
     p.add_argument("--runtime-memory-mib", type=int, default=2048)
     p.add_argument("--tool-memory-mib", type=int, default=4096)
     p.add_argument("--cpu-first", type=int, default=0)
@@ -75,9 +78,11 @@ def main() -> None:
     p.add_argument("--firecracker-snapshot-api-timeout-s", type=float, default=300.0)
     a = p.parse_args()
     shared_cpus = parse_cpu_list(a.cpu_list) if a.cpu_list else None
-    ipaddress.ip_network(f"{a.network_prefix}.0.0/16")
-    if a.sessions < 1 or a.sessions > 253:
-        raise ValueError("sessions must be between 1 and 253")
+    network = parse_network(a.network_cidr)
+    if a.sessions < 1 or a.sessions > session_capacity(network):
+        raise ValueError(
+            f"sessions must be between 1 and {session_capacity(network)} for {network}"
+        )
     if a.firecracker_api_timeout_s <= 0 or a.firecracker_snapshot_api_timeout_s <= 0:
         raise ValueError("Firecracker API timeouts must be positive")
     a.output.mkdir(parents=True, exist_ok=False)
@@ -91,12 +96,13 @@ def main() -> None:
         ]
     manifest = {
         "model_id": a.model_id,
-        "network_prefix": a.network_prefix,
+        "network_cidr": str(network),
         "sessions": [],
         "cpu_placement": "round_robin" if cpu_pairs else "exclusive",
         "cpu_pair_count": len(cpu_pairs) if cpu_pairs else a.sessions,
     }
     for index in range(a.sessions):
+        allocated = session_network(network, index)
         directory = a.output / f"session-{index:04d}"
         directory.mkdir()
         runtime_disk, tool_disk = directory / "runtime.ext4", directory / "tool.ext4"
@@ -106,7 +112,7 @@ def main() -> None:
         host_key = directory / "ssh_host_ed25519_key"
         run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(identity))
         run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(host_key))
-        tool_ip = f"{a.network_prefix}.{index + 1}.3"
+        tool_ip = str(allocated.tool)
         known_hosts = directory / "known_hosts"
         known_hosts.write_text(
             f"[{tool_ip}]:2222 {host_key.with_suffix('.pub').read_text().strip()}\n",
@@ -115,8 +121,8 @@ def main() -> None:
         environment = directory / "experiment.env"
         environment.write_text(
             f"EXPERIMENT_ID=session-{index:04d}\n"
-            f"MODEL_BASE_URL=http://{a.network_prefix}.{index + 1}.1:18081/v1\n"
-            f"MODEL_ID={a.model_id}\nRUNTIME_IP={a.network_prefix}.{index + 1}.2\n"
+            f"MODEL_BASE_URL=http://{allocated.gateway}:18081/v1\n"
+            f"MODEL_ID={a.model_id}\nRUNTIME_IP={allocated.runtime}\n"
             f"TOOL_SSH_TARGET=executor@{tool_ip}:2222\n",
             encoding="utf-8",
         )
@@ -144,8 +150,12 @@ def main() -> None:
             "rootfs": str(runtime_disk), "snapshot_state": str(directory / "runtime.vmstate"),
             "snapshot_memory": str(directory / "runtime.mem"), "vcpu_count": 1,
             "memory_mib": a.runtime_memory_mib,
-            "boot_args": f"{common} init=/usr/local/bin/experiment-runtime-init " + static_ip(a.network_prefix, index, 2),
-            "tap_device": f"crt{index:04d}", "guest_mac": f"06:30:{index + 1:02x}:00:00:02",
+            "boot_args": (
+                f"{common} init=/usr/local/bin/experiment-runtime-init "
+                + static_ip_argument(allocated.runtime, allocated.gateway)
+            ),
+            "tap_device": f"crt{index:04d}",
+            "guest_mac": guest_mac(index, 2),
             "cpu_set": str(runtime_cpu), "numa_node": a.numa_node,
             "log_path": str(directory / "runtime.log"),
             "api_timeout_s": a.firecracker_api_timeout_s,
@@ -157,8 +167,12 @@ def main() -> None:
             "rootfs": str(tool_disk), "snapshot_state": str(directory / "tool.vmstate"),
             "snapshot_memory": str(directory / "tool.mem"), "vcpu_count": 1,
             "memory_mib": a.tool_memory_mib,
-            "boot_args": f"{common} init=/usr/local/bin/experiment-tool-init " + static_ip(a.network_prefix, index, 3),
-            "tap_device": f"ctl{index:04d}", "guest_mac": f"06:30:{index + 1:02x}:00:00:03",
+            "boot_args": (
+                f"{common} init=/usr/local/bin/experiment-tool-init "
+                + static_ip_argument(allocated.tool, allocated.gateway)
+            ),
+            "tap_device": f"ctl{index:04d}",
+            "guest_mac": guest_mac(index, 3),
             "cpu_set": str(tool_cpu), "numa_node": a.numa_node,
             "log_path": str(directory / "tool.log"),
             "api_timeout_s": a.firecracker_api_timeout_s,
@@ -169,7 +183,7 @@ def main() -> None:
         tool_json.write_text(json.dumps(tool_config, indent=2) + "\n")
         manifest["sessions"].append({
             "runtime": str(runtime_json), "tool": str(tool_json),
-            "gateway_host": f"{a.network_prefix}.{index + 1}.1",
+            "gateway_host": str(allocated.gateway),
             "tool_host": tool_ip, "identity": str(identity),
             "known_hosts": str(known_hosts), "store": str(directory / "model-requests.json"),
         })
