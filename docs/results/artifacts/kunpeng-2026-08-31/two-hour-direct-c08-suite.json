@@ -13,6 +13,14 @@
       "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
       "trace": "/data/recording-output/model-trace-session-0000.jsonl",
       "prediction_file": "/data/workloads/p90-recording2-train-recording1-eval.json"
+    },
+    {
+      "name": "rec-b",
+      "independent_unit": "15five/scim2-filter-parser#13",
+      "repository": "15five/scim2-filter-parser",
+      "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
+      "trace": "/data/recording-output/model-trace-session-0001.jsonl",
+      "prediction_file": "/data/workloads/p90-recording2-train-recording1-eval.json"
     }
   ],
   "concurrency_levels": [8],
@@ -33,7 +41,6 @@
   "correctness_timeout_s": 300,
   "inference_backends": ["replay"],
   "sizing_policies": ["fixed", "p90_static"],
-  "fixed_control_tool_memory_mib": 2048,
   "memory_policies": ["resident", "snapshot"],
   "resources": {
     "runtime_memory_mib": 2048,
