@@ -1,0 +1,125 @@
+# Prediction-aware Tool admission and LLM-wait checkpointing, Kunpeng, 2026-08-31
+
+## Experimental semantics
+
+This study uses the direct-Firecracker paper runner as a single-host,
+NUMA-controlled, fail-stop experiment executor. It makes no Kubernetes,
+high-availability, or cross-node recovery claim.
+
+- Tool VM capacity is fixed for the lifetime of a VM. The predictive arms use
+  2 GiB; Firecracker RAM is not resized between tool calls.
+- A P90 reservation is per-tool predicted *incremental* demand used only by a
+  shared NUMA-0 admission/accounting gate.
+- Before a tool-bearing model response becomes visible to the Runtime VM, the
+  runner requires `live Tool-Firecracker RSS + outstanding incremental
+  commitments + new incremental P90 + safety headroom <= budget`. The study
+  uses a 16 GiB controlled Tool-memory budget and 1 GiB safety headroom. If the
+  inequality fails, the response remains queued.
+- A 100 ms host sampler feeds actual Tool-Firecracker RSS growth into the gate.
+  Prediction overruns therefore reduce remaining headroom and block later
+  admissions. The next distinct model request is the tool-completion signal;
+  it triggers a fresh RSS measurement before the future-growth commitment is
+  removed. Persistent resident pages remain charged.
+- LLM-wait checkpointing is independent of reservation accounting. It saves and
+  evicts both sandboxes during inference waits. Each event verifies that both
+  Firecracker process RSS values reached zero and records cgroup/NUMA change.
+- Actual command working set is joined from the Tool VM's per-execution cgroup
+  records. It is used for prediction-error, coverage, oracle-opportunity, and
+  fixed-capacity-sufficiency analysis, never as an online admission input.
+
+The prediction hierarchy is exact command/template, then program, tool, and
+global fallback. The immutable plan SHA-256 is
+`aeb621756df1bd014c1ea6ea53ef68279f9167a875fddfde45ca271ec52a3b8c`.
+Its capacity check uses a measured idle Tool-Firecracker RSS anchor
+of 256 MiB plus a 25% margin. Admission does not use that idle floor because
+live RSS already contains it. After 25% command headroom, rec-a and rec-b
+contain four distinct incremental P90 values from 1,845 to 1,870 KiB
+(approximately 1.802--1.826 MiB). All predictive invocations select the fixed
+2 GiB VM size class.
+
+## Design
+
+The factorial arms at each concurrency are:
+
+| Admission policy | Tool VM capacity | Sandbox policy |
+| --- | ---: | --- |
+| Static | 4 GiB | resident |
+| Static | 4 GiB | LLM-wait checkpoint |
+| Static | 2 GiB | resident |
+| Static | 2 GiB | LLM-wait checkpoint |
+| Per-tool P90 reservation | 2 GiB | resident |
+| Per-tool P90 reservation | 2 GiB | LLM-wait checkpoint |
+
+The requested density sweep is `[20, 40]` on NUMA node 0 with
+exclusive Runtime/Tool vCPU pairs. Both replay traces use the same task,
+prompt, rootfs images, recorded timing, pinned repository commit, final-state
+validator, and full repository correctness command. The two traces are
+trajectories of one independent SWE task, so cross-task confidence intervals
+are not estimable.
+
+Primary reporting fields are correct agent runs/min, model steps/min,
+reservation queueing, predicted and actual command memory, peak/mean
+Firecracker RSS, Firecracker RSS-time, NUMA/cgroup memory, checkpoint-reclaimed
+memory, checkpoint save/restore service time, OOM/failures, and correctness.
+
+## Results
+
+Results are accepted only from completed, internally valid arm summaries. The
+static-control run and prediction-aware sweep use separate immutable output
+directories and source manifests.
+
+The single-agent timing reference is the original recorded model time rather
+than a c=1 replay experiment: rec-a contains 27 model steps and 136.624 s of
+recorded LLM time; rec-b contains 39 steps and 170.131 s.
+
+The first completed static c=8 dataset predates live-RSS admission and is kept
+as a standalone capacity/checkpoint control. Its 2 GiB arms are static, not
+predictive. All 64 sessions passed correctness, all 2,112 model steps
+completed, both blocks had one final-state hash, and there were zero failures
+or OOMs.
+
+| Trace | Tool capacity | Policy | Correct | Agents/min | Steps/min | Mean/peak FC RSS GiB | RSS-time GiB-h |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| rec-a | 4 GiB | resident | 8/8 | 2.118 | 57.2 | 8.34 / 10.89 | 0.527 |
+| rec-a | 2 GiB | resident | 8/8 | 2.124 | 57.3 | 7.50 / 10.06 | 0.473 |
+| rec-a | 4 GiB | checkpoint | 8/8 | 0.764 | 20.6 | 15.91 / 32.02 | 2.769 |
+| rec-a | 2 GiB | checkpoint | 8/8 | 1.089 | 29.4 | 8.51 / 16.38 | 1.039 |
+| rec-b | 4 GiB | resident | 8/8 | 1.784 | 69.6 | 8.57 / 10.82 | 0.649 |
+| rec-b | 2 GiB | resident | 8/8 | 1.793 | 69.9 | 7.88 / 10.01 | 0.594 |
+| rec-b | 4 GiB | checkpoint | 8/8 | 0.534 | 20.8 | 15.48 / 32.01 | 3.836 |
+| rec-b | 2 GiB | checkpoint | 8/8 | 0.787 | 30.7 | 9.14 / 16.65 | 1.541 |
+
+At c=8 the 2 GiB resident control preserved throughput while reducing mean RSS
+by 0.84 GiB on rec-a and 0.69 GiB on rec-b. Full checkpointing was slower and
+increased aggregate RSS-time because snapshot I/O and restored memory mappings
+dominated these short traces. This is a negative result for checkpointing at
+this concurrency, not evidence of reclamation benefit.
+
+### Controlled checkpoint-density result
+
+A separate c=20 mechanism trace uses three 60-second model waits, two no-op Tool
+calls, fixed 2 GiB Tool capacity, and a 40 GiB Runtime+Tool resident-pair budget
+that admits 10 of 20 pairs at once. It is intentionally a mechanism
+microbenchmark, not an additional SWE task result. Both arms ran the real
+OpenClaw/Tool loop and full repository correctness command.
+
+| Policy | Correct | Wall s | Correct agents/min | Mean/peak FC RSS GiB | RSS-time GiB-h |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| resident | 20/20 | 464.2 | 2.585 | 8.30 / 9.41 | 1.071 |
+| checkpoint | 20/20 | 282.6 | 4.246 | 4.03 / 20.25 | 0.316 |
+
+Checkpointing improved correct-agent throughput by 64.3%, reduced wall time by
+39.1%, and reduced Firecracker RSS-time by 70.4%. All 60 checkpoint events
+verified both Firecracker process RSS values reached zero; summed released pair
+RSS was 38.54 GiB. Final state matched and there were zero failures. Concurrent
+restore increased peak RSS by 115%, so the result demonstrates a throughput and
+memory-time benefit under admission pressure, not a peak-memory benefit.
+
+<!-- DENSITY_RESULTS -->
+
+## Reproduction
+
+The static c=8 control suite is
+[`two-hour-direct-c08-suite.json`](artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json).
+The prediction-aware sweep is
+[`prediction-aware-sweep-suite.json`](artifacts/kunpeng-2026-08-31/prediction-aware-sweep-suite.json).
