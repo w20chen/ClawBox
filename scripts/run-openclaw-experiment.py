@@ -491,8 +491,14 @@ def main() -> None:
             if not tool_calls or tool_admission is None:
                 return {}
             if a.static_tool_reservation_mib is not None:
-                incremental_kib = int(a.static_tool_reservation_mib) * 1024
+                current_tool_rss_kib = math.ceil(tool.rss_bytes() / 1024.0)
+                incremental_kib = max(
+                    1,
+                    int(a.static_tool_reservation_mib) * 1024 - current_tool_rss_kib,
+                )
                 provenance = {"policy": "static",
+                              "static_capacity_mib": int(a.static_tool_reservation_mib),
+                              "session_tool_rss_before_mib": current_tool_rss_kib / 1024.0,
                               "tool_invocations": tool_call_descriptors(message)}
             else:
                 if step is None or step not in predictive_steps:
