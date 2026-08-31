@@ -115,6 +115,9 @@ RATIO_EFFECT_METRICS = {
     "max_actual_tool_command_memory_mib", "mean_actual_tool_command_memory_mib",
     "max_actual_tool_working_set_mib", "mean_prediction_error_mib",
     "peak_tool_resident_rss_bytes", "peak_tool_admission_charge_bytes",
+    "peak_vm_resident_rss_bytes", "peak_vm_admission_charge_bytes",
+    "vm_materialization_admission_wait_s",
+    "checkpoint_vm_cgroup_memory_released_bytes",
 }
 
 EXECUTION_ARTIFACTS = {
@@ -383,7 +386,7 @@ def validate_tool_pool_memory(raw: dict[str, Any], base: Path) -> dict[str, Any]
         raise ValueError("Tool admission headroom must be non-negative and below Whigh")
     if not memory.get("cgroup"):
         raise ValueError("tool_pool_memory.cgroup is required")
-    path = Path(_absolute(base, memory.get("cgroup")))
+    path = Path(_absolute(base, memory.get("cgroup"))).resolve(strict=True)
     if not (path / "cgroup.procs").is_file():
         raise ValueError(f"Tool pool is not a cgroup v2 directory: {path}")
     value = (path / "memory.max").read_text(encoding="ascii").strip()
@@ -417,8 +420,10 @@ def validate_vm_pool_memory(
         raise ValueError("VM-pool headroom must be non-negative and below Whigh")
     if not memory.get("cgroup") or not memory.get("runtime_cgroup"):
         raise ValueError("vm_pool_memory requires cgroup and runtime_cgroup")
-    path = Path(_absolute(base, memory["cgroup"]))
-    runtime_path = Path(_absolute(base, memory["runtime_cgroup"]))
+    path = Path(_absolute(base, memory["cgroup"])).resolve(strict=True)
+    runtime_path = Path(_absolute(base, memory["runtime_cgroup"])).resolve(
+        strict=True
+    )
     for label, candidate in (("VM pool", path), ("Runtime pool", runtime_path)):
         if not (candidate / "cgroup.procs").is_file():
             raise ValueError(f"{label} is not a cgroup v2 directory: {candidate}")
@@ -662,7 +667,10 @@ def _macro_statistics(
 
 def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Paired arm effects; inference uses task IDs rather than trajectories/steps."""
-    indexed: dict[tuple[Any, ...], dict[tuple[str, str], dict[str, Any]]] = {}
+    indexed: dict[
+        tuple[Any, ...],
+        dict[tuple[str, str, str, str], dict[str, Any]],
+    ] = {}
     for row in measurement_rows:
         if (
             int(row.get("failure_count", 0)) != 0
@@ -675,7 +683,12 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
             row["workload"], row["independent_unit"], int(row["concurrency"]),
             int(row["repetition"]), row.get("inference_backend", "replay"),
         )
-        arm_key = (row["sizing_policy"], row["residency_policy"])
+        arm_key = (
+            str(row["sizing_policy"]),
+            str(row["residency_policy"]),
+            str(row.get("decision_policy") or "none"),
+            str(row.get("restore_policy") or "reactive"),
+        )
         arms = indexed.setdefault(key, {})
         if arm_key in arms:
             raise ValueError(f"duplicate paired arm for {key}: {arm_key}")
@@ -698,9 +711,37 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
         observations.setdefault(label, {}).setdefault(metric, []).append(row)
 
     for key, arms in indexed.items():
+        def arm(
+            admission: str,
+            reclamation: str,
+            decision: str = "none",
+            restore: str = "reactive",
+        ) -> dict[str, Any] | None:
+            return arms.get((admission, reclamation, decision, restore))
+
+        def compare(
+            label: str,
+            treatment_row: dict[str, Any] | None,
+            control_row: dict[str, Any] | None,
+        ) -> None:
+            if treatment_row is None or control_row is None:
+                return
+            for metric in SUITE_METRICS:
+                if (
+                    treatment_row.get(metric) is not None
+                    and control_row.get(metric) is not None
+                ):
+                    add(
+                        label,
+                        metric,
+                        key,
+                        float(treatment_row[metric]),
+                        float(control_row[metric]),
+                    )
+
         predictive = (
             "p90_reservation"
-            if any(size == "p90_reservation" for size, _residency in arms)
+            if any(size == "p90_reservation" for size, *_rest in arms)
             else "p90_static"
         )
         for residency in ("resident", "llm_wait_checkpoint"):
@@ -709,33 +750,26 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 ("fixed2", "fixed", f"fixed2_vs_fixed/{residency}"),
                 (predictive, "fixed2", f"p90_reservation_vs_fixed2/{residency}"),
             ):
-                treatment_row = arms.get((treatment_sizing, residency))
-                control_row = arms.get((control_sizing, residency))
-                if treatment_row is None or control_row is None:
-                    continue
-                for metric in SUITE_METRICS:
-                    if treatment_row.get(metric) is not None and control_row.get(metric) is not None:
-                        add(label, metric, key, float(treatment_row[metric]), float(control_row[metric]))
+                compare(
+                    label,
+                    arm(treatment_sizing, residency),
+                    arm(control_sizing, residency),
+                )
         for sizing in ("fixed", "fixed2", predictive):
-            treatment_row = arms.get((sizing, "llm_wait_checkpoint"))
-            control_row = arms.get((sizing, "resident"))
-            if treatment_row is None or control_row is None:
-                continue
-            for metric in SUITE_METRICS:
-                if treatment_row.get(metric) is not None and control_row.get(metric) is not None:
-                    add(
-                        f"checkpoint_vs_resident/{sizing}", metric, key,
-                        float(treatment_row[metric]), float(control_row[metric]),
-                    )
+            compare(
+                f"checkpoint_vs_resident/{sizing}",
+                arm(sizing, "llm_wait_checkpoint"),
+                arm(sizing, "resident"),
+            )
         for treatment_sizing, control_sizing, label in (
             (predictive, "fixed", "interaction_checkpoint_x_p90_reservation_vs_fixed"),
             ("fixed2", "fixed", "interaction_checkpoint_x_fixed2_vs_fixed"),
         ):
             rows = (
-                arms.get((treatment_sizing, "llm_wait_checkpoint")),
-                arms.get((treatment_sizing, "resident")),
-                arms.get((control_sizing, "llm_wait_checkpoint")),
-                arms.get((control_sizing, "resident")),
+                arm(treatment_sizing, "llm_wait_checkpoint"),
+                arm(treatment_sizing, "resident"),
+                arm(control_sizing, "llm_wait_checkpoint"),
+                arm(control_sizing, "resident"),
             )
             if any(row is None for row in rows):
                 continue
@@ -750,6 +784,70 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 if metric in RATIO_EFFECT_METRICS and min(tc, tr, cc, cr) > 0:
                     percent = 100.0 * ((tc / tr) / (cc / cr) - 1.0)
                 add(label, metric, key, tc - tr, cc - cr, percent=percent)
+
+        # Redesigned fixed-capacity paper dimensions. Missing arms are normal:
+        # every suite intentionally varies only one dimension.
+        for treatment in ("static", "p90", "oracle"):
+            compare(
+                f"admission_{treatment}_vs_full_reservation/resident",
+                arm(treatment, "resident"),
+                arm("full_reservation", "resident"),
+            )
+        compare(
+            "admission_p90_vs_static/resident",
+            arm("p90", "resident"),
+            arm("static", "resident"),
+        )
+        compare(
+            "admission_oracle_vs_p90/resident",
+            arm("oracle", "resident"),
+            arm("p90", "resident"),
+        )
+
+        paper_admissions = {admission for admission, *_rest in arms}
+        for admission in paper_admissions.intersection(
+            {"full_reservation", "static", "p90", "oracle"}
+        ):
+            for reclamation in ("balloon", "checkpoint", "hybrid"):
+                decision = (
+                    "none" if reclamation == "balloon" else "fixed_delay"
+                )
+                compare(
+                    f"reclamation_{reclamation}_vs_resident/{admission}",
+                    arm(admission, reclamation, decision),
+                    arm(admission, "resident"),
+                )
+            compare(
+                f"reclamation_hybrid_vs_checkpoint/{admission}",
+                arm(admission, "hybrid", "fixed_delay"),
+                arm(admission, "checkpoint", "fixed_delay"),
+            )
+
+            for restore in ("reactive", "prefetch"):
+                compare(
+                    f"decision_fixed_delay_vs_eager/{admission}/{restore}",
+                    arm(admission, "hybrid", "fixed_delay", restore),
+                    arm(admission, "hybrid", "eager", restore),
+                )
+                compare(
+                    f"decision_predicted_pressure_aware_vs_fixed_delay/"
+                    f"{admission}/{restore}",
+                    arm(
+                        admission,
+                        "hybrid",
+                        "predicted_pressure_aware",
+                        restore,
+                    ),
+                    arm(admission, "hybrid", "fixed_delay", restore),
+                )
+            for decision in (
+                "eager", "fixed_delay", "predicted_pressure_aware",
+            ):
+                compare(
+                    f"restore_prefetch_vs_reactive/{admission}/{decision}",
+                    arm(admission, "hybrid", decision, "prefetch"),
+                    arm(admission, "hybrid", decision, "reactive"),
+                )
 
     aggregated: dict[str, Any] = {}
     for label, metrics in observations.items():

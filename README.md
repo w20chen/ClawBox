@@ -765,6 +765,21 @@ plan, but every invocation must contain `actual_incremental_kib` or
 `actual_command_peak_memory_bytes` from held-out telemetry. Oracle data is an
 offline upper bound and is never learned from the measured arm itself.
 
+The main paper controls are all explicit configuration parameters:
+
+| Configuration | Role |
+| --- | --- |
+| `tool_pool_memory.{hard_limit_mib,high_watermark_mib,low_watermark_mib,headroom_mib}` | Tool-only H, Whigh, Wlow, and admission headroom |
+| `vm_pool_memory.{hard_limit_mib,high_watermark_mib,low_watermark_mib,headroom_mib}` | parent Runtime+Tool physical-memory envelope |
+| `vm_pool_memory.{initial_runtime_rss_mib,initial_tool_rss_mib,restore_transient_headroom_mib}` | boot and snapshot re-launch growth reservations |
+| `paper_experiment.admission_policies` | `full_reservation`, `static`, `p90`, or `oracle` |
+| `paper_experiment.reclamation_policies` | `resident`, `balloon`, `checkpoint`, or `hybrid` |
+| `paper_experiment.decision_policies` | `eager`, `fixed_delay`, or `predicted_pressure_aware` |
+| `paper_experiment.restore_policies` | `reactive` or `prefetch` |
+| `reclamation.checkpoint_scope` | `pair` by default; `tool` only for the secondary ablation |
+| `cpu_placement` | `round_robin` by default; `exclusive` for CPU isolation |
+| `network_cidr` | parent range for per-session `/29` allocation |
+
 Run a single-workload smoke with `deploy/study.example.json`, or validate and
 run one of the multi-workload suites:
 
@@ -781,6 +796,11 @@ prediction coverage, and zero host OOM policy failures. Snapshot disk preflight
 budgets two alternating generations of both VM memory files for pair scope. Do
 not use the historical 2 GiB versus 4 GiB measurements as evidence for
 oversubscription; they measure guest capacity and snapshot-size effects.
+Suite `paired_contrasts` follows the selected dimension: admission arms are
+paired against full reservation (plus P90-versus-static and oracle-versus-P90),
+reclamation arms are paired against resident, and hybrid decision/restore arms
+are paired across eager, fixed-delay, predicted-pressure-aware, and prefetch
+controls within the same task, repetition, concurrency, and inference backend.
 
 `sessions`/`concurrency_levels` is offered agent concurrency: the runner starts
 that many workers and has no resident-pair slot semaphore or unique CPU-pair

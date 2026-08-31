@@ -734,6 +734,50 @@ def test_paired_contrasts_pair_repetition_and_task() -> None:
     assert result["pairs"][0]["percent_effect"] == pytest.approx(20.0)
 
 
+def test_paired_contrasts_cover_redesigned_paper_dimensions() -> None:
+    from clawbox.replay.suite import SUITE_METRICS, _paired_contrasts
+
+    def row(admission, reclamation, decision, restore, wall):
+        result = {
+            "workload": "trajectory-a", "independent_unit": "task-1",
+            "concurrency": 20, "repetition": 0, "inference_backend": "replay",
+            "sizing_policy": admission, "admission_policy": admission,
+            "residency_policy": reclamation, "reclamation_policy": reclamation,
+            "decision_policy": decision, "restore_policy": restore,
+            "sessions_requested": 1, "sessions_completed": 1,
+            "failure_count": 0, "block_final_state_equal": True,
+        }
+        result.update({metric: None for metric in SUITE_METRICS})
+        result["wall_s"] = wall
+        return result
+
+    spatial = _paired_contrasts([
+        row("full_reservation", "resident", "none", "reactive", 14.0),
+        row("static", "resident", "none", "reactive", 12.0),
+        row("p90", "resident", "none", "reactive", 10.0),
+        row("oracle", "resident", "none", "reactive", 9.0),
+    ])
+    assert spatial[
+        "c20/admission_p90_vs_static/resident"
+    ]["wall_s"]["mean"] == -2.0
+    assert spatial[
+        "c20/admission_oracle_vs_p90/resident"
+    ]["wall_s"]["mean"] == -1.0
+
+    decision = _paired_contrasts([
+        row("p90", "hybrid", "eager", "reactive", 15.0),
+        row("p90", "hybrid", "fixed_delay", "reactive", 13.0),
+        row("p90", "hybrid", "predicted_pressure_aware", "reactive", 11.0),
+        row("p90", "hybrid", "predicted_pressure_aware", "prefetch", 10.0),
+    ])
+    assert decision[
+        "c20/decision_predicted_pressure_aware_vs_fixed_delay/p90/reactive"
+    ]["wall_s"]["mean"] == -2.0
+    assert decision[
+        "c20/restore_prefetch_vs_reactive/p90/predicted_pressure_aware"
+    ]["wall_s"]["mean"] == -1.0
+
+
 def test_checkpoint_suite_reserves_two_snapshot_generations(monkeypatch, tmp_path) -> None:
     from clawbox.replay.suite import validate_disk_readiness
 

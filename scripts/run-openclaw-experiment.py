@@ -1382,25 +1382,37 @@ def main() -> None:
             }
             with tool_reservation_lock:
                 if session_closing.is_set():
-                    reject = True
+                    reject_reason = "session closed while waiting for Tool admission"
+                elif tool_reservation_lease is not None:
+                    reject_reason = "session already owns a Tool admission"
                 else:
-                    if tool_reservation_lease is not None:
-                        raise RuntimeError("session already owns a Tool admission")
-                    reject = False
+                    reject_reason = None
                     tool_reservation_lease = lease
                     vm_tool_growth_lease = vm_lease
                     tool_reservation_events.append(event)
                     current_tool_reservation_event = event
-            if not reject and a.tool_balloon_reclamation:
-                balloon_event = adjust_balloon(
-                    tool, 0, "tool_start_expand", a.tool_balloon_settle_timeout_s,
-                )
-                balloon_events.append(balloon_event)
-                event["balloon_expansion"] = balloon_event
-            if reject:
+            if reject_reason is not None:
                 tool_admission.release(lease)
                 vm_admission.release(vm_lease)
-                raise RuntimeError("session closed while waiting for Tool admission")
+                raise RuntimeError(reject_reason)
+            if a.tool_balloon_reclamation:
+                try:
+                    balloon_event = adjust_balloon(
+                        tool, 0, "tool_start_expand", a.tool_balloon_settle_timeout_s,
+                    )
+                except Exception:
+                    with tool_reservation_lock:
+                        if tool_reservation_lease == lease:
+                            tool_reservation_lease = None
+                            vm_tool_growth_lease = None
+                            current_tool_reservation_event = None
+                    try:
+                        tool_admission.release(lease)
+                    finally:
+                        vm_admission.release(vm_lease)
+                    raise
+                balloon_events.append(balloon_event)
+                event["balloon_expansion"] = balloon_event
             return event
 
         def on_request_started() -> None:
@@ -1905,9 +1917,28 @@ def main() -> None:
                   a.eviction_policy
                   if a.reclamation_policy in {"checkpoint", "hybrid"} else None
               ),
+              "victim_policy": (
+                  "lru"
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
+              "eviction_delay_s": (
+                  a.eviction_delay_s
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
+              "checkpoint_break_even_s": (
+                  a.checkpoint_break_even_s
+                  if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
               "restore_policy": (
                   a.restore_policy
                   if a.reclamation_policy in {"checkpoint", "hybrid"} else None
+              ),
+              "restore_prefetch_lead_s": (
+                  a.restore_prefetch_lead_s
+                  if (
+                      a.reclamation_policy in {"checkpoint", "hybrid"}
+                      and a.restore_policy == "prefetch"
+                  ) else None
               ),
               "checkpoint_scope": (
                   a.checkpoint_scope
