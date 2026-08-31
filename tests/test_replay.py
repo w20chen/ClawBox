@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import clawbox.replay.lifecycle as lifecycle_module
 from clawbox.replay._numa_exec import parse_cpu_set
 from clawbox.replay.engine import ReplayEngine, SnapshotPolicy
 from clawbox.replay.guest import RuntimeAgentState, VsockCommandExecutor, VsockRuntimeAgentClient
@@ -798,6 +799,43 @@ def test_firecracker_snapshot_paths_alternate(tmp_path: Path) -> None:
     assert lifecycle._next_snapshot_paths() == (
         tmp_path / "state.next", tmp_path / "memory.next",
     )
+
+
+def test_firecracker_uses_long_timeout_only_for_snapshot_io(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    observed: list[float] = []
+
+    class Client:
+        def __init__(self, _path: Path, timeout_s: float) -> None:
+            observed.append(timeout_s)
+
+        def request(self, *_args, **_kwargs):
+            return None
+
+    class Process:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(lifecycle_module, "_UnixHttpClient", Client)
+    config = FirecrackerConfig(
+        binary=tmp_path / "firecracker", api_socket=tmp_path / "api.sock",
+        kernel_image=tmp_path / "kernel", rootfs=tmp_path / "rootfs",
+        snapshot_state=tmp_path / "state", snapshot_memory=tmp_path / "memory",
+        api_timeout_s=7.0, snapshot_api_timeout_s=101.0,
+    )
+    lifecycle = FirecrackerLifecycle(config)
+    lifecycle._spawn = lambda: setattr(lifecycle, "_process", Process())
+    lifecycle.start()
+    assert observed == [7.0]
+    lifecycle._stop_process = lambda: setattr(lifecycle, "_process", None)
+    lifecycle.checkpoint_and_evict()
+    assert observed == [7.0, 101.0]
+    lifecycle._spawn = lambda: setattr(lifecycle, "_process", Process())
+    lifecycle.restore()
+    assert observed == [7.0, 101.0, 101.0]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="generated commands target the Linux Firecracker guest")

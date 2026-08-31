@@ -930,6 +930,15 @@ workload/concurrency block receives a deterministic derived seed, so arm order
 varies between blocks while remaining reproducible. Clean-host CPU and
 Firecracker checks repeat before every new block.
 
+Suites stop after the first failed workload/concurrency block by default;
+`continue_after_block_failure: true` is an explicit diagnostic-only opt-out.
+Keep ordinary Firecracker control calls short, but give synchronous full-image
+snapshot create/load calls a separate I/O timeout. The reference configs use
+`firecracker_api_timeout_s: 15`,
+`firecracker_snapshot_api_timeout_s: 300`, and a 7200-second per-session bound;
+the longer snapshot timeout prevents valid concurrent multi-GiB writes from
+being misclassified as failed API calls.
+
 Progress inspection is read-only and safe while the suite is running:
 
 ```bash

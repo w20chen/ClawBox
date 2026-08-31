@@ -800,6 +800,7 @@ def run_suite(config_path: Path) -> int:
     suite_runs: list[dict[str, Any]] = []
     measurement_rows: list[dict[str, Any]] = []
     failed = False
+    stopped_early = False
     for workload in workloads:
         if not isinstance(workload, dict) or not workload.get("name"):
             raise ValueError("each workload requires a name")
@@ -812,6 +813,7 @@ def run_suite(config_path: Path) -> int:
             child.pop("concurrency_levels", None)
             child.pop("numa_host_reserve_mib", None)
             child.pop("require_held_out_predictions", None)
+            child.pop("continue_after_block_failure", None)
             child_output = output / "runs" / name / f"c{concurrency:02d}"
             source = child.setdefault("source", {})
             for field in ("runtime_rootfs", "tool_rootfs"):
@@ -912,6 +914,11 @@ def run_suite(config_path: Path) -> int:
                                "groups": summary["groups"],
                                "final_state_equal": summary["final_state_equal"]})
             failed = failed or status != 0
+            if status != 0 and not bool(raw.get("continue_after_block_failure", False)):
+                stopped_early = True
+                break
+        if stopped_early:
+            break
 
     measurement_path = output / "measurements.csv"
     if measurement_rows:
@@ -939,6 +946,10 @@ def run_suite(config_path: Path) -> int:
              "workloads": [item["name"] for item in workloads],
              "independent_units": sorted({str(item["independent_unit"]) for item in workloads}),
              "runs": suite_runs,
+             "stopped_early": stopped_early,
+             "continue_after_block_failure": bool(
+                 raw.get("continue_after_block_failure", False)
+             ),
              "all_successful": not failed}
     (output / "suite-summary.json").write_text(
         json.dumps(final, indent=2, sort_keys=True) + "\n", encoding="utf-8"

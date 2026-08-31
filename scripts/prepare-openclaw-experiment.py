@@ -71,11 +71,15 @@ def main() -> None:
     p.add_argument("--cpu-first", type=int, default=0)
     p.add_argument("--cpu-list", help="round-robin Runtime/Tool placement over this CPU list")
     p.add_argument("--numa-node", type=int, default=0)
+    p.add_argument("--firecracker-api-timeout-s", type=float, default=15.0)
+    p.add_argument("--firecracker-snapshot-api-timeout-s", type=float, default=300.0)
     a = p.parse_args()
     shared_cpus = parse_cpu_list(a.cpu_list) if a.cpu_list else None
     ipaddress.ip_network(f"{a.network_prefix}.0.0/16")
     if a.sessions < 1 or a.sessions > 253:
         raise ValueError("sessions must be between 1 and 253")
+    if a.firecracker_api_timeout_s <= 0 or a.firecracker_snapshot_api_timeout_s <= 0:
+        raise ValueError("Firecracker API timeouts must be positive")
     a.output.mkdir(parents=True, exist_ok=False)
     cpu_pairs = None
     if shared_cpus is not None:
@@ -143,6 +147,8 @@ def main() -> None:
             "tap_device": f"crt{index:04d}", "guest_mac": f"06:30:{index + 1:02x}:00:00:02",
             "cpu_set": str(runtime_cpu), "numa_node": a.numa_node,
             "log_path": str(directory / "runtime.log"),
+            "api_timeout_s": a.firecracker_api_timeout_s,
+            "snapshot_api_timeout_s": a.firecracker_snapshot_api_timeout_s,
         }
         tool_config = {
             "binary": "/opt/kata/bin/firecracker", "api_socket": str(directory / "tool.sock"),
@@ -154,6 +160,8 @@ def main() -> None:
             "tap_device": f"ctl{index:04d}", "guest_mac": f"06:30:{index + 1:02x}:00:00:03",
             "cpu_set": str(tool_cpu), "numa_node": a.numa_node,
             "log_path": str(directory / "tool.log"),
+            "api_timeout_s": a.firecracker_api_timeout_s,
+            "snapshot_api_timeout_s": a.firecracker_snapshot_api_timeout_s,
         }
         runtime_json, tool_json = directory / "runtime.json", directory / "tool.json"
         runtime_json.write_text(json.dumps(runtime_config, indent=2) + "\n")

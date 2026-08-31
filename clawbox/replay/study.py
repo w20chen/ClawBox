@@ -300,7 +300,11 @@ def run_study(config_path: Path) -> int:
                        "--runtime-memory-mib", str(resources.get("runtime_memory_mib", 2048)),
                        "--tool-memory-mib", str(workflow.resources.tool_memory_mib),
                        "--cpu-first", str(resources.get("cpu_first", 0)),
-                       "--numa-node", str(resources.get("numa_node", 0))]
+                       "--numa-node", str(resources.get("numa_node", 0)),
+                       "--firecracker-api-timeout-s",
+                       str(raw.get("firecracker_api_timeout_s", 15.0)),
+                       "--firecracker-snapshot-api-timeout-s",
+                       str(raw.get("firecracker_snapshot_api_timeout_s", 300.0))]
             if resources.get("cpu_list"):
                 prepare += ["--cpu-list", str(resources["cpu_list"])]
             try:

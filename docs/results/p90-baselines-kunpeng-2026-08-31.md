@@ -162,6 +162,16 @@ of the 515 GiB NUMA node, not the node's physical capacity limit.
   restores Tool before Runtime. A concurrency-8 checkpoint gate must reproduce
   one final-state hash before the registered suite is relaunched. No timing
   from this partial launch is pooled.
+- A fourth 51-arm partial launch is excluded at
+  `/data/clawbox-paper-suite-001-excluded-api-timeout-20260831`. Its ordinary
+  Firecracker API timeout (15 seconds) was also applied to synchronous full
+  snapshot creation. At concurrency 8/20, legitimate multi-GiB writes exceeded
+  that control-plane bound, producing 87 raw socket timeouts; no timing from
+  the partial launch is pooled. The corrected relaunch keeps ordinary API calls
+  at 15 seconds, uses a separately recorded 300-second snapshot create/load
+  timeout, raises the outer session safety bound to 7200 seconds, and stops the
+  suite after the first failed block. These are infrastructure-validity fixes,
+  not treatment changes.
 - `throughput_tasks_per_minute` is a compatibility field counting completed
   agent sessions. It is not an official SWE-ReBench correctness result. The
   final-state validator is included in wall time and establishes equivalence

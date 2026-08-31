@@ -296,6 +296,9 @@ class FirecrackerConfig:
     numa_node: int | None = None
     log_path: Path | None = None
     api_timeout_s: float = 15.0
+    # Full snapshot creation is synchronous and can legitimately take much
+    # longer than ordinary control calls under concurrent multi-GiB I/O.
+    snapshot_api_timeout_s: float = 300.0
     boot_timeout_s: float = 30.0
 
     @classmethod
@@ -376,7 +379,9 @@ class FirecrackerLifecycle:
         if not self._resident or self._process is None:
             raise LifecycleError("cannot checkpoint a non-resident VM")
         started = time.monotonic()
-        api = _UnixHttpClient(self.config.api_socket, self.config.api_timeout_s)
+        api = _UnixHttpClient(
+            self.config.api_socket, self.config.snapshot_api_timeout_s,
+        )
         api.request("PATCH", "/vm", {"state": "Paused"})
         next_state, next_memory = self._next_snapshot_paths()
         next_state.parent.mkdir(parents=True, exist_ok=True)
@@ -421,7 +426,9 @@ class FirecrackerLifecycle:
         started = time.monotonic()
         self._spawn()
         try:
-            api = _UnixHttpClient(self.config.api_socket, self.config.api_timeout_s)
+            api = _UnixHttpClient(
+                self.config.api_socket, self.config.snapshot_api_timeout_s,
+            )
             request: dict[str, Any] = {
                 "snapshot_path": str(self._snapshot_state_path),
                 "mem_backend": {
