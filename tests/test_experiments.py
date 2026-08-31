@@ -410,6 +410,60 @@ def test_openclaw_pair_checkpoint_and_restore_dependency_order():
     ]
 
 
+def test_idle_checkpoint_victim_selection_is_deterministic_lru():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_lru", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    registry = module.LruIdleSandboxRegistry(
+        eviction_policy="eager",
+        fixed_delay_s=0,
+        checkpoint_break_even_s=0,
+        pressure_active=lambda: False,
+    )
+    noop = lambda: None
+    registry.register(module.IdleSandboxCandidate(4, "newer", 20.0, 30.0, noop))
+    registry.register(module.IdleSandboxCandidate(2, "older-high-id", 10.0, 30.0, noop))
+    registry.register(module.IdleSandboxCandidate(1, "older-low-id", 10.0, 30.0, noop))
+
+    assert registry.select_lru(21.0).request_id == "older-low-id"
+    registry.unregister(1, "different-request")
+    assert registry.select_lru(21.0).request_id == "older-low-id"
+    registry.unregister(1, "older-low-id")
+    assert registry.select_lru(21.0).request_id == "older-high-id"
+
+
+def test_idle_checkpoint_victim_selection_honors_delay_and_pressure():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_lru_policy", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    candidate = module.IdleSandboxCandidate(0, "request", 100.0, 12.0, lambda: None)
+    delayed = module.LruIdleSandboxRegistry(
+        eviction_policy="fixed_delay",
+        fixed_delay_s=5,
+        checkpoint_break_even_s=0,
+        pressure_active=lambda: False,
+    )
+    delayed.register(candidate)
+    assert delayed.select_lru(104.9) is None
+    assert delayed.select_lru(105.0) == candidate
+
+    pressure = threading.Event()
+    predicted = module.LruIdleSandboxRegistry(
+        eviction_policy="predicted_pressure_aware",
+        fixed_delay_s=0,
+        checkpoint_break_even_s=10,
+        pressure_active=pressure.is_set,
+    )
+    predicted.register(candidate)
+    assert predicted.select_lru(103.0) is None
+    pressure.set()
+    assert predicted.select_lru(103.0) == candidate
+
+
 def test_pair_checkpoint_coordinator_blocks_response_until_pair_is_restored():
     script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
     spec = importlib.util.spec_from_file_location("run_openclaw_pair_race", script)

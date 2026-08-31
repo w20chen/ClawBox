@@ -300,6 +300,100 @@ class PairCheckpointCoordinator:
         }
 
 
+class IdleSandboxCandidate(NamedTuple):
+    session_id: int
+    request_id: str
+    idle_since_unix_s: float
+    predicted_wait_s: float
+    evict: Callable[[], None]
+
+
+class LruIdleSandboxRegistry:
+    """Select exactly one deterministic LRU victim from idle LLM waiters."""
+
+    def __init__(
+        self,
+        *,
+        eviction_policy: str,
+        fixed_delay_s: float,
+        checkpoint_break_even_s: float,
+        pressure_active: Callable[[], bool],
+        poll_s: float = 0.05,
+    ) -> None:
+        if eviction_policy not in {"eager", "fixed_delay", "predicted_pressure_aware"}:
+            raise ValueError("invalid eviction policy")
+        self.eviction_policy = eviction_policy
+        self.fixed_delay_s = max(0.0, float(fixed_delay_s))
+        self.checkpoint_break_even_s = max(0.0, float(checkpoint_break_even_s))
+        self.pressure_active = pressure_active
+        self.poll_s = max(0.001, float(poll_s))
+        self._condition = threading.Condition()
+        self._candidates: dict[int, IdleSandboxCandidate] = {}
+        self._closed = False
+
+    def register(self, candidate: IdleSandboxCandidate) -> None:
+        with self._condition:
+            current = self._candidates.get(candidate.session_id)
+            if current is not None and current.request_id == candidate.request_id:
+                return
+            self._candidates[candidate.session_id] = candidate
+            self._condition.notify_all()
+
+    def unregister(self, session_id: int, request_id: str | None = None) -> None:
+        with self._condition:
+            current = self._candidates.get(session_id)
+            if current is not None and (
+                request_id is None or current.request_id == request_id
+            ):
+                self._candidates.pop(session_id, None)
+                self._condition.notify_all()
+
+    def select_lru(self, now_unix_s: float) -> IdleSandboxCandidate | None:
+        with self._condition:
+            pressure = self.pressure_active()
+            eligible = [
+                candidate for candidate in self._candidates.values()
+                if self._eligible(candidate, now_unix_s, pressure)
+            ]
+            if not eligible:
+                return None
+            return min(
+                eligible,
+                key=lambda item: (item.idle_since_unix_s, item.session_id),
+            )
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    def run(self) -> None:
+        while True:
+            with self._condition:
+                while True:
+                    if self._closed:
+                        return
+                    victim = self.select_lru(time.time())
+                    if victim is not None:
+                        self._candidates.pop(victim.session_id, None)
+                        break
+                    self._condition.wait(self.poll_s)
+            victim.evict()
+
+    def _eligible(
+        self,
+        candidate: IdleSandboxCandidate,
+        now_unix_s: float,
+        pressure: bool,
+    ) -> bool:
+        elapsed = max(0.0, now_unix_s - candidate.idle_since_unix_s)
+        if self.eviction_policy == "eager":
+            return True
+        if self.eviction_policy == "fixed_delay":
+            return elapsed >= self.fixed_delay_s
+        return pressure or candidate.predicted_wait_s - elapsed >= self.checkpoint_break_even_s
+
+
 def close_runtime_tool_pair_and_release(
     runtime: FirecrackerLifecycle,
     tool: FirecrackerLifecycle,
@@ -840,7 +934,14 @@ def main() -> None:
     samples: list[dict] = []
     stop = threading.Event()
     pressure_reclaim_active = threading.Event()
-    pressure_reclaim_lock = threading.Lock()
+    idle_sandboxes = LruIdleSandboxRegistry(
+        eviction_policy=a.eviction_policy,
+        fixed_delay_s=a.eviction_delay_s,
+        checkpoint_break_even_s=a.checkpoint_break_even_s,
+        pressure_active=pressure_reclaim_active.is_set,
+    )
+    victim_selector = threading.Thread(target=idle_sandboxes.run, daemon=True)
+    victim_selector.start()
     started_unix_s = time.time()
     started = time.monotonic()
     cgroup_baseline = cgroup_memory_used_bytes()
@@ -921,6 +1022,7 @@ def main() -> None:
         current_tool_materialization_event: dict | None = None
         tool_reservation_lock = threading.Lock()
         tool_state_lock = threading.Lock()
+        reclaim_accounting_lock = threading.Lock()
         idle_reclaim_complete = threading.Event()
         idle_reclaim_complete.set()
         idle_reclaim_errors: list[Exception] = []
@@ -990,6 +1092,7 @@ def main() -> None:
             # cancels an eviction that has not started or waits for an in-flight
             # snapshot and restores the dependency-safe pair before bytes are
             # written to the Runtime's HTTP connection.
+            idle_sandboxes.unregister(index)
             checkpoint_coordinator.begin_response_delivery()
             if not idle_reclaim_complete.wait(timeout=remaining()):
                 raise TimeoutError("timed out waiting for idle sandbox reclamation")
@@ -1096,6 +1199,7 @@ def main() -> None:
             return event
 
         def on_request_started() -> None:
+            idle_sandboxes.unregister(index)
             checkpoint_coordinator.start_request()
             idle_reclaim_complete.clear()
             def reclaim_during_wait() -> None:
@@ -1226,23 +1330,100 @@ def main() -> None:
                 return float(gateway.actions[int(replay_index)].duration_s) * a.time_scale
             return float(a.predicted_llm_wait_s)
 
-        def eviction_due(record: dict) -> bool:
-            elapsed = max(0.0, time.time() - float(record.get("started_unix_s") or time.time()))
-            predicted = predicted_wait_s(record)
-            if a.eviction_policy == "eager":
-                return True
-            if a.eviction_policy == "fixed_delay":
-                return elapsed >= a.eviction_delay_s
-            return (
-                pressure_reclaim_active.is_set()
-                or predicted - elapsed >= a.checkpoint_break_even_s
-            )
-
         def prefetch_due(record: dict) -> bool:
             if a.restore_policy != "prefetch":
                 return False
             elapsed = max(0.0, time.time() - float(record.get("started_unix_s") or time.time()))
             return predicted_wait_s(record) - elapsed <= a.restore_prefetch_lead_s
+
+        def evict_idle_candidate(record: dict) -> None:
+            nonlocal snapshot_s, snapshots
+            request_id = str(record["request_id"])
+            try:
+                with reclaim_accounting_lock:
+                    if session_closing.is_set() or request_id in processed:
+                        return
+                    transition = checkpoint_coordinator.evict(lambda: {
+                        "cgroup_memory_bytes": (
+                            cgroup_value(tool_pool_cgroup, "memory.current")
+                            if tool_pool_cgroup is not None else None
+                        ),
+                        "numa_memory_bytes": numa_memory_used_bytes(numa_node),
+                    })
+                    if transition is None:
+                        return
+                    snapshot_s += transition.elapsed_s
+                    runtime_released = max(
+                        0,
+                        transition.runtime_rss_before_bytes
+                        - transition.runtime_rss_after_bytes,
+                    )
+                    tool_released = max(
+                        0,
+                        transition.tool_rss_before_bytes
+                        - transition.tool_rss_after_bytes,
+                    )
+                    pair_released = runtime_released + tool_released
+                    cgroup_before = transition.host_before["cgroup_memory_bytes"]
+                    cgroup_after = transition.host_after["cgroup_memory_bytes"]
+                    numa_before = transition.host_before["numa_memory_bytes"]
+                    numa_after = transition.host_after["numa_memory_bytes"]
+                    checkpoint_reclamation_events.append({
+                        "request_id": request_id,
+                        "reason": a.eviction_policy,
+                        "victim_policy": "lru",
+                        "idle_since_unix_s": float(record["started_unix_s"]),
+                        "checkpoint_scope": transition.scope,
+                        "predicted_llm_wait_s": predicted_wait_s(record),
+                        "runtime_firecracker_rss_before_bytes": (
+                            transition.runtime_rss_before_bytes
+                        ),
+                        "runtime_firecracker_rss_after_bytes": (
+                            transition.runtime_rss_after_bytes
+                        ),
+                        "verified_runtime_firecracker_rss_released_bytes": (
+                            runtime_released
+                        ),
+                        "tool_firecracker_rss_before_bytes": (
+                            transition.tool_rss_before_bytes
+                        ),
+                        "tool_firecracker_rss_after_bytes": (
+                            transition.tool_rss_after_bytes
+                        ),
+                        "verified_tool_firecracker_rss_released_bytes": tool_released,
+                        "pair_firecracker_rss_before_bytes": (
+                            transition.runtime_rss_before_bytes
+                            + transition.tool_rss_before_bytes
+                        ),
+                        "pair_firecracker_rss_after_bytes": (
+                            transition.runtime_rss_after_bytes
+                            + transition.tool_rss_after_bytes
+                        ),
+                        "verified_pair_firecracker_rss_released_bytes": pair_released,
+                        "cgroup_memory_before_bytes": cgroup_before,
+                        "cgroup_memory_after_bytes": cgroup_after,
+                        "cgroup_memory_released_bytes": (
+                            None if cgroup_before is None or cgroup_after is None
+                            else max(0, cgroup_before - cgroup_after)
+                        ),
+                        "numa_memory_before_bytes": numa_before,
+                        "numa_memory_after_bytes": numa_after,
+                        "numa_memory_released_bytes": (
+                            None if numa_before is None or numa_after is None
+                            else max(0, numa_before - numa_after)
+                        ),
+                        "snapshot_s": transition.elapsed_s,
+                    })
+                    processed.add(request_id)
+                    snapshots += 1
+                if (
+                    pressure_reclaim_active.is_set()
+                    and measure_tool_resident_bytes()
+                    <= int(a.tool_pool_low_watermark_mib) * 1024 * 1024
+                ):
+                    pressure_reclaim_active.clear()
+            except Exception as exc:
+                idle_reclaim_errors.append(exc)
 
         gateway.start(spec["gateway_host"], 18081)
         deadline = time.monotonic() + a.timeout_s
@@ -1258,6 +1439,13 @@ def main() -> None:
             while time.monotonic() < deadline:
                 finished, exit_code = complete(Path(runtime_config.log_path))
                 if finished:
+                    idle_sandboxes.unregister(index)
+                    with reclaim_accounting_lock:
+                        pass
+                    if idle_reclaim_errors:
+                        raise RuntimeError(
+                            "idle sandbox reclamation failed"
+                        ) from idle_reclaim_errors[0]
                     if exit_code != 0: raise RuntimeError(f"OpenClaw exited with {exit_code}")
                     gateway_records = gateway.records()
                     failed_gateway_records = [
@@ -1361,87 +1549,23 @@ def main() -> None:
                     item for item in pending_all if item["request_id"] not in processed
                 ]
                 evicting = a.reclamation_policy in {"checkpoint", "hybrid"}
-                if (evicting and pending and idle_reclaim_complete.is_set()
-                        and eviction_due(pending[0])):
-                    request_id = pending[0]["request_id"]
-                    with pressure_reclaim_lock:
-                        # Pressure-triggered reclaim continues only to W_low.
-                        if (a.eviction_policy == "predicted_pressure_aware"
-                                and pressure_reclaim_active.is_set()
-                                and measure_tool_resident_bytes()
-                                <= int(a.tool_pool_low_watermark_mib) * 1024 * 1024):
-                            pressure_reclaim_active.clear()
-                        transition = checkpoint_coordinator.evict(lambda: {
-                            "cgroup_memory_bytes": (
-                                cgroup_value(tool_pool_cgroup, "memory.current")
-                                if tool_pool_cgroup is not None else None
-                            ),
-                            "numa_memory_bytes": numa_memory_used_bytes(numa_node),
-                        })
-                        if transition is not None:
-                            snapshot_s += transition.elapsed_s
-                            runtime_released = max(
-                                0,
-                                transition.runtime_rss_before_bytes
-                                - transition.runtime_rss_after_bytes,
-                            )
-                            tool_released = max(
-                                0,
-                                transition.tool_rss_before_bytes
-                                - transition.tool_rss_after_bytes,
-                            )
-                            pair_released = runtime_released + tool_released
-                            cgroup_before = transition.host_before["cgroup_memory_bytes"]
-                            cgroup_after = transition.host_after["cgroup_memory_bytes"]
-                            numa_before = transition.host_before["numa_memory_bytes"]
-                            numa_after = transition.host_after["numa_memory_bytes"]
-                            checkpoint_reclamation_events.append({
-                                "request_id": request_id,
-                                "reason": a.eviction_policy,
-                                "checkpoint_scope": transition.scope,
-                                "predicted_llm_wait_s": predicted_wait_s(pending[0]),
-                                "runtime_firecracker_rss_before_bytes": (
-                                    transition.runtime_rss_before_bytes
-                                ),
-                                "runtime_firecracker_rss_after_bytes": (
-                                    transition.runtime_rss_after_bytes
-                                ),
-                                "verified_runtime_firecracker_rss_released_bytes": (
-                                    runtime_released
-                                ),
-                                "tool_firecracker_rss_before_bytes": (
-                                    transition.tool_rss_before_bytes
-                                ),
-                                "tool_firecracker_rss_after_bytes": (
-                                    transition.tool_rss_after_bytes
-                                ),
-                                "verified_tool_firecracker_rss_released_bytes": tool_released,
-                                "pair_firecracker_rss_before_bytes": (
-                                    transition.runtime_rss_before_bytes
-                                    + transition.tool_rss_before_bytes
-                                ),
-                                "pair_firecracker_rss_after_bytes": (
-                                    transition.runtime_rss_after_bytes
-                                    + transition.tool_rss_after_bytes
-                                ),
-                                "verified_pair_firecracker_rss_released_bytes": pair_released,
-                                "cgroup_memory_before_bytes": cgroup_before,
-                                "cgroup_memory_after_bytes": cgroup_after,
-                                "cgroup_memory_released_bytes": (
-                                    None if cgroup_before is None or cgroup_after is None
-                                    else max(0, cgroup_before - cgroup_after)
-                                ),
-                                "numa_memory_before_bytes": numa_before,
-                                "numa_memory_after_bytes": numa_after,
-                                "numa_memory_released_bytes": (
-                                    None if numa_before is None or numa_after is None
-                                    else max(0, numa_before - numa_after)
-                                ),
-                                "snapshot_s": transition.elapsed_s,
-                            })
-                            processed.add(request_id)
-                            snapshots += 1
-                elif evicting and pending_all and pending_all[0]["request_id"] in processed:
+                if idle_reclaim_errors:
+                    raise RuntimeError(
+                        "idle sandbox reclamation failed"
+                    ) from idle_reclaim_errors[0]
+                if evicting and pending and idle_reclaim_complete.is_set():
+                    record = pending[0]
+                    idle_sandboxes.register(IdleSandboxCandidate(
+                        session_id=index,
+                        request_id=str(record["request_id"]),
+                        idle_since_unix_s=float(
+                            record.get("started_unix_s") or time.time()
+                        ),
+                        predicted_wait_s=predicted_wait_s(record),
+                        evict=lambda record=record: evict_idle_candidate(record),
+                    ))
+                if (evicting and pending_all
+                        and pending_all[0]["request_id"] in processed):
                     if prefetch_due(pending_all[0]):
                         restored = checkpoint_coordinator.restore()
                         if restored is not None:
@@ -1451,10 +1575,13 @@ def main() -> None:
                                 "reason": "prefetch_restore",
                                 **restored,
                             })
-                else: time.sleep(0.05)
+                time.sleep(0.05)
             raise TimeoutError("OpenClaw experiment timed out")
         finally:
             session_closing.set()
+            idle_sandboxes.unregister(index)
+            with reclaim_accounting_lock:
+                pass
             idle_reclaim_complete.wait(timeout=30.0)
             try:
                 close_runtime_tool_pair_and_release(runtime, tool, release_pair)
@@ -1475,6 +1602,8 @@ def main() -> None:
                 try: results.append(future.result())
                 except Exception as exc: failures.append({"session": futures[future], "type": type(exc).__name__, "error": str(exc)})
     finally:
+        idle_sandboxes.close()
+        victim_selector.join(timeout=5)
         stop.set(); sampler.join(timeout=2)
     if tool_admission is not None:
         cleanup_deadline = time.monotonic() + 2.0
