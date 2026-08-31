@@ -1,5 +1,5 @@
 {
-  "output": "/data/cb-static-resident-sweep-20260831",
+  "output": "/data/sr20-40",
   "source": {
     "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
     "tool_rootfs": "/data/openclaw-experiment-tool-cgroup.ext4",
