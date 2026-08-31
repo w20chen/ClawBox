@@ -1,0 +1,36 @@
+{
+  "output": "/data/static-fixed2-materialization-c20-v2",
+  "source": {
+    "runtime_rootfs": "/data/openclaw-experiment-runtime-instrumented.ext4",
+    "tool_rootfs": "/data/openclaw-experiment-tool-telemetry-v2.ext4",
+    "tool_repository_commit": "08c32462831d3849a70241ac9fea946b6b1884a6",
+    "repository": "15five/scim2-filter-parser",
+    "prompt": "/data/clawbox-paper-workloads-20260830/15five__scim2-filter-parser-13.prompt.txt",
+    "trace": "/data/recording-output/model-trace-session-0000.jsonl"
+  },
+  "sessions": 20,
+  "repetitions": 1,
+  "seed": 20260831,
+  "network_prefix": "172.30",
+  "validation_command": "cd /testbed && { git -c safe.directory=/testbed diff --binary --no-ext-diff 08c32462831d3849a70241ac9fea946b6b1884a6 -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig'; git -c safe.directory=/testbed ls-files --others --exclude-standard -z -- . ':(exclude).clawbox/**' ':(exclude)openclaw-ssh-shared-*/**' ':(exclude).gitconfig' | sort -z | xargs -0 -r sha256sum; }",
+  "correctness_command": "cd /testbed && PYTHONPATH=/testbed/src /opt/miniconda3/envs/testbed/bin/python -m pytest tests/ -q",
+  "correctness_timeout_s": 300,
+  "inference_backends": ["replay"],
+  "sizing_policies": ["fixed"],
+  "memory_policies": ["resident", "snapshot"],
+  "resident_memory_budget_mib": 40960,
+  "tool_reservation_budget_mib": 16384,
+  "tool_admission_safety_headroom_mib": 1024,
+  "idle_tool_vm_rss_mib": 256,
+  "resources": {
+    "runtime_memory_mib": 2048,
+    "tool_memory_mib": 2048,
+    "cpu_first": 0,
+    "numa_node": 0
+  },
+  "replay": {"time_scale": 1.0},
+  "firecracker_api_timeout_s": 15,
+  "firecracker_snapshot_api_timeout_s": 300,
+  "timeout_s": 3600,
+  "retain_vm_artifacts": false
+}
