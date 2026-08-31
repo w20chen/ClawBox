@@ -485,3 +485,35 @@ def test_predictive_batch_reservation_sums_concurrent_tool_calls():
     steps = module.predictive_steps_from_plan(payload, "rec-a")
     assert steps[1]["incremental_p90_kib"] == 300
     assert steps[2]["incremental_p90_kib"] == 1280
+
+
+def test_balloon_adjustment_waits_for_guest_and_records_rss_reclamation(monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_balloon", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Tool:
+        def __init__(self):
+            self.stats = iter([
+                {"target_mib": 1536, "actual_mib": 1400},
+                {"target_mib": 1536, "actual_mib": 1536},
+            ])
+            self.rss = iter([900 * 1024**2, 500 * 1024**2])
+
+        def rss_bytes(self):
+            return next(self.rss)
+
+        def set_balloon_target_mib(self, target):
+            assert target == 1536
+            return next(self.stats)
+
+        def balloon_statistics(self):
+            return next(self.stats)
+
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    event = module.adjust_balloon(Tool(), 1536, "tool_end_idle_reclaim", 1.0)
+    assert event["target_reached"] is True
+    assert event["statistics"]["actual_mib"] == 1536
+    assert event["tool_firecracker_rss_released_bytes"] == 400 * 1024**2

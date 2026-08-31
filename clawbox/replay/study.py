@@ -398,6 +398,20 @@ def run_study(config_path: Path) -> int:
                         "--static-tool-reservation-mib",
                         str(workflow.resources.tool_memory_mib),
                     ]
+            if raw.get("tool_balloon_reclamation"):
+                if residency != "resident" or sizing_policy not in {
+                    "p90_static", "p90_reservation",
+                }:
+                    raise ValueError(
+                        "Tool balloon reclamation requires a resident predictive arm"
+                    )
+                command += [
+                    "--tool-balloon-reclamation",
+                    "--tool-balloon-idle-floor-mib",
+                    str(int(raw["tool_balloon_idle_floor_mib"])),
+                    "--tool-balloon-settle-timeout-s",
+                    str(float(raw.get("tool_balloon_settle_timeout_s", 5.0))),
+                ]
             arm_started_at = utcnow()
             try:
                 completed = subprocess.run(command, cwd=root, check=False)

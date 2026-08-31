@@ -300,6 +300,9 @@ class FirecrackerConfig:
     # longer than ordinary control calls under concurrent multi-GiB I/O.
     snapshot_api_timeout_s: float = 300.0
     boot_timeout_s: float = 30.0
+    balloon_enabled: bool = False
+    balloon_deflate_on_oom: bool = True
+    balloon_stats_polling_interval_s: int = 1
 
     @classmethod
     def from_json(cls, path: Path) -> "FirecrackerConfig":
@@ -370,6 +373,14 @@ class FirecrackerLifecycle:
                 "vsock_id": "runtime",
                 "guest_cid": self.config.guest_cid,
                 "uds_path": str(self.config.vsock_uds),
+            })
+        if self.config.balloon_enabled:
+            api.request("PUT", "/balloon", {
+                "amount_mib": 0,
+                "deflate_on_oom": self.config.balloon_deflate_on_oom,
+                "stats_polling_interval_s": (
+                    self.config.balloon_stats_polling_interval_s
+                ),
             })
         api.request("PUT", "/actions", {"action_type": "InstanceStart"})
         self._resident = True
@@ -459,6 +470,27 @@ class FirecrackerLifecycle:
     def close(self) -> None:
         self._stop_process()
         self._resident = False
+
+    def set_balloon_target_mib(self, amount_mib: int) -> dict[str, Any] | None:
+        """Set the live virtio-balloon target without changing VM capacity."""
+        if not self.config.balloon_enabled:
+            raise LifecycleError("virtio-balloon is not configured")
+        if not self._resident or self._process is None:
+            raise LifecycleError("cannot update balloon on a non-resident VM")
+        if amount_mib < 0 or amount_mib >= self.config.memory_mib:
+            raise ValueError("balloon target must be non-negative and below VM capacity")
+        api = _UnixHttpClient(self.config.api_socket, self.config.api_timeout_s)
+        api.request("PATCH", "/balloon", {"amount_mib": int(amount_mib)})
+        return self.balloon_statistics()
+
+    def balloon_statistics(self) -> dict[str, Any] | None:
+        if not self.config.balloon_enabled:
+            return None
+        if not self._resident or self._process is None:
+            return None
+        api = _UnixHttpClient(self.config.api_socket, self.config.api_timeout_s)
+        result = api.request("GET", "/balloon/statistics")
+        return result if isinstance(result, dict) else None
 
     def rss_bytes(self) -> int:
         process = self._process

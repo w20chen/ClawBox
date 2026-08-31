@@ -926,6 +926,53 @@ def test_firecracker_uses_long_timeout_only_for_snapshot_io(
     assert observed == [7.0, 101.0, 101.0]
 
 
+def test_firecracker_balloon_is_preboot_configured_and_live_adjustable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    requests: list[tuple[str, str, object]] = []
+
+    class Client:
+        def __init__(self, _path: Path, _timeout_s: float) -> None:
+            pass
+
+        def request(self, method: str, route: str, payload=None):
+            requests.append((method, route, payload))
+            if route == "/balloon/statistics":
+                return {"target_mib": 1536, "actual_mib": 1500}
+            return None
+
+    class Process:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(lifecycle_module, "_UnixHttpClient", Client)
+    config = FirecrackerConfig(
+        binary=tmp_path / "firecracker", api_socket=tmp_path / "api.sock",
+        kernel_image=tmp_path / "kernel", rootfs=tmp_path / "rootfs",
+        snapshot_state=tmp_path / "state", snapshot_memory=tmp_path / "memory",
+        memory_mib=2048, balloon_enabled=True,
+    )
+    lifecycle = FirecrackerLifecycle(config)
+    lifecycle._spawn = lambda: setattr(lifecycle, "_process", Process())
+    lifecycle.start()
+    assert ("PUT", "/balloon", {
+        "amount_mib": 0, "deflate_on_oom": True,
+        "stats_polling_interval_s": 1,
+    }) in requests
+    assert requests.index(("PUT", "/balloon", {
+        "amount_mib": 0, "deflate_on_oom": True,
+        "stats_polling_interval_s": 1,
+    })) < next(i for i, item in enumerate(requests) if item[1] == "/actions")
+    assert lifecycle.set_balloon_target_mib(1536) == {
+        "target_mib": 1536, "actual_mib": 1500,
+    }
+    assert ("PATCH", "/balloon", {"amount_mib": 1536}) in requests
+    with pytest.raises(ValueError, match="below VM capacity"):
+        lifecycle.set_balloon_target_mib(2048)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="generated commands target the Linux Firecracker guest")
 def test_common_file_tools_are_replayable(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "file.txt"

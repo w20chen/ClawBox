@@ -361,6 +361,37 @@ def ssh_validate(spec: dict, command: str) -> bytes:
     return stdout
 
 
+def adjust_balloon(
+    tool: FirecrackerLifecycle, target_mib: int, reason: str, timeout_s: float,
+) -> dict:
+    """Adjust a live Tool balloon and record host RSS plus guest-cooperative progress."""
+    started = time.monotonic()
+    rss_before = tool.rss_bytes()
+    stats = tool.set_balloon_target_mib(target_mib)
+    reached = False
+    deadline = started + timeout_s
+    while True:
+        actual = stats.get("actual_mib") if isinstance(stats, dict) else None
+        if actual is not None:
+            actual = int(actual)
+            reached = actual <= target_mib if target_mib == 0 else actual >= target_mib
+        if reached or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+        stats = tool.balloon_statistics()
+    rss_after = tool.rss_bytes()
+    return {
+        "reason": reason,
+        "target_mib": target_mib,
+        "target_reached": reached,
+        "statistics": stats,
+        "operation_s": time.monotonic() - started,
+        "tool_firecracker_rss_before_bytes": rss_before,
+        "tool_firecracker_rss_after_bytes": rss_after,
+        "tool_firecracker_rss_released_bytes": max(0, rss_before - rss_after),
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("manifest", type=Path)
@@ -388,6 +419,9 @@ def main() -> None:
     p.add_argument("--static-tool-reservation-mib", type=int)
     p.add_argument("--tool-memory-plan", type=Path)
     p.add_argument("--tool-memory-workload")
+    p.add_argument("--tool-balloon-reclamation", action="store_true")
+    p.add_argument("--tool-balloon-idle-floor-mib", type=int)
+    p.add_argument("--tool-balloon-settle-timeout-s", type=float, default=5.0)
     a = p.parse_args()
     if a.timeout_s <= 0:
         p.error("--timeout-s must be positive")
@@ -421,6 +455,16 @@ def main() -> None:
     a.residency_policy = a.residency_policy or (
         "llm_wait_checkpoint" if a.mode == "snapshot" else a.mode
     )
+    if a.tool_balloon_reclamation:
+        if a.residency_policy != "resident":
+            p.error("Tool balloon reclamation is a resident-only baseline")
+        if a.tool_memory_plan is None:
+            p.error("Tool balloon reclamation requires a per-tool memory plan")
+        if (a.tool_balloon_idle_floor_mib is None
+                or a.tool_balloon_idle_floor_mib <= 0):
+            p.error("Tool balloon reclamation requires a positive idle floor")
+        if a.tool_balloon_settle_timeout_s <= 0:
+            p.error("Tool balloon settle timeout must be positive")
     raw = json.loads(a.manifest.read_text())
     configured_nodes = {
         FirecrackerConfig.from_json(Path(session[field])).numa_node
@@ -439,6 +483,9 @@ def main() -> None:
     if len(memory_splits) != 1:
         raise ValueError("all sessions must use the same Runtime/Tool memory split")
     runtime_memory_mib, tool_memory_mib = next(iter(memory_splits))
+    if (a.tool_balloon_reclamation
+            and a.tool_balloon_idle_floor_mib >= tool_memory_mib):
+        p.error("Tool balloon idle floor must be below fixed Tool-VM capacity")
     pair_memory_mib = int(runtime_memory_mib + tool_memory_mib)
     resident_pair_slots = len(raw["sessions"])
     if a.resident_memory_budget_mib is not None:
@@ -522,6 +569,11 @@ def main() -> None:
                     else max(0, cgroup_memory - cgroup_baseline)
                 ),
                 "tool_admission": admission_status,
+                "tool_resident_plus_headroom_over_budget": (
+                    admission_status is not None
+                    and tool_rss + admission_status["safety_headroom_bytes"]
+                    > admission_status["budget_bytes"]
+                ),
             })
     sampler = threading.Thread(target=sample, daemon=True); sampler.start()
 
@@ -531,6 +583,8 @@ def main() -> None:
         remaining = lambda: max(0.0, deadline - time.monotonic())
         tool = FirecrackerLifecycle(tool_config)
         runtime = FirecrackerLifecycle(runtime_config)
+        if a.tool_balloon_reclamation:
+            tool.config = replace(tool.config, balloon_enabled=True)
         with lifecycle_lock:
             lifecycles.extend([tool, runtime])
             tool_lifecycles.append(tool)
@@ -544,6 +598,8 @@ def main() -> None:
         tool_reservation_lease: int | None = None
         tool_reservation_events: list[dict] = []
         checkpoint_reclamation_events: list[dict] = []
+        balloon_events: list[dict] = []
+        tool_materialization_events: list[dict] = []
         current_tool_reservation_event: dict | None = None
         tool_reservation_lock = threading.Lock()
         session_closing = threading.Event()
@@ -557,6 +613,16 @@ def main() -> None:
                 current_tool_reservation_event = None
             if lease is not None:
                 assert tool_admission is not None
+                if a.tool_balloon_reclamation and tool.resident:
+                    balloon_event = adjust_balloon(
+                        tool,
+                        tool_memory_mib - int(a.tool_balloon_idle_floor_mib),
+                        "tool_end_idle_reclaim",
+                        a.tool_balloon_settle_timeout_s,
+                    )
+                    balloon_events.append(balloon_event)
+                    if event is not None:
+                        event["balloon_reclamation"] = balloon_event
                 released_status = tool_admission.release(lease)
                 if event is not None:
                     released = time.monotonic() - started
@@ -637,6 +703,12 @@ def main() -> None:
                     tool_reservation_lease = lease
                     tool_reservation_events.append(event)
                     current_tool_reservation_event = event
+            if not reject and a.tool_balloon_reclamation:
+                balloon_event = adjust_balloon(
+                    tool, 0, "tool_start_expand", a.tool_balloon_settle_timeout_s,
+                )
+                balloon_events.append(balloon_event)
+                event["balloon_expansion"] = balloon_event
             if reject:
                 tool_admission.release(lease)
                 raise RuntimeError("session closed while waiting for Tool admission")
@@ -676,6 +748,43 @@ def main() -> None:
                 runtime.config = replace(runtime.config, cpu_set=str(runtime_cpu))
                 tool.config = replace(tool.config, cpu_set=str(tool_cpu))
 
+        def with_tool_materialization_admission(reason: str, operation):
+            """Gate boot/restore RSS materialization against the Tool budget."""
+            if tool_admission is None:
+                return operation()
+            wait_started = time.monotonic()
+            acquired = tool_admission.acquire(
+                tool_memory_mib * 1024 * 1024, timeout=remaining(),
+            )
+            wait_s = time.monotonic() - wait_started
+            if acquired is None:
+                raise TimeoutError(
+                    f"timed out waiting for Tool {reason} memory admission"
+                )
+            lease, admitted = acquired
+            event = {
+                "reason": reason,
+                "reservation_mib": tool_memory_mib,
+                "wait_s": wait_s,
+                "resident_tool_rss_before_mib": (
+                    admitted["resident_bytes"] / (1024.0 * 1024.0)
+                ),
+                "acquired_elapsed_s": time.monotonic() - started,
+                "released_elapsed_s": None,
+            }
+            tool_materialization_events.append(event)
+            try:
+                return operation()
+            finally:
+                released = tool_admission.release(lease)
+                event["released_elapsed_s"] = time.monotonic() - started
+                event["resident_tool_rss_after_mib"] = (
+                    released["resident_bytes"] / (1024.0 * 1024.0)
+                )
+                event["remaining_headroom_after_mib"] = (
+                    released["remaining_headroom_bytes"] / (1024.0 * 1024.0)
+                )
+
         def release_pair() -> None:
             nonlocal pair_lease, current_lease_event
             if pair_lease is None:
@@ -690,7 +799,12 @@ def main() -> None:
         deadline = time.monotonic() + a.timeout_s
         try:
             acquire_pair()
-            tool.start(); wait_tcp(spec["tool_host"], 2222, 30); runtime.start()
+            def start_tool():
+                elapsed = tool.start()
+                wait_tcp(spec["tool_host"], 2222, 30)
+                return elapsed
+            with_tool_materialization_admission("initial_boot", start_tool)
+            runtime.start()
             processed: set[str] = set()
             while time.monotonic() < deadline:
                 finished, exit_code = complete(Path(runtime_config.log_path))
@@ -721,6 +835,11 @@ def main() -> None:
                     correctness_timed_out = False
                     correctness_path = None
                     working_set_path = a.output / f"tool-working-set-session-{index:04d}.out"
+                    if a.tool_balloon_reclamation:
+                        balloon_events.append(adjust_balloon(
+                            tool, 0, "validation_expand",
+                            a.tool_balloon_settle_timeout_s,
+                        ))
                     tool_working_sets = collect_tool_working_sets(
                         spec, tool_reservation_events, working_set_path,
                         arm_started_unix_s=started_unix_s,
@@ -768,6 +887,8 @@ def main() -> None:
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
                             "tool_reservation_events": tool_reservation_events,
                             "checkpoint_reclamation_events": checkpoint_reclamation_events,
+                            "balloon_events": balloon_events,
+                            "tool_materialization_events": tool_materialization_events,
                             "tool_working_sets": tool_working_sets,
                             "tool_working_set_artifact": str(working_set_path),
                             "validation_sha256": hashlib.sha256(validation).hexdigest(),
@@ -822,9 +943,12 @@ def main() -> None:
                         if current[request_id]["ready"]: break
                         time.sleep(0.02)
                     acquire_pair()
-                    restore_s += restore_tool_runtime_pair(
-                        tool, runtime,
-                        lambda: wait_tcp(spec["tool_host"], 2222, 30),
+                    restore_s += with_tool_materialization_admission(
+                        "snapshot_restore",
+                        lambda: restore_tool_runtime_pair(
+                            tool, runtime,
+                            lambda: wait_tcp(spec["tool_host"], 2222, 30),
+                        ),
                     )
                     processed.add(request_id); snapshots += 1
                 else: time.sleep(0.05)
@@ -884,6 +1008,10 @@ def main() -> None:
     tool_reservation_events = [
         event for item in results for event in item.get("tool_reservation_events", [])
     ]
+    tool_materialization_events = [
+        event for item in results
+        for event in item.get("tool_materialization_events", [])
+    ]
     tool_reservation_amounts = [
         float(event["reservation_mib"]) for event in tool_reservation_events
     ]
@@ -912,6 +1040,13 @@ def main() -> None:
     reclamation_events = [
         row for item in results
         for row in item.get("checkpoint_reclamation_events", [])
+    ]
+    balloon_events = [
+        row for item in results for row in item.get("balloon_events", [])
+    ]
+    balloon_reclamation_events = [
+        row for row in balloon_events
+        if row.get("reason") == "tool_end_idle_reclaim"
     ]
     rss_time = sum(
         rss_values[index] * max(
@@ -955,11 +1090,25 @@ def main() -> None:
                   tool_admission_metrics["over_budget_observations"]
                   if tool_admission_metrics is not None else None
               ),
+              "tool_resident_plus_headroom_over_budget_observations": sum(
+                  bool(sample.get("tool_resident_plus_headroom_over_budget"))
+                  for sample in samples
+              ) if tool_admission_metrics is not None else None,
               "tool_prediction_exceeded_leases": (
                   tool_admission_metrics["prediction_exceeded_leases"]
                   if tool_admission_metrics is not None else None
               ),
               "tool_reservation_events": len(tool_reservation_events),
+              "tool_materialization_admission_events": len(tool_materialization_events),
+              "tool_materialization_admission_wait_s": sum(
+                  float(event.get("wait_s") or 0.0)
+                  for event in tool_materialization_events
+              ),
+              "max_tool_materialization_admission_wait_s": max(
+                  (float(event.get("wait_s") or 0.0)
+                   for event in tool_materialization_events),
+                  default=None,
+              ),
               "tool_reservation_distinct_mib": sorted(set(tool_reservation_amounts)),
               "mean_tool_reservation_mib": (
                   statistics.fmean(tool_reservation_amounts)
@@ -969,6 +1118,23 @@ def main() -> None:
               "tool_reservation_wait_s": sum(tool_reservation_waits),
               "max_tool_reservation_wait_s": max(tool_reservation_waits, default=None),
               "tool_reservation_time_mib_s": tool_reservation_time_mib_s,
+              "tool_balloon_reclamation": a.tool_balloon_reclamation,
+              "tool_balloon_idle_floor_mib": (
+                  a.tool_balloon_idle_floor_mib
+                  if a.tool_balloon_reclamation else None
+              ),
+              "tool_balloon_events": len(balloon_events),
+              "tool_balloon_reclamation_events": len(balloon_reclamation_events),
+              "tool_balloon_target_reached_events": sum(
+                  bool(row.get("target_reached")) for row in balloon_events
+              ),
+              "tool_balloon_operation_s": sum(
+                  float(row.get("operation_s") or 0.0) for row in balloon_events
+              ),
+              "tool_balloon_verified_rss_released_bytes": sum(
+                  int(row.get("tool_firecracker_rss_released_bytes") or 0)
+                  for row in balloon_reclamation_events
+              ),
               "tool_working_set_observations": len(tool_working_sets),
               "max_actual_tool_command_memory_mib": max(actual_tool_memory_mib, default=None),
               "mean_actual_tool_command_memory_mib": (
