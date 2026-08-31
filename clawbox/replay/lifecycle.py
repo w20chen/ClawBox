@@ -742,3 +742,57 @@ class FairResourcePool:
         while self._serving_ticket in self._cancelled:
             self._cancelled.remove(self._serving_ticket)
             self._serving_ticket += 1
+
+
+class FairWeightedResourcePool:
+    """FIFO admission for heterogeneous integer accounting reservations."""
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise ValueError("weighted resource capacity must be positive")
+        self.capacity = capacity
+        self._available = capacity
+        self._leased: dict[int, int] = {}
+        self._next_lease = 0
+        self._next_ticket = 0
+        self._serving_ticket = 0
+        self._cancelled: set[int] = set()
+        self._condition = Condition()
+
+    def acquire(self, amount: int, timeout: float | None = None) -> int | None:
+        if amount <= 0 or amount > self.capacity:
+            raise ValueError("reservation must be positive and no larger than capacity")
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            while ticket != self._serving_ticket or amount > self._available:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    self._cancelled.add(ticket)
+                    self._advance_cancelled()
+                    self._condition.notify_all()
+                    return None
+                self._condition.wait(remaining)
+            lease = self._next_lease
+            self._next_lease += 1
+            self._leased[lease] = amount
+            self._available -= amount
+            self._serving_ticket += 1
+            self._advance_cancelled()
+            self._condition.notify_all()
+            return lease
+
+    def release(self, lease: int) -> None:
+        with self._condition:
+            try:
+                amount = self._leased.pop(lease)
+            except KeyError as exc:
+                raise ValueError("weighted resource lease is unknown") from exc
+            self._available += amount
+            self._condition.notify_all()
+
+    def _advance_cancelled(self) -> None:
+        while self._serving_ticket in self._cancelled:
+            self._cancelled.remove(self._serving_ticket)
+            self._serving_ticket += 1

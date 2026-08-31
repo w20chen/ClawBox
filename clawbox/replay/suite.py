@@ -52,6 +52,19 @@ SUITE_METRICS = (
     "p95_session_wall_s",
     "p99_session_wall_s",
     "snapshot_allocated_bytes",
+    "tool_reservation_events",
+    "mean_tool_reservation_mib",
+    "max_tool_reservation_mib",
+    "tool_reservation_wait_s",
+    "max_tool_reservation_wait_s",
+    "tool_reservation_time_mib_s",
+    "tool_working_set_observations",
+    "max_actual_tool_command_memory_mib",
+    "mean_actual_tool_command_memory_mib",
+    "max_actual_tool_working_set_mib",
+    "prediction_observations",
+    "prediction_memory_coverage_fraction",
+    "mean_prediction_error_mib",
 )
 
 RATIO_EFFECT_METRICS = {
@@ -63,6 +76,11 @@ RATIO_EFFECT_METRICS = {
     "max_admission_wait_event_s", "mean_session_wall_s",
     "p50_session_wall_s", "p95_session_wall_s", "p99_session_wall_s",
     "snapshot_allocated_bytes",
+    "mean_tool_reservation_mib", "max_tool_reservation_mib",
+    "tool_reservation_wait_s", "max_tool_reservation_wait_s",
+    "tool_reservation_time_mib_s",
+    "max_actual_tool_command_memory_mib", "mean_actual_tool_command_memory_mib",
+    "max_actual_tool_working_set_mib", "mean_prediction_error_mib",
 }
 
 EXECUTION_ARTIFACTS = {
@@ -503,11 +521,16 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
         observations.setdefault(label, {}).setdefault(metric, []).append(row)
 
     for key, arms in indexed.items():
+        predictive = (
+            "p90_reservation"
+            if any(size == "p90_reservation" for size, _residency in arms)
+            else "p90_static"
+        )
         for residency in ("resident", "llm_wait_checkpoint"):
             for treatment_sizing, control_sizing, label in (
-                ("p90_static", "fixed", f"p90_static_vs_fixed/{residency}"),
+                (predictive, "fixed", f"p90_reservation_vs_fixed/{residency}"),
                 ("fixed2", "fixed", f"fixed2_vs_fixed/{residency}"),
-                ("p90_static", "fixed2", f"p90_static_vs_fixed2/{residency}"),
+                (predictive, "fixed2", f"p90_reservation_vs_fixed2/{residency}"),
             ):
                 treatment_row = arms.get((treatment_sizing, residency))
                 control_row = arms.get((control_sizing, residency))
@@ -516,7 +539,7 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 for metric in SUITE_METRICS:
                     if treatment_row.get(metric) is not None and control_row.get(metric) is not None:
                         add(label, metric, key, float(treatment_row[metric]), float(control_row[metric]))
-        for sizing in ("fixed", "fixed2", "p90_static"):
+        for sizing in ("fixed", "fixed2", predictive):
             treatment_row = arms.get((sizing, "llm_wait_checkpoint"))
             control_row = arms.get((sizing, "resident"))
             if treatment_row is None or control_row is None:
@@ -528,7 +551,7 @@ def _paired_contrasts(measurement_rows: list[dict[str, Any]]) -> dict[str, Any]:
                         float(treatment_row[metric]), float(control_row[metric]),
                     )
         for treatment_sizing, control_sizing, label in (
-            ("p90_static", "fixed", "interaction_checkpoint_x_p90_static_vs_fixed"),
+            (predictive, "fixed", "interaction_checkpoint_x_p90_reservation_vs_fixed"),
             ("fixed2", "fixed", "interaction_checkpoint_x_fixed2_vs_fixed"),
         ):
             rows = (
@@ -734,7 +757,7 @@ def _preflight_suite(
         artifact_provenance["workloads"][name]["independent_unit"] = str(
             workload["independent_unit"]
         )
-        if "p90_static" in raw.get("sizing_policies", []):
+        if {"p90_static", "p90_reservation"}.intersection(raw.get("sizing_policies", [])):
             p90 = raw.get("p90_static")
             if not isinstance(p90, dict):
                 raise ValueError("p90_static configuration is required")
@@ -835,6 +858,7 @@ def run_suite(config_path: Path) -> int:
                 child["validation_command"] = workload["validation_command"]
             p90 = child.get("p90_static")
             if isinstance(p90, dict):
+                p90["workload_name"] = name
                 configured_prediction = workload.get("prediction_file") or p90.get("prediction_file")
                 if configured_prediction:
                     p90["prediction_file"] = _absolute(base, configured_prediction)

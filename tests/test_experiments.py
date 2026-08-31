@@ -179,6 +179,34 @@ def test_replay_factorial_crosses_fixed_predictive_and_residency_without_hidden_
         _p90_prediction(insufficient, None)
 
 
+def test_per_tool_plan_requires_heterogeneous_reservations_and_selects_fixed_capacity():
+    payload = {
+        "tenant_id": "tenant-a", "repo_fingerprint": "org/repo", "generation": 4,
+        "pair_digest": "a" * 64, "source_digest": "b" * 64,
+        "artifact_count": 20, "clawtune_revision": "c" * 40,
+        "prediction": {"latency_p90_sec": 1, "cpu_p90_cores": 1,
+                       "memory_p90_bytes": 1024**2, "evidence_count": 10},
+        "per_tool_memory": {"workloads": {"rec-a": {
+            "reservation_distinct_mib": [322, 384, 401],
+            "reservation_distinct_kib": [329728, 393216, 410624],
+            "selected_vm_size_class_mib": 2048,
+        }}},
+    }
+    raw = {
+        "source": {"repository": "org/repo"},
+        "sizing_policies": ["p90_static"],
+        "resources": {"tool_memory_mib": 4096},
+        "p90_static": {"prediction": payload, "use_per_tool_memory_plan": True,
+                       "workload_name": "rec-a"},
+    }
+    prediction = _p90_prediction(raw, None)
+    assert prediction is not None
+    assert _predictive_tool_memory_mib(raw, prediction) == 2048
+    payload["per_tool_memory"]["workloads"]["rec-a"]["reservation_distinct_kib"] = [329728]
+    with pytest.raises(ValueError, match="heterogeneous"):
+        _predictive_tool_memory_mib(raw, prediction)
+
+
 def test_result_envelope_and_failure_categories_serialize_distinctly():
     workflow = expand_matrix(production_spec())[0]
     envelope = ResultEnvelope(run_id="run-1", case_id="case-1", baseline=workflow.baseline,
@@ -336,3 +364,28 @@ def test_openclaw_tool_checkpoint_failure_fails_session_and_releases_pair_lease(
         "checkpoint-runtime", "checkpoint-tool", "close-runtime", "close-tool",
     ]
     assert pool.acquire(timeout=0) == lease
+
+
+def test_openclaw_collects_actual_tool_working_set_and_joins_prediction(tmp_path, monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_experiment_memory", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    command = "pytest -q"
+    digest = __import__("hashlib").sha256(command.encode()).hexdigest()
+    bridge = {"execution_id": "exec-1", "command_sha256": digest}
+    resource = {"execution_id": "exec-1", "memory_rss_peak_bytes": 64 * 1024**2,
+                "sampling_quality": "valid"}
+    stdout = (
+        "__CLAWBOX_BRIDGE__\n" + json.dumps(bridge) + "\n"
+        "__CLAWBOX_CGROUP__\n" + json.dumps(resource) + "\n"
+    ).encode()
+    monkeypatch.setattr(module, "ssh_capture", lambda *_args: (0, stdout, b"", False))
+    events = [{"model_step": 2, "reservation_mib": 384,
+               "tool_invocations": [{"command_sha256": digest,
+                                     "predicted_command_memory_p90_mib": 80.0}]}]
+    rows = module.collect_tool_working_sets({}, events, tmp_path / "actual.out")
+    assert rows[0]["actual_command_peak_memory_bytes"] == 64 * 1024**2
+    assert rows[0]["prediction_error_mib"] == 16.0
+    assert rows[0]["prediction_covered_actual"] is True

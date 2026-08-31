@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -31,6 +31,7 @@ class GatewayRequest:
     completed_unix_s: float = 0.0
     request_payload: dict[str, Any] = field(default_factory=dict)
     replay_input_match: bool | None = None
+    admission: dict[str, Any] = field(default_factory=dict)
 
 
 class ModelGateway:
@@ -39,7 +40,9 @@ class ModelGateway:
     def __init__(self, store_path: Path, *, mode: str, trace: Path | None = None,
                  time_scale: float = 1.0, upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None, upstream_model: str | None = None,
-                 timeout_s: float = 600.0) -> None:
+                 timeout_s: float = 600.0,
+                 on_request_started: Callable[[], None] | None = None,
+                 before_response_ready: Callable[[int | None, dict[str, Any]], dict[str, Any]] | None = None) -> None:
         if mode not in {"replay", "api"}:
             raise ValueError("mode must be replay or api")
         if time_scale < 0:
@@ -56,6 +59,8 @@ class ModelGateway:
         self.upstream_api_key = upstream_api_key or ""
         self.upstream_model = upstream_model or ""
         self.timeout_s = timeout_s
+        self.on_request_started = on_request_started
+        self.before_response_ready = before_response_ready
         self._requests: dict[str, GatewayRequest] = {}
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
@@ -120,6 +125,8 @@ class ModelGateway:
         with self._changed:
             request = self._requests.get(request_id)
             if request is None:
+                if self.on_request_started is not None:
+                    self.on_request_started()
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
@@ -176,15 +183,22 @@ class ModelGateway:
                 status = response.status_code
                 content_type = response.headers.get("content-type", "application/json")
                 body = response.content
+            admission = {}
+            if self.before_response_ready is not None:
+                admission = self.before_response_ready(
+                    self._requests[request_id].replay_index,
+                    _response_message(content_type, body),
+                )
             error = ""
         except Exception as exc:  # surfaced to the waiting guest request
-            status, content_type, body, error = 500, "application/json", b"", str(exc)
+            status, content_type, body, error, admission = 500, "application/json", b"", str(exc), {}
         with self._changed:
             request = self._requests[request_id]
             request.status_code = status
             request.content_type = content_type
             request.response_b64 = base64.b64encode(body).decode()
             request.error = error
+            request.admission = admission
             request.ready = True
             request.completed_unix_s = time.time()
             self._persist()

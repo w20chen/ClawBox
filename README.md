@@ -704,15 +704,35 @@ The experiment varies three independent dimensions:
 | Dimension | Baseline | Alternative |
 | --- | --- | --- |
 | Inference backend | `replay` recorded responses and latency | `api` through a real OpenAI-compatible service |
-| Sizing policy | `fixed` Tool memory | `p90_static` immutable ClawTune prediction with bounded headroom |
+| Admission/accounting policy | static reservation equal to fixed Tool capacity | `p90_reservation` per-tool immutable ClawTune P90 reservation |
 | Residency policy | `resident` keeps both VMs in memory | `llm_wait_checkpoint` checkpoints idle VMs and restores them before the next command |
 
-During an outstanding model request, `llm_wait_checkpoint` creates a
-Firecracker `vm_checkpoint` for the Tool VM and then the Runtime VM, exits their
-Firecracker processes, restores Tool before Runtime, and consumes the response
-only afterward. The model gateway identifies requests by content and stores
-responses, so retrying an interrupted HTTP connection cannot duplicate a real
-API call.
+During an outstanding model request, `llm_wait_checkpoint` first checkpoints
+the Runtime VM and then its Tool dependency, exits both Firecracker processes,
+restores Tool before Runtime, and consumes the response only afterward. This
+dependency order prevents a resumed model response from dispatching work while
+Tool is unavailable. The model gateway identifies requests by content and
+stores responses, so retrying an interrupted HTTP connection cannot duplicate
+a real API call.
+
+This is a single-host, NUMA-controlled, fail-stop research executor. It reads a
+frozen manifest, leases fixed Runtime/Tool CPU and memory pairs, and fails the
+entire experimental arm on an unexpected runner or VM failure. It is not a
+long-running scheduler or a production control plane: it does not claim agent
+restart recovery, high-availability reconciliation, cross-node migration, or
+Kubernetes checkpointing. Those properties are outside the registered paper
+mechanism and are not prerequisites for a valid arm; rerun a failed arm from
+fresh disks instead of recovering it in place.
+
+Tool VM capacity is fixed for an arm; the runner does not resize a persistent
+Firecracker VM between commands. `p90_reservation` instead gates each concrete
+tool invocation against a shared FIFO accounting budget. It resolves memory by
+the frozen KB hierarchy (exact/prefix command, program, tool, then global
+fallback), acquires before releasing the tool call to OpenClaw, and releases
+when the next model request proves that tool execution ended. Static controls
+reserve their full 4 GiB or 2 GiB Tool capacity. Actual per-command cgroup peak
+memory and whole-host Firecracker RSS are measured separately. Checkpointing,
+not reservation accounting, is what actually evicts idle VM memory.
 
 ### What this experiment does not do
 
@@ -793,10 +813,12 @@ The configuration names correspond to these general experiment concepts:
 | `source` | the two reusable VM disks, prompt, and recorded model trace |
 | `sessions`, `repetitions`, `seed` | concurrent workload size, repeat count, and randomized group order |
 | `inference_backends` | recorded timing, real model API, or both |
-| `sizing_policies` | `fixed`, `p90_static`, or both |
+| `sizing_policies` | `fixed`, `p90_reservation`, or both (`p90_static` is a legacy config alias) |
 | `memory_policies` | legacy input spelling for `resident` and `llm_wait_checkpoint`; `snapshot` remains an alias |
 | `resources` | VM memory size, CPU numbering, and NUMA placement |
-| `fixed_control_tool_memory_mib` | optional untrained fixed-size control below the conservative fixed size |
+| `fixed_control_tool_memory_mib` | optional untrained fixed-capacity/static-reservation control below the conservative fixed size |
+| `tool_reservation_budget_mib` | shared accounting budget for concurrently active tool invocations |
+| `idle_tool_vm_rss_mib` | measured idle Tool-VM RSS anchor used to evaluate capacity and derive the reservation floor |
 | `resident_memory_budget_mib` | optional configured admission budget; excess sessions queue until a VM pair is resident or checkpointed |
 | `workloads[].independent_unit` | independent task ID used for inference; repeated trajectories share one ID |
 | `numa_host_reserve_mib`, `max_numa_cpu_busy_fraction`, `require_no_firecracker` | clean-host admission bounds for timing runs |
@@ -808,7 +830,9 @@ The configuration names correspond to these general experiment concepts:
 | `validation_command` | command whose output represents the final task state |
 | `api` | OpenAI-compatible endpoint, model, and credential variable |
 
-`p90_static` requires a frozen admission-prediction JSON file. Export it from
+The compatibility `p90_static` configuration block supplies the frozen KB
+artifact used by `p90_reservation`. It must contain heterogeneous per-tool
+reservations and an explicit fixed VM capacity class. Export its base evidence from
 the authoritative Tune-KB service, keep the returned generation and digests
 with the paper artifacts, and never substitute a newer generation mid-study:
 
@@ -1027,6 +1051,24 @@ itself through `numactl` as shown above.
 
 The registered Kunpeng protocol and current paper artifacts are documented in
 [`docs/results/p90-baselines-kunpeng-2026-08-31.md`](docs/results/p90-baselines-kunpeng-2026-08-31.md).
+The bounded, directly reproducible c8 result uses the tracked
+[`two-hour-direct-c08-suite.json`](docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json):
+
+```bash
+numactl --cpunodebind=0 --membind=0 \
+  python3 -m clawbox.replay.cli suite \
+  docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json \
+  --validate-only
+
+numactl --cpunodebind=0 --membind=0 \
+  python3 -m clawbox.replay.cli suite \
+  docs/results/artifacts/kunpeng-2026-08-31/two-hour-direct-c08-suite.json
+```
+
+Its output directory is frozen in the configuration. Remove or rename a prior
+output only after preserving its evidence; `resume: true` accepts completed
+child studies with the same immutable suite identity and rejects partial or
+changed inputs.
 The earlier implementation-acceptance smoke result remains in
 [`docs/results/p90-baselines-kunpeng-2026-08-30.md`](docs/results/p90-baselines-kunpeng-2026-08-30.md)
 and is not pooled with the paper suite.

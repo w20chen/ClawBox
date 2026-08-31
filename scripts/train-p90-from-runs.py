@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from clawbox.cell.p90 import AdmissionPrediction
+from clawbox.replay.trace import load_trace
 from clawbox.tuning.__main__ import find_run_traces
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts
 from clawbox.tuning.native import _clawtune_api
@@ -30,6 +32,203 @@ def _evidence_paths(trace_dir: Path, bridge: Path) -> list[Path]:
     if tool_resource.is_dir():
         paths.update(tool_resource.glob("*.json"))
     return sorted(paths, key=lambda path: str(path))
+
+
+def _trace_tool_calls(path: Path) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    model_step = 0
+    for action in load_trace(path):
+        if action.kind != "llm":
+            continue
+        message = action.output
+        if (isinstance(message, dict) and set(message) == {"content"}
+                and isinstance(message["content"], dict)):
+            message = message["content"]
+        if not isinstance(message, dict):
+            model_step += 1
+            continue
+        for call_index, call in enumerate(message.get("tool_calls") or []):
+            function = call.get("function") or {}
+            name = str(function.get("name") or "")
+            arguments = function.get("arguments") or {}
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            command = arguments.get("command") if isinstance(arguments, dict) else None
+            calls.append({
+                "model_step": model_step,
+                "call_index": call_index,
+                "tool_name": name,
+                "command": command if isinstance(command, str) else None,
+            })
+        model_step += 1
+    return calls
+
+
+def _per_tool_memory_plan(
+    kb: Any,
+    query_type: Any,
+    *,
+    repository: str,
+    traces: dict[str, Path],
+    query_ts: float,
+    idle_tool_vm_rss_mib: float,
+    idle_safety_margin_fraction: float,
+    command_headroom_fraction: float,
+    size_classes_mib: list[int],
+) -> dict[str, Any]:
+    if idle_tool_vm_rss_mib <= 0:
+        raise ValueError("idle Tool-VM RSS must be positive")
+    if not 0 <= idle_safety_margin_fraction <= 1:
+        raise ValueError("idle safety margin must be between 0 and 1")
+    if not 0 <= command_headroom_fraction <= 1:
+        raise ValueError("command headroom must be between 0 and 1")
+    if not size_classes_mib or size_classes_mib != sorted(set(size_classes_mib)):
+        raise ValueError("Tool memory size classes must be unique and increasing")
+    idle_floor_mib = math.ceil(
+        idle_tool_vm_rss_mib * (1 + idle_safety_margin_fraction)
+    )
+    workloads: dict[str, Any] = {}
+    query_index = 0
+    for workload, trace in sorted(traces.items()):
+        reservations = []
+        for call in _trace_tool_calls(trace):
+            prediction = kb.query(query_type(
+                repo=repository,
+                tool_name=call["tool_name"] or "exec",
+                command=call["command"],
+                ts_start=query_ts + query_index * 1e-6,
+                ambient_before_mb=0.0,
+            ))["peak_memory_mb"]
+            query_index += 1
+            if prediction.conditional_p90 is None:
+                raise ValueError("per-tool memory prediction is unavailable")
+            command_p90_mib = float(prediction.conditional_p90)
+            reservation_kib = math.ceil(
+                (idle_floor_mib + command_p90_mib * (1 + command_headroom_fraction))
+                * 1024.0
+            )
+            reservation_mib = reservation_kib / 1024.0
+            reservations.append({
+                **call,
+                "command_sha256": (
+                    hashlib.sha256(call["command"].encode()).hexdigest()
+                    if call["command"] is not None else None
+                ),
+                "predicted_command_memory_p90_mib": command_p90_mib,
+                "reservation_kib": reservation_kib,
+                "reservation_mib": reservation_mib,
+                "scope": prediction.scope,
+                "key_kind": prediction.key_kind,
+                "evidence_count": prediction.evidence_count,
+                "fallback_path": list(prediction.fallback_path),
+            })
+        if not reservations:
+            raise ValueError(f"evaluation trace {workload!r} has no concrete tool calls")
+        required_mib = max(item["reservation_mib"] for item in reservations)
+        selected_class = next(
+            (value for value in size_classes_mib if value >= required_mib), None
+        )
+        if selected_class is None:
+            raise ValueError(
+                f"{workload}: {required_mib} MiB exceeds the largest Tool size class"
+            )
+        workloads[workload] = {
+            "trace_path": str(trace.resolve()),
+            "trace_sha256": _sha256(trace),
+            "tool_invocations": reservations,
+            "reservation_min_mib": min(item["reservation_mib"] for item in reservations),
+            "reservation_max_mib": required_mib,
+            "reservation_distinct_mib": sorted({
+                item["reservation_mib"] for item in reservations
+            }),
+            "reservation_distinct_kib": sorted({
+                item["reservation_kib"] for item in reservations
+            }),
+            "selected_vm_size_class_mib": selected_class,
+        }
+    return {
+        "semantics": "per-tool accounting reservations; persistent VM uses max-required size class",
+        "idle_tool_vm_rss_mib": idle_tool_vm_rss_mib,
+        "idle_safety_margin_fraction": idle_safety_margin_fraction,
+        "derived_idle_floor_mib": idle_floor_mib,
+        "command_headroom_fraction": command_headroom_fraction,
+        "size_classes_mib": size_classes_mib,
+        "workloads": workloads,
+    }
+
+
+def _attach_oracle_working_sets(
+    plan: dict[str, Any],
+    oracle_runs: dict[str, Path],
+) -> dict[str, Any]:
+    reports: dict[str, Any] = {}
+    idle_rss_mib = float(plan["idle_tool_vm_rss_mib"])
+    capacity_by_workload = {
+        name: int(item["selected_vm_size_class_mib"])
+        for name, item in plan["workloads"].items()
+    }
+    for workload, run in sorted(oracle_runs.items()):
+        if workload not in plan["workloads"]:
+            raise ValueError(f"oracle workload {workload!r} is absent from the prediction plan")
+        trace_dir, bridge = find_run_traces(run)
+        _joined, trusted = build_joined_dataset(trace_dir, bridge)
+        observations = sorted(
+            [item for item in trusted
+             if item.command and item.rss_peak_bytes is not None and item.start_time is not None],
+            key=lambda item: item.start_time,
+        )
+        planned = plan["workloads"][workload]["tool_invocations"]
+        cursor = 0
+        matched = []
+        for invocation in planned:
+            command = invocation.get("command")
+            match = None
+            for observation_index in range(cursor, len(observations)):
+                candidate = observations[observation_index]
+                if candidate.command == command:
+                    match = candidate
+                    cursor = observation_index + 1
+                    break
+            if match is None:
+                continue
+            actual_command_mib = float(match.rss_peak_bytes) / (1024.0 * 1024.0)
+            predicted_command_mib = float(invocation["predicted_command_memory_p90_mib"])
+            actual_working_set_mib = idle_rss_mib + actual_command_mib
+            row = {
+                "model_step": invocation["model_step"],
+                "call_index": invocation["call_index"],
+                "command_sha256": invocation["command_sha256"],
+                "predicted_command_memory_p90_mib": predicted_command_mib,
+                "actual_command_peak_memory_mib": actual_command_mib,
+                "prediction_error_mib": predicted_command_mib - actual_command_mib,
+                "prediction_covered_actual": predicted_command_mib >= actual_command_mib,
+                "actual_working_set_mib": actual_working_set_mib,
+                "oracle_reservation_mib": actual_working_set_mib,
+            }
+            invocation["oracle"] = row
+            matched.append(row)
+        if not matched:
+            raise ValueError(f"oracle run {workload!r} did not match any planned tool call")
+        capacity = capacity_by_workload[workload]
+        max_working_set = max(item["actual_working_set_mib"] for item in matched)
+        reports[workload] = {
+            "run_path": str(run.resolve()),
+            "matched_invocations": len(matched),
+            "planned_invocations": len(planned),
+            "coverage_fraction": sum(item["prediction_covered_actual"] for item in matched) / len(matched),
+            "mean_prediction_error_mib": sum(item["prediction_error_mib"] for item in matched) / len(matched),
+            "max_actual_command_peak_memory_mib": max(item["actual_command_peak_memory_mib"] for item in matched),
+            "max_actual_working_set_mib": max_working_set,
+            "selected_vm_capacity_mib": capacity,
+            "vm_capacity_sufficient": max_working_set < capacity,
+        }
+    return {
+        "semantics": "held-out actual command cgroup peak plus measured idle Tool-VM RSS; never used for admission",
+        "workloads": reports,
+    }
 
 
 def main() -> None:
@@ -52,6 +251,14 @@ def main() -> None:
         help="independent evaluation trace; repeat once per workload",
     )
     parser.add_argument("--evaluation-set-id", default=None)
+    parser.add_argument("--idle-tool-vm-rss-mib", type=float)
+    parser.add_argument("--idle-safety-margin-fraction", type=float, default=0.25)
+    parser.add_argument("--command-headroom-fraction", type=float, default=0.25)
+    parser.add_argument("--tool-memory-size-class-mib", type=int, action="append", default=[])
+    parser.add_argument(
+        "--oracle-run", action="append", default=[], metavar="WORKLOAD=PATH",
+        help="held-out measured run for prediction-error/oracle analysis only",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if any(value is not None for value in (
@@ -210,6 +417,34 @@ def main() -> None:
     }
     if evaluation is not None:
         payload["evaluation"] = evaluation
+    if args.idle_tool_vm_rss_mib is not None:
+        if not args.evaluation_trace:
+            parser.error("per-tool memory planning requires --evaluation-trace")
+        trace_paths = {
+            configured.partition("=")[0]: Path(configured.partition("=")[2])
+            for configured in args.evaluation_trace
+        }
+        payload["per_tool_memory"] = _per_tool_memory_plan(
+            kb,
+            ToolCallQuery,
+            repository=args.repository,
+            traces=trace_paths,
+            query_ts=max(call.ts_end for call in calls) + 1.0,
+            idle_tool_vm_rss_mib=args.idle_tool_vm_rss_mib,
+            idle_safety_margin_fraction=args.idle_safety_margin_fraction,
+            command_headroom_fraction=args.command_headroom_fraction,
+            size_classes_mib=args.tool_memory_size_class_mib,
+        )
+        oracle_runs: dict[str, Path] = {}
+        for configured in args.oracle_run:
+            workload, separator, raw_path = configured.partition("=")
+            if not separator or not workload or not raw_path:
+                parser.error("--oracle-run must use WORKLOAD=PATH")
+            oracle_runs[workload] = Path(raw_path)
+        if oracle_runs:
+            payload["oracle_evaluation"] = _attach_oracle_working_sets(
+                payload["per_tool_memory"], oracle_runs,
+            )
     prediction = AdmissionPrediction.from_payload(payload)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(args.output.name + ".next")

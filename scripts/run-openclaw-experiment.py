@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clawbox.replay.lifecycle import (
-    FairResourcePool, FirecrackerConfig, FirecrackerLifecycle,
+    FairResourcePool, FairWeightedResourcePool, FirecrackerConfig, FirecrackerLifecycle,
 )
 from clawbox.replay.model_gateway import ModelGateway
 
@@ -144,6 +144,86 @@ def request_summaries(gateway: ModelGateway) -> list[dict]:
     return summaries
 
 
+def tool_call_descriptors(message: dict) -> list[dict]:
+    descriptors = []
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        arguments = function.get("arguments") or {}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        command = arguments.get("command") if isinstance(arguments, dict) else None
+        descriptors.append({
+            "tool_name": str(function.get("name") or ""),
+            "command_sha256": (
+                hashlib.sha256(command.encode()).hexdigest()
+                if isinstance(command, str) else None
+            ),
+        })
+    return descriptors
+
+
+def collect_tool_working_sets(spec: dict, events: list[dict], output: Path) -> list[dict]:
+    command = (
+        "cd /testbed && { printf '__CLAWBOX_BRIDGE__\\n'; "
+        "cat .clawbox/tool-bridge.jsonl 2>/dev/null || true; "
+        "printf '__CLAWBOX_CGROUP__\\n'; "
+        "find .clawbox/tool-resource -type f -name 'cgroup-resource-*.json' "
+        "-exec cat {} \\; 2>/dev/null || true; }"
+    )
+    exit_code, stdout, stderr, timed_out = ssh_capture(spec, command, 30)
+    output.write_bytes(stdout + b"\n__CLAWBOX_STDERR__\n" + stderr)
+    if exit_code != 0 or timed_out:
+        raise RuntimeError("failed to collect Tool working-set artifacts")
+    text = stdout.decode(errors="replace")
+    before, separator, after = text.partition("__CLAWBOX_CGROUP__\n")
+    if not separator:
+        raise RuntimeError("Tool working-set output is missing its cgroup marker")
+    bridge_text = before.partition("__CLAWBOX_BRIDGE__\n")[2]
+    bridges = [json.loads(line) for line in bridge_text.splitlines() if line.startswith("{")]
+    cgroups = [json.loads(line) for line in after.splitlines() if line.startswith("{")]
+    by_execution = {
+        str(item.get("execution_id")): item for item in cgroups
+        if item.get("execution_id") and item.get("memory_rss_peak_bytes") is not None
+        and item.get("sampling_quality") == "valid"
+    }
+    actual = []
+    for bridge in bridges:
+        resource = by_execution.get(str(bridge.get("execution_id")))
+        if resource is None:
+            continue
+        actual.append({
+            "command_sha256": bridge.get("command_sha256"),
+            "execution_id": bridge.get("execution_id"),
+            "actual_command_peak_memory_bytes": int(resource["memory_rss_peak_bytes"]),
+        })
+    cursor = 0
+    joined = []
+    for event in events:
+        for invocation in event.get("tool_invocations") or []:
+            digest = invocation.get("command_sha256")
+            match = None
+            for actual_index in range(cursor, len(actual)):
+                if actual[actual_index]["command_sha256"] == digest:
+                    match = actual[actual_index]
+                    cursor = actual_index + 1
+                    break
+            if match is None:
+                continue
+            predicted = invocation.get("predicted_command_memory_p90_mib")
+            actual_mib = match["actual_command_peak_memory_bytes"] / (1024.0 * 1024.0)
+            row = {**match, "model_step": event.get("model_step"),
+                   "reservation_mib": event.get("reservation_mib"),
+                   "predicted_command_memory_p90_mib": predicted}
+            if predicted is not None:
+                row["prediction_error_mib"] = float(predicted) - actual_mib
+                row["prediction_covered_actual"] = float(predicted) >= actual_mib
+            joined.append(row)
+    return joined
+
+
 def ssh_capture(
     spec: dict, command: str, timeout_s: float,
 ) -> tuple[int, bytes, bytes, bool]:
@@ -207,6 +287,11 @@ def main() -> None:
         "--resident-memory-budget-mib", type=int,
         help="configured Runtime+Tool resident-memory admission budget",
     )
+    p.add_argument("--tool-reservation-budget-mib", type=int)
+    p.add_argument("--idle-tool-vm-rss-mib", type=float)
+    p.add_argument("--static-tool-reservation-mib", type=int)
+    p.add_argument("--tool-memory-plan", type=Path)
+    p.add_argument("--tool-memory-workload")
     a = p.parse_args()
     if a.timeout_s <= 0:
         p.error("--timeout-s must be positive")
@@ -216,6 +301,18 @@ def main() -> None:
         p.error("--time-scale must be non-negative")
     if a.resident_memory_budget_mib is not None and a.resident_memory_budget_mib <= 0:
         p.error("--resident-memory-budget-mib must be positive")
+    if a.tool_reservation_budget_mib is not None and a.tool_reservation_budget_mib <= 0:
+        p.error("--tool-reservation-budget-mib must be positive")
+    if a.tool_reservation_budget_mib is not None:
+        if (a.static_tool_reservation_mib is None) == (a.tool_memory_plan is None):
+            p.error("reservation budget requires exactly one static reservation or tool plan")
+        if a.idle_tool_vm_rss_mib is None or a.idle_tool_vm_rss_mib <= 0:
+            p.error("reservation budget requires positive --idle-tool-vm-rss-mib")
+        if (a.static_tool_reservation_mib is not None
+                and a.static_tool_reservation_mib > a.tool_reservation_budget_mib):
+            p.error("static Tool reservation exceeds the reservation budget")
+    if a.tool_memory_plan is not None and not a.tool_memory_workload:
+        p.error("--tool-memory-workload is required with --tool-memory-plan")
     if a.inference == "replay" and a.trace is None:
         p.error("--trace is required when --inference=replay")
     if a.inference == "api" and (not a.api_base_url or not a.api_model):
@@ -271,6 +368,25 @@ def main() -> None:
     else:
         pair_resources = list(range(resident_pair_slots))
     pair_slots = FairResourcePool(pair_resources)
+    tool_reservation_pool = (
+        FairWeightedResourcePool(a.tool_reservation_budget_mib * 1024)
+        if a.tool_reservation_budget_mib is not None else None
+    )
+    predictive_steps: dict[int, dict] = {}
+    if a.tool_memory_plan is not None:
+        plan_payload = json.loads(a.tool_memory_plan.read_text(encoding="utf-8"))
+        workload_plan = plan_payload["per_tool_memory"]["workloads"][a.tool_memory_workload]
+        for invocation in workload_plan["tool_invocations"]:
+            step = int(invocation["model_step"])
+            current = predictive_steps.setdefault(step, {
+                "reservation_kib": 0, "tool_invocations": [],
+            })
+            current["reservation_kib"] = max(
+                current["reservation_kib"], int(invocation["reservation_kib"])
+            )
+            current["tool_invocations"].append(invocation)
+        if max(item["reservation_kib"] for item in predictive_steps.values()) > a.tool_reservation_budget_mib * 1024:
+            p.error("per-tool reservation exceeds the Tool reservation budget")
     a.output.mkdir(parents=True, exist_ok=False)
     lifecycles: list[FirecrackerLifecycle] = []
     lifecycle_lock = threading.Lock()
@@ -306,11 +422,6 @@ def main() -> None:
 
     def run_one(index: int, spec: dict) -> dict:
         session_started_elapsed_s = time.monotonic() - started
-        gateway = ModelGateway(
-            Path(spec["store"]), mode=a.inference, trace=a.trace, time_scale=a.time_scale,
-            upstream_base_url=a.api_base_url,
-            upstream_api_key=os.environ.get(a.api_key_env), upstream_model=a.api_model,
-        )
         tool_config, runtime_config = FirecrackerConfig.from_json(Path(spec["tool"])), FirecrackerConfig.from_json(Path(spec["runtime"]))
         remaining = lambda: max(0.0, deadline - time.monotonic())
         tool = FirecrackerLifecycle(tool_config)
@@ -323,6 +434,68 @@ def main() -> None:
         admission_leases: list[dict] = []
         pair_lease: object | None = None
         current_lease_event: dict | None = None
+        tool_reservation_lease: int | None = None
+        tool_reservation_events: list[dict] = []
+        current_tool_reservation_event: dict | None = None
+
+        def release_tool_reservation() -> None:
+            nonlocal tool_reservation_lease, current_tool_reservation_event
+            if tool_reservation_lease is not None:
+                assert tool_reservation_pool is not None
+                tool_reservation_pool.release(tool_reservation_lease)
+                tool_reservation_lease = None
+                if current_tool_reservation_event is not None:
+                    released = time.monotonic() - started
+                    current_tool_reservation_event["released_elapsed_s"] = released
+                    current_tool_reservation_event["held_s"] = (
+                        released - current_tool_reservation_event["acquired_elapsed_s"]
+                    )
+                    current_tool_reservation_event = None
+
+        def before_response_ready(step: int | None, message: dict) -> dict:
+            nonlocal tool_reservation_lease, current_tool_reservation_event
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls or tool_reservation_pool is None:
+                return {}
+            if a.static_tool_reservation_mib is not None:
+                reservation_kib = int(a.static_tool_reservation_mib) * 1024
+                provenance = {"policy": "static",
+                              "tool_invocations": tool_call_descriptors(message)}
+            else:
+                if step is None or step not in predictive_steps:
+                    raise RuntimeError(f"predictive plan has no tool reservation for model step {step}")
+                planned = predictive_steps[step]
+                if len(planned["tool_invocations"]) != len(tool_calls):
+                    raise RuntimeError(f"predictive plan diverged at model step {step}")
+                reservation_kib = int(planned["reservation_kib"])
+                provenance = {"policy": "per_tool_p90", **planned}
+            wait_started = time.monotonic()
+            lease = tool_reservation_pool.acquire(reservation_kib, timeout=remaining())
+            wait_s = time.monotonic() - wait_started
+            if lease is None:
+                raise TimeoutError("timed out waiting for Tool accounting reservation")
+            tool_reservation_lease = lease
+            event = {
+                "model_step": step,
+                "reservation_kib": reservation_kib,
+                "reservation_mib": reservation_kib / 1024.0,
+                "wait_s": wait_s,
+                "acquired_elapsed_s": time.monotonic() - started,
+                "released_elapsed_s": None,
+                "held_s": None,
+                **provenance,
+            }
+            tool_reservation_events.append(event)
+            current_tool_reservation_event = event
+            return event
+
+        gateway = ModelGateway(
+            Path(spec["store"]), mode=a.inference, trace=a.trace, time_scale=a.time_scale,
+            upstream_base_url=a.api_base_url,
+            upstream_api_key=os.environ.get(a.api_key_env), upstream_model=a.api_model,
+            on_request_started=release_tool_reservation,
+            before_response_ready=before_response_ready,
+        )
 
         def acquire_pair() -> None:
             nonlocal admission_wait_s, admission_acquisitions, pair_lease, current_lease_event
@@ -377,6 +550,10 @@ def main() -> None:
                     correctness_exit_code = None
                     correctness_timed_out = False
                     correctness_path = None
+                    working_set_path = a.output / f"tool-working-set-session-{index:04d}.out"
+                    tool_working_sets = collect_tool_working_sets(
+                        spec, tool_reservation_events, working_set_path,
+                    )
                     if a.correctness_command:
                         (correctness_exit_code, correctness_stdout,
                          correctness_stderr, correctness_timed_out) = ssh_capture(
@@ -418,6 +595,9 @@ def main() -> None:
                                 str(correctness_path) if correctness_path else None
                             ),
                             "snapshot_s": snapshot_s, "restore_s": restore_s,
+                            "tool_reservation_events": tool_reservation_events,
+                            "tool_working_sets": tool_working_sets,
+                            "tool_working_set_artifact": str(working_set_path),
                             "validation_sha256": hashlib.sha256(validation).hexdigest(),
                             "validation_artifact": str(validation_path),
                             "model_requests": request_summaries(gateway)}
@@ -451,7 +631,10 @@ def main() -> None:
             try:
                 close_runtime_tool_pair_and_release(runtime, tool, release_pair)
             finally:
-                gateway.close()
+                try:
+                    release_tool_reservation()
+                finally:
+                    gateway.close()
 
     results, failures = [], []
     try:
@@ -483,6 +666,34 @@ def main() -> None:
         float(wait_s) for item in results
         for wait_s in item.get("admission_wait_events_s", [])
     ]
+    tool_reservation_events = [
+        event for item in results for event in item.get("tool_reservation_events", [])
+    ]
+    tool_reservation_amounts = [
+        float(event["reservation_mib"]) for event in tool_reservation_events
+    ]
+    tool_reservation_waits = [
+        float(event["wait_s"]) for event in tool_reservation_events
+    ]
+    tool_reservation_time_mib_s = sum(
+        float(event["reservation_mib"]) * float(event.get("held_s") or 0.0)
+        for event in tool_reservation_events
+    )
+    tool_working_sets = [
+        row for item in results for row in item.get("tool_working_sets", [])
+    ]
+    actual_tool_memory_mib = [
+        int(row["actual_command_peak_memory_bytes"]) / (1024.0 * 1024.0)
+        for row in tool_working_sets
+    ]
+    actual_tool_working_set_mib = [
+        float(a.idle_tool_vm_rss_mib or 0.0) + value
+        for value in actual_tool_memory_mib
+    ]
+    prediction_rows = [
+        row for row in tool_working_sets
+        if row.get("predicted_command_memory_p90_mib") is not None
+    ]
     rss_time = sum(
         rss_values[index] * max(
             0.0, float(samples[index]["elapsed_s"]) - float(samples[index - 1]["elapsed_s"])
@@ -498,6 +709,44 @@ def main() -> None:
               "resident_pair_slots": resident_pair_slots,
               "cpu_pair_leasing": configured_cpu_pairs is not None,
               "cpu_pair_pool": configured_cpu_pairs,
+              "tool_reservation_budget_mib": a.tool_reservation_budget_mib,
+              "tool_reservation_policy": (
+                  "per_tool_p90" if a.tool_memory_plan is not None
+                  else "static" if a.static_tool_reservation_mib is not None else None
+              ),
+              "tool_reservation_events": len(tool_reservation_events),
+              "tool_reservation_distinct_mib": sorted(set(tool_reservation_amounts)),
+              "mean_tool_reservation_mib": (
+                  statistics.fmean(tool_reservation_amounts)
+                  if tool_reservation_amounts else None
+              ),
+              "max_tool_reservation_mib": max(tool_reservation_amounts, default=None),
+              "tool_reservation_wait_s": sum(tool_reservation_waits),
+              "max_tool_reservation_wait_s": max(tool_reservation_waits, default=None),
+              "tool_reservation_time_mib_s": tool_reservation_time_mib_s,
+              "tool_working_set_observations": len(tool_working_sets),
+              "max_actual_tool_command_memory_mib": max(actual_tool_memory_mib, default=None),
+              "mean_actual_tool_command_memory_mib": (
+                  statistics.fmean(actual_tool_memory_mib)
+                  if actual_tool_memory_mib else None
+              ),
+              "idle_tool_vm_rss_mib": a.idle_tool_vm_rss_mib,
+              "max_actual_tool_working_set_mib": max(
+                  actual_tool_working_set_mib, default=None
+              ),
+              "prediction_observations": len(prediction_rows),
+              "prediction_memory_coverage_fraction": (
+                  sum(bool(row.get("prediction_covered_actual")) for row in prediction_rows)
+                  / len(prediction_rows) if prediction_rows else None
+              ),
+              "mean_prediction_error_mib": (
+                  statistics.fmean(float(row["prediction_error_mib"]) for row in prediction_rows)
+                  if prediction_rows else None
+              ),
+              "fixed_tool_capacity_sufficient": (
+                  max(actual_tool_working_set_mib, default=0) < tool_memory_mib
+                  if actual_tool_working_set_mib else None
+              ),
               "failures": failures, "wall_s": wall_s,
               "throughput_sessions_per_hour": len(results) * 3600 / wall_s,
               "throughput_tasks_per_minute": len(results) * 60 / wall_s,

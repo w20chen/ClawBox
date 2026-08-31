@@ -88,8 +88,8 @@ def _validate_firecracker_socket_paths(arm: Path, *, force: bool = False) -> Non
 def _sizing_baselines(raw: dict[str, Any]) -> list[str]:
     sizing = list(raw.get("sizing_policies", ["fixed"]))
     residency = list(raw.get("memory_policies", ["resident", "snapshot"]))
-    if not sizing or not set(sizing) <= {"fixed", "p90_static"}:
-        raise ValueError("sizing_policies must contain fixed and/or p90_static")
+    if not sizing or not set(sizing) <= {"fixed", "p90_static", "p90_reservation"}:
+        raise ValueError("sizing_policies must contain fixed and/or p90_reservation")
     aliases = {
         ("fixed", "resident"): "fixed-explicit-resident",
         ("fixed", "snapshot"): "fixed-llm-wait-checkpoint",
@@ -97,6 +97,9 @@ def _sizing_baselines(raw: dict[str, Any]) -> list[str]:
         ("p90_static", "resident"): "p90-static",
         ("p90_static", "snapshot"): "p90-static-llm-wait-checkpoint",
         ("p90_static", "llm_wait_checkpoint"): "p90-static-llm-wait-checkpoint",
+        ("p90_reservation", "resident"): "p90-static",
+        ("p90_reservation", "snapshot"): "p90-static-llm-wait-checkpoint",
+        ("p90_reservation", "llm_wait_checkpoint"): "p90-static-llm-wait-checkpoint",
     }
     try:
         return [aliases[(size, memory)] for size in sizing for memory in residency]
@@ -105,7 +108,7 @@ def _sizing_baselines(raw: dict[str, Any]) -> list[str]:
 
 
 def _p90_prediction(raw: dict[str, Any], base: Path | None) -> AdmissionPrediction | None:
-    if "p90_static" not in raw.get("sizing_policies", []):
+    if not {"p90_static", "p90_reservation"}.intersection(raw.get("sizing_policies", [])):
         return None
     config = raw.get("p90_static")
     if not isinstance(config, dict):
@@ -135,10 +138,32 @@ def _p90_prediction(raw: dict[str, Any], base: Path | None) -> AdmissionPredicti
     return prediction
 
 
-def _predictive_tool_memory_mib(raw: dict[str, Any], prediction: AdmissionPrediction) -> int:
+def _predictive_tool_memory_mib(
+    raw: dict[str, Any], prediction: AdmissionPrediction, base: Path | None = None,
+) -> int:
     resources = raw.get("resources", {})
     fixed_mib = int(resources.get("tool_memory_mib", 4096))
     config = raw.get("p90_static") or {}
+    if config.get("use_per_tool_memory_plan"):
+        payload = config.get("prediction")
+        if payload is None and config.get("prediction_file"):
+            path = _path(base, config["prediction_file"]) if base is not None else Path(str(config["prediction_file"]))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("per-tool memory planning requires a prediction payload")
+        plan = payload.get("per_tool_memory")
+        workload_name = str(config.get("workload_name") or "")
+        workloads = plan.get("workloads") if isinstance(plan, dict) else None
+        selected = workloads.get(workload_name) if isinstance(workloads, dict) else None
+        if not isinstance(selected, dict):
+            raise ValueError("per-tool memory plan does not contain the configured workload")
+        reservations = selected.get("reservation_distinct_kib")
+        if not isinstance(reservations, list) or len(reservations) < 2:
+            raise ValueError("per-tool predictive arm requires heterogeneous reservations")
+        selected_mib = int(selected.get("selected_vm_size_class_mib", 0))
+        if selected_mib < 256 or selected_mib >= fixed_mib:
+            raise ValueError("per-tool Tool size class must be between 256 MiB and fixed baseline")
+        return selected_mib
     headroom = float(config.get("headroom_fraction", 0.25))
     floor_mib = int(config.get("min_tool_memory_mib", 2048))
     if not 0 <= headroom <= 1:
@@ -212,9 +237,13 @@ def run_study(config_path: Path) -> int:
     spec = study_experiment_spec(raw, base=base)
     prediction = _p90_prediction(raw, base)
     predictive_tool_memory_mib = (
-        _predictive_tool_memory_mib(raw, prediction) if prediction is not None else None
+        _predictive_tool_memory_mib(raw, prediction, base) if prediction is not None else None
     )
     arm_workflows: list[tuple[str, Any]] = []
+    predictive_label = (
+        "p90_reservation"
+        if "p90_reservation" in raw.get("sizing_policies", []) else "p90_static"
+    )
     fixed_control_mib = raw.get("fixed_control_tool_memory_mib")
     if fixed_control_mib is not None:
         if "fixed" not in raw.get("sizing_policies", ["fixed"]):
@@ -236,7 +265,7 @@ def run_study(config_path: Path) -> int:
         })
         resolved = workflow.model_copy(update={"resources": resources_for_arm})
         validate_workflow(resolved)
-        arm_workflows.append(("p90_static" if predictive else "fixed", resolved))
+        arm_workflows.append((predictive_label if predictive else "fixed", resolved))
         if fixed_control_mib is not None and not predictive:
             control_resources = resolved.resources.model_copy(
                 update={"tool_memory_mib": fixed_control_mib, "kb_generation": None}
@@ -335,6 +364,25 @@ def run_study(config_path: Path) -> int:
                     "--resident-memory-budget-mib",
                     str(int(raw["resident_memory_budget_mib"])),
                 ]
+            if raw.get("tool_reservation_budget_mib") is not None:
+                command += [
+                    "--tool-reservation-budget-mib",
+                    str(int(raw["tool_reservation_budget_mib"])),
+                    "--idle-tool-vm-rss-mib",
+                    str(float(raw["idle_tool_vm_rss_mib"])),
+                ]
+                if sizing_policy in {"p90_static", "p90_reservation"}:
+                    p90_config = raw.get("p90_static") or {}
+                    plan_path = _path(base, p90_config["prediction_file"])
+                    command += [
+                        "--tool-memory-plan", str(plan_path),
+                        "--tool-memory-workload", str(p90_config["workload_name"]),
+                    ]
+                else:
+                    command += [
+                        "--static-tool-reservation-mib",
+                        str(workflow.resources.tool_memory_mib),
+                    ]
             arm_started_at = utcnow()
             try:
                 completed = subprocess.run(command, cwd=root, check=False)
@@ -405,7 +453,7 @@ def run_study(config_path: Path) -> int:
                          "sizing_policy": sizing_policy,
                          "memory_policy": legacy_residency, "residency_policy": residency,
                          "configured_tool_memory_mib": workflow.resources.tool_memory_mib,
-                         "sizing_prediction": prediction.as_status() if sizing_policy == "p90_static" and prediction else None,
+                         "sizing_prediction": prediction.as_status() if sizing_policy in {"p90_static", "p90_reservation"} and prediction else None,
                          "resolved_workflow": workflow.model_dump(mode="json"),
                          "result_dir": str(results), **summary})
             if not bool(raw.get("retain_vm_artifacts", True)):
@@ -448,7 +496,20 @@ def run_study(config_path: Path) -> int:
                             "max_admission_wait_event_s",
                             "mean_session_wall_s", "p50_session_wall_s",
                             "p95_session_wall_s", "p99_session_wall_s",
-                            "snapshot_allocated_bytes")},
+                            "snapshot_allocated_bytes",
+                            "tool_reservation_events",
+                            "mean_tool_reservation_mib",
+                            "max_tool_reservation_mib",
+                            "tool_reservation_wait_s",
+                            "max_tool_reservation_wait_s",
+                            "tool_reservation_time_mib_s",
+                            "tool_working_set_observations",
+                            "max_actual_tool_command_memory_mib",
+                            "mean_actual_tool_command_memory_mib",
+                            "max_actual_tool_working_set_mib",
+                            "prediction_observations",
+                            "prediction_memory_coverage_fraction",
+                            "mean_prediction_error_mib")},
         }
     validation_hashes = {
         session["validation_sha256"]

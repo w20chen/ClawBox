@@ -374,6 +374,32 @@ def test_openai_replay_gateway_preserves_tool_calls_and_is_idempotent(tmp_path: 
         gateway.close()
 
 
+def test_openai_gateway_gates_each_new_tool_response_once(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    _write_jsonl(trace, [{
+        "type": "action", "action_type": "llm_call", "action_id": "model-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0,
+        "data": {"raw_response": {"content": "", "tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {"name": "exec", "arguments": "{\"command\":\"true\"}"},
+        }]}, "llm_latency_ms": 0},
+    }])
+    events = []
+    gateway = ModelGateway(
+        tmp_path / "store.json", mode="replay", trace=trace, time_scale=0,
+        on_request_started=lambda: events.append("request"),
+        before_response_ready=lambda step, message: {
+            "step": step, "calls": len(message.get("tool_calls") or [])
+        },
+    )
+    payload = {"model": "ignored", "messages": [{"role": "user", "content": "go"}]}
+    first = gateway.complete(payload)
+    second = gateway.complete(payload)
+    assert first == second
+    assert events == ["request"]
+    assert gateway.records()[0]["admission"] == {"step": 0, "calls": 1}
+
+
 def test_replay_gateway_rejects_recorded_request_divergence(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     _write_jsonl(trace, [{
@@ -690,6 +716,25 @@ def test_fair_resource_pool_timeout_does_not_strand_next_ticket() -> None:
     assert pool.acquire(timeout=0.01) is None
     pool.release(lease)
     assert pool.acquire(timeout=0.1) == lease
+
+
+def test_fair_weighted_pool_accounts_heterogeneous_fifo_reservations() -> None:
+    from clawbox.replay.lifecycle import FairWeightedResourcePool
+
+    pool = FairWeightedResourcePool(10)
+    large = pool.acquire(7)
+    assert large is not None
+    outcomes: list[int | None] = []
+    waiter = threading.Thread(target=lambda: outcomes.append(pool.acquire(4, timeout=1)))
+    waiter.start()
+    time.sleep(0.02)
+    assert outcomes == []
+    small = pool.acquire(3, timeout=0.01)
+    assert small is None  # FIFO: it cannot bypass the earlier 4-unit waiter.
+    pool.release(large)
+    waiter.join(timeout=1)
+    assert outcomes[0] is not None
+    pool.release(outcomes[0])
 
 
 def test_resident_slot_lifecycle_releases_budget_after_checkpoint() -> None:
