@@ -296,3 +296,43 @@ def test_openclaw_pair_checkpoint_and_restore_dependency_order():
         "checkpoint-runtime", "checkpoint-tool",
         "restore-tool", "tool-ready", "restore-runtime",
     ]
+
+
+def test_openclaw_tool_checkpoint_failure_fails_session_and_releases_pair_lease():
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_experiment_failure", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    pool = module.FairResourcePool([(0, 1)])
+    lease = pool.acquire(timeout=0)
+    events = []
+
+    class Lifecycle:
+        def __init__(self, name, fail_checkpoint=False):
+            self.name = name
+            self.fail_checkpoint = fail_checkpoint
+
+        def checkpoint_and_evict(self):
+            events.append(f"checkpoint-{self.name}")
+            if self.fail_checkpoint:
+                raise RuntimeError("injected Tool snapshot failure")
+            return 1.0
+
+        def close(self):
+            events.append(f"close-{self.name}")
+
+    runtime = Lifecycle("runtime")
+    tool = Lifecycle("tool", fail_checkpoint=True)
+    with pytest.raises(RuntimeError, match="injected Tool snapshot failure"):
+        try:
+            module.checkpoint_runtime_tool_pair(runtime, tool)
+        finally:
+            module.close_runtime_tool_pair_and_release(
+                runtime, tool, lambda: pool.release(lease)
+            )
+
+    assert events == [
+        "checkpoint-runtime", "checkpoint-tool", "close-runtime", "close-tool",
+    ]
+    assert pool.acquire(timeout=0) == lease

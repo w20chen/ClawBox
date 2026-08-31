@@ -100,6 +100,26 @@ def restore_tool_runtime_pair(
     return elapsed
 
 
+def close_runtime_tool_pair_and_release(
+    runtime: FirecrackerLifecycle,
+    tool: FirecrackerLifecycle,
+    release_pair,
+) -> None:
+    """Close both VMs before returning their atomic pair lease.
+
+    In particular, a Tool checkpoint failure can happen after Runtime has
+    already been evicted.  Cleanup must still stop the Tool VM and make the
+    pair lease reusable; the failed session itself remains failed.
+    """
+    try:
+        runtime.close()
+    finally:
+        try:
+            tool.close()
+        finally:
+            release_pair()
+
+
 def complete(log: Path) -> tuple[bool, int | None]:
     if not log.exists(): return False, None
     for line in reversed(log.read_text(errors="replace").splitlines()):
@@ -429,15 +449,9 @@ def main() -> None:
             raise TimeoutError("OpenClaw experiment timed out")
         finally:
             try:
-                runtime.close()
+                close_runtime_tool_pair_and_release(runtime, tool, release_pair)
             finally:
-                try:
-                    tool.close()
-                finally:
-                    try:
-                        release_pair()
-                    finally:
-                        gateway.close()
+                gateway.close()
 
     results, failures = [], []
     try:
