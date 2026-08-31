@@ -51,7 +51,7 @@
     "cpu_first": 0,
     "numa_node": 0
   },
-  "p90_static": {
+  "p90_reservation": {
     "prediction_file": "/data/workloads/p90-per-tool-recording2-train-recording1-eval.json",
     "min_evidence": 5,
     "use_per_tool_memory_plan": true

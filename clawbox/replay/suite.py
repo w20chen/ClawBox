@@ -758,9 +758,9 @@ def _preflight_suite(
             workload["independent_unit"]
         )
         if {"p90_static", "p90_reservation"}.intersection(raw.get("sizing_policies", [])):
-            p90 = raw.get("p90_static")
+            p90 = raw.get("p90_reservation") or raw.get("p90_static")
             if not isinstance(p90, dict):
-                raise ValueError("p90_static configuration is required")
+                raise ValueError("p90_reservation configuration is required")
             configured = workload.get("prediction_file") or p90.get("prediction_file")
             if not configured:
                 raise ValueError(f"{name}: prediction_file is required")
@@ -856,7 +856,7 @@ def run_suite(config_path: Path) -> int:
             child["output"] = str(child_output)
             if workload.get("validation_command"):
                 child["validation_command"] = workload["validation_command"]
-            p90 = child.get("p90_static")
+            p90 = child.get("p90_reservation") or child.get("p90_static")
             if isinstance(p90, dict):
                 p90["workload_name"] = name
                 configured_prediction = workload.get("prediction_file") or p90.get("prediction_file")

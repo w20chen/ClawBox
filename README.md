@@ -830,7 +830,7 @@ The configuration names correspond to these general experiment concepts:
 | `validation_command` | command whose output represents the final task state |
 | `api` | OpenAI-compatible endpoint, model, and credential variable |
 
-The compatibility `p90_static` configuration block supplies the frozen KB
+The `p90_reservation` configuration block supplies the frozen KB
 artifact used by `p90_reservation`. It must contain heterogeneous per-tool
 reservations and an explicit fixed VM capacity class. Export its base evidence from
 the authoritative Tune-KB service, keep the returned generation and digests

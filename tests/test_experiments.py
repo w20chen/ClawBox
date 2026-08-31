@@ -194,10 +194,10 @@ def test_per_tool_plan_requires_heterogeneous_reservations_and_selects_fixed_cap
     }
     raw = {
         "source": {"repository": "org/repo"},
-        "sizing_policies": ["p90_static"],
+        "sizing_policies": ["p90_reservation"],
         "resources": {"tool_memory_mib": 4096},
-        "p90_static": {"prediction": payload, "use_per_tool_memory_plan": True,
-                       "workload_name": "rec-a"},
+        "p90_reservation": {"prediction": payload, "use_per_tool_memory_plan": True,
+                            "workload_name": "rec-a"},
     }
     prediction = _p90_prediction(raw, None)
     assert prediction is not None

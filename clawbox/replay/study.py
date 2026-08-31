@@ -110,29 +110,29 @@ def _sizing_baselines(raw: dict[str, Any]) -> list[str]:
 def _p90_prediction(raw: dict[str, Any], base: Path | None) -> AdmissionPrediction | None:
     if not {"p90_static", "p90_reservation"}.intersection(raw.get("sizing_policies", [])):
         return None
-    config = raw.get("p90_static")
+    config = raw.get("p90_reservation") or raw.get("p90_static")
     if not isinstance(config, dict):
-        raise ValueError("p90_static configuration is required for predictive sizing")
+        raise ValueError("p90_reservation configuration is required for predictive admission")
     payload = config.get("prediction")
     if payload is None and config.get("prediction_file"):
         path = _path(base, config["prediction_file"]) if base is not None else Path(str(config["prediction_file"]))
         payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("p90_static requires prediction or prediction_file")
+        raise ValueError("p90_reservation requires prediction or prediction_file")
     prediction = AdmissionPrediction.from_payload(payload)
     expected_repo = str(
         raw.get("repository") or (raw.get("source") or {}).get("repository") or ""
     ).strip()
     if expected_repo and prediction.repo_fingerprint != expected_repo:
         raise ValueError(
-            "p90_static prediction repository does not match the replay workload"
+            "p90_reservation prediction repository does not match the replay workload"
         )
     minimum = int(config.get("min_evidence", 5))
     if minimum < 1:
-        raise ValueError("p90_static.min_evidence must be positive")
+        raise ValueError("p90_reservation.min_evidence must be positive")
     if prediction.evidence_count < minimum:
         raise ValueError(
-            f"p90_static prediction has {prediction.evidence_count} samples; "
+            f"p90_reservation prediction has {prediction.evidence_count} samples; "
             f"at least {minimum} are required"
         )
     return prediction
@@ -143,7 +143,7 @@ def _predictive_tool_memory_mib(
 ) -> int:
     resources = raw.get("resources", {})
     fixed_mib = int(resources.get("tool_memory_mib", 4096))
-    config = raw.get("p90_static") or {}
+    config = raw.get("p90_reservation") or raw.get("p90_static") or {}
     if config.get("use_per_tool_memory_plan"):
         payload = config.get("prediction")
         if payload is None and config.get("prediction_file"):
@@ -167,15 +167,15 @@ def _predictive_tool_memory_mib(
     headroom = float(config.get("headroom_fraction", 0.25))
     floor_mib = int(config.get("min_tool_memory_mib", 2048))
     if not 0 <= headroom <= 1:
-        raise ValueError("p90_static.headroom_fraction must be between 0 and 1")
+        raise ValueError("p90_reservation.headroom_fraction must be between 0 and 1")
     if floor_mib < 256 or floor_mib > fixed_mib:
-        raise ValueError("p90_static.min_tool_memory_mib must be between 256 and fixed Tool memory")
+        raise ValueError("p90_reservation.min_tool_memory_mib must be between 256 and fixed Tool memory")
     predicted_mib = math.ceil(
         prediction.memory_p90_bytes * (1 + headroom) / (1024.0 * 1024.0)
     )
     selected = min(fixed_mib, max(floor_mib, predicted_mib))
     if selected >= fixed_mib:
-        raise ValueError("p90_static prediction does not reduce Tool memory below the fixed baseline")
+        raise ValueError("p90_reservation prediction does not select a smaller fixed VM class")
     return selected
 
 
@@ -372,7 +372,7 @@ def run_study(config_path: Path) -> int:
                     str(float(raw["idle_tool_vm_rss_mib"])),
                 ]
                 if sizing_policy in {"p90_static", "p90_reservation"}:
-                    p90_config = raw.get("p90_static") or {}
+                    p90_config = raw.get("p90_reservation") or raw.get("p90_static") or {}
                     plan_path = _path(base, p90_config["prediction_file"])
                     command += [
                         "--tool-memory-plan", str(plan_path),
