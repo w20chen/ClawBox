@@ -115,6 +115,23 @@ RSS was 38.54 GiB. Final state matched and there were zero failures. Concurrent
 restore increased peak RSS by 115%, so the result demonstrates a throughput and
 memory-time benefit under admission pressure, not a peak-memory benefit.
 
+The matched c=40 repeat increases pressure while retaining the same trace,
+fixed 2 GiB Tool capacity, and 10-pair resident limit:
+
+| Policy | Correct | Wall s | Correct agents/min | Steps/min | Mean/peak FC RSS GiB | RSS-time GiB-h |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| resident | 40/40 | 910.4 | 2.636 | 7.909 | 8.38 / 9.37 | 2.120 |
+| checkpoint | 40/40 | 375.1 | 6.398 | 19.195 | 7.60 / 20.22 | 0.793 |
+
+At c=40 checkpointing improved correct-agent throughput by 142.7%, reduced
+wall time by 58.8%, and reduced Firecracker RSS-time by 62.6%. All 120
+checkpoint cycles verified zero pair-process RSS after eviction, with 75.73
+GiB of event-summed pair RSS released. Both arms produced equal final state,
+zero failures, and no leaked admission leases. Restore bursts again raised
+peak RSS (115.7%); mean RSS fell 9.3%. The aggregate snapshot and restore
+service times were 1,048.8 s and 11.8 s respectively, overlapped across the
+40 sessions.
+
 <!-- DENSITY_RESULTS -->
 
 ## Reproduction

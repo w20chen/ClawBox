@@ -615,6 +615,23 @@ def main() -> None:
                 finished, exit_code = complete(Path(runtime_config.log_path))
                 if finished:
                     if exit_code != 0: raise RuntimeError(f"OpenClaw exited with {exit_code}")
+                    gateway_records = gateway.records()
+                    failed_gateway_records = [
+                        item for item in gateway_records
+                        if not item["ready"] or item["error"] or item["status_code"] != 200
+                    ]
+                    if failed_gateway_records:
+                        first = failed_gateway_records[0]
+                        raise RuntimeError(
+                            "model gateway failed at replay step "
+                            f"{first.get('replay_index')}: "
+                            f"{first.get('error') or first.get('status_code')}"
+                        )
+                    if a.inference == "replay" and len(gateway_records) != len(gateway.actions):
+                        raise RuntimeError(
+                            "OpenClaw completed before exhausting replay trace: "
+                            f"{len(gateway_records)}/{len(gateway.actions)} model steps"
+                        )
                     if a.inference == "api":
                         gateway.write_replay_trace(
                             a.output / f"model-trace-session-{index:04d}.jsonl"

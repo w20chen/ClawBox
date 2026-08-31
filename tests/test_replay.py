@@ -382,6 +382,9 @@ def test_openai_gateway_gates_each_new_tool_response_once(tmp_path: Path) -> Non
         "data": {"raw_response": {"content": "", "tool_calls": [{
             "id": "call-1", "type": "function",
             "function": {"name": "exec", "arguments": "{\"command\":\"true\"}"},
+        }, {
+            "id": "call-2", "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"/tmp/x\"}"},
         }]}, "llm_latency_ms": 0},
     }])
     events = []
@@ -392,12 +395,13 @@ def test_openai_gateway_gates_each_new_tool_response_once(tmp_path: Path) -> Non
             "step": step, "calls": len(message.get("tool_calls") or [])
         },
     )
-    payload = {"model": "ignored", "messages": [{"role": "user", "content": "go"}]}
+    payload = {"model": "ignored", "stream": True,
+               "messages": [{"role": "user", "content": "go"}]}
     first = gateway.complete(payload)
     second = gateway.complete(payload)
     assert first == second
     assert events == ["request"]
-    assert gateway.records()[0]["admission"] == {"step": 0, "calls": 1}
+    assert gateway.records()[0]["admission"] == {"step": 0, "calls": 2}
 
 
 def test_replay_gateway_rejects_recorded_request_divergence(tmp_path: Path) -> None:

@@ -282,8 +282,13 @@ def _response_message(content_type: str, body: bytes) -> dict[str, Any]:
             delta = choice.get("delta") or {}
             if isinstance(delta.get("content"), str):
                 content.append(delta["content"])
-            for fragment in delta.get("tool_calls") or []:
-                index = int(fragment.get("index", 0))
+            for position, fragment in enumerate(delta.get("tool_calls") or []):
+                # Recorded non-streaming responses contain complete tool calls
+                # without the per-fragment ``index`` required by OpenAI's
+                # streaming format.  _replay_response emits those complete
+                # calls in one SSE delta, so preserve their array positions
+                # instead of accidentally merging every call into slot zero.
+                index = int(fragment.get("index", position))
                 target = tool_calls.setdefault(
                     index, {"id": "", "type": "function",
                             "function": {"name": "", "arguments": ""}},
