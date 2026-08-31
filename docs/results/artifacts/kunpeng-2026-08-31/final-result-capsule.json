@@ -94,5 +94,12 @@
       "correct_sessions_each_arm": 40,
       "failures_each_arm": 0
     }
+  },
+  "excluded_incomplete_attempts": {
+    "static_fixed2_materialization_c20": {
+      "remote_root": "/data/static-fixed2-materialization-c20",
+      "reason": "stopped at reporting deadline before any arm summary or aggregate correctness result existed",
+      "accepted": false
+    }
   }
 }

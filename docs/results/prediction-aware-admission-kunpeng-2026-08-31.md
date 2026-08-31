@@ -43,6 +43,15 @@ contain four distinct incremental P90 values from 1,845 to 1,870 KiB
 (approximately 1.802--1.826 MiB). All predictive invocations select the fixed
 2 GiB VM size class.
 
+For rec-a's 31 concrete invocations, the frozen hierarchy selected 25
+repository command-prefix nodes (14 depth-4, 10 depth-3, one depth-1), three
+public tool-name nodes, and three public global fallbacks. Evidence counts were
+one for 14 invocations, two for one, three for 10, and 58 for the six public
+fallbacks. Thus this is genuinely per-tool and held out by recording set, but
+many narrow nodes are statistically sparse; the coverage/error measurements
+must accompany the throughput result and no cross-task generalization is
+claimed.
+
 ## Design
 
 The factorial arms at each concurrency are:
@@ -143,6 +152,17 @@ an unmet requirement in these results.
 Results are accepted only from completed, internally valid arm summaries. The
 static-control run and prediction-aware sweep use separate immutable output
 directories and source manifests.
+
+A final attempt to produce a corrected, same-commit fixed-2-GiB c=20 pair was
+stopped at the user's reporting deadline. Its checkpoint arm had no completed
+summary or correctness aggregate (sessions were at model steps 24--27), and
+the resident arm had not started. `/data/static-fixed2-materialization-c20` is
+therefore diagnostic-only and excluded from every table and effect estimate.
+The checked-in study config is retained for a future completion. Consequently,
+the accepted results support static capacity/checkpoint controls at c=8, the
+checkpoint mechanism under c=20/c=40 long-wait pressure, and corrected P90
+resident/checkpoint/balloon comparisons at c=20; they do not provide a fully
+matched corrected static-vs-P90 full-trace factorial.
 
 The single-agent timing reference is the original recorded model time rather
 than a c=1 replay experiment: rec-a contains 27 model steps and 136.624 s of
