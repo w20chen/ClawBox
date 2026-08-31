@@ -71,12 +71,37 @@ def cgroup_value(path: Path, name: str) -> int | None:
         return None
 
 
+def authoritative_cgroup_or_rss(
+    path: Path | None,
+    lifecycles: list[FirecrackerLifecycle],
+    lifecycle_lock: Any,
+) -> int:
+    """Use delegated cgroup accounting without paying for an unused RSS scan."""
+    charged = cgroup_value(path, "memory.current") if path is not None else None
+    if charged is not None:
+        return int(charged)
+    with lifecycle_lock:
+        return sum(item.rss_bytes() for item in lifecycles)
+
+
 def reset_cgroup_peak(path: Path) -> bool:
     try:
         (path / "memory.peak").write_text("0", encoding="ascii")
     except OSError:
         return False
     return True
+
+
+def establish_cgroup_peak_baseline(path: Path) -> str | None:
+    """Reset memory.peak, or accept a fresh read-only counter at zero.
+
+    Some cgroup-v2 kernels expose memory.peak as mode 0444. A newly created
+    experiment cgroup is still a valid zero-baseline scope; a reused non-zero
+    counter must fail closed because its peak would include earlier work.
+    """
+    if reset_cgroup_peak(path):
+        return "reset"
+    return "fresh_zero_read_only" if cgroup_value(path, "memory.peak") == 0 else None
 
 
 def cgroup_memory_events(path: Path) -> dict[str, int]:
@@ -330,8 +355,18 @@ def cgroup_psi_summary(
 def off_numa_ratio(snapshot: dict[str, Any] | None, numa_node: int) -> float | None:
     if not snapshot:
         return None
+    # memory.numa_stat mixes base resident-byte categories with overlapping
+    # breakdowns/counters (for example file, inactive_file, and file_thp).
+    # Summing every row double-counts the same pages and can report placement
+    # on a node even when the base anon/file accounting is entirely local.
+    base_categories = {
+        "anon", "file", "kernel_stack", "pagetables", "sec_pagetables",
+        "slab_reclaimable", "slab_unreclaimable", "sock",
+    }
     totals: dict[str, int] = {}
-    for nodes in (snapshot.get("numa_stat") or {}).values():
+    for category, nodes in (snapshot.get("numa_stat") or {}).items():
+        if category not in base_categories:
+            continue
         for node, value in nodes.items():
             totals[node] = totals.get(node, 0) + int(value)
     total = sum(totals.values())
@@ -814,6 +849,23 @@ def peak_overlapping_memory_bytes(executions: list[dict]) -> int:
     )
 
 
+def expected_tool_bridge_execution_count(event: dict) -> int:
+    """Return calls in a model response that execute through Tool Bridge.
+
+    OpenClaw's ``exec`` tool is forwarded to the Tool VM.  File-oriented tools
+    such as ``read``, ``edit``, and ``apply_patch`` run in the Runtime VM and
+    therefore cannot have Tool Bridge execution records.  Older fixtures did
+    not include tool names, so retain their historical all-calls behavior.
+    """
+    invocations = event.get("tool_invocations") or []
+    if any("tool_name" in invocation for invocation in invocations):
+        return sum(
+            str(invocation.get("tool_name") or "") == "exec"
+            for invocation in invocations
+        )
+    return len(invocations)
+
+
 def collect_tool_working_sets(
     spec: dict, events: list[dict], output: Path,
     *, arm_started_unix_s: float | None = None,
@@ -857,14 +909,47 @@ def collect_tool_working_sets(
             "monitor_source": resource.get("monitor_source"),
             "fallback_used": bool(resource.get("fallback_used")),
         })
+    # Each session owns a fresh Tool disk, so its runtime-envelope records form
+    # a strict execution sequence.  Prefer that sequence over comparing guest
+    # wall-clock timestamps with host monotonic admission windows: a throttled
+    # Firecracker guest clock can lag the host by nearly a second.  The sequence
+    # is accepted only when its total count exactly matches the planned Bridge
+    # calls, preserving fail-closed behavior for missing or duplicate records.
+    runtime_actual = sorted(
+        (
+            (index, item) for index, item in enumerate(actual)
+            if item.get("execution_source") == "runtime-envelope"
+        ),
+        key=lambda indexed: (
+            float(indexed[1]["ts_start"]),
+            float(indexed[1]["ts_end"]),
+            str(indexed[1]["execution_id"]),
+        ),
+    )
+    expected_runtime_total = sum(
+        expected_tool_bridge_execution_count(event) for event in events
+    )
+    ordered_runtime_batches: dict[int, list[tuple[int, dict]]] = {}
+    if runtime_actual and len(runtime_actual) == expected_runtime_total:
+        cursor = 0
+        for event_index, event in enumerate(events):
+            count = expected_tool_bridge_execution_count(event)
+            ordered_runtime_batches[event_index] = runtime_actual[cursor:cursor + count]
+            cursor += count
     used: set[int] = set()
     joined = []
-    for event in events:
+    for event_index, event in enumerate(events):
         matches: list[tuple[int, dict]] = []
         join_method = "command_sha256"
+        if ordered_runtime_batches:
+            matches = ordered_runtime_batches[event_index]
+            join_method = "ordered_runtime_envelope"
         acquired = event.get("acquired_elapsed_s")
         released = event.get("released_elapsed_s")
-        if arm_started_unix_s is not None and acquired is not None and released is not None:
+        if (
+            not matches and arm_started_unix_s is not None
+            and acquired is not None and released is not None
+        ):
             window_start = arm_started_unix_s + float(acquired)
             window_end = arm_started_unix_s + float(released)
             matches = [
@@ -1088,6 +1173,10 @@ def main() -> None:
     p.add_argument("--correctness-command")
     p.add_argument("--correctness-timeout-s", type=float, default=300)
     p.add_argument("--timeout-s", type=float, default=900)
+    p.add_argument(
+        "--start-stagger-s", type=float, default=0.0,
+        help="deterministic delay between successive agent submissions",
+    )
     p.add_argument("--tool-reservation-budget-mib", type=int)
     p.add_argument("--tool-admission-safety-headroom-mib", type=int, default=1024)
     p.add_argument(
@@ -1167,6 +1256,8 @@ def main() -> None:
         help="checkpoint Runtime+Tool by default; tool is a secondary ablation",
     )
     a = p.parse_args()
+    if a.start_stagger_s < 0:
+        p.error("--start-stagger-s must be non-negative")
     if a.eviction_policy == "predicted_pressure_aware":
         a.eviction_policy = "wait_aware_pressure"
     if a.restore_policy == "prefetch":
@@ -1347,6 +1438,8 @@ def main() -> None:
     tool_pool_events_before: dict[str, int] = {}
     vm_pool_cgroup = None
     runtime_pool_cgroup = None
+    vm_pool_peak_baseline_mode = None
+    tool_pool_peak_baseline_mode = None
     vm_pool_events_before: dict[str, int] = {}
     if a.tool_reservation_budget_mib is not None:
         tool_pool_cgroup = validate_tool_pool_cgroup(
@@ -1366,10 +1459,12 @@ def main() -> None:
         if runtime_pool_cgroup == tool_pool_cgroup:
             raise ValueError("Runtime and Tool pools must use distinct child cgroups")
         vm_pool_events_before = cgroup_memory_events(vm_pool_cgroup)
-        if not reset_cgroup_peak(vm_pool_cgroup):
-            raise ValueError("VM pool memory.peak cannot be reset for this arm")
-        if not reset_cgroup_peak(tool_pool_cgroup):
-            raise ValueError("Tool pool memory.peak cannot be reset for this arm")
+        vm_pool_peak_baseline_mode = establish_cgroup_peak_baseline(vm_pool_cgroup)
+        if vm_pool_peak_baseline_mode is None:
+            raise ValueError("VM pool memory.peak cannot establish a zero baseline")
+        tool_pool_peak_baseline_mode = establish_cgroup_peak_baseline(tool_pool_cgroup)
+        if tool_pool_peak_baseline_mode is None:
+            raise ValueError("Tool pool memory.peak cannot establish a zero baseline")
     a.output.mkdir(parents=True, exist_ok=False)
     tool_arm_cgroup: Path | None = None
     runtime_arm_cgroup: Path | None = None
@@ -1404,25 +1499,17 @@ def main() -> None:
     runtime_lifecycles: list[FirecrackerLifecycle] = []
     lifecycle_lock = threading.Lock()
     def measure_tool_resident_bytes() -> int:
-        with lifecycle_lock:
-            rss = sum(item.rss_bytes() for item in tool_lifecycles)
-        charged = (
-            cgroup_value(tool_pool_cgroup, "memory.current")
-            if tool_pool_cgroup is not None else None
-        )
         # memory.current is authoritative when the paper cgroup exists. RSS is
         # retained as a diagnostic fallback only; mixing the two into one
         # primary metric gives checkpointed and resident variants different
         # accounting semantics.
-        return int(charged) if charged is not None else rss
-    def measure_vm_resident_bytes() -> int:
-        with lifecycle_lock:
-            rss = sum(item.rss_bytes() for item in lifecycles)
-        charged = (
-            cgroup_value(vm_pool_cgroup, "memory.current")
-            if vm_pool_cgroup is not None else None
+        return authoritative_cgroup_or_rss(
+            tool_pool_cgroup, tool_lifecycles, lifecycle_lock,
         )
-        return int(charged) if charged is not None else rss
+    def measure_vm_resident_bytes() -> int:
+        return authoritative_cgroup_or_rss(
+            vm_pool_cgroup, lifecycles, lifecycle_lock,
+        )
     memory_admission = (
         AtomicMemoryAdmission(
             parent_high_bytes=a.vm_pool_high_watermark_mib * 1024 * 1024,
@@ -1549,6 +1636,8 @@ def main() -> None:
     sampler = threading.Thread(target=sample, daemon=True); sampler.start()
 
     def run_one(index: int, spec: dict) -> dict:
+        if a.start_stagger_s:
+            time.sleep(index * a.start_stagger_s)
         session_started_elapsed_s = time.monotonic() - started
         tool_config, runtime_config = FirecrackerConfig.from_json(Path(spec["tool"])), FirecrackerConfig.from_json(Path(spec["runtime"]))
         remaining = lambda: max(0.0, deadline - time.monotonic())
@@ -1600,21 +1689,31 @@ def main() -> None:
         idle_reclaim_cancel = threading.Event()
         balloon_inflated = threading.Event()
 
+        def session_memory_or_terminal_rss(
+            path: Path | None, lifecycle: FirecrackerLifecycle,
+        ) -> int:
+            if path is not None:
+                value = cgroup_value(path, "memory.current")
+                if value is not None:
+                    return int(value)
+            # The Runtime guest powers itself off after OpenClaw completes.
+            # Its process cgroup may therefore disappear before run_one enters
+            # cleanup.  A terminal process has no future growth, so its RSS is
+            # the conservative remaining charge (normally zero).  Missing
+            # accounting for a live VM remains a hard failure.
+            if session_closing.is_set() or lifecycle.process_exit_code() is not None:
+                return lifecycle.rss_bytes()
+            raise RuntimeError("live session VM cgroup memory.current is unavailable")
+
         def measure_session_tool_bytes() -> int:
-            if tool_session_cgroup is not None:
-                value = cgroup_value(tool_session_cgroup, "memory.current")
-                if value is None:
-                    raise RuntimeError("session Tool cgroup memory.current is unavailable")
-                return int(value)
-            return tool.rss_bytes()
+            return session_memory_or_terminal_rss(tool_session_cgroup, tool)
 
         def measure_session_parent_bytes() -> int:
             if tool_session_cgroup is not None and runtime_session_cgroup is not None:
-                tool_value = cgroup_value(tool_session_cgroup, "memory.current")
-                runtime_value = cgroup_value(runtime_session_cgroup, "memory.current")
-                if tool_value is None or runtime_value is None:
-                    raise RuntimeError("session VM cgroup memory.current is unavailable")
-                return int(tool_value) + int(runtime_value)
+                return (
+                    session_memory_or_terminal_rss(tool_session_cgroup, tool)
+                    + session_memory_or_terminal_rss(runtime_session_cgroup, runtime)
+                )
             return tool.rss_bytes() + runtime.rss_bytes()
 
         def wait_tool_service_ready() -> None:
@@ -2348,11 +2447,12 @@ def main() -> None:
                     raise RuntimeError(f"Runtime VM exited unexpectedly ({runtime_exit})")
                 if tool.resident and tool_exit is not None:
                     raise RuntimeError(f"Tool VM exited unexpectedly ({tool_exit})")
-                pending_all = [item for item in gateway.records() if not item["ready"]]
-                pending = [
-                    item for item in pending_all if item["request_id"] not in processed
-                ]
                 evicting = a.reclamation_policy in {"checkpoint", "hybrid"}
+                pending_all = gateway.pending_records() if evicting else []
+                pending = [
+                    item for item in pending_all
+                    if item["request_id"] not in processed
+                ]
                 if idle_reclaim_errors:
                     raise RuntimeError(
                         "idle sandbox reclamation failed"
@@ -2391,35 +2491,37 @@ def main() -> None:
                 pass
             idle_reclaim_complete.wait(timeout=30.0)
             try:
-                close_runtime_tool_pair(runtime, tool)
+                # Admission refresh samples per-session cgroups from another
+                # thread.  Release every lease while those cgroups still
+                # exist; closing Firecracker first can remove memory.current
+                # and crash the global sampler as sessions finish at scale.
+                release_tool_reservation()
+                if lifetime_reservation_lease is not None:
+                    status = memory_admission.release(
+                        lifetime_reservation_lease
+                    )
+                    lifetime_reservation_lease = None
+                    event = next(
+                        item for item in vm_materialization_events
+                        if item["reason"] == "static_lifetime_capacity"
+                    )
+                    event["released_elapsed_s"] = time.monotonic() - started
+                    event["held_s"] = (
+                        event["released_elapsed_s"]
+                        - event["acquired_elapsed_s"]
+                    )
+                    event["completed_lease"] = status["completed_lease"]
             finally:
                 try:
-                    release_tool_reservation()
+                    close_runtime_tool_pair(runtime, tool)
                 finally:
                     try:
-                        if lifetime_reservation_lease is not None:
-                            status = memory_admission.release(
-                                lifetime_reservation_lease
-                            )
-                            lifetime_reservation_lease = None
-                            event = next(
-                                item for item in vm_materialization_events
-                                if item["reason"] == "static_lifetime_capacity"
-                            )
-                            event["released_elapsed_s"] = time.monotonic() - started
-                            event["held_s"] = (
-                                event["released_elapsed_s"]
-                                - event["acquired_elapsed_s"]
-                            )
-                            event["completed_lease"] = status["completed_lease"]
+                        gateway.close()
                     finally:
-                        try:
-                            gateway.close()
-                        finally:
-                            if tool_session_cgroup is not None:
-                                remove_empty_cgroup(tool_session_cgroup)
-                            if runtime_session_cgroup is not None:
-                                remove_empty_cgroup(runtime_session_cgroup)
+                        if tool_session_cgroup is not None:
+                            remove_empty_cgroup(tool_session_cgroup)
+                        if runtime_session_cgroup is not None:
+                            remove_empty_cgroup(runtime_session_cgroup)
 
     results, failures = [], []
     try:
@@ -2655,16 +2757,15 @@ def main() -> None:
                 "tool_batch_wall_s": float(first.get("tool_batch_wall_s") or 0.0),
             })
     tool_execution_count_mismatches = sum(
-        int(row.get("actual_execution_count") or 0)
-        != len(next(
-            (
-                event.get("tool_invocations") or []
-                for event in item.get("tool_reservation_events", [])
-                if event.get("model_step") == row.get("model_step")
-            ),
-            [],
-        ))
-        for item in results for row in item.get("tool_working_sets", [])
+        actual_by_step.get(event.get("model_step"), 0)
+        != expected_tool_bridge_execution_count(event)
+        for item in results
+        for actual_by_step in [{
+            row.get("model_step"): int(row.get("actual_execution_count") or 0)
+            for row in item.get("tool_working_sets", [])
+        }]
+        for event in item.get("tool_reservation_events", [])
+        if expected_tool_bridge_execution_count(event) > 0
     )
     admission_metrics = (
         memory_admission.metrics() if memory_admission is not None else None
@@ -2676,6 +2777,10 @@ def main() -> None:
               "sessions_requested": len(raw["sessions"]), "sessions_completed": len(results),
               "configured_pair_memory_mib": pair_memory_mib,
               "worker_concurrency": len(raw["sessions"]),
+              "start_stagger_s": a.start_stagger_s,
+              "start_offset_schedule_s": [
+                  index * a.start_stagger_s for index in range(len(raw["sessions"]))
+              ],
               "resident_pair_slot_limit": None,
               "cpu_pair_lease_limit": None,
               "tool_reservation_budget_mib": a.tool_reservation_budget_mib,
@@ -2697,6 +2802,8 @@ def main() -> None:
               "vm_pool_headroom_mib": a.vm_pool_headroom_mib,
               "vm_pool_memory_events": vm_pool_event_deltas,
               "primary_memory_metric": "vm_pool_cgroup_memory.current",
+              "vm_pool_peak_baseline_mode": vm_pool_peak_baseline_mode,
+              "tool_pool_peak_baseline_mode": tool_pool_peak_baseline_mode,
               "mean_vm_pool_memory_current_bytes": (
                   statistics.fmean(vm_pool_values) if vm_pool_values else None
               ),

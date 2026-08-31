@@ -835,6 +835,50 @@ def test_openclaw_joins_transformed_commands_by_admission_window(tmp_path, monke
     assert rows[0]["prediction_covered_actual"] is True
 
 
+def test_openclaw_joins_bridge_execs_by_order_when_guest_clock_lags(tmp_path, monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_order_join", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    bridges = [
+        {"execution_id": f"exec-{index}", "command_sha256": f"wrapped-{index}",
+         "execution_source": "runtime-envelope"}
+        for index in range(3)
+    ]
+    resources = [
+        {"execution_id": f"exec-{index}", "memory_rss_peak_bytes": (index + 1) * 1024**2,
+         "sampling_quality": "valid", "ts_start": 100.1 + index,
+         "ts_end": 100.2 + index, "memory_source": "procfs-process-tree",
+         "monitor_source": "cgroup-v2"}
+        for index in range(3)
+    ]
+    stdout = (
+        "__CLAWBOX_BRIDGE__\n" + "\n".join(map(json.dumps, bridges))
+        + "\n__CLAWBOX_CGROUP__\n" + "\n".join(map(json.dumps, resources)) + "\n"
+    ).encode()
+    monkeypatch.setattr(module, "ssh_capture", lambda *_args: (0, stdout, b"", False))
+    events = [
+        {"model_step": 1, "acquired_elapsed_s": 10.0, "released_elapsed_s": 11.0,
+         "reservation_mib": 8.0, "tool_invocations": [
+             {"tool_name": "read"}, {"tool_name": "exec"},
+         ]},
+        {"model_step": 2, "acquired_elapsed_s": 12.0, "released_elapsed_s": 13.0,
+         "reservation_mib": 8.0, "tool_invocations": [
+             {"tool_name": "exec"}, {"tool_name": "exec"},
+         ]},
+    ]
+    rows = module.collect_tool_working_sets(
+        {}, events, tmp_path / "ordered.out", arm_started_unix_s=100.0,
+    )
+    assert [row["join_method"] for row in rows] == [
+        "ordered_runtime_envelope", "ordered_runtime_envelope",
+    ]
+    assert [row["actual_execution_count"] for row in rows] == [1, 2]
+    assert rows[0]["actual_command_peak_memory_bytes"] == 1 * 1024**2
+    assert rows[1]["actual_command_peak_memory_bytes"] == 3 * 1024**2
+
+
 def test_predictive_batch_reservation_sums_concurrent_tool_calls():
     script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
     spec = importlib.util.spec_from_file_location("run_openclaw_batch_plan", script)
@@ -850,6 +894,23 @@ def test_predictive_batch_reservation_sums_concurrent_tool_calls():
     steps = module.predictive_steps_from_plan(payload, "rec-a")
     assert steps[1]["incremental_p90_kib"] == 300
     assert steps[2]["incremental_p90_kib"] == 1280
+
+
+def test_authoritative_cgroup_accounting_skips_unused_rss_fallback(monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "run-openclaw-experiment.py"
+    spec = importlib.util.spec_from_file_location("run_openclaw_cgroup_fast_path", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Lifecycle:
+        def rss_bytes(self):
+            raise AssertionError("RSS fallback must not run for a live cgroup")
+
+    monkeypatch.setattr(module, "cgroup_value", lambda _path, _name: 123)
+    assert module.authoritative_cgroup_or_rss(
+        Path("/delegated"), [Lifecycle()], threading.Lock(),
+    ) == 123
 
 
 def test_balloon_adjustment_waits_for_guest_and_records_rss_reclamation(monkeypatch):

@@ -1,0 +1,20 @@
+[Unit]
+Description=ClawBox direct-Firecracker paper experiment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=weitianc
+Group=weitianc
+WorkingDirectory=/home/weitianc/ClawBox
+ExecStart=/bin/bash /home/weitianc/ClawBox/.artifacts/paper-current-job.sh
+Delegate=cpu cpuset io memory
+AllowedCPUs=0-79
+AllowedMemoryNodes=0
+MemorySwapMax=0
+TimeoutStartSec=infinity
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

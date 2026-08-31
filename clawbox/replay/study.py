@@ -543,6 +543,7 @@ def _run_policy_study(config_path: Path, raw: dict[str, Any]) -> int:
                 "--checkpoint-transient-parent-mib", str(checkpoint_parent_mib),
                 "--checkpoint-transient-tool-mib", str(checkpoint_tool_mib),
                 "--full-tool-incremental-mib", str(full_incremental_mib),
+                "--start-stagger-s", str(raw.get("start_stagger_s", 0.0)),
             ]
             if raw.get("correctness_command"):
                 command += [

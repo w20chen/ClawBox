@@ -950,6 +950,8 @@ def test_runtime_inprocess_sidecar_uses_a_final_upload_handshake():
     assert "CLAWBOX_REVISION" in dockerfile
     assert "_mvdan_adapter/build.sh" in dockerfile
     assert "native-shadow-probe.py" in dockerfile
+    assert "OPENCLAW_SSH_SKILLS_LOCK_PATCH" in dockerfile
+    assert "skillsRefreshPromise" in dockerfile
     # No restartable init container anywhere in the rendered runtime Job.
     assert '"restartPolicy": "Always"' not in manifest
 

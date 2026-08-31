@@ -96,6 +96,36 @@ node -e '
     }
     console.log("OPENCLAW_SANDBOX_ROOT_PATCH verify: OK (" + found + " file(s))");
   '
+node -e '
+    const fs = require("fs"), path = require("path");
+    const { execSync } = require("child_process");
+    const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
+    const dir = path.join(globalRoot, "openclaw", "dist");
+    const patched = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".js")) continue;
+      const p = path.join(dir, f);
+      const source = fs.readFileSync(p, "utf8");
+      if (!source.includes("async refreshRemoteSkillsWorkspace(session)")) continue;
+      let next = source.replace(
+        "this.ensurePromise = null;\n\t\tthis.refreshedSkillsForNextExecWorkdir = null;",
+        "this.ensurePromise = null;\n\t\tthis.skillsRefreshPromise = null;\n\t\tthis.refreshedSkillsForNextExecWorkdir = null;");
+      next = next.replace(
+        "async refreshRemoteSkillsWorkspace(session) {\n\t\tif (this.params.createParams.cfg.workspaceAccess",
+        "async refreshRemoteSkillsWorkspace(session) {\n\t\tif (this.skillsRefreshPromise) return await this.skillsRefreshPromise;\n\t\tthis.skillsRefreshPromise = this.refreshRemoteSkillsWorkspaceInner(session);\n\t\ttry {\n\t\t\tawait this.skillsRefreshPromise;\n\t\t} finally {\n\t\t\tthis.skillsRefreshPromise = null;\n\t\t}\n\t}\n\tasync refreshRemoteSkillsWorkspaceInner(session) {\n\t\tif (this.params.createParams.cfg.workspaceAccess");
+      if (next === source || !next.includes("refreshRemoteSkillsWorkspaceInner")) {
+        console.error("OPENCLAW_SSH_SKILLS_LOCK_PATCH: unexpected bundle shape in " + f);
+        process.exit(1);
+      }
+      fs.writeFileSync(p, next);
+      patched.push(f);
+    }
+    if (patched.length !== 1) {
+      console.error("OPENCLAW_SSH_SKILLS_LOCK_PATCH: expected one bundle, got " + patched.length);
+      process.exit(1);
+    }
+    console.log("OPENCLAW_SSH_SKILLS_LOCK_PATCH applied to: " + patched[0]);
+  '
 EOT
 
 WORKDIR /opt/clawtune

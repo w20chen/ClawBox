@@ -781,6 +781,7 @@ The main paper controls are all explicit configuration parameters:
 | `reclamation.checkpoint_scope` | `pair` by default; `tool` only for the secondary ablation |
 | `cpu_placement` | `round_robin` by default; `exclusive` for CPU isolation |
 | `network_cidr` | parent range for per-session `/29` allocation |
+| `start_stagger_s` | deterministic delay between successive agent submissions; freeze the same value for every arm |
 
 Run a single-workload smoke with `deploy/study.example.json`, or validate and
 run one of the multi-workload suites:

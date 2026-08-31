@@ -1,0 +1,10 @@
+[Unit]
+Description=Create dedicated ClawBox paper-experiment scratch directory
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -d -m 0750 -o weitianc -g weitianc /mnt/ann-diskann/clawbox-paper-scratch
+ProtectSystem=strict
+ReadWritePaths=/mnt/ann-diskann
+PrivateTmp=yes
+NoNewPrivileges=yes

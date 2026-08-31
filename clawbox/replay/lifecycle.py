@@ -26,7 +26,7 @@ def _read_int_file(path: Path) -> int | None:
 def _read_key_value_file(path: Path) -> dict[str, int]:
     try:
         return {
-            fields[0]: int(fields[1])
+            fields[0].rstrip(":"): int(fields[1])
             for line in path.read_text(encoding="ascii").splitlines()
             if len(fields := line.split()) == 2
         }
@@ -68,6 +68,22 @@ def _counter_delta(after: dict[str, int], before: dict[str, int], key: str) -> i
     if key not in after or key not in before:
         return None
     return max(0, int(after[key]) - int(before[key]))
+
+
+def _checkpoint_operation_peak(
+    sampled_peak: int | None,
+    kernel_peak: int | None,
+) -> tuple[int | None, int | None]:
+    """Return the best operation peak and the available kernel upper bound.
+
+    Older cgroup-v2 kernels do not support resetting ``memory.peak``.  Its
+    absolute value is still a kernel-measured upper bound for a fresh
+    per-session cgroup, so retain it instead of reporting the checkpoint peak
+    as unavailable.
+    """
+    kernel = None if kernel_peak is None else int(kernel_peak)
+    effective = max(int(sampled_peak or 0), int(kernel or 0)) or None
+    return effective, kernel
 
 
 class LifecycleError(RuntimeError):
@@ -554,12 +570,9 @@ class FirecrackerLifecycle:
         cgroup_after_evict = self._cgroup_memory_snapshot()
         before_current = cgroup_before.get("memory_current_bytes")
         peak_current = monitor.get("peak_cgroup_memory_current_bytes")
-        kernel_operation_peak = (
-            cgroup_after_create.get("memory_peak_bytes") if peak_reset else None
+        effective_peak, kernel_operation_peak = _checkpoint_operation_peak(
+            peak_current, cgroup_after_create.get("memory_peak_bytes"),
         )
-        effective_peak = max(
-            int(peak_current or 0), int(kernel_operation_peak or 0),
-        ) or None
         after_current = cgroup_after_evict.get("memory_current_bytes")
         file_before = int(cgroup_before.get("stat_file_bytes") or 0)
         file_after_create = int(cgroup_after_create.get("stat_file_bytes") or 0)
@@ -1368,6 +1381,12 @@ class AtomicMemoryAdmission:
         self._next_ticket = 0
         self._next_lease = 0
         self._waiters: dict[int, dict[str, Any]] = {}
+        # Only one waiter may perform the expensive live-memory refresh at a
+        # time.  Without an explicit handoff, notify_all() makes every waiter
+        # rescan every active per-session cgroup before the FIFO winner can
+        # acquire.  At c40 that thundering herd can stretch a trivially fitting
+        # continuation admission past the guest model-idle timeout.
+        self._evaluation_handoff_ticket: int | None = None
         self._leased: dict[int, dict[str, Any]] = {}
         self._completed: list[dict[str, Any]] = []
         self._timed_out: list[dict[str, Any]] = []
@@ -1408,11 +1427,44 @@ class AtomicMemoryAdmission:
                 "priority": self._PRIORITY[request_class],
                 "parent_increment_bytes": parent_increment,
                 "tool_increment_bytes": tool_increment,
+                # Conditions share the admission lock but keep independent
+                # wait queues, allowing a targeted wake-up of the next FIFO
+                # evaluator instead of a global notify_all() stampede.
+                "wake_condition": Condition(self._condition),
             }
             self._waiters[ticket] = waiter
             deadline = None if timeout is None else enqueued + max(0.0, timeout)
             try:
                 while True:
+                    if (
+                        self._evaluation_handoff_ticket is not None
+                        and self._evaluation_handoff_ticket not in self._waiters
+                    ):
+                        self._evaluation_handoff_ticket = None
+                    ordered = sorted(
+                        self._waiters.values(),
+                        key=lambda item: (
+                            int(item["priority"]), int(item["ticket"]),
+                        ),
+                    )
+                    evaluator_ticket = self._evaluation_handoff_ticket
+                    if evaluator_ticket is None and ordered:
+                        evaluator_ticket = int(ordered[0]["ticket"])
+                    if evaluator_ticket != ticket:
+                        remaining = (
+                            None if deadline is None
+                            else deadline - time.monotonic()
+                        )
+                        if remaining is not None and remaining <= 0:
+                            self._waiters.pop(ticket, None)
+                            self._timed_out.append({
+                                **self._public_waiter(waiter),
+                                "wait_s": time.monotonic() - enqueued,
+                            })
+                            self._wake_evaluator_locked()
+                            return None
+                        waiter["wake_condition"].wait(remaining)
+                        continue
                     status = self._status_locked()
                     selected = self._selected_waiter_locked(status)
                     if selected is waiter:
@@ -1421,7 +1473,7 @@ class AtomicMemoryAdmission:
                         parent_measure = measure_parent_bytes or self._measure_parent
                         tool_measure = measure_tool_bytes or self._measure_tool
                         lease = {
-                            **waiter,
+                            **self._public_waiter(waiter),
                             "lease": lease_id,
                             "admitted_monotonic": time.monotonic(),
                             "wait_s": time.monotonic() - enqueued,
@@ -1438,29 +1490,41 @@ class AtomicMemoryAdmission:
                         }
                         self._leased[lease_id] = lease
                         self._waiters.pop(ticket, None)
+                        self._evaluation_handoff_ticket = None
                         admitted = self._status_locked()
-                        self._condition.notify_all()
+                        self._wake_evaluator_locked()
                         return lease_id, {
                             **admitted,
                             "request_class": request_class,
                             "wait_s": lease["wait_s"],
                         }
+                    if selected is not None:
+                        self._evaluation_handoff_ticket = int(
+                            selected["ticket"]
+                        )
+                        self._wake_evaluator_locked()
+                    else:
+                        self._evaluation_handoff_ticket = None
                     remaining = None if deadline is None else deadline - time.monotonic()
                     if remaining is not None and remaining <= 0:
                         self._waiters.pop(ticket, None)
                         self._timed_out.append({
-                            **waiter,
+                            **self._public_waiter(waiter),
                             "wait_s": time.monotonic() - enqueued,
                         })
-                        self._condition.notify_all()
+                        if self._evaluation_handoff_ticket == ticket:
+                            self._evaluation_handoff_ticket = None
+                        self._wake_evaluator_locked()
                         return None
-                    self._condition.wait(
+                    waiter["wake_condition"].wait(
                         self._poll_s
                         if remaining is None else min(self._poll_s, remaining)
                     )
             except BaseException:
                 self._waiters.pop(ticket, None)
-                self._condition.notify_all()
+                if self._evaluation_handoff_ticket == ticket:
+                    self._evaluation_handoff_ticket = None
+                self._wake_evaluator_locked()
                 raise
 
     def release(self, lease_id: int) -> dict[str, Any]:
@@ -1495,13 +1559,13 @@ class AtomicMemoryAdmission:
             )
             self._completed.append(completed)
             status = self._status_locked()
-            self._condition.notify_all()
+            self._wake_evaluator_locked()
             return {**status, "completed_lease": completed}
 
     def observe(self) -> dict[str, Any]:
         with self._condition:
             status = self._status_locked()
-            self._condition.notify_all()
+            self._wake_evaluator_locked()
             return status
 
     def record_lease_growth(
@@ -1520,7 +1584,34 @@ class AtomicMemoryAdmission:
             lease["tool_peak_growth_bytes"] = max(
                 int(lease["tool_peak_growth_bytes"]), tool_growth,
             )
-            self._condition.notify_all()
+            self._wake_evaluator_locked()
+
+    @staticmethod
+    def _public_waiter(waiter: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value for key, value in waiter.items()
+            if key != "wake_condition"
+        }
+
+    def _wake_evaluator_locked(self) -> None:
+        """Wake only the waiter allowed to perform the next live refresh."""
+        if (
+            self._evaluation_handoff_ticket is not None
+            and self._evaluation_handoff_ticket not in self._waiters
+        ):
+            self._evaluation_handoff_ticket = None
+        target = None
+        if self._evaluation_handoff_ticket is not None:
+            target = self._waiters.get(self._evaluation_handoff_ticket)
+        if target is None and self._waiters:
+            target = min(
+                self._waiters.values(),
+                key=lambda item: (
+                    int(item["priority"]), int(item["ticket"]),
+                ),
+            )
+        if target is not None:
+            target["wake_condition"].notify()
 
     def metrics(self) -> dict[str, Any]:
         with self._condition:

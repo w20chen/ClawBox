@@ -37,6 +37,15 @@ def _load_openclaw_experiment_script(name: str = "run_openclaw_test"):
     return module
 
 
+def test_fresh_read_only_cgroup_peak_is_valid_zero_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_openclaw_experiment_script("run_openclaw_peak_baseline")
+    monkeypatch.setattr(module, "reset_cgroup_peak", lambda _path: False)
+    monkeypatch.setattr(module, "cgroup_value", lambda _path, _name: 0)
+    assert module.establish_cgroup_peak_baseline(Path("/fresh")) == "fresh_zero_read_only"
+    monkeypatch.setattr(module, "cgroup_value", lambda _path, _name: 1)
+    assert module.establish_cgroup_peak_baseline(Path("/reused")) is None
+
+
 def test_load_v4_actions_and_extract_shell_command(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     _write_jsonl(trace, [
@@ -468,6 +477,71 @@ def test_replay_gateway_rejects_recorded_request_divergence(tmp_path: Path) -> N
         gateway.complete({"model": "ignored", "messages": [
             {"role": "user", "content": "different"},
         ]})
+
+
+def test_replay_gateway_accepts_only_documented_volatile_input_fields(tmp_path: Path) -> None:
+    expected = (
+        "Runtime: agent=main | session=agent:main:explicit:session-0000 | "
+        "sessionId=session-0000 | host=runtime-vm\n"
+        "[Mon 2026-08-31 19:16 UTC] deterministic prompt\n"
+        "drwxr-xr-x. 10 1001 1001 4096 Aug 31 19:16 .\n"
+        "drwxr-xr-x 3 root root 4096 Aug 31 19:16 .clawbox\n"
+        "drwxr-xr-x 3 root root 4096 Aug 31 19:16 openclaw-ssh-shared-8198076c\n"
+        "156 passed in 0.28s\n"
+        "[master 790ea5c] deterministic subject\n"
+        "790ea5c deterministic subject\n"
+        "08c3246 SWE-bench\n"
+        "?? .clawbox/"
+    )
+    actual = expected.replace("session-0000", "session-0042")
+    actual = actual.replace("19:16 UTC", "19:43 UTC")
+    actual = actual.replace("Aug 31 19:16", "Aug 31 19:45")
+    actual = actual.replace("0.28s", "0.91s").replace("790ea5c", "4e1e6ea")
+    trace = tmp_path / "trace.jsonl"
+    _write_jsonl(trace, [{
+        "type": "action", "action_type": "llm_call", "action_id": "model-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0,
+        "data": {
+            "raw_request": {"messages": [{"role": "system", "content": expected}]},
+            "raw_response": {"content": "ok"}, "llm_latency_ms": 0,
+        },
+    }])
+    gateway = ModelGateway(tmp_path / "store.json", mode="replay", trace=trace)
+    gateway.complete({"model": "ignored", "messages": [
+        {"role": "system", "content": actual},
+    ]})
+    record = gateway.records()[0]
+    assert record["replay_input_match"] is True
+    assert record["replay_input_match_mode"] == "volatile_fields_v1"
+    assert record["replay_input_expected_sha256"] == record["replay_input_actual_sha256"]
+
+
+def test_gateway_pending_records_are_lightweight(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    _write_jsonl(trace, [{
+        "type": "action", "action_type": "llm_call", "action_id": "model-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 1,
+        "data": {
+            "raw_request": {"messages": [{"role": "user", "content": "large"}]},
+            "raw_response": {"content": "ok"}, "llm_latency_ms": 1000,
+        },
+    }])
+    gateway = ModelGateway(tmp_path / "store.json", mode="replay", trace=trace)
+    producer = threading.Thread(target=lambda: gateway.complete({
+        "messages": [{"role": "user", "content": "large"}],
+    }))
+    producer.start()
+    deadline = time.monotonic() + 1
+    pending = []
+    while time.monotonic() < deadline:
+        pending = gateway.pending_records()
+        if pending:
+            break
+        time.sleep(0.001)
+    assert pending and set(pending[0]) == {
+        "request_id", "replay_index", "started_unix_s", "ready",
+    }
+    producer.join(2)
 
 
 def test_streaming_model_response_can_be_exported_as_replay_trace(tmp_path: Path) -> None:
@@ -1193,6 +1267,59 @@ def test_atomic_memory_admission_keeps_normal_work_out_of_emergency_reserve() ->
     admission.release(restored[0])
 
 
+def test_atomic_memory_admission_avoids_waiter_refresh_thundering_herd() -> None:
+    from clawbox.replay.lifecycle import AtomicMemoryAdmission
+
+    parent = [950]
+    tool = [950]
+    global_measurements = [0]
+
+    def measure(value: list[int]) -> int:
+        global_measurements[0] += 1
+        return value[0]
+
+    admission = AtomicMemoryAdmission(
+        parent_high_bytes=1000,
+        parent_hard_bytes=1200,
+        parent_headroom_bytes=0,
+        tool_high_bytes=1000,
+        tool_hard_bytes=1200,
+        tool_headroom_bytes=0,
+        measure_parent_bytes=lambda: measure(parent),
+        measure_tool_bytes=lambda: measure(tool),
+        poll_s=0.5,
+    )
+    acquired: list[int] = []
+
+    def wait() -> None:
+        result = admission.acquire(
+            parent_increment_bytes=10,
+            tool_increment_bytes=10,
+            request_class="continuation",
+            timeout=2,
+            measure_parent_bytes=lambda: parent[0],
+            measure_tool_bytes=lambda: tool[0],
+        )
+        assert result is not None
+        acquired.append(result[0])
+
+    threads = [threading.Thread(target=wait) for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.05)
+    parent[0] = tool[0] = 100
+    admission.observe()
+    for thread in threads:
+        thread.join(2)
+    assert len(acquired) == len(threads)
+    # One elected waiter refreshes the live state and hands evaluation to the
+    # selected request.  Waking 20 waiters must not cause O(waiters^2) global
+    # measurements before they can acquire.
+    assert global_measurements[0] < 200
+    for lease in acquired:
+        admission.release(lease)
+
+
 def test_full_and_static_reservations_share_incremental_growth_semantics() -> None:
     module = _load_openclaw_experiment_script("run_openclaw_incremental")
     assert module.fixed_incremental_growth_mib(
@@ -1220,6 +1347,14 @@ def test_wait_estimates_and_primary_memory_metrics_are_strict(tmp_path: Path) ->
     assert module.off_numa_ratio(
         {"numa_stat": {"anon": {"N0": 75, "N1": 25}}}, 0,
     ) == pytest.approx(0.25)
+    # Derived memory.numa_stat rows overlap the base resident categories and
+    # must not be counted as additional off-node bytes.
+    assert module.off_numa_ratio({"numa_stat": {
+        "anon": {"N0": 75, "N1": 25},
+        "file": {"N0": 100, "N1": 0},
+        "inactive_file": {"N0": 0, "N1": 100},
+        "file_thp": {"N0": 0, "N1": 100},
+    }}, 0) == pytest.approx(0.125)
     psi_samples = [
         {"vm": {"pressure": {"some": {"avg10": 1, "total": 10}}}},
         {"vm": {"pressure": {"some": {"avg10": 3, "total": 25}}}},
@@ -1227,6 +1362,19 @@ def test_wait_estimates_and_primary_memory_metrics_are_strict(tmp_path: Path) ->
     memory_psi = module.cgroup_psi_summary(psi_samples, "vm")["memory"]
     assert memory_psi["max_some_avg10"] == 3
     assert memory_psi["some_stall_us"] == 15
+
+
+def test_lifecycle_proc_io_parser_and_unreset_kernel_peak(tmp_path: Path) -> None:
+    proc_io = tmp_path / "io"
+    proc_io.write_text("rchar: 10\nwrite_bytes: 4096\n", encoding="ascii")
+    assert lifecycle_module._read_key_value_file(proc_io) == {
+        "rchar": 10,
+        "write_bytes": 4096,
+    }
+    assert lifecycle_module._checkpoint_operation_peak(3000, 4096) == (
+        4096,
+        4096,
+    )
 
 
 def test_formal_replay_gate_rejects_uncovered_checkpoint_transient() -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -34,6 +36,9 @@ class GatewayRequest:
     delivered_unix_s: float = 0.0
     request_payload: dict[str, Any] = field(default_factory=dict)
     replay_input_match: bool | None = None
+    replay_input_match_mode: str | None = None
+    replay_input_expected_sha256: str | None = None
+    replay_input_actual_sha256: str | None = None
     admission: dict[str, Any] = field(default_factory=dict)
     http_attempts: int = 0
     reconnect_attempts: int = 0
@@ -102,6 +107,10 @@ class ModelGateway:
                     self._send(status, content_type, body)
                     gateway.mark_delivery(request_id, delivered=True)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    print(
+                        f"model gateway rejected request: {type(exc).__name__}: {exc}",
+                        file=sys.stderr, flush=True,
+                    )
                     self._send(HTTPStatus.BAD_REQUEST, "application/json", json.dumps({"error": str(exc)}).encode())
                 except (BrokenPipeError, ConnectionResetError):
                     if request_id is not None:
@@ -162,13 +171,39 @@ class ModelGateway:
                 if index is not None and index >= len(self.actions):
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
                 replay_input_match = None
+                replay_input_match_mode = None
+                replay_input_expected_sha256 = None
+                replay_input_actual_sha256 = None
                 if index is not None:
                     expected = self.actions[index].input
                     if isinstance(expected, list):
-                        replay_input_match = expected == canonical.get("messages")
+                        actual_input = canonical.get("messages")
                     elif isinstance(expected, dict) and expected:
-                        replay_input_match = expected == canonical
+                        actual_input = canonical
+                    else:
+                        actual_input = None
+                    if actual_input is not None:
+                        expected_identity = _canonical_replay_input(expected)
+                        actual_identity = _canonical_replay_input(actual_input)
+                        replay_input_match = expected_identity == actual_identity
+                        replay_input_match_mode = "volatile_fields_v1"
+                        replay_input_expected_sha256 = _canonical_sha256(expected_identity)
+                        replay_input_actual_sha256 = _canonical_sha256(actual_identity)
                     if replay_input_match is False:
+                        rejection = self.store_path.with_name(
+                            f"model-rejected-request-{index:04d}.json"
+                        )
+                        temporary = rejection.with_name(rejection.name + ".next")
+                        temporary.write_text(json.dumps({
+                            "actual": actual_input,
+                            "actual_canonical": actual_identity,
+                            "actual_sha256": replay_input_actual_sha256,
+                            "expected": expected,
+                            "expected_canonical": expected_identity,
+                            "expected_sha256": replay_input_expected_sha256,
+                            "model_step": index,
+                        }, sort_keys=True))
+                        temporary.replace(rejection)
                         raise ValueError(f"replay request diverged at model step {index}")
                 occurrence = len(matching)
                 request_id = hashlib.sha256(
@@ -180,6 +215,9 @@ class ModelGateway:
                     request_fingerprint=fingerprint,
                     request_payload=canonical,
                     replay_input_match=replay_input_match,
+                    replay_input_match_mode=replay_input_match_mode,
+                    replay_input_expected_sha256=replay_input_expected_sha256,
+                    replay_input_actual_sha256=replay_input_actual_sha256,
                 )
                 self._requests[request_id] = request
                 self._persist()
@@ -223,6 +261,25 @@ class ModelGateway:
     def records(self) -> list[dict[str, Any]]:
         with self._lock:
             return [asdict(item) for item in self._requests.values()]
+
+    def pending_records(self) -> list[dict[str, Any]]:
+        """Return only fields needed by checkpoint scheduling.
+
+        Copying every accumulated request payload at the 50 ms controller poll
+        rate becomes quadratic in conversation length and can starve response
+        admission at c40.  Scheduler decisions need no message content.
+        """
+        with self._lock:
+            return [
+                {
+                    "request_id": item.request_id,
+                    "replay_index": item.replay_index,
+                    "started_unix_s": item.started_unix_s,
+                    "ready": item.ready,
+                }
+                for item in self._requests.values()
+                if not item.ready
+            ]
 
     def _produce(self, request_id: str, payload: dict[str, Any]) -> None:
         with self._changed:
@@ -302,6 +359,52 @@ class ModelGateway:
         temporary = self.store_path.with_name(self.store_path.name + ".next")
         temporary.write_text(json.dumps([asdict(item) for item in self._requests.values()], sort_keys=True))
         temporary.replace(self.store_path)
+
+
+_RUNTIME_SESSION_RE = re.compile(
+    r"(?m)^(Runtime: .*?\| session=agent:main:explicit:)session-\d+"
+    r"( \| sessionId=)session-\d+( \|.*)$"
+)
+_PYTEST_TIME_RE = re.compile(r"(?m)^(\d+ passed in )\d+(?:\.\d+)?s$")
+_OPENCLAW_PROMPT_TIME_RE = re.compile(
+    r"(?m)^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} "
+    r"\d{2}:\d{2} UTC\](?= )"
+)
+_GENERATED_DIRECTORY_MTIME_RE = re.compile(
+    r"(?m)^(.+\s)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+    r"\d{1,2} \d{2}:\d{2} "
+    r"(\.|\.clawbox|openclaw-ssh-shared-[^\s]+)$"
+)
+_GIT_COMMIT_HEADER_RE = re.compile(r"(?m)^(\[master )[0-9a-f]{7,40}(\] )")
+_GIT_LOG_HEAD_RE = re.compile(
+    r"(?m)^[0-9a-f]{7,40}(?= .+\n(?:[0-9a-f]{7,40} |\?\? ))"
+)
+
+
+def _canonical_replay_text(value: str) -> str:
+    """Mask only per-session values known to be nondeterministic in this workload."""
+    value = _RUNTIME_SESSION_RE.sub(r"\1session-N\2session-N\3", value)
+    value = _OPENCLAW_PROMPT_TIME_RE.sub("[REPLAY-TIME]", value)
+    value = _GENERATED_DIRECTORY_MTIME_RE.sub(r"\1REPLAY-MTIME \2", value)
+    value = _PYTEST_TIME_RE.sub(r"\1N.NNs", value)
+    value = _GIT_COMMIT_HEADER_RE.sub(r"\1COMMIT\2", value)
+    return _GIT_LOG_HEAD_RE.sub("COMMIT", value)
+
+
+def _canonical_replay_input(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonical_replay_input(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_replay_input(item) for item in value]
+    if isinstance(value, str):
+        return _canonical_replay_text(value)
+    return value
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
 
 
 def _replay_response(action: ReplayAction, stream: bool) -> tuple[int, str, bytes]:
