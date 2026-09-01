@@ -371,7 +371,7 @@ _OPENCLAW_PROMPT_TIME_RE = re.compile(
     r"\d{2}:\d{2} UTC\](?= )"
 )
 _GENERATED_DIRECTORY_MTIME_RE = re.compile(
-    r"(?m)^(.+\s)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+    r"(?m)^(.+\s)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
     r"\d{1,2} \d{2}:\d{2} "
     r"(\.|\.clawbox|openclaw-ssh-shared-[^\s]+)$"
 )

@@ -204,6 +204,15 @@ def test_paper_policy_matrices_keep_4_gib_capacity_and_axes_separate():
     assert len(temporal) == 4
     assert {arm["admission_policy"] for arm in temporal} == {"p90"}
 
+    predicted_temporal = expand_paper_policy_matrix({**base, "paper_experiment": {
+        "dimension": "temporal", "admission_policies": ["p90"],
+        "reclamation_policies": ["checkpoint", "hybrid"],
+        "decision_policies": ["wait_aware_pressure"],
+    }})
+    assert {arm["decision_policy"] for arm in predicted_temporal} == {
+        "wait_aware_pressure",
+    }
+
     mechanism = expand_paper_policy_matrix({**base, "paper_experiment": {
         "dimension": "mechanism", "admission_policies": ["p90"],
         "reclamation_policies": ["resident", "balloon", "checkpoint"],

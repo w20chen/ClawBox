@@ -495,7 +495,9 @@ def test_replay_gateway_accepts_only_documented_volatile_input_fields(tmp_path: 
     )
     actual = expected.replace("session-0000", "session-0042")
     actual = actual.replace("19:16 UTC", "19:43 UTC")
-    actual = actual.replace("Aug 31 19:16", "Aug 31 19:45")
+    # GNU ls pads a single-digit day with two spaces (for example, "Sep  1").
+    # Crossing that boundary must not make an otherwise identical replay diverge.
+    actual = actual.replace("Aug 31 19:16", "Sep  1 19:45")
     actual = actual.replace("0.28s", "0.91s").replace("790ea5c", "4e1e6ea")
     trace = tmp_path / "trace.jsonl"
     _write_jsonl(trace, [{

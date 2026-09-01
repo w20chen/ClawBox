@@ -326,14 +326,17 @@ def expand_paper_policy_matrix(raw: dict[str, Any]) -> list[dict[str, str]]:
             raise ValueError("temporal experiment fixes exactly one admission policy")
         if not reclamation or not set(reclamation) <= _PAPER_RECLAMATION_POLICIES:
             raise ValueError("temporal reclamation_policies are empty or invalid")
-        if decisions and decisions != ["fixed_delay"]:
-            raise ValueError("temporal experiment fixes checkpoint decisions to fixed_delay")
+        if decisions and (
+            len(decisions) != 1 or decisions[0] not in _PAPER_DECISION_POLICIES
+        ):
+            raise ValueError("temporal experiment fixes exactly one checkpoint decision")
         if restores != ["reactive"]:
             raise ValueError("temporal experiment fixes restore_policies to reactive")
         arms = [{
             "admission_policy": admission[0], "reclamation_policy": policy,
             "decision_policy": (
-                "fixed_delay" if policy in {"checkpoint", "hybrid"} else "none"
+                (decisions[0] if decisions else "fixed_delay")
+                if policy in {"checkpoint", "hybrid"} else "none"
             ),
             "restore_policy": "reactive",
         } for policy in reclamation]
