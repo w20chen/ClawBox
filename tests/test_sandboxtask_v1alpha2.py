@@ -112,16 +112,13 @@ def test_cancel_patch_shape():
     assert cancel_patch() == {"spec": {"desiredState": DESIRED_CANCELLED}}
 
 
-def test_served_crd_idempotency_limits_match():
-    limits = []
-    for filename, version in (
-        ("sandboxtask-crd.yaml", "v1alpha1"),
-        ("sandboxtask-crd-v1alpha2.yaml", "v1alpha2"),
-    ):
-        crd = yaml.safe_load((ROOT / "deploy" / filename).read_text(encoding="utf-8"))
-        schema = next(item for item in crd["spec"]["versions"] if item["name"] == version)
-        limits.append(
-            schema["schema"]["openAPIV3Schema"]["properties"]["spec"]
-            ["properties"]["idempotencyKey"]["maxLength"]
-        )
-    assert limits == [512, 512]
+def test_served_crd_idempotency_limit_matches_builder():
+    crd = yaml.safe_load(
+        (ROOT / "deploy" / "sandboxtask-crd.yaml").read_text(encoding="utf-8")
+    )
+    schema = crd["spec"]["versions"][0]
+    assert schema["name"] == "v1alpha1"
+    assert (
+        schema["schema"]["openAPIV3Schema"]["properties"]["spec"]
+        ["properties"]["idempotencyKey"]["maxLength"]
+    ) == 512

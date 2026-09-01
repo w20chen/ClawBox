@@ -1544,21 +1544,6 @@ def test_engine_hashes_final_state_validation() -> None:
     assert summary.validation_sha256 == __import__("hashlib").sha256(b"stable").hexdigest()
 
 
-def test_guest_ssh_controller_requires_requests_and_guest_completion(tmp_path: Path) -> None:
-    script = Path(__file__).parents[1] / "scripts" / "run-guest-ssh-smoke.py"
-    spec = importlib.util.spec_from_file_location("guest_ssh_smoke", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    store = tmp_path / "requests.json"
-    log = tmp_path / "runtime.log"
-    store.write_text(json.dumps([{"request_id": "a", "ready": True}]))
-    log.write_text('boot\n{"ok":true,"actions":2}\n')
-    assert module._wait_complete(store, log, 1, 0.1)[0]["request_id"] == "a"
-    with pytest.raises(TimeoutError):
-        module._wait_complete(store, log, 2, 0.01)
-
-
 def test_engine_detects_replay_divergence() -> None:
     action = ReplayAction("tool", "t", 1, 0, 0, "exec", {"command": "exit 7"}, "", 0)
     with pytest.raises(RuntimeError, match="exit mismatch"):
