@@ -1,18 +1,16 @@
 # ClawBox
 
-ClawBox runs coding-agent workloads in isolated virtual machines on a
+ClawBox runs coding agent workloads in isolated virtual machines on a
 dedicated ARM64 server. Every task uses two Kata/Firecracker VMs:
 
-- the **agent VM** runs OpenClaw and ClawTune;
-- the **workspace VM** contains the repository and executes commands;
+- the **Runtime VM** runs OpenClaw and ClawTune;
+- the **Tool VM** contains the repository and executes commands;
 - a Kubernetes controller creates, monitors, collects, and removes both VMs.
 
 The separation keeps model credentials away from repository processes while
 allowing the agent to run real commands over SSH. Resource measurements are
-collected inside the workspace VM, where the command processes and their Linux
+collected inside the Tool VM, where the command processes and their Linux
 cgroups are visible.
-
-![ClawBox architecture](docs/images/clawbox-overview.png)
 
 The supported production target is one dedicated openEuler ARM64 host, such as
 a Kunpeng server, with KVM, cgroup v2, Kubernetes, Kata Containers, and
@@ -50,8 +48,8 @@ otherwise. Production images must use immutable `IMAGE@sha256:...` references.
 
 ## Architecture
 
-The agent VM receives model configuration and task-scoped upload credentials,
-but not the repository. The workspace VM receives the repository and SSH
+The Runtime VM receives model configuration and task-scoped upload credentials,
+but not the repository. The Tool VM receives the repository and SSH
 service, but never the model API key or central artifact credentials.
 
 Tool Bridge creates a cgroup for each command and records CPU, memory, and
@@ -92,13 +90,13 @@ concurrency, or timeout.
 
 Fixed profiles:
 
-| Profile | Agent VM | Workspace VM |
+| Profile | Runtime VM | Tool VM |
 | --- | --- | --- |
 | `small` | 1 vCPU, 2 GiB, plus ClawTune | 2 vCPU, 4 GiB |
 | `medium` | 2 vCPU, 4 GiB, plus ClawTune | 4 vCPU, 8 GiB |
 | `large` | 4 vCPU, 8 GiB, plus ClawTune | 8 vCPU, 16 GiB |
 
-P90 sizing changes only workspace CPU and memory. The agent VM remains on the
+P90 sizing changes only workspace CPU and memory. The Runtime VM remains on the
 fixed profile. Predictions receive safety headroom, a minimum viable
 allocation, and a maximum equal to the selected profile. Kubernetes VM
 checkpointing is not implemented.
@@ -499,7 +497,7 @@ or the research commands below.
 
 ## Direct Firecracker experiments
 
-Each session still uses separate agent and workspace VMs with OpenClaw,
+Each session still uses separate agent and Tool VMs with OpenClaw,
 ClawTune, and SSH. The runner is single-host and fail-stop; rerun failed arms
 from fresh disks rather than treating it as a highly available service.
 
