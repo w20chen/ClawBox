@@ -12,7 +12,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 from cubesandbox import NEVER_TIMEOUT, Sandbox, Template
 
@@ -173,8 +172,12 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: i
             )
             return runtime.commands.run(command, timeout=45, cwd="/workspace")
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(runtime_call, calls))
+        # This pair smoke has one Tool VM by design. The two independent
+        # session registrations are exercised sequentially here because the
+        # Cube SDK/tool transport is not a supported concurrent command
+        # multiplexer for one VM. WorkerBridge concurrency and HOL behavior
+        # across independent Tool executors is covered by the stress tests.
+        results = [runtime_call(item) for item in calls]
         assert all(result.exit_code == 0 for result in results), results
         responses = [json.loads(result.stdout) for result in results]
         for response, (session, execution_id, output) in zip(responses, calls):
