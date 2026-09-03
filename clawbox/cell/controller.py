@@ -7,7 +7,10 @@ from typing import Any, Callable
 from clawbox.cube import CubeSandboxClient
 from clawbox.experiments import ExperimentSpec
 
-from .worker_manifest import experiment_configmap, experiment_worker_job, resolved_spec_digest
+from .worker_manifest import (
+    experiment_configmap, experiment_worker_job, resolved_spec_digest,
+    worker_bridge_service,
+)
 
 GROUP = "clawbox.openai.com"
 VERSION = "v1alpha2"
@@ -129,10 +132,45 @@ class CellReconciler:
                 raise
         return self._get(self.batch.read_namespaced_job, name, namespace) is None
 
+    def _delete_bridge_service(self, task: dict[str, Any]) -> bool:
+        name = f"{task['metadata']['name']}-bridge"
+        namespace = task["metadata"]["namespace"]
+        try:
+            self.core.delete_namespaced_service(name, namespace)
+        except Exception as exc:
+            if not self._not_found(exc):
+                raise
+        return self._get(self.core.read_namespaced_service, name, namespace) is None
+
     def _cleanup(self, task: dict[str, Any]) -> bool:
         job_gone = self._delete_job(task)
+        service_gone = self._delete_bridge_service(task)
         self.cube.kill_owned_sandboxes(task["metadata"]["uid"])
-        return job_gone and not self.cube.list_owned_sandboxes(task["metadata"]["uid"])
+        return job_gone and service_gone and not self.cube.list_owned_sandboxes(task["metadata"]["uid"])
+
+    def _bridge_endpoint(self, task: dict[str, Any]) -> tuple[str, int]:
+        name = f"{task['metadata']['name']}-bridge"
+        namespace = task["metadata"]["namespace"]
+        service = self._get(self.core.read_namespaced_service, name, namespace)
+        if service is None:
+            raise RuntimeError(f"bridge Service {namespace}/{name} is missing")
+        spec = service.get("spec", {}) if isinstance(service, dict) else service.spec
+        ports = spec.get("ports", []) if isinstance(spec, dict) else spec.ports
+        first = ports[0]
+        node_port = first.get("nodePort") if isinstance(first, dict) else first.node_port
+        node_name = task["spec"]["experimentSpec"]["resources"]["target_node"]
+        node = self.core.read_node(node_name)
+        status = node.get("status", {}) if isinstance(node, dict) else node.status
+        addresses = status.get("addresses", []) if isinstance(status, dict) else status.addresses
+        internal = next(
+            (item.get("address") if isinstance(item, dict) else item.address
+             for item in addresses
+             if (item.get("type") if isinstance(item, dict) else item.type) == "InternalIP"),
+            None,
+        )
+        if not internal:
+            raise RuntimeError(f"target Worker node {node_name} has no InternalIP")
+        return str(internal), int(node_port)
 
     def _another_worker_active(self, task: dict[str, Any]) -> bool:
         response = self.batch.list_namespaced_job(
@@ -182,17 +220,30 @@ class CellReconciler:
                 return False
             self._ensure(self.core.read_namespaced_config_map,
                          self.core.create_namespaced_config_map, experiment_configmap(task))
+            bridge = self._ensure(self.core.read_namespaced_service,
+                                  self.core.create_namespaced_service, worker_bridge_service(task))
+            bridge_spec = bridge.get("spec", {}) if isinstance(bridge, dict) else bridge.spec
+            bridge_ports = bridge_spec.get("ports", []) if isinstance(bridge_spec, dict) else bridge_spec.ports
+            first = bridge_ports[0]
+            bridge_port = first.get("nodePort") if isinstance(first, dict) else first.node_port
+            bridge_host, _ = self._bridge_endpoint(task)
             self._ensure(self.batch.read_namespaced_job,
-                         self.batch.create_namespaced_job, experiment_worker_job(task))
+                         self.batch.create_namespaced_job,
+                         experiment_worker_job(task, bridge_host=bridge_host,
+                                              bridge_node_port=int(bridge_port)))
             self._patch_status(task, CellPhase.RUNNING, jobName=f"{name}-worker",
                                resolvedSpecDigest=resolved_spec_digest(task), startedAt=now())
             return True
         job_phase = self._job_phase(job)
         if job_phase is CellPhase.SUCCEEDED:
             self.cube.kill_owned_sandboxes(metadata["uid"])
+            service_gone = self._delete_bridge_service(task)
             if self.cube.list_owned_sandboxes(metadata["uid"]):
                 self._patch_status(task, CellPhase.FAILED, outcome="failed",
                                    errorCategory="sandbox_cleanup")
+            elif not service_gone:
+                self._patch_status(task, CellPhase.FAILED, outcome="failed",
+                                   errorCategory="bridge_service_cleanup")
             else:
                 self._patch_status(task, CellPhase.SUCCEEDED, outcome="succeeded",
                                    resultRef=(f"{task['spec']['resultHostPath'].rstrip('/')}"
@@ -200,6 +251,7 @@ class CellReconciler:
                                    completedAt=now())
         elif job_phase is CellPhase.FAILED:
             self.cube.kill_owned_sandboxes(metadata["uid"])
+            self._delete_bridge_service(task)
             self._patch_status(task, CellPhase.FAILED, outcome="failed", errorCategory="worker_job")
         else:
             self._patch_status(task, CellPhase.RUNNING, jobName=f"{name}-worker")

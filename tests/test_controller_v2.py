@@ -12,6 +12,7 @@ class NotFound(Exception):
 class Core:
     def __init__(self) -> None:
         self.maps = {}
+        self.services = {}
 
     def read_namespaced_config_map(self, name, namespace):
         try: return self.maps[(namespace, name)]
@@ -20,6 +21,22 @@ class Core:
     def create_namespaced_config_map(self, namespace, manifest):
         self.maps[(namespace, manifest["metadata"]["name"])] = manifest
         return manifest
+
+    def read_namespaced_service(self, name, namespace):
+        try: return self.services[(namespace, name)]
+        except KeyError: raise NotFound()
+
+    def create_namespaced_service(self, namespace, manifest):
+        manifest["spec"]["ports"][0]["nodePort"] = 31808
+        self.services[(namespace, manifest["metadata"]["name"])] = manifest
+        return manifest
+
+    def delete_namespaced_service(self, name, namespace):
+        if self.services.pop((namespace, name), None) is None:
+            raise NotFound()
+
+    def read_node(self, name):
+        return {"status": {"addresses": [{"type": "InternalIP", "address": "10.0.0.8"}]}}
 
 
 class Batch:
@@ -108,7 +125,15 @@ def test_controller_creates_exactly_one_node_pinned_worker_job() -> None:
     assert worker_node["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
     bridge_host = next(item for item in pod["containers"][0]["env"]
                        if item["name"] == "CLAWBOX_BRIDGE_HOST")
-    assert bridge_host["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"
+    assert bridge_host["value"] == "10.0.0.8"
+    bridge_port = next(item for item in pod["containers"][0]["env"]
+                       if item["name"] == "CLAWBOX_BRIDGE_NODE_PORT")
+    assert bridge_port["value"] == "31808"
+    service = core.services[("bench", "run-a-bridge")]
+    assert service["spec"]["type"] == "NodePort"
+    assert service["spec"]["externalTrafficPolicy"] == "Local"
+    assert service["spec"]["ports"][0]["targetPort"] == 18080
+    assert service["metadata"]["ownerReferences"][0]["uid"] == "uid-a"
     assert custom.statuses[-1]["phase"] == "running"
     assert set(custom.statuses[-1]) <= {"phase", "jobName", "resolvedSpecDigest",
                                         "errorCategory", "resultRef"}
@@ -141,3 +166,4 @@ def test_controller_propagates_success_and_cleans_orphans() -> None:
         "phase": "succeeded", "resultRef": "/data/results/r/a/r/summary.json",
     }
     assert cube.cleaned == ["uid-a"]
+    assert ("bench", "run-a-bridge") not in core.services

@@ -12,11 +12,12 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from cubesandbox import NEVER_TIMEOUT, Sandbox, Template
 
 from clawbox.cube.api_retry import read_with_backoff
-from clawbox.experiments.openclaw_driver import CubeToolBridge
+from clawbox.experiments.openclaw_driver import WorkerBridge
 from clawbox.replay.lifecycle import CommandResult
 
 
@@ -84,17 +85,15 @@ def assert_running(sandbox_id: str, label: str) -> None:
     assert state == "running", f"{label} is not running: {state!r}"
 
 
-def runtime_worker_tool_check(runtime, tool, *, bridge_host: str) -> dict:
-    """Exercise the real Runtime -> worker bridge -> Tool route once.
+def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: int) -> dict:
+    """Exercise Runtime -> NodePort -> fixed WorkerBridge -> Tool concurrently.
 
     This is deliberately a minimal bridge check, not the full exact-ID
     validation performed by the worker's persisted trace pipeline.
     """
-    execution_id = f"bridge-{uuid.uuid4().hex}"
-    captured: dict = {}
+    captured: dict[str, dict] = {}
 
-    def execute(command: str, timeout: float, received_id: str) -> CommandResult:
-        assert received_id == execution_id
+    def execute(session_id: str, command: str, timeout: float, received_id: str) -> CommandResult:
         envelope = "__CBX_EXEC_1__" + json.dumps(
             {"v": 1, "execution_id": received_id}, separators=(",", ":"),
         ) + "\n" + command
@@ -107,20 +106,27 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str) -> dict:
         records = [json.loads(line.removeprefix(marker)) for line in result.stderr.splitlines()
                    if line.startswith(marker)]
         assert len(records) == 1, result.stderr
-        captured["record"] = records[0]
+        captured[received_id] = {"record": records[0], "session_id": session_id,
+                                 "tool_sandbox_id": tool.sandbox_id}
         return CommandResult(result.exit_code, result.stdout, "", result.duration_s)
 
-    payload = base64.b64encode(json.dumps({
-        "command": "printf runtime-worker-tool-ok",
-        "execution_id": execution_id,
-        "timeout_seconds": 30,
-    }, separators=(",", ":")).encode()).decode()
-    with CubeToolBridge(execute, advertise_host=bridge_host) as bridge:
-        # A bare POST must reach this listener and be rejected by auth. This
-        # distinguishes TCP reachability from URL/path and auth failures.
+    bridge = WorkerBridge(advertise_host=bridge_host, advertised_port=bridge_port)
+    with bridge:
+        session_a = bridge.register(
+            "bridge-session-a",
+            lambda command, timeout, execution_id: execute(
+                "bridge-session-a", command, timeout, execution_id),
+            task_id="pair-smoke", tool_sandbox_id=tool.sandbox_id,
+        )
+        session_b = bridge.register(
+            "bridge-session-b",
+            lambda command, timeout, execution_id: execute(
+                "bridge-session-b", command, timeout, execution_id),
+            task_id="pair-smoke", tool_sandbox_id=tool.sandbox_id,
+        )
+        bridge.wait_ready()
         probe = urllib.request.Request(
-            f"http://127.0.0.1:{bridge.actual_port}/execute",
-            data=b"{}", method="POST",
+            "http://127.0.0.1:18080/execute", data=b"{}", method="POST",
         )
         try:
             urllib.request.build_opener(urllib.request.ProxyHandler({})).open(probe)
@@ -128,42 +134,77 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str) -> dict:
             assert exc.code == 401, exc
         else:
             raise AssertionError("unauthenticated bridge probe was not rejected with 401")
-        command = (
-            f"body=$(echo {shlex.quote(payload)} | base64 -d); "
-            f"curl -fsS -X POST -H 'Authorization: Bearer {bridge.token}' "
-            "-H 'Content-Type: application/json' "
-            f"--data \"$body\" {shlex.quote(bridge.url)}"
+
+        wrong_token = runtime.commands.run(
+            f"curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' -X POST "
+            f"-H 'Authorization: Bearer not-a-token' {shlex.quote(bridge.url + '/execute')}",
+            timeout=30, cwd="/workspace",
         )
-        result = runtime.commands.run(command, timeout=45, cwd="/workspace")
-    assert result.exit_code == 0, result.stderr
-    try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise AssertionError(f"Runtime bridge returned non-JSON: {result.stdout!r} {result.stderr!r}") from exc
-    assert response.get("stdout") == "runtime-worker-tool-ok", response
-    assert response.get("execution_id") == execution_id, response
-    record = captured["record"]
-    assert record.get("execution_id") == execution_id
-    assert record.get("telemetry_state") == "complete"
-    artifact_root = "/var/lib/clawtune/artifacts/tool-resource/"
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", execution_id)
-    cgroup = json.loads(tool.files.read(
-        f"{artifact_root}cgroup-resource-{safe_id}.json",
-    ))
-    native = json.loads(tool.files.read(str(record["telemetry_artifact"])))
-    assert cgroup.get("execution_id") == execution_id
-    assert cgroup.get("source") == "cgroup-v2"
-    assert cgroup.get("sampling_quality") == "valid"
-    assert native.get("execution_id") == execution_id
-    assert native.get("collection_validity") == "valid"
-    assert native.get("cleanup") == "ok"
-    assert int((native.get("telemetry_loss_total") or {}).get("total") or 0) == 0
-    # The bridge response, worker-side record, cgroup artifact, and eBPF
-    # artifact all carry one identical execution ID: 1/1 exact join.
-    return {"execution_id": execution_id, "exact_id_join": 1.0,
+        assert wrong_token.exit_code == 0 and wrong_token.stdout.strip() == "401", wrong_token
+        cross_payload = base64.b64encode(json.dumps({
+            "command": "printf should-not-run", "execution_id": "bridge-cross",
+            "session_id": session_b.session_id,
+        }, separators=(",", ":")).encode()).decode()
+        cross = runtime.commands.run(
+            f"body=$(echo {shlex.quote(cross_payload)} | base64 -d); "
+            f"curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' -X POST "
+            f"-H 'Authorization: Bearer {session_a.token}' -H 'Content-Type: application/json' "
+            f"--data \"$body\" {shlex.quote(bridge.url + '/execute')}",
+            timeout=30, cwd="/workspace",
+        )
+        assert cross.exit_code == 0 and cross.stdout.strip() == "403", cross
+
+        calls = [
+            (session_a, "bridge-a-" + uuid.uuid4().hex, "runtime-worker-tool-a"),
+            (session_b, "bridge-b-" + uuid.uuid4().hex, "runtime-worker-tool-b"),
+        ]
+
+        def runtime_call(item):
+            session, execution_id, output = item
+            payload = base64.b64encode(json.dumps({
+                "command": f"printf {output}", "execution_id": execution_id,
+                "session_id": session.session_id, "timeout_seconds": 30,
+            }, separators=(",", ":")).encode()).decode()
+            command = (
+                f"body=$(echo {shlex.quote(payload)} | base64 -d); "
+                f"curl --noproxy '*' -fsS -X POST -H 'Authorization: Bearer {session.token}' "
+                "-H 'Content-Type: application/json' "
+                f"--data \"$body\" {shlex.quote(session.url + '/execute')}"
+            )
+            return runtime.commands.run(command, timeout=45, cwd="/workspace")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(runtime_call, calls))
+        assert all(result.exit_code == 0 for result in results), results
+        responses = [json.loads(result.stdout) for result in results]
+        for response, (session, execution_id, output) in zip(responses, calls):
+            assert response.get("stdout") == output, response
+            assert response.get("execution_id") == execution_id, response
+            assert response.get("session_id") == session.session_id, response
+            observed = captured[execution_id]
+            record = observed["record"]
+            assert observed["session_id"] == session.session_id
+            assert observed["tool_sandbox_id"] == tool.sandbox_id
+            assert record.get("execution_id") == execution_id
+            assert record.get("telemetry_state") == "complete"
+            artifact_root = "/var/lib/clawtune/artifacts/tool-resource/"
+            safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", execution_id)
+            cgroup = json.loads(tool.files.read(f"{artifact_root}cgroup-resource-{safe_id}.json"))
+            native = json.loads(tool.files.read(str(record["telemetry_artifact"])))
+            assert cgroup.get("execution_id") == execution_id
+            assert cgroup.get("source") == "cgroup-v2"
+            assert cgroup.get("sampling_quality") == "valid"
+            assert native.get("execution_id") == execution_id
+            assert native.get("collection_validity") == "valid"
+            assert native.get("cleanup") == "ok"
+            assert int((native.get("telemetry_loss_total") or {}).get("total") or 0) == 0
+        assert session_a.close()
+        assert session_b.close()
+    assert bridge.session_count == 0
+    return {"execution_ids": [item[1] for item in calls], "exact_id_join": 1.0,
             "endpoint": bridge.url, "startup": bridge.startup,
-            "worker_bridge_execution_id": response["execution_id"],
-            "tool_record_execution_id": record["execution_id"]}
+            "worker_bridge_execution_ids": [item[1] for item in calls],
+            "tool_record_execution_ids": [item[1] for item in calls]}
 
 
 def main() -> int:
@@ -173,6 +214,8 @@ def main() -> int:
     parser.add_argument("--node", required=True)
     parser.add_argument("--bridge-host", required=True,
                         help="worker host address reachable from the Runtime VM")
+    parser.add_argument("--bridge-port", required=True, type=int,
+                        help="allocated NodePort for this Worker")
     args = parser.parse_args()
     owner = f"pair-smoke-{uuid.uuid4().hex}"
     sandboxes = []
@@ -230,7 +273,8 @@ def main() -> int:
         assert after["ebpf_loss_total"] == 0, after
         assert_running(runtime.sandbox_id, "Runtime after Tool restore")
         assert tool.files.read("/workspace/pair-state.txt") == "pair-ok"
-        bridge = runtime_worker_tool_check(runtime, tool, bridge_host=args.bridge_host)
+        bridge = runtime_worker_tool_check(runtime, tool, bridge_host=args.bridge_host,
+                                            bridge_port=args.bridge_port)
         print(json.dumps({"status": "PASS", "owner": owner,
                           "runtime_id": runtime.sandbox_id, "tool_id": tool.sandbox_id,
                           "timings": timings, "telemetry": {"before": before, "after": after},

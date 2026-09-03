@@ -25,10 +25,21 @@ injected only into the Runtime VM and never into the Tool VM. Kubernetes places
 the Worker; the Worker constrains both Cube sandboxes to that same node.
 
 OpenClaw has only the required `cube_shell` tool in experiment sessions; its
-host-local file, shell, process, browser, and patch tools are denied. The Worker
-bridge is authenticated with a per-session random token. The Runtime VM gets a
-narrow CubeSandbox egress allow rule for only the Worker Pod IP; the Tool VM
-gets no bridge or model credential.
+host-local file, shell, process, browser, and patch tools are denied. Each
+ExperimentWorker starts one fixed-port `WorkerBridge` on `0.0.0.0:18080`, and
+the controller creates one authenticated NodePort Service per SandboxTask with
+`targetPort: 18080` and `externalTrafficPolicy: Local`. The Runtime VM is
+advertised `http://<worker-node-InternalIP>:<allocated-nodePort>` and receives
+only that node InternalIP `/32` in `network_allow_out`. Each session has its own
+high-entropy bearer token and executor registration; requests never hold the
+registry lock while executing a Tool command. The Tool VM gets no bridge or
+model credential.
+
+This NodePort is an authenticated control-plane adapter required by this
+deployment because CubeSandbox guests cannot currently route to Kubernetes
+PodCIDR or ServiceCIDR addresses. It is not strict node-port-level egress
+isolation: the current CubeSandbox `allow_out` rule authorizes the node IP as a
+whole. Do not advertise a normal Worker Pod IP or ClusterIP to a Runtime VM.
 
 ClawTune observes this trusted boundary. Each completed `cube_shell` call emits
 a Runtime-VM native ClawTune span and a matching Worker bridge record, Tool-VM
@@ -106,6 +117,14 @@ kubectl apply -f deploy/sandboxtask-vertical-slice.yaml
 kubectl -n clawbox-benchmarks get sandboxtask,job,pod
 ```
 
+The Worker Service is created before the Worker Job so Kubernetes allocates its
+NodePort before Runtime VMs can be created. The Worker then binds its fixed
+listener, verifies the advertised NodePort returns the expected unauthenticated
+`401`, and only then starts Runtime sessions. Service selectors include the
+SandboxTask UID, owner references are set, and terminal reconciliation deletes
+the Service after killing task-owned sandboxes. A successful task therefore
+leaves no task-owned NodePort Service.
+
 Deployment examples contain machine-specific node names, template IDs, and
 immutable image digests; resolve and update them when targeting another node.
 
@@ -122,6 +141,14 @@ per-arm JSON, JSONL events, ClawTune-compatible `traces/*.jsonl` and
 Results include the resolved policy, correctness, latency, lifecycle, physical
 node-memory/storage measurements, SandboxTask identity, and pinned Cube/template
 provenance. Failed or partial arms are rerun rather than reused.
+
+Bridge logs are correlation-only: task ID, session ID, execution ID, peer IP,
+selected Tool sandbox ID, dispatch and execution timestamps, response status,
+and latency. Bearer tokens are never logged. The fixed bridge is concurrent;
+slow Tool execution in one session does not block another session, and session
+unregister waits for that session's in-flight calls without affecting other
+registrations. Use the pair smoke and the WorkerBridge tests as the minimum
+bridge acceptance, then retain their JSON output alongside the arm results.
 
 Build an offline ClawTune dataset and evaluation from one or more completed run
 directories with:

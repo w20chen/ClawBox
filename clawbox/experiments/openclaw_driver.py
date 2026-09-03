@@ -1,4 +1,4 @@
-"""Trusted OpenClaw runner with a loopback-only CubeSandbox tool bridge."""
+"""Trusted OpenClaw runner and node-routed CubeSandbox tool bridge."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,9 @@ import secrets
 import base64
 import shlex
 import threading
+import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -103,6 +106,234 @@ class CubeToolBridge:
         self.thread.join(timeout=5)
 
 
+class _WorkerBridgeSessionState:
+    def __init__(self, *, task_id: str, session_id: str, execute: Callable,
+                 tool_sandbox_id: str | None) -> None:
+        self.task_id = task_id
+        self.session_id = session_id
+        self.execute = execute
+        self.tool_sandbox_id = tool_sandbox_id
+        self.calls: list[CommandResult] = []
+        self.active_requests = 0
+        self.draining = False
+        self.condition = threading.Condition()
+
+    def acquire(self) -> bool:
+        with self.condition:
+            if self.draining:
+                return False
+            self.active_requests += 1
+            return True
+
+    def release(self) -> None:
+        with self.condition:
+            self.active_requests -= 1
+            if self.active_requests == 0:
+                self.condition.notify_all()
+
+    def drain(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self.condition:
+            self.draining = True
+            while self.active_requests:
+                if deadline is None:
+                    self.condition.wait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self.condition.wait(remaining)
+            return True
+
+
+class WorkerBridge:
+    """One fixed-port, concurrent listener dispatching authenticated sessions."""
+
+    def __init__(self, *, advertise_host: str, advertised_port: int,
+                 bind_host: str = "0.0.0.0", bind_port: int = 18080) -> None:
+        self.bind_host = bind_host
+        self.advertised_host = advertise_host
+        self.bind_port = bind_port
+        self.advertised_port = advertised_port
+        self._sessions: dict[str, _WorkerBridgeSessionState] = {}
+        self._lock = threading.RLock()
+        self.requests: list[dict[str, Any]] = []
+        self._started = False
+        bridge = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                request_start = time.monotonic()
+                remote_ip, remote_port = self.client_address
+                if self.path != "/execute":
+                    self.send_error(404)
+                    return
+                supplied = self.headers.get("Authorization", "")
+                if not supplied.startswith("Bearer "):
+                    self.send_error(401)
+                    return
+                state = bridge._acquire(supplied.removeprefix("Bearer "))
+                if state is None:
+                    self.send_error(401)
+                    return
+                execution_id = ""
+                record: dict[str, Any] = {"source_ip": remote_ip, "source_port": remote_port,
+                                          "path": self.path, "task_id": state.task_id,
+                                          "session_id": state.session_id,
+                                          "tool_sandbox_id": state.tool_sandbox_id,
+                                          "request_start": request_start}
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 1 or length > 1_048_576:
+                        raise ValueError("invalid request size")
+                    body = json.loads(self.rfile.read(length))
+                    if not isinstance(body, dict):
+                        raise ValueError("request body must be an object")
+                    if str(body.get("session_id") or "") != state.session_id:
+                        self._json(403, {"error": "session binding rejected"})
+                        record["status"] = 403
+                        return
+                    execution_id = str(body["execution_id"])
+                    command = str(body["command"])
+                    if not _EXECUTION_ID.fullmatch(execution_id):
+                        raise ValueError("invalid execution_id")
+                    timeout = min(3600.0, max(1.0, float(body.get("timeout_seconds") or 300)))
+                    record["execution_id"] = execution_id
+                    record["dispatch_start"] = time.monotonic()
+                    record["tool_execution_start"] = time.monotonic()
+                    result = state.execute(command, timeout, execution_id)
+                    record["tool_execution_end"] = time.monotonic()
+                    state.calls.append(result)
+                    payload = {"exit_code": result.exit_code, "stdout": result.stdout,
+                               "stderr": result.stderr, "duration_seconds": result.duration_s,
+                               "execution_id": execution_id, "session_id": state.session_id}
+                    self._json(200, payload)
+                    record["status"] = 200
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    record["status"] = 400
+                    self._json(400, {"error": f"{type(exc).__name__}: {exc}"})
+                except Exception as exc:
+                    record["status"] = 500
+                    self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                finally:
+                    record["response_end"] = time.monotonic()
+                    record["latency_seconds"] = record["response_end"] - request_start
+                    with bridge._lock:
+                        bridge.requests.append(record)
+                    state.release()
+
+            def _json(self, status: int, value: dict) -> None:
+                encoded = json.dumps(value).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        self.server = ThreadingHTTPServer((self.bind_host, self.bind_port), Handler)
+        self.actual_port = int(self.server.server_port)
+        self.startup = {"bind_host": self.bind_host, "bind_port": self.actual_port,
+                        "advertised_host": self.advertised_host,
+                        "advertised_port": self.advertised_port,
+                        "url": self.url}
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       name="worker-bridge", daemon=True)
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.advertised_host}:{self.advertised_port}"
+
+    def _acquire(self, token: str) -> _WorkerBridgeSessionState | None:
+        with self._lock:
+            state = self._sessions.get(token)
+            if state is None or not state.acquire():
+                return None
+            return state
+
+    def register(self, session_id: str,
+                 execute: Callable[[str, float, str], CommandResult], *,
+                 task_id: str = "", tool_sandbox_id: str | None = None) -> "WorkerBridgeSession":
+        if not session_id or not _EXECUTION_ID.fullmatch(session_id):
+            raise ValueError("session_id must be a non-empty execution-safe identifier")
+        token = secrets.token_urlsafe(32)
+        state = _WorkerBridgeSessionState(task_id=task_id, session_id=session_id,
+                                          execute=execute, tool_sandbox_id=tool_sandbox_id)
+        with self._lock:
+            if not self._started:
+                raise RuntimeError("WorkerBridge must be started before registering sessions")
+            self._sessions[token] = state
+        return WorkerBridgeSession(self, token, state)
+
+    def unregister(self, token: str, *, timeout: float | None = None) -> bool:
+        with self._lock:
+            state = self._sessions.pop(token, None)
+        if state is None:
+            return True
+        return state.drain(timeout)
+
+    def __enter__(self) -> "WorkerBridge":
+        if self.actual_port != self.bind_port:
+            raise RuntimeError(f"WorkerBridge must bind fixed port {self.bind_port}, got {self.actual_port}")
+        self.thread.start()
+        self._started = True
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        with self._lock:
+            tokens = list(self._sessions)
+            self._started = False
+        for token in tokens:
+            self.unregister(token, timeout=30)
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    @property
+    def session_count(self) -> int:
+        with self._lock:
+            return len(self._sessions)
+
+    def wait_ready(self, *, attempts: int = 8, initial_delay: float = 0.25) -> None:
+        """Require the advertised NodePort to reach this listener before VMs start."""
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        request = urllib.request.Request(self.url + "/execute", data=b"{}", method="POST")
+        delay = initial_delay
+        last_error: Exception | None = None
+        for _ in range(attempts):
+            try:
+                opener.open(request, timeout=5)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401:
+                    return
+                last_error = exc
+            except (OSError, urllib.error.URLError) as exc:
+                last_error = exc
+            time.sleep(delay)
+            delay = min(delay * 2, 4.0)
+        raise RuntimeError(f"WorkerBridge NodePort readiness failed for {self.url}: {last_error}")
+
+
+class WorkerBridgeSession:
+    """Per-session authenticated view over the process-wide WorkerBridge."""
+
+    def __init__(self, bridge: WorkerBridge, token: str,
+                 state: _WorkerBridgeSessionState) -> None:
+        self._bridge = bridge
+        self._token = token
+        self._state = state
+        self.session_id = state.session_id
+        self.task_id = state.task_id
+        self.token = token
+        self.url = bridge.url
+        self.calls = state.calls
+
+    def close(self, *, timeout: float | None = None) -> bool:
+        return self._bridge.unregister(self._token, timeout=timeout)
+
+
 def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  bridge: CubeToolBridge, runtime_executor: Any,
                  output_dir: Path, timeout_seconds: int) -> dict:
@@ -130,6 +361,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"export HOME={shlex.quote(home)} OPENCLAW_HOME={shlex.quote(home + '/.openclaw')} "
         f"CLAWBOX_CUBE_TOOL_URL={shlex.quote(bridge.url)} "
         f"CLAWBOX_CUBE_TOOL_TOKEN={shlex.quote(bridge.token)} "
+        f"CLAWBOX_CUBE_TOOL_SESSION_ID={shlex.quote(session_id)} "
         f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
 

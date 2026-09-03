@@ -15,6 +15,27 @@ def owner_reference(task: dict[str, Any]) -> dict[str, Any]:
             "controller": True, "blockOwnerDeletion": True}
 
 
+def worker_bridge_service(task: dict[str, Any]) -> dict[str, Any]:
+    """Node-routed fixed-port adapter for exactly one SandboxTask Worker."""
+    metadata = task["metadata"]
+    return {
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {
+            "name": f"{metadata['name']}-bridge",
+            "namespace": metadata["namespace"],
+            "labels": {"app.kubernetes.io/name": "clawbox-worker-bridge",
+                        "clawbox.openai.com/task-uid": metadata["uid"]},
+            "ownerReferences": [owner_reference(task)],
+        },
+        "spec": {
+            "type": "NodePort", "externalTrafficPolicy": "Local",
+            "selector": {"clawbox.openai.com/task-uid": metadata["uid"]},
+            "ports": [{"name": "worker-bridge", "port": 18080,
+                       "targetPort": 18080, "protocol": "TCP"}],
+        },
+    }
+
+
 def experiment_configmap(task: dict[str, Any]) -> dict[str, Any]:
     name = task["metadata"]["name"]
     return {
@@ -25,7 +46,8 @@ def experiment_configmap(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def experiment_worker_job(task: dict[str, Any]) -> dict[str, Any]:
+def experiment_worker_job(task: dict[str, Any], *, bridge_host: str = "",
+                          bridge_node_port: int | None = None) -> dict[str, Any]:
     metadata = task["metadata"]
     spec = task["spec"]
     experiment = spec["experimentSpec"]
@@ -73,7 +95,8 @@ def experiment_worker_job(task: dict[str, Any]) -> dict[str, Any]:
                             {"name": "CLAWBOX_ATTEMPT_ID", "value": run_ref["attemptID"]},
                             {"name": "CLAWBOX_TASK_UID", "value": metadata["uid"]},
                             {"name": "CLAWBOX_WORKER_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
-                            {"name": "CLAWBOX_BRIDGE_HOST", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}},
+                            {"name": "CLAWBOX_BRIDGE_HOST", "value": bridge_host},
+                            {"name": "CLAWBOX_BRIDGE_NODE_PORT", "value": str(bridge_node_port or "")},
                             {"name": "CUBE_API_URL", "value": spec["cubeApiURL"]},
                             {"name": "CLAWBOX_KUBERNETES_VERSION", "value": os.environ.get("CLAWBOX_KUBERNETES_VERSION", "unknown")},
                             {"name": "CLAWBOX_CONTAINERD_VERSION", "value": os.environ.get("CLAWBOX_CONTAINERD_VERSION", "unknown")},

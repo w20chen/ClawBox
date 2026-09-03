@@ -222,9 +222,52 @@ not evidence of the Runtime-to-Worker path.
 On the Kunpeng validation host, the measured network behavior was: Worker Pod
 IP works from Worker and cube-node namespaces, but PodCIDR and ClusterIP are
 unroutable from a Cube guest. A temporary NodePort on the node address was
-reachable and returned the expected `401`. This means the production bridge
-must use a node-routed fixed endpoint (or another route explicitly provided by
-the deployment); do not advertise a normal Pod IP until the guest route exists.
+reachable and returned the expected `401`. The production design is therefore
+one process-wide WorkerBridge per ExperimentWorker, bound to
+`0.0.0.0:18080`, behind one NodePort Service per SandboxTask. Kubernetes
+allocates the NodePort; the Service uses `targetPort: 18080`, selects exactly
+the task Worker Pod by task UID, and uses `externalTrafficPolicy: Local`.
+
+The Worker advertises `http://<worker-node-InternalIP>:<allocated-nodePort>`
+to Runtime while keeping that separate from its local bind address. The
+Runtime `network_allow_out` contains only the node InternalIP `/32`. This
+NodePort is an authenticated control-plane adapter required because these
+CubeSandbox guests cannot route to Kubernetes PodCIDR or ServiceCIDR addresses;
+it does not provide strict node-port-level egress isolation because the current
+CubeSandbox allow-out rule authorizes the node IP as a whole.
+
+The WorkerBridge registry is keyed by high-entropy bearer token and immutable
+session ID. Each request records only task/session/execution IDs, peer IP,
+selected Tool sandbox ID, and timing fields; bearer tokens are never logged.
+Registry locks cover only registration, lookup, and removal. Tool execution is
+performed by `ThreadingHTTPServer` handlers, so a slow session does not create
+head-of-line blocking for other sessions. A session is removed from new lookup
+immediately and its active requests are drained before its Tool VM is cleaned.
+The Worker validates the fixed listener and NodePort with a direct unauthenticated
+POST expecting `401` before launching Runtime sessions. The controller creates
+the Service before the Worker Job, sets owner references, and deletes the
+task-owned Service during terminal cleanup.
+
+For bridge acceptance, run the local stress tests and then the real pair smoke
+from the Worker Pod with the allocated Service NodePort:
+
+```bash
+python -m pytest tests/test_openclaw_driver.py -q
+python scripts/smoke-cubesandbox-agent-pair.py \
+  --runtime-template <fresh-runtime-template> \
+  --tool-template <fresh-tool-template> \
+  --node <cube-node> \
+  --bridge-host <worker-node-internal-ip> \
+  --bridge-port <sandbox-task-allocated-nodeport>
+```
+
+The pair smoke checks wrong-token and cross-session rejection, two concurrent
+Runtime-to-Worker-to-Tool requests, pre/post-resume telemetry, exact-ID joins,
+zero telemetry loss, zero owned Sandbox entries, and no remaining task-owned
+NodePort Service. It is still a minimal bridge check rather than the full
+40/60-agent experiment; final paper runs should preserve its JSON output and
+the Worker's per-execution event and trace files for latency/concurrency
+analysis.
 
 ## 6. Reboot and rollback notes
 

@@ -12,6 +12,7 @@ import statistics
 import subprocess
 import time
 import urllib.parse
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
@@ -27,7 +28,7 @@ from clawbox.replay.trace import ReplayAction, load_trace
 
 from .memory import NodeMemorySampler
 from .clawtune_trace import ClawTuneTraceWriter
-from .openclaw_driver import CubeToolBridge, run_openclaw
+from .openclaw_driver import WorkerBridge, run_openclaw
 from .policy import PolicyCoordinator
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
 from .spec import (
@@ -105,16 +106,32 @@ class ExperimentWorker:
         if self.client.journal is None:
             self.client.journal = journal
         self.results: list[ResultEnvelope] = []
+        self.worker_bridge: WorkerBridge | None = None
 
     def run(self) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
-        for arm in expand_matrix(self.spec):
-            result_path = self.output_root / "arms" / f"{arm.arm_id}.json"
-            marker_path = self.output_root / "arms" / f"{arm.arm_id}.complete"
-            if self._completed(result_path, marker_path, arm.spec_digest):
-                self.results.append(ResultEnvelope.model_validate_json(result_path.read_text()))
-                continue
-            self.results.append(self._run_arm(arm, result_path, marker_path))
+        bridge_host = os.environ.get("CLAWBOX_BRIDGE_HOST", "").strip()
+        bridge_port = int(os.environ.get("CLAWBOX_BRIDGE_NODE_PORT", "0"))
+        arms = list(expand_matrix(self.spec))
+        requires_bridge = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
+        if requires_bridge and (not bridge_host or not bridge_port):
+            raise RuntimeError("WorkerBridge requires CLAWBOX_BRIDGE_HOST and CLAWBOX_BRIDGE_NODE_PORT")
+        bridge_context = (
+            WorkerBridge(advertise_host=bridge_host, advertised_port=bridge_port)
+            if bridge_host and bridge_port else nullcontext(None)
+        )
+        with bridge_context as bridge:
+            self.worker_bridge = bridge
+            if bridge is not None:
+                bridge.wait_ready()
+            for arm in arms:
+                result_path = self.output_root / "arms" / f"{arm.arm_id}.json"
+                marker_path = self.output_root / "arms" / f"{arm.arm_id}.complete"
+                if self._completed(result_path, marker_path, arm.spec_digest):
+                    self.results.append(ResultEnvelope.model_validate_json(result_path.read_text()))
+                    continue
+                self.results.append(self._run_arm(arm, result_path, marker_path))
+            self.worker_bridge = None
         self._write_summary()
         return self.results
 
@@ -259,7 +276,7 @@ class ExperimentWorker:
                 bridge_address = ipaddress.ip_address(bridge_host)
             except ValueError as exc:
                 raise ValueError(
-                    "CLAWBOX_BRIDGE_HOST must be the ExperimentWorker Pod IP for OpenClaw"
+                    "CLAWBOX_BRIDGE_HOST must be the Worker node InternalIP"
                 ) from exc
             runtime_allow_out.append(
                 f"{bridge_address}/{32 if bridge_address.version == 4 else 128}"
@@ -367,7 +384,13 @@ class ExperimentWorker:
                                       "service_seconds": pause_s, "reason": "openclaw_tool_complete"})
                     return result
 
-                with CubeToolBridge(execute_openclaw_tool) as bridge:
+                if self.worker_bridge is None:
+                    raise RuntimeError("WorkerBridge is not active")
+                bridge = self.worker_bridge.register(
+                    session_id, execute_openclaw_tool, task_id=self.task_uid,
+                    tool_sandbox_id=self.client.sandbox_id(lifecycle.sandbox),
+                )
+                try:
                     outcome = run_openclaw(
                         prompt=arm.case.prompt, session_id=session_id,
                         configuration=arm.inference.configuration, bridge=bridge,
@@ -375,6 +398,8 @@ class ExperimentWorker:
                         output_dir=self.output_root,
                         timeout_seconds=arm.execution.arm_timeout_seconds,
                     )
+                finally:
+                    bridge.close()
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
                 model_steps = 1
                 if not tool_latencies:
