@@ -60,3 +60,23 @@ cube-node: 3/3 Running
 The temporary Pod and Service were deleted. No persistent Cube data, existing
 templates, guest-kernel artifacts, or platform services were deleted or
 restarted for this bridge test.
+
+## Controlled reboot persistence check
+
+The controlled reboot completed and SSH/Kubernetes/S3lvol recovered. The
+reboot initially restored the vendor active guest-kernel file
+(`a63aa77e…`), so the committed recovery script was run after the direct
+regression evidence. It now verifies the kprobe artifact checksum, preserves
+the vendor files as `*.original-a63aa77e`, and restores the active file and
+component registration to `f84e3fa…`.
+
+The reduced acceptance is currently blocked by a separate Cube node bootstrap
+failure: `cubelet` repeatedly exits before listening on port 9999, and
+`cube-egress-net` reports that host interface `cube-dev` is absent after its
+300-second wait. `effective-pvm` and the pod configuration both specify PVM
+disabled (`0`); `cube-sandbox-s3lvol.service` is active and
+`/var/run/s3lvol.sock` is present. No CubeVS, containerd, kubelet, S3lvol,
+routing, persistent data, or existing template repair was applied for this
+symptom. The next operator action must be a site-specific CubeVS/node-network
+bootstrap recovery, after which the reduced template/kprobe/bridge acceptance
+can resume.

@@ -276,7 +276,16 @@ guest-kernel identity, and the custom component-version directory before
 creating templates. The vendor cube-node installer may restore the vendor
 kernel during startup, so the custom kernel and component registration must be
 reapplied (or made part of the site's privileged startup procedure) before
-acceptance testing.
+acceptance testing. The recovery script requires `kubectl exec -i` for its
+checksum/backup transaction and uses the pinned
+`app.kubernetes.io/component=cube-node-installer` selector.
+
+If cube-node remains below `3/3` after the kernel is restored, stop. In the
+observed reboot check, cubelet exited because host interface `cube-dev` was
+absent and cube-egress-net timed out waiting for it, while S3lvol and its
+socket were healthy. This is a CubeVS/node-network bootstrap issue, not a
+bridge or guest-kernel acceptance failure; do not compensate by changing
+NodePort routing, containerd, kubelet, S3lvol, or existing templates.
 
 Rollback is allowed only after a zero-sandbox audit: restore the preserved
 `vmlinux-bm`, `version`, and `version.json` vendor backups in the privileged
