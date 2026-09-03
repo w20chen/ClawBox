@@ -233,7 +233,15 @@ class WorkerBridge:
             def log_message(self, _format: str, *_args: object) -> None:
                 return
 
-        self.server = ThreadingHTTPServer((self.bind_host, self.bind_port), Handler)
+        class ConcurrentHTTPServer(ThreadingHTTPServer):
+            # The default HTTPServer backlog of five drops bursty 40/60-client
+            # experiments before a handler can dispatch them. This is only a
+            # socket accept queue; Tool execution remains fully concurrent.
+            request_queue_size = 256
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self.server = ConcurrentHTTPServer((self.bind_host, self.bind_port), Handler)
         self.actual_port = int(self.server.server_port)
         self.startup = {"bind_host": self.bind_host, "bind_port": self.actual_port,
                         "advertised_host": self.advertised_host,
