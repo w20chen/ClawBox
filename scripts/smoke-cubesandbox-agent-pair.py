@@ -97,6 +97,7 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: i
             {"v": 1, "execution_id": received_id}, separators=(",", ":"),
         ) + "\n" + command
         encoded = base64.b64encode(envelope.encode()).decode()
+        started = time.monotonic()
         result = tool.commands.run(
             "TOOL_EXEC_TIMEOUT_SECONDS=30 /usr/local/bin/tool-bridge "
             f"--execute-base64 {shlex.quote(encoded)}", timeout=timeout, cwd="/workspace",
@@ -107,7 +108,7 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: i
         assert len(records) == 1, result.stderr
         captured[received_id] = {"record": records[0], "session_id": session_id,
                                  "tool_sandbox_id": tool.sandbox_id}
-        return CommandResult(result.exit_code, result.stdout, "", result.duration_s)
+        return CommandResult(result.exit_code, result.stdout, "", time.monotonic() - started)
 
     bridge = WorkerBridge(advertise_host=bridge_host, advertised_port=bridge_port)
     with bridge:
