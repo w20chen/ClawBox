@@ -78,6 +78,60 @@ changes = {
     ),
 }
 
+for path, (old, new) in changes.items():
+    text = path.read_text()
+    if new in text:
+        continue
+    if old not in text:
+        raise SystemExit(f"pin patch target changed in {path}")
+    path.write_text(text.replace(old, new, 1))
+
+# The chart has a separate, Helm-templated CubeMaster config.  Add the fixed
+# research ratio there without disturbing its service and secret templates.
+chart = root / "deploy/kubernetes/chart/files/cube-master/conf.yaml"
+text = chart.read_text()
+anchor = "  local_metric_update_timeout: 300s\n"
+addition = (
+    anchor
+    + "  overcommit_ratio:\n"
+    + "    cpu_ratio: 1.0\n"
+    + "    mem_ratio: 1.0\n"
+)
+if addition not in text:
+    if anchor not in text:
+        raise SystemExit(f"pin patch target changed in {chart}")
+    chart.write_text(text.replace(anchor, addition, 1))
+
+rendered = chart.read_text()
+required_templates = ('include "cube.dbHost"', 'include "cube.redisNodes"')
+if not all(token in rendered for token in required_templates):
+    raise SystemExit("refusing chart patch: Kubernetes database templates were lost")
+
+# The pinned chart does not expose the host S3lvol socket as a value, but the
+# Cubelet must reach the host service to initialize CubeCoW root disks. Keep
+# this as a deterministic source patch so a later reinstall reproduces the
+# live fix instead of silently reverting to a READY-but-unusable node.
+helpers = root / "deploy/kubernetes/chart/templates/_helpers.tpl"
+text = helpers.read_text()
+mount_anchor = "- name: run-vc\n  mountPath: /run/vc\n"
+mount_addition = mount_anchor + "- name: s3lvol-socket\n  mountPath: /var/run/s3lvol.sock\n"
+if mount_addition not in text:
+    if mount_anchor not in text:
+        raise SystemExit("pin patch target changed in node volume mounts")
+    text = text.replace(mount_anchor, mount_addition, 1)
+helpers.write_text(text)
+
+node_template = root / "deploy/kubernetes/chart/templates/node-daemonset.yaml"
+text = node_template.read_text()
+volume_anchor = "        - name: run-vc\n          hostPath:\n            path: {{ .Values.hostPaths.runVc }}\n            type: DirectoryOrCreate\n"
+volume_addition = volume_anchor + "        - name: s3lvol-socket\n          hostPath:\n            path: /var/run/s3lvol.sock\n            type: Socket\n"
+if volume_addition not in text:
+    if volume_anchor not in text:
+        raise SystemExit("pin patch target changed in node volumes")
+    node_template.write_text(text.replace(volume_anchor, volume_addition, 1))
+PY
+}
+
 configure_cluster_dns() {
   # CubeAPI returns per-sandbox hosts such as <id>.cube.local.  Route the
   # wildcard suffix to cube-proxy through cluster DNS.  `answer auto` is
@@ -114,36 +168,6 @@ subprocess.run(["kubectl", "apply", "-f", "-"], input=json.dumps(value).encode()
 subprocess.run(["kubectl", "-n", "kube-system", "rollout", "restart", "deployment/coredns"], check=True)
 subprocess.run(["kubectl", "-n", "kube-system", "rollout", "status", "deployment/coredns",
                 "--timeout=120s"], check=True)
-PY
-}
-for path, (old, new) in changes.items():
-    text = path.read_text()
-    if new in text:
-        continue
-    if old not in text:
-        raise SystemExit(f"pin patch target changed in {path}")
-    path.write_text(text.replace(old, new, 1))
-
-# The chart has a separate, Helm-templated CubeMaster config.  Add the fixed
-# research ratio there without disturbing its service and secret templates.
-chart = root / "deploy/kubernetes/chart/files/cube-master/conf.yaml"
-text = chart.read_text()
-anchor = "  local_metric_update_timeout: 300s\n"
-addition = (
-    anchor
-    + "  overcommit_ratio:\n"
-    + "    cpu_ratio: 1.0\n"
-    + "    mem_ratio: 1.0\n"
-)
-if addition not in text:
-    if anchor not in text:
-        raise SystemExit(f"pin patch target changed in {chart}")
-    chart.write_text(text.replace(anchor, addition, 1))
-
-rendered = chart.read_text()
-required_templates = ('include "cube.dbHost"', 'include "cube.redisNodes"')
-if not all(token in rendered for token in required_templates):
-    raise SystemExit("refusing chart patch: Kubernetes database templates were lost")
 PY
 }
 
