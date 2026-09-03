@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "variants": {
+    "bm": {
+      "version": "sha256-f84e3fa28ae6",
+      "digest_sha256": "sha256:f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f",
+      "tag": "6.6.119-49.6-clawbox-kprobes"
+    }
+  }
+}

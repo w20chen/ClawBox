@@ -1,164 +1,180 @@
-# ClawBox + ClawTune + CubeSandbox handoff (2026-09-03)
+# ClawBox continuation handoff
 
-This is the complete continuation point. Read it before changing the working tree or Kunpeng deployment.
+Updated 2026-09-04 from local commit
+`111587bf4cf2c15fbbcfd6e09105a7793c4f0ddf` and live Kunpeng evidence. This is
+a partially completed milestone, not a finished system.
 
-## Final architecture decision
+## Final goal and non-negotiable design
 
-The newest user instruction overrides the older pasted specification that said one VM per agent. Each logical Agent uses exactly two CubeSandbox MicroVMs:
+ClawBox evaluates memory admission and reclamation policies while coding agents
+run in CubeSandbox ARM64 microVMs on Kunpeng 920B. CubeSandbox is the only
+supported sandbox backend.
 
-1. **Runtime VM**: OpenClaw, native ClawTune plugin/tracer, model access, reasoning state, and only an authenticated `cube_shell` tool.
-2. **Tool VM**: `/workspace`, repository and command execution, cgroup/eBPF telemetry, and no model credential.
+- one Attempt = one SandboxTask = one Kubernetes ExperimentWorker Job;
+- one arm = one in-process PolicyCoordinator;
+- one logical Agent = one in-process AgentPairSession = exactly one Runtime
+  CubeSandbox plus exactly one Tool CubeSandbox;
+- Kubernetes places the Worker; the Worker pins both VMs to that node and uses
+  the official CubeSandbox SDK;
+- the controller remains a thin SandboxTask-to-Job reconciler;
+- the Worker orchestrates but does not run OpenClaw or repository commands;
+- Runtime runs OpenClaw, ClawTune prediction/model instrumentation, and
+  `cube_shell`; it does not own or modify the task repository;
+- Tool owns `/workspace`, runs every repository command in a dedicated guest
+  cgroup, and collects cgroup-v2 plus eBPF telemetry; it does not run OpenClaw.
 
-The ExperimentWorker owns both VM lifecycles, runs the authenticated bridge, applies ClawBox policy to the Tool VM, joins observations by execution/session identity, and writes full/redacted traces, action and lifecycle timings, resources, cgroup/eBPF data, policy events, provenance, and cleanup evidence.
+Every real tool call follows `Runtime OpenClaw -> cube_shell -> Worker bridge ->
+PolicyCoordinator -> Cube SDK -> Tool VM`. One exact `execution_id` joins the
+Runtime span/prediction, policy charge/wait, Tool result, cgroup/eBPF records,
+and pause/restore context. Never combine the pair or collapse either VM into
+the Worker.
 
-## Repository and safety
+Near-term reclamation is explicitly `snapshot_pause, scope=tool`: Runtime stays
+resident while an idle Tool VM pauses. Do not claim pair pause until separately
+validated. Admission arms are `pair_lifetime_full`, `tool_full`, `tool_static`,
+`tool_p90`, and replay-only `tool_oracle`. Charge measured physical memory plus
+unrealized incremental commitments plus lifecycle headroom, without counting
+realized growth twice. Cube quota is a fixed safety bound, not experiment
+policy.
 
-- Local tree: `C:\Users\user\Desktop\ClawBox`
-- Paired routing baseline: `aeb8109 Complete paired CubeSandbox agent routing`
-- The Tool telemetry/Runtime predictor milestone follows that baseline.
-- Clean remote copy: `/home/weitianc/ClawBox-cube`
-- Do not overwrite `/home/weitianc/ClawBox`; it is an older dirty checkout.
-- ARM64 host: `ssh weitianc@193.124.7.2` (session startup takes about 60 seconds)
-- Do not apply the optional BoostKit kernel patch or reboot without explicit permission.
+The paper path must run OpenClaw inside Runtime with both real API inference and
+an OpenAI-compatible deterministic replay endpoint. `tool_p90` must consume
+real per-command Runtime prediction metadata, never the constant `cube_shell`.
+Decision policies must consume real model-wait start/end events.
 
-## Previously verified baseline
+## Existing implementation
 
-- CubeSandbox `v0.7.0`, commit `d0081641c59822e4e5653b7462e914410b81910a`
-- SDK `cubesandbox==0.7.0`, command dependency `e2b==2.29.5`
-- Old template: `tpl-c7212cdc724844639aa65486`
-- Old image: `sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d`
-- Controller: `sha256:8696240154448a63cfb3d7f42aac20299fa733b9cef1352482fb82fd09ba6787`
-- Old Worker: `sha256:9cdb4634a14b962e0c1e8214cf8c97d3fb356c40652258f645aedf810861a9d2`
-- Real lifecycle/pause-resume, four-agent matrix, Kubernetes vertical slice, cancellation, controller restart, and cleanup previously passed.
-- Evidence: `/data/clawbox-results/` and `/home/weitianc/clawbox-results/real-matrix-1`.
-- Baseline full suite previously passed: 164 passed, 5 skipped.
+Commit `111587b` contains paired Runtime/Tool Cube Dockerfiles and entrypoints,
+an authenticated Worker bridge, paired Cube session execution, exact execution
+ID propagation, Tool cgroup/eBPF artifact collection, pair smoke/audit scripts,
+a thin controller, and tests. Preserve them. Explicit pair-domain naming,
+prediction/replay, memory accounting, full Kubernetes acceptance, and legacy
+backend cleanup are still incomplete.
 
-## Paired images and READY templates
+The local gate passed before this handoff: `compileall` and all pytest tests;
+five were skipped and only a pytest cache warning appeared.
 
-Runtime VM:
+## Live Kunpeng state
 
-- image `127.0.0.1:5000/clawbox/runtime-cube-arm64:openclaw-clawtune-v1`
-- digest `sha256:02ae0ff35f57352c615746f17734fcc425d9fac5cffa8b9d075416c5ad91523e`
-- template `tpl-743b4bf146c642328ebe4e70`, alias `clawbox-runtime-arm64-2g-v3`
-- OpenClaw `2026.7.1-2`, native ClawTune plugin, and `cube-tool`
+Host: `weitianc@193.124.7.2`
 
-Tool VM:
+- `/home/weitianc/ClawBox` is at `111587b`, with only untracked `results/`;
+  preserve it. `/home/weitianc/ClawBox-cube` is the no-git live export.
+- `/home/weitianc/CubeSandbox` is at `d0081641c59822e4e5653b7462e914410b81910a`
+  with pre-existing user changes: master/chart CPU-memory ratios 1, paused
+  release ratio 1, and untracked `=|e2b`. Preserve them.
+- `cube-node-l7kgl` was 3/3 Running; S3lvol was active; registry mirror port
+  5001 works. No host reboot was performed.
 
-- image `127.0.0.1:5000/clawbox/tool-cube-arm64:clawtune-v1`
-- digest `sha256:efe9a11299398c6755188e3e3a1b0c9c6067f17408e70cf39c5872284bc754a2`
-- template `tpl-69e6945ec7844b26976bf4b7`, alias `clawbox-tool-arm64-4g-v1`
-- workspace, `tool-bridge`, and ClawTune guest collector sources
-
-Templates use `http://193.124.7.2:5001/...`. The read-only registry mirror is `clawbox-registry-cube`; after a reboot run `ssh weitianc@193.124.7.2 'docker start clawbox-registry-cube || true'`.
-
-## Implemented but not deployed end to end
-
-- Specs/arms require separate `runtime` and `sandbox` (Tool) definitions.
-- `worker.py` creates/cleans two owned lifecycles, reserves combined memory, applies policy to Tool, records role/timings, and runs OpenClaw through Runtime.
-- `CubeSandboxLifecycle` supports creation environment variables.
-- `openclaw_driver.py` runs OpenClaw inside Runtime, starts the loopback-only native ClawTune predictor/model proxy, loads cold-start or control-plane KB snapshots, enables `cube-tool` and native ClawTune, denies host tools, injects model credentials only into Runtime, and copies Runtime traces/prediction artifacts.
-- `openclaw-plugins/cube-tool/` implements `cube_shell`.
-- Every Worker-issued Tool command uses the Cube command API to invoke the instrumented one-shot runner. The Tool entrypoint alone starts the eBPF guest collector; the runner gates execution on a per-command cgroup and returns cgroup/eBPF artifacts or an explicit unavailable reason.
-- `clawtune_trace.py` writes exact-ID v6 spans, bridge records, and measured Tool artifacts without fabricating missing values.
-- Runtime/Tool Dockerfiles and Runtime entrypoint exist.
-- CRD immutability includes credential secret and timeout; Worker Pod receives `CLAWBOX_BRIDGE_HOST`.
-- Examples contain separate Runtime and Tool templates; registration supports repeated exposed/probe ports.
-- Runtime-to-Worker requests now carry the OpenClaw tool-call ID into the
-  authoritative bridge record, and Runtime creation adds a narrow CubeSandbox
-  `network.allow_out` entry for only the Worker Pod IP.
-
-Key files: `clawbox/experiments/worker.py`, `openclaw_driver.py`, `clawtune_trace.py`, `openclaw-plugins/cube-tool/index.js`, both Cube Dockerfiles, `scripts/smoke-cubesandbox-agent-pair.py`, and `examples/experiments/openclaw-cube.yaml`.
-
-## Current verification
-
-After the telemetry/predictor refactor the complete local gate passes:
+Published ARM64 digests:
 
 ```text
-python -m compileall -q clawbox
-python -m pytest -q
-# pass; 5 environment-dependent tests skipped
+runtime original        sha256:3c83eae918b62e272e51e34d762c277068050c830a5cfc2ba7f2cb03610bcb66
+tool original           sha256:68b5e12b6f570200b8ed777dd1061d13b60ccbf4116166dc1178da98b8e2fde0
+worker                  sha256:f5fd49858a242efda1e0ea1cc1a896161b048e93348fc2402ad1019ccc8e6056
+runtime kernel-labelled sha256:5d1ea3cee703da47b031b26d8439e240b9d39ffb978e084c482fae1e17764ca7
+tool kernel-labelled    sha256:750b71f97322467a23537973c77b23160ff37d2adcdcd32aa7bba07d78c4725b
 ```
 
-Go 1.25 successfully cross-compiles the Tool bridge tests for Linux/ARM64. A
-native Kunpeng run exposed the host cgroup hang described below; the collector
-was also hardened to avoid unnecessary remounts on an already-rw cgroup tree.
+The Dockerfiles now accept `CUBE_GUEST_KERNEL_DIGEST` as an OCI label so a
+kernel generation can deliberately change image/template cache identity.
 
-## Storage recovery completed
+## ARM64 kprobe kernel work
 
-After reboot, `no more resource` actually meant `/var/run/s3lvol.sock` was missing. The Helm chart does not install the host daemon. `scripts/recover-cubesandbox-s3lvol-kunpeng920.sh` now downloads the pinned ARM64 one-click package, installs `nvme-cli` and `s3lvol_tgt`, creates a stable `cube-minio-s3lvol` service and bucket/config, creates the correctly sized WAL, and enables the systemd service under `multi-user.target`.
-
-Verified live: service active and enabled, socket present, and 32 NVMe/TCP subsystems connected. Rerun idempotently:
-
-```bash
-scp scripts/recover-cubesandbox-s3lvol-kunpeng920.sh weitianc@193.124.7.2:/tmp/
-ssh weitianc@193.124.7.2 'bash /tmp/recover-cubesandbox-s3lvol-kunpeng920.sh'
-```
-
-Do not delete `/data/cubelet/rcow/wal_bdev.img`, `bstore.json`, or the MinIO `cube-s3lvol` bucket now that the lvstore is formatted.
-
-## Immediate live blocker
-
-The paired smoke is not green. Current pod `cube-node-q2khk` is `2/3
-CreateContainerError`. The problem is below CubeSandbox application code:
-Docker metadata/start operations stall and `stat /sys/fs/cgroup` itself blocks
-in an uninterruptible kernel/filesystem wait. Cube control-plane pods remain up.
-Cubelet previously reached cubecow initialization but did not listen on 9999:
+The vendor guest config had `# CONFIG_KPROBES is not set`, so ClawTune failed
+closed attaching `__arm64_sys_execve`. Pinned OpenCloudOS `6.6.119-49.6` source
+is at `/home/weitianc/.cache/clawbox-kernel/oc-6.6.119-49.6/source`. It was
+patched per `deploy/cubesandbox/kernel-oc9-arm64-kprobes.config.patch` and built
+through Cube's `scripts/build-kernel.sh` in Ubuntu 24.04 ARM64.
 
 ```text
-starting cubelet ...
-state dir /data/cubelet/state already mounted as xfs
-set /data/cubelet/root as shared mount
-... cubelet ... Killed
-[cube-component:cubelet:run] ERROR: cubelet did not become ready
+/home/weitianc/CubeSandbox/_output/kernel/aarch64-kprobes/vmlinux
+sha256:f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
+CONFIG_KPROBES=y
+CONFIG_KRETPROBES=y
+CONFIG_FTRACE_SYSCALLS=y
 ```
 
-This is not host OOM: about 1.9 TiB is available and no kernel OOM record was found. `deploy/cubesandbox/cube-node-startup-timeout-patch.yaml` was applied to extend the entrypoint loop from 60 to 300 seconds, without resolving readiness. Diagnose the Cubelet/cubecow hang before the pair smoke:
+`CONFIG_KPROBES_ON_FTRACE` was requested but omitted by `olddefconfig`; basic
+kprobes are the required facility. Installed layout is reversible:
 
-```bash
-ssh weitianc@193.124.7.2
-systemctl status cube-sandbox-s3lvol.service
-kubectl -n cube-system get pods -o wide
-kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c cubelet --tail=200
-tail -200 /data/log/Cubelet/* 2>/dev/null
-tail -200 /data/log/rcow/s3lvol_tgt.log
-ps -eo pid,etime,rss,stat,wchan:30,cmd | grep '[c]ubelet'
+```text
+vmlinux -> vmlinux-bm
+vmlinux-bm -> vmlinux-bm-kprobes-6.6.119-49.6-111587b  # f84e3fa...
+vmlinux-bm-original-a63aa77e                           # vendor backup
+version.original-a63aa77e
+version.json.original-a63aa77e
 ```
 
-Priority next: inspect the blocked `stat`, mount, containerd, and cubelet tasks
-from a privileged node-debug/installer container, then recreate only the broken
-DaemonSet pod if the host cgroup mount recovers. Do not delete persistent Cube
-state merely to make it start, and do not reboot without user approval.
+Cube's entrypoint always resets `vmlinux -> vmlinux-bm`, hence selection must
+occur through `vmlinux-bm`. Active `version` and `version.json` advertise
+f84e3fa; checked-in copies are under `deploy/cubesandbox/`.
 
-## Remaining work
+Rollback only after a zero-sandbox audit: in container `cube-kernel-install`,
+replace `vmlinux-bm`, `version`, and `version.json` from their
+`*.original-a63aa77e` backups, restart the exact cube-node pod, and wait for
+3/3. Do not delete the custom or vendor image.
 
-1. Recover the Kunpeng cgroup/container runtime and return `cube-node` to 3/3.
-2. Build/push/register the final Runtime, Tool, and Worker ARM64 images.
-3. Verify the Runtime-to-Worker `/32` allow rule, exact execution-ID join,
-   Tool cgroup/eBPF artifacts, and Runtime native ClawTune predictions in a real
-   model-driven paired OpenClaw run.
-4. Run the Kubernetes vertical slice, cancellation, controller restart, policy
-   pause/resume, and zero-leak audit; save evidence and pin final digests.
-5. Audit/remove inactive Kata/direct-Firecracker/SSH code after import checks.
-   CubeSandbox remains the only active real sandbox.
+## Current hard blocker
 
-## Continuation commands
+Old templates booted the August 12 vendor kernel and exposed no kprobe event
+source. Templates built before metadata correction are rejected correctly:
 
-```bash
-# Repair Cubelet first.
-ssh weitianc@193.124.7.2 'systemctl is-active cube-sandbox-s3lvol.service; kubectl -n cube-system get pods'
-
-# Copy current code only to the clean remote copy.
-rsync -az --delete --exclude .git --exclude .venv ./ weitianc@193.124.7.2:/home/weitianc/ClawBox-cube/
-
-# Direct pair smoke.
-ssh weitianc@193.124.7.2 'cd /home/weitianc/ClawBox-cube && CUBE_API_URL=http://127.0.0.1:30030 CUBE_PROXY_NODE_IP=127.0.0.1 CUBE_PROXY_PORT_HTTP=30080 /home/weitianc/.local/bin/uv run --with cubesandbox==0.7.0 --with e2b==2.29.5 python scripts/smoke-cubesandbox-agent-pair.py'
-
-# Full local gate.
-python -m compileall -q clawbox
-python -m pytest -q --basetemp .pytest-tmp-handoff
-
-# Leak audit after every live test.
-ssh weitianc@193.124.7.2 'cd /home/weitianc/ClawBox-cube && /home/weitianc/.local/bin/uv run --with cubesandbox==0.7.0 --with e2b==2.29.5 python scripts/audit-cube-sandboxes.py'
+```text
+snapshot metadata not match: kernel version not eq:
+sha256:f84e3fa... sha256:a63aa77e...
 ```
 
-Acceptance requires a real model-driven OpenClaw session in Runtime invoking authenticated `cube_shell` in the matching Tool VM, joined detailed traces/resources/timings, ClawBox lifecycle policy, and zero leaked sandboxes.
+After metadata correction and cube-node restart, two bounded Tool template
+builds failed before snapshot creation:
+
+```text
+allocate cubecow template build rootfs fail:
+initialize cubecow default medium tpl-tpl-<id>-build-rootfs ...:
+initExt4BlockDevice failed
+```
+
+Failed IDs: `tpl-26b825d6202d40a7b05fd701` and
+`tpl-20ec6adf72764217bcb3e5c4`. About 906 GiB and 98% of inodes are free. This
+repeated failure is the stopping condition. Diagnose CubeCoW/rootfs
+initialization; do not rebuild the kernel, delete `/data/cubelet`, CubeCoW/S3
+objects, MinIO, or `results/`, or use old templates as acceptance evidence.
+
+`scripts/diagnose-cube-kprobes.py` creates one short-lived Tool VM and directly
+tests the guest kernel interface. A post-kernel Tool template must report the
+new build timestamp, `CONFIG_KPROBES=y`, a kprobe event source, and a successful
+manual probe on `__arm64_sys_execve` before running ClawTune.
+
+## Continuation order
+
+1. Check node, S3lvol, and zero active sandboxes with
+   `scripts/audit-cube-sandboxes.py`. The 300-second cube-node startup patch is
+   applied; Cubelet may need about five minutes and several retries for 3/3.
+2. Diagnose `initExt4BlockDevice failed` using Cubelet, CubeCoW, and S3lvol
+   logs. Keep recovery narrowly scoped and reversible.
+3. Register fresh Runtime/Tool templates from the kernel-labelled digests with
+   `--probe-port 49983`. Inspect `GET /templates/<id>` and require replica
+   `kernel_version=sha256-f84e3fa28ae6` before launch.
+4. Run `diagnose-cube-kprobes.py`, then
+   `smoke-cubesandbox-agent-pair.py` with the new template IDs and node
+   `hostname-txyuq.foreman.pxe`.
+5. Require `telemetry_state=complete`, exact-ID valid cgroup/eBPF artifacts,
+   Tool pause/restore while Runtime stays running, and zero leaked sandboxes.
+6. Only after the real pair is green: implement explicit
+   `agent_pair.runtime/tool` and AgentPairSession ownership; Runtime prediction
+   metadata into `tool_p90`; OpenClaw deterministic replay/model-wait events;
+   role-aware policies; corrected unrealized commitments; Kubernetes
+   vertical/cancel/restart tests; then retire contradictory active
+   Kata/direct-Firecracker paths without deleting reusable parsers/tests.
+
+Do not call the project paper-ready until real Kunpeng evidence proves the two
+VM roles, full Runtime-to-Tool path, exact-ID prediction/policy/telemetry join,
+real and replay inference, model-wait policies, explicit Tool-only scope,
+separate role timings, no hidden resident pause, correct memory accounting,
+one Attempt/SandboxTask/Worker, thin controller, identical Cube backend across
+arms, consistent docs/manifests, and zero leaks.
+
+At handoff, the real two-VM command path and cleanup were exercised, but kprobe
+telemetry is not accepted because no post-kernel template could be created.
+Higher-level policy behavior remains unit/static evidence until the real paired
+OpenClaw vertical slice passes.
