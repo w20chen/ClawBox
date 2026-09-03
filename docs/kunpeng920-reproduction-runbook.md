@@ -178,6 +178,9 @@ python -m pip install -e '.[dev,postgres]'
 export CUBE_API_URL=http://<cube-host>:30030
 export CUBE_PROXY_NODE_IP=<cube-host>
 export CUBE_PROXY_PORT_HTTP=30080
+# Python SDK traffic must bypass any workstation HTTP proxy for the host API.
+export NO_PROXY=<cube-host>,localhost,127.0.0.1
+export no_proxy="$NO_PROXY"
 ```
 
 Build unique Runtime and Tool aliases from the two immutable image digests:
@@ -212,6 +215,9 @@ The validation order is:
 The logical agent must remain exactly two VMs: Runtime owns OpenClaw and
 prediction instrumentation; Tool owns `/workspace`, repository commands, and
 command telemetry. Tool-only pause is the accepted reclamation behavior.
+Run the pair smoke from the Worker process/pod, or provide a worker-host
+address and port reachable from the Runtime VM; a workstation-local bridge is
+not evidence of the Runtime-to-Worker path.
 
 ## 6. Reboot and rollback notes
 

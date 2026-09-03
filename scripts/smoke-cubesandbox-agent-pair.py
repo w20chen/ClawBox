@@ -25,12 +25,11 @@ def listed(sandbox_id: str) -> dict | None:
 
 
 def instrumented_tool_check(tool, execution_id: str) -> dict:
-    command = (
-        "python3 -c \"import hashlib,time; "
-        "x=b'x'*4194304; "
-        "[hashlib.sha256(x).digest() for _ in range(200)]; "
-        "time.sleep(0.25); print('telemetry-ok')\""
-    )
+    # Keep the acceptance command deterministic and short. The collector's
+    # validity, cgroup sampling, and loss gates—not synthetic CPU load—are the
+    # subject of this smoke.
+    suffix = "before" if "before" in execution_id else "after"
+    command = f"printf telemetry-ok-{suffix}"
     envelope = "__CBX_EXEC_1__" + json.dumps(
         {"v": 1, "execution_id": execution_id}, separators=(",", ":"),
     ) + "\n" + command
@@ -41,7 +40,7 @@ def instrumented_tool_check(tool, execution_id: str) -> dict:
         timeout=45, cwd="/workspace",
     )
     assert result.exit_code == 0, result.stderr
-    assert result.stdout.strip() == "telemetry-ok", result.stdout
+    assert result.stdout.strip() == f"telemetry-ok-{suffix}", result.stdout
     marker = "CLAWBOX_TELEMETRY_RECORD="
     records = [
         json.loads(line.removeprefix(marker))
@@ -122,8 +121,12 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str) -> dict:
             f"--data \"$body\" {shlex.quote(bridge.url)}"
         )
         result = runtime.commands.run(command, timeout=45, cwd="/workspace")
-    response = json.loads(result.stdout)
-    assert result.exit_code == 0 and response.get("stdout") == "runtime-worker-tool-ok", response
+    assert result.exit_code == 0, result.stderr
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"Runtime bridge returned non-JSON: {result.stdout!r} {result.stderr!r}") from exc
+    assert response.get("stdout") == "runtime-worker-tool-ok", response
     assert response.get("execution_id") == execution_id, response
     record = captured["record"]
     assert record.get("execution_id") == execution_id
