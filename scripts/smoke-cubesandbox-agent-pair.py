@@ -203,9 +203,10 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: i
             assert cgroup.get("execution_id") == execution_id
             assert cgroup.get("source") == "cgroup-v2"
             assert cgroup.get("sampling_quality") == "valid"
-            assert native.get("execution_id") == execution_id
             assert native.get("collection_validity") == "valid"
             assert native.get("cleanup") == "ok"
+            native_calls = native.get("calls") or []
+            assert len(native_calls) == 1 and native_calls[0].get("tool_call_id") == execution_id, native
             assert int((native.get("telemetry_loss_total") or {}).get("total") or 0) == 0
         assert session_a.close()
         assert session_b.close()
