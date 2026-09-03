@@ -155,6 +155,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + "export CLAWTUNE_POLICY=observe-only "
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
+        + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
+        + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(base_url)} "
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(model)} "

@@ -74,6 +74,8 @@ def test_openclaw_runner_disables_host_tools_and_uses_secret_env(monkeypatch, tm
     setup_command = next(command for command in commands if "clawtune_sidecar.main" in command)
     onboard_command = next(command for command in commands if " onboard " in command)
     assert "native-kb-pull.py" in setup_command
+    assert "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false" in setup_command
+    assert "CLAWTUNE_REPO_KEY=" in setup_command
     assert "http://127.0.0.1:8765/v1" in onboard_command
     assert "Use cube_shell for every" in agent_command
     assert "secret-from-kubernetes" not in "\n".join(commands)

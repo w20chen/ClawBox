@@ -121,7 +121,7 @@ func randomCollectorToken() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-// ensureTracefs mounts the guest tracefs before BCC starts. Kata's minimal
+// ensureTracefs mounts the Cube guest tracefs before BCC starts. The minimal
 // guest kernel supports tracefs, but does not mount it by default. BCC can
 // compile its tracepoint program in that state and then fails at attach time
 // because the tracepoint id files do not exist. Tool pods carry SYS_ADMIN
@@ -135,7 +135,11 @@ func ensureTracefs() error {
 	if err := os.MkdirAll(tracefs, 0755); err != nil {
 		return fmt.Errorf("create tracefs mountpoint: %w", err)
 	}
-	output, mountErr := exec.Command("mount", "-t", "tracefs", "tracefs", tracefs).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, mountErr := exec.CommandContext(
+		ctx, "mount", "-t", "tracefs", "tracefs", tracefs,
+	).CombinedOutput()
 	if _, err := os.Stat(eventID); err == nil {
 		return nil
 	}

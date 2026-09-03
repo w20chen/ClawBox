@@ -97,8 +97,11 @@ def test_cube_client_adds_only_explicit_narrow_egress_allowlist() -> None:
     client.create_sandbox(
         template="tpl", node_name="node-a", ownership=_owner(),
         network_allow_out=["10.244.1.23/32"],
+        network_deny_out=["0.0.0.0/0"],
     )
-    assert _Sandbox.create_kwargs["network"] == {"allow_out": ["10.244.1.23/32"]}
+    assert _Sandbox.create_kwargs["network"] == {
+        "allow_out": ["10.244.1.23/32"], "deny_out": ["0.0.0.0/0"],
+    }
 
 
 def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:

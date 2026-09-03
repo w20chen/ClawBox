@@ -564,6 +564,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--prepare-collector" {
+		if err := ensureTracefs(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "--execute-base64" {
 		os.Exit(runOneShot(os.Args[2]))
 	}

@@ -13,7 +13,8 @@ class CubeSandboxLifecycle:
                  node_name: str, ownership: Ownership,
                  allow_internet_access: bool = True,
                  env_vars: Mapping[str, str] | None = None,
-                 network_allow_out: list[str] | None = None) -> None:
+                 network_allow_out: list[str] | None = None,
+                 network_deny_out: list[str] | None = None) -> None:
         self.client = client
         self.template = template
         self.node_name = node_name
@@ -21,6 +22,7 @@ class CubeSandboxLifecycle:
         self.allow_internet_access = allow_internet_access
         self.env_vars = dict(env_vars or {})
         self.network_allow_out = list(network_allow_out or [])
+        self.network_deny_out = list(network_deny_out or [])
         self.sandbox = None
         self.sandbox_id: str | None = None
         self._resident = False
@@ -40,6 +42,7 @@ class CubeSandboxLifecycle:
             env_vars=self.env_vars or None,
             allow_internet_access=self.allow_internet_access,
             network_allow_out=self.network_allow_out or None,
+            network_deny_out=self.network_deny_out or None,
         )
         self.sandbox_id = self.client.sandbox_id(self.sandbox)
         self._resident = True

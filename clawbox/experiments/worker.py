@@ -11,6 +11,7 @@ import platform
 import statistics
 import subprocess
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
@@ -33,6 +34,17 @@ from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
     ReclamationPolicy, RestorePolicy, expand_matrix, load_experiment,
 )
+
+
+def _network_target(endpoint: str, *, label: str) -> str:
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{label} must be an http(s) URL with a hostname")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return parsed.hostname
+    return f"{address}/{32 if address.version == 4 else 128}"
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -252,6 +264,14 @@ class ExperimentWorker:
             runtime_allow_out.append(
                 f"{bridge_address}/{32 if bridge_address.version == 4 else 128}"
             )
+            runtime_allow_out.append(_network_target(
+                runtime_env["OPENAI_BASE_URL"], label="OpenClaw base_url",
+            ))
+            if kb_endpoint := runtime_env.get("CLAWBOX_KB_ENDPOINT"):
+                runtime_allow_out.append(_network_target(
+                    kb_endpoint, label="CLAWBOX_KB_ENDPOINT",
+                ))
+            runtime_allow_out = list(dict.fromkeys(runtime_allow_out))
         runtime_lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.runtime.template,
             node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
@@ -259,6 +279,7 @@ class ExperimentWorker:
             allow_internet_access=arm.runtime.allow_internet_access,
             env_vars=runtime_env,
             network_allow_out=runtime_allow_out,
+            network_deny_out=["0.0.0.0/0"] if runtime_allow_out else None,
         )
         tool_env = {
             "TOOL_BRIDGE_LOG_PATH": "/var/lib/clawtune/artifacts/tool-bridge.jsonl",
