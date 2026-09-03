@@ -36,6 +36,8 @@ hostPaths:
 
 controlPlane:
   api:
+    # Must match cubeProxy.domain; CubeAPI returns this suffix to SDK clients.
+    sandboxDomain: cube.local
     service:
       type: NodePort
       nodePort: 30030

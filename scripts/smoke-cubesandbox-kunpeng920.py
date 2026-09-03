@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 import uuid
 
@@ -27,6 +28,13 @@ def kill_without_resume(item: dict) -> None:
     Sandbox(item, Config()).kill()
 
 
+def mem_available_mib() -> int:
+    for line in open("/proc/meminfo", encoding="ascii"):
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) // 1024
+    raise RuntimeError("MemAvailable is absent from /proc/meminfo")
+
+
 def wait_state(sandbox_id: str, expected: str, timeout: float = 90) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -44,6 +52,7 @@ def main() -> int:
     args = parser.parse_args()
     owner = f"clawbox-smoke-{uuid.uuid4().hex}"
     sandbox = None
+    memory = {"before_create_mib": mem_available_mib()}
     try:
         health = Sandbox.health()
         if str(health.get("status", "")).lower() not in {"ok", "healthy"}:
@@ -62,19 +71,29 @@ def main() -> int:
         assert result.exit_code == 0 and result.stdout == "clawbox-cube-ok"
         sandbox.files.write("/workspace/clawbox-smoke.txt", "state-survives-pause\n")
         process = sandbox.commands.run(
-            "sleep 300 >/dev/null 2>&1 & echo $! > /workspace/clawbox-smoke.pid",
+            "python -c 'import time; x=bytearray(512*1024*1024); "
+            "x[::4096]=b\"x\"*(512*256); time.sleep(300)' "
+            ">/dev/null 2>&1 & echo $! > /workspace/clawbox-smoke.pid",
             timeout=30, cwd="/workspace",
         )
         assert process.exit_code == 0
+        time.sleep(3)
+        memory["resident_mib"] = mem_available_mib()
         sandbox.pause(wait=True, timeout=90)
         wait_state(sandbox.sandbox_id, "paused")
+        time.sleep(2)
+        memory["paused_mib"] = mem_available_mib()
+        memory["pause_reclaimed_mib"] = memory["paused_mib"] - memory["resident_mib"]
         sandbox = Sandbox.connect(sandbox.sandbox_id)
+        time.sleep(2)
+        memory["restored_mib"] = mem_available_mib()
         assert sandbox.files.read("/workspace/clawbox-smoke.txt") == "state-survives-pause\n"
         process = sandbox.commands.run(
             "kill -0 $(cat /workspace/clawbox-smoke.pid)", timeout=30, cwd="/workspace",
         )
         assert process.exit_code == 0
         print(f"PASS sandbox={sandbox.sandbox_id} owner={owner}")
+        print(json.dumps({"host_memory": memory}, sort_keys=True))
         return 0
     finally:
         if sandbox is not None:

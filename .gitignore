@@ -9,6 +9,7 @@ clawtune-*/
 __pycache__/
 *.py[cod]
 .pytest-tmp-root/
+.pytest-tmp-root-*/
 .pytest_cache/
 .pytest_tmp*/
 

@@ -99,6 +99,9 @@ def test_controller_creates_exactly_one_node_pinned_worker_job() -> None:
     pod = job["spec"]["template"]["spec"]
     assert job["spec"]["backoffLimit"] == 0
     assert pod["restartPolicy"] == "Never" and pod["nodeName"] == "node-a"
+    prepare = pod["initContainers"][0]
+    assert prepare["name"] == "prepare-results"
+    assert prepare["securityContext"]["capabilities"]["add"] == ["CHOWN", "FOWNER"]
     worker_node = next(item for item in pod["containers"][0]["env"]
                        if item["name"] == "CLAWBOX_WORKER_NODE")
     assert worker_node["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"

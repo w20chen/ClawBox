@@ -63,15 +63,13 @@ def test_dispatcher_can_manage_sandboxtasks_but_not_pods_or_secrets():
     assert _verbs_for(role_name, "networking.k8s.io", "networkpolicies", docs) == set()
 
 
-def test_cell_controller_keeps_cell_realization_verbs():
+def test_cell_controller_only_realizes_configmaps_and_jobs():
     docs = _load(CONTROL_RBAC)
     role_name = "clawbox-cell-controller"
-    # The cell controller (not the API/dispatcher) is the only component with
-    # pod/secret creation.
-    assert _verbs_for(role_name, "", "pods", docs) >= {"create", "delete"}
-    assert _verbs_for(role_name, "", "secrets", docs) >= {"create", "delete"}
-    assert _verbs_for(role_name, "", "services", docs) >= {"create", "delete"}
+    assert _verbs_for(role_name, "", "configmaps", docs) >= {"get", "create"}
     assert _verbs_for(role_name, "batch", "jobs", docs) >= {"create", "delete"}
+    assert _verbs_for(role_name, "", "pods", docs) == set()
+    assert _verbs_for(role_name, "", "secrets", docs) == set()
 
 
 def test_single_cell_controller_never_overlaps_without_leader_election():
@@ -79,22 +77,3 @@ def test_single_cell_controller_never_overlaps_without_leader_election():
     assert deployment["kind"] == "Deployment"
     assert deployment["spec"]["replicas"] == 1
     assert deployment["spec"]["strategy"] == {"type": "Recreate"}
-
-
-def test_benchmark_launcher_is_direct_cr_path_being_retired():
-    # The legacy launcher still has direct CR create for the dev/benchmark
-    # path; production admission must come through the Dispatcher instead.
-    docs = _load(CONTROL_RBAC)
-    assert _verbs_for("clawbox-benchmark-launcher", "clawbox.openai.com", "sandboxtasks", docs) >= {
-        "create", "delete",
-    }
-    cluster_role = next(
-        d for d in docs
-        if d.get("kind") == "ClusterRole"
-        and d.get("metadata", {}).get("name") == "clawbox-benchmark-runtimeclass-reader"
-    )
-    namespace_verbs = set()
-    for rule in cluster_role["rules"]:
-        if "" in rule.get("apiGroups", []) and "namespaces" in rule.get("resources", []):
-            namespace_verbs.update(rule["verbs"])
-    assert namespace_verbs == {"get"}

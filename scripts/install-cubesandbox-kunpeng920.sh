@@ -52,6 +52,14 @@ prepare_source() {
   git -C "$SOURCE_DIR" checkout --detach "$CUBE_TAG"
   [[ $(git -C "$SOURCE_DIR" rev-parse HEAD) == "$CUBE_COMMIT" ]] || { echo "unexpected CubeSandbox commit" >&2; exit 1; }
 
+  # Rebuild the deterministic patch from the pristine pin on every run.  In
+  # particular, never replace the chart copy with CubeMaster/conf.yaml: the
+  # chart file contains Helm templates for the Kubernetes MySQL/Redis hosts.
+  git -C "$SOURCE_DIR" restore --source=HEAD -- \
+    CubeMaster/conf.yaml \
+    Cubelet/dynamicconf/conf.yaml \
+    deploy/kubernetes/chart/files/cube-master/conf.yaml
+
   # v0.7.0 does not expose these research controls as Helm values. Patch the
   # pinned chart inputs deterministically before rendering it.
   python3 - "$SOURCE_DIR" <<'PY'
@@ -69,6 +77,45 @@ changes = {
         "cpu_ratio: 1.0\n    mem_ratio: 1.0",
     ),
 }
+
+configure_cluster_dns() {
+  # CubeAPI returns per-sandbox hosts such as <id>.cube.local.  Route the
+  # wildcard suffix to cube-proxy through cluster DNS.  `answer auto` is
+  # required so DNS replies retain the name originally queried by the client.
+  python3 - "$NAMESPACE" "$RELEASE" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+namespace, release = sys.argv[1:]
+begin = f"# BEGIN cube-sandbox-dns {release}"
+end = f"# END cube-sandbox-dns {release}"
+proxy = f"{release}-proxy.{namespace}.svc.cluster.local."
+block = f"""{begin}
+cube.local:53 {{
+    errors
+    cache 60
+    rewrite stop name exact cube.local. {proxy} answer auto
+    rewrite stop name regex (.*)[.]cube[.]local[.]? {proxy} answer auto
+    kubernetes cluster.local
+    forward . /etc/resolv.conf
+}}
+{end}"""
+raw = subprocess.check_output([
+    "kubectl", "-n", "kube-system", "get", "configmap", "coredns", "-o", "json"
+])
+value = json.loads(raw)
+corefile = value["data"]["Corefile"]
+corefile = re.sub(re.escape(begin) + r".*?" + re.escape(end), "", corefile,
+                  flags=re.DOTALL).rstrip() + "\n\n" + block + "\n"
+value["data"]["Corefile"] = corefile
+subprocess.run(["kubectl", "apply", "-f", "-"], input=json.dumps(value).encode(), check=True)
+subprocess.run(["kubectl", "-n", "kube-system", "rollout", "restart", "deployment/coredns"], check=True)
+subprocess.run(["kubectl", "-n", "kube-system", "rollout", "status", "deployment/coredns",
+                "--timeout=120s"], check=True)
+PY
+}
 for path, (old, new) in changes.items():
     text = path.read_text()
     if new in text:
@@ -77,10 +124,26 @@ for path, (old, new) in changes.items():
         raise SystemExit(f"pin patch target changed in {path}")
     path.write_text(text.replace(old, new, 1))
 
-# The Helm chart embeds the master config from its files directory.
-source = root / "CubeMaster/conf.yaml"
-target = root / "deploy/kubernetes/chart/files/cube-master/conf.yaml"
-target.write_text(source.read_text())
+# The chart has a separate, Helm-templated CubeMaster config.  Add the fixed
+# research ratio there without disturbing its service and secret templates.
+chart = root / "deploy/kubernetes/chart/files/cube-master/conf.yaml"
+text = chart.read_text()
+anchor = "  local_metric_update_timeout: 300s\n"
+addition = (
+    anchor
+    + "  overcommit_ratio:\n"
+    + "    cpu_ratio: 1.0\n"
+    + "    mem_ratio: 1.0\n"
+)
+if addition not in text:
+    if anchor not in text:
+        raise SystemExit(f"pin patch target changed in {chart}")
+    chart.write_text(text.replace(anchor, addition, 1))
+
+rendered = chart.read_text()
+required_templates = ('include "cube.dbHost"', 'include "cube.redisNodes"')
+if not all(token in rendered for token in required_templates):
+    raise SystemExit("refusing chart patch: Kubernetes database templates were lost")
 PY
 }
 
@@ -108,6 +171,7 @@ install_cube() {
     --set-string redis.password="$CUBE_REDIS_PASSWORD" \
     --set-string cubeProxy.advertiseIP="$ip" \
     --wait --timeout 20m
+  configure_cluster_dns
   status
 }
 
@@ -118,6 +182,19 @@ status() {
 }
 
 uninstall_cube() {
+  # DNS cleanup is deliberately conservative: remove only this release's
+  # marker-delimited block and leave every other CoreDNS setting untouched.
+  python3 - "$RELEASE" <<'PY'
+import json, re, subprocess, sys
+release = sys.argv[1]
+begin, end = f"# BEGIN cube-sandbox-dns {release}", f"# END cube-sandbox-dns {release}"
+raw = subprocess.check_output(["kubectl", "-n", "kube-system", "get", "configmap", "coredns", "-o", "json"])
+value = json.loads(raw)
+value["data"]["Corefile"] = re.sub(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "",
+                                      value["data"]["Corefile"], flags=re.DOTALL)
+subprocess.run(["kubectl", "apply", "-f", "-"], input=json.dumps(value).encode(), check=True)
+subprocess.run(["kubectl", "-n", "kube-system", "rollout", "restart", "deployment/coredns"], check=True)
+PY
   helm -n "$NAMESPACE" uninstall "$RELEASE"
   kubectl delete namespace "$NAMESPACE" --ignore-not-found
   echo "Persistent data and /data/cubelet were intentionally retained."

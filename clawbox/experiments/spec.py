@@ -57,6 +57,9 @@ class InferenceSpec(StrictFrozenModel):
 class SandboxSpec(StrictFrozenModel):
     template_id: str | None = Field(default=None, min_length=1)
     template_alias: str | None = Field(default=None, min_length=1)
+    source_image_reference: str | None = Field(default=None, min_length=1)
+    image_digest: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
+    architecture: str = Field(default="arm64", pattern=r"^arm64$")
     vcpu: int = Field(default=2, ge=1)
     memory_mib: int = Field(default=4096, ge=128)
     workspace: str = Field(default="/workspace", pattern=r"^/")

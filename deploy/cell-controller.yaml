@@ -18,13 +18,16 @@ spec:
         - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
       containers:
         - name: controller
-          image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
-          imagePullPolicy: Always
+          image: 127.0.0.1:5000/clawbox/control-plane-arm64@sha256:8696240154448a63cfb3d7f42aac20299fa733b9cef1352482fb82fd09ba6787
+          imagePullPolicy: IfNotPresent
           command: ["clawbox-cell-controller"]
           env:
             - {name: CLAWBOX_CELL_NAMESPACE, value: clawbox-benchmarks}
             - {name: CLAWBOX_MAX_WORKLOAD_STARTS_PER_CYCLE, value: "1"}
             - {name: CUBE_API_URL, value: http://cube-api.cube-system.svc:3000}
+            - {name: CLAWBOX_KUBERNETES_VERSION, value: v1.35.7}
+            - {name: CLAWBOX_CONTAINERD_VERSION, value: 2.3.4}
+            - {name: CLAWBOX_REVISION, value: cc0f5e6+working-tree}
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: "1", memory: 512Mi}

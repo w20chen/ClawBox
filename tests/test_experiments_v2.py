@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
+from clawbox.experiments.worker import ExperimentWorker
 
 
 def raw_spec() -> dict:
@@ -65,3 +66,13 @@ def test_yaml_loader_and_v1_error(tmp_path: Path) -> None:
     path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="migrate schema v1"):
         load_experiment(path)
+
+
+def test_worker_only_reuses_successful_complete_arm(tmp_path: Path) -> None:
+    result = tmp_path / "arm.json"
+    marker = tmp_path / "arm.complete"
+    marker.write_text("digest\n", encoding="ascii")
+    result.write_text(json.dumps({"arm": {"spec_digest": "digest"}, "status": "failed"}))
+    assert not ExperimentWorker._completed(result, marker, "digest")
+    result.write_text(json.dumps({"arm": {"spec_digest": "digest"}, "status": "succeeded"}))
+    assert ExperimentWorker._completed(result, marker, "digest")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any
 
 import yaml
@@ -49,6 +50,20 @@ def experiment_worker_job(task: dict[str, Any]) -> dict[str, Any]:
                     "automountServiceAccountToken": False,
                     "nodeName": target_node,
                     "securityContext": {"fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch"},
+                    # kubelet does not reliably apply fsGroup ownership to hostPath
+                    # volumes.  Prepare only this task's dedicated result directory
+                    # before starting the non-root worker.
+                    "initContainers": [{
+                        "name": "prepare-results", "image": spec["workerImage"],
+                        "imagePullPolicy": "IfNotPresent",
+                        "command": ["sh", "-c", "chown 10001:10001 /results && chmod 0770 /results"],
+                        "securityContext": {
+                            "runAsUser": 0, "runAsGroup": 0,
+                            "allowPrivilegeEscalation": False,
+                            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "FOWNER"]},
+                        },
+                        "volumeMounts": [{"name": "results", "mountPath": "/results"}],
+                    }],
                     "containers": [{
                         "name": "worker", "image": spec["workerImage"],
                         "imagePullPolicy": "IfNotPresent",
@@ -59,6 +74,9 @@ def experiment_worker_job(task: dict[str, Any]) -> dict[str, Any]:
                             {"name": "CLAWBOX_TASK_UID", "value": metadata["uid"]},
                             {"name": "CLAWBOX_WORKER_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
                             {"name": "CUBE_API_URL", "value": spec["cubeApiURL"]},
+                            {"name": "CLAWBOX_KUBERNETES_VERSION", "value": os.environ.get("CLAWBOX_KUBERNETES_VERSION", "unknown")},
+                            {"name": "CLAWBOX_CONTAINERD_VERSION", "value": os.environ.get("CLAWBOX_CONTAINERD_VERSION", "unknown")},
+                            {"name": "CLAWBOX_REVISION", "value": os.environ.get("CLAWBOX_REVISION", "unknown")},
                         ],
                         "envFrom": ([{"secretRef": {"name": spec["credentialSecretName"]}}]
                                     if spec.get("credentialSecretName") else []),

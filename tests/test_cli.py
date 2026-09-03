@@ -3,126 +3,42 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from clawbox import cli
-from clawbox.benchmark.managed_client import ManagedAPIError
 
 
-def test_submit_cli_forwards_full_problem_and_tenant(monkeypatch, tmp_path, capsys):
-    problem = tmp_path / "problem.txt"
-    problem.write_text("Fix the parser.\n", encoding="utf-8")
+def test_public_cli_contains_only_experiment_group() -> None:
+    parser = cli.parser()
+    groups = next(action for action in parser._actions if action.dest == "group")
+    assert set(groups.choices) == {"experiment"}
+    commands = next(action for action in groups.choices["experiment"]._actions
+                    if action.dest == "command")
+    assert set(commands.choices) == {"validate", "plan", "run", "status", "cancel", "collect"}
+
+
+def test_validate_and_plan_v2(capsys) -> None:
+    path = "examples/experiments/vertical-slice.yaml"
+    assert cli.main(["experiment", "validate", path]) == 0
+    assert '"valid": true' in capsys.readouterr().out
+    assert cli.main(["experiment", "plan", path]) == 0
+    assert '"arms"' in capsys.readouterr().out
+
+
+def test_run_and_status_use_managed_api(monkeypatch, capsys) -> None:
     seen = {}
 
     class FakeClient:
         def __init__(self, base_url, *, token, tenant_id):
-            seen.update(base_url=base_url, token=token, tenant_id=tenant_id)
-
-        def create_run(self, **kwargs):
+            seen["tenant"] = tenant_id
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def create_experiment(self, **kwargs):
             seen.update(kwargs)
-            return SimpleNamespace(
-                run_id="01TEST",
-                phase="Accepted",
-                idempotency_replay=False,
-                current_attempt_id=None,
-            )
+            return SimpleNamespace(run_id="run-1", phase="accepted", idempotency_replay=False)
+        def get_run(self, run_id): return {"runId": run_id, "phase": "succeeded"}
 
     monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
-    assert cli.main([
-        "--api-url", "http://api.example",
-        "--tenant", "team-a",
-        "submit",
-        "--input-ref", "repo-a",
-        "--problem-file", str(problem),
-        "--idempotency-key", "request-1",
-    ]) == 0
-
-    assert seen["tenant_id"] == "team-a"
-    assert seen["problem_statement"] == "Fix the parser.\n"
-    assert seen["input_sha256"] == cli.input_sha256("Fix the parser.\n")
-    assert '"runId": "01TEST"' in capsys.readouterr().out
-
-
-def test_status_cli_uses_tenant_scope(monkeypatch, capsys):
-    seen = {}
-
-    class FakeClient:
-        def __init__(self, base_url, *, token, tenant_id):
-            seen["tenant_id"] = tenant_id
-
-        def get_run(self, run_id):
-            return {"runId": run_id, "phase": "Succeeded"}
-
-    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
-    assert cli.main(["--tenant", "team-b", "status", "01RUN"]) == 0
-    assert seen["tenant_id"] == "team-b"
-    assert '"phase": "Succeeded"' in capsys.readouterr().out
-
-
-def test_submit_cli_generates_idempotency_key_when_omitted(monkeypatch):
-    seen = {}
-
-    class FakeClient:
-        def __init__(self, base_url, *, token, tenant_id):
-            pass
-
-        def create_run(self, **kwargs):
-            seen.update(kwargs)
-            return SimpleNamespace(
-                run_id="01TEST",
-                phase="Accepted",
-                idempotency_replay=False,
-                current_attempt_id=None,
-            )
-
-    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
-    assert cli.main(["submit", "--input-ref", "repo-a"]) == 0
-    assert seen["idempotency_key"].startswith("cli-")
-
-
-def test_missing_problem_file_is_reported_without_traceback(monkeypatch, tmp_path, capsys):
-    class FakeClient:
-        def __init__(self, base_url, *, token, tenant_id):
-            pass
-
-    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
-    missing = tmp_path / "missing.txt"
-
-    assert cli.main([
-        "submit", "--input-ref", "repo-a", "--problem-file", str(missing),
-    ]) == 1
-    stderr = capsys.readouterr().err
-    assert "clawbox: error:" in stderr
-    assert "Traceback" not in stderr
-
-
-def test_managed_api_error_is_reported_without_traceback(monkeypatch, capsys):
-    class FakeClient:
-        def __init__(self, base_url, *, token, tenant_id):
-            pass
-
-        def get_run(self, run_id):
-            raise ManagedAPIError(404, {"detail": "run not found"})
-
-    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
-
-    assert cli.main(["status", "missing-run"]) == 1
-    stderr = capsys.readouterr().err
-    assert "Managed API 404: run not found" in stderr
-    assert "Traceback" not in stderr
-
-
-def test_client_dependency_error_is_reported_without_traceback(monkeypatch, capsys):
-    class BrokenClient:
-        def __init__(self, *args, **kwargs):
-            raise ImportError("proxy support is unavailable")
-
-    monkeypatch.setattr(cli, "ManagedAPIClient", BrokenClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "secret-token")
-
-    assert cli.main(["status", "01RUN"]) == 1
-    stderr = capsys.readouterr().err
-    assert "proxy support is unavailable" in stderr
-    assert "Traceback" not in stderr
+    monkeypatch.setenv("CLAWBOX_TOKEN", "token")
+    spec = "examples/experiments/vertical-slice.yaml"
+    assert cli.main(["--tenant", "team-a", "experiment", "run", spec]) == 0
+    assert seen["tenant"] == "team-a" and seen["experiment_spec"]["schema_version"] == 2
+    assert cli.main(["experiment", "status", "run-1"]) == 0
+    assert '"phase": "succeeded"' in capsys.readouterr().out

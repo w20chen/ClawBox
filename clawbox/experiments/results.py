@@ -36,6 +36,7 @@ class ResultEnvelope(BaseModel):
     schema_version: int = 2
     run_id: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)
+    sandbox_task_uid: str | None = None
     experiment_id: str = Field(min_length=1)
     arm: ExperimentArm
     provenance: dict[str, Any] = Field(default_factory=dict)

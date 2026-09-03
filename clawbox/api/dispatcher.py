@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Any, Protocol
 
@@ -51,6 +52,11 @@ logger = logging.getLogger(__name__)
 
 # Cell controller namespace for SandboxTask CRs (matches CLAWBOX_CELL_NAMESPACE).
 DEFAULT_CELL_NAMESPACE = "clawbox-benchmarks"
+
+
+def _dns_label(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
+    return (normalized or "unknown")[:63].rstrip("-")
 
 
 class CRBackend(Protocol):
@@ -239,8 +245,6 @@ class Dispatcher:
                 self._cr.cancel_sandboxtask(name, self.namespace)
 
     def _build_manifest(self, run: Run, attempt) -> dict[str, Any]:
-        from clawbox.benchmark.kubernetes import dns_label
-
         execution_spec = {
             "workerImage": os.environ.get(
                 "CLAWBOX_WORKER_IMAGE", "clawbox/experiment-worker@sha256:" + "0" * 64,
@@ -274,8 +278,8 @@ class Dispatcher:
             labels={
                 "app.kubernetes.io/name": "clawbox-managed",
                 "app.kubernetes.io/managed-by": "clawbox-dispatcher",
-                "clawbox.openai.com/tenant": dns_label(run.tenant_id),
-                "clawbox.openai.com/run": dns_label(run.run_id),
+                "clawbox.openai.com/tenant": _dns_label(run.tenant_id),
+                "clawbox.openai.com/run": _dns_label(run.run_id),
             },
             annotations=annotations,
         )

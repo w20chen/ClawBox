@@ -22,6 +22,9 @@ dependencies = [
   "typing-extensions>=4.12",
   "alembic>=1.13",
   "cubesandbox==0.7.0",
+  # cubesandbox 0.7.0 imports e2b.envd.process for its command transport but
+  # does not declare the package dependency itself.
+  "e2b==2.29.5",
   "PyYAML>=6.0",
 ]
 
@@ -31,24 +34,10 @@ images = ["datasets>=3.0"]
 dev = ["pytest>=8", "httpx2"]
 
 [project.scripts]
-clawbox-scheduler = "clawbox.scheduler.app:main"
-clawbox-allocator = "clawbox.allocator.app:main"
-clawbox-controller = "clawbox.controller.app:main"
-clawbox-node-agent = "clawbox.node_agent.app:main"
-clawbox-tool-agent = "clawbox.tool_agent.app:main"
-clawbox-swe-rebench = "clawbox.benchmark.kubernetes:main"
 clawbox-cell-controller = "clawbox.cell.app:main"
-clawbox-trace-ingester = "clawbox.ingester.app:main"
-clawbox-replay = "clawbox.replay.cli:main"
 clawbox-managed-api = "clawbox.api.main:main"
 clawbox-managed-dispatcher = "clawbox.api.dispatcher_main:main"
-clawbox-managed-benchmark = "clawbox.benchmark.managed_client:_main"
-clawbox-multitenant = "clawbox.benchmark.multitenant:main"
-clawbox-load-test = "clawbox.benchmark.multitenant:main"
 clawbox = "clawbox.cli:main"
-clawbox-tune-server = "clawbox.tuning.server:main"
-clawbox-arm64-images = "clawbox.images.arm64:main"
-clawbox-swe-rebench-arm64-images = "clawbox.images.swerebench:main"
 clawbox-p90-export = "clawbox.cell.p90:export_main"
 clawbox-experiment-worker = "clawbox.experiments.worker:main"
 

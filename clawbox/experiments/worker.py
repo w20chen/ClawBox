@@ -82,7 +82,8 @@ class ExperimentWorker:
         self.run_id = run_id
         self.attempt_id = attempt_id
         self.task_uid = task_uid
-        self.output_root = output_root or Path(spec.output.directory) / run_id
+        output_base = Path(os.environ.get("CLAWBOX_OUTPUT_ROOT", spec.output.directory))
+        self.output_root = output_root or output_base / run_id
         journal = OwnedSandboxJournal(self.output_root / "owned-sandboxes.jsonl")
         self.client = client or CubeSandboxClient(journal=journal)
         if self.client.journal is None:
@@ -106,8 +107,10 @@ class ExperimentWorker:
         if not result_path.exists() or not marker_path.exists():
             return False
         try:
+            previous = json.loads(result_path.read_text(encoding="utf-8"))
             return marker_path.read_text(encoding="ascii").strip() == digest and \
-                json.loads(result_path.read_text(encoding="utf-8"))["arm"]["spec_digest"] == digest
+                previous["arm"]["spec_digest"] == digest and \
+                previous["status"] == RunStatus.SUCCEEDED
         except (OSError, ValueError, KeyError):
             return False
 
@@ -159,6 +162,7 @@ class ExperimentWorker:
         model_steps = sum(int(item["model_steps"]) for item in sessions)
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
+            sandbox_task_uid=self.task_uid,
             experiment_id=self.spec.experiment_id, arm=arm,
             provenance=self._provenance(), status=status,
             failure_category=failure_category_for(status, "" if failure is None else str(failure)),
@@ -271,7 +275,11 @@ class ExperimentWorker:
                 coordinator.unregister(session_id)
 
     def _actions(self, arm: ExperimentArm) -> list[ReplayAction]:
-        if arm.agent.driver not in {AgentDriver.REPLAY_ENGINE, AgentDriver.OPENCLAW}:
+        if arm.agent.driver is AgentDriver.OPENCLAW:
+            raise RuntimeError(
+                "OpenClaw Worker tool routing is not implemented; refusing to substitute replay"
+            )
+        if arm.agent.driver is not AgentDriver.REPLAY_ENGINE:
             raise RuntimeError(f"unsupported agent driver: {arm.agent.driver}")
         trace = arm.case.replay_trace_reference or arm.case.source_reference
         return load_trace(Path(trace))
@@ -337,13 +345,14 @@ class ExperimentWorker:
             "cubesandbox_tag": "v0.7.0",
             "cubesandbox_commit": "d0081641c59822e4e5653b7462e914410b81910a",
             "cubesandbox_sdk": sdk,
-            "clawbox_commit": command("git", "rev-parse", "HEAD"),
+            "clawbox_commit": os.environ.get("CLAWBOX_REVISION", command("git", "rev-parse", "HEAD")),
             "kubernetes_version": os.environ.get("CLAWBOX_KUBERNETES_VERSION", "unknown"),
             "containerd_version": os.environ.get("CLAWBOX_CONTAINERD_VERSION", "unknown"),
             "os_release": platform.platform(), "kernel": platform.release(),
             "architecture": platform.machine(), "cpu_model": platform.processor(),
             "template_reference": self.spec.sandbox.template,
-            "template_image_digest": os.environ.get("CLAWBOX_TEMPLATE_IMAGE_DIGEST", "unknown"),
+            "template_source_image": self.spec.sandbox.source_image_reference or "unknown",
+            "template_image_digest": self.spec.sandbox.image_digest or os.environ.get("CLAWBOX_TEMPLATE_IMAGE_DIGEST", "unknown"),
             "measurement_scope": "node-level physical memory, baseline-subtracted per arm",
             "cube_runtime_settings": {
                 "cpu_overcommit_ratio": 1.0, "memory_overcommit_ratio": 1.0,
@@ -369,6 +378,24 @@ class ExperimentWorker:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        lines = [
+            f"# Experiment {self.spec.experiment_id}", "",
+            f"Run: `{self.run_id}`  ",
+            f"Attempt: `{self.attempt_id}`  ",
+            f"SandboxTask UID: `{self.task_uid}`", "",
+            "| Arm | Policy | Agents | Status | Duration (s) | Pauses | Resumes |",
+            "|---|---|---:|---|---:|---:|---:|",
+        ]
+        for item in self.results:
+            lines.append(
+                f"| `{item.arm.arm_id}` | {item.arm.policy.name} | {item.arm.concurrency} | "
+                f"{item.status.value} | {item.performance.get('duration_seconds', 0):.3f} | "
+                f"{item.performance.get('pause_count', 0)} | {item.performance.get('resume_count', 0)} |"
+            )
+        markdown = self.output_root / "summary.md"
+        markdown_tmp = markdown.with_name(markdown.name + ".tmp")
+        markdown_tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(markdown_tmp, markdown)
 
 
 def main(argv: list[str] | None = None) -> int:

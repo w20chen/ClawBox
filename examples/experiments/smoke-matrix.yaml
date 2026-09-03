@@ -1,8 +1,8 @@
 schema_version: 2
-experiment_id: cube-vertical-slice
+experiment_id: cube-smoke-matrix
 workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 1}
 agent: {driver: replay_engine}
-inference: {backend: replay, configuration: {time_scale: 1.0}}
+inference: {backend: replay, configuration: {time_scale: 0.1}}
 sandbox:
   template_id: tpl-c7212cdc724844639aa65486
   source_image_reference: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code
@@ -12,8 +12,9 @@ sandbox:
   memory_mib: 4096
   workspace: /workspace
 execution:
-  concurrency_levels: [1]
-  randomized_order: false
+  concurrency_levels: [4]
+  randomized_order: true
+  random_seed: 20260903
   arm_timeout_seconds: 600
   command_timeout_seconds: 60
   stabilization_seconds: 1
@@ -24,6 +25,7 @@ resources:
   checkpoint_restore_headroom_mib: 8192
   static_tool_memory_mib: 256
 policies:
+  - {name: static-resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
   - {name: eager-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: eager, restore: reactive}
 validation: {command: "test -f /workspace/result.txt"}
 output: {directory: /results}

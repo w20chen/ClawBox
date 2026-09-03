@@ -1,0 +1,47 @@
+apiVersion: clawbox.openai.com/v1alpha2
+kind: SandboxTask
+metadata:
+  name: cube-vertical-slice
+  namespace: clawbox-benchmarks
+spec:
+  runRef:
+    tenantID: local
+    runID: k8s-vertical-slice-v2
+    attemptID: attempt-1
+  idempotencyKey: k8s-vertical-slice-v2/attempt-1
+  requestDigest: 02ac4bc490fb76ce397f9dba8c15ef579fb6b19da2e71d2ac89771dad8a1bf19
+  desiredState: Running
+  workerImage: 127.0.0.1:5000/clawbox/experiment-worker@sha256:9cdb4634a14b962e0c1e8214cf8c97d3fb356c40652258f645aedf810861a9d2
+  cubeApiURL: http://cube-api.cube-system.svc:3000
+  resultHostPath: /data/clawbox-results/k8s-vertical-slice-v2/attempt-1
+  timeoutSeconds: 600
+  experimentSpec:
+    schema_version: 2
+    experiment_id: cube-vertical-slice
+    workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 1}
+    agent: {driver: replay_engine}
+    inference: {backend: replay, configuration: {time_scale: 1.0}}
+    sandbox:
+      template_id: tpl-c7212cdc724844639aa65486
+      source_image_reference: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code
+      image_digest: sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d
+      architecture: arm64
+      vcpu: 2
+      memory_mib: 4096
+      workspace: /workspace
+    execution:
+      concurrency_levels: [1]
+      randomized_order: false
+      arm_timeout_seconds: 600
+      command_timeout_seconds: 60
+      stabilization_seconds: 1
+    resources:
+      target_node: hostname-txyuq.foreman.pxe
+      pool_memory_budget_mib: 1600000
+      emergency_free_memory_mib: 200000
+      checkpoint_restore_headroom_mib: 8192
+      static_tool_memory_mib: 256
+    policies:
+      - {name: eager-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: eager, restore: reactive}
+    validation: {command: "test -f /workspace/result.txt"}
+    output: {directory: /results}
