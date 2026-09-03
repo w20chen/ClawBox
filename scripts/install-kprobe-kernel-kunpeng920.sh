@@ -36,7 +36,7 @@ kubectl -n "$NAMESPACE" cp "$ROOT_DIR/deploy/cubesandbox/kernel-oc9-arm64-kprobe
 kubectl -n "$NAMESPACE" cp "$ROOT_DIR/deploy/cubesandbox/kernel-oc9-arm64-kprobes.version.json" \
   "$POD:$STAGE/version.json" -c cube-kernel-install
 
-if ! changed=$(kubectl -n "$NAMESPACE" exec "$POD" -c cube-kernel-install -- \
+if ! changed=$(kubectl -n "$NAMESPACE" exec -i "$POD" -c cube-kernel-install -- \
   sh -s <<'EOF'
 set -eu
 EXPECTED=f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
