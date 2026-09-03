@@ -46,7 +46,7 @@ VERSION_ID=sha256-f84e3fa28ae6
 STAGE=/data/cubelet/root/.clawbox-kprobe-kernel/$VERSION_ID
 ROOT=/usr/local/services/cubetoolbox/cube-kernel-scf
 COMP=/data/cubelet/root/component_versions/cube-kernel-scf/$VERSION_ID
-test "$(sha256sum "$STAGE/vmlinux-kprobes" | awk '{print $1}')" = "$EXPECTED" 
+test "$(sha256sum "$STAGE/vmlinux-kprobes" | awk '{print $1}')" = "$EXPECTED"
 test "$(sha256sum "$STAGE/vmlinux-kprobes" | awk '{print $1}')" = \
       "$(sha256sum "$ROOT/vmlinux-bm" | awk '{print $1}')" || {
   current=$(sha256sum "$ROOT/vmlinux-bm" | awk '{print $1}')
