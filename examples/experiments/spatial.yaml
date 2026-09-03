@@ -1,0 +1,24 @@
+schema_version: 2
+experiment_id: spatial
+workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 3}
+agent: {driver: replay_engine}
+inference: {backend: replay, configuration: {time_scale: 1.0}}
+sandbox: {template_alias: clawbox-task-arm64, vcpu: 2, memory_mib: 4096, workspace: /workspace}
+execution: {concurrency_levels: [20, 40, 60], randomized_order: true, random_seed: 20260903}
+resources:
+  target_node: kunpeng920b-0
+  pool_memory_budget_mib: 1600000
+  emergency_free_memory_mib: 200000
+  checkpoint_restore_headroom_mib: 8192
+  static_tool_memory_mib: 256
+  full_tool_memory_mib: 4096
+  p90_predictions: examples/predictions/smoke-p90.json
+  oracle_measurements: examples/predictions/smoke-oracle.json
+policies:
+  - {name: lifetime-full, admission: lifetime_full, reclamation: resident, eviction: none, restore: none}
+  - {name: tool-full, admission: tool_full, reclamation: resident, eviction: none, restore: none}
+  - {name: tool-static, admission: tool_static, reclamation: resident, eviction: none, restore: none}
+  - {name: tool-p90, admission: tool_p90, reclamation: resident, eviction: none, restore: none}
+  - {name: tool-oracle, admission: tool_oracle, reclamation: resident, eviction: none, restore: none}
+validation: {command: "test -f /workspace/result.txt"}
+output: {directory: /results}

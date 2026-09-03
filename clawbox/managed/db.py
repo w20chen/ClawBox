@@ -65,6 +65,7 @@ class RunRow(ManagedBase):
     idempotency_key: Mapped[str] = mapped_column(String(512))
     request_digest: Mapped[str] = mapped_column(String(64))
     problem_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
+    experiment_spec: Mapped[str] = mapped_column(Text, default="{}")
     phase: Mapped[str] = mapped_column(String(32), default="Accepted")
     desired_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     current_attempt_id: Mapped[str | None] = mapped_column(String(26), nullable=True)

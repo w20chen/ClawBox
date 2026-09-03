@@ -11,38 +11,26 @@ spec:
     kind: SandboxTask
     shortNames: [sbt]
   versions:
-    - name: v1alpha1
+    - name: v1alpha2
       served: true
       storage: true
-      subresources:
-        status: {}
+      subresources: {status: {}}
       additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Outcome
-          type: string
-          jsonPath: .status.outcome
-        - name: Profile
-          type: string
-          jsonPath: .spec.profile
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Job, type: string, jsonPath: .status.jobName}
+        - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
       schema:
         openAPIV3Schema:
           type: object
           required: [spec]
-          x-kubernetes-validations:
-            - rule: "self.metadata.name.size() <= 48"
-              message: "SandboxTask names are limited to 48 characters for owned child names"
           properties:
             spec:
               type: object
+              required: [runRef, idempotencyKey, requestDigest, desiredState, workerImage,
+                         cubeApiURL, resultHostPath, experimentSpec]
               x-kubernetes-validations:
-                - rule: "self == oldSelf || (oldSelf.desiredState == 'Running' && self.desiredState == 'Cancelled')"
-                  message: "SandboxTask spec is immutable except one-way cancellation via desiredState"
-              required: [toolImage, problemStatement, llmSecretName, llmEgressCIDR]
+                - rule: "self == oldSelf || (oldSelf.desiredState == 'Running' && self.desiredState == 'Cancelled' && self.runRef == oldSelf.runRef && self.idempotencyKey == oldSelf.idempotencyKey && self.requestDigest == oldSelf.requestDigest && self.workerImage == oldSelf.workerImage && self.cubeApiURL == oldSelf.cubeApiURL && self.resultHostPath == oldSelf.resultHostPath && self.experimentSpec == oldSelf.experimentSpec)"
+                  message: "spec is immutable except Running to Cancelled"
               properties:
                 runRef:
                   type: object
@@ -52,36 +40,21 @@ spec:
                     runID: {type: string, minLength: 1, maxLength: 128}
                     attemptID: {type: string, minLength: 1, maxLength: 128}
                 idempotencyKey: {type: string, minLength: 1, maxLength: 512}
-                requestDigest: {type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
+                requestDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
                 desiredState: {type: string, enum: [Running, Cancelled], default: Running}
-                toolImage:
-                  type: string
-                  pattern: '^.+@sha256:[a-f0-9]{64}$'
-                  description: Immutable, contract-tested linux/arm64 SWE-ReBench image.
-                problemStatement: {type: string, minLength: 1, maxLength: 1000000}
-                baseCommit: {type: string, maxLength: 256}
-                hintText: {type: string, maxLength: 1000000}
-                llmSecretName: {type: string, minLength: 1, maxLength: 253}
-                llmEgressCIDR: {type: string, minLength: 3, maxLength: 64}
-                llmEgressCIDRs:
-                  type: array
-                  minItems: 1
-                  maxItems: 32
-                  items: {type: string, minLength: 3, maxLength: 64}
-                llmEgressPort: {type: integer, minimum: 1, maximum: 65535, default: 443}
-                toolEgressCIDRs:
-                  type: array
-                  maxItems: 32
-                  items: {type: string, minLength: 3, maxLength: 64}
-                profile: {type: string, enum: [small, medium, large], default: small}
-                baseline:
-                  type: string
-                  enum: [fixed-resident, p90-static, p90-elastic]
-                  default: fixed-resident
-                kbGeneration: {type: integer, minimum: 1}
-                timeoutSeconds: {type: integer, minimum: 60, maximum: 21600, default: 1800}
-                commandTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600, default: 300}
-                outputLimitBytes: {type: integer, minimum: 1024, maximum: 33554432, default: 4194304}
+                workerImage: {type: string, pattern: '^.+@sha256:[a-f0-9]{64}$'}
+                cubeApiURL: {type: string, minLength: 1}
+                credentialSecretName: {type: string, minLength: 1, maxLength: 253}
+                resultHostPath: {type: string, pattern: '^/'}
+                timeoutSeconds: {type: integer, minimum: 60, maximum: 86400, default: 21600}
+                experimentSpec:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
             status:
               type: object
-              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase: {type: string, enum: [pending, running, succeeded, failed, cancelled, cleaned]}
+                jobName: {type: string}
+                resolvedSpecDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
+                errorCategory: {type: string}
+                resultRef: {type: string}

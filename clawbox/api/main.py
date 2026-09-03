@@ -1,28 +1,13 @@
-"""Managed API entry point (clawbox-managed-api).
-
-Builds the app from the environment (service token + template registry) so a
-deployed container honors CLAWBOX_SERVICE_TOKEN / CLAWBOX_TEMPLATES.
-"""
+"""Managed API entry point (clawbox-managed-api)."""
 
 from __future__ import annotations
 
-import json
 import os
 
 import uvicorn
 
 from clawbox.api.app import create_app
-from clawbox.api.templates import TemplateRegistry, default_registry
-
-
-def _load_registry() -> TemplateRegistry:
-    raw = os.getenv("CLAWBOX_TEMPLATES")
-    if raw:
-        return TemplateRegistry.from_dict(json.loads(raw))
-    return default_registry()
-
-
-app = create_app(registry=_load_registry())
+app = create_app()
 
 
 def main() -> None:

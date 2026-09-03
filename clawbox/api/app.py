@@ -1,6 +1,6 @@
-"""Managed API server (M1, ADR-001/002).
+"""Managed API server.
 
-FastAPI app factory so tests inject a session factory + template registry.
+FastAPI app factory so tests can inject a session factory.
 Restart-safe: every handler reads/writes through the repository (no in-process
 memory is authoritative). Auth: X-Clawbox-Token (service token) plus
 X-Tenant-Id for tenant scoping on every resource.
@@ -21,7 +21,7 @@ from clawbox.api.schemas import (
     RunEventResponse,
     RunResponse,
 )
-from clawbox.api.templates import TemplateError, TemplateRegistry, default_registry
+from clawbox.experiments import spec_digest
 from clawbox.managed.db import managed_session_factory
 from clawbox.managed.models import RunIntent, idempotency_digest
 from clawbox.managed.repo import (
@@ -38,11 +38,9 @@ from clawbox.managed.repo import (
 def create_app(
     *,
     session_factory=None,
-    registry: TemplateRegistry | None = None,
     service_token: str | None = None,
 ) -> FastAPI:
     factory = session_factory or managed_session_factory()
-    templates = registry or default_registry()
     service_token = service_token or os.getenv("CLAWBOX_SERVICE_TOKEN", "development-only-token")
 
     app = FastAPI(title="ClawBox Managed API", version="0.2.0")
@@ -84,26 +82,20 @@ def create_app(
         tenant_id: str = Depends(tenant),
         session: Session = Depends(db),
     ) -> CreateRunResponse:
-        try:
-            policy = templates.resolve(body.templateRef, body.templateRevision)
-            templates.validate_deadline(policy, body.deadlineSeconds)
-        except TemplateError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-
         # request_digest is computed from the server-canonicalized body so a
         # replay returns the original Run and a different body is a 409.
         digest_payload = body.model_dump()
         intent = RunIntent(
             tenant_id=tenant_id,
             project_id=body.projectId,
-            template_ref=body.templateRef,
-            template_revision=body.templateRevision,
-            input_ref=body.inputRef,
-            input_sha256=body.inputSha256,
-            deadline_seconds=body.deadlineSeconds,
+            template_ref=body.experimentSpec.sandbox.template,
+            template_revision=2,
+            input_ref=body.experimentSpec.workload.input,
+            input_sha256=spec_digest(body.experimentSpec),
+            deadline_seconds=body.experimentSpec.execution.arm_timeout_seconds,
             idempotency_key=body.idempotencyKey,
             request_digest=idempotency_digest(digest_payload),
-            problem_statement=body.problemStatement,
+            experiment_spec=body.experimentSpec.model_dump(mode="json"),
         )
         try:
             run, created = create_run(session, intent)
@@ -131,11 +123,6 @@ def create_app(
             runId=run.run_id,
             tenantId=run.tenant_id,
             projectId=run.project_id,
-            templateRef=run.template_ref,
-            templateRevision=run.template_revision,
-            inputRef=run.input_ref,
-            inputSha256=run.input_sha256,
-            deadlineSeconds=run.deadline_seconds,
             phase=run.phase.value,
             desiredState=run.desired_state,
             currentAttemptId=run.current_attempt_id,
@@ -144,6 +131,8 @@ def create_app(
             updatedAt=run.updated_at,
             committedAt=run.committed_at,
             finalReason=run.final_reason,
+            experimentId=str(run.experiment_spec.get("experiment_id", "experiment")),
+            specDigest=run.input_sha256,
         )
 
     @app.post("/v1/runs/{run_id}/cancel", response_model=RunResponse)

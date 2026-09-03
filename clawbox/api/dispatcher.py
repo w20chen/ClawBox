@@ -16,13 +16,13 @@ a fake.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from clawbox.api.templates import TemplateRegistry
 from clawbox.cell.sandboxtask_v1alpha2 import (
     DESIRED_CANCELLED,
     DESIRED_RUNNING,
@@ -147,13 +147,11 @@ class Dispatcher:
         self,
         *,
         session_factory,
-        registry: TemplateRegistry,
         cr_backend: CRBackend,
         namespace: str = DEFAULT_CELL_NAMESPACE,
         batch_size: int = 10,
     ):
         self._factory = session_factory
-        self._registry = registry
         self._cr = cr_backend
         self.namespace = namespace
         self.batch_size = batch_size
@@ -224,8 +222,7 @@ class Dispatcher:
         if run is None:
             raise RuntimeError(f"run {row.run_id} not found for attempt {attempt_id}")
 
-        policy = self._registry.resolve(run.template_ref, run.template_revision)
-        manifest = self._build_manifest(run, attempt, policy)
+        manifest = self._build_manifest(run, attempt)
         self._cr.apply_sandboxtask(manifest)
         if run.phase == RunPhase.ACCEPTED:
             transition_run(db, run, RunPhase.QUEUED, reason="dispatcher", message="SandboxTask CR created")
@@ -241,29 +238,27 @@ class Dispatcher:
                 name = _cr_name(run, attempt)
                 self._cr.cancel_sandboxtask(name, self.namespace)
 
-    def _build_manifest(self, run: Run, attempt, policy) -> dict[str, Any]:
+    def _build_manifest(self, run: Run, attempt) -> dict[str, Any]:
         from clawbox.benchmark.kubernetes import dns_label
 
         execution_spec = {
-            "toolImage": policy.tool_image,
-            "problemStatement": _problem_statement(run),
-            "llmSecretName": policy.secret_name,
-            "llmEgressCIDR": policy.llm_egress_cidr,
-            "profile": policy.profile,
-            "baseline": policy.baseline,
-            "timeoutSeconds": run.deadline_seconds,
-            "commandTimeoutSeconds": 300,
-            "outputLimitBytes": 4 * 1024**2,
-            "toolEgressCIDRs": [],
+            "workerImage": os.environ.get(
+                "CLAWBOX_WORKER_IMAGE", "clawbox/experiment-worker@sha256:" + "0" * 64,
+            ),
+            "cubeApiURL": os.environ.get("CUBE_API_URL", "http://cube-api.cube-system.svc:3000"),
+            "resultHostPath": os.path.join(
+                os.environ.get("CLAWBOX_RESULT_HOST_ROOT", "/data/clawbox-results"),
+                run.run_id, attempt.attempt_id,
+            ),
+            "timeoutSeconds": min(86400, max(60, run.deadline_seconds)),
+            "experimentSpec": run.experiment_spec,
         }
-        if policy.kb_generation is not None:
-            execution_spec["kbGeneration"] = policy.kb_generation
+        if secret := os.environ.get("CLAWBOX_WORKER_SECRET"):
+            execution_spec["credentialSecretName"] = secret
         annotations = {
             "clawbox.openai.com/input-ref": run.input_ref,
             "clawbox.openai.com/template": f"{run.template_ref}@{run.template_revision}",
         }
-        if policy.repository:
-            annotations["clawbox.openai.com/repository"] = policy.repository
         return build_sandboxtask_v1alpha2(
             name=_cr_name(run, attempt),
             namespace=self.namespace,
@@ -317,8 +312,10 @@ class Dispatcher:
         if run.current_attempt_id != attempt.attempt_id:
             return
 
-        if observed == "Cleaned":
-            observed = status.get("outcome")
+        if observed == "cleaned":
+            observed = "cancelled" if status.get("errorCategory") == "cancelled" else "failed"
+        if status.get("resultRef"):
+            attempt.result_manifest_ref = str(status["resultRef"])
         attempt_target = _attempt_phase_for_cell(observed)
         run_target = _run_phase_for_cell(observed)
         if attempt_target is None or run_target is None:
@@ -383,30 +380,28 @@ _RUN_PROGRESS = [
 
 
 def _attempt_phase_for_cell(phase: str | None) -> AttemptPhase | None:
-    try:
-        return AttemptPhase(phase) if phase else None
-    except ValueError:
-        return None
+    return {
+        "pending": AttemptPhase.QUEUED,
+        "running": AttemptPhase.RUNTIME_RUNNING,
+        "succeeded": AttemptPhase.SUCCEEDED,
+        "failed": AttemptPhase.FAILED,
+        "cancelled": AttemptPhase.CANCELLED,
+    }.get(phase or "")
 
 
 def _run_phase_for_cell(phase: str | None) -> RunPhase | None:
     mapping = {
-        "Queued": RunPhase.QUEUED,
-        "Admitted": RunPhase.RUNNING,
-        "ToolStarting": RunPhase.RUNNING,
-        "ToolReady": RunPhase.RUNNING,
-        "RuntimeRunning": RunPhase.RUNNING,
-        "Collecting": RunPhase.FINALIZING,
-        "Succeeded": RunPhase.SUCCEEDED,
-        "Failed": RunPhase.FAILED,
-        "TimedOut": RunPhase.TIMED_OUT,
-        "Cancelled": RunPhase.CANCELLED,
+        "pending": RunPhase.QUEUED,
+        "running": RunPhase.RUNNING,
+        "succeeded": RunPhase.SUCCEEDED,
+        "failed": RunPhase.FAILED,
+        "cancelled": RunPhase.CANCELLED,
     }
     return mapping.get(phase or "")
 
 
 def _status_detail(status: dict[str, Any]) -> tuple[str | None, str | None]:
-    return status.get("reason"), status.get("message")
+    return status.get("errorCategory"), None
 
 
 def _advance_attempt(

@@ -120,6 +120,21 @@ class ManagedAPIClient:
             raise UnknownTemplateError(response.status_code, response.json())
         raise ManagedAPIError(response.status_code, response.text)
 
+    def create_experiment(self, *, project_id: str, experiment_spec: dict[str, Any],
+                          idempotency_key: str) -> CreateRunResult:
+        response = self._client.post(
+            "/v1/runs", headers=self._headers,
+            json={"projectId": project_id, "experimentSpec": experiment_spec,
+                  "idempotencyKey": idempotency_key},
+        )
+        if response.status_code in (200, 201):
+            data = response.json()
+            return CreateRunResult(data["runId"], data["phase"], data["idempotencyReplay"],
+                                   data.get("currentAttemptId"))
+        if response.status_code == 409:
+            raise RunConflictError(response.status_code, response.json())
+        raise ManagedAPIError(response.status_code, response.json())
+
     def get_run(self, run_id: str) -> dict[str, Any]:
         response = self._client.get(f"/v1/runs/{run_id}", headers=self._headers)
         if response.status_code != 200:

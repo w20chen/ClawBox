@@ -1,0 +1,12 @@
+schema_version: 2
+experiment_id: full-system
+workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 3}
+agent: {driver: replay_engine}
+inference: {backend: replay}
+sandbox: {template_alias: clawbox-task-arm64, vcpu: 2, memory_mib: 4096}
+execution: {concurrency_levels: [20, 40, 60], random_seed: 20260903}
+resources: {target_node: kunpeng920b-0, pool_memory_budget_mib: 1600000, emergency_free_memory_mib: 200000, checkpoint_restore_headroom_mib: 8192, p90_predictions: examples/predictions/smoke-p90.json}
+policies:
+  - {name: naive, admission: lifetime_full, reclamation: resident, eviction: none, restore: none}
+  - {name: proposed, admission: tool_p90, reclamation: snapshot_pause, eviction: wait_aware_pressure, restore: proactive, prefetch_lead_seconds: 0.5}
+validation: {command: "test -f /workspace/result.txt"}

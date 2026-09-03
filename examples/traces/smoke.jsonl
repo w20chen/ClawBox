@@ -1,0 +1,2 @@
+{"type":"action","action_type":"llm_call","action_id":"llm-1","iteration":0,"ts_start":0.0,"ts_end":0.01,"data":{"messages_in":[{"role":"user","content":"create marker"}],"raw_response":{"content":"done"},"llm_latency_ms":10}}
+{"type":"action","action_type":"tool_exec","action_id":"tool-1","iteration":0,"ts_start":0.01,"ts_end":0.02,"data":{"tool_name":"exec","args":{"command":"printf complete > /workspace/result.txt"},"exit_code":0,"result":""}}

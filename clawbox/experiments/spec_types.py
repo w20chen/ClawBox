@@ -1,4 +1,3 @@
-"""Shared enums kept separate to avoid a spec/baseline import cycle."""
 from enum import StrEnum
 
 
@@ -18,27 +17,27 @@ class InferenceBackend(StrEnum):
     REPLAY = "replay"
 
 
-class SandboxBackend(StrEnum):
-    KUBERNETES = "kubernetes"
-    DIRECT_FIRECRACKER = "direct_firecracker"
-    LOCAL = "local"
-
-
-class ToolTransport(StrEnum):
-    SSH = "ssh"
-    VSOCK = "vsock"
-    LOCAL = "local"
-    KUBECTL = "kubectl"
-
-
 class AdmissionPolicy(StrEnum):
-    FIXED_PROFILE = "fixed_profile"
-    FIXED_EXPLICIT = "fixed_explicit"
-    P90_STATIC = "p90_static"
-    P90_ELASTIC = "p90_elastic"
+    LIFETIME_FULL = "lifetime_full"
+    TOOL_FULL = "tool_full"
+    TOOL_STATIC = "tool_static"
+    TOOL_P90 = "tool_p90"
+    TOOL_ORACLE = "tool_oracle"
 
 
-class ResidencyPolicy(StrEnum):
+class ReclamationPolicy(StrEnum):
     RESIDENT = "resident"
-    LLM_WAIT_CHECKPOINT = "llm_wait_checkpoint"
-    PRESSURE_CHECKPOINT = "pressure_checkpoint"
+    SNAPSHOT_PAUSE = "snapshot_pause"
+
+
+class EvictionPolicy(StrEnum):
+    NONE = "none"
+    EAGER = "eager"
+    FIXED_DELAY = "fixed_delay"
+    WAIT_AWARE_PRESSURE = "wait_aware_pressure"
+
+
+class RestorePolicy(StrEnum):
+    NONE = "none"
+    REACTIVE = "reactive"
+    PROACTIVE = "proactive"

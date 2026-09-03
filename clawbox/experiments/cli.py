@@ -1,55 +1,30 @@
-"""Read-only inspection CLI for canonical experiment specifications."""
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
 
-from .baselines import BASELINES
-from .capabilities import validate_workflow
-from .spec import expand_matrix, load_experiment
-
-
-def _dump(value: object) -> None:
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    print(json.dumps(value, indent=2, sort_keys=True))
+from .spec import expand_matrix, load_experiment, spec_digest
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Validate and plan ClawBox experiments")
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("validate", "resolve", "matrix"):
-        item = commands.add_parser(command)
-        item.add_argument("experiment", type=Path)
-    commands.add_parser("list-baselines")
+    for name in ("validate", "plan"):
+        command = commands.add_parser(name)
+        command.add_argument("experiment", type=Path)
     args = parser.parse_args(argv)
-    if args.command == "list-baselines":
-        _dump({name: {"admission_policy": baseline.admission_policy,
-                      "residency_policy": baseline.residency_policy,
-                      "implementation_status": baseline.implementation_status}
-               for name, baseline in BASELINES.items()})
-        return 0
     try:
         spec = load_experiment(args.experiment)
-        workflows = expand_matrix(spec, validate=False)
+        arms = expand_matrix(spec)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
-    assessments = [validate_workflow(workflow) for workflow in workflows]
-    if args.command == "validate":
-        _dump({"valid": all(item.implemented for item in assessments), "workflows": [
-            {"workflow": workflow.model_dump(mode="json"), "capability": assessment.__dict__}
-            for workflow, assessment in zip(workflows, assessments)
-        ]})
-        return 0 if all(item.implemented for item in assessments) else 2
-    if not all(item.implemented for item in assessments):
-        parser.error("; ".join(item.reason for item in assessments if not item.implemented))
-    if args.command == "resolve":
-        if len(workflows) != 1:
-            parser.error("resolve requires exactly one workflow; use matrix to inspect a Cartesian expansion")
-        _dump(workflows[0])
-        return 0
-    _dump([workflow.model_dump(mode="json") for workflow in workflows])
+    payload: dict[str, object] = {
+        "valid": True, "spec_digest": spec_digest(spec), "arm_count": len(arms),
+    }
+    if args.command == "plan":
+        payload["arms"] = [arm.model_dump(mode="json") for arm in arms]
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 

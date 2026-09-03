@@ -1,0 +1,73 @@
+# ClawBox research profile for CubeSandbox v0.7.0.
+# Layer after the upstream chart's values-single-node.yaml.
+placement:
+  controlPlane:
+    nodeSelector:
+      cube.tencent.com/cube-control: "true"
+  compute:
+    nodeSelector:
+      cube.tencent.com/cube-node: "true"
+
+bootstrap:
+  pvmHostKernel:
+    enabled: false
+    startupGate:
+      enabled: false
+      requirePreflight: false
+  nodeInit:
+    dataCubelet:
+      path: /data/cubelet
+      loopback:
+        enabled: true
+        imagePath: /data/cubelet-xfs.img
+        size: 200G
+
+cubeNode:
+  pvmGuestKernel:
+    enabled: false
+  network:
+    cidr: "172.16.0.0/18"
+    cidrSkipConflictCheck: false
+
+hostPaths:
+  dataCubelet: /data/cubelet
+  # Keep pause snapshots on the same reflink-capable XFS allocation.
+  dataSnapshotPack: /data/cubelet/snapshot_pack
+
+controlPlane:
+  api:
+    service:
+      type: NodePort
+      nodePort: 30030
+  master:
+    persistence:
+      hostPath: /data/cubesandbox/master
+
+mysql:
+  host: ""
+  password: "CHANGE_ME_CUBE_MYSQL_PASSWORD"
+  rootPassword: "CHANGE_ME_CUBE_MYSQL_ROOT_PASSWORD"
+  persistence:
+    hostPath: /data/cubesandbox/mysql
+
+redis:
+  host: ""
+  password: "CHANGE_ME_CUBE_REDIS_PASSWORD"
+  persistence:
+    hostPath: /data/cubesandbox/redis
+
+minio:
+  persistence:
+    hostPath: /data/cubesandbox/minio
+
+cubeProxy:
+  advertiseIP: "CHANGE_ME_NODE_IP"
+  domain: cube.local
+  ingress:
+    enabled: false
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30080
+      https: 30443
+      grpc: 30090

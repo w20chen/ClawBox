@@ -1,21 +1,14 @@
-"""Managed API pydantic schemas (M1)."""
-
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from clawbox.experiments import ExperimentSpec
+
 
 class CreateRunRequest(BaseModel):
-    projectId: str = Field(min_length=1, max_length=128)
-    templateRef: str = Field(min_length=1, max_length=256)
-    templateRevision: int = Field(ge=1)
-    inputRef: str = Field(min_length=1, max_length=512)
-    inputSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    deadlineSeconds: int = Field(ge=60, le=86400)
+    projectId: str = Field(default="default", min_length=1, max_length=128)
+    experimentSpec: ExperimentSpec
     idempotencyKey: str = Field(min_length=1, max_length=512)
-    # Optional full problem text (1MB cap like the CRD); when omitted the
-    # dispatcher falls back to inputRef.
-    problemStatement: str | None = Field(default=None, max_length=1_000_000)
 
 
 class CreateRunResponse(BaseModel):
@@ -29,15 +22,12 @@ class RunResponse(BaseModel):
     runId: str
     tenantId: str
     projectId: str
-    templateRef: str
-    templateRevision: int
-    inputRef: str
-    inputSha256: str
-    deadlineSeconds: int
     phase: str
     desiredState: str | None = None
     currentAttemptId: str | None = None
     attemptCounter: int
+    experimentId: str
+    specDigest: str
     createdAt: str | None = None
     updatedAt: str | None = None
     committedAt: str | None = None

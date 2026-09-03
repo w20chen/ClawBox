@@ -4,66 +4,30 @@ metadata:
   name: clawbox-cell-controller
   namespace: clawbox-system
   labels: &labels
-    app.kubernetes.io/name: clawbox
-    app.kubernetes.io/component: cell-controller
+    app.kubernetes.io/name: clawbox-cell-controller
 spec:
   replicas: 1
-  # Admission has no leader election. Recreate trades a brief upgrade pause
-  # for the invariant that two schedulers never reserve Cell capacity at once.
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels: *labels
+  strategy: {type: Recreate}
+  selector: {matchLabels: *labels}
   template:
-    metadata:
-      labels: *labels
+    metadata: {labels: *labels}
     spec:
       serviceAccountName: clawbox-cell-controller
-      automountServiceAccountToken: true
-      nodeSelector:
-        kubernetes.io/arch: arm64
-      # Single-node test cluster: the control-plane node carries the kubeadm
-      # control-plane taint and (under disk pressure) the kubelet re-adds
-      # node.kubernetes.io/disk-pressure. Tolerate both so the controller can
-      # schedule/keep running.
+      nodeSelector: {kubernetes.io/arch: arm64}
       tolerations:
         - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
-        - {key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule}
       containers:
         - name: controller
           image: 127.0.0.1:5000/clawbox/control-plane-arm64:dev
-          # Always: dev builds mutate the :dev tag and IfNotPresent silently
-          # reused the stale locally-cached image after restarts.
           imagePullPolicy: Always
           command: ["clawbox-cell-controller"]
           env:
-            - {name: KUBERNETES_RUNTIME_CLASS, value: kata-fc-arm64}
-            # Cells' tool/runtime containers must re-pull :dev images: dev
-            # builds mutate the tag and IfNotPresent silently reuses the stale
-            # locally-cached image (observed: pod ran the old runtime digest).
-            - {name: KUBERNETES_IMAGE_PULL_POLICY, value: Always}
             - {name: CLAWBOX_CELL_NAMESPACE, value: clawbox-benchmarks}
-            # Admission remains concurrent, while VM materialization (and a
-            # future resume path) is paced on the single audited ARM64 node.
             - {name: CLAWBOX_MAX_WORKLOAD_STARTS_PER_CYCLE, value: "1"}
-            # Native p90 admission is research-only and fails closed until a
-            # repository snapshot has enough paired, valid executions.
-            - {name: CLAWBOX_P90_MIN_EVIDENCE, value: "5"}
-            - {name: RUNTIME_IMAGE, value: 127.0.0.1:5000/clawbox/runtime-arm64:dev}
-            - {name: TOOL_BRIDGE_IMAGE, value: 127.0.0.1:5000/clawbox/tool-bridge-arm64:dev}
-            - {name: TRACE_INGESTER_URL, value: http://clawbox-ingester.clawbox-system.svc:8084}
-            - {name: CLAWBOX_KB_ENDPOINT, value: http://clawbox-tune-kb.clawbox-system.svc:8086}
-            - name: CLAWBOX_KB_TOKEN
-              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: service-token}}
-            - name: CLAWBOX_KB_INGEST_SECRET
-              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
-            - name: CLAWBOX_INGEST_SECRET
-              valueFrom: {secretKeyRef: {name: clawbox-control-plane, key: ingest-secret}}
-            - name: CLAWBOX_DEVMAPPER_AVAILABLE_BYTES
-              valueFrom: {configMapKeyRef: {name: clawbox-node-capacity, key: devmapper-available-bytes}}
+            - {name: CUBE_API_URL, value: http://cube-api.cube-system.svc:3000}
           resources:
-            requests: {cpu: 250m, memory: 256Mi}
-            limits: {cpu: "1", memory: 1Gi}
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -71,4 +35,3 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
-            seccompProfile: {type: RuntimeDefault}

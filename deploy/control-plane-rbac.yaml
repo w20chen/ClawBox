@@ -1,142 +1,43 @@
 apiVersion: v1
 kind: Namespace
-metadata:
-  name: clawbox-system
+metadata: {name: clawbox-system}
 ---
 apiVersion: v1
 kind: Namespace
-metadata:
-  name: clawbox-benchmarks
-  labels:
-    app.kubernetes.io/managed-by: clawbox
+metadata: {name: clawbox-benchmarks}
 ---
 apiVersion: v1
 kind: ServiceAccount
-metadata:
-  name: clawbox-cell-controller
-  namespace: clawbox-system
+metadata: {name: clawbox-cell-controller, namespace: clawbox-system}
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: clawbox-cell-controller-inventory
-rules:
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["list"]
-  - apiGroups: ["node.k8s.io"]
-    resources: ["runtimeclasses"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: clawbox-cell-controller-inventory
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: clawbox-cell-controller-inventory
-subjects:
-  - kind: ServiceAccount
-    name: clawbox-cell-controller
-    namespace: clawbox-system
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: clawbox-experiment-worker, namespace: clawbox-benchmarks}
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata:
-  name: clawbox-cell-controller
-  namespace: clawbox-benchmarks
+metadata: {name: clawbox-cell-controller, namespace: clawbox-benchmarks}
 rules:
   - apiGroups: ["clawbox.openai.com"]
     resources: ["sandboxtasks"]
-    verbs: ["get", "list", "watch", "patch", "update", "delete"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["clawbox.openai.com"]
     resources: ["sandboxtasks/status", "sandboxtasks/finalizers"]
     verbs: ["get", "patch", "update"]
   - apiGroups: [""]
-    resources: ["pods", "services", "secrets", "configmaps"]
-    verbs: ["get", "list", "create", "delete"]
+    resources: ["configmaps"]
+    verbs: ["get", "create"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "create", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["get", "list", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata:
-  name: clawbox-cell-controller
-  namespace: clawbox-benchmarks
+metadata: {name: clawbox-cell-controller, namespace: clawbox-benchmarks}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: clawbox-cell-controller
 subjects:
-  - kind: ServiceAccount
-    name: clawbox-cell-controller
-    namespace: clawbox-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: clawbox-benchmark-runtimeclass-reader
-rules:
-  # The benchmark preflight verifies that its target namespace exists before
-  # creating any CR. This remains read-only and cluster-scoped.
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get"]
-  - apiGroups: ["node.k8s.io"]
-    resources: ["runtimeclasses"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: clawbox-benchmark-runtimeclass-reader
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: clawbox-benchmark-runtimeclass-reader
-subjects:
-  - kind: ServiceAccount
-    name: clawbox-benchmark-launcher
-    namespace: clawbox-system
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: clawbox-benchmark-launcher
-  namespace: clawbox-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: clawbox-benchmark-launcher
-  namespace: clawbox-benchmarks
-rules:
-  - apiGroups: ["clawbox.openai.com"]
-    resources: ["sandboxtasks"]
-    verbs: ["get", "list", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["clawbox-llm"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: clawbox-benchmark-launcher
-  namespace: clawbox-benchmarks
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: clawbox-benchmark-launcher
-subjects:
-  - kind: ServiceAccount
-    name: clawbox-benchmark-launcher
-    namespace: clawbox-system
+  - {kind: ServiceAccount, name: clawbox-cell-controller, namespace: clawbox-system}

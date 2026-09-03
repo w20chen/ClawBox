@@ -5,7 +5,6 @@ import sys
 import time
 import traceback
 
-from clawbox.cell.capacity import KubernetesNodeCapacityProvider, SingleNodePlacementPolicy
 from clawbox.cell.controller import CellReconciler, GROUP, PLURAL, VERSION
 from clawbox.common.config import settings
 
@@ -17,32 +16,10 @@ def build_reconciler() -> CellReconciler:
     except config.ConfigException:
         config.load_kube_config()
     core = client.CoreV1Api()
-    if settings.kubernetes_runtime_class != "kata-fc-arm64":
-        raise RuntimeError("the Cell controller only supports kata-fc-arm64")
-    node_api = client.NodeV1Api()
-    runtime = node_api.read_runtime_class(settings.kubernetes_runtime_class)
-    if runtime.handler != settings.kubernetes_runtime_class or not getattr(runtime.overhead, "pod_fixed", None):
-        raise RuntimeError("kata-fc-arm64 handler and Pod overhead have not passed the host gate")
-    tool_runtime = node_api.read_runtime_class(settings.kubernetes_tool_runtime_class)
-    if (
-        tool_runtime.handler != settings.kubernetes_tool_runtime_class
-        or not getattr(tool_runtime.overhead, "pod_fixed", None)
-    ):
-        raise RuntimeError("Tool eBPF RuntimeClass has not passed the host gate")
-    nodes = core.list_node(label_selector="clawbox.openai.com/firecracker-ready=true").items
-    ready_arm64 = [node for node in nodes if (node.metadata.labels or {}).get("kubernetes.io/arch") == "arm64"]
-    if len(ready_arm64) != 1:
-        raise RuntimeError(f"exactly one audited arm64 Firecracker node is required; found {len(ready_arm64)}")
-    node_name = ready_arm64[0].metadata.name
     return CellReconciler(
         core_api=core,
         batch_api=client.BatchV1Api(),
-        networking_api=client.NetworkingV1Api(),
         custom_api=client.CustomObjectsApi(),
-        capacity_provider=KubernetesNodeCapacityProvider(
-            core, devmapper_available_bytes=int(os.getenv("CLAWBOX_DEVMAPPER_AVAILABLE_BYTES", "0")),
-        ),
-        placement_policy=SingleNodePlacementPolicy(node_name),
     )
 
 

@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+ARG PIP_INDEX_URL=https://pypi.org/simple
+WORKDIR /opt/clawbox
+COPY pyproject.toml ./
+COPY clawbox ./clawbox
+COPY examples ./examples
+RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" . \
+ && groupadd --gid 10001 clawbox \
+ && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin clawbox \
+ && mkdir -p /results \
+ && chown 10001:10001 /results
+ENV PYTHONUNBUFFERED=1
+USER 10001:10001
+ENTRYPOINT ["clawbox-experiment-worker"]

@@ -7,7 +7,6 @@
 #       database-url    PostgreSQL (psycopg) or single-node SQLite URL;
 #                       production schema is managed with Alembic
 #       service-token   >=32 random bytes shared with API clients
-#       templates       JSON TemplateRegistry (optional; else built-in default)
 #   - run `alembic upgrade head` before serving traffic; the DB is
 #     authoritative (restart-safe).
 #
@@ -61,12 +60,6 @@ spec:
                 secretKeyRef:
                   name: clawbox-managed
                   key: service-token
-            - name: CLAWBOX_TEMPLATES
-              valueFrom:
-                secretKeyRef:
-                  name: clawbox-managed
-                  key: templates
-                  optional: true
           resources:
             requests: {cpu: "100m", memory: "256Mi"}
             limits: {cpu: "1000m", memory: "1Gi"}
@@ -123,16 +116,14 @@ spec:
                 secretKeyRef:
                   name: clawbox-managed
                   key: database-url
-            - name: CLAWBOX_TEMPLATES
-              valueFrom:
-                secretKeyRef:
-                  name: clawbox-managed
-                  key: templates
-                  optional: true
             - name: CLAWBOX_CELL_NAMESPACE
               value: clawbox-benchmarks
-            - name: CLAWBOX_CR_VERSION
-              value: v1alpha1
+            - name: CLAWBOX_WORKER_IMAGE
+              value: 127.0.0.1:5000/clawbox/experiment-worker-arm64:dev
+            - name: CUBE_API_URL
+              value: http://cube-api.cube-system.svc:3000
+            - name: CLAWBOX_RESULT_HOST_ROOT
+              value: /data/clawbox-results
             - name: DISPATCHER_INTERVAL_SECONDS
               value: "2"
           resources:

@@ -1,0 +1,22 @@
+schema_version: 2
+experiment_id: cube-vertical-slice
+workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 1}
+agent: {driver: replay_engine}
+inference: {backend: replay, configuration: {time_scale: 1.0}}
+sandbox: {template_alias: clawbox-task-arm64, vcpu: 2, memory_mib: 4096, workspace: /workspace}
+execution:
+  concurrency_levels: [1]
+  randomized_order: false
+  arm_timeout_seconds: 600
+  command_timeout_seconds: 60
+  stabilization_seconds: 1
+resources:
+  target_node: kunpeng920b-0
+  pool_memory_budget_mib: 1600000
+  emergency_free_memory_mib: 200000
+  checkpoint_restore_headroom_mib: 8192
+  static_tool_memory_mib: 256
+policies:
+  - {name: eager-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: eager, restore: reactive}
+validation: {command: "test -f /workspace/result.txt"}
+output: {directory: /results}

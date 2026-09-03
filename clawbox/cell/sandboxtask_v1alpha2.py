@@ -33,12 +33,7 @@ def build_sandboxtask_v1alpha2(
     labels: dict[str, str] | None = None,
     annotations: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build a v1alpha2 SandboxTask around an immutable execution spec.
-
-    The caller passes the v1alpha1 execution spec (toolImage/problemStatement/
-    llmSecretName/...); identity fields are server-generated (ADR-002) and must
-    not come from user input.
-    """
+    """Build one immutable SandboxTask for one managed Attempt."""
     if desired_state not in (DESIRED_RUNNING, DESIRED_CANCELLED):
         raise ValueError(f"desiredState must be Running or Cancelled, got {desired_state!r}")
     if not tenant_id or not run_id or not attempt_id:

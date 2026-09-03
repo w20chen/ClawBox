@@ -21,6 +21,8 @@ dependencies = [
   "prometheus-client>=0.20",
   "typing-extensions>=4.12",
   "alembic>=1.13",
+  "cubesandbox==0.7.0",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +50,7 @@ clawbox-tune-server = "clawbox.tuning.server:main"
 clawbox-arm64-images = "clawbox.images.arm64:main"
 clawbox-swe-rebench-arm64-images = "clawbox.images.swerebench:main"
 clawbox-p90-export = "clawbox.cell.p90:export_main"
+clawbox-experiment-worker = "clawbox.experiments.worker:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

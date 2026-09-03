@@ -86,6 +86,7 @@ class RunIntent:
     request_digest: str
     # Optional full problem text (otherwise input_ref is used as the problem).
     problem_statement: str | None = None
+    experiment_spec: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -102,6 +103,7 @@ class Run:
     request_digest: str
     # Optional full problem text (otherwise input_ref is used as the problem).
     problem_statement: str | None = None
+    experiment_spec: dict = field(default_factory=dict)
     phase: RunPhase = RunPhase.ACCEPTED
     # One-way desired state (e.g. "Cancelled"); nil until a cancel is recorded.
     desired_state: str | None = None
@@ -127,6 +129,7 @@ class Run:
             idempotency_key=intent.idempotency_key,
             request_digest=intent.request_digest,
             problem_statement=intent.problem_statement,
+            experiment_spec=dict(intent.experiment_spec),
             created_at=now,
             updated_at=now,
         )
