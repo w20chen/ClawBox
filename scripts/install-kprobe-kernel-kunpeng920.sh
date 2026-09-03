@@ -8,6 +8,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ARTIFACT=${1:?usage: $0 /path/to/vmlinux [cube-node]}
 NODE=${2:-${CUBE_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}}
 EXPECTED_DIGEST=f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
+VENDOR_DIGEST=a63aa77e9c2db5d3eb7feb8d1b002e0165693533574bce7468d28c3e235423df
+VENDOR_SUFFIX=a63aa77e
 VERSION_ID=sha256-f84e3fa28ae6
 NAMESPACE=${CUBE_NAMESPACE:-cube-system}
 STAGE=/data/cubelet/root/.clawbox-kprobe-kernel/${VERSION_ID}
@@ -19,7 +21,9 @@ actual=$(sha256sum "$ARTIFACT" | awk '{print $1}')
   echo "kernel checksum mismatch: $actual != $EXPECTED_DIGEST" >&2; exit 1;
 }
 
-POD=$(kubectl -n "$NAMESPACE" get pod -l app=cube-node-installer \
+POD=$(kubectl -n "$NAMESPACE" get pod \
+  -l app.kubernetes.io/component=cube-node-installer \
+  --field-selector="spec.nodeName=$NODE" \
   -o jsonpath='{.items[0].metadata.name}')
 [[ -n "$POD" ]] || { echo "cube-node-installer pod not found" >&2; exit 1; }
 
@@ -32,20 +36,29 @@ kubectl -n "$NAMESPACE" cp "$ROOT_DIR/deploy/cubesandbox/kernel-oc9-arm64-kprobe
 kubectl -n "$NAMESPACE" cp "$ROOT_DIR/deploy/cubesandbox/kernel-oc9-arm64-kprobes.version.json" \
   "$POD:$STAGE/version.json" -c cube-kernel-install
 
-changed=$(kubectl -n "$NAMESPACE" exec "$POD" -c cube-kernel-install -- \
+if ! changed=$(kubectl -n "$NAMESPACE" exec "$POD" -c cube-kernel-install -- \
   sh -s <<'EOF'
 set -eu
 EXPECTED=f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
+VENDOR_DIGEST=a63aa77e9c2db5d3eb7feb8d1b002e0165693533574bce7468d28c3e235423df
+VENDOR_SUFFIX=a63aa77e
 VERSION_ID=sha256-f84e3fa28ae6
 STAGE=/data/cubelet/root/.clawbox-kprobe-kernel/$VERSION_ID
 ROOT=/usr/local/services/cubetoolbox/cube-kernel-scf
 COMP=/data/cubelet/root/component_versions/cube-kernel-scf/$VERSION_ID
-test "$(sha256sum "$STAGE/vmlinux-kprobes" | awk '{print $1}')" = "$EXPECTED"
+test "$(sha256sum "$STAGE/vmlinux-kprobes" | awk '{print $1}')" = "$EXPECTED" 
 test "$(sha256sum "$STAGE/vmlinux-kprobes" | awk '{print $1}')" = \
       "$(sha256sum "$ROOT/vmlinux-bm" | awk '{print $1}')" || {
-  test -f "$ROOT/vmlinux-bm-original-a63aa77e"
-  test -f "$ROOT/version.original-a63aa77e"
-  test -f "$ROOT/version.json.original-a63aa77e"
+  current=$(sha256sum "$ROOT/vmlinux-bm" | awk '{print $1}')
+  if [ ! -f "$ROOT/vmlinux-bm-original-$VENDOR_SUFFIX" ]; then
+    test "$current" = "$VENDOR_DIGEST"
+    install -m 0644 "$ROOT/vmlinux-bm" "$ROOT/vmlinux-bm-original-$VENDOR_SUFFIX"
+    install -m 0644 "$ROOT/version" "$ROOT/version.original-$VENDOR_SUFFIX"
+    install -m 0644 "$ROOT/version.json" "$ROOT/version.json.original-$VENDOR_SUFFIX"
+  fi
+  test -f "$ROOT/vmlinux-bm-original-$VENDOR_SUFFIX"
+  test -f "$ROOT/version.original-$VENDOR_SUFFIX"
+  test -f "$ROOT/version.json.original-$VENDOR_SUFFIX"
   install -m 0644 "$STAGE/vmlinux-kprobes" "$ROOT/vmlinux-bm"
   install -m 0644 "$STAGE/version" "$ROOT/version"
   install -m 0644 "$STAGE/version.json" "$ROOT/version.json"
@@ -61,7 +74,10 @@ if [ ! -f "$COMP/vmlinux-bm" ] || [ "$(sha256sum "$COMP/vmlinux-bm" | awk '{prin
   echo changed
 fi
 EOF
-)
+); then
+  echo "kernel installation or component registration failed" >&2
+  exit 1
+fi
 
 if grep -q changed <<<"$changed"; then
   kubectl -n "$NAMESPACE" rollout restart daemonset/cube-node
