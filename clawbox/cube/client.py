@@ -79,7 +79,8 @@ class CubeSandboxClient:
 
     def create_sandbox(self, *, template: str, node_name: str,
                        ownership: Ownership, env_vars: dict[str, str] | None = None,
-                       allow_internet_access: bool = True) -> Any:
+                       allow_internet_access: bool = True,
+                       network_allow_out: list[str] | None = None) -> Any:
         sandbox = self._sandbox_class.create(
             template=template,
             timeout=-1,  # cubesandbox.NEVER_TIMEOUT in SDK v0.7.0
@@ -88,6 +89,7 @@ class CubeSandboxClient:
             distribution_scope=[node_name],
             env_vars=env_vars,
             allow_internet_access=allow_internet_access,
+            network=({"allow_out": network_allow_out} if network_allow_out else None),
             **self._sdk_kwargs(),
         )
         sandbox_id = self.sandbox_id(sandbox)

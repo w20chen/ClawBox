@@ -9,22 +9,26 @@ Kubernetes node. CubeSandbox is the only sandbox runtime.
 clawbox experiment
   -> ClawBox API -> Run / Attempt / transactional Outbox
   -> one SandboxTask -> thin controller -> one ExperimentWorker Job
-  -> OpenClaw agent -> loopback-only cube_shell plugin -> trusted Worker
+  -> one trusted Runtime VM (OpenClaw + native ClawTune + model access)
+  -> authenticated cube_shell bridge -> trusted Worker
   -> one in-process PolicyCoordinator per arm -> official CubeSandbox Python SDK
-  -> one ARM64 CubeSandbox workspace per logical Agent
+  -> one untrusted Tool VM (/workspace + command/resource telemetry)
   -> ClawTune v6 spans + exact-ID Cube execution records -> offline KB/p90
 ```
 
-The trusted Worker owns model/replay orchestration, policy decisions, validation,
-and result collection. Untrusted shell, repository, file, compilation, and test
-operations execute through CubeSandbox's command API in `/workspace`. Model
-credentials are never injected into a sandbox. Kubernetes places the Worker;
-the Worker constrains every Cube sandbox to that same node.
+The trusted Worker owns replay orchestration, policy decisions, validation,
+and result collection. Each logical Agent owns exactly two CubeSandbox ARM64
+MicroVMs: a Runtime VM for OpenClaw, reasoning state, native ClawTune, and model
+access; and a Tool VM for `/workspace` plus every shell, repository, file,
+compilation, generated-program, and test operation. Model credentials are
+injected only into the Runtime VM and never into the Tool VM. Kubernetes places
+the Worker; the Worker constrains both Cube sandboxes to that same node.
 
 OpenClaw has only the required `cube_shell` tool in experiment sessions; its
-host-local file, shell, process, browser, and patch tools are denied. The
-loopback bridge is authenticated with a per-session random token and is not
-exposed outside the Worker container.
+host-local file, shell, process, browser, and patch tools are denied. The Worker
+bridge is authenticated with a per-session random token. The Runtime VM gets a
+narrow CubeSandbox egress allow rule for only the Worker Pod IP; the Tool VM
+gets no bridge or model credential.
 
 ClawTune observes this trusted boundary. Each completed `cube_shell` call emits
 a ClawTune v6 tool span and a matching authoritative Cube bridge record with the
@@ -34,9 +38,9 @@ latency coverage; CPU/RSS fields remain explicitly absent until an independent
 Cube-side resource collector is available. ClawTune never executes commands,
 schedules work, or owns sandbox pause/resume/kill decisions.
 
-There is no selectable sandbox backend, SSH tool transport, Runtime/Tool VM
-pair, ClawBox node agent, pool manager, custom scheduler, Kata execution path,
-or direct Firecracker execution path in the supported interface.
+There is no selectable sandbox backend, SSH tool transport, ClawBox node agent,
+pool manager, custom scheduler, Kata execution path, or direct Firecracker
+execution path in the supported interface.
 
 ## Public interface
 

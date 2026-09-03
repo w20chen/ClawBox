@@ -2,7 +2,7 @@
 
 The supported path is now:
 
-`clawbox experiment -> API -> Run/Attempt/outbox -> SandboxTask v1alpha2 -> one ExperimentWorker Job -> one PolicyCoordinator per arm -> cubesandbox==0.7.0 -> one ARM64 workspace per Agent`.
+`clawbox experiment -> API -> Run/Attempt/outbox -> SandboxTask v1alpha2 -> one ExperimentWorker Job -> one PolicyCoordinator per arm -> cubesandbox==0.7.0 -> one Runtime VM plus one Tool VM per Agent`.
 
 Verified on the Kunpeng host:
 
@@ -20,8 +20,9 @@ The installer now preserves Helm database templates, configures wildcard Cube
 DNS correctly, and repairs result hostPath ownership for the non-root Worker.
 Failed arm markers are never reused as completed work.
 
-Remaining limitation: `agent.driver=openclaw` still needs a trusted Worker-side
-OpenClaw tool adapter that routes tools to the Cube command executor. Replay is
-fully exercised; OpenClaw acceptance must not be claimed yet. Legacy runtime
-modules remain in the source tree for later deletion, but their console entry
-points, tests, deployment permissions, and README path have been retired.
+The paired OpenClaw implementation is present locally: the Runtime VM contains
+OpenClaw, native ClawTune, model access, and only authenticated `cube_shell`;
+the Tool VM owns `/workspace` and command execution. The Worker owns both
+lifecycles and applies policy to the Tool VM. Real paired OpenClaw acceptance,
+Tool-VM cgroup/eBPF collection, final image digests, and the post-refactor live
+Kubernetes matrix are not yet verified and must not be claimed as passing.

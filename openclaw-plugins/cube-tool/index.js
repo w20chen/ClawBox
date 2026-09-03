@@ -19,10 +19,14 @@ export default defineToolPlugin({
         const base = process.env.CLAWBOX_CUBE_TOOL_URL;
         const token = process.env.CLAWBOX_CUBE_TOOL_TOKEN;
         if (!base || !token) throw new Error("Cube tool bridge is not configured");
+        // OpenClaw's tool-call ID is also the native ClawTune span identity.
+        // Preserve it across Runtime -> Worker -> Tool; UUID is a fallback for
+        // OpenClaw versions that omit an ID from the tool context.
+        const execution_id = context.toolCallId || context.tool_call_id || crypto.randomUUID();
         const response = await fetch(`${base}/execute`, {
           method: "POST",
           headers: {"content-type": "application/json", "authorization": `Bearer ${token}`},
-          body: JSON.stringify({command, timeout_seconds}),
+          body: JSON.stringify({command, timeout_seconds, execution_id}),
           signal: context.signal
         });
         const body = await response.json();

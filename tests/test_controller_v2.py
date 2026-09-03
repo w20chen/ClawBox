@@ -106,6 +106,9 @@ def test_controller_creates_exactly_one_node_pinned_worker_job() -> None:
     worker_node = next(item for item in pod["containers"][0]["env"]
                        if item["name"] == "CLAWBOX_WORKER_NODE")
     assert worker_node["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
+    bridge_host = next(item for item in pod["containers"][0]["env"]
+                       if item["name"] == "CLAWBOX_BRIDGE_HOST")
+    assert bridge_host["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"
     assert custom.statuses[-1]["phase"] == "running"
     assert set(custom.statuses[-1]) <= {"phase", "jobName", "resolvedSpecDigest",
                                         "errorCategory", "resultRef"}

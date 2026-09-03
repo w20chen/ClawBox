@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import ipaddress
 import importlib.metadata
 import json
 import os
@@ -220,18 +221,30 @@ class ExperimentWorker:
             f"{session_id}-tool", arm.policy.name,
         )
         runtime_env: dict[str, str] = {}
+        runtime_allow_out: list[str] = []
         if arm.agent.driver is AgentDriver.OPENCLAW:
             credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
             credential = os.environ.get(credential_name)
             if not credential:
                 raise ValueError(f"OpenClaw credential environment is missing: {credential_name}")
             runtime_env[credential_name] = credential
+            bridge_host = os.environ.get("CLAWBOX_BRIDGE_HOST", "").strip()
+            try:
+                bridge_address = ipaddress.ip_address(bridge_host)
+            except ValueError as exc:
+                raise ValueError(
+                    "CLAWBOX_BRIDGE_HOST must be the ExperimentWorker Pod IP for OpenClaw"
+                ) from exc
+            runtime_allow_out.append(
+                f"{bridge_address}/{32 if bridge_address.version == 4 else 128}"
+            )
         runtime_lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.runtime.template,
             node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
             ownership=runtime_ownership,
             allow_internet_access=arm.runtime.allow_internet_access,
             env_vars=runtime_env,
+            network_allow_out=runtime_allow_out,
         )
         lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.sandbox.template,
@@ -265,7 +278,8 @@ class ExperimentWorker:
                     self.output_root, run_id=self.run_id, session_id=session_id,
                     repo_fingerprint=str(arm.inference.configuration.get("repo_fingerprint") or "") or None,
                 )
-                def execute_openclaw_tool(command: str, timeout_s: float):
+                def execute_openclaw_tool(command: str, timeout_s: float,
+                                          execution_id: str):
                     if not lifecycle.resident:
                         self._restore_with_one_victim(
                             arm, session_id, lifecycle, coordinator, events,
@@ -278,7 +292,7 @@ class ExperimentWorker:
                         result = executor.execute(command, min(
                             timeout_s, arm.execution.command_timeout_seconds,
                         ))
-                        execution_id = trace_writer.record(command, result)
+                        trace_writer.record(command, result, execution_id=execution_id)
                         events.write({"event": "clawtune_observation", "session_id": session_id,
                                       "execution_id": execution_id, "tool": "cube_shell",
                                       "latency_only": True})

@@ -62,6 +62,9 @@ Templates use `http://193.124.7.2:5001/...`. The read-only registry mirror is `c
 - Runtime/Tool Dockerfiles and Runtime entrypoint exist.
 - CRD immutability includes credential secret and timeout; Worker Pod receives `CLAWBOX_BRIDGE_HOST`.
 - Examples contain separate Runtime and Tool templates; registration supports repeated exposed/probe ports.
+- Runtime-to-Worker requests now carry the OpenClaw tool-call ID into the
+  authoritative bridge record, and Runtime creation adds a narrow CubeSandbox
+  `network.allow_out` entry for only the Worker Pod IP.
 
 Key files: `clawbox/experiments/worker.py`, `openclaw_driver.py`, `clawtune_trace.py`, `openclaw-plugins/cube-tool/index.js`, both Cube Dockerfiles, `scripts/smoke-cubesandbox-agent-pair.py`, and `examples/experiments/openclaw-cube.yaml`.
 
@@ -118,13 +121,12 @@ Likely next: attach `strace -ff -p PID` from a privileged node-debug pod while C
 
 ## Remaining work
 
-1. Runtime-to-Worker routing: Cube egress denies RFC1918 by default. Add the narrowest supported allow rule or stable authenticated Service/host port; do not broadly open private networking.
-2. Exact trace join: `cube_shell` must send a stable execution/tool-call ID used identically by bridge events, Tool telemetry, and native ClawTune spans.
-3. Tool telemetry: wrap every Tool command with the guest collector, cgroup v2 snapshots, and eBPF. Record explicit unavailable reasons; never fabricate values.
-4. README: current uncommitted wording still describes one workspace/Worker-side OpenClaw in places. Rewrite for Runtime VM + Tool VM only.
-5. Build/push/pin the final ARM64 Worker, apply CRD/controller changes, and run a real OpenClaw job using a Kubernetes Secret.
-6. Run focused/full tests, direct pair smoke, OpenClaw+ClawTune pair, Kubernetes vertical slice, cancellation, controller restart, policy pause/resume, and zero-leak audit. Save evidence.
-7. Audit/remove inactive Kata/direct-Firecracker/SSH paths after import checks. CubeSandbox remains the only active real sandbox.
+1. Verify the new Runtime-to-Worker `/32` allow rule and exact tool-call ID
+   against the real Runtime image and native ClawTune span output.
+2. Tool telemetry: wrap every Tool command with the guest collector, cgroup v2 snapshots, and eBPF. Record explicit unavailable reasons; never fabricate values.
+3. Build/push/pin the final ARM64 Worker, apply CRD/controller changes, and run a real OpenClaw job using a Kubernetes Secret.
+4. Run focused/full tests, direct pair smoke, OpenClaw+ClawTune pair, Kubernetes vertical slice, cancellation, controller restart, policy pause/resume, and zero-leak audit. Save evidence.
+5. Audit/remove inactive Kata/direct-Firecracker/SSH paths after import checks. CubeSandbox remains the only active real sandbox.
 
 ## Continuation commands
 

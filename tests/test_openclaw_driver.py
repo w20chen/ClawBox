@@ -16,28 +16,31 @@ from clawbox.replay.lifecycle import CommandResult
 def test_cube_tool_bridge_is_authenticated_and_preserves_result_shape() -> None:
     seen = {}
 
-    def execute(command: str, timeout: float) -> CommandResult:
-        seen.update(command=command, timeout=timeout)
+    def execute(command: str, timeout: float, execution_id: str) -> CommandResult:
+        seen.update(command=command, timeout=timeout, execution_id=execution_id)
         return CommandResult(exit_code=7, stdout="out", stderr="err", duration_s=0.25)
 
     with CubeToolBridge(execute) as bridge:
-        body = json.dumps({"command": "pytest -q", "timeout_seconds": 9}).encode()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        body = json.dumps({"command": "pytest -q", "timeout_seconds": 9,
+                           "execution_id": "call-123"}).encode()
         unauthorized = urllib.request.Request(
             bridge.url + "/execute", data=body,
             headers={"content-type": "application/json"}, method="POST",
         )
         with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(unauthorized)
+            opener.open(unauthorized)
         assert error.value.code == 401
         request = urllib.request.Request(
             bridge.url + "/execute", data=body,
             headers={"content-type": "application/json",
                      "authorization": f"Bearer {bridge.token}"}, method="POST",
         )
-        result = json.load(urllib.request.urlopen(request))
-    assert seen == {"command": "pytest -q", "timeout": 9.0}
+        result = json.load(opener.open(request))
+    assert seen == {"command": "pytest -q", "timeout": 9.0,
+                    "execution_id": "call-123"}
     assert result == {"exit_code": 7, "stdout": "out", "stderr": "err",
-                      "duration_seconds": 0.25}
+                      "duration_seconds": 0.25, "execution_id": "call-123"}
 
 
 def test_openclaw_runner_disables_host_tools_and_uses_secret_env(monkeypatch, tmp_path: Path) -> None:

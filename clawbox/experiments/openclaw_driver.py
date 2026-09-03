@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import base64
 import shlex
@@ -14,10 +15,13 @@ from typing import Any, Callable
 from clawbox.replay.lifecycle import CommandResult
 
 
-class CubeToolBridge:
-    """Expose one session executor to its colocated OpenClaw process only."""
+_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
-    def __init__(self, execute: Callable[[str, float], CommandResult], *,
+
+class CubeToolBridge:
+    """Expose one authenticated session executor to its Runtime VM."""
+
+    def __init__(self, execute: Callable[[str, float, str], CommandResult], *,
                  advertise_host: str | None = None) -> None:
         self._execute = execute
         self.token = secrets.token_urlsafe(32)
@@ -39,12 +43,16 @@ class CubeToolBridge:
                         raise ValueError("invalid request size")
                     body = json.loads(self.rfile.read(length))
                     command = str(body["command"])
+                    execution_id = str(body["execution_id"])
+                    if not _EXECUTION_ID.fullmatch(execution_id):
+                        raise ValueError("invalid execution_id")
                     timeout = min(3600.0, max(1.0, float(body.get("timeout_seconds") or 300)))
-                    result = bridge._execute(command, timeout)
+                    result = bridge._execute(command, timeout, execution_id)
                     bridge.calls.append(result)
                     payload = {
                         "exit_code": result.exit_code, "stdout": result.stdout,
                         "stderr": result.stderr, "duration_seconds": result.duration_s,
+                        "execution_id": execution_id,
                     }
                     self._json(200, payload)
                 except Exception as exc:

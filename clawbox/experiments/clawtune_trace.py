@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ from pathlib import Path
 from threading import Lock
 
 from clawbox.replay.lifecycle import CommandResult
+
+
+_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
 class ClawTuneTraceWriter:
@@ -32,9 +36,12 @@ class ClawTuneTraceWriter:
         self._sequence = 0
         self._lock = Lock()
 
-    def record(self, command: str, result: CommandResult) -> str:
+    def record(self, command: str, result: CommandResult, *,
+               execution_id: str | None = None) -> str:
         """Record one completed Cube command and return its execution ID."""
-        execution_id = f"cube-{uuid.uuid4().hex}"
+        execution_id = execution_id or f"cube-{uuid.uuid4().hex}"
+        if not _EXECUTION_ID.fullmatch(execution_id):
+            raise ValueError("execution_id must be 1-128 safe ASCII identifier characters")
         digest = hashlib.sha256(command.encode()).hexdigest()
         now_ns = time.time_ns()
         duration_ns = max(0, int(result.duration_s * 1_000_000_000))
@@ -112,4 +119,3 @@ class ClawTuneTraceWriter:
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
             stream.flush()
-

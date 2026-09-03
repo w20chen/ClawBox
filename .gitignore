@@ -10,6 +10,7 @@ __pycache__/
 *.py[cod]
 .pytest-tmp-root/
 .pytest-tmp-root-*/
+.pytest-tmp-*/
 .pytest_cache/
 .pytest_tmp*/
 
