@@ -149,6 +149,8 @@ slow Tool execution in one session does not block another session, and session
 unregister waits for that session's in-flight calls without affecting other
 registrations. Use the pair smoke and the WorkerBridge tests as the minimum
 bridge acceptance, then retain their JSON output alongside the arm results.
+The latest Kunpeng live results are recorded in
+`docs/kunpeng920-nodeport-acceptance.md`.
 
 Build an offline ClawTune dataset and evaluation from one or more completed run
 directories with:
