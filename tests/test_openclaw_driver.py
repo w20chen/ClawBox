@@ -21,6 +21,9 @@ def test_cube_tool_bridge_is_authenticated_and_preserves_result_shape() -> None:
         return CommandResult(exit_code=7, stdout="out", stderr="err", duration_s=0.25)
 
     with CubeToolBridge(execute) as bridge:
+        assert bridge.bind_host == "127.0.0.1"
+        assert bridge.advertised_host == "127.0.0.1"
+        assert bridge.actual_port > 0
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         body = json.dumps({"command": "pytest -q", "timeout_seconds": 9,
                            "execution_id": "call-123"}).encode()
@@ -41,6 +44,19 @@ def test_cube_tool_bridge_is_authenticated_and_preserves_result_shape() -> None:
                     "execution_id": "call-123"}
     assert result == {"exit_code": 7, "stdout": "out", "stderr": "err",
                       "duration_seconds": 0.25, "execution_id": "call-123"}
+    assert bridge.requests[0]["path"] == "/execute"
+    assert bridge.requests[0]["source_ip"] in {"127.0.0.1", "::1"}
+
+
+def test_cube_tool_bridge_downward_api_host_binds_all_interfaces(monkeypatch) -> None:
+    monkeypatch.setenv("CLAWBOX_BRIDGE_HOST", "192.0.2.10")
+    with CubeToolBridge(lambda *_: CommandResult(0, "", "", 0.0)) as bridge:
+        assert bridge.bind_host == "0.0.0.0"
+        assert bridge.advertised_host == "192.0.2.10"
+        assert bridge.startup == {
+            "bind_host": "0.0.0.0", "advertised_host": "192.0.2.10",
+            "actual_port": bridge.actual_port, "url": bridge.url,
+        }
 
 
 def test_openclaw_runner_disables_host_tools_and_uses_secret_env(monkeypatch, tmp_path: Path) -> None:

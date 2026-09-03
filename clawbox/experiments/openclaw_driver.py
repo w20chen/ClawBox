@@ -27,10 +27,18 @@ class CubeToolBridge:
         self._execute = execute
         self.token = secrets.token_urlsafe(32)
         self.calls: list[CommandResult] = []
+        self.requests: list[dict[str, Any]] = []
+        self.bind_host = "0.0.0.0" if advertise_host or os.environ.get("CLAWBOX_BRIDGE_HOST") else "127.0.0.1"
+        self.advertised_host = advertise_host or os.environ.get("CLAWBOX_BRIDGE_HOST") or "127.0.0.1"
         bridge = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+                bridge.requests.append({
+                    "source_ip": self.client_address[0],
+                    "source_port": self.client_address[1],
+                    "path": self.path,
+                })
                 if self.path != "/execute":
                     self.send_error(404)
                     return
@@ -70,15 +78,20 @@ class CubeToolBridge:
             def log_message(self, _format: str, *_args: object) -> None:
                 return
 
-        self.advertise_host = advertise_host or os.environ.get("CLAWBOX_BRIDGE_HOST") or "127.0.0.1"
-        bind_host = "0.0.0.0" if advertise_host or os.environ.get("CLAWBOX_BRIDGE_HOST") else "127.0.0.1"
-        self.server = ThreadingHTTPServer((bind_host, 0), Handler)
+        self.server = ThreadingHTTPServer((self.bind_host, 0), Handler)
+        self.actual_port = int(self.server.server_port)
+        self.startup = {
+            "bind_host": self.bind_host,
+            "advertised_host": self.advertised_host,
+            "actual_port": self.actual_port,
+            "url": self.url,
+        }
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        name="cube-tool-bridge", daemon=True)
 
     @property
     def url(self) -> str:
-        return f"http://{self.advertise_host}:{self.server.server_port}"
+        return f"http://{self.advertised_host}:{self.actual_port}"
 
     def __enter__(self) -> "CubeToolBridge":
         self.thread.start()

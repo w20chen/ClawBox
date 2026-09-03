@@ -219,6 +219,13 @@ Run the pair smoke from the Worker process/pod, or provide a worker-host
 address and port reachable from the Runtime VM; a workstation-local bridge is
 not evidence of the Runtime-to-Worker path.
 
+On the Kunpeng validation host, the measured network behavior was: Worker Pod
+IP works from Worker and cube-node namespaces, but PodCIDR and ClusterIP are
+unroutable from a Cube guest. A temporary NodePort on the node address was
+reachable and returned the expected `401`. This means the production bridge
+must use a node-routed fixed endpoint (or another route explicitly provided by
+the deployment); do not advertise a normal Pod IP until the guest route exists.
+
 ## 6. Reboot and rollback notes
 
 After reboot, validate S3lvol/socket, registry, cube-node readiness, active
