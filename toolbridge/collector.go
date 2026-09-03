@@ -30,6 +30,7 @@ package main
 // that observes the real tool processes.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -359,9 +360,35 @@ func tryPerExecCgroup(execID string, shellPid int) (string, bool, string) {
 	return path, true, ""
 }
 
-// remountCgroupRW best-effort remounts the guest cgroup2 tree read-write.
+// remountCgroupRW best-effort remounts the guest cgroup2 tree read-write. A
+// normal delegated rw mount needs no remount; avoiding the syscall also
+// prevents a degraded host mount helper from delaying every tool execution.
 func remountCgroupRW() {
-	_ = exec.Command("mount", "-o", "remount,rw", "/sys/fs/cgroup").Run()
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return
+	}
+	readOnly := false
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[1] != "/sys/fs/cgroup" || fields[2] != "cgroup2" {
+			continue
+		}
+		for _, option := range strings.Split(fields[3], ",") {
+			if option == "rw" {
+				return
+			}
+			if option == "ro" {
+				readOnly = true
+			}
+		}
+	}
+	if !readOnly {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "mount", "-o", "remount,rw", "/sys/fs/cgroup").Run()
 }
 
 func sanitizeCgroupLeaf(value string) string {

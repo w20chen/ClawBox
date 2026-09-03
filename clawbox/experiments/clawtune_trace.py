@@ -37,7 +37,9 @@ class ClawTuneTraceWriter:
         self._lock = Lock()
 
     def record(self, command: str, result: CommandResult, *,
-               execution_id: str | None = None) -> str:
+               execution_id: str | None = None,
+               bridge_record: dict | None = None,
+               artifacts: dict[str, str] | None = None) -> str:
         """Record one completed Cube command and return its execution ID."""
         execution_id = execution_id or f"cube-{uuid.uuid4().hex}"
         if not _EXECUTION_ID.fullmatch(execution_id):
@@ -48,6 +50,8 @@ class ClawTuneTraceWriter:
         status = "ok" if result.exit_code == 0 else (
             "timeout" if result.exit_code == 124 else "error"
         )
+        cgroup = self._artifact(artifacts, "cgroup_resource_v1", execution_id)
+        attribution_status = "measured" if cgroup else "latency_only"
         with self._lock:
             sequence = self._sequence
             self._sequence += 1
@@ -77,22 +81,25 @@ class ClawTuneTraceWriter:
                     "payload_command": command,
                     "command_digest": digest,
                 },
-                # The Worker observes the entire Cube RPC wall-time window.
-                # CPU/RSS remain null until an independent Cube collector is
-                # available; the latency observation itself is complete.
+                # The Worker observes the entire Cube RPC wall-time window and
+                # only attaches CPU/RSS values produced by the Tool VM.
                 "resources": {
-                    "attribution_status": "latency_only",
-                    "scope": "cube_rpc",
-                    "quality": "complete",
+                    "attribution_status": attribution_status,
+                    "scope": "tool_vm_cgroup" if cgroup else "cube_rpc",
+                    "quality": cgroup.get("sampling_quality", "unknown") if cgroup else "complete",
                     "monitor_start_wall_time_ns": str(now_ns - duration_ns),
                     "monitor_end_wall_time_ns": str(now_ns),
                     "coverage_ratio": 1.0,
                     "coverage_reason": "cube_rpc_full_window",
                     "action_duration_ns": str(duration_ns),
-                    "cpu_time_s": None,
-                    "cpu_utilization_avg_cores": None,
-                    "rss_peak_bytes": None,
-                    "memory_rss_bytes_after": None,
+                    "cpu_time_s": cgroup.get("cpu_time_s") if cgroup else None,
+                    "cpu_utilization_avg_cores": (
+                        cgroup.get("cpu_utilization_avg_cores") if cgroup else None
+                    ),
+                    "rss_peak_bytes": cgroup.get("memory_rss_peak_bytes") if cgroup else None,
+                    "memory_rss_bytes_after": (
+                        cgroup.get("memory_rss_after_bytes") if cgroup else None
+                    ),
                 },
             }
             bridge = {
@@ -110,9 +117,44 @@ class ClawTuneTraceWriter:
                 "stderr_bytes": len(result.stderr.encode()),
                 "output_truncated": False,
             }
+            if bridge_record:
+                bridge.update(bridge_record)
+            bridge["execution_id"] = execution_id
             self._append(self.trace_path, span)
             self._append(self.bridge_path, bridge)
+            self._persist_artifacts(execution_id, artifacts or {})
         return execution_id
+
+    @staticmethod
+    def _artifact(artifacts: dict[str, str] | None, kind: str,
+                  execution_id: str) -> dict | None:
+        try:
+            value = json.loads((artifacts or {})[kind])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if value.get("execution_id") != execution_id:
+            return None
+        return value
+
+    def _persist_artifacts(self, execution_id: str, artifacts: dict[str, str]) -> None:
+        target_dir = self.trace_path.parent / "tool-resource"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        names = {
+            "cgroup_resource_v1": "cgroup-resource",
+            "clause_telemetry_v2": "clause-telemetry",
+        }
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", execution_id)
+        for kind, prefix in names.items():
+            value = self._artifact(artifacts, kind, execution_id)
+            if value is None:
+                continue
+            target = target_dir / f"{prefix}-{safe_id}.json"
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(target)
 
     @staticmethod
     def _append(path: Path, value: dict) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -115,6 +117,51 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
+
+
+def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+    )
+    lifecycle.start()
+    sandbox = lifecycle.sandbox
+    execution_id = "call:123"
+    cgroup = {
+        "schema": "cgroup_resource_v1", "execution_id": execution_id,
+        "source": "cgroup-v2", "memory_rss_peak_bytes": 4096,
+    }
+    sandbox.files.content[
+        "/var/lib/clawtune/artifacts/tool-resource/cgroup-resource-call_123.json"
+    ] = json.dumps(cgroup)
+
+    def run(command: str, **_kwargs):
+        encoded = command.rsplit(" ", 1)[-1]
+        envelope = base64.b64decode(encoded).decode()
+        assert envelope.endswith("\nprintf observed")
+        record = {
+            "execution_id": execution_id, "exit_code": 0,
+            "telemetry_state": "complete", "telemetry_artifact": "",
+        }
+        return SimpleNamespace(
+            exit_code=0, stdout="observed", stderr=(
+                "diagnostic\nCLAWBOX_TELEMETRY_RECORD=" + json.dumps(record) + "\n"
+            ),
+        )
+
+    sandbox.commands = SimpleNamespace(run=run)
+    observed = CubeCommandExecutor(
+        client, lambda: lifecycle.sandbox,
+    ).execute_observed("printf observed", 5, execution_id=execution_id)
+    assert observed.result.stdout == "observed"
+    assert observed.result.stderr == "diagnostic"
+    assert observed.bridge_record["execution_id"] == execution_id
+    assert json.loads(observed.artifacts["cgroup_resource_v1"])[
+        "memory_rss_peak_bytes"
+    ] == 4096
+    assert observed.telemetry_unavailable_reason is None
+    lifecycle.close()
 
 
 def test_cleanup_uses_journal_and_metadata_fallback(tmp_path: Path) -> None:

@@ -10,5 +10,6 @@ RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-runtime-entrypoint.sh \
  && /usr/local/bin/npm install \
       --prefix /opt/clawbox/openclaw-plugins/cube-tool --omit=dev --legacy-peer-deps
 ENV PATH=/usr/local/bin:/opt/clawtune/venv/bin:$PATH
+ENV CLAWBOX_VM_ROLE=runtime
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/cube-runtime-entrypoint.sh"]

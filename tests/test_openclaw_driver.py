@@ -67,8 +67,32 @@ def test_openclaw_runner_disables_host_tools_and_uses_secret_env(monkeypatch, tm
     assert config["tools"]["allow"] == ["cube_shell"]
     assert {"exec", "read", "write", "apply_patch"} <= set(config["tools"]["deny"])
     assert config["plugins"]["entries"]["clawtune"]["config"]["instrumentTools"] == ["cube_shell"]
+    assert config["plugins"]["entries"]["clawtune"]["config"]["endpoint"] == (
+        "http://127.0.0.1:8765"
+    )
     agent_command = next(command for command in commands if " agent " in command)
+    setup_command = next(command for command in commands if "clawtune_sidecar.main" in command)
+    onboard_command = next(command for command in commands if " onboard " in command)
+    assert "native-kb-pull.py" in setup_command
+    assert "http://127.0.0.1:8765/v1" in onboard_command
     assert "Use cube_shell for every" in agent_command
     assert "secret-from-kubernetes" not in "\n".join(commands)
     assert '"${OPENCLAW_API_KEY}"' in "\n".join(commands)
     assert result["tool_calls"] == 0
+
+
+def test_openclaw_runner_rejects_unsafe_credential_environment(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    with CubeToolBridge(lambda *_: CommandResult(0, "", "", 0.1)) as bridge:
+        with pytest.raises(ValueError, match="valid environment variable"):
+            run_openclaw(
+                prompt="test", session_id="session-a",
+                configuration={
+                    "base_url": "http://model.test/v1", "model": "test-model",
+                    "api_key_env": "OPENCLAW_API_KEY;env",
+                },
+                bridge=bridge, runtime_executor=object(), output_dir=tmp_path,
+                timeout_seconds=60,
+            )

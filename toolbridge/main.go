@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -55,6 +56,7 @@ type executionLog struct {
 
 var executionLogMu sync.Mutex
 var guestCollector guestCollectorAPI
+var guestCollectorError string
 
 func persistExecutionLog(record executionLog) {
 	encoded, _ := json.Marshal(record)
@@ -333,7 +335,10 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		)
 		telemetryBegun := false
 		if guestCollector == nil {
-			record.TelemetryError = "guest collector helper is not configured"
+			record.TelemetryError = guestCollectorError
+			if record.TelemetryError == "" {
+				record.TelemetryError = "guest collector helper is not configured"
+			}
 		} else if !cgroupOK {
 			record.TelemetryError = "exclusive cgroup unavailable: " + cgroupError
 		} else {
@@ -427,6 +432,80 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	return record
 }
 
+// stdioChannel adapts the existing execution/collector path to a one-shot
+// process invoked through CubeSandbox's commands API. It deliberately does
+// not open an SSH listener or add another transport.
+type stdioChannel struct{}
+
+func (stdioChannel) Read(p []byte) (int, error)                     { return os.Stdin.Read(p) }
+func (stdioChannel) Write(p []byte) (int, error)                    { return os.Stdout.Write(p) }
+func (stdioChannel) Close() error                                   { return nil }
+func (stdioChannel) CloseWrite() error                              { return nil }
+func (stdioChannel) SendRequest(string, bool, []byte) (bool, error) { return false, nil }
+func (stdioChannel) Stderr() io.ReadWriter                          { return os.Stderr }
+
+func connectExistingGuestCollector() guestCollectorAPI {
+	socket := os.Getenv("CLAWTUNE_GUEST_COLLECTOR_SOCKET")
+	if socket == "" {
+		socket = "/run/clawtune/guest-collector.sock"
+	}
+	tokenPath := os.Getenv("CLAWTUNE_GUEST_COLLECTOR_TOKEN_FILE")
+	if tokenPath == "" {
+		tokenPath = "/run/clawtune/guest-collector.token"
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var lastError error
+	unavailablePath := "/var/log/clawtune-guest-collector.unavailable"
+	if reason, err := os.ReadFile(unavailablePath); err == nil {
+		guestCollectorError = "guest collector unavailable: " + strings.TrimSpace(string(reason))
+		return nil
+	}
+	for time.Now().Before(deadline) {
+		token, err := os.ReadFile(tokenPath)
+		if err == nil && strings.TrimSpace(string(token)) != "" {
+			client := &guestCollectorClient{
+				socket: socket, token: strings.TrimSpace(string(token)), timeout: 15 * time.Second,
+			}
+			response, healthErr := client.request(map[string]any{"op": "health"})
+			if healthErr == nil && response.State == "ready" {
+				return client
+			}
+			lastError = healthErr
+		} else {
+			lastError = err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastError != nil {
+		guestCollectorError = "guest collector unavailable: " + lastError.Error()
+	} else {
+		guestCollectorError = "guest collector unavailable: readiness timeout"
+	}
+	return nil
+}
+
+func runOneShot(encoded string) int {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid --execute-base64 payload")
+		return 125
+	}
+	workdir := os.Getenv("TOOL_BRIDGE_WORKDIR")
+	if workdir == "" {
+		workdir = "/workspace"
+	}
+	guestCollector = connectExistingGuestCollector()
+	record := runCommand(
+		stdioChannel{}, string(raw), workdir,
+		time.Duration(envInt("TOOL_EXEC_TIMEOUT_SECONDS", 300))*time.Second,
+		int64(envInt("TOOL_OUTPUT_LIMIT_BYTES", 4*1024*1024)),
+	)
+	persistExecutionLog(record)
+	encodedRecord, _ := json.Marshal(record)
+	fmt.Fprintf(os.Stderr, "\nCLAWBOX_TELEMETRY_RECORD=%s\n", encodedRecord)
+	return record.ExitCode
+}
+
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, workdir string, timeout time.Duration, outputLimit int64, semaphore chan struct{}) {
 	defer channel.Close()
 	defer func() { <-semaphore }()
@@ -484,6 +563,9 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "--execute-base64" {
+		os.Exit(runOneShot(os.Args[2]))
 	}
 	address := os.Getenv("TOOL_BRIDGE_LISTEN")
 	if address == "" {

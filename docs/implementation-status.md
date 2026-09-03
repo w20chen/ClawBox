@@ -21,8 +21,15 @@ DNS correctly, and repairs result hostPath ownership for the non-root Worker.
 Failed arm markers are never reused as completed work.
 
 The paired OpenClaw implementation is present locally: the Runtime VM contains
-OpenClaw, native ClawTune, model access, and only authenticated `cube_shell`;
-the Tool VM owns `/workspace` and command execution. The Worker owns both
-lifecycles and applies policy to the Tool VM. Real paired OpenClaw acceptance,
-Tool-VM cgroup/eBPF collection, final image digests, and the post-refactor live
-Kubernetes matrix are not yet verified and must not be claimed as passing.
+OpenClaw, native ClawTune prediction/model proxying, model access, and only
+authenticated `cube_shell`; the Tool VM owns `/workspace`, command execution,
+per-execution cgroups, and the eBPF guest collector. The Worker owns both
+lifecycles, applies policy to the Tool VM, and persists exact-ID joined Runtime,
+bridge, cgroup, and eBPF records. The complete local suite passes with five
+environment skips, and the Tool bridge cross-compiles for Linux/ARM64.
+
+Real paired acceptance is currently blocked by the Kunpeng node: the
+`cube-node` pod is `2/3 CreateContainerError`, Docker starts stall, and even a
+host `stat /sys/fs/cgroup` blocks. Final image digests and the post-refactor
+live Kubernetes matrix are therefore not yet verified and must not be claimed
+as passing.

@@ -228,6 +228,20 @@ class ExperimentWorker:
             if not credential:
                 raise ValueError(f"OpenClaw credential environment is missing: {credential_name}")
             runtime_env[credential_name] = credential
+            runtime_env.update({
+                "OPENAI_BASE_URL": str(arm.inference.configuration.get("base_url") or ""),
+                "OPENCLAW_MODEL": str(arm.inference.configuration.get("model") or ""),
+                "CLAWBOX_RUN_ID": self.run_id,
+                "CLAWBOX_ATTEMPT_ID": self.attempt_id,
+                "CLAWBOX_TENANT_ID": os.environ.get("CLAWBOX_TENANT_ID", "default"),
+                "CLAWBOX_REPO_KEY": (
+                    arm.case.repository
+                    or str(arm.inference.configuration.get("repo_fingerprint") or arm.case.case_id)
+                ),
+            })
+            for optional in ("CLAWBOX_KB_ENDPOINT", "CLAWBOX_KB_TOKEN"):
+                if value := os.environ.get(optional):
+                    runtime_env[optional] = value
             bridge_host = os.environ.get("CLAWBOX_BRIDGE_HOST", "").strip()
             try:
                 bridge_address = ipaddress.ip_address(bridge_host)
@@ -246,10 +260,18 @@ class ExperimentWorker:
             env_vars=runtime_env,
             network_allow_out=runtime_allow_out,
         )
+        tool_env = {
+            "TOOL_BRIDGE_LOG_PATH": "/var/lib/clawtune/artifacts/tool-bridge.jsonl",
+            "TOOL_BRIDGE_WORKDIR": arm.sandbox.workspace,
+            "TASK_ID": session_id,
+            "CELL_ID": self.task_uid,
+            "CLAWBOX_REPOSITORY": arm.case.repository or arm.case.case_id,
+        }
         lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.sandbox.template,
             node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
             ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
+            env_vars=tool_env,
         )
         coordinator.register(session_id, lifecycle)
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
@@ -273,11 +295,33 @@ class ExperimentWorker:
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
-            if arm.agent.driver is AgentDriver.OPENCLAW:
-                trace_writer = ClawTuneTraceWriter(
-                    self.output_root, run_id=self.run_id, session_id=session_id,
-                    repo_fingerprint=str(arm.inference.configuration.get("repo_fingerprint") or "") or None,
+            trace_writer = ClawTuneTraceWriter(
+                self.output_root, run_id=self.run_id, session_id=session_id,
+                repo_fingerprint=(arm.case.repository or str(
+                    arm.inference.configuration.get("repo_fingerprint") or ""
+                ) or None),
+            )
+
+            def execute_observed(command: str, timeout_s: float,
+                                 execution_id: str):
+                observed = executor.execute_observed(
+                    command, min(timeout_s, arm.execution.command_timeout_seconds),
+                    execution_id=execution_id,
                 )
+                trace_writer.record(
+                    command, observed.result, execution_id=execution_id,
+                    bridge_record=observed.bridge_record, artifacts=observed.artifacts,
+                )
+                events.write({
+                    "event": "clawtune_observation", "session_id": session_id,
+                    "execution_id": execution_id, "tool": "cube_shell",
+                    "telemetry_state": observed.bridge_record.get("telemetry_state"),
+                    "telemetry_unavailable_reason": observed.telemetry_unavailable_reason,
+                    "artifact_kinds": sorted(observed.artifacts),
+                })
+                return observed.result
+
+            if arm.agent.driver is AgentDriver.OPENCLAW:
                 def execute_openclaw_tool(command: str, timeout_s: float,
                                           execution_id: str):
                     if not lifecycle.resident:
@@ -289,13 +333,7 @@ class ExperimentWorker:
                     coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
                     coordinator.set_tool_active(session_id, True)
                     try:
-                        result = executor.execute(command, min(
-                            timeout_s, arm.execution.command_timeout_seconds,
-                        ))
-                        trace_writer.record(command, result, execution_id=execution_id)
-                        events.write({"event": "clawtune_observation", "session_id": session_id,
-                                      "execution_id": execution_id, "tool": "cube_shell",
-                                      "latency_only": True})
+                        result = execute_observed(command, timeout_s, execution_id)
                     finally:
                         coordinator.set_tool_active(session_id, False)
                         coordinator.release(session_id, amount)
@@ -322,7 +360,7 @@ class ExperimentWorker:
                     raise RuntimeError("OpenClaw completed without using the required cube_shell tool")
             else:
                 actions = self._actions(arm)
-                for action in actions:
+                for action_index, action in enumerate(actions):
                     if action.kind == "llm":
                         model_steps += 1
                         self._model_wait(arm, action, session_id, lifecycle, coordinator, events)
@@ -333,7 +371,11 @@ class ExperimentWorker:
                     coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
                     coordinator.set_tool_active(session_id, True)
                     try:
-                        result = executor.execute(action.shell_command(), arm.execution.command_timeout_seconds)
+                        result = execute_observed(
+                            action.shell_command(), arm.execution.command_timeout_seconds,
+                            f"{session_id}:replay:{action_index}:"
+                            f"{hashlib.sha256(action.action_id.encode()).hexdigest()[:16]}",
+                        )
                         tool_latencies.append(result.duration_s)
                         if action.expected_exit_code is not None and result.exit_code != action.expected_exit_code:
                             exit_mismatches += 1
@@ -346,10 +388,15 @@ class ExperimentWorker:
                 arm.case.validation if isinstance(arm.case.validation, str) else None)
             valid = exit_mismatches == 0
             if validation:
-                valid = valid and executor.execute(validation, arm.execution.command_timeout_seconds).exit_code == 0
-            hash_result = executor.execute(
+                validation_result = execute_observed(
+                    validation, arm.execution.command_timeout_seconds,
+                    f"{session_id}:validation",
+                )
+                valid = valid and validation_result.exit_code == 0
+            hash_result = execute_observed(
                 "find . -type f -exec sha256sum {} \\; | LC_ALL=C sort | sha256sum",
                 arm.execution.command_timeout_seconds,
+                f"{session_id}:output-hash",
             )
             output_hash = (hash_result.stdout.split()[0] if hash_result.exit_code == 0
                            and hash_result.stdout.split() else hashlib.sha256(

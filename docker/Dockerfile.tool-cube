@@ -1,11 +1,23 @@
 # Tool CubeSandbox: repository/workspace plus ClawTune eBPF/cgroup collectors.
 FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d AS cube-base
 
+FROM golang:1.25-bookworm AS toolbridge-build
+ARG GOPROXY=https://goproxy.cn,direct
+WORKDIR /src
+COPY toolbridge/go.mod toolbridge/go.sum ./
+RUN GOPROXY="${GOPROXY}" go mod download
+COPY toolbridge/*.go ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath \
+      -ldflags='-s -w -buildid=' -o /out/tool-bridge .
+
 FROM 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:c9e44ea0283ce7a6545fd942c6d85d63a7230a9b71c6dcefd1dc4fd0d883629b
 USER root
 COPY --from=cube-base /usr/bin/envd /usr/bin/envd
+COPY --from=toolbridge-build /out/tool-bridge /usr/local/bin/tool-bridge
 COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-tool-entrypoint.sh
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-tool-entrypoint.sh \
- && mkdir -p /workspace /var/lib/clawtune/artifacts
+ && test -f /opt/clawtune-guest/tools/guest_collector_server.py \
+ && mkdir -p /workspace /var/lib/clawtune/artifacts/tool-resource
+ENV CLAWBOX_VM_ROLE=tool
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/cube-tool-entrypoint.sh"]

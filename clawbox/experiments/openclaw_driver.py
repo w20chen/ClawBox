@@ -16,6 +16,7 @@ from clawbox.replay.lifecycle import CommandResult
 
 
 _EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class CubeToolBridge:
@@ -99,6 +100,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     base_url = str(configuration.get("base_url") or os.environ.get("OPENCLAW_BASE_URL", ""))
     model = str(configuration.get("model") or os.environ.get("OPENCLAW_MODEL_REF", ""))
     key_env = str(configuration.get("api_key_env", "OPENCLAW_API_KEY"))
+    if not _ENV_NAME.fullmatch(key_env):
+        raise ValueError("api_key_env must be a valid environment variable name")
     api_key = os.environ.get(key_env, "")
     if not prompt.strip():
         raise ValueError("OpenClaw workload case requires a non-empty prompt")
@@ -133,7 +136,45 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
         return result
 
-    runtime_executor.execute(prefix + f"mkdir -p {shlex.quote(workspace)} {shlex.quote(trace_dir)}", 30)
+    setup = runtime_executor.execute(
+        prefix
+        + f"mkdir -p {shlex.quote(workspace)} {shlex.quote(trace_dir + '/tool-resource')} "
+        + f"{shlex.quote(home + '/logs')}; "
+        + f"cp -n /opt/clawtune/cold-start/tool-resource/*-kb.json "
+        + f"{shlex.quote(trace_dir + '/tool-resource')}/ 2>/dev/null || true; "
+        + "if [ -n \"${CLAWBOX_KB_ENDPOINT:-}\" ] && "
+        + "[ -n \"${CLAWBOX_KB_TOKEN:-}\" ]; then "
+        + "/opt/clawtune/venv/bin/python /usr/local/bin/native-kb-pull.py "
+        + "--endpoint \"$CLAWBOX_KB_ENDPOINT\" --token \"$CLAWBOX_KB_TOKEN\" "
+        + "--tenant \"${CLAWBOX_TENANT_ID:-default}\" "
+        + "--repo \"${CLAWBOX_REPO_KEY:-unknown}\" "
+        + f"--artifact-dir {shlex.quote(trace_dir + '/tool-resource')} "
+        + f">{shlex.quote(home + '/logs/kb-pull.log')} 2>&1 || "
+        + f"printf '%s\\n' 'control-plane KB pull unavailable; cold-start retained' "
+        + f">{shlex.quote(home + '/logs/kb-pull.unavailable')}; fi; "
+        + "export CLAWTUNE_POLICY=observe-only "
+        + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
+        + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
+        + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(base_url)} "
+        + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{key_env}}}\" "
+        + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(model)} "
+        + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
+        + "nohup /opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
+        + f"--host 127.0.0.1 --port 8765 >{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
+        + f"echo $! >{shlex.quote(home + '/sidecar.pid')}",
+        30,
+    )
+    if setup.exit_code:
+        raise RuntimeError(f"ClawTune sidecar setup failed: {setup.stderr[-2000:]}")
+    ready = runtime_executor.execute(
+        prefix
+        + "for i in $(seq 1 120); do "
+        + "curl -fsS http://127.0.0.1:8765/health/ready >/dev/null 2>&1 && exit 0; "
+        + "sleep 0.5; done; exit 1",
+        70,
+    )
+    if ready.exit_code:
+        raise RuntimeError("ClawTune sidecar did not become ready in the Runtime VM")
     invoke(["plugins", "install", "--link", plugin])
     invoke(["plugins", "enable", "clawbox-cube-tool"])
     invoke(["plugins", "install", "--link", clawtune_plugin])
@@ -149,6 +190,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "plugins": {"entries": {
             "clawbox-cube-tool": {"enabled": True},
             "clawtune": {"enabled": True, "config": {
+                "endpoint": "http://127.0.0.1:8765",
                 "mode": "observe", "failOpen": True, "executionBackend": "hook-only",
                 "instrumentTools": ["cube_shell"], "enableCgroup": False,
                 "enableAffinity": False, "enableNuma": False, "autoStartSidecar": False,
@@ -162,7 +204,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     }
     invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
-            "--auth-choice", "vllm", "--custom-base-url", base_url,
+            "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
             "--custom-api-key", f"$ENV:{key_env}", "--custom-model-id", model])
     instruction = (
         "Use cube_shell for every shell, repository, file, build, test, and generated-program "
@@ -175,8 +217,19 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
+    runtime_executor.execute(
+        prefix
+        + f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
+        + f"pid=$(cat {shlex.quote(home + '/sidecar.pid')}); "
+        + "case $pid in *[!0-9]*|'') ;; *) kill -TERM \"$pid\" 2>/dev/null || true; "
+        + "for i in $(seq 1 20); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.1; done;; "
+        + "esac; fi",
+        10,
+    )
     trace_listing = runtime_executor.execute(
-        prefix + f"find {shlex.quote(trace_dir)} -maxdepth 1 -type f -name '*.jsonl' -print", 30,
+        prefix + f"find {shlex.quote(trace_dir)} -type f "
+        + "\\( -name '*.jsonl' -o -name '*.json' \\) -print",
+        30,
     )
     copied_traces: list[str] = []
     host_trace_dir = output_dir / "runtime-traces" / session_id
@@ -184,9 +237,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     for remote_path in trace_listing.stdout.splitlines():
         if not remote_path.startswith(trace_dir + "/"):
             continue
+        relative = Path(remote_path.removeprefix(trace_dir + "/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
         encoded = runtime_executor.execute(prefix + f"base64 -w0 {shlex.quote(remote_path)}", 30)
         if encoded.exit_code == 0:
-            target = host_trace_dir / Path(remote_path).name
+            target = host_trace_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(base64.b64decode(encoded.stdout))
             copied_traces.append(str(target))
     return {"stdout": result.stdout, "stderr": result.stderr, "tool_calls": len(bridge.calls),

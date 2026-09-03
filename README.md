@@ -31,12 +31,13 @@ narrow CubeSandbox egress allow rule for only the Worker Pod IP; the Tool VM
 gets no bridge or model credential.
 
 ClawTune observes this trusted boundary. Each completed `cube_shell` call emits
-a ClawTune v6 tool span and a matching authoritative Cube bridge record with the
-same execution ID. These records feed the existing validation, dataset,
-ablation, KB, and frozen-p90 pipeline. Current Cube records have complete RPC
-latency coverage; CPU/RSS fields remain explicitly absent until an independent
-Cube-side resource collector is available. ClawTune never executes commands,
-schedules work, or owns sandbox pause/resume/kill decisions.
+a Runtime-VM native ClawTune span and a matching Worker bridge record, Tool-VM
+cgroup snapshot, and eBPF clause artifact under the same execution ID. The
+Tool VM starts the guest collector; every command enters a dedicated cgroup
+before its execution gate opens. Missing kernel support or collector failures
+are recorded explicitly and never replaced with fabricated resource values.
+Runtime-side ClawTune predictors consume the cold-start or control-plane KB and
+proxy model calls, but never execute commands or own sandbox lifecycle policy.
 
 There is no selectable sandbox backend, SSH tool transport, ClawBox node agent,
 pool manager, custom scheduler, Kata execution path, or direct Firecracker
