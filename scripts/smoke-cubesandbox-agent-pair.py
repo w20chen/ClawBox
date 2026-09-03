@@ -166,7 +166,8 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: i
             }, separators=(",", ":")).encode()).decode()
             command = (
                 f"body=$(echo {shlex.quote(payload)} | base64 -d); "
-                f"curl --noproxy '*' -fsS -X POST -H 'Authorization: Bearer {session.token}' "
+                f"curl --noproxy '*' -sS -X POST -w '\\n%{{http_code}}' "
+                f"-H 'Authorization: Bearer {session.token}' "
                 "-H 'Content-Type: application/json' "
                 f"--data \"$body\" {shlex.quote(session.url + '/execute')}"
             )
@@ -178,8 +179,12 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str, bridge_port: i
         # multiplexer for one VM. WorkerBridge concurrency and HOL behavior
         # across independent Tool executors is covered by the stress tests.
         results = [runtime_call(item) for item in calls]
-        assert all(result.exit_code == 0 for result in results), results
-        responses = [json.loads(result.stdout) for result in results]
+        responses = []
+        for result in results:
+            assert result.exit_code == 0, result
+            response_text, status = result.stdout.rsplit("\n", 1)
+            assert status == "200", result
+            responses.append(json.loads(response_text))
         for response, (session, execution_id, output) in zip(responses, calls):
             assert response.get("stdout") == output, response
             assert response.get("execution_id") == execution_id, response
