@@ -29,7 +29,7 @@ spec:
               required: [runRef, idempotencyKey, requestDigest, desiredState, workerImage,
                          cubeApiURL, resultHostPath, experimentSpec]
               x-kubernetes-validations:
-                - rule: "self == oldSelf || (oldSelf.desiredState == 'Running' && self.desiredState == 'Cancelled' && self.runRef == oldSelf.runRef && self.idempotencyKey == oldSelf.idempotencyKey && self.requestDigest == oldSelf.requestDigest && self.workerImage == oldSelf.workerImage && self.cubeApiURL == oldSelf.cubeApiURL && self.resultHostPath == oldSelf.resultHostPath && self.experimentSpec == oldSelf.experimentSpec)"
+                - rule: "self == oldSelf || (oldSelf.desiredState == 'Running' && self.desiredState == 'Cancelled' && self.runRef == oldSelf.runRef && self.idempotencyKey == oldSelf.idempotencyKey && self.requestDigest == oldSelf.requestDigest && self.workerImage == oldSelf.workerImage && self.cubeApiURL == oldSelf.cubeApiURL && self.credentialSecretName == oldSelf.credentialSecretName && self.resultHostPath == oldSelf.resultHostPath && self.timeoutSeconds == oldSelf.timeoutSeconds && self.experimentSpec == oldSelf.experimentSpec)"
                   message: "spec is immutable except Running to Cancelled"
               properties:
                 runRef:

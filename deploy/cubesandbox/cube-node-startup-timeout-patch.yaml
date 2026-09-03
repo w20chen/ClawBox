@@ -1,0 +1,10 @@
+spec:
+  template:
+    spec:
+      containers:
+        - name: cubelet
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - sed -i 's/seq 1 60/seq 1 300/' /usr/local/bin/component-entrypoint.sh; exec /usr/local/bin/component-entrypoint.sh

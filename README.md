@@ -9,9 +9,10 @@ Kubernetes node. CubeSandbox is the only sandbox runtime.
 clawbox experiment
   -> ClawBox API -> Run / Attempt / transactional Outbox
   -> one SandboxTask -> thin controller -> one ExperimentWorker Job
-  -> one in-process PolicyCoordinator per arm
-  -> official CubeSandbox Python SDK
+  -> OpenClaw agent -> loopback-only cube_shell plugin -> trusted Worker
+  -> one in-process PolicyCoordinator per arm -> official CubeSandbox Python SDK
   -> one ARM64 CubeSandbox workspace per logical Agent
+  -> ClawTune v6 spans + exact-ID Cube execution records -> offline KB/p90
 ```
 
 The trusted Worker owns model/replay orchestration, policy decisions, validation,
@@ -19,6 +20,19 @@ and result collection. Untrusted shell, repository, file, compilation, and test
 operations execute through CubeSandbox's command API in `/workspace`. Model
 credentials are never injected into a sandbox. Kubernetes places the Worker;
 the Worker constrains every Cube sandbox to that same node.
+
+OpenClaw has only the required `cube_shell` tool in experiment sessions; its
+host-local file, shell, process, browser, and patch tools are denied. The
+loopback bridge is authenticated with a per-session random token and is not
+exposed outside the Worker container.
+
+ClawTune observes this trusted boundary. Each completed `cube_shell` call emits
+a ClawTune v6 tool span and a matching authoritative Cube bridge record with the
+same execution ID. These records feed the existing validation, dataset,
+ablation, KB, and frozen-p90 pipeline. Current Cube records have complete RPC
+latency coverage; CPU/RSS fields remain explicitly absent until an independent
+Cube-side resource collector is available. ClawTune never executes commands,
+schedules work, or owns sandbox pause/resume/kill decisions.
 
 There is no selectable sandbox backend, SSH tool transport, Runtime/Tool VM
 pair, ClawBox node agent, pool manager, custom scheduler, Kata execution path,
@@ -98,10 +112,24 @@ recorded seed, and executes arms sequentially. See
 `examples/experiments/vertical-slice.yaml` and `smoke-matrix.yaml`.
 
 Each arm is persisted atomically before its completion marker. A run emits
-per-arm JSON, JSONL events, `summary.json`, `summary.csv`, and `summary.md`.
+per-arm JSON, JSONL events, ClawTune-compatible `traces/*.jsonl` and
+`tool-bridge.jsonl`, `summary.json`, `summary.csv`, and `summary.md`.
 Results include the resolved policy, correctness, latency, lifecycle, physical
 node-memory/storage measurements, SandboxTask identity, and pinned Cube/template
 provenance. Failed or partial arms are rerun rather than reused.
+
+Build an offline ClawTune dataset and evaluation from one or more completed run
+directories with:
+
+```bash
+python -m clawbox.tuning /data/clawbox-results/RUN_ID \
+  --output-dir /data/clawbox-results/clawtune-analysis
+```
+
+The optional `clawbox-tune-server` serves the validated tenant/repository KB.
+Experiment specifications can consume an immutable exported p90 JSON through
+the `tool_p90` admission policy; it is measurement-derived policy input, not a
+second runtime control plane.
 
 ## Verification
 

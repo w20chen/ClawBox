@@ -1,0 +1,11 @@
+# Tool CubeSandbox: repository/workspace plus ClawTune eBPF/cgroup collectors.
+FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d AS cube-base
+
+FROM 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:c9e44ea0283ce7a6545fd942c6d85d63a7230a9b71c6dcefd1dc4fd0d883629b
+USER root
+COPY --from=cube-base /usr/bin/envd /usr/bin/envd
+COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-tool-entrypoint.sh
+RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-tool-entrypoint.sh \
+ && mkdir -p /workspace /var/lib/clawtune/artifacts
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/cube-tool-entrypoint.sh"]

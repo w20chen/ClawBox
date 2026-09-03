@@ -69,6 +69,7 @@ def task() -> dict:
         "schema_version": 2, "experiment_id": "vertical",
         "workload": {"source": "recorded_trace", "input": "/input/trace.jsonl"},
         "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
+        "runtime": {"template_alias": "runtime-arm64", "memory_mib": 2048},
         "sandbox": {"template_alias": "arm64"},
         "resources": {"target_node": "node-a", "pool_memory_budget_mib": 1000,
                       "emergency_free_memory_mib": 100},
@@ -108,6 +109,20 @@ def test_controller_creates_exactly_one_node_pinned_worker_job() -> None:
     assert custom.statuses[-1]["phase"] == "running"
     assert set(custom.statuses[-1]) <= {"phase", "jobName", "resolvedSpecDigest",
                                         "errorCategory", "resultRef"}
+
+
+def test_controller_projects_optional_model_credentials_only_into_worker() -> None:
+    value = task()
+    value["spec"]["credentialSecretName"] = "openclaw-model-credentials"
+    value["metadata"]["finalizers"] = [FINALIZER]
+    batch = Batch()
+    CellReconciler(core_api=Core(), batch_api=batch, custom_api=Custom(),
+                   cube_client=Cube()).reconcile(value)
+    pod = batch.jobs[("bench", "run-a-worker")]["spec"]["template"]["spec"]
+    assert pod["containers"][0]["envFrom"] == [
+        {"secretRef": {"name": "openclaw-model-credentials"}}
+    ]
+    assert "envFrom" not in pod["initContainers"][0]
 
 
 def test_controller_propagates_success_and_cleans_orphans() -> None:

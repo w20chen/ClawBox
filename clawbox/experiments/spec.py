@@ -143,6 +143,7 @@ class ExperimentSpec(StrictFrozenModel):
     workload: WorkloadSpec
     agent: AgentSpec = Field(default_factory=AgentSpec)
     inference: InferenceSpec = Field(default_factory=InferenceSpec)
+    runtime: SandboxSpec
     sandbox: SandboxSpec
     execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
     resources: ResourcesSpec
@@ -156,6 +157,11 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("only schema_version: 2 is supported; migrate schema v1")
         if not self.policies:
             raise ValueError("policies must not be empty")
+        if self.agent.driver is AgentDriver.OPENCLAW:
+            if self.inference.backend is not InferenceBackend.API:
+                raise ValueError("agent.driver=openclaw currently requires inference.backend=api")
+            if "api_key" in self.inference.configuration:
+                raise ValueError("model credentials must be injected from a Kubernetes Secret")
         names = [policy.name for policy in self.policies]
         if len(names) != len(set(names)):
             raise ValueError("policy names must be unique")
@@ -185,6 +191,7 @@ class ExperimentArm(StrictFrozenModel):
     policy: PolicySpec
     agent: AgentSpec
     inference: InferenceSpec
+    runtime: SandboxSpec
     sandbox: SandboxSpec
     execution: ExecutionSpec
     resources: ResourcesSpec
@@ -214,7 +221,8 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                     arms.append(ExperimentArm(
                         arm_id=arm_id, spec_digest=digest, case=case,
                         repetition=repetition, concurrency=concurrency, policy=policy,
-                        agent=spec.agent, inference=spec.inference, sandbox=spec.sandbox,
+                        agent=spec.agent, inference=spec.inference, runtime=spec.runtime,
+                        sandbox=spec.sandbox,
                         execution=spec.execution, resources=spec.resources,
                         validation=spec.validation,
                     ))

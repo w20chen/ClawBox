@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Mapping
 
 from clawbox.replay.lifecycle import LifecycleError
 
@@ -10,12 +11,14 @@ from .client import CubeSandboxClient, Ownership
 class CubeSandboxLifecycle:
     def __init__(self, client: CubeSandboxClient, *, template: str,
                  node_name: str, ownership: Ownership,
-                 allow_internet_access: bool = True) -> None:
+                 allow_internet_access: bool = True,
+                 env_vars: Mapping[str, str] | None = None) -> None:
         self.client = client
         self.template = template
         self.node_name = node_name
         self.ownership = ownership
         self.allow_internet_access = allow_internet_access
+        self.env_vars = dict(env_vars or {})
         self.sandbox = None
         self.sandbox_id: str | None = None
         self._resident = False
@@ -32,6 +35,7 @@ class CubeSandboxLifecycle:
             template=self.template,
             node_name=self.node_name,
             ownership=self.ownership,
+            env_vars=self.env_vars or None,
             allow_internet_access=self.allow_internet_access,
         )
         self.sandbox_id = self.client.sandbox_id(self.sandbox)

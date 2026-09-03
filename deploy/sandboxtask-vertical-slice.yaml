@@ -21,6 +21,7 @@ spec:
     workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 1}
     agent: {driver: replay_engine}
     inference: {backend: replay, configuration: {time_scale: 1.0}}
+    runtime: {template_id: tpl-743b4bf146c642328ebe4e70, vcpu: 1, memory_mib: 2048}
     sandbox:
       template_id: tpl-c7212cdc724844639aa65486
       source_image_reference: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code

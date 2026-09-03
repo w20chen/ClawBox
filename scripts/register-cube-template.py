@@ -22,6 +22,8 @@ def main() -> int:
         help="template CPU quota in millicores (default: 2000 = 2 vCPU)",
     )
     parser.add_argument("--memory-mib", type=int, default=4096)
+    parser.add_argument("--exposed-port", type=int, action="append")
+    parser.add_argument("--probe-port", type=int, default=49999)
     parser.add_argument("--timeout", type=float, default=1200)
     args = parser.parse_args()
 
@@ -35,7 +37,7 @@ def main() -> int:
         name=args.alias, image=args.image, nodes=[args.node],
         cpu_count=args.cpu_millicores,
         memory_mb=args.memory_mib, writable_layer_size="20G",
-        exposed_ports=[49999, 49983], probe_port=49999,
+        exposed_ports=args.exposed_port or [49999, 49983], probe_port=args.probe_port,
     )
     if not build.template_id or not build.build_id:
         raise RuntimeError(f"CubeAPI returned an incomplete template build: {build}")

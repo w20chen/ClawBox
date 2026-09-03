@@ -133,6 +133,7 @@ def test_worker_runs_atomic_arm_and_skips_matching_completion(tmp_path: Path) ->
         "schema_version": 2, "experiment_id": "worker-test",
         "workload": {"source": "recorded_trace", "input": str(trace)},
         "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
+        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
         "sandbox": {"template_alias": "tpl"},
         "execution": {"concurrency_levels": [1], "randomized_order": False,
                       "stabilization_seconds": 0},

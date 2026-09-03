@@ -1,0 +1,14 @@
+# Runtime CubeSandbox: OpenClaw + ClawTune + ClawBox tool plugin.
+FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d AS cube-base
+
+FROM 127.0.0.1:5000/clawbox/runtime-arm64@sha256:d138c8497baac8262c9a24abfce920bffcaf9acbbc4243d2124806129eb7cd9b
+USER root
+COPY --from=cube-base /usr/bin/envd /usr/bin/envd
+COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-runtime-entrypoint.sh
+COPY openclaw-plugins/cube-tool /opt/clawbox/openclaw-plugins/cube-tool
+RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-runtime-entrypoint.sh \
+ && /usr/local/bin/npm install \
+      --prefix /opt/clawbox/openclaw-plugins/cube-tool --omit=dev --legacy-peer-deps
+ENV PATH=/usr/local/bin:/opt/clawtune/venv/bin:$PATH
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/cube-runtime-entrypoint.sh"]

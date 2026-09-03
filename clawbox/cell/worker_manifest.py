@@ -73,6 +73,7 @@ def experiment_worker_job(task: dict[str, Any]) -> dict[str, Any]:
                             {"name": "CLAWBOX_ATTEMPT_ID", "value": run_ref["attemptID"]},
                             {"name": "CLAWBOX_TASK_UID", "value": metadata["uid"]},
                             {"name": "CLAWBOX_WORKER_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
+                            {"name": "CLAWBOX_BRIDGE_HOST", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}},
                             {"name": "CUBE_API_URL", "value": spec["cubeApiURL"]},
                             {"name": "CLAWBOX_KUBERNETES_VERSION", "value": os.environ.get("CLAWBOX_KUBERNETES_VERSION", "unknown")},
                             {"name": "CLAWBOX_CONTAINERD_VERSION", "value": os.environ.get("CLAWBOX_CONTAINERD_VERSION", "unknown")},

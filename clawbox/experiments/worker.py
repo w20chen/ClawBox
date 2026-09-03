@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from typing import Any
 
 from clawbox.cube import (
@@ -23,6 +24,8 @@ from clawbox.cube import (
 from clawbox.replay.trace import ReplayAction, load_trace
 
 from .memory import NodeMemorySampler
+from .clawtune_trace import ClawTuneTraceWriter
+from .openclaw_driver import CubeToolBridge, run_openclaw
 from .policy import PolicyCoordinator
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
 from .spec import (
@@ -208,42 +211,121 @@ class ExperimentWorker:
                      events: EventWriter) -> dict[str, Any]:
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
-        ownership = Ownership(self.run_id, self.attempt_id, self.task_uid,
-                              self.spec.experiment_id, session_id, arm.policy.name)
+        runtime_ownership = Ownership(
+            self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
+            f"{session_id}-runtime", arm.policy.name,
+        )
+        tool_ownership = Ownership(
+            self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
+            f"{session_id}-tool", arm.policy.name,
+        )
+        runtime_env: dict[str, str] = {}
+        if arm.agent.driver is AgentDriver.OPENCLAW:
+            credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
+            credential = os.environ.get(credential_name)
+            if not credential:
+                raise ValueError(f"OpenClaw credential environment is missing: {credential_name}")
+            runtime_env[credential_name] = credential
+        runtime_lifecycle = CubeSandboxLifecycle(
+            self.client, template=arm.runtime.template,
+            node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
+            ownership=runtime_ownership,
+            allow_internet_access=arm.runtime.allow_internet_access,
+            env_vars=runtime_env,
+        )
         lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.sandbox.template,
             node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
-            ownership=ownership, allow_internet_access=arm.sandbox.allow_internet_access,
+            ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
         )
         coordinator.register(session_id, lifecycle)
-        lifetime = arm.sandbox.memory_mib if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0
+        lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
+                    if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
         try:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
-            create_s = lifecycle.start()
+            runtime_create_s = runtime_lifecycle.start()
+            events.write({"event": "sandbox_created", "session_id": session_id,
+                          "role": "runtime", "service_seconds": runtime_create_s,
+                          "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
+            tool_create_s = lifecycle.start()
+            events.write({"event": "sandbox_created", "session_id": session_id,
+                          "role": "tool", "service_seconds": tool_create_s,
+                          "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
+            create_s = runtime_create_s + tool_create_s
+            runtime_executor = CubeCommandExecutor(
+                self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
+            )
             executor = CubeCommandExecutor(self.client, lambda: lifecycle.sandbox, cwd=arm.sandbox.workspace)
-            actions = self._actions(arm)
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
-            for action in actions:
-                if action.kind == "llm":
-                    model_steps += 1
-                    self._model_wait(arm, action, session_id, lifecycle, coordinator, events)
-                    continue
-                if not lifecycle.resident:
-                    self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
-                amount = self._tool_reservation_mib(arm, action)
-                coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
-                coordinator.set_tool_active(session_id, True)
-                try:
-                    result = executor.execute(action.shell_command(), arm.execution.command_timeout_seconds)
-                    tool_latencies.append(result.duration_s)
-                    if action.expected_exit_code is not None and result.exit_code != action.expected_exit_code:
-                        exit_mismatches += 1
-                finally:
-                    coordinator.set_tool_active(session_id, False)
-                    coordinator.release(session_id, amount)
+            if arm.agent.driver is AgentDriver.OPENCLAW:
+                trace_writer = ClawTuneTraceWriter(
+                    self.output_root, run_id=self.run_id, session_id=session_id,
+                    repo_fingerprint=str(arm.inference.configuration.get("repo_fingerprint") or "") or None,
+                )
+                def execute_openclaw_tool(command: str, timeout_s: float):
+                    if not lifecycle.resident:
+                        self._restore_with_one_victim(
+                            arm, session_id, lifecycle, coordinator, events,
+                        )
+                    action = SimpleNamespace(action_id="cube_shell")
+                    amount = self._tool_reservation_mib(arm, action)
+                    coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
+                    coordinator.set_tool_active(session_id, True)
+                    try:
+                        result = executor.execute(command, min(
+                            timeout_s, arm.execution.command_timeout_seconds,
+                        ))
+                        execution_id = trace_writer.record(command, result)
+                        events.write({"event": "clawtune_observation", "session_id": session_id,
+                                      "execution_id": execution_id, "tool": "cube_shell",
+                                      "latency_only": True})
+                    finally:
+                        coordinator.set_tool_active(session_id, False)
+                        coordinator.release(session_id, amount)
+                    if (arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+                            and arm.policy.eviction is EvictionPolicy.EAGER):
+                        pause_s = lifecycle.checkpoint_and_evict()
+                        coordinator.pause_count += 1
+                        coordinator.pause_service_seconds += pause_s
+                        events.write({"event": "sandbox_paused", "session_id": session_id,
+                                      "service_seconds": pause_s, "reason": "openclaw_tool_complete"})
+                    return result
+
+                with CubeToolBridge(execute_openclaw_tool) as bridge:
+                    outcome = run_openclaw(
+                        prompt=arm.case.prompt, session_id=session_id,
+                        configuration=arm.inference.configuration, bridge=bridge,
+                        runtime_executor=runtime_executor,
+                        output_dir=self.output_root,
+                        timeout_seconds=arm.execution.arm_timeout_seconds,
+                    )
+                tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
+                model_steps = 1
+                if not tool_latencies:
+                    raise RuntimeError("OpenClaw completed without using the required cube_shell tool")
+            else:
+                actions = self._actions(arm)
+                for action in actions:
+                    if action.kind == "llm":
+                        model_steps += 1
+                        self._model_wait(arm, action, session_id, lifecycle, coordinator, events)
+                        continue
+                    if not lifecycle.resident:
+                        self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
+                    amount = self._tool_reservation_mib(arm, action)
+                    coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
+                    coordinator.set_tool_active(session_id, True)
+                    try:
+                        result = executor.execute(action.shell_command(), arm.execution.command_timeout_seconds)
+                        tool_latencies.append(result.duration_s)
+                        if action.expected_exit_code is not None and result.exit_code != action.expected_exit_code:
+                            exit_mismatches += 1
+                    finally:
+                        coordinator.set_tool_active(session_id, False)
+                        coordinator.release(session_id, amount)
             if not lifecycle.resident:
                 self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
             validation = arm.validation.command or (
@@ -263,6 +345,8 @@ class ExperimentWorker:
             if not valid:
                 raise RuntimeError(f"validation failed for {session_id}")
             return {"session_id": session_id, "valid": valid, "create_seconds": create_s,
+                    "runtime_create_seconds": runtime_create_s,
+                    "tool_create_seconds": tool_create_s,
                     "duration_seconds": time.monotonic() - session_started,
                     "tool_steps": len(tool_latencies), "model_steps": model_steps,
                     "tool_latencies": tool_latencies, "output_hash": output_hash}
@@ -270,15 +354,14 @@ class ExperimentWorker:
             try:
                 lifecycle.close()
             finally:
-                if lifetime:
-                    coordinator.release(session_id, lifetime)
-                coordinator.unregister(session_id)
+                try:
+                    runtime_lifecycle.close()
+                finally:
+                    if lifetime:
+                        coordinator.release(session_id, lifetime)
+                    coordinator.unregister(session_id)
 
     def _actions(self, arm: ExperimentArm) -> list[ReplayAction]:
-        if arm.agent.driver is AgentDriver.OPENCLAW:
-            raise RuntimeError(
-                "OpenClaw Worker tool routing is not implemented; refusing to substitute replay"
-            )
         if arm.agent.driver is not AgentDriver.REPLAY_ENGINE:
             raise RuntimeError(f"unsupported agent driver: {arm.agent.driver}")
         trace = arm.case.replay_trace_reference or arm.case.source_reference

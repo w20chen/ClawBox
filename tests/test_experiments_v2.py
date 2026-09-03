@@ -21,6 +21,7 @@ def raw_spec() -> dict:
         },
         "agent": {"driver": "replay_engine"},
         "inference": {"backend": "replay"},
+        "runtime": {"template_alias": "runtime-arm64", "vcpu": 1, "memory_mib": 2048},
         "sandbox": {"template_alias": "task-arm64", "vcpu": 2, "memory_mib": 4096},
         "execution": {"concurrency_levels": [1, 4], "random_seed": 17},
         "resources": {
@@ -55,6 +56,16 @@ def test_v2_rejects_backend_transport_and_invalid_policy() -> None:
     raw = raw_spec()
     raw["policies"][0]["eviction"] = "eager"
     with pytest.raises(ValidationError, match="resident requires"):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_openclaw_requires_api_inference_and_secret_credentials() -> None:
+    raw = raw_spec()
+    raw["agent"] = {"driver": "openclaw"}
+    with pytest.raises(ValidationError, match="requires inference.backend=api"):
+        ExperimentSpec.model_validate(raw)
+    raw["inference"] = {"backend": "api", "configuration": {"api_key": "do-not-store"}}
+    with pytest.raises(ValidationError, match="Kubernetes Secret"):
         ExperimentSpec.model_validate(raw)
 
 

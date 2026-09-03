@@ -1,15 +1,28 @@
 # syntax=docker/dockerfile:1
+FROM node:24.16.0-bookworm-slim AS openclaw
+RUN npm install --global openclaw@2026.7.1
+WORKDIR /cube-tool
+COPY openclaw-plugins/cube-tool/package.json ./
+# The plugin's OpenClaw peer is supplied by the global installation above;
+# avoid installing a duplicate OpenClaw dependency tree here.
+RUN npm install --omit=dev --legacy-peer-deps
+COPY openclaw-plugins/cube-tool/index.js openclaw-plugins/cube-tool/openclaw.plugin.json ./
+
 FROM python:3.12-slim
 ARG PIP_INDEX_URL=https://pypi.org/simple
 WORKDIR /opt/clawbox
+COPY --from=openclaw /usr/local/bin/node /usr/local/bin/node
+COPY --from=openclaw /usr/local/bin/openclaw /usr/local/bin/openclaw
+COPY --from=openclaw /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY pyproject.toml ./
 COPY clawbox ./clawbox
 COPY examples ./examples
+COPY --from=openclaw /cube-tool ./openclaw-plugins/cube-tool
 RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" . \
  && groupadd --gid 10001 clawbox \
  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin clawbox \
  && mkdir -p /results \
- && chown 10001:10001 /results
+ && chown -R 10001:10001 /results /opt/clawbox/openclaw-plugins
 ENV PYTHONUNBUFFERED=1
 USER 10001:10001
 ENTRYPOINT ["clawbox-experiment-worker"]
