@@ -23,5 +23,5 @@ def test_template_helper_exposes_cube_command_ports() -> None:
     )
 
     assert 'action="append"' in helper
-    assert "args.exposed_port or [49999, 49983]" in helper
-    assert "default=49999" in helper
+    assert "args.exposed_port or [49983]" in helper
+    assert "default=49983" in helper
