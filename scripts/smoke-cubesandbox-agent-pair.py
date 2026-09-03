@@ -9,6 +9,8 @@ import re
 import shlex
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 
 from cubesandbox import NEVER_TIMEOUT, Sandbox, Template
@@ -114,6 +116,18 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str) -> dict:
         "timeout_seconds": 30,
     }, separators=(",", ":")).encode()).decode()
     with CubeToolBridge(execute, advertise_host=bridge_host) as bridge:
+        # A bare POST must reach this listener and be rejected by auth. This
+        # distinguishes TCP reachability from URL/path and auth failures.
+        probe = urllib.request.Request(
+            f"http://127.0.0.1:{bridge.actual_port}/execute",
+            data=b"{}", method="POST",
+        )
+        try:
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(probe)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401, exc
+        else:
+            raise AssertionError("unauthenticated bridge probe was not rejected with 401")
         command = (
             f"body=$(echo {shlex.quote(payload)} | base64 -d); "
             f"curl -fsS -X POST -H 'Authorization: Bearer {bridge.token}' "
@@ -147,6 +161,7 @@ def runtime_worker_tool_check(runtime, tool, *, bridge_host: str) -> dict:
     # The bridge response, worker-side record, cgroup artifact, and eBPF
     # artifact all carry one identical execution ID: 1/1 exact join.
     return {"execution_id": execution_id, "exact_id_join": 1.0,
+            "endpoint": bridge.url, "startup": bridge.startup,
             "worker_bridge_execution_id": response["execution_id"],
             "tool_record_execution_id": record["execution_id"]}
 
