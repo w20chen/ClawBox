@@ -2,7 +2,7 @@
 
 Locks least-privilege: the Managed API has no Kubernetes permissions; the
 Dispatcher can only touch SandboxTask CRs (no Pods/Secrets/Jobs); the Cell
-Controller keeps the Pod/Secret/Job verbs it needs to realize Cells.
+Controller keeps the Service/ConfigMap/Job verbs it needs to realize Cells.
 """
 
 from pathlib import Path

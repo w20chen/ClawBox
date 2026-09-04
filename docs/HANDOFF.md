@@ -3,6 +3,66 @@
 Updated 2026-09-04 after the post-reboot acceptance milestone, with live
 Kunpeng evidence. The source commit is recorded in the repository history.
 
+## Latest clean stopping point: managed c1 readiness
+
+This handoff is intentionally at the next important milestone, before any
+formal paper matrix. The latest pushed source is `386170a`. It adds the
+task-namespace Service permissions required by the controller's NodePort
+adapter and sanitized top-level Worker exception logging. Local targeted
+managed/controller tests and `git diff --check` pass; the full suite had
+already passed with five environment skips before this small change.
+
+The live controller on Kunpeng is healthy and uses control-plane image digest
+`sha256:2b3814b06de6da7ef00b86201db0cbcfc23061a6fe441ef0520146bae4e0a1d5`.
+Applying the updated `deploy/control-plane-rbac.yaml` made these checks pass
+for `system:serviceaccount:clawbox-system:clawbox-cell-controller` in
+`clawbox-benchmarks`: Service `get`, `create`, and `delete`. A fresh task then
+created its two-port NodePort Service and Worker Job through the normal
+controller path, proving the RBAC defect was real and is fixed.
+
+The temporary synthetic Worker attempt used Worker digest
+`sha256:086f6556f345f76e2c763b3a77f4f53a0de7e3b3c05527f1c5d48d01063475b6`.
+It failed in pre-arm readiness before writing evidence; the prior image did
+not emit a useful top-level exception, which is why `386170a` adds sanitized
+failure logging. Its rebuild was deliberately stopped, so do not claim that
+this is a valid managed c1 result and do not infer the exact readiness cause
+from the silent old-image exit. The temporary task, failed Job, mock Pod,
+mock Service, credential Secret, and task-owned NodePort Service were removed.
+The result directory was left untouched; no persistent results, `/data/cubelet`,
+MinIO/S3 data, templates, kernel artifacts, or validated services were
+deleted or restarted.
+
+The live namespace retains only the pre-existing historical `cube-cancel-smoke`
+and `cube-vertical-slice` task records/worker result, which were not created by
+this continuation and were preserved. A direct Cube inventory using the SDK
+returned no Sandbox rows and listed the existing templates, including the
+fresh Runtime `tpl-72fecb8e388d4c9fa3a61054` and Tool
+`tpl-4ffe6e6abd574be99b2869e1`; the active guest-kernel hash remains
+`f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f`.
+
+## Exact next milestone
+
+No usable real LLM credential exists on the host: `clawbox-benchmarks` has no
+`clawbox-llm` Secret, and the old stored traces use `exec/read/edit` rather
+than the current managed `cube_shell` contract. Do not reuse or relabel them.
+The next operator must provide a task-scoped Secret with the configured API-key
+environment name, then:
+
+1. Build and publish a fresh immutable Worker image from `386170a` and record
+   its digest. Do not use the interrupted build as a published artifact.
+2. Create a unique real c1 `SandboxTask` using the fresh Runtime/Tool template
+   IDs and the immutable Worker image. Reconcile only through the controller.
+3. Require the real API record to show command-specific Runtime prediction
+   metadata, actual model request count, request-event-driven policy actions,
+   separate JCT/validation/hash/cleanup timing, valid Tool telemetry, exact
+   execution-ID joins, correct outputs, and zero losses/leaks.
+4. Freeze the real trace, immutable prediction/KB artifact, and Tool trajectory
+   hashes. Replay with independent session-local state and require exact
+   trajectory/output equivalence before c4, c8, or c20.
+5. Preserve raw success and failure artifacts and classify evidence as live
+   inference or deterministic replay on real Kunpeng. Do not start c40/c60
+   until c20 meets every stated acceptance condition.
+
 ## Latest continuation status
 
 The post-reboot reduced acceptance is now complete. The custom guest kernel was
@@ -70,12 +130,11 @@ infrastructure-inclusive durations are recorded separately.
 
 ## Existing implementation
 
-Commit `111587b` contains paired Runtime/Tool Cube Dockerfiles and entrypoints,
-an authenticated Worker bridge, paired Cube session execution, exact execution
-ID propagation, Tool cgroup/eBPF artifact collection, pair smoke/audit scripts,
-a thin controller, and tests. Preserve them. Explicit pair-domain naming,
-prediction/replay, memory accounting, full Kubernetes acceptance, and legacy
-backend cleanup are still incomplete.
+The original paired implementation landed in `111587b`; it has since been
+extended through `4ade359`, `9e7084b`, `867093c`, and `386170a`. The current
+source includes the fixed NodePort bridge, session-local gateway, prediction
+provenance, memory-accounting safeguards, and controller RBAC/logging fixes.
+Preserve the design and continue only from the c1 gate described above.
 
 The local gate passed before this handoff: `compileall` and all pytest tests;
 five were skipped and only a pytest cache warning appeared.
@@ -84,13 +143,14 @@ five were skipped and only a pytest cache warning appeared.
 
 Host: `weitianc@193.124.7.2`
 
-- `/home/weitianc/ClawBox` is at `111587b`, with only untracked `results/`;
-  preserve it. `/home/weitianc/ClawBox-cube` is the no-git live export.
+- `/home/weitianc/ClawBox` is at `386170a`, with only pre-existing untracked
+  results/data; preserve them. `/home/weitianc/ClawBox-cube` is the no-git live
+  export.
 - `/home/weitianc/CubeSandbox` is at `d0081641c59822e4e5653b7462e914410b81910a`
   with pre-existing user changes: master/chart CPU-memory ratios 1, paused
   release ratio 1, and untracked `=|e2b`. Preserve them.
-- `cube-node-l7kgl` was 3/3 Running; S3lvol was active; registry mirror port
-  5001 works. No host reboot was performed.
+- Cube node was 3/3 Running; S3lvol was active; registry mirror port 5001
+  works. No additional host reboot was performed during this c1 continuation.
 
 Published ARM64 digests:
 
@@ -141,7 +201,7 @@ replace `vmlinux-bm`, `version`, and `version.json` from their
 `*.original-a63aa77e` backups, restart the exact cube-node pod, and wait for
 3/3. Do not delete the custom or vendor image.
 
-## Current hard blocker
+## Historical template-recovery blocker (resolved)
 
 Old templates booted the August 12 vendor kernel and exposed no kprobe event
 source. Templates built before metadata correction are rejected correctly:
@@ -162,16 +222,19 @@ initExt4BlockDevice failed
 
 Failed IDs: `tpl-26b825d6202d40a7b05fd701` and
 `tpl-20ec6adf72764217bcb3e5c4`. About 906 GiB and 98% of inodes are free. This
-repeated failure is the stopping condition. Diagnose CubeCoW/rootfs
-initialization; do not rebuild the kernel, delete `/data/cubelet`, CubeCoW/S3
-objects, MinIO, or `results/`, or use old templates as acceptance evidence.
+repeated failure was the earlier stopping condition. It was later resolved by
+the narrow host S3lvol/socket-mount recovery; the fresh Runtime and Tool
+templates listed in the latest clean stopping point are now the accepted
+post-kernel templates. Do not rebuild the kernel, delete `/data/cubelet`,
+CubeCoW/S3 objects, MinIO, or results, or use old templates as acceptance
+evidence.
 
 `scripts/diagnose-cube-kprobes.py` creates one short-lived Tool VM and directly
 tests the guest kernel interface. A post-kernel Tool template must report the
 new build timestamp, `CONFIG_KPROBES=y`, a kprobe event source, and a successful
 manual probe on `__arm64_sys_execve` before running ClawTune.
 
-## Continuation order
+## Historical continuation order
 
 1. Check node, S3lvol, and zero active sandboxes with
    `scripts/audit-cube-sandboxes.py`. The 300-second cube-node startup patch is
@@ -186,9 +249,9 @@ manual probe on `__arm64_sys_execve` before running ClawTune.
    `hostname-txyuq.foreman.pxe`.
 5. Require `telemetry_state=complete`, exact-ID valid cgroup/eBPF artifacts,
    Tool pause/restore while Runtime stays running, and zero leaked sandboxes.
-6. Build and deploy the normal controller-created Worker image, then run the
-   managed c1 record + replay gate. Freeze the record trace and KB hashes and
-   require trajectory/correctness equivalence before any c4/c8/c20 work.
+6. The remaining current work is the managed c1 record + replay gate. Follow
+   the numbered steps under `Exact next milestone` above; the source-level
+   implementation is ready, but real API credentials are still required.
 7. Only after that gate is green: run separated admission, reclamation, and
    decision studies; randomize policy order within workload/concurrency/
    repetition blocks; preserve failed arms and label evidence type. Do not
@@ -202,7 +265,7 @@ separate role timings, no hidden resident pause, correct memory accounting,
 one Attempt/SandboxTask/Worker, thin controller, identical Cube backend across
 arms, consistent docs/manifests, and zero leaks.
 
-At handoff, the real two-VM command path and cleanup were exercised, but kprobe
-telemetry is not accepted because no post-kernel template could be created.
-Higher-level policy behavior remains unit/static evidence until the real paired
-OpenClaw vertical slice passes.
+At handoff, the real two-VM command path, kprobe telemetry, NodePort bridge,
+pause/resume, exact-ID joins, and cleanup are accepted at the reduced
+post-reboot level. Higher-level managed OpenClaw behavior remains
+unit/static/synthetic evidence until a real c1 record and exact replay pass.

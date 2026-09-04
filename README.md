@@ -56,6 +56,31 @@ PodCIDR or ServiceCIDR addresses. It is not strict node-port-level egress
 isolation: the current CubeSandbox `allow_out` rule authorizes the node IP as a
 whole. Do not advertise a normal Worker Pod IP or ClusterIP to a Runtime VM.
 
+## Current managed-measurement milestone
+
+The source-level managed OpenClaw measurement gate is ready at commit
+`386170a` and the local suite passes. The cell controller RBAC now includes the
+task-owned Service permissions required to create, read, and delete the
+NodePort adapter; this was applied and verified on Kunpeng. The controller
+created the expected Service and Worker Job through the normal
+`SandboxTask -> controller` path.
+
+This milestone is intentionally stopped before the paper matrix. A temporary
+synthetic c1 attempt reached the Worker preflight but did not produce evidence,
+and was cleaned up. The live Kunpeng namespace has no temporary c1 task, Job,
+model-mock Service, or task-owned NodePort Service. Existing project tasks,
+templates, results, Cube data, and the validated kernel were preserved.
+
+Real c1 recording remains blocked until the operator supplies a task-scoped
+LLM credential Secret in `clawbox-benchmarks`; no usable `clawbox-llm` Secret
+was present on the host. Do not reuse the older `exec/read/edit` traces for the
+current managed `cube_shell` contract, and do not start c4/c8/c20/c40/c60.
+The next gate is: real c1 record, frozen trace/KB hashes, exact session-local
+replay equivalence, correct command-specific P90 provenance, exact-ID
+telemetry joins, and zero resource leaks. See
+[`docs/implementation-status.md`](docs/implementation-status.md) and
+[`docs/HANDOFF.md`](docs/HANDOFF.md) for the reproducible continuation record.
+
 ClawTune observes this trusted boundary. Each completed `cube_shell` call emits
 a Runtime-VM native ClawTune span and a matching Worker bridge record, Tool-VM
 cgroup snapshot, and eBPF clause artifact under the same execution ID. The

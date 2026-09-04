@@ -1,5 +1,54 @@
 # CubeSandbox migration status (2026-09-04)
 
+## Managed OpenClaw measurement boundary (stopped cleanly)
+
+The current important milestone is source and controller readiness for a
+semantically correct managed c1 run; the formal paper matrix has not started.
+
+- Latest source commit: `386170a` (`Make cell controller services and worker
+  failures diagnosable`), pushed to `origin/main`.
+- Local verification: targeted managed/controller tests and `git diff --check`
+  pass; the preceding full suite passed with five environment skips. The new
+  Worker image publication was intentionally stopped before completion, so the
+  live Worker image remains the prior immutable digest listed below.
+- Controller image live on Kunpeng:
+  `sha256:2b3814b06de6da7ef00b86201db0cbcfc23061a6fe441ef0520146bae4e0a1d5`.
+- Worker image used by the temporary controller-created attempt:
+  `sha256:086f6556f345f76e2c763b3a77f4f53a0de7e3b3c05527f1c5d48d01063475b6`
+  (built from the managed c1 fixture commit, before the sanitized top-level
+  failure-log change).
+- The missing cell-controller Service RBAC was the concrete infrastructure
+  defect found at this boundary. `deploy/control-plane-rbac.yaml` now grants
+  only `get/create/delete` on Services in `clawbox-benchmarks`; the live
+  `can-i` checks returned `yes` for all three verbs.
+- Normal reconciliation was verified: a fresh `SandboxTask` caused the
+  controller to create its owner-referenced two-port NodePort Service and
+  Worker Job. The temporary attempt was then removed after it failed before
+  producing a result; it is not accepted measurement evidence.
+- Temporary task, Job, model-mock Pod/Service/Secret, and task-owned NodePort
+  resources are gone. A direct Cube inventory returned no Sandbox entries
+  (only Template records); existing historical project resources were not
+  deleted.
+- No real API c1 can be recorded yet: `clawbox-benchmarks/clawbox-llm` is
+  absent. The available old result traces use a different tool schema and must
+  not be relabeled as current managed evidence.
+
+Evidence classification at this boundary:
+
+| Area | Classification |
+|---|---|
+| Kernel, S3lvol, fresh templates, Cube node, NodePort bridge, Tool telemetry | live Kunpeng verified in the prior acceptance milestone |
+| Session-local gateway, command-specific P90, policy-event timing, timing separation | source/unit evidence; targeted tests pass |
+| Controller Service RBAC and normal Service/Job realization | live Kunpeng verified in this milestone |
+| Managed c1 recording/replay and paper results | not yet run; real credential is required |
+
+Next operator actions are deliberately narrow: publish a Worker image from
+`386170a`, create the LLM Secret without committing values, run one real c1
+record through the managed path, freeze the trace/KB/Tool hashes, run the
+session-local replay equivalence gate, and retain all raw outputs. Only after
+zero divergence, zero telemetry loss, exact-ID joins, correct outputs, and
+zero leaks should c4/c8/c20 be considered.
+
 The supported path is now:
 
 `clawbox experiment -> API -> Run/Attempt/outbox -> SandboxTask v1alpha2 -> one ExperimentWorker Job -> one PolicyCoordinator per arm -> cubesandbox==0.7.0 -> one Runtime VM plus one Tool VM per Agent`.
