@@ -1,7 +1,7 @@
 # ClawBox continuation handoff
 
-Updated 2026-09-04 after the native-SSH architecture cutover and first live
-Tool-template gate.
+Updated 2026-09-05 after the native-SSH architecture cutover, c40 replay
+matrices, and managed-gateway validation.
 
 ## Fixed direction
 
@@ -28,6 +28,10 @@ All are pushed to `origin/main`. Local full suite at `49ab5a4` passed 183 tests
 with 5 environment skips. Kunpeng targeted Python tests passed. Toolbridge Go
 tests passed on ARM64 in `golang:1.25-bookworm` using
 `GOPROXY=https://goproxy.cn,direct`.
+
+The continuation commits `a4be792`, `a30292a`, and `493206d` add structured
+timing spans, bounded Cube command streams, and managed API-path coverage.
+They are local commits and are not yet pushed to `origin/main`.
 
 The Runtime-side `/usr/local/bin/ssh` shim:
 
@@ -83,31 +87,54 @@ Two failed template records are expected from discovery and must not be reused:
 - `tpl-56851ed069e44912a13b5904` exposed the template-build/session-key bug fixed
   by `de74a26`.
 
+## Current continuation result
+
+The replay worker was run at concurrency 40 for all prepared baseline suites:
+decision (12 arms), full-system (6), reclamation (6), smoke-matrix (2), spatial
+(15), and vertical-slice (1). All arms passed after retrying isolated transient
+Cube API transport failures. The decision run also reproduced and then cleared
+a broken command-stream hang with the bounded client deadline. Each run was
+checked for zero remaining Cube sandboxes. Fresh-source runs after `a4be792`
+also emit `session_timing` events containing `session`, `agent`, per-sandbox
+create, validation, hashing, and cleanup spans.
+
+The managed gateway has both replay and API implementations. Replay is covered
+by session-local cursor, retry, delivery, and HOL tests. API mode is covered by
+an upstream-compatible integration test that verifies model forwarding and
+server-side credential handling. A real upstream model request was not sent by
+automation: the operator credential is sensitive, and the live native SSH route
+is still unavailable.
+
+The remaining live blocker is concrete. On kunpeng, `get_host(2222)` returns an
+HTTP ingress authority; the Tool VM's per-sandbox raw mapping is reachable from
+the CubeProxy pod but not from the host node or Runtime VM. Guest `hostname -I`
+values are isolated link addresses and must not be used as a native target.
+Supply a deployment-owned raw TCP endpoint, then run the pair smoke and managed
+OpenClaw c1 before claiming the native path or scaling it.
+
 ## Highest-priority next steps
 
-1. Rebuild/push Runtime at `de74a26` for clean shared provenance, then register
-   a fresh Runtime template exposing 49983 and bound to the same kernel.
-2. Add/run a Cube-only pair smoke using Tool template
-   `tpl-b5cb6f5ee26a41448000b9c2`. Verify what address/port from
-   `tool.get_host(2222)` is reachable by Runtime native OpenSSH. Do not assume
-   `:2222` until tested.
-3. Exercise the actual Runtime SSH shim against a host PolicyControlServer:
-   admitted command, Tool pause, demand-triggered restore before SSH connect,
-   completion, exact command execution count, and no command/output in policy
-   logs.
+1. Provide a deployment-owned raw TCP endpoint for each Tool sandbox and set
+   `CLAWBOX_NATIVE_SSH_TARGET` (or `CLAWBOX_NATIVE_SSH_HOST` plus port). Do not
+   derive it from guest `hostname -I` or `get_host(2222)`.
+2. Run the Cube-only pair smoke with Runtime template
+   `tpl-39efe4ad90384a1fbea3caff` and Tool template
+   `tpl-b5cb6f5ee26a41448000b9c2`, then verify admitted SSH, Tool pause, demand
+   restore, exact execution count, and no policy command/output leakage.
+3. Run managed OpenClaw c1 in replay and API modes with the operator-provided
+   credential, export the API response trace, and require replay equivalence
+   before any native OpenClaw scale claim.
 4. Join Runtime ClawTune spans, PolicyControl records, Tool bridge JSONL,
-   cgroup artifacts, and eBPF artifacts by `(session_id, execution_id)`. The
-   current native runner returns control records but does not yet copy and
-   fail-closed validate all Tool artifacts; this is the main source gap.
+   cgroup artifacts, and eBPF artifacts by `(session_id, execution_id)` and
+   retain the new `session_timing` events in the result bundle.
 5. Validate every native file tool, not merely `exec`. Confirm ClawTune applies
-   its execution envelope to the SSH commands produced by
-   `process/read/write/edit/apply_patch`. Any unenveloped Agent operation must
-   fail closed; setup/validation operations need an explicit non-agent phase.
-6. Fix one lifecycle race before scale: model-wait pause checks `tool_active`,
-   and per-session locks serialize callbacks, but add a focused race test where
-   admission and a delayed pause become ready simultaneously.
-7. After c1 record/replay equivalence, run real Cube c4/c8 HOL/cross-routing and
-   leak tests. Only then run c20 and finally c40/c60 policy arms.
+   its execution envelope to SSH commands produced by
+   `process/read/write/edit/apply_patch`; unenveloped Agent operations must fail
+   closed while setup/validation remain explicit non-agent phases.
+6. Add the focused admission-versus-delayed-pause race test, then run native
+   OpenClaw c4/c8 HOL/cross-routing and leak tests.
+7. Only after those native gates pass, run c20 and finally c40/c60 native
+   OpenClaw policy arms. The replay c40 matrix is already green.
 
 ## Easier cleanup left intentionally
 
