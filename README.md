@@ -10,30 +10,45 @@ clawbox experiment
   -> ClawBox API -> Run / Attempt / transactional Outbox
   -> one SandboxTask -> thin controller -> one ExperimentWorker Job
   -> one trusted Runtime VM (OpenClaw + native ClawTune + model access)
-  -> authenticated cube_shell bridge -> trusted Worker
+  -> node-routed ModelGateway -> authenticated cube_shell bridge -> trusted Worker
   -> one in-process PolicyCoordinator per arm -> official CubeSandbox Python SDK
   -> one untrusted Tool VM (/workspace + command/resource telemetry)
   -> ClawTune v6 spans + exact-ID Cube execution records -> offline KB/p90
 ```
 
-The trusted Worker owns replay orchestration, policy decisions, validation,
-and result collection. Each logical Agent owns exactly two CubeSandbox ARM64
-MicroVMs: a Runtime VM for OpenClaw, reasoning state, native ClawTune, and model
-access; and a Tool VM for `/workspace` plus every shell, repository, file,
-compilation, generated-program, and test operation. Model credentials are
-injected only into the Runtime VM and never into the Tool VM. Kubernetes places
+The trusted Worker owns the model boundary, replay orchestration, policy
+decisions, validation, and result collection. Each logical Agent owns exactly
+two CubeSandbox ARM64 MicroVMs: a Runtime VM for OpenClaw, reasoning state,
+native ClawTune, and model access; and a Tool VM for `/workspace` plus every
+shell, repository, file, compilation, generated-program, and test operation.
+For managed OpenClaw, the upstream model credential remains in the Worker and
+Runtime receives only a per-session ModelGateway credential; it is never sent
+to the Tool VM. Kubernetes places
 the Worker; the Worker constrains both Cube sandboxes to that same node.
 
 OpenClaw has only the required `cube_shell` tool in experiment sessions; its
 host-local file, shell, process, browser, and patch tools are denied. Each
-ExperimentWorker starts one fixed-port `WorkerBridge` on `0.0.0.0:18080`, and
-the controller creates one authenticated NodePort Service per SandboxTask with
-`targetPort: 18080` and `externalTrafficPolicy: Local`. The Runtime VM is
+ExperimentWorker starts one fixed-port ModelGateway on `0.0.0.0:18081` and one
+fixed-port `WorkerBridge` on `0.0.0.0:18080`. The controller creates one
+authenticated NodePort Service per SandboxTask with both target ports and
+`externalTrafficPolicy: Local`. The Runtime VM is
 advertised `http://<worker-node-InternalIP>:<allocated-nodePort>` and receives
 only that node InternalIP `/32` in `network_allow_out`. Each session has its own
 high-entropy bearer token and executor registration; requests never hold the
 registry lock while executing a Tool command. The Tool VM gets no bridge or
 model credential.
+
+The ModelGateway has one session-local replay cursor, idempotency ledger,
+request fingerprint set, logical model-step count, timing record, and
+completion check per Runtime session. A logical model step is one newly
+accepted inference request; HTTP retries do not add steps. Replay fails closed
+on missing or extra entries, canonical input divergence, or undelivered
+responses. Fixed-delay eviction timers start at the real gateway request event,
+and lifecycle work is queued on a per-arm policy executor rather than performed
+in the gateway lock. Runtime prediction metadata comes from the immutable
+ClawTune-compatible P90 artifact, is attached to each Tool execution ID, and
+is rejected if missing or for another command. Validation and output hashing
+use a non-instrumented executor and are excluded from Tool/P90 evidence.
 
 This NodePort is an authenticated control-plane adapter required by this
 deployment because CubeSandbox guests cannot currently route to Kubernetes

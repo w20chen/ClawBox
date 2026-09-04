@@ -69,6 +69,8 @@ class BridgeRecord(StrictModel):
     cell_id: str | None = None
     task_id: str | None = None
     execution_id: str
+    phase: Literal["agent", "validation"] = "agent"
+    prediction: dict[str, Any] | None = None
     execution_source: Literal["bridge-local", "runtime-envelope"] | None = None
     command_sha256: str | None = None
     command_bytes: int | None = None

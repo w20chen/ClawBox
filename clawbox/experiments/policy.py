@@ -4,6 +4,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from threading import Condition
 from typing import Protocol
 
@@ -29,6 +30,23 @@ class SessionState:
 
 class AdmissionTimeout(RuntimeError):
     pass
+
+
+class PolicyEventExecutor:
+    """Small per-arm executor for nonblocking model lifecycle events."""
+
+    def __init__(self, *, workers: int = 4) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, workers), thread_name_prefix="policy-event"
+        )
+
+    def submit(self, operation: Callable[..., object], *args: object, **kwargs: object) -> None:
+        # ThreadPoolExecutor.submit only enqueues work; callers are never
+        # allowed to perform checkpoint/restore work in the gateway callback.
+        self._executor.submit(operation, *args, **kwargs)
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=False)
 
 
 class PolicyCoordinator:

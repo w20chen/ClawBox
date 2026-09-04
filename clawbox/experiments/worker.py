@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import statistics
@@ -16,7 +17,7 @@ from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Timer
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,8 +29,10 @@ from clawbox.replay.trace import ReplayAction, load_trace
 
 from .memory import NodeMemorySampler
 from .clawtune_trace import ClawTuneTraceWriter
+from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .openclaw_driver import WorkerBridge, run_openclaw
-from .policy import PolicyCoordinator
+from .policy import PolicyCoordinator, PolicyEventExecutor
+from .prediction import CommandPredictionProvider, PredictionUnavailable
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
 from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
@@ -107,23 +110,38 @@ class ExperimentWorker:
             self.client.journal = journal
         self.results: list[ResultEnvelope] = []
         self.worker_bridge: WorkerBridge | None = None
+        self.model_gateway: ManagedModelGateway | None = None
 
     def run(self) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
         bridge_host = os.environ.get("CLAWBOX_BRIDGE_HOST", "").strip()
         bridge_port = int(os.environ.get("CLAWBOX_BRIDGE_NODE_PORT", "0"))
+        gateway_host = os.environ.get("CLAWBOX_MODEL_GATEWAY_HOST", bridge_host).strip()
+        gateway_port = int(os.environ.get("CLAWBOX_MODEL_GATEWAY_NODE_PORT", "0"))
         arms = list(expand_matrix(self.spec))
         requires_bridge = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
         if requires_bridge and (not bridge_host or not bridge_port):
             raise RuntimeError("WorkerBridge requires CLAWBOX_BRIDGE_HOST and CLAWBOX_BRIDGE_NODE_PORT")
+        if requires_bridge and (not gateway_host or not gateway_port):
+            raise RuntimeError(
+                "managed ModelGateway requires CLAWBOX_MODEL_GATEWAY_HOST and "
+                "CLAWBOX_MODEL_GATEWAY_NODE_PORT"
+            )
         bridge_context = (
             WorkerBridge(advertise_host=bridge_host, advertised_port=bridge_port)
             if bridge_host and bridge_port else nullcontext(None)
         )
-        with bridge_context as bridge:
+        gateway_context = (
+            ManagedModelGateway(advertise_host=gateway_host, advertised_port=gateway_port)
+            if gateway_host and gateway_port else nullcontext(None)
+        )
+        with bridge_context as bridge, gateway_context as model_gateway:
             self.worker_bridge = bridge
+            self.model_gateway = model_gateway
             if bridge is not None:
                 bridge.wait_ready()
+            if model_gateway is not None:
+                model_gateway.wait_ready()
             for arm in arms:
                 result_path = self.output_root / "arms" / f"{arm.arm_id}.json"
                 marker_path = self.output_root / "arms" / f"{arm.arm_id}.complete"
@@ -132,6 +150,7 @@ class ExperimentWorker:
                     continue
                 self.results.append(self._run_arm(arm, result_path, marker_path))
             self.worker_bridge = None
+            self.model_gateway = None
         self._write_summary()
         return self.results
 
@@ -158,12 +177,22 @@ class ExperimentWorker:
             operation_headroom_mib=arm.resources.checkpoint_restore_headroom_mib,
             physical_sample=sampler.current,
         )
+        prediction_provider = None
+        if arm.agent.driver is AgentDriver.OPENCLAW and arm.policy.admission is AdmissionPolicy.TOOL_P90:
+            if not arm.resources.p90_predictions:
+                raise ValueError("tool_p90 requires an immutable command prediction artifact")
+            prediction_provider = CommandPredictionProvider(
+                Path(arm.resources.p90_predictions),
+                repository=arm.case.repository or arm.case.case_id,
+            )
+        policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
         sampler.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
         try:
             with ThreadPoolExecutor(max_workers=arm.concurrency, thread_name_prefix="agent") as pool:
-                futures = [pool.submit(self._run_session, arm, index, coordinator, events)
+                futures = [pool.submit(self._run_session, arm, index, coordinator, events,
+                                       policy_events, prediction_provider)
                            for index in range(arm.concurrency)]
                 for future in as_completed(futures, timeout=arm.execution.arm_timeout_seconds):
                     try:
@@ -176,6 +205,7 @@ class ExperimentWorker:
             failure = exc
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
+            policy_events.close()
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
@@ -189,10 +219,17 @@ class ExperimentWorker:
                 failure = failure or cleanup_error
         status = RunStatus.SUCCEEDED if failure is None else RunStatus.FAILED
         duration = time.monotonic() - started
-        session_durations = [float(item["duration_seconds"]) for item in sessions]
+        session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
+                             for item in sessions]
         tool_latencies = [float(value) for item in sessions for value in item["tool_latencies"]]
         tool_steps = sum(int(item["tool_steps"]) for item in sessions)
         model_steps = sum(int(item["model_steps"]) for item in sessions)
+        workload_starts = [float(item["timeline"]["agent_execution_start"])
+                           for item in sessions if item.get("timeline", {}).get("agent_execution_start")]
+        workload_ends = [float(item["timeline"]["final_agent_completion"])
+                         for item in sessions if item.get("timeline", {}).get("final_agent_completion")]
+        workload_window = (max(workload_ends) - min(workload_starts)
+                           if workload_starts and workload_ends else None)
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
             sandbox_task_uid=self.task_uid,
@@ -209,8 +246,10 @@ class ExperimentWorker:
             },
             performance={
                 "duration_seconds": duration,
-                "agents_per_minute": len(sessions) / max(duration, 1e-9) * 60,
-                "steps_per_minute": (tool_steps + model_steps) / max(duration, 1e-9) * 60,
+                "infrastructure_inclusive_duration_seconds": duration,
+                "workload_window_seconds": workload_window,
+                "agents_per_minute": len(sessions) / max(workload_window or duration, 1e-9) * 60,
+                "steps_per_minute": (tool_steps + model_steps) / max(workload_window or duration, 1e-9) * 60,
                 "tool_steps": tool_steps, "model_steps": model_steps,
                 "jct_mean_seconds": statistics.fmean(session_durations) if session_durations else None,
                 "jct_p50_seconds": percentile(session_durations, 0.50),
@@ -227,6 +266,7 @@ class ExperimentWorker:
                 "resume_count": coordinator.resume_count,
                 "resume_service_seconds": coordinator.resume_service_seconds,
                 "blocked_admission_seconds": coordinator.blocked_seconds,
+                "session_timelines": [item.get("timeline") for item in sessions],
             },
             memory={**asdict(memory), "peak_commitment_bytes": coordinator.peak_commitment_bytes},
             artifacts={"events": str(events.path)},
@@ -238,9 +278,11 @@ class ExperimentWorker:
         return result
 
     def _run_session(self, arm: ExperimentArm, index: int, coordinator: PolicyCoordinator,
-                     events: EventWriter) -> dict[str, Any]:
+                     events: EventWriter, policy_events: PolicyEventExecutor,
+                     prediction_provider: CommandPredictionProvider | None = None) -> dict[str, Any]:
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
+        timeline: dict[str, float] = {"session_started": time.time()}
         runtime_ownership = Ownership(
             self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
             f"{session_id}-runtime", arm.policy.name,
@@ -253,12 +295,13 @@ class ExperimentWorker:
         runtime_allow_out: list[str] = []
         if arm.agent.driver is AgentDriver.OPENCLAW:
             credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
-            credential = os.environ.get(credential_name)
-            if not credential:
+            credential = os.environ.get(credential_name, "")
+            if arm.inference.backend.value == "api" and not credential:
                 raise ValueError(f"OpenClaw credential environment is missing: {credential_name}")
-            runtime_env[credential_name] = credential
             runtime_env.update({
-                "OPENAI_BASE_URL": str(arm.inference.configuration.get("base_url") or ""),
+                # Runtime talks only to the Worker-owned node-routed gateway;
+                # the upstream API key stays in the Worker process.
+                "OPENAI_BASE_URL": "",
                 "OPENCLAW_MODEL": str(arm.inference.configuration.get("model") or ""),
                 "CLAWBOX_RUN_ID": self.run_id,
                 "CLAWBOX_ATTEMPT_ID": self.attempt_id,
@@ -281,9 +324,11 @@ class ExperimentWorker:
             runtime_allow_out.append(
                 f"{bridge_address}/{32 if bridge_address.version == 4 else 128}"
             )
-            runtime_allow_out.append(_network_target(
-                runtime_env["OPENAI_BASE_URL"], label="OpenClaw base_url",
-            ))
+            # The model gateway and WorkerBridge share the target node IP but
+            # use distinct fixed listeners/NodePorts. A single /32 is the
+            # narrow guest egress allowance supported by CubeSandbox today.
+            if self.model_gateway is None:
+                raise RuntimeError("managed ModelGateway is not active")
             if kb_endpoint := runtime_env.get("CLAWBOX_KB_ENDPOINT"):
                 runtime_allow_out.append(_network_target(
                     kb_endpoint, label="CLAWBOX_KB_ENDPOINT",
@@ -314,14 +359,216 @@ class ExperimentWorker:
         coordinator.register(session_id, lifecycle)
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
                     if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
+        gateway_session: SessionGatewayState | None = None
+        wait_lock = Lock()
+        wait_timer: Timer | None = None
+        restore_timer: Timer | None = None
+        wait_state: dict[str, Any] = {}
+        completed_model_requests: set[str] = set()
+        policy_event_errors: list[str] = []
+
+        if arm.agent.driver is AgentDriver.OPENCLAW:
+            if self.model_gateway is None:
+                raise RuntimeError("managed ModelGateway is not active")
+            prediction_wait = arm.inference.configuration.get("model_wait_prediction_seconds")
+            if arm.policy.restore is RestorePolicy.PROACTIVE:
+                if prediction_wait is None:
+                    raise ValueError(
+                        "proactive restore requires explicit model_wait_prediction_seconds"
+                    )
+                try:
+                    prediction_wait = float(prediction_wait)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("model_wait_prediction_seconds must be finite") from exc
+                if prediction_wait < 0:
+                    raise ValueError("model_wait_prediction_seconds must be non-negative")
+            else:
+                prediction_wait = None
+
+            def pause_for_model_wait(event: dict[str, Any]) -> None:
+                nonlocal wait_timer
+                try:
+                    with wait_lock:
+                        wait_timer = None
+                        if not lifecycle.resident:
+                            return
+                        started = time.time()
+                        elapsed = lifecycle.checkpoint_and_evict()
+                        finished = time.time()
+                        wait_state.update({
+                            "pause_started_at": started,
+                            "pause_completed_at": finished,
+                            "pause_request_id": event.get("request_id"),
+                        })
+                    coordinator.pause_count += 1
+                    coordinator.pause_service_seconds += elapsed
+                    events.write({
+                        "event": "sandbox_paused", "session_id": session_id,
+                        "service_seconds": elapsed,
+                        "reason": "model_request_wait",
+                        "request_id": event.get("request_id"),
+                    })
+                except Exception as exc:
+                    policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
+
+            def restore_for_model_wait(event: dict[str, Any]) -> None:
+                nonlocal restore_timer
+                try:
+                    with wait_lock:
+                        restore_timer = None
+                        if str(event.get("request_id")) in completed_model_requests:
+                            return
+                        if lifecycle.resident:
+                            target = wait_state.get("scheduled_restore_time")
+                            remaining = max(
+                                0.05,
+                                float(target) - time.time() if target is not None else 0.05,
+                            )
+                            restore_timer = Timer(
+                                remaining,
+                                lambda: policy_events.submit(restore_for_model_wait, event),
+                            )
+                            restore_timer.daemon = True
+                            restore_timer.start()
+                            return
+                        wait_state["restore_started_at"] = time.time()
+                    elapsed = self._restore_with_one_victim(
+                        arm, session_id, lifecycle, coordinator, events,
+                    )
+                    with wait_lock:
+                        wait_state["restore_completed_at"] = time.time()
+                        wait_state["restore_request_id"] = event.get("request_id")
+                    # _restore_with_one_victim already records the service
+                    # event; retain the explicit timing for gateway provenance.
+                    _ = elapsed
+                except Exception as exc:
+                    policy_event_errors.append(f"restore: {type(exc).__name__}: {exc}")
+
+            def on_model_request_started(event: dict[str, Any]) -> None:
+                """Enqueue lifecycle work; never checkpoint in the gateway callback."""
+                policy_events.submit(handle_model_request_started, event)
+
+            def handle_model_request_started(event: dict[str, Any]) -> None:
+                nonlocal wait_timer, restore_timer
+                timeline.setdefault("first_model_request", float(event["request_started_at"]))
+                with wait_lock:
+                    # A zero-scaled replay response can arrive before the
+                    # executor gets scheduled. Never create a late checkpoint
+                    # for an already completed model request.
+                    if str(event.get("request_id")) in completed_model_requests:
+                        return
+                coordinator.set_eviction_eligible(session_id, True)
+                if arm.policy.reclamation is ReclamationPolicy.RESIDENT:
+                    return
+                if arm.policy.eviction is EvictionPolicy.EAGER:
+                    delay = 0.0
+                elif arm.policy.eviction is EvictionPolicy.FIXED_DELAY:
+                    delay = float(arm.policy.fixed_delay_seconds or 0.0)
+                elif arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+                    delay = 0.0 if coordinator.pressure() else None
+                else:
+                    delay = None
+                with wait_lock:
+                    wait_state.clear()
+                    wait_state.update({
+                        "request_id": event.get("request_id"),
+                        "request_started_at": event.get("request_started_at"),
+                        "predicted_wait_seconds": prediction_wait,
+                        "prediction_source": (
+                            "configured_request_time_prediction"
+                            if prediction_wait is not None else None
+                        ),
+                    })
+                    elapsed_since_request = max(
+                        0.0, time.time() - float(event["request_started_at"])
+                    )
+                    restore_target = None
+                    if prediction_wait is not None and arm.policy.restore is RestorePolicy.PROACTIVE:
+                        restore_target = (
+                            float(event["request_started_at"])
+                            + prediction_wait
+                            - float(arm.policy.prefetch_lead_seconds or 0.0)
+                        )
+                        wait_state["scheduled_restore_time"] = restore_target
+                    if delay is not None:
+                        wait_timer = Timer(
+                            max(0.0, float(delay) - elapsed_since_request),
+                            lambda: policy_events.submit(pause_for_model_wait, event),
+                        )
+                        wait_timer.daemon = True
+                        wait_timer.start()
+                    if prediction_wait is not None and arm.policy.restore is RestorePolicy.PROACTIVE:
+                        lead = float(arm.policy.prefetch_lead_seconds or 0.0)
+                        restore_timer = Timer(
+                            max(0.0, prediction_wait - lead - elapsed_since_request),
+                            lambda: policy_events.submit(restore_for_model_wait, event),
+                        )
+                        restore_timer.daemon = True
+                        restore_timer.start()
+
+            def before_model_response_ready(step: int | None, message: dict[str, Any],
+                                            event: dict[str, Any]) -> dict[str, Any]:
+                nonlocal wait_timer, restore_timer
+                with wait_lock:
+                    completed_model_requests.add(str(event.get("request_id")))
+                    if wait_timer is not None:
+                        wait_timer.cancel()
+                        wait_timer = None
+                    if restore_timer is not None:
+                        restore_timer.cancel()
+                        restore_timer = None
+                    started = float(event["request_started_at"])
+                    generated = float(event["model_generated_at"])
+                    actual_wait = max(0.0, generated - started)
+                    wait_state["model_generated_at"] = generated
+                    admission = {
+                        "request_id": event.get("request_id"),
+                        "model_step": step,
+                        "predicted_wait_seconds": prediction_wait,
+                        "prediction_source": (
+                            "configured_request_time_prediction"
+                            if prediction_wait is not None else None
+                        ),
+                        "actual_wait_seconds": actual_wait,
+                        "prediction_error_seconds": (
+                            None if prediction_wait is None else actual_wait - prediction_wait
+                        ),
+                        "scheduled_restore_time": wait_state.get("scheduled_restore_time"),
+                        "restore_started_at": wait_state.get("restore_started_at"),
+                        "restore_completed_at": wait_state.get("restore_completed_at"),
+                        "tool_call_count": len(message.get("tool_calls") or []),
+                    }
+                    return admission
+
+            trace_path = (
+                Path(arm.case.replay_trace_reference)
+                if arm.inference.backend.value == "replay"
+                and arm.case.replay_trace_reference else None
+            )
+            gateway_session = self.model_gateway.register(
+                session_id=session_id,
+                store_path=self.output_root / "model-gateway" / f"{session_id}.json",
+                mode=arm.inference.backend.value,
+                trace=trace_path,
+                time_scale=float(arm.inference.configuration.get("time_scale", 1.0)),
+                upstream_base_url=str(arm.inference.configuration.get("base_url") or "") or None,
+                upstream_api_key=credential or None,
+                upstream_model=str(arm.inference.configuration.get("model") or "") or None,
+                on_request_started=on_model_request_started,
+                before_response_ready=before_model_response_ready,
+            )
+            runtime_env["CLAWBOX_MODEL_GATEWAY_TOKEN"] = gateway_session.token
         try:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
+            timeline["sandbox_create_start"] = time.time()
             runtime_create_s = runtime_lifecycle.start()
+            timeline["runtime_ready"] = time.time()
             events.write({"event": "sandbox_created", "session_id": session_id,
                           "role": "runtime", "service_seconds": runtime_create_s,
                           "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
             tool_create_s = lifecycle.start()
+            timeline["sandbox_ready"] = time.time()
             events.write({"event": "sandbox_created", "session_id": session_id,
                           "role": "tool", "service_seconds": tool_create_s,
                           "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
@@ -333,6 +580,8 @@ class ExperimentWorker:
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
+            prediction_records: list[dict[str, Any]] = []
+            observed_by_execution: dict[str, Any] = {}
             trace_writer = ClawTuneTraceWriter(
                 self.output_root, run_id=self.run_id, session_id=session_id,
                 repo_fingerprint=(arm.case.repository or str(
@@ -341,37 +590,73 @@ class ExperimentWorker:
             )
 
             def execute_observed(command: str, timeout_s: float,
-                                 execution_id: str):
+                                 execution_id: str, *,
+                                 prediction: dict[str, Any] | None = None,
+                                 phase: str = "agent"):
                 observed = executor.execute_observed(
                     command, min(timeout_s, arm.execution.command_timeout_seconds),
                     execution_id=execution_id,
                 )
+                observed_by_execution[execution_id] = observed
                 trace_writer.record(
                     command, observed.result, execution_id=execution_id,
                     bridge_record=observed.bridge_record, artifacts=observed.artifacts,
+                    prediction=prediction, phase=phase,
                 )
                 events.write({
                     "event": "clawtune_observation", "session_id": session_id,
                     "execution_id": execution_id, "tool": "cube_shell",
+                    "phase": phase,
+                    "prediction": prediction,
                     "telemetry_state": observed.bridge_record.get("telemetry_state"),
                     "telemetry_unavailable_reason": observed.telemetry_unavailable_reason,
                     "artifact_kinds": sorted(observed.artifacts),
                 })
                 return observed.result
 
+            timeline["agent_execution_start"] = time.time()
+            model_trace_path: Path | None = None
             if arm.agent.driver is AgentDriver.OPENCLAW:
                 def execute_openclaw_tool(command: str, timeout_s: float,
-                                          execution_id: str):
+                                          execution_id: str,
+                                          runtime_prediction: dict[str, Any] | None = None):
                     if not lifecycle.resident:
                         self._restore_with_one_victim(
                             arm, session_id, lifecycle, coordinator, events,
                         )
-                    action = SimpleNamespace(action_id="cube_shell")
-                    amount = self._tool_reservation_mib(arm, action)
-                    coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
+                    prediction = (
+                        prediction_provider.resolve(command, runtime_prediction)
+                        if prediction_provider is not None else runtime_prediction
+                    )
+                    amount = self._tool_reservation_mib(arm, prediction=prediction)
+                    admission_wait = coordinator.acquire(
+                        session_id, amount, arm.execution.arm_timeout_seconds
+                    )
                     coordinator.set_tool_active(session_id, True)
                     try:
-                        result = execute_observed(command, timeout_s, execution_id)
+                        result = execute_observed(
+                            command, timeout_s, execution_id, prediction=prediction,
+                        )
+                        if prediction is not None:
+                            prediction_record = dict(prediction)
+                            observed = observed_by_execution.get(execution_id)
+                            measured_memory = None
+                            if observed is not None:
+                                try:
+                                    measured_memory = float(json.loads(
+                                        observed.artifacts.get("cgroup_resource_v1", "{}")
+                                    ).get("memory_rss_peak_bytes", 0)) / (1024 * 1024)
+                                except (TypeError, ValueError, json.JSONDecodeError):
+                                    measured_memory = None
+                            prediction_record.update({
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "raw_command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+                                "actual_measured_memory_mib": measured_memory,
+                                "admitted_reservation_mib": amount,
+                                "admission_blocked_seconds": admission_wait,
+                            })
+                            prediction_records.append(prediction_record)
                     finally:
                         coordinator.set_tool_active(session_id, False)
                         coordinator.release(session_id, amount)
@@ -397,13 +682,36 @@ class ExperimentWorker:
                         runtime_executor=runtime_executor,
                         output_dir=self.output_root,
                         timeout_seconds=arm.execution.arm_timeout_seconds,
+                        model_gateway=gateway_session,
+                        prediction_manifest=(
+                            prediction_provider.manifest
+                            if prediction_provider is not None else None
+                        ),
                     )
                 finally:
                     bridge.close()
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
-                model_steps = 1
+                if gateway_session is None:
+                    raise RuntimeError("managed OpenClaw session has no ModelGateway state")
+                model_steps = gateway_session.gateway.logical_model_steps()
+                completeness = gateway_session.replay_completeness()
+                if not completeness["complete"]:
+                    raise RuntimeError(
+                        "managed ModelGateway session incomplete: "
+                        + json.dumps(completeness, sort_keys=True)
+                    )
                 if not tool_latencies:
                     raise RuntimeError("OpenClaw completed without using the required cube_shell tool")
+                if arm.inference.backend.value == "api":
+                    model_trace_path = self.output_root / "model-traces" / f"{session_id}.jsonl"
+                    gateway_session.write_replay_trace(model_trace_path)
+                    events.write({
+                        "event": "model_trace_recorded",
+                        "session_id": session_id,
+                        "path": str(model_trace_path),
+                        "sha256": hashlib.sha256(model_trace_path.read_bytes()).hexdigest(),
+                    })
+                timeline["final_agent_completion"] = time.time()
             else:
                 actions = self._actions(arm)
                 for action_index, action in enumerate(actions):
@@ -428,21 +736,28 @@ class ExperimentWorker:
                     finally:
                         coordinator.set_tool_active(session_id, False)
                         coordinator.release(session_id, amount)
+                timeline["final_agent_completion"] = time.time()
             if not lifecycle.resident:
                 self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
             validation = arm.validation.command or (
                 arm.case.validation if isinstance(arm.case.validation, str) else None)
             valid = exit_mismatches == 0
+            timeline.setdefault("agent_execution_start", timeline.get("sandbox_ready", time.time()))
+            timeline["validation_start"] = time.time()
             if validation:
-                validation_result = execute_observed(
+                validation_result = executor.execute(
                     validation, arm.execution.command_timeout_seconds,
-                    f"{session_id}:validation",
                 )
                 valid = valid and validation_result.exit_code == 0
-            hash_result = execute_observed(
+            timeline["validation_end"] = time.time()
+            timeline["output_hash_start"] = time.time()
+            hash_result = executor.execute(
                 "find . -type f -exec sha256sum {} \\; | LC_ALL=C sort | sha256sum",
                 arm.execution.command_timeout_seconds,
-                f"{session_id}:output-hash",
+            )
+            timeline["output_hash_end"] = time.time()
+            timeline["output_hash_overhead_seconds"] = max(
+                0.0, timeline["output_hash_end"] - timeline["validation_end"]
             )
             output_hash = (hash_result.stdout.split()[0] if hash_result.exit_code == 0
                            and hash_result.stdout.split() else hashlib.sha256(
@@ -451,19 +766,74 @@ class ExperimentWorker:
             events.write({"event": "session_complete", "session_id": session_id, "valid": valid})
             if not valid:
                 raise RuntimeError(f"validation failed for {session_id}")
+            events.write({
+                "event": "managed_session_measurement",
+                "session_id": session_id,
+                "model_steps": model_steps,
+                "tool_steps": len(tool_latencies),
+                "model_gateway_records": (
+                    gateway_session.records() if gateway_session is not None else []
+                ),
+                "model_gateway_completeness": (
+                    gateway_session.replay_completeness()
+                    if gateway_session is not None else None
+                ),
+                "prediction_records": prediction_records,
+                "prediction_provenance": (
+                    prediction_provider.provenance(prediction_records)
+                    if prediction_provider is not None else None
+                ),
+            })
+            if policy_event_errors:
+                raise RuntimeError("policy event executor failed: " + "; ".join(policy_event_errors))
             return {"session_id": session_id, "valid": valid, "create_seconds": create_s,
                     "runtime_create_seconds": runtime_create_s,
                     "tool_create_seconds": tool_create_s,
                     "duration_seconds": time.monotonic() - session_started,
+                    "agent_jct_seconds": max(
+                        0.0, timeline["final_agent_completion"] - timeline["agent_execution_start"]
+                    ),
+                    "provisioning_inclusive_jct_seconds": max(
+                        0.0, timeline["final_agent_completion"] - timeline["sandbox_create_start"]
+                    ),
+                    "validation_overhead_seconds": max(
+                        0.0, timeline["validation_end"] - timeline["final_agent_completion"]
+                    ),
                     "tool_steps": len(tool_latencies), "model_steps": model_steps,
-                    "tool_latencies": tool_latencies, "output_hash": output_hash}
+                    "tool_latencies": tool_latencies, "output_hash": output_hash,
+                    "prediction_records": prediction_records,
+                    "prediction_provenance": (
+                        prediction_provider.provenance(prediction_records)
+                        if prediction_provider is not None else None
+                    ),
+                    "model_gateway_records": (
+                        gateway_session.records() if gateway_session is not None else []
+                    ),
+                    "model_gateway_completeness": (
+                        gateway_session.replay_completeness()
+                        if gateway_session is not None else None
+                    ),
+                    "model_trace_path": str(model_trace_path) if model_trace_path else None,
+                    "timeline": timeline}
         finally:
+            with wait_lock:
+                if wait_timer is not None:
+                    wait_timer.cancel()
+                if restore_timer is not None:
+                    restore_timer.cancel()
+            if gateway_session is not None and self.model_gateway is not None:
+                self.model_gateway.unregister(gateway_session.token, timeout=30)
             try:
                 lifecycle.close()
             finally:
                 try:
                     runtime_lifecycle.close()
                 finally:
+                    timeline["sandbox_cleanup_end"] = time.time()
+                    if timeline.get("validation_end"):
+                        timeline["cleanup_overhead_seconds"] = max(
+                            0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]
+                        )
                     if lifetime:
                         coordinator.release(session_id, lifetime)
                     coordinator.unregister(session_id)
@@ -509,7 +879,9 @@ class ExperimentWorker:
         events.write({"event": "sandbox_restored", "session_id": session_id,
                       "service_seconds": elapsed})
 
-    def _tool_reservation_mib(self, arm: ExperimentArm, action: ReplayAction) -> int:
+    def _tool_reservation_mib(self, arm: ExperimentArm,
+                              action: ReplayAction | None = None, *,
+                              prediction: dict[str, Any] | None = None) -> int:
         policy = arm.policy.admission
         if policy is AdmissionPolicy.LIFETIME_FULL:
             return 0
@@ -517,9 +889,24 @@ class ExperimentWorker:
             return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
         if policy is AdmissionPolicy.TOOL_STATIC:
             return int(arm.resources.static_tool_memory_mib or 1)
+        if policy is AdmissionPolicy.TOOL_P90 and prediction is None and arm.agent.driver is AgentDriver.OPENCLAW:
+            raise PredictionUnavailable(
+                "managed tool_p90 cannot admit without Runtime command prediction metadata"
+            )
         source = arm.resources.p90_predictions if policy is AdmissionPolicy.TOOL_P90 else arm.resources.oracle_measurements
+        if prediction is not None:
+            value = prediction.get("predicted_incremental_memory_mib")
+            if value is None:
+                raise PredictionUnavailable("prediction metadata has no memory reservation")
+            return max(1, int(math.ceil(float(value))))
+        if action is None:
+            raise ValueError("replay admission requires an action")
         payload = json.loads(Path(str(source)).read_text(encoding="utf-8"))
-        return max(1, int(payload.get(action.action_id, payload.get("default_incremental_mib", 1))))
+        if action.action_id not in payload:
+            raise PredictionUnavailable(
+                f"prediction artifact has no entry for replay action {action.action_id}"
+            )
+        return max(1, int(payload[action.action_id]))
 
     def _provenance(self) -> dict[str, Any]:
         def command(*args: str) -> str:

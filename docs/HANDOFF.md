@@ -17,9 +17,10 @@ task-owned NodePort Services.
 
 This closes the post-reboot kernel/template/bridge/telemetry acceptance
 milestone. It does not claim that the full paper experiment matrix is finished;
-the remaining work is the higher-level Runtime-to-Worker-to-Tool experiment
-matrix, real/replay inference comparison, policy-arm results, and final
-statistical report.
+the next gate is the semantically correct managed OpenClaw measurement path,
+followed by the higher-level Runtime-to-Worker-to-Tool experiment matrix,
+real/replay inference comparison, policy-arm results, and final statistical
+report.
 
 ## Final goal and non-negotiable design
 
@@ -55,9 +56,17 @@ realized growth twice. Cube quota is a fixed safety bound, not experiment
 policy.
 
 The paper path must run OpenClaw inside Runtime with both real API inference and
-an OpenAI-compatible deterministic replay endpoint. `tool_p90` must consume
-real per-command Runtime prediction metadata, never the constant `cube_shell`.
-Decision policies must consume real model-wait start/end events.
+an OpenAI-compatible deterministic replay endpoint. The Worker now exposes one
+fixed node-routed ModelGateway at `0.0.0.0:18081` behind a second NodePort on
+the task Service. Each Runtime session has independent replay actions/cursor,
+fingerprints, idempotency/delivery state, logical model-step count, and timing
+records. `tool_p90` consumes command-specific Runtime prediction metadata from
+the immutable ClawTune-compatible artifact and fails closed when it is absent;
+it never uses the constant `cube_shell` key. Decision policies consume real
+gateway request-start/response-ready events through a nonblocking per-arm event
+executor, and fixed-delay timers are anchored to the request event rather than
+realized future latency. Agent JCT, validation, hashing, cleanup, and
+infrastructure-inclusive durations are recorded separately.
 
 ## Existing implementation
 
@@ -177,12 +186,14 @@ manual probe on `__arm64_sys_execve` before running ClawTune.
    `hostname-txyuq.foreman.pxe`.
 5. Require `telemetry_state=complete`, exact-ID valid cgroup/eBPF artifacts,
    Tool pause/restore while Runtime stays running, and zero leaked sandboxes.
-6. Only after the real pair is green: implement explicit
-   `agent_pair.runtime/tool` and AgentPairSession ownership; Runtime prediction
-   metadata into `tool_p90`; OpenClaw deterministic replay/model-wait events;
-   role-aware policies; corrected unrealized commitments; Kubernetes
-   vertical/cancel/restart tests; then retire contradictory active
-   Kata/direct-Firecracker paths without deleting reusable parsers/tests.
+6. Build and deploy the normal controller-created Worker image, then run the
+   managed c1 record + replay gate. Freeze the record trace and KB hashes and
+   require trajectory/correctness equivalence before any c4/c8/c20 work.
+7. Only after that gate is green: run separated admission, reclamation, and
+   decision studies; randomize policy order within workload/concurrency/
+   repetition blocks; preserve failed arms and label evidence type. Do not
+   start c40/c60 until c20 has zero replay divergence, telemetry loss, ID-join
+   failure, output-validation failure, or resource leak.
 
 Do not call the project paper-ready until real Kunpeng evidence proves the two
 VM roles, full Runtime-to-Tool path, exact-ID prediction/policy/telemetry join,

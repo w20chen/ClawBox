@@ -109,8 +109,17 @@ def build_joined_dataset(
     artifacts, they are joined by execution_id and their quality gate and
     measured CPU/RSS values supersede span-side proxies.
     """
-    span_records = list(iter_trace_dir(trace_dir))
-    bridges = read_bridge_jsonl(bridge_path)
+    # Validation and output-hash commands are harness work, not agent
+    # trajectory observations. They may be retained in raw artifacts, but
+    # cannot enter Tool latency/P90 training or policy statistics.
+    span_records = [
+        record for record in iter_trace_dir(trace_dir)
+        if record.get("phase", "agent") == "agent"
+    ]
+    bridges = [
+        record for record in read_bridge_jsonl(bridge_path)
+        if record.phase == "agent"
+    ]
     cgroup_artifacts = read_cgroup_artifacts(trace_dir)
     joined = join_trace_and_bridge(span_records, bridges, cgroup_artifacts)
     validator = ObservationValidator(ingest_secret)

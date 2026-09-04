@@ -158,8 +158,8 @@ class ExperimentSpec(StrictFrozenModel):
         if not self.policies:
             raise ValueError("policies must not be empty")
         if self.agent.driver is AgentDriver.OPENCLAW:
-            if self.inference.backend is not InferenceBackend.API:
-                raise ValueError("agent.driver=openclaw currently requires inference.backend=api")
+            if self.inference.backend not in {InferenceBackend.API, InferenceBackend.REPLAY}:
+                raise ValueError("agent.driver=openclaw requires inference.backend=api or replay")
             if "api_key" in self.inference.configuration:
                 raise ValueError("model credentials must be injected from a Kubernetes Secret")
         names = [policy.name for policy in self.policies]

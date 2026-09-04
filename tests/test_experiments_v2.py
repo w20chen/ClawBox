@@ -59,11 +59,10 @@ def test_v2_rejects_backend_transport_and_invalid_policy() -> None:
         ExperimentSpec.model_validate(raw)
 
 
-def test_openclaw_requires_api_inference_and_secret_credentials() -> None:
+def test_openclaw_allows_managed_api_or_replay_and_keeps_secret_credentials_out_of_spec() -> None:
     raw = raw_spec()
     raw["agent"] = {"driver": "openclaw"}
-    with pytest.raises(ValidationError, match="requires inference.backend=api"):
-        ExperimentSpec.model_validate(raw)
+    assert ExperimentSpec.model_validate(raw).inference.backend.value == "replay"
     raw["inference"] = {"backend": "api", "configuration": {"api_key": "do-not-store"}}
     with pytest.raises(ValidationError, match="Kubernetes Secret"):
         ExperimentSpec.model_validate(raw)

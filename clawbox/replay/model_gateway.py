@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import re
 import sys
@@ -32,6 +33,8 @@ class GatewayRequest:
     response_b64: str = ""
     error: str = ""
     started_unix_s: float = 0.0
+    model_generated_unix_s: float = 0.0
+    response_released_unix_s: float = 0.0
     completed_unix_s: float = 0.0
     delivered_unix_s: float = 0.0
     request_payload: dict[str, Any] = field(default_factory=dict)
@@ -146,6 +149,10 @@ class ModelGateway:
         )
         return status, content_type, body
 
+    def complete_http(self, payload: dict[str, Any]) -> tuple[int, str, bytes, str]:
+        """Complete an HTTP request and retain its request identity."""
+        return self._complete_with_identity(payload, http_attempt=True)
+
     def _complete_with_identity(
         self, payload: dict[str, Any], *, http_attempt: bool,
     ) -> tuple[int, str, bytes, str]:
@@ -156,6 +163,7 @@ class ModelGateway:
         fingerprint = hashlib.sha256(json.dumps(
             canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode()).hexdigest()
+        started_event: dict[str, Any] | None = None
         with self._changed:
             matching = [
                 item for item in self._requests.values()
@@ -165,8 +173,6 @@ class ModelGateway:
             # Once delivered, an identical payload is a new logical model step.
             request = matching[-1] if matching and not matching[-1].delivered else None
             if request is None:
-                if self.on_request_started is not None:
-                    self.on_request_started()
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
@@ -221,9 +227,12 @@ class ModelGateway:
                 )
                 self._requests[request_id] = request
                 self._persist()
-                threading.Thread(
-                    target=self._produce, args=(request_id, payload), daemon=True,
-                ).start()
+                started_event = {
+                    "request_id": request_id,
+                    "replay_index": index,
+                    "request_started_at": request.started_unix_s,
+                    "request_fingerprint": fingerprint,
+                }
             else:
                 request_id = request.request_id
             if http_attempt:
@@ -231,6 +240,15 @@ class ModelGateway:
                 if request.http_attempts > 1:
                     request.reconnect_attempts += 1
                 self._persist()
+        # Lifecycle notification is deliberately outside the gateway condition
+        # lock. The callback must only enqueue work and return immediately.
+        if started_event is not None:
+            self._emit_request_started(started_event)
+            threading.Thread(
+                target=self._produce, args=(request_id, payload), daemon=True,
+            ).start()
+        with self._changed:
+            request = self._requests[request_id]
             deadline = time.monotonic() + self.timeout_s
             while not request.ready:
                 remaining = deadline - time.monotonic()
@@ -243,6 +261,26 @@ class ModelGateway:
                 request.status_code, request.content_type,
                 base64.b64decode(request.response_b64), request_id,
             )
+
+    def _emit_request_started(self, event: dict[str, Any]) -> None:
+        callback = self.on_request_started
+        if callback is None:
+            return
+        try:
+            if len(inspect.signature(callback).parameters) == 0:
+                callback()
+            else:
+                callback(dict(event))
+        except Exception as exc:
+            # Do not turn a lifecycle observer failure into an inference
+            # failure. Preserve the error as non-sensitive provenance.
+            with self._changed:
+                request = self._requests.get(str(event["request_id"]))
+                if request is not None:
+                    request.admission["request_event_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    self._persist()
 
     def mark_delivery(self, request_id: str, *, delivered: bool) -> None:
         """Record whether a host response write survived a guest disconnect."""
@@ -260,7 +298,83 @@ class ModelGateway:
 
     def records(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [asdict(item) for item in self._requests.values()]
+            records: list[dict[str, Any]] = []
+            for item in self._requests.values():
+                record = asdict(item)
+                # Stable semantic names for campaign analysis; retain the
+                # *_unix_s fields for compatibility with the original CLI.
+                record.update({
+                    "request_started_at": item.started_unix_s,
+                    "model_generated_at": item.model_generated_unix_s,
+                    "response_released_at": item.response_released_unix_s,
+                    "response_delivered_at": item.delivered_unix_s,
+                    "pure_model_latency_seconds": (
+                        item.model_generated_unix_s - item.started_unix_s
+                        if item.model_generated_unix_s else None
+                    ),
+                    "policy_induced_response_hold_seconds": (
+                        item.response_released_unix_s - item.model_generated_unix_s
+                        if item.response_released_unix_s and item.model_generated_unix_s else None
+                    ),
+                    "delivery_latency_seconds": (
+                        item.delivered_unix_s - item.response_released_unix_s
+                        if item.delivered_unix_s and item.response_released_unix_s else None
+                    ),
+                    "runtime_visible_model_wait_seconds": (
+                        item.delivered_unix_s - item.started_unix_s
+                        if item.delivered_unix_s else None
+                    ),
+                })
+                records.append(record)
+            return records
+
+    def logical_model_steps(self) -> int:
+        """Count accepted logical model requests, excluding HTTP retries."""
+        with self._lock:
+            return len(self._requests)
+
+    def replay_completeness(self, *, require_delivery: bool = True) -> dict[str, Any]:
+        """Return a strict, auditable completion verdict for this session."""
+        records = self.records()
+        expected = len(self.actions) if self.mode == "replay" else None
+        failed_matches = [
+            item for item in records
+            if self.mode == "replay" and item.get("replay_input_match") is not True
+        ]
+        incomplete = [
+            item["request_id"] for item in records
+            if not item.get("ready") or item.get("error") or item.get("status_code") != 200
+            or (require_delivery and not item.get("delivered"))
+        ]
+        consumed = (
+            sorted(item["replay_index"] for item in records
+                   if item.get("replay_index") is not None)
+            if self.mode == "replay" else []
+        )
+        expected_indices = list(range(expected or 0))
+        complete = (
+            self.mode != "replay" or (
+                len(records) == expected
+                and consumed == expected_indices
+                and not failed_matches
+            )
+        ) and not incomplete
+        return {
+            "mode": self.mode,
+            "observed_logical_model_steps": len(records),
+            "expected_replay_model_steps": expected,
+            "replay_indices": consumed,
+            "replay_entries_consumed_exactly_once": (
+                self.mode != "replay" or consumed == expected_indices
+            ),
+            "canonical_request_matches": not failed_matches,
+            "required_responses_delivered": not incomplete,
+            "retry_http_attempts": sum(
+                max(0, int(item.get("http_attempts", 0)) - 1) for item in records
+            ),
+            "missing_or_failed_request_ids": incomplete,
+            "complete": complete,
+        }
 
     def pending_records(self) -> list[dict[str, Any]]:
         """Return only fields needed by checkpoint scheduling.
@@ -304,12 +418,32 @@ class ModelGateway:
                 status = response.status_code
                 content_type = response.headers.get("content-type", "application/json")
                 body = response.content
+            # Capture the pure model/replay completion before any policy or
+            # restore operation. ``completed_unix_s`` remains the legacy
+            # response-release timestamp for old consumers.
+            model_generated = time.time()
+            with self._changed:
+                request = self._requests[request_id]
+                request.model_generated_unix_s = model_generated
+                self._persist()
             admission = {}
             if self.before_response_ready is not None:
-                admission = self.before_response_ready(
-                    self._requests[request_id].replay_index,
-                    _response_message(content_type, body),
-                )
+                event = {
+                    "request_id": request_id,
+                    "replay_index": self._requests[request_id].replay_index,
+                    "request_started_at": self._requests[request_id].started_unix_s,
+                    "model_generated_at": model_generated,
+                }
+                message = _response_message(content_type, body)
+                callback = self.before_response_ready
+                if len(inspect.signature(callback).parameters) >= 3:
+                    admission = callback(
+                        self._requests[request_id].replay_index, message, event,
+                    )
+                else:
+                    admission = callback(
+                        self._requests[request_id].replay_index, message,
+                    )
             error = ""
         except Exception as exc:  # surfaced to the waiting guest request
             status, content_type, body, error, admission = 500, "application/json", b"", str(exc), {}
@@ -321,7 +455,8 @@ class ModelGateway:
             request.error = error
             request.admission = admission
             request.ready = True
-            request.completed_unix_s = time.time()
+            request.response_released_unix_s = time.time()
+            request.completed_unix_s = request.response_released_unix_s
             self._persist()
             self._changed.notify_all()
 

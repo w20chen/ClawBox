@@ -1,5 +1,23 @@
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+
+let runtimePredictionIndex;
+function runtimePrediction(command) {
+  const path = process.env.CLAWBOX_RUNTIME_PREDICTION_FILE;
+  if (!path) return null;
+  if (runtimePredictionIndex === undefined) {
+    try {
+      runtimePredictionIndex = JSON.parse(readFileSync(path, "utf8"));
+    } catch (_error) {
+      runtimePredictionIndex = null;
+    }
+  }
+  if (!runtimePredictionIndex || typeof runtimePredictionIndex !== "object") return null;
+  const digest = createHash("sha256").update(command).digest("hex");
+  return runtimePredictionIndex[digest] || null;
+}
 
 export default defineToolPlugin({
   id: "clawbox-cube-tool",
@@ -27,7 +45,8 @@ export default defineToolPlugin({
         const response = await fetch(`${base}/execute`, {
           method: "POST",
           headers: {"content-type": "application/json", "authorization": `Bearer ${token}`},
-          body: JSON.stringify({command, timeout_seconds, execution_id, session_id}),
+          body: JSON.stringify({command, timeout_seconds, execution_id, session_id,
+            prediction: runtimePrediction(command)}),
           signal: context.signal
         });
         const body = await response.json();

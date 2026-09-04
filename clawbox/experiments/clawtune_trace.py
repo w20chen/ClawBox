@@ -39,7 +39,9 @@ class ClawTuneTraceWriter:
     def record(self, command: str, result: CommandResult, *,
                execution_id: str | None = None,
                bridge_record: dict | None = None,
-               artifacts: dict[str, str] | None = None) -> str:
+               artifacts: dict[str, str] | None = None,
+               prediction: dict | None = None,
+               phase: str = "agent") -> str:
         """Record one completed Cube command and return its execution ID."""
         execution_id = execution_id or f"cube-{uuid.uuid4().hex}"
         if not _EXECUTION_ID.fullmatch(execution_id):
@@ -67,6 +69,7 @@ class ClawTuneTraceWriter:
                 "sequence_no": sequence,
                 "kind": "tool",
                 "name": "cube_shell",
+                "phase": phase,
                 "wall_time_ns": str(now_ns),
                 "monotonic_time_ns": str(time.monotonic_ns()),
                 "duration_ns": str(duration_ns),
@@ -102,6 +105,8 @@ class ClawTuneTraceWriter:
                     ),
                 },
             }
+            if prediction is not None:
+                span["prediction"] = prediction
             bridge = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "cell_id": None,
@@ -116,9 +121,12 @@ class ClawTuneTraceWriter:
                 "stdout_bytes": len(result.stdout.encode()),
                 "stderr_bytes": len(result.stderr.encode()),
                 "output_truncated": False,
+                "phase": phase,
             }
             if bridge_record:
                 bridge.update(bridge_record)
+            if prediction is not None:
+                bridge["prediction"] = prediction
             bridge["execution_id"] = execution_id
             self._append(self.trace_path, span)
             self._append(self.bridge_path, bridge)

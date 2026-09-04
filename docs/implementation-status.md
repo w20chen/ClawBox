@@ -21,8 +21,9 @@ DNS correctly, and repairs result hostPath ownership for the non-root Worker.
 Failed arm markers are never reused as completed work.
 
 The paired OpenClaw implementation is present locally: the Runtime VM contains
-OpenClaw, native ClawTune prediction/model proxying, model access, and only
-authenticated `cube_shell`; the Tool VM owns `/workspace`, command execution,
+OpenClaw, native ClawTune prediction/model proxying, and only authenticated
+`cube_shell`; the Worker owns the node-routed ModelGateway and keeps the
+upstream model credential outside Runtime; the Tool VM owns `/workspace`, command execution,
 per-execution cgroups, and the eBPF guest collector. The Worker owns both
 lifecycles, applies policy to the Tool VM, and persists exact-ID joined Runtime,
 bridge, cgroup, and eBPF records. The complete local suite passes with five
@@ -40,9 +41,13 @@ The post-reboot reduced real paired acceptance is now verified on Kunpeng:
 - bridge stress passes 141 requests with head-of-line isolation and no secrets;
 - final owner audit reports zero sandboxes and zero NodePort Service leaks.
 
-This is a reduced two-VM acceptance, not the full paper matrix. Remaining
-paper work is to run the Runtime-to-Worker-to-Tool arms at the target
-concurrency levels, compare real API inference with deterministic replay,
-produce policy-arm statistics, and publish the final experiment report. The
-live evidence and exact provenance are recorded in
+This is a reduced two-VM acceptance, not the full paper matrix. Before broader
+runs, the managed measurement gate must pass real c1 trajectory recording and
+session-local deterministic replay equivalence, command-specific prediction
+provenance, logical model-step accounting, nonblocking request events,
+non-oracle wait predictions, separated timing, exact telemetry joins, and zero
+leaks. Remaining paper work is then to run the Runtime-to-Worker-to-Tool arms at
+the target concurrency levels, compare real API inference with deterministic
+replay, produce policy-arm statistics, and publish the final experiment report.
+The live evidence and exact provenance are recorded in
 `docs/kunpeng920-nodeport-acceptance.md`.

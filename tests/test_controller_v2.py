@@ -28,6 +28,7 @@ class Core:
 
     def create_namespaced_service(self, namespace, manifest):
         manifest["spec"]["ports"][0]["nodePort"] = 31808
+        manifest["spec"]["ports"][1]["nodePort"] = 31809
         self.services[(namespace, manifest["metadata"]["name"])] = manifest
         return manifest
 
@@ -133,6 +134,10 @@ def test_controller_creates_exactly_one_node_pinned_worker_job() -> None:
     assert service["spec"]["type"] == "NodePort"
     assert service["spec"]["externalTrafficPolicy"] == "Local"
     assert service["spec"]["ports"][0]["targetPort"] == 18080
+    assert service["spec"]["ports"][1] == {
+        "name": "model-gateway", "port": 18081, "targetPort": 18081,
+        "protocol": "TCP", "nodePort": 31809,
+    }
     assert service["metadata"]["ownerReferences"][0]["uid"] == "uid-a"
     assert custom.statuses[-1]["phase"] == "running"
     assert set(custom.statuses[-1]) <= {"phase", "jobName", "resolvedSpecDigest",

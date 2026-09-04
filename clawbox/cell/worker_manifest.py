@@ -30,8 +30,12 @@ def worker_bridge_service(task: dict[str, Any]) -> dict[str, Any]:
         "spec": {
             "type": "NodePort", "externalTrafficPolicy": "Local",
             "selector": {"clawbox.openai.com/task-uid": metadata["uid"]},
-            "ports": [{"name": "worker-bridge", "port": 18080,
-                       "targetPort": 18080, "protocol": "TCP"}],
+            "ports": [
+                {"name": "worker-bridge", "port": 18080,
+                 "targetPort": 18080, "protocol": "TCP"},
+                {"name": "model-gateway", "port": 18081,
+                 "targetPort": 18081, "protocol": "TCP"},
+            ],
         },
     }
 
@@ -47,7 +51,8 @@ def experiment_configmap(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def experiment_worker_job(task: dict[str, Any], *, bridge_host: str = "",
-                          bridge_node_port: int | None = None) -> dict[str, Any]:
+                          bridge_node_port: int | None = None,
+                          model_gateway_node_port: int | None = None) -> dict[str, Any]:
     metadata = task["metadata"]
     spec = task["spec"]
     experiment = spec["experimentSpec"]
@@ -97,6 +102,9 @@ def experiment_worker_job(task: dict[str, Any], *, bridge_host: str = "",
                             {"name": "CLAWBOX_WORKER_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
                             {"name": "CLAWBOX_BRIDGE_HOST", "value": bridge_host},
                             {"name": "CLAWBOX_BRIDGE_NODE_PORT", "value": str(bridge_node_port or "")},
+                            {"name": "CLAWBOX_MODEL_GATEWAY_HOST", "value": bridge_host},
+                            {"name": "CLAWBOX_MODEL_GATEWAY_NODE_PORT",
+                             "value": str(model_gateway_node_port or "")},
                             {"name": "CUBE_API_URL", "value": spec["cubeApiURL"]},
                             {"name": "CLAWBOX_KUBERNETES_VERSION", "value": os.environ.get("CLAWBOX_KUBERNETES_VERSION", "unknown")},
                             {"name": "CLAWBOX_CONTAINERD_VERSION", "value": os.environ.get("CLAWBOX_CONTAINERD_VERSION", "unknown")},

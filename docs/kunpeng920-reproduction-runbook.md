@@ -236,6 +236,16 @@ CubeSandbox guests cannot route to Kubernetes PodCIDR or ServiceCIDR addresses;
 it does not provide strict node-port-level egress isolation because the current
 CubeSandbox allow-out rule authorizes the node IP as a whole.
 
+The same task Service exposes a second allocated NodePort for the Worker-owned
+ModelGateway at fixed target port `18081`. Runtime OpenClaw uses the gateway
+URL as its OpenAI-compatible upstream; the Worker retains the real API
+credential, or the session-local deterministic replay trace, and Runtime gets
+only a session token. The gateway is one fixed listener per Worker, not one
+TCP server per session. Each session owns its replay cursor, fingerprints,
+idempotency/delivery state, logical model-step count, and model timing points.
+The Worker requires complete replay consumption, canonical input matches, and
+delivered responses before accepting a replay run.
+
 The WorkerBridge registry is keyed by high-entropy bearer token and immutable
 session ID. Each request records only task/session/execution IDs, peer IP,
 selected Tool sandbox ID, and timing fields; bearer tokens are never logged.

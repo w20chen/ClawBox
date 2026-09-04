@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import inspect
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -118,6 +119,12 @@ class _WorkerBridgeSessionState:
         self.draining = False
         self.condition = threading.Condition()
 
+    def run(self, command: str, timeout: float, execution_id: str,
+            prediction: dict[str, Any] | None) -> CommandResult:
+        if len(inspect.signature(self.execute).parameters) >= 4:
+            return self.execute(command, timeout, execution_id, prediction)
+        return self.execute(command, timeout, execution_id)
+
     def acquire(self) -> bool:
         with self.condition:
             if self.draining:
@@ -201,7 +208,11 @@ class WorkerBridge:
                     record["execution_id"] = execution_id
                     record["dispatch_start"] = time.monotonic()
                     record["tool_execution_start"] = time.monotonic()
-                    result = state.execute(command, timeout, execution_id)
+                    prediction = body.get("prediction")
+                    if prediction is not None and not isinstance(prediction, dict):
+                        raise ValueError("prediction metadata must be an object")
+                    record["prediction_present"] = prediction is not None
+                    result = state.run(command, timeout, execution_id, prediction)
                     record["tool_execution_end"] = time.monotonic()
                     state.calls.append(result)
                     payload = {"exit_code": result.exit_code, "stdout": result.stdout,
@@ -343,8 +354,10 @@ class WorkerBridgeSession:
 
 
 def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
-                 bridge: CubeToolBridge, runtime_executor: Any,
-                 output_dir: Path, timeout_seconds: int) -> dict:
+                 bridge: CubeToolBridge | Any, runtime_executor: Any,
+                 output_dir: Path, timeout_seconds: int,
+                 model_gateway: Any | None = None,
+                 prediction_manifest: dict[str, dict[str, Any]] | None = None) -> dict:
     """Run OpenClaw + ClawTune inside the agent's Runtime CubeSandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     plugin = "/opt/clawbox/openclaw-plugins/cube-tool"
@@ -357,8 +370,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     api_key = os.environ.get(key_env, "")
     if not prompt.strip():
         raise ValueError("OpenClaw workload case requires a non-empty prompt")
-    if not base_url or not model or not api_key:
+    if not model:
+        raise ValueError("OpenClaw requires a model")
+    if model_gateway is None and (not base_url or not api_key):
         raise ValueError(f"OpenClaw requires base_url, model, and credential environment {key_env}")
+    gateway_key_env = "CLAWBOX_MODEL_GATEWAY_TOKEN"
+    upstream_url = model_gateway.url if model_gateway is not None else base_url
+    upstream_key_env = gateway_key_env if model_gateway is not None else key_env
     if "api_key" in configuration:
         raise ValueError("OpenClaw API keys must come from a Kubernetes Secret environment variable")
 
@@ -370,6 +388,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_CUBE_TOOL_URL={shlex.quote(bridge.url)} "
         f"CLAWBOX_CUBE_TOOL_TOKEN={shlex.quote(bridge.token)} "
         f"CLAWBOX_CUBE_TOOL_SESSION_ID={shlex.quote(session_id)} "
+        f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote('/state/clawtune/' + session_id + '/runtime-predictions.json')} "
         f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
 
@@ -389,10 +408,20 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
         return result
 
+    prediction_setup = ""
+    if prediction_manifest is not None:
+        encoded_predictions = base64.b64encode(
+            json.dumps(prediction_manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).decode()
+        prediction_setup = (
+            f"printf %s {shlex.quote(encoded_predictions)} | base64 -d >"
+            f" {shlex.quote('/state/clawtune/' + session_id + '/runtime-predictions.json')}; "
+        )
     setup = runtime_executor.execute(
         prefix
         + f"mkdir -p {shlex.quote(workspace)} {shlex.quote(trace_dir + '/tool-resource')} "
         + f"{shlex.quote(home + '/logs')}; "
+        + prediction_setup
         + f"cp -n /opt/clawtune/cold-start/tool-resource/*-kb.json "
         + f"{shlex.quote(trace_dir + '/tool-resource')}/ 2>/dev/null || true; "
         + "if [ -n \"${CLAWBOX_KB_ENDPOINT:-}\" ] && "
@@ -410,8 +439,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
-        + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(base_url)} "
-        + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{key_env}}}\" "
+        + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(upstream_url)} "
+        + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup /opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
@@ -460,7 +489,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
-            "--custom-api-key", f"$ENV:{key_env}", "--custom-model-id", model])
+            "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", model])
     instruction = (
         "Use cube_shell for every shell, repository, file, build, test, and generated-program "
         "operation. The isolated working directory is /workspace. Never use host-local tools.\n\n"
@@ -503,4 +532,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             copied_traces.append(str(target))
     return {"stdout": result.stdout, "stderr": result.stderr, "tool_calls": len(bridge.calls),
             "tool_latencies": [item.duration_s for item in bridge.calls],
-            "runtime_traces": copied_traces}
+            "runtime_traces": copied_traces,
+            "model_gateway_records": (
+                model_gateway.records() if model_gateway is not None else []
+            ),
+            "model_gateway_completeness": (
+                model_gateway.replay_completeness() if model_gateway is not None else None
+            )}
