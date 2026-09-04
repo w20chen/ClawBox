@@ -150,9 +150,10 @@ COPY scripts/kb-flush.py /usr/local/bin/kb-flush.py
 COPY scripts/native-shadow-report.py /usr/local/bin/native-shadow-report.py
 COPY scripts/native-kb-pull.py /usr/local/bin/native-kb-pull.py
 COPY scripts/native-shadow-probe.py /usr/local/bin/native-shadow-probe.py
+COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
 RUN groupadd --gid 10001 openclaw \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash openclaw \
- && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader /usr/local/bin/kb-flush.py /usr/local/bin/native-shadow-report.py /usr/local/bin/native-kb-pull.py /usr/local/bin/native-shadow-probe.py \
+ && chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint /usr/local/bin/artifact-uploader /usr/local/bin/kb-flush.py /usr/local/bin/native-shadow-report.py /usr/local/bin/native-kb-pull.py /usr/local/bin/native-shadow-probe.py /usr/local/bin/ssh \
  && mkdir -p /state /workspace /home/openclaw/.openclaw \
  && chown -R 10001:10001 /state /workspace /home/openclaw
 
