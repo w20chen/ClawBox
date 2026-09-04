@@ -24,9 +24,9 @@ alternate architecture.
 - `de74a26` — live-discovered fix allowing Cube to build Tool templates without
   per-session ephemeral SSH keys.
 
-All are pushed to `origin/main`. Local full suite at `49ab5a4` passed 183 tests
-with 5 environment skips. Kunpeng targeted Python tests passed. Toolbridge Go
-tests passed on ARM64 in `golang:1.25-bookworm` using
+Those historical commits are on `origin/main`. The local full suite now passes,
+including the continuation tests. Kunpeng targeted Python tests passed.
+Toolbridge Go tests passed on ARM64 in `golang:1.25-bookworm` using
 `GOPROXY=https://goproxy.cn,direct`.
 
 The continuation commits `a4be792`, `a30292a`, and `493206d` add structured
