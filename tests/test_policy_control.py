@@ -85,6 +85,21 @@ def test_policy_control_rejects_wrong_session_and_execution_id_reuse() -> None:
         assert session.close(timeout=1)
 
 
+def test_policy_control_rejects_completion_for_a_different_command() -> None:
+    server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
+                                 bind_host="127.0.0.1", bind_port=0)
+    server.advertised_port = server.actual_port
+    with server:
+        session = server.register("session-a", admit=lambda _request: {},
+                                  complete=lambda _request: {})
+        _post(session, "/v1/tool/admit", "exec-a", digest="a" * 64)
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post(session, "/v1/tool/complete", "exec-a", digest="b" * 64)
+        assert error.value.code == 400
+        _post(session, "/v1/tool/complete", "exec-a", digest="a" * 64)
+        assert session.close(timeout=1)
+
+
 def test_policy_control_c60_has_no_cross_session_head_of_line_blocking() -> None:
     server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
                                  bind_host="127.0.0.1", bind_port=0)

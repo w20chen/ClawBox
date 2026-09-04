@@ -215,51 +215,24 @@ The validation order is:
 The logical agent must remain exactly two VMs: Runtime owns OpenClaw and
 prediction instrumentation; Tool owns `/workspace`, repository commands, and
 command telemetry. Tool-only pause is the accepted reclamation behavior.
-Run the pair smoke from the Worker process/pod, or provide a worker-host
-address and port reachable from the Runtime VM; a workstation-local bridge is
-not evidence of the Runtime-to-Worker path.
+Run the pair smoke from the host process with a host address reachable from the
+Runtime VM. Policy control is a metadata-only listener on port `18080`; the
+Runtime-to-Tool command and stdio path is native OpenSSH. No WorkerBridge,
+NodePort, Kubernetes Service, or HTTP command dispatcher is part of this gate.
 
-On the Kunpeng validation host, the measured network behavior was: Worker Pod
-IP works from Worker and cube-node namespaces, but PodCIDR and ClusterIP are
-unroutable from a Cube guest. A temporary NodePort on the node address was
-reachable and returned the expected `401`. The production design is therefore
-one process-wide WorkerBridge per ExperimentWorker, bound to
-`0.0.0.0:18080`, behind one NodePort Service per SandboxTask. Kubernetes
-allocates the NodePort; the Service uses `targetPort: 18080`, selects exactly
-the task Worker Pod by task UID, and uses `externalTrafficPolicy: Local`.
+The Tool VM owns the ephemeral SSH host key and authorized client key for the
+session. The Runtime receives only the client key, the pinned host key, and the
+host policy endpoint. A Runtime SSH shim sends admission/completion metadata
+and starts OpenSSH exactly once after `ADMIT`; command text and all stdio stay
+on the Runtime-to-Tool SSH connection.
 
-The Worker advertises `http://<worker-node-InternalIP>:<allocated-nodePort>`
-to Runtime while keeping that separate from its local bind address. The
-Runtime `network_allow_out` contains only the node InternalIP `/32`. This
-NodePort is an authenticated control-plane adapter required because these
-CubeSandbox guests cannot route to Kubernetes PodCIDR or ServiceCIDR addresses;
-it does not provide strict node-port-level egress isolation because the current
-CubeSandbox allow-out rule authorizes the node IP as a whole.
+The Worker advertises direct host listeners for PolicyControl (`18080`) and
+ModelGateway (`18081`) and allows Runtime egress only to the configured host
+IP. The gateway remains session-local: it retains the upstream credential on the
+host, gives Runtime a per-session token, and requires complete replay
+consumption, canonical input matches, and delivered responses.
 
-The same task Service exposes a second allocated NodePort for the Worker-owned
-ModelGateway at fixed target port `18081`. Runtime OpenClaw uses the gateway
-URL as its OpenAI-compatible upstream; the Worker retains the real API
-credential, or the session-local deterministic replay trace, and Runtime gets
-only a session token. The gateway is one fixed listener per Worker, not one
-TCP server per session. Each session owns its replay cursor, fingerprints,
-idempotency/delivery state, logical model-step count, and model timing points.
-The Worker requires complete replay consumption, canonical input matches, and
-delivered responses before accepting a replay run.
-
-The WorkerBridge registry is keyed by high-entropy bearer token and immutable
-session ID. Each request records only task/session/execution IDs, peer IP,
-selected Tool sandbox ID, and timing fields; bearer tokens are never logged.
-Registry locks cover only registration, lookup, and removal. Tool execution is
-performed by `ThreadingHTTPServer` handlers, so a slow session does not create
-head-of-line blocking for other sessions. A session is removed from new lookup
-immediately and its active requests are drained before its Tool VM is cleaned.
-The Worker validates the fixed listener and NodePort with a direct unauthenticated
-POST expecting `401` before launching Runtime sessions. The controller creates
-the Service before the Worker Job, sets owner references, and deletes the
-task-owned Service during terminal cleanup.
-
-For bridge acceptance, run the local stress tests and then the real pair smoke
-from the Worker Pod with the allocated Service NodePort:
+For native SSH acceptance, run the local tests and then the real pair smoke:
 
 ```bash
 python -m pytest tests/test_openclaw_driver.py -q
@@ -267,17 +240,18 @@ python scripts/smoke-cubesandbox-agent-pair.py \
   --runtime-template <fresh-runtime-template> \
   --tool-template <fresh-tool-template> \
   --node <cube-node> \
-  --bridge-host <worker-node-internal-ip> \
-  --bridge-port <sandbox-task-allocated-nodeport>
+  --control-host <host-ip-reachable-from-runtime> \
+  --policy-port 18080
 ```
 
-The pair smoke checks wrong-token and cross-session rejection, two concurrent
-Runtime-to-Worker-to-Tool requests, pre/post-resume telemetry, exact-ID joins,
-zero telemetry loss, zero owned Sandbox entries, and no remaining task-owned
-NodePort Service. It is still a minimal bridge check rather than the full
-40/60-agent experiment; final paper runs should preserve its JSON output and
-the Worker's per-execution event and trace files for latency/concurrency
-analysis.
+The pair smoke records the exact `tool.get_host(2222)` value, probes it from
+Runtime without assuming a port, verifies that an unenveloped Agent SSH
+operation fails closed, checks native SSH output before and after Tool pause,
+triggers demand restore through PolicyControl, validates cgroup/eBPF artifacts
+by exact execution ID, confirms policy records contain no command/output, and
+audits zero owned Sandbox leaks. It is a boundary smoke rather than the full
+40/60-agent experiment; preserve its JSON output and the worker's per-session
+artifacts for later analysis.
 
 ## 6. Reboot and rollback notes
 
@@ -295,7 +269,7 @@ observed reboot check, cubelet exited because host interface `cube-dev` was
 absent and cube-egress-net timed out waiting for it, while S3lvol and its
 socket were healthy. This is a CubeVS/node-network bootstrap issue, not a
 bridge or guest-kernel acceptance failure; do not compensate by changing
-NodePort routing, containerd, kubelet, S3lvol, or existing templates.
+network routing, containerd, kubelet, S3lvol, or existing templates.
 
 Rollback is allowed only after a zero-sandbox audit: restore the preserved
 `vmlinux-bm`, `version`, and `version.json` vendor backups in the privileged

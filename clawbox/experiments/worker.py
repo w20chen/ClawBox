@@ -33,7 +33,8 @@ from clawbox.replay.trace import ReplayAction, load_trace
 from .memory import NodeMemorySampler
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
-from .openclaw_driver import NativeSSHConfig, run_openclaw
+from .native_artifacts import collect_and_validate_native_tool_artifacts
+from .openclaw_driver import NativeSSHConfig, native_ssh_target, run_openclaw
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, PredictionUnavailable
@@ -245,6 +246,21 @@ class ExperimentWorker:
                 "completed_sessions": sum(item.get("valid", False) for item in sessions),
                 "failed_sessions": arm.concurrency - sum(item.get("valid", False) for item in sessions),
                 "validation_passed": failure is None and all(item.get("valid", False) for item in sessions),
+                "native_tool_exact_id_join_rate": (
+                    min(
+                        float((item.get("native_tool_artifact_validation") or {})
+                             .get("exact_id_join_rate", 0.0))
+                        for item in sessions
+                        if item.get("native_tool_artifact_validation") is not None
+                    )
+                    if any(item.get("native_tool_artifact_validation") is not None for item in sessions)
+                    else None
+                ),
+                "native_tool_telemetry_loss_total": sum(
+                    int((item.get("native_tool_artifact_validation") or {})
+                        .get("telemetry_loss_total", 0))
+                    for item in sessions
+                ),
                 "failure": None if failure is None else str(failure),
                 "session_output_hashes": [item.get("output_hash") for item in sessions],
             },
@@ -273,7 +289,24 @@ class ExperimentWorker:
                 "session_timelines": [item.get("timeline") for item in sessions],
             },
             memory={**asdict(memory), "peak_commitment_bytes": coordinator.peak_commitment_bytes},
-            artifacts={"events": str(events.path)},
+            artifacts={
+                "events": str(events.path),
+                **{
+                    f"native_tool_artifacts:{item['session_id']}": str(item["native_tool_artifact_root"])
+                    for item in sessions
+                    if item.get("native_tool_artifact_root")
+                },
+                **{
+                    f"policy_control:{item['session_id']}": str(item["policy_control_path"])
+                    for item in sessions
+                    if item.get("policy_control_path")
+                },
+                **{
+                    f"runtime_traces:{item['session_id']}": str(item["runtime_trace_root"])
+                    for item in sessions
+                    if item.get("runtime_trace_root")
+                },
+            },
         )
         # Result first, complete marker second. A crash between them retries the
         # entire arm, never treating a partial result as complete.
@@ -637,6 +670,8 @@ class ExperimentWorker:
 
             timeline["agent_execution_start"] = time.time()
             model_trace_path: Path | None = None
+            native_artifacts = None
+            policy_control_path: Path | None = None
             if arm.agent.driver is AgentDriver.OPENCLAW:
                 active_reservations: dict[str, int] = {}
                 reservation_lock = Lock()
@@ -721,15 +756,16 @@ class ExperimentWorker:
                     complete=complete_openclaw_tool,
                 )
                 tool_host = lifecycle.sandbox.get_host(2222)
+                ssh_config = NativeSSHConfig(
+                    target=native_ssh_target(str(tool_host), port=2222),
+                    identity_private_key=ssh_credentials.client_private,
+                    host_public_key=ssh_credentials.host_public,
+                    workspace_root=arm.sandbox.workspace,
+                )
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
                     configuration=arm.inference.configuration,
-                    ssh=NativeSSHConfig(
-                        target=f"executor@{tool_host}:2222",
-                        identity_private_key=ssh_credentials.client_private,
-                        host_public_key=ssh_credentials.host_public,
-                        workspace_root=arm.sandbox.workspace,
-                    ),
+                    ssh=ssh_config,
                     policy_control=policy_session, runtime_executor=runtime_executor,
                     output_dir=self.output_root,
                     timeout_seconds=arm.execution.arm_timeout_seconds,
@@ -738,6 +774,29 @@ class ExperimentWorker:
                                          if prediction_provider is not None else None),
                 )
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
+                policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"
+                atomic_json(policy_control_path, outcome["policy_control_records"])
+                # A completed Agent call may have triggered eager Tool eviction.
+                # Serialize restore and collection with delayed model-wait and
+                # eager-pause callbacks so the Tool cannot disappear halfway
+                # through the artifact stream.
+                with wait_lock:
+                    if not lifecycle.resident:
+                        self._restore_with_one_victim(
+                            arm, session_id, lifecycle, coordinator, events,
+                        )
+                    native_artifacts = collect_and_validate_native_tool_artifacts(
+                        runtime_executor=runtime_executor, ssh=ssh_config,
+                        session_id=session_id, output_dir=self.output_root,
+                        policy_records=outcome["policy_control_records"],
+                        runtime_trace_paths=outcome["runtime_traces"],
+                    )
+                events.write({
+                    "event": "native_tool_artifacts_collected",
+                    "session_id": session_id,
+                    "root": str(native_artifacts.root),
+                    "validation": native_artifacts.validation,
+                })
                 if gateway_session is None:
                     raise RuntimeError("managed OpenClaw session has no ModelGateway state")
                 model_steps = gateway_session.gateway.logical_model_steps()
@@ -860,8 +919,25 @@ class ExperimentWorker:
                         gateway_session.replay_completeness()
                         if gateway_session is not None else None
                     ),
-                    "model_trace_path": str(model_trace_path) if model_trace_path else None,
-                    "timeline": timeline}
+                     "model_trace_path": str(model_trace_path) if model_trace_path else None,
+                     "policy_control_path": (
+                         str(policy_control_path) if policy_control_path else None
+                     ),
+                     "runtime_trace_root": (
+                         str(self.output_root / "runtime-traces" / session_id)
+                         if arm.agent.driver is AgentDriver.OPENCLAW else None
+                     ),
+                     "native_tool_artifact_root": (
+                         str(native_artifacts.root)
+                         if arm.agent.driver is AgentDriver.OPENCLAW and native_artifacts
+                         else None
+                     ),
+                     "native_tool_artifact_validation": (
+                         native_artifacts.validation
+                         if arm.agent.driver is AgentDriver.OPENCLAW and native_artifacts
+                         else None
+                     ),
+                     "timeline": timeline}
         finally:
             with wait_lock:
                 if wait_timer is not None:

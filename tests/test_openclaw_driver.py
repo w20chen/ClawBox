@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from clawbox.experiments.openclaw_driver import NativeSSHConfig, run_openclaw
+from clawbox.experiments.openclaw_driver import (
+    NativeSSHConfig,
+    native_ssh_target,
+    run_openclaw,
+    split_native_ssh_target,
+)
 from clawbox.replay.lifecycle import CommandResult
 
 
@@ -61,8 +66,32 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert clawtune["instrumentTools"] == config["tools"]["allow"]
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
+    assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert result["tool_calls"] == 1
     assert result["tool_latencies"] == [0.25]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("executor@tool.example:2200", ("executor", "tool.example", 2200)),
+        ("executor@[2001:db8::10]:2200", ("executor", "2001:db8::10", 2200)),
+        ("tool.example", ("executor", "tool.example", 22)),
+    ],
+)
+def test_native_ssh_target_preserves_cube_port(value, expected) -> None:
+    assert split_native_ssh_target(value) == expected
+
+
+def test_native_ssh_target_does_not_append_a_second_port() -> None:
+    target = native_ssh_target("tool.example:2200", port=2222)
+    assert target == "executor@tool.example:2200"
+    assert split_native_ssh_target(target) == ("executor", "tool.example", 2200)
+
+
+def test_native_ssh_target_rejects_malformed_explicit_port() -> None:
+    with pytest.raises(ValueError, match="target port"):
+        split_native_ssh_target("executor@[2001:db8::10]:")
 
 
 def test_openclaw_runner_rejects_unsafe_credential_environment(

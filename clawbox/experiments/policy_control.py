@@ -92,6 +92,8 @@ class _Session:
             execution = self.executions.get(execution_id)
             if execution is None or execution.admission is None:
                 raise ValueError("completion has no admitted execution")
+            if execution.request["command_sha256"] != request["command_sha256"]:
+                raise ValueError("completion command does not match admission")
             while execution.completing:
                 self.condition.wait()
             if execution.completion is not None:

@@ -24,6 +24,69 @@ class NativeSSHConfig:
     workspace_root: str = "/workspace"
 
 
+def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str, str, int]:
+    """Return ``(user, host, port)`` for an OpenClaw SSH target.
+
+    OpenClaw stores targets in ``user@host:port`` form, while OpenSSH itself
+    wants the port as a separate ``-p`` argument.  Cube's ``get_host`` may
+    return either a bare host or an already mapped ``host:port`` value, so the
+    parser must preserve an explicitly returned port and avoid appending a
+    second one.
+    """
+    value = str(target or "").strip()
+    if not value:
+        raise ValueError("native SSH target is empty")
+    user, separator, address = value.rpartition("@")
+    if not separator:
+        user, address = "executor", value
+    if not user or not address:
+        raise ValueError(f"invalid native SSH target: {target!r}")
+    if address.startswith("["):
+        closing = address.find("]")
+        if closing < 0:
+            raise ValueError(f"invalid bracketed native SSH host: {target!r}")
+        host = address[1:closing]
+        suffix = address[closing + 1:]
+        if suffix:
+            if not suffix.startswith(":") or not suffix[1:].isdigit():
+                raise ValueError(f"invalid native SSH target port: {target!r}")
+            port = int(suffix[1:])
+        else:
+            port = default_port
+    elif address.count(":") == 1:
+        host, rendered_port = address.rsplit(":", 1)
+        if not host or not rendered_port.isdigit():
+            raise ValueError(f"invalid native SSH target port: {target!r}")
+        port = int(rendered_port)
+    else:
+        host, port = address, default_port
+    if not host or not 1 <= port <= 65535:
+        raise ValueError(f"invalid native SSH target: {target!r}")
+    return user, host, port
+
+
+def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> str:
+    """Build the target representation used by OpenClaw's SSH sandbox."""
+    rendered = str(host or "").strip()
+    if not rendered:
+        raise ValueError("native SSH host is empty")
+    if "://" in rendered:
+        rendered = rendered.split("://", 1)[1].split("/", 1)[0]
+    if rendered.startswith("["):
+        _user, parsed_host, parsed_port = split_native_ssh_target(
+            f"{user}@{rendered}", default_port=port,
+        )
+        return f"{_user}@[{parsed_host}]:{parsed_port}"
+    if rendered.count(":") == 1:
+        _user, parsed_host, parsed_port = split_native_ssh_target(
+            f"{user}@{rendered}", default_port=port,
+        )
+        return f"{_user}@{parsed_host}:{parsed_port}"
+    if rendered.count(":") > 1:
+        return f"{user}@[{rendered}]:{port}"
+    return f"{user}@{rendered}:{port}"
+
+
 def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  ssh: NativeSSHConfig, policy_control: Any,
                  runtime_executor: Any, output_dir: Path, timeout_seconds: int,
@@ -62,6 +125,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_CONTROL_URL={shlex.quote(policy_control.url)} "
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
+        "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
         f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
@@ -82,8 +146,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         return result
 
     private_b64 = base64.b64encode(ssh.identity_private_key.encode()).decode()
-    host = ssh.target.split("@", 1)[-1].rsplit(":", 1)[0]
-    port = ssh.target.rsplit(":", 1)[-1] if ":" in ssh.target else "22"
+    _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"[{host}]:{port} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
     encoded_predictions = base64.b64encode(json.dumps(
