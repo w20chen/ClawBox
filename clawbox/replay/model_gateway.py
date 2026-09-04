@@ -470,7 +470,10 @@ class ModelGateway:
                 item["content_type"], base64.b64decode(item["response_b64"])
             )
             start = float(item["started_unix_s"])
-            end = float(item["completed_unix_s"])
+            # Preserve the pure model/replay duration.  ``completed_unix_s``
+            # is the legacy response-release timestamp and may include
+            # policy-induced checkpoint/restore hold time.
+            end = float(item.get("model_generated_unix_s") or item["completed_unix_s"])
             if start <= 0 or end < start:
                 raise ValueError("model response has no valid timing metadata")
             records.append({

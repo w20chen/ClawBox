@@ -356,7 +356,6 @@ class ExperimentWorker:
             ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
             env_vars=tool_env,
         )
-        coordinator.register(session_id, lifecycle)
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
                     if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
         gateway_session: SessionGatewayState | None = None
@@ -558,6 +557,12 @@ class ExperimentWorker:
                 before_response_ready=before_model_response_ready,
             )
             runtime_env["CLAWBOX_MODEL_GATEWAY_TOKEN"] = gateway_session.token
+        # Delay coordinator registration until every pre-VM validation and
+        # per-session gateway registration has succeeded.  Otherwise a bad
+        # replay path or gateway setup error can leave a non-existent session
+        # occupying policy state even though the main cleanup block was never
+        # entered.
+        coordinator.register(session_id, lifecycle)
         try:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
@@ -643,9 +648,13 @@ class ExperimentWorker:
                             measured_memory = None
                             if observed is not None:
                                 try:
-                                    measured_memory = float(json.loads(
-                                        observed.artifacts.get("cgroup_resource_v1", "{}")
-                                    ).get("memory_rss_peak_bytes", 0)) / (1024 * 1024)
+                                    raw_artifact = observed.artifacts.get("cgroup_resource_v1")
+                                    if raw_artifact:
+                                        measured_bytes = json.loads(raw_artifact).get(
+                                            "memory_rss_peak_bytes"
+                                        )
+                                        if measured_bytes is not None:
+                                            measured_memory = float(measured_bytes) / (1024 * 1024)
                                 except (TypeError, ValueError, json.JSONDecodeError):
                                     measured_memory = None
                             prediction_record.update({
