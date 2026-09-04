@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
@@ -61,7 +63,8 @@ class CubeSandboxClient:
     """Small synchronous wrapper around the official CubeSandbox v0.7 SDK."""
 
     def __init__(self, *, journal: OwnedSandboxJournal | None = None,
-                 sandbox_class: type | None = None, config: Any = None) -> None:
+                 sandbox_class: type | None = None, config: Any = None,
+                 command_stream_grace_s: float = 15.0) -> None:
         if sandbox_class is None:
             from cubesandbox import Sandbox
             sandbox_class = Sandbox
@@ -69,6 +72,9 @@ class CubeSandboxClient:
         self._config = config
         self.journal = journal
         self._handles: dict[str, Any] = {}
+        if command_stream_grace_s < 0:
+            raise ValueError("command_stream_grace_s must be non-negative")
+        self.command_stream_grace_s = float(command_stream_grace_s)
 
     def _sdk_kwargs(self) -> dict[str, Any]:
         return {} if self._config is None else {"config": self._config}
@@ -117,7 +123,41 @@ class CubeSandboxClient:
 
     def run_command(self, sandbox: Any, command: str, *, timeout_s: float,
                     cwd: str = "/workspace") -> Any:
-        return sandbox.commands.run(command, timeout=timeout_s, cwd=cwd)
+        """Run a command without allowing a broken stream to block forever.
+
+        CubeSandbox's e2b-connect transport intentionally leaves stream reads
+        unbounded and relies on the server-side command deadline.  A proxy or
+        a partially closed stream can therefore outlive that deadline.  Keep
+        the SDK call in a daemon thread and enforce the same deadline locally,
+        with a short grace period for normal deadline propagation.  The owning
+        session fails and its normal cleanup path kills the sandbox; the
+        daemon thread is only retained for the broken transport edge case and
+        cannot keep the worker process alive.
+        """
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                result_queue.put(("result", sandbox.commands.run(
+                    command, timeout=timeout_s, cwd=cwd,
+                )))
+            except BaseException as exc:  # re-raise in the caller's context
+                result_queue.put(("error", exc))
+
+        thread = threading.Thread(target=invoke, name="cube-command", daemon=True)
+        thread.start()
+        thread.join(timeout_s + self.command_stream_grace_s)
+        if thread.is_alive():
+            raise TimeoutError(
+                "CubeSandbox command stream exceeded deadline "
+                f"({timeout_s:g}s + {self.command_stream_grace_s:g}s grace)"
+            )
+        kind, value = result_queue.get_nowait()
+        if kind == "error":
+            raise value
+        return value
 
     @staticmethod
     def read_file(sandbox: Any, path: str) -> str:

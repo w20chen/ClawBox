@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,6 +104,29 @@ def test_cube_client_adds_only_explicit_narrow_egress_allowlist() -> None:
     assert _Sandbox.create_kwargs["network"] == {
         "allow_out": ["10.244.1.23/32"], "deny_out": ["0.0.0.0/0"],
     }
+
+
+def test_cube_client_bounds_a_stalled_command_stream() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox, command_stream_grace_s=0.01)
+    sandbox = _Sandbox({"sandboxID": "stalled"})
+    release = threading.Event()
+
+    def stalled_run(_command: str, **_kwargs):
+        release.wait()
+        return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+    sandbox.commands = SimpleNamespace(run=stalled_run)
+    started = time.monotonic()
+    try:
+        client.run_command(sandbox, "true", timeout_s=0.02)
+    except TimeoutError as exc:
+        assert "command stream exceeded deadline" in str(exc)
+    else:
+        raise AssertionError("stalled command stream was not bounded")
+    finally:
+        release.set()
+    assert time.monotonic() - started < 0.5
 
 
 def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
