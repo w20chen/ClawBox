@@ -1,4 +1,4 @@
-# CubeSandbox migration status (2026-09-03)
+# CubeSandbox migration status (2026-09-04)
 
 The supported path is now:
 
@@ -28,8 +28,21 @@ lifecycles, applies policy to the Tool VM, and persists exact-ID joined Runtime,
 bridge, cgroup, and eBPF records. The complete local suite passes with five
 environment skips, and the Tool bridge cross-compiles for Linux/ARM64.
 
-Real paired acceptance is currently blocked by the Kunpeng node: the
-`cube-node` pod is `2/3 CreateContainerError`, Docker starts stall, and even a
-host `stat /sys/fs/cgroup` blocks. Final image digests and the post-refactor
-live Kubernetes matrix are therefore not yet verified and must not be claimed
-as passing.
+The post-reboot reduced real paired acceptance is now verified on Kunpeng:
+
+- custom guest kernel `sha256:f84e3fa28ae6...` boots and exposes kprobes;
+- fresh immutable Runtime/Tool templates boot with the new kernel identity;
+- Runtime reaches the authenticated fixed-port WorkerBridge through the
+  node-routed NodePort adapter;
+- Tool pause/resume preserves the workspace while Runtime remains resident;
+- cgroup-v2 and native eBPF telemetry are valid with zero loss and exact
+  execution-ID joins;
+- bridge stress passes 141 requests with head-of-line isolation and no secrets;
+- final owner audit reports zero sandboxes and zero NodePort Service leaks.
+
+This is a reduced two-VM acceptance, not the full paper matrix. Remaining
+paper work is to run the Runtime-to-Worker-to-Tool arms at the target
+concurrency levels, compare real API inference with deterministic replay,
+produce policy-arm statistics, and publish the final experiment report. The
+live evidence and exact provenance are recorded in
+`docs/kunpeng920-nodeport-acceptance.md`.
