@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
-from clawbox.experiments.worker import ExperimentWorker
+from clawbox.experiments.worker import ExperimentWorker, build_time_spans
 
 
 def raw_spec() -> dict:
@@ -46,6 +46,31 @@ def test_v2_matrix_is_complete_stable_and_randomized() -> None:
     assert [arm.arm_id for arm in first] == [arm.arm_id for arm in second]
     assert all(arm.spec_digest == spec_digest(spec) for arm in first)
     assert {arm.policy.name for arm in first} == {"resident", "proposed"}
+
+
+def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
+    spans = build_time_spans({
+        "session_started": 1.0,
+        "sandbox_create_start": 2.0,
+        "tool_create_start": 2.0,
+        "tool_ready": 3.5,
+        "runtime_create_start": 3.0,
+        "runtime_ready": 4.0,
+        "sandbox_ready": 4.0,
+        "agent_execution_start": 4.5,
+        "final_agent_completion": 9.0,
+        "validation_start": 9.0,
+        "validation_end": 9.5,
+        "output_hash_start": 9.5,
+        "output_hash_end": 10.0,
+        "sandbox_cleanup_start": 10.0,
+        "sandbox_cleanup_end": 11.0,
+        "session_finished": 11.0,
+    })
+    by_name = {item["name"]: item for item in spans}
+    assert by_name["agent"]["duration_seconds"] == 4.5
+    assert by_name["sandbox.create"]["duration_seconds"] == 2.0
+    assert by_name["sandbox.cleanup"]["duration_seconds"] == 1.0
 
 
 def test_v2_rejects_backend_transport_and_invalid_policy() -> None:

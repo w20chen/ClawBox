@@ -90,6 +90,33 @@ def percentile(values: list[float], quantile: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
+def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, float | str]]:
+    """Build stable, machine-readable spans from session lifecycle markers."""
+    pairs = (
+        ("session", "session_started", "session_finished"),
+        ("sandbox.create", "sandbox_create_start", "sandbox_ready"),
+        ("sandbox.tool.create", "tool_create_start", "tool_ready"),
+        ("sandbox.runtime.create", "runtime_create_start", "runtime_ready"),
+        ("agent", "agent_execution_start", "final_agent_completion"),
+        ("validation", "validation_start", "validation_end"),
+        ("output_hash", "output_hash_start", "output_hash_end"),
+        ("sandbox.cleanup", "sandbox_cleanup_start", "sandbox_cleanup_end"),
+    )
+    spans: list[dict[str, float | str]] = []
+    for name, start_key, end_key in pairs:
+        start = timeline.get(start_key)
+        end = timeline.get(end_key)
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        spans.append({
+            "name": name,
+            "start_unix_s": float(start),
+            "end_unix_s": float(end),
+            "duration_seconds": max(0.0, float(end) - float(start)),
+        })
+    return spans
+
+
 class EventWriter:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,6 +317,9 @@ class ExperimentWorker:
                 "resume_service_seconds": coordinator.resume_service_seconds,
                 "blocked_admission_seconds": coordinator.blocked_seconds,
                 "session_timelines": [item.get("timeline") for item in sessions],
+                "session_time_spans": [
+                    item.get("timeline", {}).get("time_spans", []) for item in sessions
+                ],
             },
             memory={**asdict(memory), "peak_commitment_bytes": coordinator.peak_commitment_bytes},
             artifacts={
@@ -322,7 +352,7 @@ class ExperimentWorker:
                      prediction_provider: CommandPredictionProvider | None = None) -> dict[str, Any]:
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
-        timeline: dict[str, float] = {"session_started": time.time()}
+        timeline: dict[str, Any] = {"session_started": time.time()}
         runtime_ownership = Ownership(
             self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
             f"{session_id}-runtime", arm.policy.name,
@@ -627,12 +657,14 @@ class ExperimentWorker:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
             timeline["sandbox_create_start"] = time.time()
+            timeline["tool_create_start"] = time.time()
             tool_create_s = lifecycle.start()
             timeline["tool_ready"] = time.time()
             events.write({"event": "sandbox_created", "session_id": session_id,
                           "role": "tool", "service_seconds": tool_create_s,
                           "lifecycle_timing": lifecycle.timings[-1],
                           "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
+            timeline["runtime_create_start"] = time.time()
             runtime_create_s = runtime_lifecycle.start()
             timeline["runtime_ready"] = time.time()
             timeline["sandbox_ready"] = timeline["runtime_ready"]
@@ -965,6 +997,7 @@ class ExperimentWorker:
                      ),
                      "timeline": timeline}
         finally:
+            timeline["sandbox_cleanup_start"] = time.time()
             with wait_lock:
                 if wait_timer is not None:
                     wait_timer.cancel()
@@ -991,6 +1024,10 @@ class ExperimentWorker:
                     })
                 finally:
                     timeline["sandbox_cleanup_end"] = time.time()
+                    timeline["session_finished"] = timeline["sandbox_cleanup_end"]
+                    timeline["time_spans"] = build_time_spans(timeline)
+                    events.write({"event": "session_timing", "session_id": session_id,
+                                  "time_spans": timeline["time_spans"]})
                     if timeline.get("validation_end"):
                         timeline["cleanup_overhead_seconds"] = max(
                             0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]
