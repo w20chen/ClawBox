@@ -61,7 +61,7 @@ The temporary Pod and Service were deleted. No persistent Cube data, existing
 templates, guest-kernel artifacts, or platform services were deleted or
 restarted for this bridge test.
 
-## Controlled reboot persistence check
+## Controlled reboot persistence check (historical first observation)
 
 The controlled reboot completed and SSH/Kubernetes/S3lvol recovered. The
 reboot initially restored the vendor active guest-kernel file
@@ -70,7 +70,7 @@ regression evidence. It now verifies the kprobe artifact checksum, preserves
 the vendor files as `*.original-a63aa77e`, and restores the active file and
 component registration to `f84e3fa…`.
 
-The reduced acceptance is currently blocked by a separate Cube node bootstrap
+The reduced acceptance was initially blocked by a separate Cube node bootstrap
 failure: `cubelet` repeatedly exits before listening on port 9999, and
 `cube-egress-net` reports that host interface `cube-dev` is absent after its
 300-second wait. `effective-pvm` and the pod configuration both specify PVM
@@ -79,4 +79,30 @@ disabled (`0`); `cube-sandbox-s3lvol.service` is active and
 routing, persistent data, or existing template repair was applied for this
 symptom. The next operator action must be a site-specific CubeVS/node-network
 bootstrap recovery, after which the reduced template/kprobe/bridge acceptance
-can resume.
+can resume. It subsequently recovered without changing persistent Cube data,
+existing templates, S3lvol, containerd, kubelet, routing, or the host kernel.
+
+## Post-reboot reduced acceptance completed
+
+After the node recovered, the reduced persistence acceptance passed:
+
+```text
+node: Ready
+cube-node: 3/3 Running
+cube-sandbox-s3lvol.service: active/running
+/var/run/s3lvol.sock: listening UNIX socket
+cubelet-mounted socket: present
+Tool template: tpl-4ffe6e6abd574be99b2869e1
+Runtime template: tpl-72fecb8e388d4c9fa3a61054
+guest kernel: 6.6.119-cube.bm.guest.001, CONFIG_KPROBES=y
+post-reboot NodePort: 31209
+pair smoke: PASS; exact bridge join: 1.0; cgroup/eBPF loss: 0
+bridge stress: PASS; 141 requests; HOL isolation; secrets_logged=false
+Cube API /sandboxes: []
+task-owned NodePort Services: none
+```
+
+The temporary Pod and Service were deleted. This closes the post-reboot
+kernel, template, bridge, pause/resume, telemetry, and cleanup acceptance
+milestone. It remains a reduced two-VM acceptance, not a claim that the full
+paper experiment matrix has completed.

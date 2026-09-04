@@ -1,8 +1,25 @@
 # ClawBox continuation handoff
 
-Updated 2026-09-04 from local commit
-`111587bf4cf2c15fbbcfd6e09105a7793c4f0ddf` and live Kunpeng evidence. This is
-a partially completed milestone, not a finished system.
+Updated 2026-09-04 after the post-reboot acceptance milestone, with live
+Kunpeng evidence. The source commit is recorded in the repository history.
+
+## Latest continuation status
+
+The post-reboot reduced acceptance is now complete. The custom guest kernel was
+restored idempotently after reboot, cube-node returned to `3/3 Running`, the
+fresh Tool template passed the direct kprobe diagnostic, and a fresh Runtime /
+Tool pair passed through the node-routed NodePort bridge. The pair reported
+valid cgroup-v2 and native telemetry, zero loss, Tool-only pause/resume with
+Runtime remaining active, and an exact bridge execution-ID join of `1.0`.
+The concurrent bridge stress passed with 141 requests, head-of-line isolation,
+and no logged secrets. Final owner-based cleanup found no sandboxes and no
+task-owned NodePort Services.
+
+This closes the post-reboot kernel/template/bridge/telemetry acceptance
+milestone. It does not claim that the full paper experiment matrix is finished;
+the remaining work is the higher-level Runtime-to-Worker-to-Tool experiment
+matrix, real/replay inference comparison, policy-arm results, and final
+statistical report.
 
 ## Final goal and non-negotiable design
 
