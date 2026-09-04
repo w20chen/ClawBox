@@ -28,6 +28,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create"]
+  # The controller creates one task-owned NodePort adapter before the Worker
+  # Job starts, reads its allocated ports, and removes it after cleanup.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "create", "delete"]

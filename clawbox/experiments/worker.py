@@ -11,7 +11,9 @@ import os
 import platform
 import statistics
 import subprocess
+import sys
 import time
+import traceback
 import urllib.parse
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -991,8 +993,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attempt-id", default=os.environ.get("CLAWBOX_ATTEMPT_ID"), required=os.environ.get("CLAWBOX_ATTEMPT_ID") is None)
     parser.add_argument("--task-uid", default=os.environ.get("CLAWBOX_TASK_UID"), required=os.environ.get("CLAWBOX_TASK_UID") is None)
     args = parser.parse_args(argv)
-    results = ExperimentWorker(load_experiment(args.spec), run_id=args.run_id,
-                               attempt_id=args.attempt_id, task_uid=args.task_uid).run()
+    try:
+        results = ExperimentWorker(load_experiment(args.spec), run_id=args.run_id,
+                                   attempt_id=args.attempt_id, task_uid=args.task_uid).run()
+    except Exception as exc:
+        # Kubernetes otherwise records only exit code 1 when a pre-arm gate
+        # fails (for example NodePort readiness). Keep the log useful without
+        # printing credentials, prompts, request bodies, or bearer tokens.
+        print(
+            "experiment worker failed before completion: "
+            f"run_id={args.run_id} attempt_id={args.attempt_id} "
+            f"task_uid={args.task_uid} error_type={type(exc).__name__} "
+            f"error={exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        traceback.print_exc(file=sys.stderr)
+        return 1
     return 0 if all(result.status is RunStatus.SUCCEEDED for result in results) else 1
 
 

@@ -63,10 +63,11 @@ def test_dispatcher_can_manage_sandboxtasks_but_not_pods_or_secrets():
     assert _verbs_for(role_name, "networking.k8s.io", "networkpolicies", docs) == set()
 
 
-def test_cell_controller_only_realizes_configmaps_and_jobs():
+def test_cell_controller_realizes_task_owned_services_configmaps_and_jobs():
     docs = _load(CONTROL_RBAC)
     role_name = "clawbox-cell-controller"
     assert _verbs_for(role_name, "", "configmaps", docs) >= {"get", "create"}
+    assert _verbs_for(role_name, "", "services", docs) >= {"get", "create", "delete"}
     assert _verbs_for(role_name, "batch", "jobs", docs) >= {"create", "delete"}
     assert _verbs_for(role_name, "", "pods", docs) == set()
     assert _verbs_for(role_name, "", "secrets", docs) == set()
