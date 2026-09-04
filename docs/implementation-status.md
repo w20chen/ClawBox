@@ -45,7 +45,8 @@ native OpenClaw path.
 
 The c40 artifacts were retained on kunpeng under
 `/tmp/clawbox-baseline-results40`. The latest-source refreshes are
-`baseline40-smoke-a30292a`, `baseline40-reclamation-a30292a`,
+`baseline40-decision-a30292a`, `baseline40-smoke-a30292a`,
+`baseline40-reclamation-a30292a`,
 `baseline40-full-a30292a`, `baseline40-spatial-a30292a`, and
 `baseline40-vertical-a30292a`; the decision run was resumed as
 `baseline40-decision` after the command-stream fix. Every run finished with

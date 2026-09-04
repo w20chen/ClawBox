@@ -96,7 +96,8 @@ Cube API transport failures. The decision run also reproduced and then cleared
 a broken command-stream hang with the bounded client deadline. Each run was
 checked for zero remaining Cube sandboxes. Fresh-source runs after `a4be792`
 also emit `session_timing` events containing `session`, `agent`, per-sandbox
-create, validation, hashing, and cleanup spans.
+create, validation, hashing, and cleanup spans; the fresh decision bundle
+`baseline40-decision-a30292a` contains all 12 of those timing records.
 
 The managed gateway has both replay and API implementations. Replay is covered
 by session-local cursor, retry, delivery, and HOL tests. API mode is covered by
