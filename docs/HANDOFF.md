@@ -6,7 +6,8 @@ Kunpeng evidence. The source commit is recorded in the repository history.
 ## Latest clean stopping point: managed c1 readiness
 
 This handoff is intentionally at the next important milestone, before any
-formal paper matrix. The latest pushed source is `386170a`. It adds the
+formal paper matrix. The latest implementation commit is `386170a`; the
+documentation update is repository HEAD `d9ee6dc`. The implementation adds the
 task-namespace Service permissions required by the controller's NodePort
 adapter and sanitized top-level Worker exception logging. Local targeted
 managed/controller tests and `git diff --check` pass; the full suite had

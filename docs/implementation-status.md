@@ -5,8 +5,9 @@
 The current important milestone is source and controller readiness for a
 semantically correct managed c1 run; the formal paper matrix has not started.
 
-- Latest source commit: `386170a` (`Make cell controller services and worker
-  failures diagnosable`), pushed to `origin/main`.
+- Latest implementation commit: `386170a` (`Make cell controller services
+  and worker failures diagnosable`); the documentation handoff is committed
+  at repository HEAD `d9ee6dc`, both pushed to `origin/main`.
 - Local verification: targeted managed/controller tests and `git diff --check`
   pass; the preceding full suite passed with five environment skips. The new
   Worker image publication was intentionally stopped before completion, so the
