@@ -34,7 +34,9 @@ from .memory import NodeMemorySampler
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
-from .openclaw_driver import NativeSSHConfig, native_ssh_target, run_openclaw
+from .openclaw_driver import (
+    NativeSSHConfig, native_ssh_target, run_openclaw, select_native_ssh_host,
+)
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, PredictionUnavailable
@@ -756,8 +758,20 @@ class ExperimentWorker:
                     complete=complete_openclaw_tool,
                 )
                 tool_host = lifecycle.sandbox.get_host(2222)
+                tool_ip_result = executor.execute("hostname -I", 30)
+                if tool_ip_result.exit_code != 0:
+                    raise RuntimeError(
+                        "Tool setup could not resolve its direct native SSH IP: "
+                        + tool_ip_result.stderr[-1000:]
+                    )
+                tool_direct_ip = select_native_ssh_host(tool_ip_result.stdout)
+                events.write({
+                    "event": "native_ssh_endpoint_resolved", "session_id": session_id,
+                    "get_host_2222": str(tool_host), "direct_tool_ip": tool_direct_ip,
+                    "port": 2222, "phase": "setup",
+                })
                 ssh_config = NativeSSHConfig(
-                    target=native_ssh_target(str(tool_host), port=2222),
+                    target=native_ssh_target(tool_direct_ip, port=2222),
                     identity_private_key=ssh_credentials.client_private,
                     host_public_key=ssh_credentials.host_public,
                     workspace_root=arm.sandbox.workspace,

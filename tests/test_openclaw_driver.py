@@ -11,6 +11,7 @@ from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
     native_ssh_target,
     run_openclaw,
+    select_native_ssh_host,
     split_native_ssh_target,
 )
 from clawbox.replay.lifecycle import CommandResult
@@ -87,6 +88,15 @@ def test_native_ssh_target_does_not_append_a_second_port() -> None:
     target = native_ssh_target("tool.example:2200", port=2222)
     assert target == "executor@tool.example:2200"
     assert split_native_ssh_target(target) == ("executor", "tool.example", 2200)
+
+
+def test_select_native_ssh_host_prefers_routable_ipv4() -> None:
+    assert select_native_ssh_host("127.0.0.1 2001:db8::1 192.168.3.17") == "192.168.3.17"
+
+
+def test_select_native_ssh_host_rejects_loopback_only_output() -> None:
+    with pytest.raises(ValueError, match="routable"):
+        select_native_ssh_host("127.0.0.1 ::1")
 
 
 def test_native_ssh_target_rejects_malformed_explicit_port() -> None:

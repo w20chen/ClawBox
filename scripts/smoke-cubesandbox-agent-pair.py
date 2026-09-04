@@ -24,6 +24,7 @@ from clawbox.cube.api_retry import read_with_backoff
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
     native_ssh_target,
+    select_native_ssh_host,
     split_native_ssh_target,
 )
 from clawbox.experiments.policy_control import PolicyControlServer
@@ -262,8 +263,10 @@ def main() -> int:
         tool_holder["sandbox"] = tool
         tool_id = tool.sandbox_id
         raw_host = str(tool.get_host(2222))
+        tool_ip_result = run(tool, "hostname -I")
+        direct_tool_ip = select_native_ssh_host(tool_ip_result.stdout)
         ssh = NativeSSHConfig(
-            target=native_ssh_target(raw_host, port=2222),
+            target=native_ssh_target(direct_tool_ip, port=2222),
             identity_private_key=credentials.client_private,
             host_public_key=credentials.host_public,
         )
@@ -334,6 +337,7 @@ def main() -> int:
                 "status": "PASS", "owner": owner,
                 "runtime_id": runtime.sandbox_id, "tool_id": tool_id,
                 "ssh_target": ssh.target, "get_host_2222": raw_host,
+                "direct_tool_ip": direct_tool_ip,
                 "policy_endpoint": server.url, "native_probe": probe,
                 "restore_count": restore_count, "timings": timings,
                 "telemetry": validation, "exact_id_validation": True,

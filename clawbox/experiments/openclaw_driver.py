@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -85,6 +86,30 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
     if rendered.count(":") > 1:
         return f"{user}@[{rendered}]:{port}"
     return f"{user}@{rendered}:{port}"
+
+
+def select_native_ssh_host(addresses: str) -> str:
+    """Select a routable non-loopback IP from setup-phase VM output.
+
+    CubeProxy's virtual ``get_host`` names are HTTP ingress names.  When the
+    Runtime and Tool are pinned to one Cube node, native SSH can instead use
+    the Tool's sandbox IP and container port directly; this helper keeps that
+    endpoint selection explicit and deterministic.
+    """
+    candidates: list[tuple[int, str]] = []
+    for rendered in str(addresses or "").split():
+        candidate = rendered.split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if address.is_loopback or address.is_unspecified:
+            continue
+        candidates.append((address.version, candidate))
+    if not candidates:
+        raise ValueError("Tool setup did not report a routable non-loopback IP")
+    candidates.sort(key=lambda item: (item[0] != 4, item[1]))
+    return candidates[0][1]
 
 
 def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
