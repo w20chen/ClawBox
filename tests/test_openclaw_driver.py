@@ -10,8 +10,9 @@ import pytest
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
     native_ssh_target,
+    native_tool_bridge_setup_command,
+    native_ssh_target_from_env,
     run_openclaw,
-    select_native_ssh_host,
     split_native_ssh_target,
 )
 from clawbox.replay.lifecycle import CommandResult
@@ -90,13 +91,36 @@ def test_native_ssh_target_does_not_append_a_second_port() -> None:
     assert split_native_ssh_target(target) == ("executor", "tool.example", 2200)
 
 
-def test_select_native_ssh_host_prefers_routable_ipv4() -> None:
-    assert select_native_ssh_host("127.0.0.1 2001:db8::1 192.168.3.17") == "192.168.3.17"
+def test_native_ssh_target_from_env_requires_explicit_raw_endpoint(monkeypatch) -> None:
+    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_TARGET", raising=False)
+    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_HOST", raising=False)
+    with pytest.raises(ValueError, match="get_host is HTTP-only"):
+        native_ssh_target_from_env()
 
 
-def test_select_native_ssh_host_rejects_loopback_only_output() -> None:
-    with pytest.raises(ValueError, match="routable"):
-        select_native_ssh_host("127.0.0.1 ::1")
+def test_native_ssh_target_from_env_renders_per_sandbox_target(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "CLAWBOX_NATIVE_SSH_TARGET",
+        "executor@192.168.3.166:20055",
+    )
+    assert native_ssh_target_from_env(sandbox_id="sandbox-a") == (
+        "executor@192.168.3.166:20055"
+    )
+
+
+def test_native_ssh_target_from_env_supports_host_and_port(monkeypatch) -> None:
+    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_TARGET", raising=False)
+    monkeypatch.setenv("CLAWBOX_NATIVE_SSH_HOST", "192.168.3.166")
+    monkeypatch.setenv("CLAWBOX_NATIVE_SSH_PORT", "20055")
+    assert native_ssh_target_from_env() == "executor@192.168.3.166:20055"
+
+
+def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:
+    command = native_tool_bridge_setup_command()
+    assert "CLAWBOX_TOOL_HOST_KEY_B64" in command
+    assert "nohup env TOOL_BRIDGE_HOST_KEY" in command
+    assert ":08AE" in command
+    assert "exit 1" in command
 
 
 def test_native_ssh_target_rejects_malformed_explicit_port() -> None:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import ipaddress
 import json
 import os
 import re
@@ -88,28 +87,59 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
     return f"{user}@{rendered}:{port}"
 
 
-def select_native_ssh_host(addresses: str) -> str:
-    """Select a routable non-loopback IP from setup-phase VM output.
+def native_ssh_target_from_env(*, sandbox_id: str = "",
+                               explicit: str | None = None) -> str:
+    """Resolve the raw TCP endpoint used by native OpenSSH.
 
-    CubeProxy's virtual ``get_host`` names are HTTP ingress names.  When the
-    Runtime and Tool are pinned to one Cube node, native SSH can instead use
-    the Tool's sandbox IP and container port directly; this helper keeps that
-    endpoint selection explicit and deterministic.
+    Cube's ``get_host`` value is an HTTP ingress authority, not a raw TCP
+    endpoint.  A deployment must therefore provide the actual route (for
+    example a node host-port mapping) explicitly.  The optional
+    ``{sandbox_id}`` placeholder makes per-sandbox endpoint helpers possible
+    without ever guessing from guest ``hostname -I`` output.
     """
-    candidates: list[tuple[int, str]] = []
-    for rendered in str(addresses or "").split():
-        candidate = rendered.split("%", 1)[0]
-        try:
-            address = ipaddress.ip_address(candidate)
-        except ValueError:
-            continue
-        if address.is_loopback or address.is_unspecified:
-            continue
-        candidates.append((address.version, candidate))
-    if not candidates:
-        raise ValueError("Tool setup did not report a routable non-loopback IP")
-    candidates.sort(key=lambda item: (item[0] != 4, item[1]))
-    return candidates[0][1]
+    value = (explicit if explicit is not None else
+             os.environ.get("CLAWBOX_NATIVE_SSH_TARGET", "")).strip()
+    if value:
+        value = value.replace("{sandbox_id}", str(sandbox_id))
+        split_native_ssh_target(value)
+        return value
+    host = os.environ.get("CLAWBOX_NATIVE_SSH_HOST", "").strip()
+    if not host:
+        raise ValueError(
+            "native SSH requires CLAWBOX_NATIVE_SSH_TARGET or "
+            "CLAWBOX_NATIVE_SSH_HOST; Cube get_host is HTTP-only"
+        )
+    rendered_port = os.environ.get("CLAWBOX_NATIVE_SSH_PORT", "2222").strip()
+    if not rendered_port.isdigit():
+        raise ValueError("CLAWBOX_NATIVE_SSH_PORT must be an integer")
+    return native_ssh_target(host, port=int(rendered_port))
+
+
+def native_tool_bridge_setup_command() -> str:
+    """Return the explicit post-create Tool SSH bootstrap command.
+
+    Cube restores a template snapshot before applying per-sandbox environment
+    variables, so the image entrypoint cannot reliably see ephemeral SSH keys.
+    The setup phase therefore materializes those keys through envd and starts
+    the native bridge before any Agent operation is admitted.
+    """
+    return (
+        "set -eu; "
+        "mkdir -p /run/clawbox-ssh; "
+        "printf '%s' \"$CLAWBOX_TOOL_HOST_KEY_B64\" | base64 -d > /run/clawbox-ssh/host_key; "
+        "printf '%s' \"$CLAWBOX_TOOL_AUTHORIZED_KEY_B64\" | base64 -d > /run/clawbox-ssh/authorized_key; "
+        "chmod 600 /run/clawbox-ssh/host_key /run/clawbox-ssh/authorized_key; "
+        "if ! grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then "
+        "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
+        "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
+        "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
+        "/usr/local/bin/tool-bridge </dev/null >/var/log/tool-bridge.log 2>&1 & "
+        "fi; "
+        "ready=0; i=0; while [ $i -lt 50 ]; do "
+        "if grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then ready=1; break; fi; "
+        "i=$((i + 1)); sleep 0.1; done; "
+        "if [ $ready -ne 1 ]; then cat /var/log/tool-bridge.log >&2 || true; exit 1; fi"
+    )
 
 
 def run_openclaw(*, prompt: str, session_id: str, configuration: dict,

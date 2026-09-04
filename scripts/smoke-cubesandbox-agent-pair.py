@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -23,8 +24,8 @@ from cubesandbox import NEVER_TIMEOUT, Sandbox, Template
 from clawbox.cube.api_retry import read_with_backoff
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
-    native_ssh_target,
-    select_native_ssh_host,
+    native_ssh_target_from_env,
+    native_tool_bridge_setup_command,
     split_native_ssh_target,
 )
 from clawbox.experiments.policy_control import PolicyControlServer
@@ -213,10 +214,31 @@ def main() -> int:
     )
     parser.add_argument("--policy-port", type=int,
                         default=int(os.environ.get("CLAWBOX_POLICY_PORT", "18080")))
+    parser.add_argument(
+        "--ssh-target", default=os.environ.get("CLAWBOX_NATIVE_SSH_TARGET", ""),
+        help="raw native SSH target; may contain {sandbox_id}",
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     if not args.control_host:
         parser.error("--control-host or CLAWBOX_CONTROL_HOST is required")
+    try:
+        configured_target = native_ssh_target_from_env(
+            explicit=args.ssh_target or None, sandbox_id="pending",
+        )
+        _user, configured_host, _port = split_native_ssh_target(configured_target)
+    except ValueError as exc:
+        parser.error(str(exc))
+    runtime_allow_out = []
+    for value in (args.control_host, configured_host):
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        runtime_allow_out.append(
+            f"{address}/{32 if address.version == 4 else 128}"
+        )
+    runtime_allow_out = list(dict.fromkeys(runtime_allow_out))
 
     owner = f"pair-smoke-{uuid.uuid4().hex}"
     session_id = f"{owner}-session"
@@ -240,6 +262,10 @@ def main() -> int:
             lifecycle={"on_timeout": "kill", "auto_resume": False},
             metadata={"clawbox.owner": owner, "clawbox.role": "runtime"},
             distribution_scope=[args.node], env_vars={"CLAWBOX_VM_ROLE": "runtime"},
+            network=(
+                {"allow_out": runtime_allow_out, "deny_out": ["0.0.0.0/0"]}
+                if runtime_allow_out else None
+            ),
         )
         timings["runtime_create_seconds"] = time.monotonic() - started
         started = time.monotonic()
@@ -263,10 +289,19 @@ def main() -> int:
         tool_holder["sandbox"] = tool
         tool_id = tool.sandbox_id
         raw_host = str(tool.get_host(2222))
-        tool_ip_result = run(tool, "hostname -I")
-        direct_tool_ip = select_native_ssh_host(tool_ip_result.stdout)
+        setup_result = tool.commands.run(
+            native_tool_bridge_setup_command(), timeout=30, cwd="/workspace",
+        )
+        if setup_result.exit_code != 0:
+            raise RuntimeError(
+                "Tool setup could not start native SSH bridge: "
+                + setup_result.stderr[-1000:]
+            )
+        ssh_target = native_ssh_target_from_env(
+            explicit=args.ssh_target or None, sandbox_id=tool_id,
+        )
         ssh = NativeSSHConfig(
-            target=native_ssh_target(direct_tool_ip, port=2222),
+            target=ssh_target,
             identity_private_key=credentials.client_private,
             host_public_key=credentials.host_public,
         )
@@ -337,7 +372,6 @@ def main() -> int:
                 "status": "PASS", "owner": owner,
                 "runtime_id": runtime.sandbox_id, "tool_id": tool_id,
                 "ssh_target": ssh.target, "get_host_2222": raw_host,
-                "direct_tool_ip": direct_tool_ip,
                 "policy_endpoint": server.url, "native_probe": probe,
                 "restore_count": restore_count, "timings": timings,
                 "telemetry": validation, "exact_id_validation": True,
