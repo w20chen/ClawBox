@@ -1,0 +1,16 @@
+{
+  "artifact_id": "managed-c1-synthetic",
+  "generation": 1,
+  "commands": {
+    "printf 'managed-c1-a\\n' > /workspace/managed-c1-a.txt": {
+      "predicted_command_memory_p90_mib": 1.0,
+      "key_kind": "exact_command",
+      "evidence_count": 1
+    },
+    "printf 'managed-c1-b\\n' > /workspace/managed-c1-b.txt": {
+      "predicted_command_memory_p90_mib": 1.0,
+      "key_kind": "exact_command",
+      "evidence_count": 1
+    }
+  }
+}
