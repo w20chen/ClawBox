@@ -1,216 +1,145 @@
 # ClawBox
 
-ClawBox runs reproducible coding-agent experiments on a dedicated ARM64
-Kubernetes node. CubeSandbox is the only sandbox runtime.
+ClawBox is a research harness for high-density coding-agent execution on
+CubeSandbox MicroVMs. CubeSandbox is the sole sandbox and multi-node substrate;
+ClawBox supplies Agent-aware memory admission and residency policy above it.
 
 ## Architecture
 
+Each Agent owns two CubeSandbox VMs:
+
 ```text
-clawbox experiment
-  -> ClawBox API -> Run / Attempt / transactional Outbox
-  -> one SandboxTask -> thin controller -> one ExperimentWorker Job
-  -> one trusted Runtime VM (OpenClaw + native ClawTune + model access)
-  -> node-routed ModelGateway -> authenticated cube_shell bridge -> trusted Worker
-  -> one in-process PolicyCoordinator per arm -> official CubeSandbox Python SDK
-  -> one untrusted Tool VM (/workspace + command/resource telemetry)
-  -> ClawTune v6 spans + exact-ID Cube execution records -> offline KB/p90
+host ModelGateway <--- OpenAI-compatible HTTP --- Runtime VM (OpenClaw + ClawTune)
+                                                   |
+                         synchronous policy hook --+--> host PolicyCoordinator
+                                                   |
+                                                   +--- native SSH ---> Tool VM
+                                                                         |
+                                                       workspace + cgroup/eBPF
 ```
 
-The trusted Worker owns the model boundary, replay orchestration, policy
-decisions, validation, and result collection. Each logical Agent owns exactly
-two CubeSandbox ARM64 MicroVMs: a Runtime VM for OpenClaw, reasoning state,
-native ClawTune, and model access; and a Tool VM for `/workspace` plus every
-shell, repository, file, compilation, generated-program, and test operation.
-For managed OpenClaw, the upstream model credential remains in the Worker and
-Runtime receives only a per-session ModelGateway credential; it is never sent
-to the Tool VM. Kubernetes places
-the Worker; the Worker constrains both Cube sandboxes to that same node.
+The Tool data path is native SSH. Commands, file content, stdout, and stderr do
+not pass through PolicyCoordinator. A Runtime-side SSH hook sends only control
+metadata and blocks until admission returns `ADMIT`; after SSH finishes it sends
+an idempotent completion. `(session_id, execution_id)` joins prediction,
+admission, SSH, Tool cgroup/eBPF telemetry, and completion.
 
-OpenClaw has only the required `cube_shell` tool in experiment sessions; its
-host-local file, shell, process, browser, and patch tools are denied. Each
-ExperimentWorker starts one fixed-port ModelGateway on `0.0.0.0:18081` and one
-fixed-port `WorkerBridge` on `0.0.0.0:18080`. The controller creates one
-authenticated NodePort Service per SandboxTask with both target ports and
-`externalTrafficPolicy: Local`. The Runtime VM is
-advertised `http://<worker-node-InternalIP>:<allocated-nodePort>` and receives
-only that node InternalIP `/32` in `network_allow_out`. Each session has its own
-high-entropy bearer token and executor registration; requests never hold the
-registry lock while executing a Tool command. The Tool VM gets no bridge or
-model credential.
+During model waits, lightweight ModelGateway events are queued to policy workers.
+Policy decides when an idle Tool VM should be swapped out and restored;
+CubeSandbox performs create, pause/checkpoint, connect/restore, placement, and
+destroy. Gateway locks never contain slow lifecycle work.
 
-The ModelGateway has one session-local replay cursor, idempotency ledger,
-request fingerprint set, logical model-step count, timing record, and
-completion check per Runtime session. A logical model step is one newly
-accepted inference request; HTTP retries do not add steps. Replay fails closed
-on missing or extra entries, canonical input divergence, or undelivered
-responses. Fixed-delay eviction timers start at the real gateway request event,
-and lifecycle work is queued on a per-arm policy executor rather than performed
-in the gateway lock. Runtime prediction metadata comes from the immutable
-ClawTune-compatible P90 artifact, is attached to each Tool execution ID, and
-is rejected if missing or for another command. Validation and output hashing
-use a non-instrumented executor and are excluded from Tool/P90 evidence.
+ClawBox does not use SandboxTask CRDs, controllers, Jobs/Pods, Services,
+NodePorts, Kubernetes scheduling, or direct Firecracker management. Some legacy
+modules and deployment files still await deletion after the native SSH live gate;
+they are not supported architecture.
 
-This NodePort is an authenticated control-plane adapter required by this
-deployment because CubeSandbox guests cannot currently route to Kubernetes
-PodCIDR or ServiceCIDR addresses. It is not strict node-port-level egress
-isolation: the current CubeSandbox `allow_out` rule authorizes the node IP as a
-whole. Do not advertise a normal Worker Pod IP or ClusterIP to a Runtime VM.
+## Set up a research host
 
-## Current managed-measurement milestone
+Requirements:
 
-The source-level managed OpenClaw measurement gate is ready at commit
-`386170a` and the local suite passes. The cell controller RBAC now includes the
-task-owned Service permissions required to create, read, and delete the
-NodePort adapter; this was applied and verified on Kunpeng. The controller
-created the expected Service and Worker Job through the normal
-`SandboxTask -> controller` path.
+- ARM64 host with KVM and cgroup v2;
+- CubeSandbox 0.7.0 control/compute services and its official Python SDK;
+- working S3lvol/CubeCoW storage;
+- Runtime and Tool images built for ARM64;
+- the validated kprobe-enabled guest kernel when native eBPF telemetry is required;
+- Python 3.12+ and Docker/BuildKit for image builds.
 
-This milestone is intentionally stopped before the paper matrix. A temporary
-synthetic c1 attempt reached the Worker preflight but did not produce evidence,
-and was cleaned up. The live Kunpeng namespace has no temporary c1 task, Job,
-model-mock Service, or task-owned NodePort Service. Existing project tasks,
-templates, results, Cube data, and the validated kernel were preserved.
-
-Real c1 recording remains blocked until the operator supplies a task-scoped
-LLM credential Secret in `clawbox-benchmarks`; no usable `clawbox-llm` Secret
-was present on the host. Do not reuse the older `exec/read/edit` traces for the
-current managed `cube_shell` contract, and do not start c4/c8/c20/c40/c60.
-The next gate is: real c1 record, frozen trace/KB hashes, exact session-local
-replay equivalence, correct command-specific P90 provenance, exact-ID
-telemetry joins, and zero resource leaks. See
-[`docs/implementation-status.md`](docs/implementation-status.md) and
-[`docs/HANDOFF.md`](docs/HANDOFF.md) for the reproducible continuation record.
-
-ClawTune observes this trusted boundary. Each completed `cube_shell` call emits
-a Runtime-VM native ClawTune span and a matching Worker bridge record, Tool-VM
-cgroup snapshot, and eBPF clause artifact under the same execution ID. The
-Tool VM starts the guest collector; every command enters a dedicated cgroup
-before its execution gate opens. Missing kernel support or collector failures
-are recorded explicitly and never replaced with fabricated resource values.
-Runtime-side ClawTune predictors consume the cold-start or control-plane KB and
-proxy model calls, but never execute commands or own sandbox lifecycle policy.
-
-There is no selectable sandbox backend, SSH tool transport, ClawBox node agent,
-pool manager, custom scheduler, Kata execution path, or direct Firecracker
-execution path in the supported interface.
-
-## Public interface
-
-```bash
-clawbox experiment validate examples/experiments/vertical-slice.yaml
-clawbox experiment plan examples/experiments/vertical-slice.yaml
-clawbox experiment run examples/experiments/vertical-slice.yaml --project PROJECT_ID
-clawbox experiment status RUN_ID
-clawbox experiment cancel RUN_ID
-clawbox experiment collect RUN_ID
-```
-
-`run`, `status`, `cancel`, and `collect` use the managed API. Retry is an API
-Run/Attempt operation; Kubernetes Jobs use `backoffLimit: 0` and
-`restartPolicy: Never`.
-
-## Kunpeng installation
-
-Requirements are an ARM64 Kubernetes node with native `/dev/kvm`, cgroup v2,
-and at least 210 GiB free under `/data` when the installer creates its default
-200 GiB reflink XFS loopback allocation. Inspect before changing the host:
+On the validated Kunpeng deployment, inspect first and avoid changing a healthy
+kernel or storage installation:
 
 ```bash
 bash scripts/install-cubesandbox-kunpeng920.sh check
-```
-
-Install the pinned CubeSandbox release and its Kubernetes components:
-
-```bash
-export CUBE_MYSQL_PASSWORD='...'
-export CUBE_MYSQL_ROOT_PASSWORD='...'
-export CUBE_REDIS_PASSWORD='...'
-export CUBE_USE_CN_MIRROR=1        # optional
-bash scripts/install-cubesandbox-kunpeng920.sh install
-```
-
-The installer pins CubeSandbox `v0.7.0` at commit
-`d0081641c59822e4e5653b7462e914410b81910a`, configures 1.0 CPU/memory
-overcommit ratios and full paused-resource release, and installs cluster DNS for
-`*.cube.local`. It does not patch or replace the host kernel.
-
-Register the known ARM64 task template and run the real lifecycle smoke test:
-
-```bash
-python scripts/register-cube-template.py \
-  --image cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d \
-  --alias clawbox-task-arm64-4g --memory-mib 4096
-
+python -m venv .venv
+.venv/bin/pip install -e '.[dev,postgres]'
 CUBE_API_URL=http://127.0.0.1:30030 \
-python scripts/smoke-cubesandbox-kunpeng920.py \
-  --template tpl-c7212cdc724844639aa65486
+  .venv/bin/python scripts/audit-cube-sandboxes.py --json
 ```
 
-Deploy the CRD and controller after publishing immutable ARM64 Worker and
-control-plane images to the node registry:
+Build immutable pair images. Replace the base-image digests in the Dockerfiles
+only when intentionally publishing a new base generation:
 
 ```bash
-kubectl apply -f deploy/sandboxtask-crd.yaml
-kubectl apply -f deploy/cell-rbac.yaml
-kubectl apply -f deploy/cell-controller.yaml
-kubectl apply -f deploy/sandboxtask-vertical-slice.yaml
-kubectl -n clawbox-benchmarks get sandboxtask,job,pod
+KERNEL_SHA=f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
+docker build --network host --build-arg CUBE_GUEST_KERNEL_DIGEST="$KERNEL_SHA" \
+  -f docker/Dockerfile.runtime-cube -t REGISTRY/clawbox/runtime-cube-arm64:REV .
+docker build --network host --build-arg CUBE_GUEST_KERNEL_DIGEST="$KERNEL_SHA" \
+  -f docker/Dockerfile.tool-cube -t REGISTRY/clawbox/tool-cube-arm64:REV .
+docker push REGISTRY/clawbox/runtime-cube-arm64:REV
+docker push REGISTRY/clawbox/tool-cube-arm64:REV
 ```
 
-The Worker Service is created before the Worker Job so Kubernetes allocates its
-NodePort before Runtime VMs can be created. The Worker then binds its fixed
-listener, verifies the advertised NodePort returns the expected unauthenticated
-`401`, and only then starts Runtime sessions. Service selectors include the
-SandboxTask UID, owner references are set, and terminal reconciliation deletes
-the Service after killing task-owned sandboxes. A successful task therefore
-leaves no task-owned NodePort Service.
-
-Deployment examples contain machine-specific node names, template IDs, and
-immutable image digests; resolve and update them when targeting another node.
-
-## Experiment specification and results
-
-Schema v2 has no runtime or transport selector. It expands workload case ×
-repetition × concurrency × explicit policy tuple, randomizes arms with the
-recorded seed, and executes arms sequentially. See
-`examples/experiments/vertical-slice.yaml` and `smoke-matrix.yaml`.
-
-Each arm is persisted atomically before its completion marker. A run emits
-per-arm JSON, JSONL events, ClawTune-compatible `traces/*.jsonl` and
-`tool-bridge.jsonl`, `summary.json`, `summary.csv`, and `summary.md`.
-Results include the resolved policy, correctness, latency, lifecycle, physical
-node-memory/storage measurements, SandboxTask identity, and pinned Cube/template
-provenance. Failed or partial arms are rerun rather than reused.
-
-Bridge logs are correlation-only: task ID, session ID, execution ID, peer IP,
-selected Tool sandbox ID, dispatch and execution timestamps, response status,
-and latency. Bearer tokens are never logged. The fixed bridge is concurrent;
-slow Tool execution in one session does not block another session, and session
-unregister waits for that session's in-flight calls without affecting other
-registrations. Use the pair smoke and the WorkerBridge tests as the minimum
-bridge acceptance, then retain their JSON output alongside the arm results.
-The latest Kunpeng live results are recorded in
-`docs/kunpeng920-nodeport-acceptance.md`.
-
-Build an offline ClawTune dataset and evaluation from one or more completed run
-directories with:
+Register fresh templates by digest. Tool templates must expose SSH port 2222;
+both images expose envd on 49983 for Cube readiness:
 
 ```bash
-python -m clawbox.tuning /data/clawbox-results/RUN_ID \
-  --output-dir /data/clawbox-results/clawtune-analysis
+CUBE_API_URL=http://127.0.0.1:30030 .venv/bin/python \
+  scripts/register-cube-template.py RUNTIME_IMAGE@sha256:DIGEST \
+  --alias clawbox-runtime-REV --node NODE --memory-mib 2048 \
+  --exposed-port 49983 --probe-port 49983
+
+CUBE_API_URL=http://127.0.0.1:30030 .venv/bin/python \
+  scripts/register-cube-template.py TOOL_IMAGE@sha256:DIGEST \
+  --alias clawbox-tool-REV --node NODE --memory-mib 4096 \
+  --exposed-port 49983 --exposed-port 2222 --probe-port 49983
 ```
 
-The optional `clawbox-tune-server` serves the validated tenant/repository KB.
-Experiment specifications can consume an immutable exported p90 JSON through
-the `tool_p90` admission policy; it is measurement-derived policy input, not a
-second runtime control plane.
+Never reuse a failed or pre-kernel template as evidence. Gate 1 must verify
+create, native Runtime-to-Tool SSH, pause/checkpoint, physical-memory release,
+restore, post-restore SSH/telemetry, destroy, and zero owner leaks.
 
-## Verification
+## Define and run experiments
+
+Experiment YAML uses schema v2. Start from
+`examples/experiments/openclaw-cube.yaml`; pin Runtime/Tool template IDs, target
+node, memory budget, workload, replay trace, and policy tuples. Available
+mechanisms are:
+
+- admission: `lifetime_full`, `tool_full`, `tool_static`, `tool_p90`;
+- residency: `resident`, `snapshot_pause`;
+- eviction: `eager`, `fixed_delay`, `wait_aware_pressure`;
+- restore: `reactive`, `proactive`.
+
+Validate and inspect the randomized arm plan:
 
 ```bash
-python -m pip install -e '.[dev,postgres]'
+clawbox experiment validate experiment.yaml
+clawbox experiment plan experiment.yaml
+```
+
+Run the standalone worker directly against CubeSandbox. `CLAWBOX_CONTROL_HOST`
+must be an IP reachable from Runtime VMs; ports 18080 and 18081 are direct host
+listeners for policy control and ModelGateway respectively:
+
+```bash
+export CUBE_API_URL=http://127.0.0.1:30030
+export CLAWBOX_CONTROL_HOST=HOST_IP_REACHABLE_FROM_CUBE
+export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
+export OPENCLAW_API_KEY='...'       # API-recording runs only
+
+clawbox --output-root /data/clawbox-results experiment run experiment.yaml \
+  --run-id run-name
+clawbox --output-root /data/clawbox-results experiment status run-name
+clawbox --output-root /data/clawbox-results experiment collect run-name
+```
+
+Deterministic replay is the primary comparison mode: Runtime, OpenClaw, SSH,
+Tool VM, commands, memory pressure, and telemetry remain real; only model
+generation is replayed. Replay cursors and response state are per session.
+
+Progress through c1, c4/c8 correctness, c20 policy pilot, then c40/c60. Do not
+claim an arm unless output validation passes, exact-ID join rate is 1.0,
+telemetry loss and duplicate execution are zero, routing is session-correct,
+and all owned sandboxes are destroyed. Agent JCT excludes validation, hashing,
+cleanup, and stabilization.
+
+## Local verification
+
+```bash
 python -m pytest -q
+docker run --rm -e GOPROXY=https://goproxy.cn,direct \
+  -v "$PWD/toolbridge:/src" -w /src golang:1.25-bookworm go test ./...
 ```
 
-The synthetic Cube client is used only by unit tests. Runtime smoke and matrix
-claims require execution against the real Kunpeng CubeSandbox deployment.
+See [docs/HANDOFF.md](docs/HANDOFF.md) for the exact current live boundary and
+next implementation tasks.
