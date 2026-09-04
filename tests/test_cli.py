@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json
 
 from clawbox import cli
 
@@ -11,7 +11,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
     assert set(groups.choices) == {"experiment"}
     commands = next(action for action in groups.choices["experiment"]._actions
                     if action.dest == "command")
-    assert set(commands.choices) == {"validate", "plan", "run", "status", "cancel", "collect"}
+    assert set(commands.choices) == {"validate", "plan", "run", "status", "collect"}
 
 
 def test_validate_and_plan_v2(capsys) -> None:
@@ -22,23 +22,14 @@ def test_validate_and_plan_v2(capsys) -> None:
     assert '"arms"' in capsys.readouterr().out
 
 
-def test_run_and_status_use_managed_api(monkeypatch, capsys) -> None:
-    seen = {}
-
-    class FakeClient:
-        def __init__(self, base_url, *, token, tenant_id):
-            seen["tenant"] = tenant_id
-        def __enter__(self): return self
-        def __exit__(self, *_): return None
-        def create_experiment(self, **kwargs):
-            seen.update(kwargs)
-            return SimpleNamespace(run_id="run-1", phase="accepted", idempotency_replay=False)
-        def get_run(self, run_id): return {"runId": run_id, "phase": "succeeded"}
-
-    monkeypatch.setattr(cli, "ManagedAPIClient", FakeClient)
-    monkeypatch.setenv("CLAWBOX_TOKEN", "token")
-    spec = "examples/experiments/vertical-slice.yaml"
-    assert cli.main(["--tenant", "team-a", "experiment", "run", spec]) == 0
-    assert seen["tenant"] == "team-a" and seen["experiment_spec"]["schema_version"] == 2
-    assert cli.main(["experiment", "status", "run-1"]) == 0
-    assert '"phase": "succeeded"' in capsys.readouterr().out
+def test_status_and_collect_read_standalone_results(tmp_path, capsys) -> None:
+    run = tmp_path / "run-1"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps([
+        {"arm": {"arm_id": "arm-a"}, "status": "succeeded"},
+    ]), encoding="utf-8")
+    prefix = ["--output-root", str(tmp_path), "experiment"]
+    assert cli.main([*prefix, "status", "run-1"]) == 0
+    assert '"status": "succeeded"' in capsys.readouterr().out
+    assert cli.main([*prefix, "collect", "run-1"]) == 0
+    assert '"arm_id": "arm-a"' in capsys.readouterr().out

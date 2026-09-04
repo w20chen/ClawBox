@@ -148,6 +148,17 @@ class PolicyControlSession:
     def close(self, *, timeout: float | None = None) -> bool:
         return self._server.unregister(self.token, timeout=timeout)
 
+    def records(self) -> list[dict[str, Any]]:
+        with self._state.condition:
+            return [
+                {
+                    "request": dict(item.request),
+                    "admission": dict(item.admission) if item.admission else None,
+                    "completion": dict(item.completion) if item.completion else None,
+                }
+                for item in self._state.executions.values()
+            ]
+
 
 class PolicyControlServer:
     """Concurrent, per-session admission endpoint for native SSH hooks."""

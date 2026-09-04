@@ -11,6 +11,7 @@ import os
 import platform
 import statistics
 import subprocess
+import base64
 import sys
 import time
 import traceback
@@ -32,9 +33,11 @@ from clawbox.replay.trace import ReplayAction, load_trace
 from .memory import NodeMemorySampler
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
-from .openclaw_driver import WorkerBridge, run_openclaw
+from .openclaw_driver import NativeSSHConfig, run_openclaw
 from .policy import PolicyCoordinator, PolicyEventExecutor
+from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, PredictionUnavailable
+from .ssh_credentials import generate_ssh_credentials
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
 from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
@@ -111,37 +114,36 @@ class ExperimentWorker:
         if self.client.journal is None:
             self.client.journal = journal
         self.results: list[ResultEnvelope] = []
-        self.worker_bridge: WorkerBridge | None = None
+        self.policy_control: PolicyControlServer | None = None
         self.model_gateway: ManagedModelGateway | None = None
 
     def run(self) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
-        bridge_host = os.environ.get("CLAWBOX_BRIDGE_HOST", "").strip()
-        bridge_port = int(os.environ.get("CLAWBOX_BRIDGE_NODE_PORT", "0"))
-        gateway_host = os.environ.get("CLAWBOX_MODEL_GATEWAY_HOST", bridge_host).strip()
-        gateway_port = int(os.environ.get("CLAWBOX_MODEL_GATEWAY_NODE_PORT", "0"))
+        control_host = os.environ.get("CLAWBOX_CONTROL_HOST", "").strip()
+        policy_port = int(os.environ.get("CLAWBOX_POLICY_PORT", "18080"))
+        gateway_host = os.environ.get("CLAWBOX_MODEL_GATEWAY_HOST", control_host).strip()
+        gateway_port = int(os.environ.get("CLAWBOX_MODEL_GATEWAY_PORT", "18081"))
         arms = list(expand_matrix(self.spec))
-        requires_bridge = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
-        if requires_bridge and (not bridge_host or not bridge_port):
-            raise RuntimeError("WorkerBridge requires CLAWBOX_BRIDGE_HOST and CLAWBOX_BRIDGE_NODE_PORT")
-        if requires_bridge and (not gateway_host or not gateway_port):
+        requires_control = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
+        if requires_control and not control_host:
+            raise RuntimeError("native SSH policy control requires CLAWBOX_CONTROL_HOST")
+        if requires_control and not gateway_host:
             raise RuntimeError(
                 "managed ModelGateway requires CLAWBOX_MODEL_GATEWAY_HOST and "
                 "CLAWBOX_MODEL_GATEWAY_NODE_PORT"
             )
-        bridge_context = (
-            WorkerBridge(advertise_host=bridge_host, advertised_port=bridge_port)
-            if bridge_host and bridge_port else nullcontext(None)
+        policy_context = (
+            PolicyControlServer(advertise_host=control_host, advertised_port=policy_port,
+                                bind_port=policy_port)
+            if control_host else nullcontext(None)
         )
         gateway_context = (
             ManagedModelGateway(advertise_host=gateway_host, advertised_port=gateway_port)
             if gateway_host and gateway_port else nullcontext(None)
         )
-        with bridge_context as bridge, gateway_context as model_gateway:
-            self.worker_bridge = bridge
+        with policy_context as policy_control, gateway_context as model_gateway:
+            self.policy_control = policy_control
             self.model_gateway = model_gateway
-            if bridge is not None:
-                bridge.wait_ready()
             if model_gateway is not None:
                 model_gateway.wait_ready()
             for arm in arms:
@@ -151,7 +153,7 @@ class ExperimentWorker:
                     self.results.append(ResultEnvelope.model_validate_json(result_path.read_text()))
                     continue
                 self.results.append(self._run_arm(arm, result_path, marker_path))
-            self.worker_bridge = None
+            self.policy_control = None
             self.model_gateway = None
         self._write_summary()
         return self.results
@@ -316,19 +318,18 @@ class ExperimentWorker:
             for optional in ("CLAWBOX_KB_ENDPOINT", "CLAWBOX_KB_TOKEN"):
                 if value := os.environ.get(optional):
                     runtime_env[optional] = value
-            bridge_host = os.environ.get("CLAWBOX_BRIDGE_HOST", "").strip()
+            control_host = os.environ.get("CLAWBOX_CONTROL_HOST", "").strip()
             try:
-                bridge_address = ipaddress.ip_address(bridge_host)
+                control_address = ipaddress.ip_address(control_host)
             except ValueError as exc:
                 raise ValueError(
-                    "CLAWBOX_BRIDGE_HOST must be the Worker node InternalIP"
+                    "CLAWBOX_CONTROL_HOST must be a host IP reachable from Runtime VMs"
                 ) from exc
             runtime_allow_out.append(
-                f"{bridge_address}/{32 if bridge_address.version == 4 else 128}"
+                f"{control_address}/{32 if control_address.version == 4 else 128}"
             )
-            # The model gateway and WorkerBridge share the target node IP but
-            # use distinct fixed listeners/NodePorts. A single /32 is the
-            # narrow guest egress allowance supported by CubeSandbox today.
+            # ModelGateway and PolicyControl share the host address and have
+            # distinct direct listeners; Kubernetes/NodePort is not involved.
             if self.model_gateway is None:
                 raise RuntimeError("managed ModelGateway is not active")
             if kb_endpoint := runtime_env.get("CLAWBOX_KB_ENDPOINT"):
@@ -345,9 +346,17 @@ class ExperimentWorker:
             network_allow_out=runtime_allow_out,
             network_deny_out=["0.0.0.0/0"] if runtime_allow_out else None,
         )
+        ssh_credentials = generate_ssh_credentials()
         tool_env = {
             "TOOL_BRIDGE_LOG_PATH": "/var/lib/clawtune/artifacts/tool-bridge.jsonl",
             "TOOL_BRIDGE_WORKDIR": arm.sandbox.workspace,
+            "TOOL_MAX_CONCURRENCY": "1",
+            "CLAWBOX_TOOL_HOST_KEY_B64": base64.b64encode(
+                ssh_credentials.host_private.encode()
+            ).decode(),
+            "CLAWBOX_TOOL_AUTHORIZED_KEY_B64": base64.b64encode(
+                (ssh_credentials.client_public + "\n").encode()
+            ).decode(),
             "TASK_ID": session_id,
             "CELL_ID": self.task_uid,
             "CLAWBOX_REPOSITORY": arm.case.repository or arm.case.case_id,
@@ -361,6 +370,8 @@ class ExperimentWorker:
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
                     if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
         gateway_session: SessionGatewayState | None = None
+        policy_session = None
+        policy_drained = True
         wait_lock = Lock()
         wait_timer: Timer | None = None
         restore_timer: Timer | None = None
@@ -391,7 +402,7 @@ class ExperimentWorker:
                 try:
                     with wait_lock:
                         wait_timer = None
-                        if not lifecycle.resident:
+                        if not lifecycle.resident or coordinator.tool_active(session_id):
                             return
                         started = time.time()
                         elapsed = lifecycle.checkpoint_and_evict()
@@ -569,16 +580,19 @@ class ExperimentWorker:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
             timeline["sandbox_create_start"] = time.time()
-            runtime_create_s = runtime_lifecycle.start()
-            timeline["runtime_ready"] = time.time()
-            events.write({"event": "sandbox_created", "session_id": session_id,
-                          "role": "runtime", "service_seconds": runtime_create_s,
-                          "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
             tool_create_s = lifecycle.start()
-            timeline["sandbox_ready"] = time.time()
+            timeline["tool_ready"] = time.time()
             events.write({"event": "sandbox_created", "session_id": session_id,
                           "role": "tool", "service_seconds": tool_create_s,
+                          "lifecycle_timing": lifecycle.timings[-1],
                           "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
+            runtime_create_s = runtime_lifecycle.start()
+            timeline["runtime_ready"] = time.time()
+            timeline["sandbox_ready"] = timeline["runtime_ready"]
+            events.write({"event": "sandbox_created", "session_id": session_id,
+                          "role": "runtime", "service_seconds": runtime_create_s,
+                          "lifecycle_timing": runtime_lifecycle.timings[-1],
+                          "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
             create_s = runtime_create_s + tool_create_s
             runtime_executor = CubeCommandExecutor(
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
@@ -624,83 +638,105 @@ class ExperimentWorker:
             timeline["agent_execution_start"] = time.time()
             model_trace_path: Path | None = None
             if arm.agent.driver is AgentDriver.OPENCLAW:
-                def execute_openclaw_tool(command: str, timeout_s: float,
-                                          execution_id: str,
-                                          runtime_prediction: dict[str, Any] | None = None):
-                    if not lifecycle.resident:
-                        self._restore_with_one_victim(
-                            arm, session_id, lifecycle, coordinator, events,
-                        )
+                active_reservations: dict[str, int] = {}
+                reservation_lock = Lock()
+
+                def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
+                    execution_id = str(request["execution_id"])
                     prediction = (
-                        prediction_provider.resolve(command, runtime_prediction)
-                        if prediction_provider is not None else runtime_prediction
+                        prediction_provider.resolve_digest(
+                            str(request["command_sha256"]), request.get("prediction")
+                        ) if prediction_provider is not None else request.get("prediction")
                     )
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
-                    admission_wait = coordinator.acquire(
-                        session_id, amount, arm.execution.arm_timeout_seconds
-                    )
-                    coordinator.set_tool_active(session_id, True)
-                    try:
-                        result = execute_observed(
-                            command, timeout_s, execution_id, prediction=prediction,
+                    with wait_lock:
+                        if not lifecycle.resident:
+                            self._restore_with_one_victim(
+                                arm, session_id, lifecycle, coordinator, events,
+                            )
+                        admission_wait = coordinator.acquire(
+                            session_id, amount, arm.execution.arm_timeout_seconds
                         )
-                        if prediction is not None:
-                            prediction_record = dict(prediction)
-                            observed = observed_by_execution.get(execution_id)
-                            measured_memory = None
-                            if observed is not None:
-                                try:
-                                    raw_artifact = observed.artifacts.get("cgroup_resource_v1")
-                                    if raw_artifact:
-                                        measured_bytes = json.loads(raw_artifact).get(
-                                            "memory_rss_peak_bytes"
-                                        )
-                                        if measured_bytes is not None:
-                                            measured_memory = float(measured_bytes) / (1024 * 1024)
-                                except (TypeError, ValueError, json.JSONDecodeError):
-                                    measured_memory = None
-                            prediction_record.update({
-                                "session_id": session_id,
-                                "execution_id": execution_id,
-                                "raw_command_sha256": hashlib.sha256(command.encode()).hexdigest(),
-                                "actual_measured_memory_mib": measured_memory,
-                                "admitted_reservation_mib": amount,
-                                "admission_blocked_seconds": admission_wait,
-                            })
-                            prediction_records.append(prediction_record)
-                    finally:
-                        coordinator.set_tool_active(session_id, False)
+                        with reservation_lock:
+                            active_reservations[execution_id] = amount
+                            coordinator.set_tool_active(session_id, True)
+                    prediction_record = dict(prediction or {})
+                    prediction_record.update({
+                                 "session_id": session_id,
+                                 "execution_id": execution_id,
+                                 "command_sha256": request["command_sha256"],
+                                 "operation": request.get("operation"),
+                                 "actual_measured_memory_mib": None,
+                                 "admitted_reservation_mib": amount,
+                                 "admission_blocked_seconds": admission_wait,
+                    })
+                    prediction_records.append(prediction_record)
+                    events.write({
+                        "event": "tool_admitted", "session_id": session_id,
+                        "execution_id": execution_id,
+                        "command_sha256": request["command_sha256"],
+                        "prediction_key": prediction_record.get("canonical_prediction_key"),
+                        "prediction_source": prediction_record.get("prediction_source"),
+                        "fallback_level": prediction_record.get("fallback_level"),
+                        "predicted_memory_mib": prediction_record.get(
+                            "predicted_incremental_memory_mib"
+                        ),
+                        "admitted_memory_mib": amount,
+                        "admission_blocked_seconds": admission_wait,
+                    })
+                    return {"decision": "ADMIT", "admitted_memory_mib": amount,
+                            "admission_blocked_seconds": admission_wait}
+
+                def complete_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
+                    execution_id = str(request["execution_id"])
+                    with wait_lock, reservation_lock:
+                        amount = active_reservations.pop(execution_id)
                         coordinator.release(session_id, amount)
+                        coordinator.set_tool_active(session_id, bool(active_reservations))
+
+                    def eager_pause() -> None:
+                        with wait_lock, reservation_lock:
+                            if active_reservations or not lifecycle.resident:
+                                return
+                            pause_s = lifecycle.checkpoint_and_evict()
+                            coordinator.pause_count += 1
+                            coordinator.pause_service_seconds += pause_s
+                            events.write({
+                                "event": "sandbox_paused", "session_id": session_id,
+                                "service_seconds": pause_s,
+                                "reason": "openclaw_tool_complete",
+                            })
                     if (arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
                             and arm.policy.eviction is EvictionPolicy.EAGER):
-                        pause_s = lifecycle.checkpoint_and_evict()
-                        coordinator.pause_count += 1
-                        coordinator.pause_service_seconds += pause_s
-                        events.write({"event": "sandbox_paused", "session_id": session_id,
-                                      "service_seconds": pause_s, "reason": "openclaw_tool_complete"})
-                    return result
+                        policy_events.submit(eager_pause)
+                    events.write({"event": "tool_completed", "session_id": session_id,
+                                  "execution_id": execution_id,
+                                  "exit_code": request.get("exit_code")})
+                    return {"status": "COMPLETED"}
 
-                if self.worker_bridge is None:
-                    raise RuntimeError("WorkerBridge is not active")
-                bridge = self.worker_bridge.register(
-                    session_id, execute_openclaw_tool, task_id=self.task_uid,
-                    tool_sandbox_id=self.client.sandbox_id(lifecycle.sandbox),
+                if self.policy_control is None:
+                    raise RuntimeError("PolicyControlServer is not active")
+                policy_session = self.policy_control.register(
+                    session_id, admit=admit_openclaw_tool,
+                    complete=complete_openclaw_tool,
                 )
-                try:
-                    outcome = run_openclaw(
-                        prompt=arm.case.prompt, session_id=session_id,
-                        configuration=arm.inference.configuration, bridge=bridge,
-                        runtime_executor=runtime_executor,
-                        output_dir=self.output_root,
-                        timeout_seconds=arm.execution.arm_timeout_seconds,
-                        model_gateway=gateway_session,
-                        prediction_manifest=(
-                            prediction_provider.manifest
-                            if prediction_provider is not None else None
-                        ),
-                    )
-                finally:
-                    bridge.close()
+                tool_host = lifecycle.sandbox.get_host(2222)
+                outcome = run_openclaw(
+                    prompt=arm.case.prompt, session_id=session_id,
+                    configuration=arm.inference.configuration,
+                    ssh=NativeSSHConfig(
+                        target=f"executor@{tool_host}:2222",
+                        identity_private_key=ssh_credentials.client_private,
+                        host_public_key=ssh_credentials.host_public,
+                        workspace_root=arm.sandbox.workspace,
+                    ),
+                    policy_control=policy_session, runtime_executor=runtime_executor,
+                    output_dir=self.output_root,
+                    timeout_seconds=arm.execution.arm_timeout_seconds,
+                    model_gateway=gateway_session,
+                    prediction_manifest=(prediction_provider.manifest
+                                         if prediction_provider is not None else None),
+                )
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
                 if gateway_session is None:
                     raise RuntimeError("managed OpenClaw session has no ModelGateway state")
@@ -834,11 +870,23 @@ class ExperimentWorker:
                     restore_timer.cancel()
             if gateway_session is not None and self.model_gateway is not None:
                 self.model_gateway.unregister(gateway_session.token, timeout=30)
+            if policy_session is not None:
+                policy_drained = policy_session.close(timeout=30)
             try:
-                lifecycle.close()
+                tool_destroy_s = lifecycle.close()
+                events.write({
+                    "event": "sandbox_destroyed", "session_id": session_id,
+                    "role": "tool", "service_seconds": tool_destroy_s,
+                    "lifecycle_timing": lifecycle.timings[-1],
+                })
             finally:
                 try:
-                    runtime_lifecycle.close()
+                    runtime_destroy_s = runtime_lifecycle.close()
+                    events.write({
+                        "event": "sandbox_destroyed", "session_id": session_id,
+                        "role": "runtime", "service_seconds": runtime_destroy_s,
+                        "lifecycle_timing": runtime_lifecycle.timings[-1],
+                    })
                 finally:
                     timeline["sandbox_cleanup_end"] = time.time()
                     if timeline.get("validation_end"):
@@ -848,6 +896,8 @@ class ExperimentWorker:
                     if lifetime:
                         coordinator.release(session_id, lifetime)
                     coordinator.unregister(session_id)
+                    if not policy_drained:
+                        raise RuntimeError(f"policy session did not drain: {session_id}")
 
     def _actions(self, arm: ExperimentArm) -> list[ReplayAction]:
         if arm.agent.driver is not AgentDriver.REPLAY_ENGINE:

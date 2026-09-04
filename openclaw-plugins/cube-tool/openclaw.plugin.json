@@ -1,8 +1,0 @@
-{
-  "id": "clawbox-cube-tool",
-  "name": "ClawBox Cube Tool",
-  "description": "Runs untrusted coding-agent commands in the session CubeSandbox",
-  "contracts": {"tools": ["cube_shell"]},
-  "activation": {"onStartup": true},
-  "configSchema": {"type": "object", "additionalProperties": false}
-}

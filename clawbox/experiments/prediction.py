@@ -93,7 +93,11 @@ class CommandPredictionProvider:
         return {key: dict(value) for key, value in self._by_digest.items()}
 
     def resolve(self, command: str, runtime_metadata: dict[str, Any] | None) -> dict[str, Any]:
-        digest = command_sha256(command)
+        return self.resolve_digest(command_sha256(command), runtime_metadata)
+
+    def resolve_digest(self, digest: str,
+                       runtime_metadata: dict[str, Any] | None) -> dict[str, Any]:
+        """Resolve metadata without moving raw command text off the SSH path."""
         expected = self._by_digest.get(digest)
         if expected is None:
             with self._lock:

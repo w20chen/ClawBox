@@ -14,7 +14,6 @@ dependencies = [
   "sqlalchemy>=2.0",
   "uvicorn>=0.27",
   "docker>=7.0",
-  "kubernetes>=35,<36",
   "cryptography>=42",
   "numpy>=1.26",
   "psutil>=5.9",

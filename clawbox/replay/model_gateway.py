@@ -324,6 +324,15 @@ class ModelGateway:
                         item.delivered_unix_s - item.started_unix_s
                         if item.delivered_unix_s else None
                     ),
+                    "lifecycle_events": [
+                        {"event": name, "unix_s": timestamp}
+                        for name, timestamp in (
+                            ("ModelRequestStarted", item.started_unix_s),
+                            ("ModelResponseGenerated", item.model_generated_unix_s),
+                            ("ModelResponseReleased", item.response_released_unix_s),
+                            ("ModelResponseDelivered", item.delivered_unix_s),
+                        ) if timestamp > 0
+                    ],
                 })
                 records.append(record)
             return records

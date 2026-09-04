@@ -90,6 +90,10 @@ class PolicyCoordinator:
             state.last_used = time.monotonic()
             self._condition.notify_all()
 
+    def tool_active(self, session_id: str) -> bool:
+        with self._condition:
+            return self._sessions[session_id].tool_active
+
     def set_eviction_eligible(self, session_id: str, eligible: bool) -> None:
         with self._condition:
             state = self._sessions[session_id]

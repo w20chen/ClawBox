@@ -7,12 +7,9 @@ LABEL io.clawbox.cube-guest-kernel-digest="${CUBE_GUEST_KERNEL_DIGEST}"
 USER root
 COPY --from=cube-base /usr/bin/envd /usr/bin/envd
 COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-runtime-entrypoint.sh
-COPY openclaw-plugins/cube-tool /opt/clawbox/openclaw-plugins/cube-tool
 COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-runtime-entrypoint.sh \
- && chmod 0755 /usr/local/bin/ssh \
- && /usr/local/bin/npm install \
-      --prefix /opt/clawbox/openclaw-plugins/cube-tool --omit=dev --legacy-peer-deps
+ && chmod 0755 /usr/local/bin/ssh
 ENV PATH=/usr/local/bin:/opt/clawtune/venv/bin:$PATH
 ENV CLAWBOX_VM_ROLE=runtime
 WORKDIR /workspace

@@ -64,7 +64,7 @@ def test_openclaw_allows_managed_api_or_replay_and_keeps_secret_credentials_out_
     raw["agent"] = {"driver": "openclaw"}
     assert ExperimentSpec.model_validate(raw).inference.backend.value == "replay"
     raw["inference"] = {"backend": "api", "configuration": {"api_key": "do-not-store"}}
-    with pytest.raises(ValidationError, match="Kubernetes Secret"):
+    with pytest.raises(ValidationError, match="environment variable"):
         ExperimentSpec.model_validate(raw)
 
 

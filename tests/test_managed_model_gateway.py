@@ -69,6 +69,10 @@ def test_managed_gateway_keeps_replay_cursors_and_delivery_state_session_local(t
         ]
         assert first.gateway.logical_model_steps() == 1
         assert second.gateway.logical_model_steps() == 1
+        assert [event["event"] for event in first.records()[0]["lifecycle_events"]] == [
+            "ModelRequestStarted", "ModelResponseGenerated",
+            "ModelResponseReleased", "ModelResponseDelivered",
+        ]
         assert first.records()[0]["replay_index"] == 0
         assert second.records()[0]["replay_index"] == 0
         assert first.records()[0]["request_namespace"] == "session-a"

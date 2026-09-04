@@ -547,12 +547,13 @@ func handleConnection(raw net.Conn, config *ssh.ServerConfig, workdir string, ti
 		if err != nil {
 			continue
 		}
-		select {
-		case semaphore <- struct{}{}:
-			go handleSession(channel, channelRequests, workdir, timeout, outputLimit, semaphore)
-		default:
-			_ = channel.Close()
-		}
+		// Commands in one Tool VM queue for workspace semantics. Each Agent has
+		// its own bridge/semaphore, so a long command never serializes unrelated
+		// Agents.
+		go func() {
+			semaphore <- struct{}{}
+			handleSession(channel, channelRequests, workdir, timeout, outputLimit, semaphore)
+		}()
 	}
 }
 
