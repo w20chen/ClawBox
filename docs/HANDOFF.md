@@ -89,6 +89,12 @@ Commit `5a9598b` makes result provenance explicit for both VM roles: new
 bundles record separate Runtime and Tool template references, source images,
 and digests, while retaining the historical Tool provenance keys.
 
+Commit `65321cb` makes the matrix audit require immutable Runtime/Tool
+template IDs, source image references, and SHA-256 digests for formal
+OpenClaw experiments. Commit `0060297` protects a Tool before restore or
+memory admission begins, resolves the native route only after that boundary,
+and adds the focused admission-versus-delayed-pause race regression.
+
 The local c40 Worker gate now also materializes every implemented schema-v2
 policy recipe directly from the canonical baseline catalog against a
 concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete, all
@@ -320,8 +326,8 @@ NodePort, a ClawBox proxy, or a second allocator.
    its execution envelope to SSH commands produced by
    `process/read/write/edit/apply_patch`; unenveloped Agent operations must fail
    closed while setup/validation remain explicit non-agent phases.
-8. Add the focused admission-versus-delayed-pause race test, then run native
-   OpenClaw c4/c8 HOL/cross-routing and leak tests.
+8. Run native OpenClaw c4/c8 HOL/cross-routing and leak tests; the focused
+   admission-versus-delayed-pause race test is now covered by `0060297`.
 9. Only after those native gates pass, run c20 and finally c40/c60 native
    OpenClaw policy arms. The formal replay c40 matrix is also pending a
    corrected live run after CubeNode recovery.
