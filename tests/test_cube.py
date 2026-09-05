@@ -350,6 +350,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         }
         status, _content_type, _body, request_id = model_gateway.gateway.complete_http(payload)
         assert status == 200
+        # Proactive response preparation restores only Runtime. Tool remains
+        # swapped until the following Tool admission reserves memory for it.
+        assert SnapshotSandbox.created[0].resume_calls == 0
         model_gateway.mark_delivery(request_id, delivered=True)
         command = "true"
         command_sha256 = hashlib.sha256(command.encode()).hexdigest()
@@ -401,7 +404,10 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             "prompt": "hello",
         }]},
         "agent": {"driver": "openclaw"},
-        "inference": {"backend": "replay", "configuration": {"model": "recorded-model"}},
+        "inference": {"backend": "replay", "configuration": {
+            "model": "recorded-model", "model_wait_prediction_seconds": 0.3,
+            "model_wait_prediction_source": "frozen-test-predictor",
+        }},
         "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
         "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
         "execution": {"concurrency_levels": [1], "randomized_order": False,
@@ -412,7 +418,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                        "static_tool_memory_mib": 1},
         "policies": [{"name": "snapshot", "admission": "tool_static",
                       "reclamation": "snapshot_pause", "eviction": "eager",
-                      "restore": "reactive"}],
+                      "restore": "proactive", "prefetch_lead_seconds": 0.1}],
     })
     result = ExperimentWorker(
         spec, run_id="openclaw-snapshot", attempt_id="attempt", task_uid="task",
@@ -442,7 +448,10 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         row["phase"] for row in event_rows
         if row.get("event") == "openclaw_agent_pid_observed"
     }
-    assert {"before_runtime_pause", "after_runtime_restore_response"} <= pid_phases
+    assert "before_runtime_pause" in pid_phases
+    assert {
+        "after_runtime_restore_scheduled", "after_runtime_restore_response",
+    } & pid_phases
     pause_roles = {
         row.get("role") for row in event_rows if row.get("event") == "sandbox_paused"
     }

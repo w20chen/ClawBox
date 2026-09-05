@@ -161,6 +161,32 @@ def test_lifecycle_reservations_do_not_pollute_tool_admission_metrics() -> None:
     assert metrics["lifecycle_restore_reservation_wait_seconds"] >= 0
 
 
+def test_incremental_reservation_is_added_to_observed_host_memory() -> None:
+    policy = PolicySpec(name="resident", admission="tool_static", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=1, operation_headroom_mib=0,
+        physical_sample=lambda: (8 * 1024**2, 100 * 1024**2),
+    )
+    with pytest.raises(AdmissionTimeout):
+        coordinator.acquire("tool", 3, 0)
+
+
+def test_lifetime_capacity_claim_is_not_double_counted_after_materialization() -> None:
+    policy = PolicySpec(name="conservative", admission="lifetime_full",
+                        reclamation="resident", eviction="none", restore="none")
+    used = [0]
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=1, operation_headroom_mib=0,
+        physical_sample=lambda: (used[0], 100 * 1024**2),
+    )
+    coordinator.acquire_capacity("agent", 8, 1)
+    used[0] = 8 * 1024**2
+    coordinator.acquire("agent", 2, 1)
+    coordinator.release("agent", 2)
+    coordinator.release_capacity("agent", 8)
+
+
 def test_wait_plan_uses_only_request_time_prediction() -> None:
     policy = PolicySpec(
         name="predicted", admission="tool_static", reclamation="snapshot_pause",

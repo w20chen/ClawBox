@@ -13,6 +13,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -36,6 +37,8 @@ from clawbox.experiments.ssh_credentials import generate_ssh_credentials
 
 MARKER = "/run/clawbox-ssh/clawbox-tool-sandbox-id"
 ENVELOPE = "__CBX_EXEC_1__"
+BRIDGE_LOG = "/var/lib/clawtune/artifacts/tool-bridge.jsonl"
+ARTIFACT_ROOT = "/var/lib/clawtune/artifacts/tool-resource/"
 
 
 def endpoint_route(endpoint, epoch: int):
@@ -225,6 +228,60 @@ def complete_without_ssh(session, execution_id: str) -> None:
     with urllib.request.urlopen(http_request, timeout=30) as response:
         if response.status != 200:
             raise RuntimeError(f"rejected admission cleanup returned HTTP {response.status}")
+
+
+def validate_tool_telemetry(tool, policy_session, expected_ids: set[str]) -> dict[str, object]:
+    records = [
+        json.loads(line) for line in tool.files.read(BRIDGE_LOG).splitlines()
+        if line.strip()
+    ]
+    records = [
+        record for record in records
+        if record.get("execution_source") == "runtime-envelope"
+    ]
+    by_id: dict[str, list[dict]] = {}
+    for record in records:
+        by_id.setdefault(str(record.get("execution_id") or ""), []).append(record)
+    if set(by_id) != expected_ids or any(len(items) != 1 for items in by_id.values()):
+        raise AssertionError(
+            f"Tool telemetry IDs are not exact/unique: expected={sorted(expected_ids)} "
+            f"actual={sorted(by_id)}"
+        )
+    for execution_id in expected_ids:
+        record = by_id[execution_id][0]
+        if record.get("telemetry_state") != "complete" \
+                or record.get("telemetry_collection_validity") != "valid" \
+                or record.get("telemetry_cleanup") != "ok" \
+                or int(record.get("telemetry_loss_total") or 0):
+            raise AssertionError(
+                f"invalid telemetry for {execution_id}: {json.dumps(record, sort_keys=True)}"
+            )
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", execution_id)
+        cgroup = json.loads(tool.files.read(
+            f"{ARTIFACT_ROOT}cgroup-resource-{safe_id}.json"
+        ))
+        if cgroup.get("execution_id") != execution_id \
+                or cgroup.get("source") != "cgroup-v2" \
+                or cgroup.get("sampling_quality") != "valid":
+            raise AssertionError(f"invalid cgroup artifact for {execution_id}: {cgroup}")
+        telemetry_path = str(record.get("telemetry_artifact") or "")
+        if not telemetry_path.startswith(ARTIFACT_ROOT):
+            raise AssertionError(f"unsafe telemetry artifact path for {execution_id}")
+        telemetry = json.loads(tool.files.read(telemetry_path))
+        calls = telemetry.get("calls") or []
+        if len(calls) != 1 or calls[0].get("tool_call_id") != execution_id:
+            raise AssertionError(f"invalid eBPF call attribution for {execution_id}")
+    policy_ids = {item["request"]["execution_id"] for item in policy_session.records()}
+    if policy_ids != expected_ids:
+        raise AssertionError(
+            f"policy IDs differ from Tool telemetry: {sorted(policy_ids)}"
+        )
+    return {
+        "execution_ids": sorted(expected_ids),
+        "exact_id_join_rate": 1.0,
+        "telemetry_loss_total": 0,
+        "duplicate_tool_execution_count": 0,
+    }
 
 
 def main() -> int:
@@ -437,12 +494,14 @@ def main() -> int:
 
             policy_initial = []
             policy_after = []
+            expected_execution_ids: list[set[str]] = [set() for _ in range(args.count)]
             stale_probes = []
             resumed_probes = []
             after_ssh_config = []
             for index, (tool, ssh) in enumerate(zip(tools, ssh_before)):
                 identity, known_hosts = ssh_files[ssh.sandbox_id]
                 execution_before = f"{owner}-{index}-before"
+                expected_execution_ids[index].add(execution_before)
                 result = policy_ssh_call(
                     runtime, ssh, identity, known_hosts, sessions[index],
                     execution_before, f"cat {MARKER}",
@@ -459,6 +518,7 @@ def main() -> int:
                 stale_probes.append(stale)
 
                 execution_after = f"{owner}-{index}-after"
+                expected_execution_ids[index].add(execution_after)
                 # Deliberately pass the pre-pause target. The admission response
                 # must restore the Tool and be the only source of the current
                 # route for this call.
@@ -500,6 +560,10 @@ def main() -> int:
                     raise AssertionError(f"admission identity history mismatch: {history}")
                 if int(history[1]["epoch"]) <= int(history[0]["epoch"]):
                     raise AssertionError(f"endpoint epoch did not advance: {history}")
+            telemetry = [
+                validate_tool_telemetry(tool, sessions[index], expected_execution_ids[index])
+                for index, tool in enumerate(tools)
+            ]
             if any(item["completion"] is None for session in sessions for item in session.records()):
                 raise AssertionError("policy contains an incomplete execution")
             for session in sessions:
@@ -518,6 +582,16 @@ def main() -> int:
                 "ssh_config_before": before_ssh_config,
                 "ssh_config_after": after_ssh_config,
                 "cross_tool_rejected_before_ssh": args.count > 1,
+                "telemetry": telemetry,
+                "telemetry_exact_id_join_rate": min(
+                    float(item["exact_id_join_rate"]) for item in telemetry
+                ),
+                "telemetry_loss_total": sum(
+                    int(item["telemetry_loss_total"]) for item in telemetry
+                ),
+                "duplicate_tool_execution_count": sum(
+                    int(item["duplicate_tool_execution_count"]) for item in telemetry
+                ),
                 "unique_before": len(set(before_addresses)) == len(before_addresses),
                 "unique_after": len(set(after_addresses)) == len(after_addresses),
                 "zero_leaks": True,

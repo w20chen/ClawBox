@@ -4,6 +4,32 @@ Updated 2026-09-06 after the semantic CubeSandbox TCP-endpoint cutover,
 native-SSH route-gate investigation, host-network datapath audit, and Kunpeng
 recovery.
 
+## Latest superseding continuation
+
+The historical blocker narrative below is retained as an audit trail, but it
+is no longer the current state. CubeSandbox branch `clawbox/hostport-hairpin`
+commit `0dda1c4` fixed the supported same-node semantic HostPort datapath. Live
+Kunpeng gates now pass at c1, c4, and c8 with the current immutable Runtime
+template `tpl-437392a8c57b48ccb32ef2ee` and Tool template
+`tpl-4a67524e1fcd41859905c77b`. The c8 gate proves 16/16 exact PolicyControl +
+cgroup-v2 + native eBPF joins, zero telemetry loss/duplicates/wrong-Tool
+execution/leaks, stale-route rejection, and endpoint epoch advancement.
+
+CubeSandbox memory reclamation is also verified independently: pausing a Tool
+with a touched 1 GiB allocation removed its 1,248,739,328-byte host shim RSS and
+increased whole-host `MemAvailable` by 948,801,536 bytes; restore preserved the
+guest PID and memory. The evidence files and hashes are recorded at the top of
+`docs/implementation-status.md`.
+
+Current ClawBox work after `9843f08` corrects the shared physical-memory ledger
+so observed host use plus incremental create/restore/execution reservations is
+charged atomically, while conservative lifetime claims avoid double-counting
+resident memory. It also ensures proactive model response preparation restores
+Runtime only; Tool demand-restore remains admission-scoped. Formal scale is not
+yet claimed: next work is representative trajectory capture, ClawTune-derived
+frozen KB and guest-to-host calibration, then repeated c20/c40/c60 orthogonal
+policy arms and real-LLM c1/c2/c4 confirmation.
+
 ## Fixed direction
 
 The operator-facing setup contract is now consolidated in

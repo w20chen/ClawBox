@@ -871,46 +871,9 @@ class ExperimentWorker:
                         restore_timer = None
                         if str(event.get("request_id")) in completed_model_requests:
                             return
-                        runtime_resident = (
-                            not runtime_snapshot_enabled or runtime_lifecycle.resident
-                        )
-                        if lifecycle.resident and runtime_resident:
-                            target = wait_state.get("scheduled_restore_time")
-                            remaining = max(
-                                0.05,
-                                float(target) - time.time() if target is not None else 0.05,
-                            )
-                            restore_timer = Timer(
-                                remaining,
-                                lambda: policy_events.submit(restore_for_model_wait, event),
-                            )
-                            restore_timer.daemon = True
-                            restore_timer.start()
+                        if not runtime_snapshot_enabled or runtime_lifecycle.resident:
                             return
-                        restore_tool = not lifecycle.resident
                     restore_runtime_for_model_wait(event, phase="scheduled")
-                    if restore_tool:
-                        with wait_lock:
-                            wait_state["restore_started_at"] = time.time()
-                        agent_pid_before = observe_openclaw_agent_pid("before_tool_restore")
-                    elapsed = self._restore_with_one_victim(
-                        arm, session_id, lifecycle, coordinator, events,
-                    ) if restore_tool else 0.0
-                    if restore_tool:
-                        agent_pid_after = observe_openclaw_agent_pid("after_tool_restore")
-                        if agent_pid_before != agent_pid_after:
-                            raise RuntimeError(
-                                "OpenClaw agent PID changed across Tool restore: "
-                                f"{agent_pid_before} -> {agent_pid_after}"
-                            )
-                    with wait_lock:
-                        wait_state["restore_completed_at"] = time.time()
-                        wait_state["restore_request_id"] = event.get("request_id")
-                        if restore_tool:
-                            wait_state["openclaw_agent_pid"] = agent_pid_after
-                    # _restore_with_one_victim already records the service
-                    # event; retain the explicit timing for gateway provenance.
-                    _ = elapsed
                 except Exception as exc:
                     policy_event_errors.append(f"restore: {type(exc).__name__}: {exc}")
 
@@ -1056,7 +1019,9 @@ class ExperimentWorker:
         coordinator.register(session_id, lifecycle)
         try:
             if lifetime:
-                coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
+                coordinator.acquire_capacity(
+                    session_id, lifetime, arm.execution.arm_timeout_seconds,
+                )
                 lifetime_acquired = True
             if sandbox_create_gate is not None:
                 timeline["sandbox_create_gate_wait_start"] = time.time()
@@ -1719,7 +1684,7 @@ class ExperimentWorker:
                             0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]
                         )
                     if lifetime and lifetime_acquired:
-                        coordinator.release(session_id, lifetime)
+                        coordinator.release_capacity(session_id, lifetime)
                     coordinator.unregister(session_id)
                     if not policy_drained:
                         raise RuntimeError(f"policy session did not drain: {session_id}")

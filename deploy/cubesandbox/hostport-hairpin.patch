@@ -1,5 +1,5 @@
 diff --git a/CubeNet/src/mvmtap.bpf.c b/CubeNet/src/mvmtap.bpf.c
-index bcd2f75..dae70c4 100644
+index bcd2f75..58c2feb 100644
 --- a/CubeNet/src/mvmtap.bpf.c
 +++ b/CubeNet/src/mvmtap.bpf.c
 @@ -234,6 +234,75 @@ enum tcp_nat_result {
@@ -113,7 +113,7 @@ index bcd2f75..dae70c4 100644
  
  			return bpf_redirect(nodenic_ifindex, 0);
  		}
-@@ -1069,6 +1154,21 @@ int from_cube(struct __sk_buff *skb)
+@@ -1069,6 +1154,26 @@ int from_cube(struct __sk_buff *skb)
  		 * behavior of the do_tcp_nat() path; UDP/ICMP silently drop.
  		 * dport is 0 because the original check was port-agnostic.
  		 */
@@ -125,11 +125,16 @@ index bcd2f75..dae70c4 100644
 +			if (!__pull_headers(skb, &l2, &l3, &l4))
 +				return TC_ACT_SHOT;
 +			dport = l4->dest;
-+			if (classify_egress_flow(ifindex, daddr, dport, proto) == FLOW_REJECT)
-+				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 +			target = bpf_map_lookup_elem(&remote_port_mapping, &dport);
++			/* A populated mapping is a CubeSandbox-owned internal route,
++			 * not arbitrary access to the node subnet. Recognize it before
++			 * applying the sandbox's external egress deny list, which normally
++			 * includes the pod/private range hosting this endpoint. Unmapped
++			 * node traffic remains subject to the normal policy below. */
 +			if (target)
 +				return tcp_hairpin_proxy(skb, l2, l3, l4, target);
++			if (classify_egress_flow(ifindex, daddr, dport, proto) == FLOW_REJECT)
++				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 +			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 +		}
  		switch (classify_egress_flow(ifindex, daddr, 0, proto)) {

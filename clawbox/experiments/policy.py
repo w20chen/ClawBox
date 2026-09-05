@@ -62,7 +62,12 @@ class PolicyCoordinator:
         self.operation_headroom_mib = operation_headroom_mib
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self._condition = Condition()
+        # Incremental reservations cover memory not represented by the current
+        # host sample yet (VM create/restore) or memory a Tool is predicted to
+        # add. Lifetime capacity claims describe an already-resident footprint
+        # and therefore must not be added to that same observed footprint.
         self._reservations: dict[str, int] = {}
+        self._capacity_claims: dict[str, int] = {}
         self._waiters: deque[object] = deque()
         self._sessions: dict[str, SessionState] = {}
         self.blocked_seconds = 0.0
@@ -88,6 +93,7 @@ class PolicyCoordinator:
         with self._condition:
             self._sessions.pop(session_id, None)
             self._reservations.pop(session_id, None)
+            self._capacity_claims.pop(session_id, None)
             self._condition.notify_all()
 
     def set_tool_active(self, session_id: str, active: bool) -> None:
@@ -127,10 +133,16 @@ class PolicyCoordinator:
     def pressure(self, additional_bytes: int = 0) -> bool:
         return bool(self._pressure_reasons(additional_bytes))
 
-    def _pressure_reasons(self, additional_bytes: int = 0) -> tuple[str, ...]:
+    def _pressure_reasons(self, additional_bytes: int = 0, *,
+                          capacity_claim: bool = False) -> tuple[str, ...]:
         used, available = self.physical_sample()
-        committed = sum(self._reservations.values()) + additional_bytes
-        charged = max(used, committed) + self.operation_headroom_bytes
+        incremental = sum(self._reservations.values())
+        capacity = sum(self._capacity_claims.values())
+        if capacity_claim:
+            capacity += additional_bytes
+        else:
+            incremental += additional_bytes
+        charged = max(used, capacity) + incremental + self.operation_headroom_bytes
         reasons = []
         if charged > self.budget_bytes:
             reasons.append("configured_memory_budget")
@@ -139,7 +151,8 @@ class PolicyCoordinator:
         return tuple(reasons)
 
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float, *,
-                wait_class: str = "tool_admission") -> float:
+                wait_class: str = "tool_admission",
+                capacity_claim: bool = False) -> float:
         started = time.monotonic()
         amount = amount_mib * MIB
         if amount == 0:
@@ -159,7 +172,9 @@ class PolicyCoordinator:
             try:
                 while True:
                     at_head = self._waiters[0] is ticket
-                    safety_reasons = self._pressure_reasons(amount) if at_head else ()
+                    safety_reasons = self._pressure_reasons(
+                        amount, capacity_claim=capacity_claim,
+                    ) if at_head else ()
                     if at_head and not safety_reasons:
                         break
                     for reason in safety_reasons:
@@ -185,9 +200,12 @@ class PolicyCoordinator:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
                     self._condition.wait(min(0.2, remaining))
                 self._waiters.popleft()
-                self._reservations[session_id] = self._reservations.get(session_id, 0) + amount
+                ledger = self._capacity_claims if capacity_claim else self._reservations
+                ledger[session_id] = ledger.get(session_id, 0) + amount
                 self.peak_commitment_bytes = max(
-                    self.peak_commitment_bytes, sum(self._reservations.values()))
+                    self.peak_commitment_bytes,
+                    sum(self._capacity_claims.values()) + sum(self._reservations.values()),
+                )
                 self._condition.notify_all()
             except Exception:
                 if ticket in self._waiters:
@@ -254,15 +272,29 @@ class PolicyCoordinator:
         }
 
     def release(self, session_id: str, amount_mib: int) -> None:
+        self._release_from(self._reservations, session_id, amount_mib)
+
+    def acquire_capacity(self, session_id: str, amount_mib: int,
+                         timeout_s: float) -> float:
+        return self.acquire(
+            session_id, amount_mib, timeout_s,
+            wait_class="tool_admission", capacity_claim=True,
+        )
+
+    def release_capacity(self, session_id: str, amount_mib: int) -> None:
+        self._release_from(self._capacity_claims, session_id, amount_mib)
+
+    def _release_from(self, ledger: dict[str, int], session_id: str,
+                      amount_mib: int) -> None:
         amount = amount_mib * MIB
         with self._condition:
-            current = self._reservations.get(session_id, 0)
+            current = ledger.get(session_id, 0)
             if amount > current:
                 raise RuntimeError(f"reservation underflow for {session_id}")
             if amount == current:
-                self._reservations.pop(session_id, None)
+                ledger.pop(session_id, None)
             else:
-                self._reservations[session_id] = current - amount
+                ledger[session_id] = current - amount
             self._condition.notify_all()
 
     def victim_for_restore(self, session_id: str) -> SessionState | None:

@@ -2,6 +2,62 @@
 
 ## Current milestone
 
+### Superseding live update: memory reclamation and native c8 are green
+
+The earlier deployment-topology blocker described later in this document has
+been resolved in CubeSandbox, not bypassed in ClawBox. CubeSandbox source commit
+`0dda1c4` recognizes an exact `remote_port_mapping` route before the ordinary
+Runtime egress deny decision. The Kunpeng CubeNode is running the corresponding
+temporary diagnostic binary. Runtime now reaches only CubeSandbox's semantic
+`get_tcp_endpoint(2222)` result; no proxy, guest-IP fallback, NodePort, Redis
+lookup, or ClawBox port allocator was introduced.
+
+Fresh immutable artifacts used by the current gates are Runtime template
+`tpl-437392a8c57b48ccb32ef2ee` (image digest `sha256:f4009d045edd932e0246e790af6e43bff36a295b9fb0dd41d2aa38864ea132d0`)
+and Tool template `tpl-4a67524e1fcd41859905c77b` (image digest
+`sha256:95ef090dc3036f7f2acd9190234f04d07a226b95b6855e855adf76a4e69aa092`).
+The Tool image contains the exact patched OpenCloudOS 6.6.119 kernel source
+needed by ClawTune/BCC; the prior generic 6.18 headers produced invalid native
+telemetry and are not accepted evidence.
+
+The bounded physical-memory probe is now green. A Tool with a touched 1 GiB
+allocation had 1,248,739,328 bytes of matching host-process RSS before pause
+and no matching live process afterward. Whole-host `MemAvailable` increased by
+948,801,536 bytes. Restore completed in 0.203 seconds and preserved guest PID
+20 and its allocation. The evidence is
+`/tmp/clawbox-memory-reclaim-exact.json` on Kunpeng (SHA-256
+`1b2104dd17194886f3fb7b9b43b170066dc4e99d25f3a289f2b9a6d6f6985979`).
+This verifies that this deployment's CubeSandbox pause means snapshot plus live
+microVM eviction; the formal experiments must still report every event's
+observed bytes rather than infer reclamation from API success.
+
+The exact native route/identity/telemetry gate passes at c4 and c8. At c8 all
+16 admitted SSH executions joined exactly across PolicyControl, Tool bridge,
+cgroup-v2, and native eBPF artifacts; telemetry loss, duplicates, wrong-Tool
+execution, and leaks were zero. Every stale pre-pause endpoint failed, every
+endpoint epoch advanced, and cross-Tool identity was rejected before OpenSSH.
+Kunpeng evidence files are `/tmp/clawbox-route-c4-telemetry.json` (SHA-256
+`dc025d26e8af320d1675e4a201eed27a6da4ad644e76a61bc5e3d8a83f5a6c84`)
+and `/tmp/clawbox-route-c8-telemetry.json` (SHA-256
+`253c19870d10c070c1103496be0fb44da7156bba42d2eb10ded6ee4c0e7396c2`).
+The post-gate CubeSandbox inventory was empty.
+
+The shared memory ledger now distinguishes observed/reserved physical capacity
+from incremental commitments. Admission charges
+`max(observed_host_delta, lifetime_capacity_claims) + incremental_reservations
++ safety_headroom`; VM create/restore footprints and predicted Tool execution
+increments are reserved before materialization, while conservative lifetime
+claims are not double-counted once resident. Proactive model-response handling
+restores only Runtime. Tool remains swapped until its next admission has first
+reserved execution and restore memory. These are implementation mechanisms,
+not oracle policy choices; replay still cannot consume the recorded future wait.
+
+The remaining paper gates are representative API-captured trajectories, frozen
+ClawTune KB calibration and guest-to-host increment calibration, managed replay
+c20/c40/c60 with repeated orthogonal baselines, and real-LLM c1/c2/c4. The
+checked-in single marker trace remains smoke-only and must not be presented as
+formal evidence.
+
 The deployment contract is now written down in
 [`docs/cubesandbox-setup.md`](cubesandbox-setup.md) and linked from the
 README. It has two explicit paths: prepare a fresh standalone CubeSandbox
