@@ -1,5 +1,1 @@
-* text=auto eol=lf
-*.sh text eol=lf
-*.py text eol=lf
-*.go text eol=lf
-Dockerfile* text eol=lf
+deploy/cubesandbox/*.patch whitespace=-blank-at-eol
