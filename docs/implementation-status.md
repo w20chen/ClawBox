@@ -125,6 +125,11 @@ attempt timed out. The single-node inventory has no second physical node or
 private NIC for an independent HostPort test, so no same-node hairpin or BPF
 hit-path success is claimed.
 
+The standalone one-click bundle was not installed on Kunpeng. A build-only
+attempt was canceled after the ARM64 builder stalled in its Ubuntu package
+download; the live diagnostic Kubernetes deployment was not modified and
+remains healthy with zero sandboxes.
+
 ## Evidence
 
 | Boundary | Status |

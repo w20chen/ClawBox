@@ -321,6 +321,13 @@ deployment topology must not be optimized in ClawBox; the formal native SSH
 path remains pending a deployment-owned semantic endpoint that Runtime can
 actually reach.
 
+The standalone one-click bundle was not installed on Kunpeng. A build-only
+attempt from the prepared CubeSandbox checkout was canceled after the ARM64
+builder's Ubuntu package download stalled for about twelve minutes. No
+standalone service, K8s object, host-network setting, or persistent Cube data
+was changed by that attempt. The current host remains the healthy diagnostic
+Kubernetes profile described above.
+
 A further read-only `GET /templates/<id>` probe found a provenance mismatch that
 must be resolved before the next live run: the accepted Tool template
 `tpl-b5cb6f5ee26a41448000b9c2` still references the checked-in Tool digest
