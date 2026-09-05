@@ -170,10 +170,11 @@ def main() -> int:
         print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)
         return_code = 127
     ssh_reaped_at = time.time()
+    execution_completed_at = time.time()
     completion = {
         **request,
         "execution_started_at": execution_started_at,
-        "execution_completed_at": time.time(),
+        "execution_completed_at": execution_completed_at,
         "exit_code": return_code,
         "endpoint_sandbox_id": route["sandbox_id"],
         "endpoint_epoch": route["epoch"],

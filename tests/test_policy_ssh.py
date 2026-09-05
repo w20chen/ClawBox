@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -101,3 +103,51 @@ def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(
 
     assert policy_ssh.main() == 125
     assert posted == ["/v1/tool/admit"]
+
+
+def test_policy_does_not_complete_while_ssh_child_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[tuple[str, dict]] = []
+    child_started = threading.Event()
+    release_child = threading.Event()
+
+    def post(path: str, body: dict, *, attempts: int) -> dict:
+        posted.append((path, body))
+        if path.endswith("/admit"):
+            return {
+                "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 10,
+                "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+            }
+        return {"status": "COMPLETED"}
+
+    class Child:
+        def wait(self) -> int:
+            child_started.set()
+            if not release_child.wait(timeout=2):
+                raise AssertionError("test child was not released")
+            return 0
+
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda _argv: Child())
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
+
+    result: list[int] = []
+    thread = threading.Thread(target=lambda: result.append(policy_ssh.main()))
+    thread.start()
+    assert child_started.wait(timeout=2)
+    time.sleep(0.02)
+    assert [path for path, _body in posted] == ["/v1/tool/admit"]
+    release_child.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result == [0]
+    assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
+    completion = posted[-1][1]
+    assert completion["ssh_reaped_at"] <= completion["execution_completed_at"]
