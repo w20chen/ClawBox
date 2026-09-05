@@ -122,7 +122,9 @@ additional stress or recovery mutation was attempted. A subsequent
 experiment pins `sha256:05cb920d...`; the Runtime template must be rebuilt or
 reconciled before live native-SSH evidence is admissible. The Tool template
 still reports the checked-in Tool digest and its create metadata exposes the
-existing `2222:49983` mapping.
+existing `2222:49983` mapping. The older replay-matrix Runtime alias also
+resolves to a `READY` template with `sha256:02ae0ff3...`, so its historical
+results are not evidence for the current Runtime artifact.
 
 Live route finding: `Sandbox.get_host(2222)` is an HTTP ingress authority, not
 an OpenSSH endpoint. CubeMaster/CubeProxy metadata proves the existing

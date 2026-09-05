@@ -223,6 +223,14 @@ Runtime artifact. Do not run or claim a native c1 gate with that Runtime ID
 until a fresh Runtime template is registered from the checked-in image digest
 or the deployed revision is independently reconciled.
 
+The same inventory shows the Runtime alias used by the older replay matrices,
+`clawbox-runtime-arm64-2g-v3`, resolves to
+`tpl-743b4bf146c642328ebe4e70` with image digest `sha256:02ae0ff3...`, so
+those unpinned historical matrix configs are not current-artifact evidence
+either. The checked-in OpenClaw configs are digest-pinned and will now fail
+closed through the Worker gate until a matching Runtime template is
+registered.
+
 Current-source runs after `a4be792` emit `session_timing` events containing
 `session`, `agent`, per-sandbox create, validation, hashing, and cleanup spans.
 `7a0740f` additionally records failed lifecycle attempts, control admission and
