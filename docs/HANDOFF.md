@@ -79,6 +79,12 @@ canonical baseline catalog; and raw CubeSandbox routes without an explicit
 mapped port fail closed instead of defaulting to SSH port 22. `bdf6fba` records
 the live Runtime template provenance mismatch described below.
 
+Post-audit milestones `4327903`, `23449da`, `24a96f0`, and `62858a7` are also
+pushed. They bind native artifact joins to the session identity, exercise the
+managed API listener and API-to-replay export, and correct Runtime egress so
+explicitly internet-enabled arms are not accidentally closed by the control
+plane allowlist. The full local suite and compile/diff gates remain green.
+
 Commit `53b1733` adds a creation-time provenance gate: whenever schema-v2 pins
 an image digest, Worker verifies the corresponding CubeSandbox Template record
 through the official Template API before creating either VM. A `READY` status
@@ -234,7 +240,9 @@ Kubernetes API is alive (`/version`, `/readyz`, and `/livez` returned 200), the
 Cube API health endpoint is alive, and both accepted templates still report
 `READY` with the expected CubeNode replica metadata. However,
 `GET /v2/sandboxes` remains empty, the CubeNode daemon port 9999 is closed, and
-the host SSH service now stalls during key exchange or session setup. One
+the host SSH service now stalls during key exchange or session setup. A fresh
+probe still returns Cube API health 200 with zero sandboxes, while `ssh kunpeng`
+does not complete after the authorization banner. One
 owner-tagged SDK Tool create was attempted with the existing
 `CUBE_PROXY_NODE_IP`/`CUBE_PROXY_PORT_HTTP` transport and a 20-second request
 timeout; it hung before returning a sandbox ID and the post-check still showed
