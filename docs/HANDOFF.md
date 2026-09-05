@@ -215,6 +215,10 @@ aliases. The pre-schema-v2 direct-Firecracker `clawbox replay study` path now
 fails closed with a migration message rather than importing removed workflow
 types or selecting a second backend.
 
+The current replay-worker observation path also uses the actual replay/OpenClaw
+Tool name (for example `exec`) in ClawTune spans and worker events; it no
+longer emits the retired `cube_shell` label.
+
 The managed gateway has both replay and API implementations. Replay is covered
 by session-local cursor, retry, delivery, and HOL tests. API mode is covered by
 an upstream-compatible integration test that verifies model forwarding and

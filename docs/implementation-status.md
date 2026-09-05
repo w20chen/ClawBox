@@ -49,6 +49,8 @@ all policy tuples resolve through the immutable current catalog, and no
 removed Tool template or `cube_shell` OpenClaw prompt is present. The old
 direct-Firecracker study compatibility entry point is now explicit and
 fail-closed; it cannot silently select a removed workflow schema.
+Current replay-worker telemetry likewise records the actual Tool operation name
+(for example `exec`) instead of the retired `cube_shell` label.
 
 ## Evidence
 
