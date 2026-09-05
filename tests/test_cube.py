@@ -18,6 +18,7 @@ from clawbox.cube import (
     Ownership,
 )
 from clawbox.experiments import BASELINES, ExperimentSpec
+from clawbox.experiments.policy import PolicyCoordinator
 from clawbox.experiments.worker import ExperimentWorker
 
 
@@ -286,6 +287,75 @@ def test_cleanup_uses_journal_and_metadata_fallback(tmp_path: Path) -> None:
     client.kill_owned_sandboxes("task")
     assert first.sandbox_id not in _Sandbox.items
     assert second.sandbox_id not in _Sandbox.items
+
+
+def test_cleanup_attempts_every_owned_sandbox_after_one_kill_fails() -> None:
+    class PartiallyFailingSandbox(_Sandbox):
+        failed = False
+
+        def kill(self):
+            if not type(self).failed:
+                type(self).failed = True
+                raise RuntimeError("transient kill failure")
+            return super().kill()
+
+    PartiallyFailingSandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=PartiallyFailingSandbox)
+    first = client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
+    second = client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
+    with pytest.raises(RuntimeError, match="kill errors="):
+        client.kill_owned_sandboxes("task")
+    # The first failure is reported, but the second owned sandbox was still
+    # attempted and removed.  A retry can reclaim the failed first handle.
+    assert second.sandbox_id not in PartiallyFailingSandbox.items
+    assert first.sandbox_id in PartiallyFailingSandbox.items
+    client.kill_owned_sandboxes("task")
+    assert PartiallyFailingSandbox.items == {}
+
+
+def test_failed_lifetime_admission_does_not_underflow_cleanup_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(
+        '{"type":"action","action_type":"tool_exec","action_id":"t",'
+        '"ts_start":0,"ts_end":0,"data":{"tool_name":"exec",'
+        '"args":{"command":"true"},"exit_code":0}}\n',
+        encoding="utf-8",
+    )
+    spec = ExperimentSpec.model_validate({
+        "schema_version": 2, "experiment_id": "failed-admission-cleanup",
+        "workload": {"source": "recorded_trace", "input": str(trace)},
+        "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
+        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
+        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
+        "execution": {"concurrency_levels": [1], "randomized_order": False,
+                       "arm_timeout_seconds": 1, "stabilization_seconds": 0},
+        "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
+                       "emergency_free_memory_mib": 1},
+        "policies": [{"name": "naive", "admission": "lifetime_full",
+                      "reclamation": "resident", "eviction": "none", "restore": "none"}],
+    })
+    unregistered: list[str] = []
+    original_unregister = PolicyCoordinator.unregister
+
+    def fail_acquire(self, session_id: str, amount_mib: int, timeout_s: float) -> float:
+        raise RuntimeError("admission deliberately failed")
+
+    def record_unregister(self, session_id: str) -> None:
+        unregistered.append(session_id)
+        original_unregister(self, session_id)
+
+    monkeypatch.setattr(PolicyCoordinator, "acquire", fail_acquire)
+    monkeypatch.setattr(PolicyCoordinator, "unregister", record_unregister)
+    result = ExperimentWorker(
+        spec, run_id="run", attempt_id="attempt", task_uid="task",
+        output_root=tmp_path / "results", client=CubeSandboxClient(sandbox_class=_Sandbox),
+    ).run()[0]
+    assert result.status.value == "failed"
+    assert "reservation underflow" not in str(result.correctness["failure"])
+    assert len(unregistered) == 1
+    assert unregistered[0].endswith("-0000")
 
 
 def test_worker_runs_atomic_arm_and_skips_matching_completion(tmp_path: Path) -> None:

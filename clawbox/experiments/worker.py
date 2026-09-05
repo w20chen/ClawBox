@@ -476,6 +476,7 @@ class ExperimentWorker:
         gateway_session: SessionGatewayState | None = None
         policy_session = None
         policy_drained = True
+        lifetime_acquired = False
         wait_lock = Lock()
         wait_timer: Timer | None = None
         restore_timer: Timer | None = None
@@ -699,6 +700,7 @@ class ExperimentWorker:
         try:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
+                lifetime_acquired = True
             if sandbox_create_gate is not None:
                 timeline["sandbox_create_gate_wait_start"] = time.time()
                 sandbox_create_gate.acquire()
@@ -1238,7 +1240,7 @@ class ExperimentWorker:
                         timeline["cleanup_overhead_seconds"] = max(
                             0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]
                         )
-                    if lifetime:
+                    if lifetime and lifetime_acquired:
                         coordinator.release(session_id, lifetime)
                     coordinator.unregister(session_id)
                     if not policy_drained:

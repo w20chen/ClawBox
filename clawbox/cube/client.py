@@ -284,12 +284,28 @@ class CubeSandboxClient:
     def kill_owned_sandboxes(self, owner_id: str) -> None:
         ids = self.journal.sandbox_ids(task_uid=owner_id) if self.journal else []
         ids.extend(self._info_id(item) for item in self.list_owned_sandboxes(owner_id))
+        errors: list[str] = []
         for sandbox_id in dict.fromkeys(filter(None, ids)):
-            self.kill_sandbox(sandbox_id)
+            try:
+                self.kill_sandbox(sandbox_id)
+            except Exception as exc:
+                # A single stale/broken handle must not prevent cleanup of the
+                # other sandboxes in this task.  Continue through the complete
+                # ownership set, then fail closed after a fresh list check.
+                errors.append(f"{sandbox_id}: {type(exc).__name__}: {exc}")
         remaining = self.list_owned_sandboxes(owner_id)
-        if remaining:
-            raise RuntimeError(f"CubeSandbox cleanup incomplete for task {owner_id}: "
-                               f"{[self._info_id(item) for item in remaining]}")
+        if errors or remaining:
+            details = []
+            if errors:
+                details.append("kill errors=" + repr(errors))
+            if remaining:
+                details.append(
+                    "remaining=" + repr([self._info_id(item) for item in remaining])
+                )
+            raise RuntimeError(
+                f"CubeSandbox cleanup incomplete for task {owner_id}: "
+                + "; ".join(details)
+            )
 
     @staticmethod
     def _info_id(info: dict[str, Any]) -> str:
