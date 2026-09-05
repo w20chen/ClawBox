@@ -1,7 +1,8 @@
 # ClawBox continuation handoff
 
 Updated 2026-09-05 after the semantic CubeSandbox TCP-endpoint cutover,
-native-SSH route-gate investigation, and Kunpeng recovery attempt.
+native-SSH route-gate investigation, host-network datapath audit, and Kunpeng
+recovery.
 
 ## Fixed direction
 
@@ -167,17 +168,24 @@ cannot; the Runtime receives `Connection refused` even though the Tool bridge
 is listening and the host-side TCP probe succeeds. The isolated Tool guest
 address is not a valid substitute.
 
-During diagnosis, a temporary `hostNetwork=true` CubeNode experiment was
-reverted and its failed replacement/debug pods were removed. The node then
-required a root-initiated reboot to clear stale containerd tasks. The first
-post-reboot health check was green, but the subsequent c40 replay stress left
-CubeNode in CrashLoopBackOff (`gateway mac for eth0 via 169.254.1.1 not found`)
-and the host later stopped completing SSH handshakes. This is a deployment
-recovery blocker, not a reason to add a ClawBox networking layer. Existing
-kernel, S3lvol, templates, and results were not intentionally modified or
-deleted. The remote ClawBox checkout is at
-`d42da58` with the native-endpoint production files synchronized in its working
-tree; pre-existing untracked `results/` and `uv.lock` are preserved.
+During the latest diagnosis, a temporary `hostNetwork=true` CubeNode
+experiment was run with zero sandboxes. A live `cubevsmapdump` showed the
+existing `remote_port_mapping` entries for guest port 2222 and `tc` showed the
+CubeSandbox `from_world` ingress program attached. Nevertheless, host
+self-connect, CubeProxy-to-endpoint, and an external TCP probe all returned
+`Connection refused`; Tool bridge setup consequently received a CubeProxy 502
+from the same upstream endpoint. This proves that CubeSandbox creates the
+semantic mapping and programs its datapath, but does not prove Runtime
+reachability in this deployment. The experiment was reverted to
+`hostNetwork=false`/`ClusterFirst`. Rollback briefly reproduced
+`gateway mac for eth0 via 169.254.1.1 not found`; a root-initiated reboot with
+zero sandboxes restored CubeNode to `3/3`, restored the API, and left
+`GET /v2/sandboxes` empty. This is a deployment topology/recovery blocker, not
+a reason to add a ClawBox networking layer. Existing kernel, S3lvol, templates,
+and results were not intentionally modified or deleted. The remote ClawBox
+checkout is at `d42da58` with the native-endpoint production files synchronized
+in its working tree; pre-existing untracked `results/` and `uv.lock` are
+preserved.
 
 The updated Cube API image was built and deployed as
 `127.0.0.1:5000/clawbox/cube-api:route-endpoint-b3a1ee7`, registry digest
@@ -227,27 +235,23 @@ was added. The already-built ARM64 API image
 the node-local registry. A live Tool then returned JSON from the semantic SDK
 path, for example `192.168.3.175:20019` for container port 2222.
 
-The fresh post-reboot templates used for subsequent gates are Runtime
-`tpl-e682eb059452495ca0ac4c17` (digest `sha256:05cb920d...`, current kernel
-binding `sha256-a63aa77e9c2d`) and Tool
-`tpl-06b699a92c694c7ba3e6465b` (digest `sha256:b175fea...`, exposure
-`2222:49983`, same current kernel binding). The Tool bridge listens on guest
-2222 and the host can connect through the semantic mapping, but a Runtime VM
-cannot reach the CubeNode Pod IP even with the explicit Runtime `allow_out`
-rule; it can reach the node's public SSH IP. Thus c1 still fails at the
-Runtime-to-Tool identity check, with no successful native c1/c4/c8 claim.
+The post-reboot normal-network templates used for the latest Runtime-to-Tool
+probe were Runtime `tpl-3871262f976946fa835f3035` and Tool
+`tpl-bc7533c482984dcc9594efdf`, both with the current kernel and checked-in
+image digests. The Tool bridge listened on guest 2222 and CubeSandbox returned
+the existing pod-IP `HostIP:mappedPort` route, but the Runtime VM received
+`Connection refused`. The fresh host-network diagnostic templates were
+Runtime `tpl-55ad06ce2a3a4d61b5682ef2` and Tool
+`tpl-980d2310ac4c4dfcbd077128`; they are not valid follow-up templates after
+the host-network experiment was reverted. No successful native c1/c4/c8 claim
+exists.
 
 The route gate now includes a bounded readiness wait after the semantic route
 is resolved (commit `c8debc4`); it does not change the endpoint or retry the
-SSH command. A temporary CubeNode `hostNetwork=true` patch was tested while
-the sandbox inventory was zero. It changed the advertised endpoint to the
-node's public IP but Cubelet failed its startup probe and was killed, so the
-patch was reverted to `hostNetwork=false`/`ClusterFirst`. The reverted Cubelet
-entered CrashLoopBackOff. With no live sandboxes, root `systemctl reboot` was
-then invoked on Kunpeng to clear the known containerd/CubeNode recovery state;
-verify post-boot Cubelet readiness before creating anything. Do not leave the
-hostNetwork experiment enabled and do not work around the topology with a
-proxy, NodePort, Redis lookup, or guest IP.
+SSH command. The host-network diagnostic temporarily advertised the node
+public IP, but the existing CubeSandbox BPF route still refused TCP from host,
+CubeProxy, and outside the node. Do not leave that experiment enabled and do
+not work around the topology with a proxy, NodePort, Redis lookup, or guest IP.
 
 Two failed template records are expected from discovery and must not be reused:
 
@@ -267,21 +271,16 @@ creates/cleans, but used the legacy `sandbox-code` template without the
 ClawTune Tool bridge; its 40 sessions per arm failed validation. Commit
 `65ed9cf` now points every replay suite at the accepted instrumented Tool
 template and updates the real-LLM example to current templates. The corrected
-c40 suites remain pending CubeNode recovery.
+c40 suites remain pending a Runtime-reachable semantic endpoint; the latest
+reboot recovered CubeNode control-plane health but did not change that
+datapath result.
 
-The latest read-only recovery probe on 2026-09-05 confirmed that the public
-Kubernetes API is alive (`/version`, `/readyz`, and `/livez` returned 200), the
-Cube API health endpoint is alive, and both accepted templates still report
-`READY` with the expected CubeNode replica metadata. However,
-`GET /v2/sandboxes` remains empty, the CubeNode daemon port 9999 is closed, and
-the host SSH service now authenticates the configured public key but stalls
-while opening the session channel. A fresh probe completes TCP, KEX, host-key
-verification, and public-key authentication, then times out before
-`printf live-ssh-ok` runs; Cube API health remains 200 with zero sandboxes. One
-owner-tagged SDK Tool create was attempted with the existing
-`CUBE_PROXY_NODE_IP`/`CUBE_PROXY_PORT_HTTP` transport and a 20-second request
-timeout; it hung before returning a sandbox ID and the post-check still showed
-zero sandboxes. No c40 retry was started and no recovery mutation was made.
+The final recovery check on 2026-09-05 found CubeNode `3/3` with
+`hostNetwork=false`/`ClusterFirst`, a responding Cube API, and
+`GET /v2/sandboxes` equal to `[]`. The host-network diagnostic was not left
+enabled. No c40 retry was started and no native c1 was claimed after recovery;
+the normal-network c1 identity probe still fails at Runtime-to-mapped-endpoint
+TCP reachability.
 
 A further read-only `GET /templates/<id>` probe found a provenance mismatch that
 must be resolved before the next live run: the accepted Tool template

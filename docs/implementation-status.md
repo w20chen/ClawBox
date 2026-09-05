@@ -63,11 +63,11 @@ An exact OpenClaw replay trace must be exported from a successful API-mode c1
 run before replay c40 is claimed.
 
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
-corrected ARM64 Tool image was built and a fresh kernel-bound Tool template was
-accepted on Kunpeng. The full live native SSH pair and managed real-inference
-c1 gates remain pending because this Cube deployment does not expose the
-per-sandbox mapped SSH port to Runtime; no c20+ paper claim is made for the
-native OpenClaw path.
+corrected ARM64 Tool image was built and fresh kernel-bound Runtime/Tool
+templates were accepted on Kunpeng. The full live native SSH pair and managed
+real-inference c1 gates remain pending because this Cube deployment does not
+make the existing per-sandbox mapped SSH port Runtime-reachable; no c20+ paper
+claim is made for the native OpenClaw path.
 
 The checked-in baseline matrix audit is also green: all eight schema-v2
 experiment files load and plan with the expected c1/c4/c20/c40/c60 levels,
@@ -104,9 +104,11 @@ empty-body 404 even though direct CubeMaster metadata contained the per-sandbox
 registered and the SDK endpoint call now returns the expected raw endpoint.
 The host-side Tool probe succeeds, but Runtime-to-CubeNode-Pod traffic is still
 refused, so this remains a deployment-topology blocker rather than a ClawBox
-endpoint-resolution gap. A temporary CubeNode host-network patch was reverted
-after Cubelet failed its startup probe; a root reboot was invoked with zero
-sandboxes to recover the node before the next gate.
+endpoint-resolution gap. A zero-sandbox host-network experiment confirmed the
+existing `remote_port_mapping` and attached `from_world` BPF program, but host,
+CubeProxy, and external TCP probes all refused the advertised endpoint. The
+experiment was reverted; a root reboot then restored CubeNode to `3/3` with
+`hostNetwork=false` and left the API inventory empty.
 
 ## Evidence
 
@@ -123,22 +125,24 @@ sandboxes to recover the node before the next gate.
 | Runtime image build/push | passed; digest `05cb920d...` |
 | Tool image build/push | passed; digest `b175fea7...` |
 | Runtime template record | mismatch; `tpl-39efe4ad90384a1fbea3caff` is `READY` but currently reports `sha256:79a492d2...` / `CLAWBOX_REVISION=c4af3d825...`, not the checked-in `sha256:05cb920d...` pin |
-| Fresh Tool template + kprobe binding | passed; `tpl-b5cb6f5ee26a41448000b9c2` |
-| Replay decision c40 | historical bundle; corrected rerun pending CubeNode recovery |
-| Replay full-system c40 | historical bundle; corrected rerun pending CubeNode recovery |
-| Replay reclamation c40 | historical bundle; corrected rerun pending CubeNode recovery |
-| Replay smoke-matrix c40 | corrected config committed; rerun pending CubeNode recovery |
-| Replay spatial c40 | historical bundle; corrected rerun pending CubeNode recovery |
-| Replay vertical-slice c40 | corrected config committed; rerun pending CubeNode recovery |
+| Fresh normal-network Runtime template + kprobe binding | passed; `tpl-3871262f976946fa835f3035` |
+| Fresh normal-network Tool template + kprobe binding | passed; `tpl-bc7533c482984dcc9594efdf` |
+| Host-network diagnostic templates | not reusable after rollback; Runtime `tpl-55ad06ce2a3a4d61b5682ef2`, Tool `tpl-980d2310ac4c4dfcbd077128` |
+| Replay decision c40 | historical bundle; corrected rerun pending a Runtime-reachable semantic endpoint |
+| Replay full-system c40 | historical bundle; corrected rerun pending a Runtime-reachable semantic endpoint |
+| Replay reclamation c40 | historical bundle; corrected rerun pending a Runtime-reachable semantic endpoint |
+| Replay smoke-matrix c40 | corrected config committed; rerun pending a Runtime-reachable semantic endpoint |
+| Replay spatial c40 | historical bundle; corrected rerun pending a Runtime-reachable semantic endpoint |
+| Replay vertical-slice c40 | corrected config committed; rerun pending a Runtime-reachable semantic endpoint |
 | CubeMaster/CubeProxy existing Tool 2222 mapping | proved; semantic API returns per-sandbox raw endpoint |
 | Endpoint identity/epoch/stale/cross-Tool unit gates | passed; cross-Tool route is rejected before SSH spawn |
 | OpenClaw target semantics/PID witness | passed; target is captured and Agent PID witness is stable across lifecycle callbacks |
 | SSH completion ordering | passed; `/complete` follows child reaping and records `ssh_reaped_at <= execution_completed_at` |
-| Real Runtime-to-Tool native SSH | blocked; current pod-IP mapping is reachable from host but refused from Runtime |
+| Real Runtime-to-Tool native SSH | blocked; normal-network pod-IP mapping is reachable from host but refused from Runtime; host-network map/BPF proof still refused TCP |
 | Pause -> policy restore -> SSH -> telemetry | blocked by deployment topology; no live c1 claim |
 | Managed real-inference c1 | pending; operator credential is present but not sent by automation |
 | Deterministic c1 replay equivalence | prior 27-step API-captured export/replay matched 27/27; current native OpenClaw c1 pending |
-| c4/c8/c20/c40/c60 | corrected replay c40 and native OpenClaw scale pending CubeNode recovery |
+| c4/c8/c20/c40/c60 | corrected replay c40 and native OpenClaw scale pending a Runtime-reachable semantic endpoint |
 
 The earlier c40 artifacts were retained on kunpeng under
 `/tmp/clawbox-baseline-results40`, but the post-reboot cleanup removed that
@@ -173,9 +177,11 @@ mapping while the Runtime VM cannot. Guest `hostname -I` is isolated and must
 not be used. A temporary host-network experiment was reverted; the host then
 rebooted to clear stale containerd tasks. Post-reboot c1 again failed at
 Runtime -> mapped endpoint with `Connection refused` and cleaned up to zero
-sandboxes. The later c40 stress left CubeNode CrashLooping with a missing
-pod-network gateway MAC, so no c4/c8/c20/c40/c60 native result or corrected
-replay c40 result is valid yet.
+sandboxes. The later c40 stress temporarily left CubeNode CrashLooping with a
+missing pod-network gateway MAC. A subsequent zero-sandbox rollback and reboot
+restored CubeNode `3/3`; no c4/c8/c20/c40/c60 native result or corrected replay
+c40 result is valid yet because Runtime still cannot reach the semantic
+endpoint.
 
 See `docs/HANDOFF.md` for exact provenance, discovered failures, host state,
 and ordered continuation steps. Kubernetes-era code still in the tree is
