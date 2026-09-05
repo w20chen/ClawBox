@@ -94,8 +94,9 @@ required a root-initiated reboot to clear stale containerd tasks; recovery must
 be rechecked before any further live test. That recovery check is now complete:
 the node is Ready, CubeNode is 3/3 Running, no debug pod remains, and the owned
 sandbox list is empty. Existing kernel, S3lvol, templates, and results were not
-intentionally modified or deleted. Repository is at `de74a26` on the remote
-checkout with pre-existing untracked `results/` and `uv.lock` preserved.
+intentionally modified or deleted. The remote ClawBox checkout is at
+`d42da58` with the native-endpoint production files synchronized in its working
+tree; pre-existing untracked `results/` and `uv.lock` are preserved.
 
 The updated Cube API image was built and deployed as
 `127.0.0.1:5000/clawbox/cube-api:route-endpoint-b3a1ee7`, registry digest
