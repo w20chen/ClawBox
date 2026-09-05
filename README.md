@@ -113,6 +113,10 @@ listeners for policy control and ModelGateway respectively:
 
 ```bash
 export CUBE_API_URL=http://127.0.0.1:30030
+# Existing CubeProxy HTTP transport for SDK data-plane requests; this is not
+# the native SSH endpoint and does not allocate or proxy Tool port 2222.
+export CUBE_PROXY_NODE_IP=HOST_IP_REACHABLE_FROM_WORKER
+export CUBE_PROXY_PORT_HTTP=30080
 export CLAWBOX_CONTROL_HOST=HOST_IP_REACHABLE_FROM_CUBE
 export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
 export OPENCLAW_API_KEY='...'       # API-recording runs only

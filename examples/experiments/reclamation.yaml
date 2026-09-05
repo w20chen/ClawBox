@@ -4,7 +4,7 @@ workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitio
 agent: {driver: replay_engine}
 inference: {backend: replay}
 runtime: {template_alias: clawbox-runtime-arm64-2g-v3, vcpu: 1, memory_mib: 2048}
-sandbox: {template_alias: clawbox-task-arm64, vcpu: 2, memory_mib: 4096}
+sandbox: {template_alias: clawbox-tool-native-ssh-de74a26, vcpu: 2, memory_mib: 4096}
 execution: {concurrency_levels: [20, 40, 60], random_seed: 20260903}
 resources: {target_node: kunpeng920b-0, pool_memory_budget_mib: 1600000, emergency_free_memory_mib: 200000, checkpoint_restore_headroom_mib: 8192, p90_predictions: examples/predictions/smoke-p90.json}
 policies:
