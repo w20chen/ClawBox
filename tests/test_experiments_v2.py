@@ -66,11 +66,23 @@ def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
         "sandbox_cleanup_start": 10.0,
         "sandbox_cleanup_end": 11.0,
         "session_finished": 11.0,
+        "sandbox_create_gate_wait_start": 1.0,
+        "sandbox_create_gate_acquired": 2.0,
     })
     by_name = {item["name"]: item for item in spans}
     assert by_name["agent"]["duration_seconds"] == 4.5
     assert by_name["sandbox.create"]["duration_seconds"] == 2.0
+    assert by_name["sandbox.create.queue"]["duration_seconds"] == 1.0
     assert by_name["sandbox.cleanup"]["duration_seconds"] == 1.0
+
+
+def test_worker_bounds_pair_creation_for_high_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "3")
+    assert ExperimentWorker._sandbox_create_limit(40) == 3
+    assert ExperimentWorker._sandbox_create_limit(2) == 2
+    monkeypatch.setenv("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "0")
+    with pytest.raises(ValueError, match="positive integer"):
+        ExperimentWorker._sandbox_create_limit(40)
 
 
 def test_v2_rejects_backend_transport_and_invalid_policy() -> None:

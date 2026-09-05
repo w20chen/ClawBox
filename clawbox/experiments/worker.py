@@ -20,7 +20,7 @@ from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
-from threading import Lock, Timer
+from threading import Lock, Semaphore, Timer
 from types import SimpleNamespace
 from typing import Any
 
@@ -94,6 +94,8 @@ def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, float | str]]:
     """Build stable, machine-readable spans from session lifecycle markers."""
     pairs = (
         ("session", "session_started", "session_finished"),
+        ("sandbox.create.queue", "sandbox_create_gate_wait_start",
+         "sandbox_create_gate_acquired"),
         ("sandbox.create", "sandbox_create_start", "sandbox_ready"),
         ("sandbox.tool.create", "tool_create_start", "tool_ready"),
         ("sandbox.runtime.create", "runtime_create_start", "runtime_ready"),
@@ -147,6 +149,22 @@ class ExperimentWorker:
         self.results: list[ResultEnvelope] = []
         self.policy_control: PolicyControlServer | None = None
         self.model_gateway: ManagedModelGateway | None = None
+
+    @staticmethod
+    def _sandbox_create_limit(concurrency: int) -> int:
+        """Bound pair creation so c40 does not stampede Cubelet/containerd."""
+        raw = os.environ.get("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "8")
+        try:
+            limit = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                "CLAWBOX_SANDBOX_CREATE_CONCURRENCY must be a positive integer"
+            ) from exc
+        if limit < 1:
+            raise ValueError(
+                "CLAWBOX_SANDBOX_CREATE_CONCURRENCY must be a positive integer"
+            )
+        return min(concurrency, limit)
 
     def run(self) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -221,13 +239,15 @@ class ExperimentWorker:
                 repository=arm.case.repository or arm.case.case_id,
             )
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
+        sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
         sampler.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
         try:
             with ThreadPoolExecutor(max_workers=arm.concurrency, thread_name_prefix="agent") as pool:
                 futures = [pool.submit(self._run_session, arm, index, coordinator, events,
-                                       policy_events, prediction_provider)
+                                       policy_events, prediction_provider,
+                                       sandbox_create_gate)
                            for index in range(arm.concurrency)]
                 for future in as_completed(futures, timeout=arm.execution.arm_timeout_seconds):
                     try:
@@ -349,7 +369,8 @@ class ExperimentWorker:
 
     def _run_session(self, arm: ExperimentArm, index: int, coordinator: PolicyCoordinator,
                      events: EventWriter, policy_events: PolicyEventExecutor,
-                     prediction_provider: CommandPredictionProvider | None = None) -> dict[str, Any]:
+                     prediction_provider: CommandPredictionProvider | None = None,
+                     sandbox_create_gate: Semaphore | None = None) -> dict[str, Any]:
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
         timeline: dict[str, Any] = {"session_started": time.time()}
@@ -663,39 +684,55 @@ class ExperimentWorker:
         try:
             if lifetime:
                 coordinator.acquire(session_id, lifetime, arm.execution.arm_timeout_seconds)
-            timeline["sandbox_create_start"] = time.time()
-            timeline["tool_create_start"] = time.time()
-            tool_create_s = lifecycle.start()
-            timeline["tool_ready"] = time.time()
-            events.write({"event": "sandbox_created", "session_id": session_id,
-                          "role": "tool", "service_seconds": tool_create_s,
-                          "lifecycle_timing": lifecycle.timings[-1],
-                          "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
-            setup_route = None
-            if arm.agent.driver is AgentDriver.OPENCLAW:
-                tool_endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
-                route_epoch += 1
-                setup_route = native_ssh_route(tool_endpoint, epoch=route_epoch)
-                try:
-                    endpoint_address = ipaddress.ip_address(setup_route.host)
-                except ValueError as exc:
-                    raise RuntimeError(
-                        f"CubeSandbox returned a non-IP TCP endpoint host: {setup_route.host!r}"
-                    ) from exc
-                runtime_lifecycle.network_allow_out.append(
-                    f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
-                )
-                runtime_lifecycle.network_allow_out = list(
-                    dict.fromkeys(runtime_lifecycle.network_allow_out)
-                )
-            timeline["runtime_create_start"] = time.time()
-            runtime_create_s = runtime_lifecycle.start()
-            timeline["runtime_ready"] = time.time()
-            timeline["sandbox_ready"] = timeline["runtime_ready"]
-            events.write({"event": "sandbox_created", "session_id": session_id,
-                          "role": "runtime", "service_seconds": runtime_create_s,
-                          "lifecycle_timing": runtime_lifecycle.timings[-1],
-                          "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
+            if sandbox_create_gate is not None:
+                timeline["sandbox_create_gate_wait_start"] = time.time()
+                sandbox_create_gate.acquire()
+                timeline["sandbox_create_gate_acquired"] = time.time()
+                events.write({
+                    "event": "sandbox_create_gate_acquired", "session_id": session_id,
+                    "wait_seconds": max(
+                        0.0,
+                        timeline["sandbox_create_gate_acquired"]
+                        - timeline["sandbox_create_gate_wait_start"],
+                    ),
+                })
+            try:
+                timeline["sandbox_create_start"] = time.time()
+                timeline["tool_create_start"] = time.time()
+                tool_create_s = lifecycle.start()
+                timeline["tool_ready"] = time.time()
+                events.write({"event": "sandbox_created", "session_id": session_id,
+                              "role": "tool", "service_seconds": tool_create_s,
+                              "lifecycle_timing": lifecycle.timings[-1],
+                              "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
+                setup_route = None
+                if arm.agent.driver is AgentDriver.OPENCLAW:
+                    tool_endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
+                    route_epoch += 1
+                    setup_route = native_ssh_route(tool_endpoint, epoch=route_epoch)
+                    try:
+                        endpoint_address = ipaddress.ip_address(setup_route.host)
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f"CubeSandbox returned a non-IP TCP endpoint host: {setup_route.host!r}"
+                        ) from exc
+                    runtime_lifecycle.network_allow_out.append(
+                        f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
+                    )
+                    runtime_lifecycle.network_allow_out = list(
+                        dict.fromkeys(runtime_lifecycle.network_allow_out)
+                    )
+                timeline["runtime_create_start"] = time.time()
+                runtime_create_s = runtime_lifecycle.start()
+                timeline["runtime_ready"] = time.time()
+                timeline["sandbox_ready"] = timeline["runtime_ready"]
+                events.write({"event": "sandbox_created", "session_id": session_id,
+                              "role": "runtime", "service_seconds": runtime_create_s,
+                              "lifecycle_timing": runtime_lifecycle.timings[-1],
+                              "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
+            finally:
+                if sandbox_create_gate is not None:
+                    sandbox_create_gate.release()
             create_s = runtime_create_s + tool_create_s
             runtime_executor = CubeCommandExecutor(
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
