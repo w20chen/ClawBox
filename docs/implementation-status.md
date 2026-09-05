@@ -2,6 +2,16 @@
 
 ## Current milestone
 
+The deployment contract is now written down in
+[`docs/cubesandbox-setup.md`](cubesandbox-setup.md) and linked from the
+README. It has two explicit paths: prepare a fresh standalone CubeSandbox
+deployment, or preflight an existing deployment before running ClawBox. The
+checked-in `deploy/cubesandbox/semantic-tcp-endpoint.patch` plus
+`prepare-semantic-source.sh` makes the semantic CubeAPI route and matching SDK
+reproducible from the public v0.7.0 source tag. The Kunpeng Kubernetes profile
+is explicitly diagnostic only because its HostPort address is a Pod IP that
+Runtime cannot reach.
+
 The source architecture has been cut over from Kubernetes/HTTP Tool execution
 to standalone CubeSandbox plus native OpenClaw SSH. PolicyControl is a
 synchronous metadata-only control path, while Runtime-to-Tool commands and

@@ -1,5 +1,13 @@
 # CubeSandbox v0.7.0 on Kunpeng 920B
 
+> This document describes the reproducible Kunpeng Kubernetes profile, not
+> the final native-SSH deployment. The live single-node profile reports a
+> Kubernetes Pod IP as the semantic HostPort address, and Runtime-to-that
+> endpoint is not reachable. Do not use it to claim native c1/c4/c8 or scale
+> results. For a fresh or already-installed machine, use
+> [the supported setup guide](cubesandbox-setup.md), which requires a
+> deployment-owned physical/private endpoint reachable from Runtime.
+
 ClawBox uses native ARM64 KVM through CubeSandbox. PVM is explicitly disabled.
 The pin is tag `v0.7.0`, commit
 `d0081641c59822e4e5653b7462e914410b81910a`, with Python package

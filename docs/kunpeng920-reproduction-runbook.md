@@ -1,5 +1,12 @@
 # Reproducible Kunpeng 920B CubeSandbox setup
 
+> This is a historical/reproducible Kubernetes profile for the Kunpeng host.
+> It is not the final native-SSH topology: the current single-node deployment
+> publishes a Pod-IP HostPort that Runtime cannot reach. Use
+> [docs/cubesandbox-setup.md](cubesandbox-setup.md) for fresh-machine and
+> already-setup-machine instructions, and do not promote this runbook's
+> lifecycle smoke to native c1/c4/c8 evidence.
+
 This is the shortest verified path to reproduce the ARM64 CubeSandbox
 environment used by ClawBox. It records the important live-host steps as well
 as the source-controlled files that implement them. Do not use old READY

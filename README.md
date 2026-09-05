@@ -34,7 +34,40 @@ NodePorts, Kubernetes scheduling, or direct Firecracker management. Some legacy
 modules and deployment files still await deletion after the native SSH live gate;
 they are not supported architecture.
 
-## Set up a research host
+## Set up a machine
+
+The complete operator guide is [docs/cubesandbox-setup.md](docs/cubesandbox-setup.md).
+It covers both a fresh CubeSandbox one-click deployment and an already-set-up
+machine, including the semantic Tool `2222` endpoint gate. The short rule is:
+the Runtime must consume CubeSandbox's raw `host: mappedPort` endpoint and
+reach it over the deployment's physical/private network. A populated
+CubeSandbox HostPort map, a successful host-side TCP probe, or a successful
+CubeProxy HTTP command is not sufficient evidence.
+
+For a fresh deployment, prepare the pinned CubeSandbox source and its matching
+SDK before building the CubeSandbox API/release bundle:
+
+```bash
+export CUBE_SOURCE_DIR="$PWD/.cubesandbox"
+bash deploy/cubesandbox/prepare-semantic-source.sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev,postgres]'
+.venv/bin/python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
+```
+
+The helper applies the checked-in semantic endpoint patch to CubeSandbox
+`v0.7.0`; the public tag does not contain this API. Install the resulting
+CubeSandbox deployment using its official one-click or multi-node procedure,
+then run `scripts/validate-cubesandbox-tcp-endpoints.py --count 1` before any
+experiment. Do not use `Sandbox.get_host(2222)`, a guest IP, NodePort, Redis
+metadata, or a ClawBox SSH proxy.
+
+## Kunpeng 920 reproducible profile
+
+The following is the source-controlled Kunpeng/Kubernetes profile. It is useful
+for checking CubeSandbox lifecycle, storage, kernel, and template setup; its
+current single-node Pod-IP HostPort topology is explicitly not accepted as the
+final native-SSH topology. Use the standalone guide above for the final gate.
 
 Requirements:
 

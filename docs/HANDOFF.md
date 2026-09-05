@@ -6,6 +6,14 @@ recovery.
 
 ## Fixed direction
 
+The operator-facing setup contract is now consolidated in
+`docs/cubesandbox-setup.md`. A fresh machine must use a standalone CubeSandbox
+one-click/control-compute deployment built with the checked-in semantic API
+patch; an existing machine must pass the semantic c1 endpoint gate before it
+can run ClawBox. `docs/kunpeng920-reproduction-runbook.md` and the Kunpeng
+profile are explicitly marked as diagnostic Kubernetes material, not final
+native-SSH acceptance. The README links to the new guide.
+
 CubeSandbox is the only sandbox/multi-node substrate. One Agent is one Runtime
 CubeSandbox plus one Tool CubeSandbox. OpenClaw uses its native SSH sandbox for
 `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`; the mutable
