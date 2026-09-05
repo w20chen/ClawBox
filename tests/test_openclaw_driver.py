@@ -13,6 +13,7 @@ from clawbox.experiments.openclaw_driver import (
     RUNTIME_LOCAL_TOOLS,
     TOOL_VM_TOOLS,
     native_ssh_host_key_alias,
+    native_ssh_route,
     native_ssh_target,
     native_tool_bridge_setup_command,
     native_ssh_target_from_env,
@@ -39,6 +40,17 @@ def test_native_ssh_route_has_an_explicit_epoch_and_stable_tool_alias() -> None:
     assert native_ssh_host_key_alias("tool-a") == "clawbox-tool-tool-a"
     with pytest.raises(ValueError, match="epoch"):
         NativeSSHRoute("tool-a", 2222, 0, "192.0.2.10", 20010)
+
+
+def test_native_ssh_route_requires_cube_mapped_port() -> None:
+    with pytest.raises(ValueError, match="mapped port"):
+        native_ssh_route(
+            type("Endpoint", (), {
+                "sandbox_id": "tool-a", "container_port": 2222,
+                "address": "192.0.2.10",
+            })(),
+            epoch=1,
+        )
 
 
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(

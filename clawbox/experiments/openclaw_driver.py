@@ -63,7 +63,13 @@ def native_ssh_route(endpoint: Any, *, epoch: int) -> NativeSSHRoute:
     container_port = int(endpoint.container_port)
     if not endpoint_id or not 1 <= container_port <= 65535:
         raise ValueError("CubeSandbox returned an invalid semantic TCP endpoint")
-    _user, host, port = split_native_ssh_target(native_ssh_target(endpoint.address))
+    # A semantic raw endpoint is already the complete host:port route returned
+    # by CubeSandbox.  Do not let the generic OpenSSH target helper turn a
+    # missing mapped port into the SSH default (22); that would make a broken
+    # CubeSandbox response look like a valid route to another service.
+    _user, host, port = split_native_ssh_target(
+        str(endpoint.address or "").strip(), require_explicit_port=True,
+    )
     return NativeSSHRoute(endpoint_id, container_port, epoch, host, port)
 
 
@@ -75,7 +81,9 @@ def native_ssh_host_key_alias(sandbox_id: str) -> str:
     return value
 
 
-def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str, str, int]:
+def split_native_ssh_target(
+    target: str, *, default_port: int = 22, require_explicit_port: bool = False,
+) -> tuple[str, str, int]:
     """Return ``(user, host, port)`` for an OpenClaw SSH target.
 
     OpenClaw stores targets in ``user@host:port`` form, while OpenSSH itself
@@ -92,6 +100,7 @@ def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str
         user, address = "executor", value
     if not user or not address:
         raise ValueError(f"invalid native SSH target: {target!r}")
+    explicit_port = False
     if address.startswith("["):
         closing = address.find("]")
         if closing < 0:
@@ -102,6 +111,7 @@ def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str
             if not suffix.startswith(":") or not suffix[1:].isdigit():
                 raise ValueError(f"invalid native SSH target port: {target!r}")
             port = int(suffix[1:])
+            explicit_port = True
         else:
             port = default_port
     elif address.count(":") == 1:
@@ -109,8 +119,13 @@ def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str
         if not host or not rendered_port.isdigit():
             raise ValueError(f"invalid native SSH target port: {target!r}")
         port = int(rendered_port)
+        explicit_port = True
     else:
         host, port = address, default_port
+    if require_explicit_port and not explicit_port:
+        raise ValueError(
+            f"raw CubeSandbox TCP endpoint must include a mapped port: {target!r}"
+        )
     if not host or not 1 <= port <= 65535:
         raise ValueError(f"invalid native SSH target: {target!r}")
     return user, host, port
