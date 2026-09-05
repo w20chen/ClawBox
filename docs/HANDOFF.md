@@ -1,6 +1,6 @@
 # ClawBox continuation handoff
 
-Updated 2026-09-05 after the semantic CubeSandbox TCP-endpoint cutover,
+Updated 2026-09-06 after the semantic CubeSandbox TCP-endpoint cutover,
 native-SSH route-gate investigation, host-network datapath audit, and Kunpeng
 recovery.
 
@@ -86,9 +86,11 @@ service-time, and response-hold fields in the event and gateway JSONL. The
 Runtime remains resident for `resident` arms, and the replay-engine compatibility
 path remains Tool-only by design.
 
-Commit `43c67a2` implements and tests that paired native lifecycle. The local
-full suite, the all-baseline c40 fake-CubeSandbox regression, compileall, and
-matrix audit pass after the change. The live Kunpeng check remains a healthy
+Commit `43c67a2` implements and tests that paired native lifecycle. Commit
+`c49c623` records the paired-snapshot validation boundary and updates the
+operator documentation. The local full suite, the all-baseline c40
+fake-CubeSandbox regression, compileall, and matrix audit pass after the
+change. The live Kunpeng check remains a healthy
 single-node Kubernetes diagnostic deployment with zero sandboxes; it still has
 no standalone one-click bundle, second physical/private node, or
 Runtime-reachable semantic TCP endpoint.
@@ -340,12 +342,15 @@ deployment topology must not be optimized in ClawBox; the formal native SSH
 path remains pending a deployment-owned semantic endpoint that Runtime can
 actually reach.
 
-The standalone one-click bundle was not installed on Kunpeng. A build-only
-attempt from the prepared CubeSandbox checkout was canceled after the ARM64
-builder's Ubuntu package download stalled for about twelve minutes. No
-standalone service, K8s object, host-network setting, or persistent Cube data
-was changed by that attempt. The current host remains the healthy diagnostic
-Kubernetes profile described above.
+The standalone one-click bundle was not installed on Kunpeng. Two build-only
+attempts were made from the prepared CubeSandbox checkout: the first stalled
+in the ARM64 builder's Ubuntu package download, and the retry (with host
+networking requested and a China Go proxy build argument) was canceled while
+still in the Ubuntu/LLVM package layers; the Dockerfile does not consume that
+Go proxy argument. No builder image, standalone service, K8s object,
+host-network setting, or persistent Cube data was changed by either attempt.
+The current host remains the healthy diagnostic Kubernetes profile described
+above.
 
 A further read-only `GET /templates/<id>` probe found a provenance mismatch that
 must be resolved before the next live run: the accepted Tool template

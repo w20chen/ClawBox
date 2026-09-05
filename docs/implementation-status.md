@@ -1,4 +1,4 @@
-# Implementation status (2026-09-05)
+# Implementation status (2026-09-06)
 
 ## Current milestone
 
@@ -134,10 +134,12 @@ attempt timed out. The single-node inventory has no second physical node or
 private NIC for an independent HostPort test, so no same-node hairpin or BPF
 hit-path success is claimed.
 
-The standalone one-click bundle was not installed on Kunpeng. A build-only
-attempt was canceled after the ARM64 builder stalled in its Ubuntu package
-download; the live diagnostic Kubernetes deployment was not modified and
-remains healthy with zero sandboxes.
+The standalone one-click bundle was not installed on Kunpeng. Two build-only
+attempts were made from the prepared CubeSandbox checkout: the first stalled
+in the ARM64 builder's Ubuntu package download, and the retry was canceled in
+the Ubuntu/LLVM package layers before an image or bundle was produced. The
+live diagnostic Kubernetes deployment was not modified and remains healthy
+with zero sandboxes.
 
 ## Evidence
 
