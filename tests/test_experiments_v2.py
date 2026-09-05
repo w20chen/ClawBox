@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
@@ -135,6 +136,36 @@ def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
         assert by_id[experiment_id]["concurrency_levels"] == [20, 40, 60]
     assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
     assert all(item["tool_template"] != "sandbox-code" for item in audits)
+    openclaw = by_id["openclaw-cube-replay-c40"]["artifact_provenance"]
+    assert openclaw["runtime"]["template_id"] == "tpl-39efe4ad90384a1fbea3caff"
+    assert openclaw["tool"]["template_id"] == "tpl-b5cb6f5ee26a41448000b9c2"
+    assert openclaw["runtime"]["image_digest"].startswith("sha256:")
+    assert openclaw["tool"]["image_digest"].startswith("sha256:")
+
+
+def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
+    tmp_path: Path,
+) -> None:
+    raw = raw_spec()
+    raw["agent"] = {"driver": "openclaw"}
+    raw["inference"] = {
+        "backend": "replay", "configuration": {"model": "recorded-model"},
+    }
+    path = tmp_path / "openclaw.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="immutable template_id"):
+        audit_experiments([path])
+
+    raw["runtime"] = {
+        "template_id": "runtime-id", "source_image_reference": "registry/runtime",
+        "image_digest": "sha256:" + "a" * 64,
+    }
+    raw["sandbox"] = {
+        "template_id": "tool-id", "source_image_reference": "registry/tool",
+    }
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing image_digest"):
+        audit_experiments([path])
 
 
 def test_baseline_catalog_materializes_only_current_policy_tuples() -> None:

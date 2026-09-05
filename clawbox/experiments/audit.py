@@ -12,6 +12,7 @@ from .spec import (
     load_workload_cases,
     spec_digest,
 )
+from .spec_types import AgentDriver
 
 
 # These are deliberate gates, not assumptions about the live host. The small
@@ -40,6 +41,41 @@ def _catalog_keys() -> set[tuple[object, ...]]:
     return {_policy_key(baseline.as_policy()) for baseline in BASELINES.values()}
 
 
+def _artifact_provenance(spec: ExperimentSpec, path: Path) -> dict[str, dict[str, str]]:
+    """Return immutable Runtime/Tool provenance required by OpenClaw runs.
+
+    Replay-engine capacity matrices intentionally retain aliases because they
+    are historical systems fixtures.  OpenClaw runs, however, are formal
+    agent evidence and must identify the exact template record and image that
+    the Worker will validate before creating either VM.
+    """
+    if spec.agent.driver is not AgentDriver.OPENCLAW:
+        return {}
+    provenance: dict[str, dict[str, str]] = {}
+    for role, sandbox in (("runtime", spec.runtime), ("tool", spec.sandbox)):
+        if sandbox.template_id is None:
+            raise ValueError(
+                f"{path}: OpenClaw {role} template must use immutable template_id"
+            )
+        missing = [
+            name for name, value in (
+                ("source_image_reference", sandbox.source_image_reference),
+                ("image_digest", sandbox.image_digest),
+            ) if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"{path}: OpenClaw {role} artifact provenance is incomplete; "
+                f"missing {', '.join(missing)}"
+            )
+        provenance[role] = {
+            "template_id": sandbox.template_id,
+            "source_image_reference": sandbox.source_image_reference or "",
+            "image_digest": sandbox.image_digest or "",
+        }
+    return provenance
+
+
 def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = None) -> dict[str, object]:
     """Validate one experiment and return a machine-readable audit record."""
     spec: ExperimentSpec = load_experiment(path)
@@ -54,6 +90,7 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
         prompts = [case.prompt for case in spec.workload.cases]
         if any("cube_shell" in prompt for prompt in prompts):
             raise ValueError(f"{path}: OpenClaw workload still names removed cube_shell")
+    artifact_provenance = _artifact_provenance(spec, path)
     catalog_keys = _catalog_keys()
     missing = [
         policy.name for policy in spec.policies
@@ -82,6 +119,7 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
         "inference_backend": spec.inference.backend.value,
         "runtime_template": spec.runtime.template,
         "tool_template": spec.sandbox.template,
+        "artifact_provenance": artifact_provenance,
     }
 
 

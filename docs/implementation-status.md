@@ -61,6 +61,11 @@ native Worker path.
 Current replay-worker telemetry likewise records the actual Tool operation name
 (for example `exec`) instead of the retired `cube_shell` label.
 
+The matrix audit now also requires formal OpenClaw experiments to pin both
+Runtime and Tool by immutable template ID, source image reference, and SHA-256
+image digest. Historical replay-engine capacity matrices may retain aliases,
+but they are not admissible as OpenClaw artifact evidence.
+
 A local c40 Worker regression materializes all ten implemented policy recipes
 directly from the canonical baseline catalog with 40 concurrent sessions per
 arm and verifies successful completion, complete session/sandbox/agent/cleanup

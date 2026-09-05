@@ -264,6 +264,9 @@ read-only `scripts/audit-experiment-matrices.py` command loads all eight
 checked-in experiment YAMLs, verifies their deterministic arm counts, rejects
 the removed `sandbox-code` Tool template and `cube_shell` OpenClaw prompt
 name, and checks every policy tuple against the immutable baseline catalog.
+For formal OpenClaw matrices it also requires immutable Runtime and Tool
+template IDs plus source image references and SHA-256 digests; alias-based
+replay-engine capacity matrices remain historical systems fixtures only.
 The four paper matrices plan c20/c40/c60; the native OpenClaw replay fixture
 plans c40; the remaining c1/c4 files remain intentionally small gates. The
 old baseline names are retained only as explicit schema-v2 compatibility
