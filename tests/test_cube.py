@@ -518,6 +518,9 @@ def test_lifecycle_records_host_physical_memory_reclamation() -> None:
     assert checkpoint["host_memory_after"]["host_used_bytes"] == 70
     assert checkpoint["host_observed_reclaimed_bytes"] == 50
     assert checkpoint["host_observed_growth_bytes"] == 0
+    assert checkpoint["host_observed_net_change_bytes"] == -50
+    assert checkpoint["host_reclamation_evidence"] == "observed_whole_host_reclamation"
+    assert checkpoint["lifecycle_mechanism"] == "cubesandbox_pause_snapshot_destroy"
 
 
 def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> None:

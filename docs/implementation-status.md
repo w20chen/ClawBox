@@ -67,6 +67,24 @@ successful pause API response from being reported without physical-memory
 evidence. Host `oom_kill` deltas fail the arm, and admission metrics count each
 configured-budget or emergency-free-memory safety intervention.
 
+The CubeSandbox `64102d9` pause implementation and a bounded live Kunpeng
+probe now establish the lifecycle semantics behind those records. Pause runs
+`PauseToSnapshot` and then destroys the live microVM/shim while retaining a
+paused tombstone. With a touched 1.5 GiB Tool allocation, the diagnostic probe
+observed about 1.69 GiB sandbox-process RSS before pause, no matching live
+process after pause, and about 1.64 GiB returned to whole-host
+`MemAvailable`; resume preserved guest PID 29 and the allocation. The sandbox
+inventory was empty after cleanup. This is lifecycle-gate evidence rather than
+a formal policy result. Lifecycle JSON now labels the mechanism and reports a
+signed whole-host net change plus whether reclamation was actually observed.
+
+The durable system boundary is recorded in
+[`docs/research-system-contract.md`](research-system-contract.md). It explicitly
+assigns command normalization, duration/resource prediction, P50/P90 and
+fallback behavior, cgroup-v2 collection, and eBPF/kprobe telemetry to the
+pinned sibling ClawTune implementation. ClawBox owns the surrounding managed
+admission, VM residency, exact joins, freezing, and reporting layers.
+
 Schema-v2 now supports deterministic heterogeneous managed workloads without
 splitting each trace into a different policy arm. With
 `workload.session_assignment: round_robin`, session indices consume the same

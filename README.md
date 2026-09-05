@@ -4,6 +4,10 @@ ClawBox is a research harness for high-density coding-agent execution on
 CubeSandbox MicroVMs. CubeSandbox is the sole sandbox and multi-node substrate;
 ClawBox supplies Agent-aware memory admission and residency policy above it.
 
+The non-negotiable research architecture, ClawTune ownership boundary, replay
+rules, and evidence requirements are summarized in
+[docs/research-system-contract.md](docs/research-system-contract.md).
+
 ## Architecture
 
 Each Agent owns two CubeSandbox VMs:

@@ -39,6 +39,9 @@ class LifecycleTiming:
     host_memory_after: dict[str, Any] | None = None
     host_observed_reclaimed_bytes: int | None = None
     host_observed_growth_bytes: int | None = None
+    host_observed_net_change_bytes: int | None = None
+    host_reclamation_evidence: str = "unavailable"
+    lifecycle_mechanism: str | None = None
 
 
 class CubeSandboxLifecycle:
@@ -90,17 +93,26 @@ class CubeSandboxLifecycle:
         host_memory_after = self._observe_physical()
         before_used = self._host_used(host_memory_before)
         after_used = self._host_used(host_memory_after)
-        reclaimed = growth = None
+        reclaimed = growth = net_change = None
+        evidence = "unavailable"
         if before_used is not None and after_used is not None:
             reclaimed = max(0, before_used - after_used)
             growth = max(0, after_used - before_used)
+            net_change = after_used - before_used
+            if operation == "checkpoint":
+                evidence = (
+                    "observed_whole_host_reclamation"
+                    if reclaimed > 0
+                    else "not_observed_whole_host_reclamation"
+                )
         self._timings.append(LifecycleTiming(
             operation, started_wall, completed_wall, started_mono,
             completed_mono, duration, before.value, after.value,
             status, error_type,
             dict(host_memory_before) if host_memory_before is not None else None,
             dict(host_memory_after) if host_memory_after is not None else None,
-            reclaimed, growth,
+            reclaimed, growth, net_change, evidence,
+            "cubesandbox_pause_snapshot_destroy" if operation == "checkpoint" else None,
         ))
         return duration
 
@@ -145,6 +157,13 @@ class CubeSandboxLifecycle:
                 raise
 
     def checkpoint_and_evict(self) -> float:
+        """Ask CubeSandbox to snapshot the VM and destroy its live runtime.
+
+        CubeSandbox commit 64102d9 implements its pause API as
+        ``PauseToSnapshot`` followed by a keep-tombstone destroy. The API
+        completion is still not, by itself, physical-memory evidence; the
+        before/after host observations below remain explicit in every record.
+        """
         with self._lock:
             if self.sandbox is None or self._state is not SandboxState.RUNNING:
                 raise LifecycleError("CubeSandbox is not resident")
