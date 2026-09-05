@@ -121,7 +121,11 @@ class _Session:
                 self.condition.notify_all()
             raise
         with self.condition:
-            execution.completion = response
+            # Retain the SSH witness fields supplied by the Runtime wrapper,
+            # not just the callback acknowledgement.  These timestamps and
+            # endpoint fields prove that completion followed process reap and
+            # used the route admitted for this execution.
+            execution.completion = {**request, **response}
             execution.completing = False
             execution.completion_completed_monotonic_s = time.monotonic()
             self.condition.notify_all()

@@ -64,6 +64,12 @@ def test_policy_control_is_idempotent_and_drains_inflight_completion() -> None:
         ]
         assert timing["admission_service_seconds"] >= 0
         assert timing["completion_service_seconds"] >= 0
+        record = session.records()[0]
+        assert record["completion"]["session_id"] == "session-a"
+        assert record["completion"]["command_sha256"] == hashlib.sha256(
+            b"exec-a"
+        ).hexdigest()
+        assert record["completion"]["status"] == "COMPLETED"
         assert session.close(timeout=1)
         assert session.lifecycle is SessionLifecycle.CLOSED
 

@@ -34,7 +34,7 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
 ) -> None:
     monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
     monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
-    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_AUTH", "token")
     monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
     monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
     monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")

@@ -16,10 +16,17 @@ from clawbox.experiments.openclaw_driver import (
     native_ssh_route,
     native_ssh_target,
     native_tool_bridge_setup_command,
+    openclaw_shared_ssh_runtime_directory,
     run_openclaw,
     split_native_ssh_target,
 )
 from clawbox.replay.lifecycle import CommandResult
+
+
+def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
+    assert openclaw_shared_ssh_runtime_directory("/workspace/") == (
+        "/workspace/openclaw-ssh-shared-8198076c"
+    )
 
 
 class PolicySession:
@@ -89,9 +96,18 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert clawtune["failOpen"] is False
     assert clawtune["sandboxExecEnvelope"] is True
     assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
+    assert clawtune["instrumentHosts"] == ["sandbox", "gateway"]
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
+    assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
+    assert "/bin/ssh" in "\n".join(commands)
+    assert config["agents"]["defaults"]["sandbox"]["ssh"]["command"].endswith(
+        "/bin/ssh"
+    )
+    assert "exec /usr/local/bin/ssh" in base64.b64decode(
+        re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", commands[0])[2]
+    ).decode()
     agent_command = next(command for command in commands if " agent " in command)
     assert "agent.pid" in agent_command
     assert "exec " in agent_command

@@ -22,6 +22,20 @@ TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
 
 
+def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
+    """Return the installed backend's deterministic shared runtime marker.
+
+    OpenClaw's SSH backend treats an existing runtime marker as an already
+    externalized workspace.  Creating it in the Tool bootstrap prevents the
+    backend from copying the Runtime VM's local workspace over the Tool-owned
+    mutable workspace.
+    """
+    value = 5381
+    for character in "shared":
+        value = ((value * 33) ^ ord(character)) & 0xFFFFFFFF
+    return f"{workspace_root.rstrip('/')}/openclaw-ssh-shared-{value:x}"
+
+
 @dataclass(frozen=True, slots=True)
 class NativeSSHConfig:
     target: str
@@ -234,12 +248,19 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     ssh_dir = f"{home}/ssh"
     identity_file = f"{ssh_dir}/id_ed25519"
     known_hosts_file = f"{ssh_dir}/known_hosts"
+    launcher_dir = f"{home}/bin"
+    ssh_launcher = f"{launcher_dir}/ssh"
     agent_pid_file = f"{home}/agent.pid"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
     prefix = (
         f"export HOME={shlex.quote(home)} OPENCLAW_HOME={shlex.quote(home + '/.openclaw')} "
+        f"PATH={shlex.quote(launcher_dir)}:$PATH "
         f"CLAWBOX_POLICY_CONTROL_URL={shlex.quote(policy_control.url)} "
-        f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
+        # OpenClaw intentionally removes inherited *_TOKEN variables before
+        # spawning its SSH backend. This per-session capability is not an LLM
+        # provider credential; use a name that survives the installed
+        # backend's environment sanitizer.
+        f"CLAWBOX_POLICY_CONTROL_AUTH={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
@@ -272,15 +293,24 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
+    launcher_b64 = base64.b64encode(
+        b"#!/bin/sh\n"
+        b"export CLAWBOX_POLICY_CONTROL_TOKEN="
+        b"${CLAWBOX_POLICY_CONTROL_AUTH:-${CLAWBOX_POLICY_CONTROL_TOKEN:-}}\n"
+        b"exec /usr/local/bin/ssh \"$@\"\n"
+    ).decode()
     encoded_predictions = base64.b64encode(json.dumps(
         prediction_manifest or {}, sort_keys=True, separators=(",", ":"),
     ).encode()).decode()
     setup = runtime_executor.execute(
         prefix
         + f"mkdir -p {shlex.quote(runtime_workspace)} {shlex.quote(trace_dir + '/tool-resource')} "
+        + f"{shlex.quote(launcher_dir)} "
         + f"{shlex.quote(home + '/logs')} {shlex.quote(ssh_dir)}; "
         + f"printf %s {shlex.quote(private_b64)} | base64 -d > {shlex.quote(identity_file)}; "
         + f"printf %s {shlex.quote(known_b64)} | base64 -d > {shlex.quote(known_hosts_file)}; "
+        + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher)}; "
+        + f"chmod 700 {shlex.quote(ssh_launcher)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
         + f"cp -n /opt/clawtune/cold-start/tool-resource/*-kb.json {shlex.quote(trace_dir + '/tool-resource')}/ 2>/dev/null || true; "
@@ -310,7 +340,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     patch = {
         "agents": {"defaults": {"workspace": runtime_workspace, "sandbox": {
             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
-            "ssh": {"target": ssh.target, "workspaceRoot": ssh.workspace_root,
+            "ssh": {"target": ssh.target, "command": ssh_launcher,
+                    "workspaceRoot": ssh.workspace_root,
                     "identityFile": identity_file, "knownHostsFile": known_hosts_file,
                     "strictHostKeyChecking": True, "updateHostKeys": False},
         }}},
@@ -327,7 +358,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "plugins": {"entries": {"clawtune": {"enabled": True, "config": {
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
-            "instrumentHosts": ["sandbox"],
+            # OpenClaw resolves the configured sandbox backend after the
+            # before_tool_call hook, so hook params without an explicit host
+            # are reported as "gateway" even though execution is SSH-backed.
+            # Tool-name filtering keeps Runtime-local web/memory tools out.
+            "instrumentHosts": ["sandbox", "gateway"],
             "instrumentTools": list(TOOL_VM_TOOLS),
             "enableCgroup": False, "enableAffinity": False, "enableNuma": False,
             "autoStartSidecar": False, "securityBoundaryAccepted": True,

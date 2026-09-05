@@ -139,7 +139,13 @@ def _jsonl(raw: bytes, label: str) -> list[dict[str, Any]]:
 
 
 def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
-    """Load Runtime ClawTune tool span ends from the copied trace files."""
+    """Load Runtime ClawTune tool span ends from the copied trace files.
+
+    ClawTune can persist the same logical span through its direct writer and
+    its sidecar-normalized writer.  Collapse only those mirrored records that
+    have the same trace/span/execution identity and agree on outcome; distinct
+    spans reusing one execution ID remain visible to the strict join check.
+    """
     spans: list[dict[str, Any]] = []
     for rendered_path in paths:
         path = Path(rendered_path)
@@ -154,7 +160,33 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
             if not isinstance(execution, dict) or not execution.get("execution_id"):
                 continue
             spans.append(record)
-    return spans
+    by_execution: dict[str, list[dict[str, Any]]] = {}
+    for span in spans:
+        execution_id = str(span["execution"]["execution_id"])
+        candidates = by_execution.setdefault(execution_id, [])
+        matching = next((item for item in candidates if (
+            item.get("trace_id"), item.get("span_id"), item.get("session_id"),
+            item.get("name"), (item.get("status") or {}).get("code"),
+            (item.get("output") or {}).get("exit_code"),
+        ) == (
+            span.get("trace_id"), span.get("span_id"), span.get("session_id"),
+            span.get("name"), (span.get("status") or {}).get("code"),
+            (span.get("output") or {}).get("exit_code"),
+        )), None)
+        if matching is None:
+            candidates.append(span)
+            continue
+        current_execution = matching.get("execution") or {}
+        incoming_execution = span.get("execution") or {}
+        current_detail = sum(current_execution.get(key) is not None for key in (
+            "requested_command", "effective_command", "payload_command",
+        ))
+        incoming_detail = sum(incoming_execution.get(key) is not None for key in (
+            "requested_command", "effective_command", "payload_command",
+        ))
+        if incoming_detail > current_detail:
+            candidates[candidates.index(matching)] = span
+    return [span for candidates in by_execution.values() for span in candidates]
 
 
 def _validate_cgroup(payload: dict[str, Any], execution_id: str) -> None:

@@ -2,7 +2,35 @@
 
 ## Current milestone
 
-### Superseding live update: memory reclamation and native c8 are green
+### Superseding live update: native managed c1 is green
+
+The real managed deterministic-replay path now passes c1 on Kunpeng. OpenClaw
+in the Runtime VM consumed two exact recorded model steps, issued one logical
+`exec`, synchronously obtained PolicyControl admission, and ran through native
+SSH in the Tool VM. Five SSH processes (four backend-maintenance operations and
+the Agent operation) each produced an exact policy/Tool-bridge/cgroup-v2/native
+eBPF join; the Agent operation also joined the Runtime ClawTune span by the same
+execution ID. Final workspace validation passed, telemetry loss and duplicate
+execution were zero, and CubeSandbox inventory was empty after cleanup. The
+smoke result is `/tmp/clawbox-managed-c1/live-c1-two-step` on Kunpeng; summary
+SHA-256 is `47f43e0f10fca147740b86b77a0e3443a890cc93877c917b10f95dff5093e235`.
+It is infrastructure evidence only because the temporary two-step marker trace
+is not a representative held-out coding trajectory.
+
+This gate exposed and fixed four installed-version integration details. The
+OpenClaw environment sanitizer removes names ending in `_TOKEN`, so ClawBox
+passes the per-session policy capability as `CLAWBOX_POLICY_CONTROL_AUTH` and
+an explicitly configured session SSH launcher maps it only for the existing
+policy shim. The Tool bootstrap creates OpenClaw's deterministic shared SSH
+runtime marker so the Tool-owned workspace is never overwritten by a Runtime
+workspace mirror. Hook events omit an explicit host before backend resolution,
+so ClawTune instruments the selected Tool names for both `gateway` and
+`sandbox` hook labels. Finally, mirrored direct/sidecar Runtime span records are
+collapsed only when trace, span, execution identity, and outcome agree; a true
+execution-ID reuse still fails closed. Replay mismatch and exhaustion are now
+sticky for the session and preserve rejection evidence.
+
+### Memory reclamation and native c8 are green
 
 CubeSandbox branch commit `559f894` now preserves CubeMaster's `image_info` in
 the CubeAPI template-detail response. The deployed API returned the expected

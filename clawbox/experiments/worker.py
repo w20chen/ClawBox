@@ -37,7 +37,8 @@ from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
 from .openclaw_driver import (
     NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
-    native_tool_bridge_setup_command, run_openclaw,
+    native_tool_bridge_setup_command, openclaw_shared_ssh_runtime_directory,
+    run_openclaw,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .policy_control import PolicyControlServer
@@ -290,6 +291,12 @@ def summarize_tool_execution_observations(
     records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Produce paper-facing prediction and telemetry aggregates."""
+    # Backend probes are admitted and measured, but are not logical Agent Tool
+    # calls and must not dilute command-prediction statistics.
+    records = [
+        item for item in records
+        if item.get("execution_scope", "agent-tool") == "agent-tool"
+    ]
     errors = [
         float(item["prediction_error_mib"])
         for item in records if item.get("prediction_error_mib") is not None
@@ -594,7 +601,8 @@ class ExperimentWorker:
         provenance.update(self._arm_provenance(arm))
         if prediction_provider is not None:
             provenance["prediction_artifact"] = prediction_provider.provenance(
-                tool_execution_observations
+                [item for item in tool_execution_observations
+                 if item.get("execution_scope", "agent-tool") == "agent-tool"]
             )
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
@@ -1300,11 +1308,26 @@ class ExperimentWorker:
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     execution_id = str(request["execution_id"])
+                    execution_scope = str(
+                        request.get("execution_scope") or "agent-tool"
+                    )
                     prediction = (
                         prediction_provider.resolve_digest(
                             str(request["command_sha256"]), request.get("prediction")
-                        ) if prediction_provider is not None else request.get("prediction")
+                        ) if prediction_provider is not None
+                        and execution_scope == "agent-tool"
+                        else request.get("prediction")
                     )
+                    if (prediction_provider is not None
+                            and execution_scope != "agent-tool"):
+                        prediction = {
+                            "canonical_prediction_key": "ssh-backend-maintenance",
+                            "prediction_source": "backend_maintenance_static",
+                            "fallback_level": "not_applicable",
+                            "predicted_incremental_memory_mib": int(
+                                arm.resources.static_tool_memory_mib or 1
+                            ),
+                        }
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
                     reservation_acquired = False
                     with wait_lock:
@@ -1357,6 +1380,7 @@ class ExperimentWorker:
                                  "execution_id": execution_id,
                                  "command_sha256": request["command_sha256"],
                                  "operation": request.get("operation"),
+                                 "execution_scope": execution_scope,
                                  "actual_measured_memory_mib": None,
                                  "admitted_reservation_mib": amount,
                                  "admission_blocked_seconds": admission_wait,
@@ -1492,6 +1516,20 @@ class ExperimentWorker:
                     session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
                 )
+                # The Tool VM is authoritative for mutable state. Mark the
+                # installed shared SSH runtime as initialized so OpenClaw does
+                # not copy its Runtime-local workspace into the Tool.
+                remote_runtime_dir = openclaw_shared_ssh_runtime_directory(
+                    arm.sandbox.workspace
+                )
+                workspace_result = executor.execute(
+                    f"mkdir -p -- {shlex.quote(remote_runtime_dir)}", 30,
+                )
+                if workspace_result.exit_code != 0:
+                    raise RuntimeError(
+                        "Tool setup could not initialize OpenClaw SSH workspace: "
+                        + workspace_result.stderr[-1000:]
+                    )
                 tool_bridge_result = executor.execute(native_tool_bridge_setup_command(), 30)
                 if tool_bridge_result.exit_code != 0:
                     raise RuntimeError(

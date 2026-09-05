@@ -82,6 +82,7 @@ class ModelGateway:
         self.on_request_started = on_request_started
         self.before_response_ready = before_response_ready
         self._requests: dict[str, GatewayRequest] = {}
+        self._replay_failure: str | None = None
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
         self._server: ThreadingHTTPServer | None = None
@@ -153,6 +154,31 @@ class ModelGateway:
         """Complete an HTTP request and retain its request identity."""
         return self._complete_with_identity(payload, http_attempt=True)
 
+    def _persist_replay_rejection(
+        self, *, index: int, actual: Any, expected: Any, reason: str,
+    ) -> None:
+        """Persist fail-closed replay evidence, including trace exhaustion."""
+        actual_identity = _canonical_replay_input(actual)
+        expected_identity = _canonical_replay_input(expected)
+        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        rejection = self.store_path.with_name(
+            f"{self.store_path.stem}.rejected-request-{index:04d}.json"
+        )
+        temporary = rejection.with_name(rejection.name + ".next")
+        temporary.write_text(json.dumps({
+            "actual": actual,
+            "actual_canonical": actual_identity,
+            "actual_sha256": _canonical_sha256(actual_identity),
+            "expected": expected,
+            "expected_canonical": expected_identity,
+            "expected_sha256": (
+                _canonical_sha256(expected_identity) if expected is not None else None
+            ),
+            "model_step": index,
+            "reason": reason,
+        }, sort_keys=True))
+        temporary.replace(rejection)
+
     def _complete_with_identity(
         self, payload: dict[str, Any], *, http_attempt: bool,
     ) -> tuple[int, str, bytes, str]:
@@ -165,6 +191,10 @@ class ModelGateway:
         ).encode()).hexdigest()
         started_event: dict[str, Any] | None = None
         with self._changed:
+            if self._replay_failure is not None:
+                raise ValueError(
+                    f"replay session already diverged: {self._replay_failure}"
+                )
             matching = [
                 item for item in self._requests.values()
                 if item.request_fingerprint == fingerprint
@@ -175,6 +205,11 @@ class ModelGateway:
             if request is None:
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
+                    self._replay_failure = "trace_exhausted"
+                    self._persist_replay_rejection(
+                        index=index, actual=canonical, expected=None,
+                        reason="trace_exhausted",
+                    )
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
                 replay_input_match = None
                 replay_input_match_mode = None
@@ -196,21 +231,11 @@ class ModelGateway:
                         replay_input_expected_sha256 = _canonical_sha256(expected_identity)
                         replay_input_actual_sha256 = _canonical_sha256(actual_identity)
                     if replay_input_match is False:
-                        self.store_path.parent.mkdir(parents=True, exist_ok=True)
-                        rejection = self.store_path.with_name(
-                            f"{self.store_path.stem}.rejected-request-{index:04d}.json"
+                        self._replay_failure = "canonical_request_mismatch"
+                        self._persist_replay_rejection(
+                            index=index, actual=actual_input, expected=expected,
+                            reason="canonical_request_mismatch",
                         )
-                        temporary = rejection.with_name(rejection.name + ".next")
-                        temporary.write_text(json.dumps({
-                            "actual": actual_input,
-                            "actual_canonical": actual_identity,
-                            "actual_sha256": replay_input_actual_sha256,
-                            "expected": expected,
-                            "expected_canonical": expected_identity,
-                            "expected_sha256": replay_input_expected_sha256,
-                            "model_step": index,
-                        }, sort_keys=True))
-                        temporary.replace(rejection)
                         raise ValueError(f"replay request diverged at model step {index}")
                 occurrence = len(matching)
                 request_id = hashlib.sha256(
@@ -367,6 +392,7 @@ class ModelGateway:
                 len(records) == expected
                 and consumed == expected_indices
                 and not failed_matches
+                and self._replay_failure is None
             )
         ) and not incomplete
         return {
@@ -378,6 +404,7 @@ class ModelGateway:
                 self.mode != "replay" or consumed == expected_indices
             ),
             "canonical_request_matches": not failed_matches,
+            "replay_failure": self._replay_failure,
             "required_responses_delivered": not incomplete,
             "retry_http_attempts": sum(
                 max(0, int(item.get("http_attempts", 0)) - 1) for item in records
@@ -510,13 +537,16 @@ class ModelGateway:
 
 
 _RUNTIME_SESSION_RE = re.compile(
-    r"(?m)^(Runtime: .*?\| session=agent:main:explicit:)session-\d+"
-    r"( \| sessionId=)session-\d+( \|.*)$"
+    r"(?m)^(Runtime: .*?\| session=agent:main:explicit:)[A-Za-z0-9_.-]+"
+    r"( \| sessionId=)[A-Za-z0-9_.-]+( \|.*)$"
 )
 _PYTEST_TIME_RE = re.compile(r"(?m)^(\d+ passed in )\d+(?:\.\d+)?s$")
 _OPENCLAW_PROMPT_TIME_RE = re.compile(
     r"(?m)^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} "
     r"\d{2}:\d{2} UTC\](?= )"
+)
+_OPENCLAW_WORKSPACE_RE = re.compile(
+    r"/state/openclaw/[A-Za-z0-9_.-]+/runtime-workspace"
 )
 _GENERATED_DIRECTORY_MTIME_RE = re.compile(
     r"(?m)^(.+\s)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
@@ -533,6 +563,9 @@ def _canonical_replay_text(value: str) -> str:
     """Mask only per-session values known to be nondeterministic in this workload."""
     value = _RUNTIME_SESSION_RE.sub(r"\1session-N\2session-N\3", value)
     value = _OPENCLAW_PROMPT_TIME_RE.sub("[REPLAY-TIME]", value)
+    value = _OPENCLAW_WORKSPACE_RE.sub(
+        "/state/openclaw/session-N/runtime-workspace", value,
+    )
     value = _GENERATED_DIRECTORY_MTIME_RE.sub(r"\1REPLAY-MTIME \2", value)
     value = _PYTEST_TIME_RE.sub(r"\1N.NNs", value)
     value = _GIT_COMMIT_HEADER_RE.sub(r"\1COMMIT\2", value)

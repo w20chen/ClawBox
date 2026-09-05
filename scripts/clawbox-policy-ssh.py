@@ -201,7 +201,10 @@ def main() -> int:
     ssh_argv = list(sys.argv[1:])
     parsed = _envelope(ssh_argv)
     policy_url = os.environ.get("CLAWBOX_POLICY_CONTROL_URL")
-    policy_token = os.environ.get("CLAWBOX_POLICY_CONTROL_TOKEN")
+    policy_token = (
+        os.environ.get("CLAWBOX_POLICY_CONTROL_AUTH")
+        or os.environ.get("CLAWBOX_POLICY_CONTROL_TOKEN")
+    )
     session_id = os.environ.get("CLAWBOX_POLICY_SESSION_ID")
     if parsed is None:
         if os.environ.get("CLAWBOX_POLICY_REQUIRE_ENVELOPE") == "1":

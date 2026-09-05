@@ -37,6 +37,107 @@ def test_replay_divergence_is_persisted_before_store_directory_exists(
     assert record["model_step"] == 0
     assert record["actual"] != record["expected"]
     assert record["actual_sha256"] != record["expected_sha256"]
+    assert record["reason"] == "canonical_request_mismatch"
+
+
+def test_replay_trace_exhaustion_persists_the_unexpected_request(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0.1,
+        "data": {
+            "raw_request": {"messages": [{"role": "user", "content": "first"}]},
+            "raw_response": {"content": "first response"},
+        },
+    }) + "\n", encoding="utf-8")
+    gateway = ModelGateway(
+        tmp_path / "not-created" / "session.json", mode="replay", trace=trace,
+    )
+    status, _content_type, _body, request_id = gateway.complete_http({
+        "model": "recorded-model",
+        "messages": [{"role": "user", "content": "first"}],
+    })
+    assert status == 200
+    gateway.mark_delivery(request_id, delivered=True)
+
+    unexpected = {
+        "model": "recorded-model",
+        "messages": [{"role": "user", "content": "second"}],
+    }
+    with pytest.raises(ValueError, match="more model calls"):
+        gateway.complete(unexpected)
+
+    rejection = tmp_path / "not-created" / "session.rejected-request-0001.json"
+    record = json.loads(rejection.read_text(encoding="utf-8"))
+    assert record["model_step"] == 1
+    assert record["reason"] == "trace_exhausted"
+    assert record["expected"] is None
+    assert record["expected_sha256"] is None
+    assert record["actual"]["messages"][0]["content"] == "second"
+    with pytest.raises(ValueError, match="already diverged: trace_exhausted"):
+        gateway.complete({
+            "model": "recorded-model",
+            "messages": [{"role": "user", "content": "first"}],
+        })
+    assert gateway.replay_completeness()["replay_failure"] == "trace_exhausted"
+
+
+def test_replay_request_mismatch_poison_session(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0,
+        "data": {
+            "raw_request": {"messages": [{"role": "user", "content": "expected"}]},
+            "raw_response": {"content": "ok"},
+        },
+    }) + "\n", encoding="utf-8")
+    gateway = ModelGateway(tmp_path / "session.json", mode="replay", trace=trace)
+
+    with pytest.raises(ValueError, match="diverged at model step 0"):
+        gateway.complete({
+            "model": "recorded-model",
+            "messages": [{"role": "user", "content": "wrong"}],
+        })
+    with pytest.raises(ValueError, match="already diverged"):
+        gateway.complete({
+            "model": "recorded-model",
+            "messages": [{"role": "user", "content": "expected"}],
+        })
+    verdict = gateway.replay_completeness()
+    assert verdict["replay_failure"] == "canonical_request_mismatch"
+    assert verdict["complete"] is False
+
+
+def test_replay_canonicalization_masks_openclaw_session_workspace(
+    tmp_path: Path,
+) -> None:
+    expected = (
+        "Files resolve under /state/openclaw/arm-a-0000/runtime-workspace.\n"
+        "Runtime: agent=main | session=agent:main:explicit:arm-a-0000 "
+        "| sessionId=arm-a-0000 | host=runtime"
+    )
+    actual = expected.replace("arm-a-0000", "arm-b-0007")
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0,
+        "data": {
+            "raw_request": {"messages": [{"role": "system", "content": expected}]},
+            "raw_response": {"content": "ok"},
+        },
+    }) + "\n", encoding="utf-8")
+    gateway = ModelGateway(tmp_path / "session.json", mode="replay", trace=trace)
+
+    status, _content_type, _body = gateway.complete({
+        "model": "recorded-model",
+        "messages": [{"role": "system", "content": actual}],
+    })
+
+    assert status == 200
+    assert gateway.records()[0]["replay_input_match"] is True
 
 
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(

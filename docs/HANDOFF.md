@@ -6,6 +6,26 @@ recovery.
 
 ## Latest superseding continuation
 
+The real managed OpenClaw replay path is now green at c1. Kunpeng result
+`/tmp/clawbox-managed-c1/live-c1-two-step` completed two exact model steps and
+one logical Agent `exec` with synchronous admission, native SSH, valid cgroup
+and native eBPF telemetry, exact Runtime/Policy/Tool execution identity, final
+workspace validation, and zero CubeSandbox leaks. Its summary SHA-256 is
+`47f43e0f10fca147740b86b77a0e3443a890cc93877c917b10f95dff5093e235`.
+The temporary marker trace is smoke-only. Next live gates are the same managed
+path under paired Runtime/Tool `snapshot_pause`, then c4/c8 with frozen exact
+smoke inputs; representative capture, frozen ClawTune KB calibration, formal
+c20/c40/c60 comparisons, and real-provider c1/c2/c4 remain outstanding.
+
+Installed OpenClaw 2026.7.1 sanitizes inherited `_TOKEN` variables before its
+SSH backend spawn and resolves a missing hook `host` only after
+`before_tool_call`. The current implementation therefore binds
+`ssh.command` to a per-session launcher carrying the non-provider policy AUTH
+variable and lets ClawTune match configured Tool names at both pre-resolution
+`gateway` and resolved `sandbox` labels. Tool bootstrap also creates the
+deterministic shared SSH runtime marker, preventing OpenClaw from mirroring the
+Runtime-local workspace over the authoritative Tool workspace.
+
 The historical blocker narrative below is retained as an audit trail, but it
 is no longer the current state. CubeSandbox branch `clawbox/hostport-hairpin`
 commit `0dda1c4` fixed the supported same-node semantic HostPort datapath, and

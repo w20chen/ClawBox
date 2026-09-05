@@ -58,6 +58,14 @@ reach it over the deployment's physical/private network. A populated
 CubeSandbox HostPort map, a successful host-side TCP probe, or a successful
 CubeProxy HTTP command is not sufficient evidence.
 
+The current Kunpeng c1 managed-replay gate is green on the real architecture:
+two exact model steps, one logical Agent `exec`, five admitted native SSH
+processes including backend setup, 100% PolicyControl/Runtime/bridge/cgroup/eBPF
+execution-ID join, successful workspace validation, and zero leaked sandboxes.
+This is an infrastructure smoke trajectory, not a representative paper
+workload; formal c20/c40/c60 results still require separately captured held-out
+trajectories and a frozen ClawTune-derived KB.
+
 For a fresh deployment, prepare the pinned CubeSandbox source and its matching
 SDK before building the CubeSandbox API/release bundle:
 

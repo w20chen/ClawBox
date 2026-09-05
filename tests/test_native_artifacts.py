@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from clawbox.experiments.native_artifacts import (
+    _runtime_spans,
     collect_and_validate_native_tool_artifacts,
     validate_native_tool_join,
 )
@@ -52,6 +53,39 @@ def _artifacts(execution_id: str, digest: str) -> tuple[list[dict], dict, dict]:
         "calls": [{"tool_call_id": execution_id, "eligible_for_kb": True}],
     }
     return bridge, cgroup, clause
+
+
+def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
+    tmp_path: Path,
+) -> None:
+    execution_id = "exec-mirrored"
+    base = {
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "status": {"code": "ok"}, "output": {"exit_code": 0},
+        "execution": {"execution_id": execution_id, "mode": "launcher"},
+    }
+    rich = {
+        **base,
+        "execution": {
+            "execution_id": execution_id, "mode": "marker",
+            "requested_command": "printf ok", "effective_command": "envelope",
+            "payload_command": "printf ok",
+        },
+    }
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.write_text(json.dumps(base) + "\n", encoding="utf-8")
+    second.write_text(json.dumps(rich) + "\n", encoding="utf-8")
+
+    spans = _runtime_spans([str(first), str(second)])
+
+    assert len(spans) == 1
+    assert spans[0]["execution"]["requested_command"] == "printf ok"
+
+    distinct = {**base, "span_id": "call-b"}
+    second.write_text(json.dumps(distinct) + "\n", encoding="utf-8")
+    assert len(_runtime_spans([str(first), str(second)])) == 2
 
 
 def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
@@ -207,7 +241,14 @@ def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
     assert enriched[0]["prediction_error_mib"] == 1.0
     assert enriched[0]["prediction_underestimate_mib"] == 0.0
     assert enriched[0]["telemetry_eligible_for_kb"] is True
+    enriched.append({
+        **enriched[0], "execution_id": "maintenance-1",
+        "execution_scope": "backend-maintenance",
+        "prediction_source": "backend_maintenance_static",
+        "fallback_level": "not_applicable",
+    })
     summary = summarize_tool_execution_observations(enriched)
+    assert summary["tool_execution_observation_count"] == 1
     assert summary["prediction_fallback_rate"] == 0.0
     assert summary["prediction_error_p90_mib"] == 1.0
     assert summary["prediction_coverage_fraction"] == 1.0
