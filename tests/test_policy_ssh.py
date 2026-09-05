@@ -105,6 +105,35 @@ def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(
     assert posted == ["/v1/tool/admit"]
 
 
+def test_policy_rejects_non_ssh_container_port_before_spawning_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[str] = []
+
+    def post(path: str, _body: dict, *, attempts: int) -> dict:
+        posted.append(path)
+        return {
+            "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 1,
+            "container_port": 49983, "host": "192.0.2.20", "port": 20020,
+        }
+
+    def fail_spawn(_argv: list[str]):
+        raise AssertionError("non-SSH container port reached subprocess")
+
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", fail_spawn)
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
+
+    assert policy_ssh.main() == 125
+    assert posted == ["/v1/tool/admit"]
+
+
 def test_policy_does_not_complete_while_ssh_child_is_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

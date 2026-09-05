@@ -89,6 +89,10 @@ def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
     epoch = admission.get("epoch")
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
         raise RuntimeError("policy route has no positive endpoint epoch")
+    container_port = admission.get("container_port")
+    if (isinstance(container_port, bool) or not isinstance(container_port, int)
+            or container_port != 2222):
+        raise RuntimeError("policy route is not for the Tool SSH port 2222")
     host = str(admission.get("host") or "").strip()
     try:
         ipaddress.ip_address(host)
