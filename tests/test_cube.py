@@ -141,6 +141,29 @@ def test_cube_client_consumes_semantic_tcp_endpoint_and_checks_identity() -> Non
         raise AssertionError("endpoint identity mismatch was not rejected")
 
 
+def test_cube_client_retries_endpoint_publication_after_create() -> None:
+    class EventuallyPublishedSandbox(_Sandbox):
+        endpoint_calls = 0
+
+        def get_tcp_endpoint(self, container_port):
+            type(self).endpoint_calls += 1
+            if type(self).endpoint_calls < 3:
+                raise RuntimeError("HTTP 404: route not published yet")
+            return super().get_tcp_endpoint(container_port)
+
+    EventuallyPublishedSandbox.items = {}
+    client = CubeSandboxClient(
+        sandbox_class=EventuallyPublishedSandbox,
+        tcp_endpoint_attempts=3,
+        tcp_endpoint_initial_delay_s=0,
+        tcp_endpoint_max_delay_s=0,
+    )
+    sandbox = EventuallyPublishedSandbox({"sandboxID": "sb-7"})
+    endpoint = client.get_tcp_endpoint(sandbox)
+    assert endpoint.address == "192.0.2.7:20007"
+    assert EventuallyPublishedSandbox.endpoint_calls == 3
+
+
 def test_cube_client_rejects_ready_template_with_wrong_pinned_image() -> None:
     expected = "sha256:" + "a" * 64
 

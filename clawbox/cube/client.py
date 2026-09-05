@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from .api_retry import read_with_backoff
+
 
 @dataclass(frozen=True, slots=True)
 class Ownership:
@@ -75,7 +77,10 @@ class CubeSandboxClient:
     def __init__(self, *, journal: OwnedSandboxJournal | None = None,
                  sandbox_class: type | None = None, template_class: type | None = None,
                  config: Any = None,
-                 command_stream_grace_s: float = 15.0) -> None:
+                 command_stream_grace_s: float = 15.0,
+                 tcp_endpoint_attempts: int = 5,
+                 tcp_endpoint_initial_delay_s: float = 0.25,
+                 tcp_endpoint_max_delay_s: float = 2.0) -> None:
         if sandbox_class is None:
             from cubesandbox import Sandbox
             sandbox_class = Sandbox
@@ -86,7 +91,14 @@ class CubeSandboxClient:
         self._handles: dict[str, Any] = {}
         if command_stream_grace_s < 0:
             raise ValueError("command_stream_grace_s must be non-negative")
+        if tcp_endpoint_attempts < 1:
+            raise ValueError("tcp_endpoint_attempts must be positive")
+        if tcp_endpoint_initial_delay_s < 0 or tcp_endpoint_max_delay_s < 0:
+            raise ValueError("TCP endpoint retry delays must be non-negative")
         self.command_stream_grace_s = float(command_stream_grace_s)
+        self.tcp_endpoint_attempts = int(tcp_endpoint_attempts)
+        self.tcp_endpoint_initial_delay_s = float(tcp_endpoint_initial_delay_s)
+        self.tcp_endpoint_max_delay_s = float(tcp_endpoint_max_delay_s)
 
     def _sdk_kwargs(self) -> dict[str, Any]:
         return {} if self._config is None else {"config": self._config}
@@ -148,7 +160,17 @@ class CubeSandboxClient:
             raise RuntimeError(
                 "CubeSandbox SDK must expose get_tcp_endpoint(container_port)"
             )
-        raw = getter(container_port)
+        # CubeAPI acknowledges sandbox creation/resume before CubeMaster has
+        # published the corresponding L4 route record.  Retry only this
+        # read-after-lifecycle boundary; the endpoint remains wholly owned by
+        # CubeSandbox and no cached or alternate route is introduced.
+        raw = read_with_backoff(
+            lambda: getter(container_port),
+            label=(f"TCP endpoint for {self.sandbox_id(sandbox)}:{container_port}"),
+            attempts=self.tcp_endpoint_attempts,
+            initial_delay_s=self.tcp_endpoint_initial_delay_s,
+            max_delay_s=self.tcp_endpoint_max_delay_s,
+        )
         if isinstance(raw, Mapping):
             sandbox_id = raw.get("sandboxID") or raw.get("sandbox_id")
             returned_port = raw.get("containerPort") or raw.get("container_port")
