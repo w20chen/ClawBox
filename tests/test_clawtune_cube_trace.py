@@ -34,7 +34,7 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
     assert joined.join_rate == 1.0
     assert len(trusted) == 1
     assert trusted[0].execution_id == execution_id
-    assert trusted[0].tool_name == "cube_shell"
+    assert trusted[0].tool_name == "exec"
     assert trusted[0].duration_sec == 1.25
     assert trusted[0].rss_peak_bytes == 4096
     assert trusted[0].cgroup is not None

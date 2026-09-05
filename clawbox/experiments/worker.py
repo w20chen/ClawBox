@@ -810,7 +810,7 @@ class ExperimentWorker:
             )
 
             def execute_observed(command: str, timeout_s: float,
-                                 execution_id: str, *,
+                                 execution_id: str, *, tool_name: str = "exec",
                                  prediction: dict[str, Any] | None = None,
                                  phase: str = "agent"):
                 observed = executor.execute_observed(
@@ -821,11 +821,11 @@ class ExperimentWorker:
                 trace_writer.record(
                     command, observed.result, execution_id=execution_id,
                     bridge_record=observed.bridge_record, artifacts=observed.artifacts,
-                    prediction=prediction, phase=phase,
+                    prediction=prediction, tool_name=tool_name, phase=phase,
                 )
                 events.write({
                     "event": "clawtune_observation", "session_id": session_id,
-                    "execution_id": execution_id, "tool": "cube_shell",
+                    "execution_id": execution_id, "tool": tool_name,
                     "phase": phase,
                     "prediction": prediction,
                     "telemetry_state": observed.bridge_record.get("telemetry_state"),
@@ -1081,6 +1081,7 @@ class ExperimentWorker:
                             action.shell_command(), arm.execution.command_timeout_seconds,
                             f"{session_id}:replay:{action_index}:"
                             f"{hashlib.sha256(action.action_id.encode()).hexdigest()[:16]}",
+                            tool_name=action.name.rsplit(".", 1)[-1].rsplit("/", 1)[-1],
                         )
                         tool_latencies.append(result.duration_s)
                         if action.expected_exit_code is not None and result.exit_code != action.expected_exit_code:

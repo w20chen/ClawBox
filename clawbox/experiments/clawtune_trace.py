@@ -41,11 +41,15 @@ class ClawTuneTraceWriter:
                bridge_record: dict | None = None,
                artifacts: dict[str, str] | None = None,
                prediction: dict | None = None,
+               tool_name: str = "exec",
                phase: str = "agent") -> str:
         """Record one completed Cube command and return its execution ID."""
         execution_id = execution_id or f"cube-{uuid.uuid4().hex}"
         if not _EXECUTION_ID.fullmatch(execution_id):
             raise ValueError("execution_id must be 1-128 safe ASCII identifier characters")
+        tool_name = str(tool_name or "exec").strip()
+        if not tool_name or len(tool_name) > 128:
+            raise ValueError("tool_name must be between 1 and 128 characters")
         digest = hashlib.sha256(command.encode()).hexdigest()
         now_ns = time.time_ns()
         duration_ns = max(0, int(result.duration_s * 1_000_000_000))
@@ -68,7 +72,7 @@ class ClawTuneTraceWriter:
                 "agent_id": self.session_id,
                 "sequence_no": sequence,
                 "kind": "tool",
-                "name": "cube_shell",
+                "name": tool_name,
                 "phase": phase,
                 "wall_time_ns": str(now_ns),
                 "monotonic_time_ns": str(time.monotonic_ns()),
