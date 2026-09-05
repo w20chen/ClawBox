@@ -67,6 +67,15 @@ successful pause API response from being reported without physical-memory
 evidence. Host `oom_kill` deltas fail the arm, and admission metrics count each
 configured-budget or emergency-free-memory safety intervention.
 
+Schema-v2 now supports deterministic heterogeneous managed workloads without
+splitting each trace into a different policy arm. With
+`workload.session_assignment: round_robin`, session indices consume the same
+ordered A/B/C trace mix for every baseline. Results retain the exact
+session-to-case/trace assignment and all configured trace hashes. Arrival is
+also explicit: the default is labeled `burst`, while `fixed_stagger` uses a
+deterministic per-index offset and records that offered schedule separately
+from provisioning and Agent JCT.
+
 When an experiment pins `image_digest`, Worker now checks the official
 CubeSandbox Template record before creating a VM and rejects a `READY` record
 whose image digest does not match. This makes the currently stale Runtime

@@ -13,6 +13,7 @@ from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
     EventWriter, ExperimentWorker, _runtime_network_deny_out, build_time_spans,
+    session_case_for,
 )
 
 
@@ -60,6 +61,44 @@ def test_v2_matrix_is_complete_stable_and_randomized() -> None:
     assert [arm.arm_id for arm in first] == [arm.arm_id for arm in second]
     assert all(arm.spec_digest == spec_digest(spec) for arm in first)
     assert {arm.policy.name for arm in first} == {"resident", "proposed"}
+
+
+def test_round_robin_workload_builds_one_arm_and_stable_session_mix() -> None:
+    raw = raw_spec()
+    raw["workload"]["repetitions"] = 1
+    raw["workload"]["session_assignment"] = "round_robin"
+    raw["workload"]["cases"].append({
+        "case_id": "case-b", "source": "recorded_trace",
+        "source_reference": "trace-b.jsonl",
+        "replay_trace_reference": "trace-b.jsonl",
+    })
+    spec = ExperimentSpec.model_validate(raw)
+    arms = expand_matrix(spec)
+    assert len(arms) == 2 * 2  # concurrency levels x policies, not x cases
+    arm = arms[0]
+    assert [item.case_id for item in arm.session_cases] == ["case-a", "case-b"]
+    assert [session_case_for(arm, index).case_id for index in range(5)] == [
+        "case-a", "case-b", "case-a", "case-b", "case-a",
+    ]
+
+
+def test_round_robin_requires_multiple_explicit_cases() -> None:
+    raw = raw_spec()
+    raw["workload"]["session_assignment"] = "round_robin"
+    with pytest.raises(ValidationError, match="at least two cases"):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_arrival_schedule_is_explicit_and_validated() -> None:
+    raw = raw_spec()
+    assert ExperimentSpec.model_validate(raw).execution.arrival_schedule.value == "burst"
+    raw["execution"].update({
+        "arrival_schedule": "fixed_stagger", "stagger_interval_seconds": 0.25,
+    })
+    assert ExperimentSpec.model_validate(raw).execution.stagger_interval_seconds == 0.25
+    raw["execution"]["stagger_interval_seconds"] = 0
+    with pytest.raises(ValidationError, match="positive stagger"):
+        ExperimentSpec.model_validate(raw)
 
 
 def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:

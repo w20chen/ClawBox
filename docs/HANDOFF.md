@@ -177,6 +177,16 @@ remain subject to concurrent-node noise. A host `oom_kill` delta invalidates the
 arm, while PolicyCoordinator records budget and emergency-free-memory safety
 interventions in its admission metrics.
 
+The managed experiment schema can now run a fixed heterogeneous trajectory mix
+inside one arm. `workload.session_assignment: round_robin` maps session index
+to the ordered case list and preserves the same mapping across policies;
+configured trace hashes and the realized session assignment are emitted with
+the result. `execution.arrival_schedule` distinguishes an explicit simultaneous
+burst from a deterministic fixed stagger, avoiding an implicit startup pattern.
+The current checked-in OpenClaw replay fixture is still the documented
+single-trace smoke input; representative API-captured A/B/C trajectories must
+replace it before formal c20/c40/c60 evidence is claimed.
+
 The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
 was reviewed against this post-`50db717` tree and is intentionally not
 cherry-picked. Its useful lifecycle-failure, per-execution timing, FIFO

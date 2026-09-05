@@ -7,6 +7,16 @@ class WorkloadSource(StrEnum):
     SYNTHETIC = "synthetic"
 
 
+class SessionAssignment(StrEnum):
+    SINGLE_CASE = "single_case"
+    ROUND_ROBIN = "round_robin"
+
+
+class ArrivalSchedule(StrEnum):
+    BURST = "burst"
+    FIXED_STAGGER = "fixed_stagger"
+
+
 class AgentDriver(StrEnum):
     OPENCLAW = "openclaw"
     REPLAY_ENGINE = "replay_engine"

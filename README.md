@@ -180,6 +180,13 @@ Deterministic replay is the primary comparison mode: Runtime, OpenClaw, SSH,
 Tool VM, commands, memory pressure, and telemetry remain real; only model
 generation is replayed. Replay cursors and response state are per session.
 
+Formal heterogeneous workloads can set `workload.session_assignment` to
+`round_robin` and provide two or more cases, each with its own frozen replay
+trace. Session index deterministically selects A/B/C/A/... in every policy arm.
+`execution.arrival_schedule` explicitly labels a simultaneous `burst`, or can
+use `fixed_stagger` with `stagger_interval_seconds`; the assignment, offered
+start offsets, trace hashes, and seed are retained in result provenance.
+
 Run the native replay arm after the endpoint gates:
 
 ```bash

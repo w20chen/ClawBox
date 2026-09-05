@@ -11,8 +11,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .spec_types import (
-    AdmissionPolicy, AgentDriver, EvictionPolicy, InferenceBackend,
-    ReclamationPolicy, RestorePolicy, WorkloadSource,
+    AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, InferenceBackend,
+    ReclamationPolicy, RestorePolicy, SessionAssignment, WorkloadSource,
 )
 
 
@@ -37,11 +37,14 @@ class WorkloadSpec(StrictFrozenModel):
     input: str = Field(min_length=1)
     repetitions: int = Field(default=1, ge=1)
     cases: tuple[WorkloadCase, ...] = ()
+    session_assignment: SessionAssignment = SessionAssignment.SINGLE_CASE
 
     @model_validator(mode="after")
     def cases_match_source(self) -> "WorkloadSpec":
         if mismatched := [case.case_id for case in self.cases if case.source is not self.source]:
             raise ValueError("workload.cases source mismatch: " + ", ".join(mismatched))
+        if self.session_assignment is SessionAssignment.ROUND_ROBIN and len(self.cases) < 2:
+            raise ValueError("round_robin session assignment requires at least two cases")
         return self
 
 
@@ -84,6 +87,8 @@ class ExecutionSpec(StrictFrozenModel):
     command_timeout_seconds: int = Field(default=300, ge=1)
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
+    arrival_schedule: ArrivalSchedule = ArrivalSchedule.BURST
+    stagger_interval_seconds: float = Field(default=0.0, ge=0)
 
     @field_validator("concurrency_levels")
     @classmethod
@@ -93,6 +98,20 @@ class ExecutionSpec(StrictFrozenModel):
         if len(value) != len(set(value)):
             raise ValueError("execution.concurrency_levels must not contain duplicates")
         return value
+
+    @model_validator(mode="after")
+    def valid_arrival_schedule(self) -> "ExecutionSpec":
+        if (
+            self.arrival_schedule is ArrivalSchedule.FIXED_STAGGER
+            and self.stagger_interval_seconds <= 0
+        ):
+            raise ValueError("fixed_stagger requires a positive stagger_interval_seconds")
+        if (
+            self.arrival_schedule is ArrivalSchedule.BURST
+            and self.stagger_interval_seconds != 0
+        ):
+            raise ValueError("burst requires stagger_interval_seconds=0")
+        return self
 
 
 class ResourcesSpec(StrictFrozenModel):
@@ -186,6 +205,8 @@ class ExperimentArm(StrictFrozenModel):
     arm_id: str
     spec_digest: str
     case: WorkloadCase
+    session_cases: tuple[WorkloadCase, ...] = ()
+    session_assignment: SessionAssignment = SessionAssignment.SINGLE_CASE
     repetition: int
     concurrency: int
     policy: PolicySpec
@@ -210,16 +231,26 @@ def spec_digest(spec: ExperimentSpec) -> str:
 def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
     digest = spec_digest(spec)
     arms: list[ExperimentArm] = []
-    for case in load_workload_cases(spec.workload):
+    workload_cases = load_workload_cases(spec.workload)
+    case_groups = (
+        ((workload_cases[0], workload_cases),)
+        if spec.workload.session_assignment is SessionAssignment.ROUND_ROBIN
+        else tuple((case, (case,)) for case in workload_cases)
+    )
+    for case, session_cases in case_groups:
         for repetition in range(spec.workload.repetitions):
             for concurrency in spec.execution.concurrency_levels:
                 for policy in spec.policies:
-                    identity = {"spec_digest": digest, "case_id": case.case_id,
+                    identity = {"spec_digest": digest,
+                                "case_ids": [item.case_id for item in session_cases],
+                                "session_assignment": spec.workload.session_assignment,
                                 "repetition": repetition, "concurrency": concurrency,
                                 "policy": policy.model_dump(mode="json")}
                     arm_id = hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:24]
                     arms.append(ExperimentArm(
                         arm_id=arm_id, spec_digest=digest, case=case,
+                        session_cases=session_cases,
+                        session_assignment=spec.workload.session_assignment,
                         repetition=repetition, concurrency=concurrency, policy=policy,
                         agent=spec.agent, inference=spec.inference, runtime=spec.runtime,
                         sandbox=spec.sandbox,

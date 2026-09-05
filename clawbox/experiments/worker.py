@@ -50,6 +50,11 @@ from .spec import (
 )
 
 
+def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
+    cases = arm.session_cases or (arm.case,)
+    return cases[session_index % len(cases)]
+
+
 def _network_target(endpoint: str, *, label: str) -> str:
     parsed = urllib.parse.urlsplit(endpoint)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -452,11 +457,14 @@ class ExperimentWorker:
         sampler.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
+        arm_started_wall = time.time()
+        arm_started_monotonic = time.monotonic()
         try:
             with ThreadPoolExecutor(max_workers=arm.concurrency, thread_name_prefix="agent") as pool:
                 futures = [pool.submit(self._run_session, arm, index, coordinator, events,
                                        policy_events, prediction_provider,
-                                       sandbox_create_gate, sampler.observe)
+                                       sandbox_create_gate, sampler.observe,
+                                       arm_started_wall, arm_started_monotonic)
                            for index in range(arm.concurrency)]
                 for future in as_completed(futures, timeout=arm.execution.arm_timeout_seconds):
                     try:
@@ -566,6 +574,14 @@ class ExperimentWorker:
                 "admission_control": coordinator.admission_metrics(),
                 "tool_execution_observations": tool_execution_observations,
                 **observation_summary,
+                "session_trace_assignment": [
+                    {
+                        "session_id": item.get("session_id"),
+                        "case_id": item.get("case_id"),
+                        "trace_reference": item.get("trace_reference"),
+                    }
+                    for item in sorted(sessions, key=lambda value: value["session_id"])
+                ],
                 "session_timelines": [item.get("timeline") for item in sessions],
                 "session_time_spans": [
                     item.get("timeline", {}).get("time_spans", []) for item in sessions
@@ -601,10 +617,29 @@ class ExperimentWorker:
                      events: EventWriter, policy_events: PolicyEventExecutor,
                      prediction_provider: CommandPredictionProvider | None = None,
                      sandbox_create_gate: Semaphore | None = None,
-                     physical_observation: Any = None) -> dict[str, Any]:
+                     physical_observation: Any = None,
+                     arm_started_wall: float | None = None,
+                     arm_started_monotonic: float | None = None) -> dict[str, Any]:
+        session_case = session_case_for(arm, index)
+        if session_case != arm.case:
+            arm = arm.model_copy(update={"case": session_case})
+        offered_offset = (
+            index * arm.execution.stagger_interval_seconds
+            if arm.execution.arrival_schedule.value == "fixed_stagger" else 0.0
+        )
+        if arm_started_monotonic is not None:
+            time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
-        timeline: dict[str, Any] = {"session_started": time.time()}
+        session_started_wall = time.time()
+        timeline: dict[str, Any] = {
+            "session_started": session_started_wall,
+            "offered_start_offset_seconds": offered_offset,
+            "offered_start_unix_s": (
+                arm_started_wall + offered_offset
+                if arm_started_wall is not None else session_started_wall
+            ),
+        }
         runtime_ownership = Ownership(
             self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
             f"{session_id}-runtime", arm.policy.name,
@@ -1571,7 +1606,11 @@ class ExperimentWorker:
             })
             if policy_event_errors:
                 raise RuntimeError("policy event executor failed: " + "; ".join(policy_event_errors))
-            return {"session_id": session_id, "valid": valid, "create_seconds": create_s,
+            return {"session_id": session_id, "case_id": arm.case.case_id,
+                    "trace_reference": (
+                        arm.case.replay_trace_reference or arm.case.source_reference
+                    ),
+                    "valid": valid, "create_seconds": create_s,
                     "runtime_create_seconds": runtime_create_s,
                     "tool_create_seconds": tool_create_s,
                     "duration_seconds": time.monotonic() - session_started,
@@ -1804,22 +1843,36 @@ class ExperimentWorker:
             )
         else:
             evidence_class = "synthetic-stress"
-        trace_reference = (
-            arm.case.replay_trace_reference or arm.case.source_reference
-        )
-        trace_path = Path(trace_reference)
-        trace_sha256 = (
-            hashlib.sha256(trace_path.read_bytes()).hexdigest()
-            if trace_path.is_file() else None
-        )
+        cases = arm.session_cases or (arm.case,)
+        configured_traces = []
+        for case in cases:
+            trace_reference = case.replay_trace_reference or case.source_reference
+            trace_path = Path(trace_reference)
+            configured_traces.append({
+                "case_id": case.case_id,
+                "reference": trace_reference,
+                "sha256": (
+                    hashlib.sha256(trace_path.read_bytes()).hexdigest()
+                    if trace_path.is_file() else None
+                ),
+            })
         configuration = arm.inference.configuration
         return {
             "evidence_class": evidence_class,
-            "workload_case_id": arm.case.case_id,
-            "configured_trace_reference": trace_reference,
-            "configured_trace_sha256": trace_sha256,
-            "session_assignment": "single-case-per-arm",
+            "workload_case_ids": [case.case_id for case in cases],
+            "configured_traces": configured_traces,
+            "configured_trace_reference": (
+                configured_traces[0]["reference"] if len(configured_traces) == 1 else None
+            ),
+            "configured_trace_sha256": (
+                configured_traces[0]["sha256"] if len(configured_traces) == 1 else None
+            ),
+            "session_assignment": arm.session_assignment.value,
             "random_seed": arm.execution.random_seed,
+            "arrival_schedule": {
+                "kind": arm.execution.arrival_schedule.value,
+                "stagger_interval_seconds": arm.execution.stagger_interval_seconds,
+            },
             "resource_scope": {
                 "target_node": arm.resources.target_node,
                 "pool_memory_budget_mib": arm.resources.pool_memory_budget_mib,

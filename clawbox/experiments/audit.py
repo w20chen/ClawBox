@@ -99,8 +99,12 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
     if missing:
         raise ValueError(f"{path}: policies missing from the baseline catalog: {missing}")
     arms = expand_matrix(spec)
+    case_multiplier = (
+        1 if spec.workload.session_assignment.value == "round_robin"
+        else len(load_workload_cases(spec.workload))
+    )
     expected_arms = (
-        len(load_workload_cases(spec.workload))
+        case_multiplier
         * spec.workload.repetitions
         * len(spec.execution.concurrency_levels)
         * len(spec.policies)
@@ -120,6 +124,8 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
         "runtime_template": spec.runtime.template,
         "tool_template": spec.sandbox.template,
         "artifact_provenance": artifact_provenance,
+        "session_assignment": spec.workload.session_assignment.value,
+        "workload_case_count": len(load_workload_cases(spec.workload)),
     }
 
 

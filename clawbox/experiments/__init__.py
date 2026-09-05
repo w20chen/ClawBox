@@ -3,15 +3,18 @@
 from .baselines import BASELINES, Baseline, resolve_baseline
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for
 from .spec import (
-    AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
+    AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, ExperimentArm, ExperimentSpec,
     InferenceBackend, PolicySpec, ReclamationPolicy, RestorePolicy, WorkloadCase,
-    WorkloadSource, expand_matrix, load_experiment, load_workload_cases, spec_digest,
+    SessionAssignment, WorkloadSource, expand_matrix, load_experiment,
+    load_workload_cases, spec_digest,
 )
 
 __all__ = [
-    "AdmissionPolicy", "AgentDriver", "BASELINES", "Baseline", "EvictionPolicy", "ExperimentArm",
+    "AdmissionPolicy", "AgentDriver", "ArrivalSchedule", "BASELINES", "Baseline",
+    "EvictionPolicy", "ExperimentArm",
     "ExperimentSpec", "FailureCategory", "InferenceBackend", "PolicySpec",
     "ReclamationPolicy", "RestorePolicy", "ResultEnvelope", "RunStatus",
-    "WorkloadCase", "WorkloadSource", "expand_matrix", "failure_category_for",
+    "SessionAssignment", "WorkloadCase", "WorkloadSource", "expand_matrix",
+    "failure_category_for",
     "load_experiment", "load_workload_cases", "resolve_baseline", "spec_digest",
 ]
