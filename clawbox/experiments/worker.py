@@ -35,8 +35,8 @@ from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
 from .openclaw_driver import (
-    NativeSSHConfig, NativeSSHRouteState, native_ssh_target,
-    native_tool_bridge_setup_command, run_openclaw, split_native_ssh_target,
+    NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
+    native_tool_bridge_setup_command, run_openclaw,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .policy_control import PolicyControlServer
@@ -363,7 +363,7 @@ class ExperimentWorker:
         )
         runtime_env: dict[str, str] = {}
         runtime_allow_out: list[str] = []
-        route_state: NativeSSHRouteState | None = None
+        route_epoch = 0
         ssh_config: NativeSSHConfig | None = None
         if arm.agent.driver is AgentDriver.OPENCLAW:
             credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
@@ -515,7 +515,6 @@ class ExperimentWorker:
                     elapsed = self._restore_with_one_victim(
                         arm, session_id, lifecycle, coordinator, events,
                     )
-                    refresh_native_ssh_route()
                     with wait_lock:
                         wait_state["restore_completed_at"] = time.time()
                         wait_state["restore_request_id"] = event.get("request_id")
@@ -656,17 +655,16 @@ class ExperimentWorker:
                           "role": "tool", "service_seconds": tool_create_s,
                           "lifecycle_timing": lifecycle.timings[-1],
                           "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
-            tool_endpoint = None
+            setup_route = None
             if arm.agent.driver is AgentDriver.OPENCLAW:
                 tool_endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
-                _user, endpoint_host, _port = split_native_ssh_target(
-                    native_ssh_target(tool_endpoint.address)
-                )
+                route_epoch += 1
+                setup_route = native_ssh_route(tool_endpoint, epoch=route_epoch)
                 try:
-                    endpoint_address = ipaddress.ip_address(endpoint_host)
+                    endpoint_address = ipaddress.ip_address(setup_route.host)
                 except ValueError as exc:
                     raise RuntimeError(
-                        f"CubeSandbox returned a non-IP TCP endpoint host: {endpoint_host!r}"
+                        f"CubeSandbox returned a non-IP TCP endpoint host: {setup_route.host!r}"
                     ) from exc
                 runtime_lifecycle.network_allow_out.append(
                     f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
@@ -688,32 +686,24 @@ class ExperimentWorker:
             )
             executor = CubeCommandExecutor(self.client, lambda: lifecycle.sandbox, cwd=arm.sandbox.workspace)
 
-            def refresh_native_ssh_route() -> None:
-                nonlocal ssh_config
-                if route_state is None or ssh_config is None or lifecycle.sandbox is None:
-                    raise RuntimeError("native SSH route state is not initialized")
+            def resolve_native_ssh_route(phase: str) -> NativeSSHRoute:
+                """Resolve CubeSandbox's current route at an operation boundary."""
+                nonlocal route_epoch, ssh_config
+                if lifecycle.sandbox is None:
+                    raise RuntimeError("native SSH route requested before Tool start")
                 endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
-                target = native_ssh_target(endpoint.address)
-                if not route_state.update(target):
-                    return
-                _user, host, port = split_native_ssh_target(target)
-                known_host = f"[{host}]:{port} {ssh_credentials.host_public}\n"
-                encoded = base64.b64encode(known_host.encode()).decode()
-                updated = runtime_executor.execute(
-                    f"printf %s {shlex.quote(encoded)} | base64 -d > "
-                    f"/state/openclaw/{session_id}/ssh/known_hosts", 30,
-                )
-                if updated.exit_code:
-                    raise RuntimeError(
-                        "Runtime known-host refresh failed: " + updated.stderr[-1000:]
-                    )
-                ssh_config = replace(ssh_config, target=target)
+                route_epoch += 1
+                route = native_ssh_route(endpoint, epoch=route_epoch)
+                if ssh_config is not None:
+                    ssh_config = replace(ssh_config, target=route.target)
                 events.write({
-                    "event": "native_ssh_endpoint_refreshed", "session_id": session_id,
-                    "container_port": endpoint.container_port,
-                    "tcp_endpoint": endpoint.address,
+                    "event": "native_ssh_endpoint_resolved", "session_id": session_id,
+                    "sandbox_id": route.sandbox_id, "container_port": route.container_port,
+                    "endpoint_epoch": route.epoch, "host": route.host, "port": route.port,
+                    "tcp_endpoint": endpoint.address, "phase": phase,
                     "source": "cubesandbox_tcp_endpoint",
                 })
+                return route
 
             exit_mismatches = 0
             model_steps = 0
@@ -758,6 +748,7 @@ class ExperimentWorker:
             policy_control_path: Path | None = None
             if arm.agent.driver is AgentDriver.OPENCLAW:
                 active_reservations: dict[str, int] = {}
+                admitted_routes: dict[str, NativeSSHRoute] = {}
                 reservation_lock = Lock()
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
@@ -773,12 +764,13 @@ class ExperimentWorker:
                             self._restore_with_one_victim(
                                 arm, session_id, lifecycle, coordinator, events,
                             )
-                            refresh_native_ssh_route()
+                        route = resolve_native_ssh_route("admit")
                         admission_wait = coordinator.acquire(
                             session_id, amount, arm.execution.arm_timeout_seconds
                         )
                         with reservation_lock:
                             active_reservations[execution_id] = amount
+                            admitted_routes[execution_id] = route
                             coordinator.set_tool_active(session_id, True)
                     prediction_record = dict(prediction or {})
                     prediction_record.update({
@@ -803,14 +795,63 @@ class ExperimentWorker:
                         ),
                         "admitted_memory_mib": amount,
                         "admission_blocked_seconds": admission_wait,
+                        "endpoint_sandbox_id": route.sandbox_id,
+                        "endpoint_epoch": route.epoch,
+                        "endpoint_host": route.host,
+                        "endpoint_port": route.port,
                     })
-                    return {"decision": "ADMIT", "admitted_memory_mib": amount,
-                            "admission_blocked_seconds": admission_wait}
+                    return {
+                        "decision": "ADMIT", "admitted_memory_mib": amount,
+                        "admission_blocked_seconds": admission_wait,
+                        "sandbox_id": route.sandbox_id, "epoch": route.epoch,
+                        "container_port": route.container_port,
+                        "host": route.host, "port": route.port,
+                    }
 
                 def complete_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     execution_id = str(request["execution_id"])
+                    timestamp_names = (
+                        "execution_started_at", "ssh_reaped_at", "execution_completed_at",
+                    )
+                    timestamps: dict[str, float] = {}
+                    for name in timestamp_names:
+                        value = request.get(name)
+                        if isinstance(value, bool) or not isinstance(value, (int, float)):
+                            raise RuntimeError(f"completion is missing numeric {name}")
+                        rendered = float(value)
+                        if not math.isfinite(rendered):
+                            raise RuntimeError(f"completion has non-finite {name}")
+                        timestamps[name] = rendered
+                    if not (
+                        timestamps["execution_started_at"]
+                        <= timestamps["ssh_reaped_at"]
+                        <= timestamps["execution_completed_at"]
+                    ):
+                        raise RuntimeError(
+                            "completion timestamps do not prove SSH reaped before complete"
+                        )
                     with wait_lock, reservation_lock:
-                        amount = active_reservations.pop(execution_id)
+                        amount = active_reservations.get(execution_id)
+                        admitted_route = admitted_routes.get(execution_id)
+                        if amount is None or admitted_route is None:
+                            raise RuntimeError(f"completion has no active admission for {execution_id}")
+                        completion_route = (
+                            request.get("endpoint_sandbox_id"),
+                            request.get("endpoint_epoch"),
+                            request.get("endpoint_host"),
+                            request.get("endpoint_port"),
+                        )
+                        expected_route = (
+                            admitted_route.sandbox_id, admitted_route.epoch,
+                            admitted_route.host, admitted_route.port,
+                        )
+                        if completion_route != expected_route:
+                            raise RuntimeError(
+                                "completion endpoint does not match its admission: "
+                                f"expected={expected_route!r} got={completion_route!r}"
+                            )
+                        active_reservations.pop(execution_id)
+                        admitted_routes.pop(execution_id)
                         coordinator.release(session_id, amount)
                         coordinator.set_tool_active(session_id, bool(active_reservations))
 
@@ -831,7 +872,9 @@ class ExperimentWorker:
                         policy_events.submit(eager_pause)
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
-                                  "exit_code": request.get("exit_code")})
+                                  "exit_code": request.get("exit_code"),
+                                  "ssh_reaped_at": timestamps["ssh_reaped_at"],
+                                  "endpoint_epoch": expected_route[1]})
                     return {"status": "COMPLETED"}
 
                 if self.policy_control is None:
@@ -846,14 +889,15 @@ class ExperimentWorker:
                         "Tool setup could not start native SSH bridge: "
                         + tool_bridge_result.stderr[-1000:]
                     )
-                if tool_endpoint is None:
+                if setup_route is None:
                     raise RuntimeError("OpenClaw Tool endpoint was not resolved")
-                ssh_target = native_ssh_target(tool_endpoint.address)
-                route_state = NativeSSHRouteState(ssh_target)
+                ssh_target = setup_route.target
                 events.write({
                     "event": "native_ssh_endpoint_resolved", "session_id": session_id,
-                    "target": ssh_target, "container_port": tool_endpoint.container_port,
-                    "tcp_endpoint": tool_endpoint.address,
+                    "sandbox_id": setup_route.sandbox_id,
+                    "endpoint_epoch": setup_route.epoch,
+                    "target": ssh_target, "container_port": setup_route.container_port,
+                    "host": setup_route.host, "port": setup_route.port,
                     "phase": "setup", "source": "cubesandbox_tcp_endpoint",
                 })
                 ssh_config = NativeSSHConfig(
@@ -861,6 +905,8 @@ class ExperimentWorker:
                     identity_private_key=ssh_credentials.client_private,
                     host_public_key=ssh_credentials.host_public,
                     workspace_root=arm.sandbox.workspace,
+                    sandbox_id=setup_route.sandbox_id,
+                    host_key_alias=native_ssh_host_key_alias(setup_route.sandbox_id),
                 )
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
@@ -870,7 +916,6 @@ class ExperimentWorker:
                     output_dir=self.output_root,
                     timeout_seconds=arm.execution.arm_timeout_seconds,
                     model_gateway=gateway_session,
-                    ssh_target_provider=route_state.get_target,
                     prediction_manifest=(prediction_provider.manifest
                                          if prediction_provider is not None else None),
                 )
@@ -886,7 +931,9 @@ class ExperimentWorker:
                         self._restore_with_one_victim(
                             arm, session_id, lifecycle, coordinator, events,
                         )
-                        refresh_native_ssh_route()
+                    resolve_native_ssh_route("collection")
+                    if ssh_config is None:
+                        raise RuntimeError("native SSH config was not initialized")
                     native_artifacts = collect_and_validate_native_tool_artifacts(
                         runtime_executor=runtime_executor, ssh=ssh_config,
                         session_id=session_id, output_dir=self.output_root,

@@ -9,7 +9,8 @@ import pytest
 
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
-    NativeSSHRouteState,
+    NativeSSHRoute,
+    native_ssh_host_key_alias,
     native_ssh_target,
     native_tool_bridge_setup_command,
     native_ssh_target_from_env,
@@ -30,15 +31,12 @@ class PolicySession:
         }}]
 
 
-def test_native_ssh_route_state_updates_only_on_a_new_valid_endpoint() -> None:
-    state = NativeSSHRouteState("executor@192.0.2.10:20010")
-    assert state.get_target() == "executor@192.0.2.10:20010"
-    assert state.update("executor@192.0.2.10:20010") is False
-    assert state.update("executor@192.0.2.11:20011") is True
-    assert state.get_target() == "executor@192.0.2.11:20011"
-    with pytest.raises(ValueError, match="target"):
-        state.update("executor@192.0.2.11:not-a-port")
-    assert state.get_target() == "executor@192.0.2.11:20011"
+def test_native_ssh_route_has_an_explicit_epoch_and_stable_tool_alias() -> None:
+    route = NativeSSHRoute("tool-a", 2222, 7, "192.0.2.10", 20010)
+    assert route.target == "executor@192.0.2.10:20010"
+    assert native_ssh_host_key_alias("tool-a") == "clawbox-tool-tool-a"
+    with pytest.raises(ValueError, match="epoch"):
+        NativeSSHRoute("tool-a", 2222, 0, "192.0.2.10", 20010)
 
 
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
@@ -61,6 +59,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
             target="executor@2222-tool.cube.local:2222",
             identity_private_key="PRIVATE KEY\n",
             host_public_key="ssh-ed25519 AAAATEST",
+            sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
         ),
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=60,

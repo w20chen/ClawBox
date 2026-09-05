@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+
+_SPEC = importlib.util.spec_from_file_location(
+    "clawbox_policy_ssh", Path(__file__).parents[1] / "scripts" / "clawbox-policy-ssh.py",
+)
+assert _SPEC is not None and _SPEC.loader is not None
+policy_ssh = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(policy_ssh)
+
+
+def _argv() -> list[str]:
+    metadata = json.dumps(
+        {"v": 1, "execution_id": "exec-a", "tool_name": "exec"},
+        separators=(",", ":"),
+    )
+    return [
+        "-F", "/state/openclaw/ssh/config", "openclaw-sandbox",
+        policy_ssh.PREFIX + metadata + "\nprintf /run/identity",
+    ]
+
+
+def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[tuple[str, dict]] = []
+
+    def post(path: str, body: dict, *, attempts: int) -> dict:
+        posted.append((path, body))
+        if path.endswith("/admit"):
+            return {
+                "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 9,
+                "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+            }
+        return {"status": "COMPLETED"}
+
+    class Child:
+        def wait(self) -> int:
+            return 0
+
+    launched: list[list[str]] = []
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda argv: (launched.append(argv) or Child()))
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
+
+    assert policy_ssh.main() == 0
+    assert len(launched) == 1
+    command = launched[0]
+    assert command[0] == "/fake/ssh"
+    assert "-F" in command and "/state/openclaw/ssh/config" in command
+    assert "-o" in command
+    assert "HostName=192.0.2.20" in command
+    assert "Port=20020" in command
+    assert "HostKeyAlias=clawbox-tool-tool-a" in command
+    assert command[-2] == "openclaw-sandbox"
+    assert command[-1].endswith("\nprintf /run/identity")
+    assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
+    completion = posted[-1][1]
+    assert completion["endpoint_sandbox_id"] == "tool-a"
+    assert completion["endpoint_epoch"] == 9
+    assert completion["ssh_reaped_at"] <= completion["execution_completed_at"]
+
+
+def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[str] = []
+
+    def post(path: str, _body: dict, *, attempts: int) -> dict:
+        posted.append(path)
+        return {
+            "decision": "ADMIT", "sandbox_id": "tool-b", "epoch": 1,
+            "container_port": 2222, "host": "192.0.2.21", "port": 20021,
+        }
+
+    def fail_spawn(_argv: list[str]):
+        raise AssertionError("cross-Tool route reached subprocess")
+
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", fail_spawn)
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
+
+    assert policy_ssh.main() == 125
+    assert posted == ["/v1/tool/admit"]

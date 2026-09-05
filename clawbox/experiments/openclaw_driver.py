@@ -6,10 +6,9 @@ import json
 import os
 import re
 import shlex
-from threading import Event, Lock, Thread
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from clawbox.replay.lifecycle import CommandResult
 
@@ -23,27 +22,51 @@ class NativeSSHConfig:
     identity_private_key: str
     host_public_key: str
     workspace_root: str = "/workspace"
+    sandbox_id: str = ""
+    host_key_alias: str = "openclaw-sandbox"
 
 
-class NativeSSHRouteState:
-    """Thread-safe current target shared with a running OpenClaw process."""
+@dataclass(frozen=True, slots=True)
+class NativeSSHRoute:
+    """One admission-scoped raw TCP route owned by CubeSandbox."""
 
-    def __init__(self, target: str) -> None:
-        split_native_ssh_target(target)
-        self._target = target
-        self._lock = Lock()
+    sandbox_id: str
+    container_port: int
+    epoch: int
+    host: str
+    port: int
 
-    def get_target(self) -> str:
-        with self._lock:
-            return self._target
+    def __post_init__(self) -> None:
+        if self.epoch < 1:
+            raise ValueError("native SSH route epoch must be a positive integer")
+        if not 1 <= self.container_port <= 65535 or not 1 <= self.port <= 65535:
+            raise ValueError("native SSH route has an invalid port")
+        if not self.sandbox_id or not self.host:
+            raise ValueError("native SSH route identity is empty")
 
-    def update(self, target: str) -> bool:
-        split_native_ssh_target(target)
-        with self._lock:
-            if target == self._target:
-                return False
-            self._target = target
-            return True
+    @property
+    def target(self) -> str:
+        return native_ssh_target(self.host, port=self.port)
+
+
+def native_ssh_route(endpoint: Any, *, epoch: int) -> NativeSSHRoute:
+    """Convert a semantic CubeSandbox endpoint for one SSH admission."""
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        raise ValueError("native SSH route epoch must be a positive integer")
+    endpoint_id = str(endpoint.sandbox_id or "")
+    container_port = int(endpoint.container_port)
+    if not endpoint_id or not 1 <= container_port <= 65535:
+        raise ValueError("CubeSandbox returned an invalid semantic TCP endpoint")
+    _user, host, port = split_native_ssh_target(native_ssh_target(endpoint.address))
+    return NativeSSHRoute(endpoint_id, container_port, epoch, host, port)
+
+
+def native_ssh_host_key_alias(sandbox_id: str) -> str:
+    """Return a stable, per-Tool host-key namespace."""
+    value = f"clawbox-tool-{str(sandbox_id).strip()}"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value):
+        raise ValueError("sandbox_id cannot produce a safe SSH host-key alias")
+    return value
 
 
 def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str, str, int]:
@@ -168,8 +191,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  ssh: NativeSSHConfig, policy_control: Any,
                  runtime_executor: Any, output_dir: Path, timeout_seconds: int,
                  model_gateway: Any | None = None,
-                 prediction_manifest: dict[str, dict[str, Any]] | None = None,
-                 ssh_target_provider: Callable[[], str] | None = None) -> dict:
+                 prediction_manifest: dict[str, dict[str, Any]] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -190,6 +212,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     upstream_key_env = gateway_key_env if model_gateway is not None else key_env
     if "api_key" in configuration:
         raise ValueError("OpenClaw API keys must come from an environment variable")
+    if not ssh.sandbox_id:
+        raise ValueError("native SSH requires the intended Tool sandbox_id")
+    host_key_alias = ssh.host_key_alias.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", host_key_alias):
+        raise ValueError("native SSH host_key_alias is not safe")
 
     home = f"/state/openclaw/{session_id}"
     runtime_workspace = f"{home}/runtime-workspace"
@@ -205,6 +232,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
+        f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
+        f"CLAWBOX_SSH_HOST_KEY_ALIAS={shlex.quote(host_key_alias)} "
         f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
 
@@ -225,7 +254,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
 
     private_b64 = base64.b64encode(ssh.identity_private_key.encode()).decode()
     _user, host, port = split_native_ssh_target(ssh.target)
-    known_host = f"[{host}]:{port} {ssh.host_public_key.strip()}\n"
+    known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
     encoded_predictions = base64.b64encode(json.dumps(
         prediction_manifest or {}, sort_keys=True, separators=(",", ":"),
@@ -300,50 +329,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "Use only the sandboxed exec/process/read/write/edit/apply_patch tools for every "
         "workspace operation. The mutable workspace is in the Tool VM.\n\nTask:\n" + prompt
     )
-    refresh_stop = Event()
-    refresh_errors: list[BaseException] = []
-    refresh_thread: Thread | None = None
-    if ssh_target_provider is not None:
-        current_target = ssh.target
-
-        def refresh_target() -> None:
-            nonlocal current_target
-            while not refresh_stop.wait(0.2):
-                try:
-                    target = str(ssh_target_provider()).strip()
-                    split_native_ssh_target(target)
-                    if target == current_target:
-                        continue
-                    invoke(
-                        ["config", "patch", "--stdin"],
-                        input_value=json.dumps({
-                            "agents": {"defaults": {"sandbox": {
-                                "ssh": {"target": target},
-                            }}}
-                        }),
-                    )
-                    current_target = target
-                except BaseException as exc:  # propagate after agent exit
-                    refresh_errors.append(exc)
-                    refresh_stop.set()
-                    return
-
-        refresh_thread = Thread(
-            target=refresh_target, name=f"openclaw-ssh-refresh-{session_id}", daemon=True,
-        )
-        refresh_thread.start()
-    try:
-        result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
-                         "--model", f"vllm/{model}", "--message", instruction,
-                         "--timeout", str(timeout_seconds), "--json"])
-    finally:
-        refresh_stop.set()
-        if refresh_thread is not None:
-            refresh_thread.join(timeout=5)
-        if refresh_errors:
-            raise RuntimeError(
-                f"native SSH endpoint refresh failed: {refresh_errors[0]}"
-            ) from refresh_errors[0]
+    result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
+                     "--model", f"vllm/{model}", "--message", instruction,
+                     "--timeout", str(timeout_seconds), "--json"])
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")

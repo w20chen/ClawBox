@@ -7,8 +7,10 @@ client exactly once after admission.  HTTP carries control metadata only.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -19,6 +21,7 @@ from typing import Any
 
 
 PREFIX = "__CBX_EXEC_1__"
+_HOST_KEY_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 def _envelope(argv: list[str]) -> tuple[dict[str, Any], str] | None:
@@ -75,6 +78,55 @@ def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
     raise RuntimeError(f"policy control unavailable: {last_error}")
 
 
+def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
+    """Validate the endpoint returned for this one admitted invocation."""
+    expected_sandbox_id = os.environ.get("CLAWBOX_TOOL_SANDBOX_ID", "").strip()
+    sandbox_id = str(admission.get("sandbox_id") or "").strip()
+    if not expected_sandbox_id or sandbox_id != expected_sandbox_id:
+        raise RuntimeError(
+            f"policy route belongs to {sandbox_id!r}, expected Tool {expected_sandbox_id!r}"
+        )
+    epoch = admission.get("epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        raise RuntimeError("policy route has no positive endpoint epoch")
+    host = str(admission.get("host") or "").strip()
+    try:
+        ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise RuntimeError(f"policy route host is not an IP address: {host!r}") from exc
+    port = admission.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise RuntimeError("policy route has an invalid TCP port")
+    alias = os.environ.get("CLAWBOX_SSH_HOST_KEY_ALIAS", "").strip()
+    if not _HOST_KEY_ALIAS.fullmatch(alias):
+        raise RuntimeError("stable Tool SSH host-key alias is not configured")
+    return {
+        "sandbox_id": sandbox_id, "epoch": epoch, "host": host,
+        "port": port, "host_key_alias": alias,
+    }
+
+
+def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
+    """Override only destination routing for the current OpenSSH invocation.
+
+    OpenClaw supplies a generated SSH config and the final two arguments are
+    its stable host alias plus the remote command.  The config remains the
+    source of identity and strict-host-key settings; these options only make
+    the admitted CubeSandbox route current for this invocation.
+    """
+    if len(argv) < 2:
+        raise RuntimeError("SSH invocation has no destination and remote command")
+    target_index = len(argv) - 2
+    if argv[target_index].startswith("-"):
+        raise RuntimeError("SSH invocation has no stable destination argument")
+    overrides = [
+        "-o", f"HostName={route['host']}",
+        "-o", f"Port={route['port']}",
+        "-o", f"HostKeyAlias={route['host_key_alias']}",
+    ]
+    return [*argv[:target_index], *overrides, *argv[target_index:]]
+
+
 def main() -> int:
     real_ssh = os.environ.get("CLAWBOX_REAL_SSH", "/usr/bin/ssh")
     parsed = _envelope(sys.argv[1:])
@@ -105,17 +157,29 @@ def main() -> int:
         admission = _post("/v1/tool/admit", request, attempts=3)
         if admission.get("decision") != "ADMIT":
             raise RuntimeError(f"unexpected policy decision: {admission.get('decision')!r}")
+        route = _admission_route(admission)
     except Exception as exc:
         print(f"ClawBox policy admission failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 125
 
     execution_started_at = time.time()
-    return_code = subprocess.call([real_ssh, *sys.argv[1:]])
+    try:
+        child = subprocess.Popen([real_ssh, *_ssh_args_for_route(sys.argv[1:], route)])
+        return_code = child.wait()
+    except OSError as exc:
+        print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)
+        return_code = 127
+    ssh_reaped_at = time.time()
     completion = {
         **request,
         "execution_started_at": execution_started_at,
         "execution_completed_at": time.time(),
         "exit_code": return_code,
+        "endpoint_sandbox_id": route["sandbox_id"],
+        "endpoint_epoch": route["epoch"],
+        "endpoint_host": route["host"],
+        "endpoint_port": route["port"],
+        "ssh_reaped_at": ssh_reaped_at,
     }
     try:
         _post("/v1/tool/complete", completion, attempts=3)

@@ -25,6 +25,8 @@ from clawbox.cube import CubeSandboxClient
 from clawbox.cube.api_retry import read_with_backoff
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
+    native_ssh_host_key_alias,
+    native_ssh_route,
     native_ssh_target,
     native_tool_bridge_setup_command,
     split_native_ssh_target,
@@ -76,6 +78,8 @@ def endpoint_ssh(endpoint, credentials) -> NativeSSHConfig:
         target=native_ssh_target(endpoint.address),
         identity_private_key=credentials.client_private,
         host_public_key=credentials.host_public,
+        sandbox_id=endpoint.sandbox_id,
+        host_key_alias=native_ssh_host_key_alias(endpoint.sandbox_id),
     )
 
 
@@ -105,6 +109,7 @@ def ssh_args(ssh: NativeSSHConfig, identity: str, known_hosts: str,
         "-o", f"UserKnownHostsFile={known_hosts}",
         "-o", "StrictHostKeyChecking=yes",
         "-o", "UpdateHostkeys=no",
+        "-o", f"HostKeyAlias={ssh.host_key_alias}",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=15",
         "-p", str(port), f"{user}@{host_argument}",
@@ -116,8 +121,7 @@ def setup_runtime_ssh(runtime, ssh: NativeSSHConfig, credentials,
     home = f"/state/clawbox-pair/{session_id}"
     identity = f"{home}/id_ed25519"
     known_hosts = f"{home}/known_hosts"
-    _user, host, port = split_native_ssh_target(ssh.target)
-    known_host = f"[{host}]:{port} {credentials.host_public}\n"
+    known_host = f"{ssh.host_key_alias} {credentials.host_public}\n"
     command = f"mkdir -p {shlex.quote(home)}; "
     for path, value in ((identity, credentials.client_private),
                         (known_hosts, known_host)):
@@ -130,8 +134,7 @@ def setup_runtime_ssh(runtime, ssh: NativeSSHConfig, credentials,
 
 def refresh_known_hosts(runtime, ssh: NativeSSHConfig, credentials,
                         known_hosts: str) -> None:
-    _user, host, port = split_native_ssh_target(ssh.target)
-    known_host = f"[{host}]:{port} {credentials.host_public}\n"
+    known_host = f"{ssh.host_key_alias} {credentials.host_public}\n"
     encoded = base64.b64encode(known_host.encode()).decode()
     run(runtime, f"printf %s {shlex.quote(encoded)} | base64 -d > {shlex.quote(known_hosts)}")
 
@@ -156,6 +159,24 @@ def failed_ssh_probe(runtime, ssh: NativeSSHConfig, identity: str,
             "stderr": result.stderr}
 
 
+def ssh_config_dump(runtime, ssh: NativeSSHConfig, identity: str,
+                    known_hosts: str) -> dict[str, object]:
+    """Inspect the effective OpenSSH policy without opening a connection."""
+    args = ssh_args(ssh, identity, known_hosts)
+    args.insert(1, "-G")
+    command = shlex.join(args)
+    result = run(runtime, command, timeout=30)
+    rendered = result.stdout.lower()
+    if "stricthostkeychecking yes" not in rendered and \
+            "stricthostkeychecking true" not in rendered:
+        raise AssertionError("ssh -G did not retain strict host-key checking")
+    if f"hostkeyalias {ssh.host_key_alias.lower()}" not in rendered:
+        raise AssertionError("ssh -G did not retain the stable Tool host-key alias")
+    if f"userknownhostsfile {known_hosts.lower()}" not in rendered:
+        raise AssertionError("ssh -G did not retain the dedicated known_hosts file")
+    return {"target": ssh.target, "output": result.stdout}
+
+
 def policy_ssh_call(runtime, ssh: NativeSSHConfig, identity: str, known_hosts: str,
                     session, execution_id: str, remote_command: str):
     envelope = ENVELOPE + json.dumps(
@@ -167,6 +188,8 @@ def policy_ssh_call(runtime, ssh: NativeSSHConfig, identity: str, known_hosts: s
         f"CLAWBOX_POLICY_CONTROL_URL={shlex.quote(session.url)} "
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(session.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session.session_id)} "
+        f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
+        f"CLAWBOX_SSH_HOST_KEY_ALIAS={shlex.quote(ssh.host_key_alias)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1; "
         + shlex.join([*ssh_args(ssh, identity, known_hosts, "/usr/local/bin/ssh"), envelope])
     )
@@ -180,6 +203,8 @@ def unwrapped_ssh_call(runtime, ssh: NativeSSHConfig, identity: str,
         f"CLAWBOX_POLICY_CONTROL_URL={shlex.quote(session.url)} "
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(session.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session.session_id)} "
+        f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
+        f"CLAWBOX_SSH_HOST_KEY_ALIAS={shlex.quote(ssh.host_key_alias)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1; "
         + shlex.join([*ssh_args(ssh, identity, known_hosts, "/usr/local/bin/ssh"),
                       "printf should-not-run"])
@@ -276,6 +301,7 @@ def main() -> int:
     expected_ids: set[str] = set()
     restore_count = 0
     restore_seconds: list[float] = []
+    admission_routes: list[dict[str, object]] = []
     tool_holder: dict[str, object] = {}
     timings: dict[str, float] = {}
     try:
@@ -341,7 +367,9 @@ def main() -> int:
         )
         timings["runtime_create_seconds"] = time.monotonic() - started
         ssh = endpoint_ssh(endpoint_before, credentials)
+        initial_ssh = ssh
         identity, known_hosts = setup_runtime_ssh(runtime, ssh, credentials, session_id)
+        ssh_policy_before = ssh_config_dump(runtime, ssh, identity, known_hosts)
         probe = direct_ssh_probe(runtime, ssh, identity, known_hosts, f"cat {marker}")
         if probe["stdout"].strip() != tool_id:
             raise AssertionError(
@@ -365,7 +393,21 @@ def main() -> int:
                     tool_holder["sandbox"] = current_tool
                     restore_seconds.append(time.monotonic() - started_restore)
                     restore_count += 1
-                return {"decision": "ADMIT", "restore_count": restore_count}
+                route = native_ssh_route(
+                    cube.get_tcp_endpoint(current_tool, 2222),
+                    epoch=len(admission_routes) + 1,
+                )
+                if route.sandbox_id != tool_id:
+                    raise AssertionError(
+                        f"admission route reached wrong Tool: {route.sandbox_id!r}"
+                    )
+                rendered = {
+                    "sandbox_id": route.sandbox_id, "epoch": route.epoch,
+                    "container_port": route.container_port,
+                    "host": route.host, "port": route.port,
+                }
+                admission_routes.append(rendered)
+                return {"decision": "ADMIT", "restore_count": restore_count, **rendered}
 
             def complete(_request: dict) -> dict:
                 return {"status": "COMPLETED"}
@@ -375,12 +417,14 @@ def main() -> int:
             after_id = f"{session_id}-after-{uuid.uuid4().hex}"
             expected_ids.add(before_id)
             result = policy_ssh_call(
-                runtime, ssh, identity, known_hosts, policy_session, before_id,
+                runtime, initial_ssh, identity, known_hosts, policy_session, before_id,
                 f"cat {marker}",
             )
             if result.exit_code != 0 or result.stdout.strip() != tool_id:
                 raise AssertionError(f"native SSH reached the wrong Tool before pause: {result}")
-            unwrapped = unwrapped_ssh_call(runtime, ssh, identity, known_hosts, policy_session)
+            unwrapped = unwrapped_ssh_call(
+                runtime, initial_ssh, identity, known_hosts, policy_session,
+            )
             if unwrapped.exit_code != 125:
                 raise AssertionError(f"unenveloped Agent operation was not rejected: {unwrapped}")
 
@@ -393,7 +437,7 @@ def main() -> int:
             if paused_endpoint.sandbox_id != tool_id:
                 raise AssertionError("paused endpoint identity changed")
             stale_probe = failed_ssh_probe(
-                runtime, ssh, identity, known_hosts, f"cat {marker}",
+                runtime, initial_ssh, identity, known_hosts, f"cat {marker}",
             )
             if stale_probe["exit_code"] == 0:
                 raise AssertionError(
@@ -409,16 +453,12 @@ def main() -> int:
             endpoint_after = cube.get_tcp_endpoint(tool, 2222)
             if endpoint_after.sandbox_id != tool_id:
                 raise AssertionError("resumed endpoint identity changed")
-            if endpoint_after.address == endpoint_before.address:
-                raise AssertionError(
-                    "CubeSandbox reused the pre-pause endpoint; stale-endpoint "
-                    "invalidation was not observable"
-                )
             ssh = endpoint_ssh(endpoint_after, credentials)
             refresh_known_hosts(runtime, ssh, credentials, known_hosts)
             resumed_probe = direct_ssh_probe(
                 runtime, ssh, identity, known_hosts, f"cat {marker}",
             )
+            ssh_policy_after = ssh_config_dump(runtime, ssh, identity, known_hosts)
             if resumed_probe["stdout"].strip() != tool_id:
                 raise AssertionError(
                     f"resumed native SSH reached the wrong Tool: {resumed_probe}"
@@ -426,11 +466,17 @@ def main() -> int:
 
             expected_ids.add(after_id)
             result = policy_ssh_call(
-                runtime, ssh, identity, known_hosts, policy_session, after_id,
+                runtime, initial_ssh, identity, known_hosts, policy_session, after_id,
                 f"cat {marker}",
             )
             if result.exit_code != 0 or result.stdout.strip() != tool_id:
                 raise AssertionError(f"native SSH reached the wrong Tool after restore: {result}")
+            if len(admission_routes) != 2:
+                raise AssertionError(f"expected two admission endpoint resolutions: {admission_routes}")
+            if admission_routes[0]["sandbox_id"] != tool_id or admission_routes[1]["sandbox_id"] != tool_id:
+                raise AssertionError(f"admission endpoint identity mismatch: {admission_routes}")
+            if int(admission_routes[1]["epoch"]) <= int(admission_routes[0]["epoch"]):
+                raise AssertionError(f"endpoint epoch did not advance after restore: {admission_routes}")
             timings["tool_restore_seconds"] = restore_seconds[-1]
             require_state(tool_id, "running", "Tool after demand restore")
             require_state(runtime.sandbox_id, "running", "Runtime after Tool restore")
@@ -449,6 +495,7 @@ def main() -> int:
                 "tcp_endpoint_before": endpoint_record(endpoint_before),
                 "tcp_endpoint_paused": endpoint_record(paused_endpoint),
                 "tcp_endpoint_after": endpoint_record(endpoint_after),
+                "admission_routes": admission_routes,
                 "stale_endpoint_probe": stale_probe,
                 "native_identity": {
                     "expected_tool_id": tool_id,
@@ -456,6 +503,8 @@ def main() -> int:
                     "after": resumed_probe["stdout"].strip(),
                 },
                 "policy_endpoint": server.url, "native_probe": probe,
+                "ssh_config_before": ssh_policy_before,
+                "ssh_config_after": ssh_policy_after,
                 "restore_count": restore_count, "timings": timings,
                 "telemetry": validation, "exact_id_validation": True,
             }
