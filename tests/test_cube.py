@@ -292,3 +292,94 @@ def test_worker_runs_atomic_arm_and_skips_matching_completion(tmp_path: Path) ->
                               client=CubeSandboxClient(sandbox_class=_Sandbox)).run()
     assert second[0].arm.arm_id == first[0].arm.arm_id
     assert _Sandbox.create_kwargs == {}
+
+
+def test_worker_runs_every_current_baseline_at_c40_with_complete_spans(
+    tmp_path: Path,
+) -> None:
+    class ConcurrentSandbox(_Sandbox):
+        create_lock = threading.Lock()
+        create_sequence = 0
+
+        @classmethod
+        def create(cls, **kwargs):
+            with cls.create_lock:
+                cls.create_sequence += 1
+                sandbox_id = f"c40-{cls.create_sequence}"
+            item = cls({
+                "sandboxID": sandbox_id,
+                "templateID": kwargs["template"],
+                "metadata": kwargs["metadata"],
+            })
+            cls.items[sandbox_id] = item
+            return item
+
+    ConcurrentSandbox.items = {}
+    trace = tmp_path / "c40-trace.jsonl"
+    trace.write_text(
+        '{"type":"action","action_type":"llm_call","action_id":"llm-1",'
+        '"ts_start":0,"ts_end":0.01,"data":{"llm_latency_ms":10}}\n'
+        '{"type":"action","action_type":"tool_exec","action_id":"tool-1",'
+        '"ts_start":0.01,"ts_end":0.02,"data":{"tool_name":"exec",'
+        '"args":{"command":"true"},"exit_code":0}}\n',
+        encoding="utf-8",
+    )
+    policy_data = [
+        {"name": "lifetime-full", "admission": "lifetime_full",
+         "reclamation": "resident", "eviction": "none", "restore": "none"},
+        {"name": "tool-full", "admission": "tool_full",
+         "reclamation": "resident", "eviction": "none", "restore": "none"},
+        {"name": "tool-static", "admission": "tool_static",
+         "reclamation": "resident", "eviction": "none", "restore": "none"},
+        {"name": "tool-p90", "admission": "tool_p90",
+         "reclamation": "resident", "eviction": "none", "restore": "none"},
+        {"name": "tool-oracle", "admission": "tool_oracle",
+         "reclamation": "resident", "eviction": "none", "restore": "none"},
+        {"name": "tool-static-eager", "admission": "tool_static",
+         "reclamation": "snapshot_pause", "eviction": "eager", "restore": "reactive"},
+        {"name": "tool-p90-eager", "admission": "tool_p90",
+         "reclamation": "snapshot_pause", "eviction": "eager", "restore": "reactive"},
+        {"name": "tool-p90-fixed", "admission": "tool_p90",
+         "reclamation": "snapshot_pause", "eviction": "fixed_delay",
+         "restore": "reactive", "fixed_delay_seconds": 0},
+        {"name": "tool-p90-wait", "admission": "tool_p90",
+         "reclamation": "snapshot_pause", "eviction": "wait_aware_pressure",
+         "restore": "reactive"},
+        {"name": "tool-p90-proactive", "admission": "tool_p90",
+         "reclamation": "snapshot_pause", "eviction": "wait_aware_pressure",
+         "restore": "proactive", "prefetch_lead_seconds": 0},
+    ]
+    spec = ExperimentSpec.model_validate({
+        "schema_version": 2, "experiment_id": "baseline-c40-test",
+        "workload": {"source": "recorded_trace", "input": str(trace)},
+        "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
+        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
+        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
+        "execution": {"concurrency_levels": [40], "randomized_order": False,
+                       "stabilization_seconds": 0},
+        "resources": {
+            "target_node": "node-a", "pool_memory_budget_mib": 1000000,
+            "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 8192,
+            "static_tool_memory_mib": 256, "full_tool_memory_mib": 4096,
+            "p90_predictions": "examples/predictions/smoke-p90.json",
+            "oracle_measurements": "examples/predictions/smoke-oracle.json",
+        },
+        "policies": policy_data,
+        "output": {"directory": str(tmp_path / "output")},
+    })
+    results = ExperimentWorker(
+        spec, run_id="c40-run", attempt_id="c40-attempt", task_uid="c40-task",
+        output_root=tmp_path / "results",
+        client=CubeSandboxClient(sandbox_class=ConcurrentSandbox),
+    ).run()
+    assert len(results) == len(policy_data)
+    assert all(result.status.value == "succeeded" for result in results)
+    assert all(result.arm.concurrency == 40 for result in results)
+    assert ConcurrentSandbox.items == {}
+    for result in results:
+        spans = {
+            span["name"]
+            for session in result.performance["session_time_spans"]
+            for span in session
+        }
+        assert {"session", "sandbox.create", "agent", "sandbox.cleanup"} <= spans

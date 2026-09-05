@@ -54,6 +54,11 @@ native Worker path.
 Current replay-worker telemetry likewise records the actual Tool operation name
 (for example `exec`) instead of the retired `cube_shell` label.
 
+A local c40 Worker regression exercises all ten current policy recipes with 40
+concurrent sessions per arm and verifies successful completion, complete
+session/sandbox/agent/cleanup spans, and zero remaining fake owned sandboxes.
+The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
+
 ## Evidence
 
 | Boundary | Status |

@@ -69,6 +69,12 @@ Tool names in replay telemetry, document that distinction, and expose the
 catalog through the read-only experiment CLI. They are all pushed to
 `origin/main`.
 
+The local c40 Worker gate now also runs every current schema-v2 policy recipe
+against a concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete,
+all session/sandbox/agent/cleanup spans are present, and the owned-sandbox set
+returns to zero. This is scheduler and logging evidence only; it is not a
+substitute for the blocked live Runtime-to-Tool route gate.
+
 The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
 was reviewed against this post-`50db717` tree and is intentionally not
 cherry-picked. Its useful lifecycle-failure, per-execution timing, FIFO
