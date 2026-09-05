@@ -40,6 +40,9 @@ covered alongside the existing SSH-child completion-order test.
 
 The policy shim also fails closed on a duplicate idempotent admission response;
 it never launches a second SSH subprocess for the same execution identity.
+Commit `5b41a48` hardens zero-leak cleanup: an admission that never acquired a
+lifetime reservation cannot release one during `finally`, and cleanup attempts
+all task-owned sandboxes before reporting any kill error or remaining owner.
 
 Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
 admission/completion service spans, FIFO admission wait distributions, and

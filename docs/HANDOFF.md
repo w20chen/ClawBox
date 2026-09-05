@@ -100,6 +100,10 @@ ports.
 The obsolete environment-based endpoint fallback and standalone
 known-host refresh were removed afterward; no supported path can supply a
 route outside CubeSandbox resolution plus the per-invocation policy shim.
+Commit `5b41a48` hardens the final ownership barrier: failed lifetime admission
+cannot underflow a reservation during session cleanup, and one failed sandbox
+kill no longer prevents cleanup from attempting the rest of the task-owned set.
+The cleanup operation still fails closed after a fresh ownership-list check.
 
 The local c40 Worker gate now also materializes every implemented schema-v2
 policy recipe directly from the canonical baseline catalog against a
