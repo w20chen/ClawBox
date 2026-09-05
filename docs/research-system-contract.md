@@ -37,6 +37,14 @@ memory, and safety headroom. The reservation remains held until the actual
 remote operation has ended, the SSH process has been reaped, and completion
 telemetry is ordered correctly.
 
+The execution identity is attached at the lowest boundary that actually owns
+the SSH subprocess. ClawTune attaches it directly to command-bearing `exec`.
+For OpenClaw filesystem/backend SSH created below the tool-hook boundary, the
+ClawBox SSH hook attaches a new ID before synchronous admission and inserts that
+same ID into the Tool-bridge envelope. Backend-maintenance SSH is measured but
+does not count as an Agent Tool call. Runtime-span coverage is a separate metric
+from the mandatory Policy/SSH/guest-telemetry exact-ID join.
+
 ## ClawTune ownership
 
 Reuse the sibling `ClawTune` repository rather than recreating its research

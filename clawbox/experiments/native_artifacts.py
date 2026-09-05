@@ -251,9 +251,13 @@ def validate_native_tool_join(
                 execution.get("execution_id") if isinstance(execution, dict) else ""
             )
             runtime_by_id.setdefault(execution_id, []).append(span)
-        if set(runtime_by_id) != set(expected):
-            missing = sorted(set(expected) - set(runtime_by_id))
-            extra = sorted(set(runtime_by_id) - set(expected))
+        trace_expected = {
+            execution_id for execution_id, request in expected.items()
+            if request.get("runtime_trace_expected", True) is not False
+        }
+        if set(runtime_by_id) != trace_expected:
+            missing = sorted(trace_expected - set(runtime_by_id))
+            extra = sorted(set(runtime_by_id) - trace_expected)
             raise ValueError(
                 f"native Runtime trace identity mismatch; missing={missing}, extra={extra}"
             )
@@ -286,7 +290,8 @@ def validate_native_tool_join(
             )
         if bridge.get("command_sha256") != request.get("command_sha256"):
             raise ValueError(f"{execution_id}: policy and bridge command digests differ")
-        if runtime_span_records is not None:
+        if (runtime_span_records is not None
+                and request.get("runtime_trace_expected", True) is not False):
             span_execution = runtime_by_id[execution_id][0]["execution"]
             span_digest = span_execution.get("command_digest")
             if span_digest is not None and span_digest != request.get("command_sha256"):
@@ -303,6 +308,16 @@ def validate_native_tool_join(
         "runtime_envelope_execution_count": len(runtime_records),
         "runtime_trace_execution_count": (
             len(runtime_by_id) if runtime_span_records is not None else None
+        ),
+        "runtime_trace_expected_execution_count": (
+            sum(request.get("runtime_trace_expected", True) is not False
+                for request in expected.values())
+            if runtime_span_records is not None else None
+        ),
+        "runtime_trace_exempt_execution_count": (
+            sum(request.get("runtime_trace_expected", True) is False
+                for request in expected.values())
+            if runtime_span_records is not None else None
         ),
         "exact_id_join_rate": 1.0,
         "duplicate_tool_execution_count": 0,

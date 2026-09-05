@@ -78,6 +78,20 @@ PID surviving Tool pause/restore. A semantic raw endpoint must include its
 explicit mapped TCP port; a missing port is rejected rather than interpreted as
 OpenSSH's default port 22.
 
+The same installed-source audit verified the subtle operation boundary.
+ClawTune can directly envelope `exec` because it has a command parameter;
+OpenClaw's filesystem bridge and backend preparation spawn SSH below the tool
+hook and therefore do not. ClawBox now adopts only the captured OpenClaw SSH
+session argv shape, assigns each real SSH subprocess a unique execution ID,
+admits it synchronously, and adds the bridge envelope before launch. Arbitrary
+unenveloped SSH remains rejected. Filesystem work is labeled `agent-tool`;
+skills/workdir/backend preparation is labeled `backend-maintenance` and excluded
+from Agent Tool throughput, but remains admitted and fully measured. The audit
+also confirmed that background `exec` retains the local SSH child in OpenClaw's
+process supervisor, so the original reservation is held until the remote
+process ends and that SSH child is reaped; `process` polling does not start a
+second remote command.
+
 The current native lifecycle continuation also snapshots the Runtime during a
 model wait for `snapshot_pause` arms. It witnesses the OpenClaw Agent PID before
 Runtime checkpoint and after Runtime restore, restores Runtime synchronously in
@@ -486,10 +500,11 @@ NodePort, a ClawBox proxy, or a second allocator.
 6. Join Runtime ClawTune spans, PolicyControl records, Tool bridge JSONL,
    cgroup artifacts, and eBPF artifacts by `(session_id, execution_id)` and
    retain the new `session_timing` events in the result bundle.
-7. Validate every native file tool, not merely `exec`. Confirm ClawTune applies
-   its execution envelope to SSH commands produced by
-   `process/read/write/edit/apply_patch`; unenveloped Agent operations must fail
-   closed while setup/validation remain explicit non-agent phases.
+7. Validate every native file tool, not merely `exec`, against the installed
+   backend. Confirm recognized below-hook filesystem SSH is assigned a unique
+   ID, admitted, enveloped, and exactly joined; confirm arbitrary unenveloped
+   SSH fails closed. `process` must continue polling the retained original SSH
+   child without launching a duplicate command.
 8. Run native OpenClaw c4/c8 HOL/cross-routing and leak tests; the focused
    admission-versus-delayed-pause race test is now covered by `0060297`.
 9. Only after those native gates pass, run c20 and finally c40/c60 native

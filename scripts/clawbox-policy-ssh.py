@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,34 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str] | None:
         command = argument[:marker] + payload
         return metadata, command
     return None
+
+
+def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, Any], str] | None:
+    """Adopt OpenClaw SSH-backend calls which cannot carry an exec envelope.
+
+    ClawTune can put an execution envelope in the ``exec`` tool's command.
+    OpenClaw's SSH filesystem bridge and backend preparation calls are emitted
+    below the tool-hook boundary, so there is no command parameter for the
+    plugin to wrap.  Recognize only the captured OpenClaw SSH session shape,
+    mint an ID for the real SSH execution, and add the same bridge envelope
+    before admission.  Arbitrary unenveloped SSH remains fail-closed.
+    """
+    if len(argv) < 4 or "-F" not in argv:
+        return None
+    alias = os.environ.get("CLAWBOX_OPENCLAW_SSH_ALIAS", "openclaw-sandbox")
+    if argv[-2] != alias or argv[-2].startswith("-"):
+        return None
+    command = argv[-1]
+    is_filesystem = "openclaw-sandbox-fs" in command
+    metadata = {
+        "v": 1,
+        "execution_id": str(uuid.uuid4()),
+        "tool_name": "filesystem" if is_filesystem else "ssh_backend_maintenance",
+        "execution_scope": "agent-tool" if is_filesystem else "backend-maintenance",
+        "runtime_trace_expected": False,
+    }
+    argv[-1] = PREFIX + json.dumps(metadata, separators=(",", ":")) + "\n" + command
+    return metadata, command
 
 
 def _prediction(command_sha256: str) -> dict[str, Any] | None:
@@ -133,15 +162,19 @@ def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
 
 def main() -> int:
     real_ssh = os.environ.get("CLAWBOX_REAL_SSH", "/usr/bin/ssh")
-    parsed = _envelope(sys.argv[1:])
+    ssh_argv = list(sys.argv[1:])
+    parsed = _envelope(ssh_argv)
     policy_url = os.environ.get("CLAWBOX_POLICY_CONTROL_URL")
     policy_token = os.environ.get("CLAWBOX_POLICY_CONTROL_TOKEN")
     session_id = os.environ.get("CLAWBOX_POLICY_SESSION_ID")
     if parsed is None:
         if os.environ.get("CLAWBOX_POLICY_REQUIRE_ENVELOPE") == "1":
-            print("ClawBox policy rejected SSH command without an execution envelope", file=sys.stderr)
-            return 125
-        return subprocess.call([real_ssh, *sys.argv[1:]])
+            parsed = _openclaw_unenveloped(ssh_argv)
+            if parsed is None:
+                print("ClawBox policy rejected SSH command without an execution envelope", file=sys.stderr)
+                return 125
+        else:
+            return subprocess.call([real_ssh, *ssh_argv])
     if not policy_url or not policy_token or not session_id:
         print("ClawBox policy control is not configured", file=sys.stderr)
         return 125
@@ -153,6 +186,8 @@ def main() -> int:
         "session_id": session_id,
         "execution_id": execution_id,
         "operation": str(metadata.get("tool_name") or "exec"),
+        "execution_scope": str(metadata.get("execution_scope") or "agent-tool"),
+        "runtime_trace_expected": bool(metadata.get("runtime_trace_expected", True)),
         "command_sha256": command_sha256,
         "prediction": _prediction(command_sha256),
         "runtime_request_at": time.time(),
@@ -177,7 +212,7 @@ def main() -> int:
 
     execution_started_at = time.time()
     try:
-        child = subprocess.Popen([real_ssh, *_ssh_args_for_route(sys.argv[1:], route)])
+        child = subprocess.Popen([real_ssh, *_ssh_args_for_route(ssh_argv, route)])
         return_code = child.wait()
     except OSError as exc:
         print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)

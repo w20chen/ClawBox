@@ -362,12 +362,23 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             copied.append(str(target))
     control_records = policy_control.records()
     completed = [item for item in control_records if item["completion"]]
-    latencies = [
+    agent_tool_completed = [
+        item for item in completed
+        if (item.get("request") or {}).get("execution_scope", "agent-tool") == "agent-tool"
+    ]
+    native_ssh_latencies = [
         max(0.0, float(item["completion"]["execution_completed_at"])
             - float(item["completion"]["execution_started_at"])) for item in completed
     ]
+    latencies = [
+        max(0.0, float(item["completion"]["execution_completed_at"])
+            - float(item["completion"]["execution_started_at"]))
+        for item in agent_tool_completed
+    ]
     return {"stdout": result.stdout, "stderr": result.stderr,
-            "tool_calls": len(completed), "tool_latencies": latencies,
+            "tool_calls": len(agent_tool_completed),
+            "native_ssh_executions": len(completed), "tool_latencies": latencies,
+            "native_ssh_latencies": native_ssh_latencies,
             "agent_pid_file": agent_pid_file,
             "runtime_traces": copied, "policy_control_records": control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],

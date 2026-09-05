@@ -113,7 +113,7 @@ def test_each_tool_vm_operation_keeps_its_native_policy_operation(
     assert posted[1][1]["operation"] == tool_name
 
 
-def test_unenveloped_agent_ssh_is_rejected_before_subprocess(
+def test_unrecognized_unenveloped_ssh_is_rejected_before_subprocess(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CLAWBOX_POLICY_REQUIRE_ENVELOPE", "1")
@@ -125,6 +125,66 @@ def test_unenveloped_agent_ssh_is_rejected_before_subprocess(
 
     monkeypatch.setattr(policy_ssh.subprocess, "call", fail_spawn)
     assert policy_ssh.main() == 125
+
+
+def test_openclaw_filesystem_ssh_gets_admission_and_bridge_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_POLICY_REQUIRE_ENVELOPE", "1")
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[tuple[str, dict]] = []
+    launched: list[list[str]] = []
+
+    def post(path: str, body: dict, *, attempts: int) -> dict:
+        posted.append((path, body))
+        if path.endswith("/admit"):
+            return {
+                "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 3,
+                "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+            }
+        return {"status": "COMPLETED"}
+
+    class Child:
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(
+        policy_ssh.subprocess, "Popen", lambda argv: (launched.append(argv) or Child()),
+    )
+    remote = "/bin/sh -c 'printf data' openclaw-sandbox-fs /workspace/a"
+    monkeypatch.setattr(sys, "argv", [
+        "clawbox-policy-ssh.py", "-F", "/tmp/config", "-T",
+        "openclaw-sandbox", remote,
+    ])
+
+    assert policy_ssh.main() == 0
+    request = posted[0][1]
+    assert request["operation"] == "filesystem"
+    assert request["execution_scope"] == "agent-tool"
+    assert request["runtime_trace_expected"] is False
+    assert request["execution_id"]
+    assert launched[0][-1].startswith(policy_ssh.PREFIX)
+    assert launched[0][-1].endswith(remote)
+    assert posted[1][1]["execution_id"] == request["execution_id"]
+
+
+def test_openclaw_backend_preparation_is_admitted_but_not_counted_as_agent_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv = ["-F", "/tmp/config", "-T", "openclaw-sandbox", "pwd"]
+    parsed = policy_ssh._openclaw_unenveloped(argv)
+    assert parsed is not None
+    metadata, command = parsed
+    assert command == "pwd"
+    assert metadata["tool_name"] == "ssh_backend_maintenance"
+    assert metadata["execution_scope"] == "backend-maintenance"
+    assert argv[-1].startswith(policy_ssh.PREFIX)
 
 
 def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(

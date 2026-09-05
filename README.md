@@ -27,6 +27,12 @@ not pass through PolicyCoordinator. A Runtime-side SSH hook sends only control
 metadata and blocks until admission returns `ADMIT`; after SSH finishes it sends
 an idempotent completion. `(session_id, execution_id)` joins prediction,
 admission, SSH, Tool cgroup/eBPF telemetry, and completion.
+ClawTune supplies the ID/envelope for command-bearing `exec` calls. OpenClaw's
+lower-level SSH filesystem/backend calls have no command field at the tool-hook
+boundary, so the SSH hook admits only recognized OpenClaw backend invocations,
+mints their per-SSH IDs, and inserts the same Tool-bridge envelope. Other
+unenveloped SSH is rejected. Backend-maintenance executions are labeled
+separately and are excluded from Agent Tool-call throughput.
 
 During model waits, lightweight ModelGateway events are queued to policy workers.
 For native OpenClaw with `snapshot_pause`, policy snapshots both the Runtime and

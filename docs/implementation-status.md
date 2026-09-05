@@ -126,6 +126,16 @@ covered alongside the existing SSH-child completion-order test.
 
 The policy shim also fails closed on a duplicate idempotent admission response;
 it never launches a second SSH subprocess for the same execution identity.
+The installed OpenClaw 2026.7.1 backend audit additionally found that only
+`exec` exposes a command that ClawTune can envelope. Native filesystem and SSH
+backend-preparation calls are created below the tool-hook boundary. The shim now
+recognizes only the captured OpenClaw `-F ... openclaw-sandbox <command>` shape,
+mints a unique ID, synchronously admits it, and inserts the Tool-bridge envelope
+before launching OpenSSH. Arbitrary unenveloped SSH still fails closed. Actual
+filesystem calls and backend-maintenance calls are labeled separately; both are
+exactly joined to bridge/cgroup/eBPF records, while only the former contributes
+to Agent Tool-call throughput. Runtime ClawTune span coverage is reported
+separately because these below-hook executions have no Runtime span ID.
 Commit `5b41a48` hardens zero-leak cleanup: an admission that never acquired a
 lifetime reservation cannot release one during `finally`, and cleanup attempts
 all task-owned sandboxes before reporting any kill error or remaining owner.
@@ -174,9 +184,10 @@ but they are not admissible as OpenClaw artifact evidence.
 A local c40 Worker regression materializes every baseline-catalog entry—10
 canonical recipes plus 7 compatibility aliases—with 40 concurrent sessions
 per arm and verifies successful completion, complete session/sandbox/agent/
-cleanup spans, and zero remaining fake owned sandboxes. The policy shim tests also
-cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
-fail-closed behavior for an unenveloped Agent SSH operation. Result bundles
+cleanup spans, and zero remaining fake owned sandboxes. The policy shim tests
+cover ClawTune-enveloped operation names, recognized OpenClaw
+filesystem/backend SSH, and fail-closed behavior for any other unenveloped SSH
+operation. Result bundles
 now also separate Runtime and Tool template provenance fields.
 The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
 The latest bounded Kunpeng probe completes SSH authentication but stalls before

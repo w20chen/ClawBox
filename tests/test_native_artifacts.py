@@ -84,6 +84,24 @@ def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
         )
 
 
+def test_native_tool_join_allows_explicit_runtime_trace_exemption() -> None:
+    execution_id = "exec-fs"
+    digest = hashlib.sha256(b"read file").hexdigest()
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    policy = _policy(execution_id, digest)
+    policy[0]["request"].update({
+        "operation": "filesystem", "runtime_trace_expected": False,
+    })
+    verdict = validate_native_tool_join(
+        bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+        clause_artifacts={execution_id: clause}, policy_records=policy,
+        runtime_span_records=[], expected_session_id="session-a",
+    )
+    assert verdict["exact_id_join_rate"] == 1.0
+    assert verdict["runtime_trace_expected_execution_count"] == 0
+    assert verdict["runtime_trace_exempt_execution_count"] == 1
+
+
 class _RuntimeExecutor:
     def __init__(self, stdout: str) -> None:
         self.stdout = stdout
