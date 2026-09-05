@@ -86,6 +86,13 @@ service-time, and response-hold fields in the event and gateway JSONL. The
 Runtime remains resident for `resident` arms, and the replay-engine compatibility
 path remains Tool-only by design.
 
+Commit `43c67a2` implements and tests that paired native lifecycle. The local
+full suite, the all-baseline c40 fake-CubeSandbox regression, compileall, and
+matrix audit pass after the change. The live Kunpeng check remains a healthy
+single-node Kubernetes diagnostic deployment with zero sandboxes; it still has
+no standalone one-click bundle, second physical/private node, or
+Runtime-reachable semantic TCP endpoint.
+
 Recent continuation milestones `a6c3263`, `74fb823`, `72be43b`, and `1a6349a`
 align the baseline catalog and matrix audit with schema-v2, use actual native
 Tool names in replay telemetry, document that distinction, and expose the

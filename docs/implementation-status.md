@@ -166,6 +166,7 @@ remains healthy with zero sandboxes.
 | CubeMaster/CubeProxy existing Tool 2222 mapping | proved; semantic API returns per-sandbox raw endpoint |
 | Endpoint identity/epoch/stale/cross-Tool unit gates | passed; cross-Tool route is rejected before SSH spawn |
 | OpenClaw target semantics/PID witness | passed; target is captured and Agent PID witness is stable across lifecycle callbacks |
+| Native OpenClaw paired Runtime/Tool snapshot | passed in local integration gate; Runtime PID survives checkpoint/restore and response release is held until Runtime restore |
 | SSH completion ordering | passed; `/complete` follows child reaping and records `ssh_reaped_at <= execution_completed_at` |
 | Real Runtime-to-Tool native SSH | blocked; normal-network pod-IP mapping is reachable from host but refused from Runtime; host-network map/BPF proof still refused TCP |
 | Pause -> policy restore -> SSH -> telemetry | blocked by deployment topology; no live c1 claim |
