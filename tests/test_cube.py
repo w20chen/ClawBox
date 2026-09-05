@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from clawbox.cube import (
     Ownership,
 )
 from clawbox.experiments import BASELINES, ExperimentSpec
+import clawbox.experiments.worker as worker_module
 from clawbox.experiments.policy import PolicyCoordinator
 from clawbox.experiments.worker import ExperimentWorker
 
@@ -260,6 +263,192 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
+
+
+def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SnapshotCommands(_Commands):
+        def run(self, command: str, **kwargs):
+            self.owner.command_calls.append((command, kwargs))
+            if "kill -0 $pid" in command:
+                return SimpleNamespace(exit_code=0, stdout="4242", stderr="")
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+    class SnapshotSandbox(_Sandbox):
+        sequence = 0
+        created: list["SnapshotSandbox"] = []
+
+        def __init__(self, data=None, config=None) -> None:
+            super().__init__(data, config)
+            self.pause_calls = 0
+            self.resume_calls = 0
+            self.commands = SnapshotCommands(self)
+
+        @classmethod
+        def create(cls, **kwargs):
+            cls.sequence += 1
+            item = cls({
+                "sandboxID": f"snapshot-{cls.sequence}",
+                "templateID": kwargs["template"],
+                "metadata": kwargs["metadata"],
+            })
+            cls.items[item.sandbox_id] = item
+            cls.created.append(item)
+            return item
+
+        @classmethod
+        def connect(cls, sandbox_id, **kwargs):
+            item = cls.items[sandbox_id]
+            item.state = "running"
+            item.resume_calls += 1
+            return item
+
+        def pause(self, wait=True):
+            self.pause_calls += 1
+            super().pause(wait=wait)
+
+    SnapshotSandbox.items = {}
+    SnapshotSandbox.sequence = 0
+    SnapshotSandbox.created = []
+    trace = tmp_path / "openclaw-snapshot.jsonl"
+    trace.write_text(json.dumps({
+        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0.5,
+        "data": {
+            "model": "recorded-model",
+            "raw_request": {"messages": [{"role": "user", "content": "hello"}]},
+            "raw_response": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": "exec", "arguments": '{"command":"true"}'},
+                }],
+            },
+            "llm_latency_ms": 500,
+        },
+    }) + "\n", encoding="utf-8")
+
+    def post_policy(policy_control, path: str, body: dict) -> dict:
+        request = urllib.request.Request(
+            policy_control.url + path,
+            data=json.dumps(body).encode(), method="POST",
+            headers={
+                "Authorization": f"Bearer {policy_control.token}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+
+    def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
+                          policy_control, runtime_executor, output_dir,
+                          timeout_seconds, model_gateway, prediction_manifest=None):
+        payload = {
+            "model": "recorded-model",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        status, _content_type, _body, request_id = model_gateway.gateway.complete_http(payload)
+        assert status == 200
+        model_gateway.mark_delivery(request_id, delivered=True)
+        command = "true"
+        command_sha256 = hashlib.sha256(command.encode()).hexdigest()
+        admission = post_policy(policy_control, "/v1/tool/admit", {
+            "session_id": session_id, "execution_id": "exec-1",
+            "operation": "exec", "command_sha256": command_sha256,
+            "runtime_request_at": time.time(),
+        })
+        assert admission["decision"] == "ADMIT"
+        started = time.time()
+        post_policy(policy_control, "/v1/tool/complete", {
+            "session_id": session_id, "execution_id": "exec-1",
+            "operation": "exec", "command_sha256": command_sha256,
+            "runtime_request_at": started,
+            "execution_started_at": started,
+            "ssh_reaped_at": started + 0.01,
+            "execution_completed_at": started + 0.01,
+            "exit_code": 0,
+            "endpoint_sandbox_id": admission["sandbox_id"],
+            "endpoint_epoch": admission["epoch"],
+            "endpoint_host": admission["host"],
+            "endpoint_port": admission["port"],
+        })
+        return {
+            "agent_pid_file": f"/state/openclaw/{session_id}/agent.pid",
+            "tool_latencies": [0.01], "runtime_traces": [],
+            "policy_control_records": policy_control.records(),
+        }
+
+    monkeypatch.setattr(worker_module, "run_openclaw", fake_run_openclaw)
+    monkeypatch.setattr(
+        worker_module, "collect_and_validate_native_tool_artifacts",
+        lambda **_kwargs: SimpleNamespace(root=tmp_path / "native", validation={"ok": True}),
+    )
+    monkeypatch.setenv("CLAWBOX_CONTROL_HOST", "127.0.0.1")
+    monkeypatch.setenv("CLAWBOX_MODEL_GATEWAY_HOST", "127.0.0.1")
+    spec = ExperimentSpec.model_validate({
+        "schema_version": 2, "experiment_id": "openclaw-snapshot-test",
+        "workload": {"source": "recorded_trace", "input": str(trace), "cases": [{
+            "case_id": "snapshot-case", "source": "recorded_trace",
+            "source_reference": str(trace), "replay_trace_reference": str(trace),
+            "prompt": "hello",
+        }]},
+        "agent": {"driver": "openclaw"},
+        "inference": {"backend": "replay", "configuration": {"model": "recorded-model"}},
+        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
+        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
+        "execution": {"concurrency_levels": [1], "randomized_order": False,
+                       "arm_timeout_seconds": 10, "command_timeout_seconds": 5,
+                       "stabilization_seconds": 0},
+        "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
+                       "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 1,
+                       "static_tool_memory_mib": 1},
+        "policies": [{"name": "snapshot", "admission": "tool_static",
+                      "reclamation": "snapshot_pause", "eviction": "eager",
+                      "restore": "reactive"}],
+    })
+    result = ExperimentWorker(
+        spec, run_id="openclaw-snapshot", attempt_id="attempt", task_uid="task",
+        output_root=tmp_path / "results",
+        client=CubeSandboxClient(sandbox_class=SnapshotSandbox),
+    ).run()[0]
+
+    assert result.status.value == "succeeded"
+    # Worker creates the Tool before the Runtime, even though the Runtime is
+    # the long-lived OpenClaw process whose PID is witnessed.
+    tool, runtime = SnapshotSandbox.created
+    assert runtime.pause_calls >= 1
+    assert runtime.resume_calls >= 1
+    assert tool.pause_calls >= 1
+    assert SnapshotSandbox.items == {}
+    event_path = next((tmp_path / "results" / "events").glob("*.jsonl"))
+    event_rows = [json.loads(line) for line in event_path.read_text().splitlines()]
+    pid_phases = {
+        row["phase"] for row in event_rows
+        if row.get("event") == "openclaw_agent_pid_observed"
+    }
+    assert {"before_runtime_pause", "after_runtime_restore_response"} <= pid_phases
+    pause_roles = {
+        row.get("role") for row in event_rows if row.get("event") == "sandbox_paused"
+    }
+    restore_roles = {
+        row.get("role") for row in event_rows if row.get("event") == "sandbox_restored"
+    }
+    assert {"runtime", "tool"} <= pause_roles
+    assert {"runtime", "tool"} <= restore_roles
+    gateway_path = next((tmp_path / "results" / "model-gateway").glob("*.json"))
+    gateway_record = json.loads(gateway_path.read_text())[0]
+    admission = gateway_record["admission"]
+    assert admission["runtime_snapshot_enabled"] is True
+    assert admission["runtime_pause_started_at"] <= admission["runtime_pause_completed_at"]
+    assert admission["runtime_restore_started_at"] <= admission["runtime_restore_completed_at"]
+    assert (
+        admission["runtime_pause_completed_at"]
+        <= admission["runtime_restore_started_at"]
+        <= gateway_record["response_released_unix_s"]
+    )
+    assert admission["runtime_agent_pid_before_pause"] == 4242
+    assert admission["runtime_agent_pid_after_restore"] == 4242
 
 
 def test_lifecycle_records_failed_create_with_state_and_error_type() -> None:

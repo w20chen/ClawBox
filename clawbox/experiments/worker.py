@@ -12,6 +12,7 @@ import platform
 import statistics
 import subprocess
 import base64
+import shlex
 import sys
 import time
 import traceback
@@ -496,6 +497,15 @@ class ExperimentWorker:
         if arm.agent.driver is AgentDriver.OPENCLAW:
             if self.model_gateway is None:
                 raise RuntimeError("managed ModelGateway is not active")
+            # Native OpenClaw can keep its long-lived Agent process in a VM
+            # snapshot.  During a model wait, snapshot both VMs for a
+            # snapshot_pause policy; Runtime is restored before the gateway
+            # response is released, while Tool may stay swapped until the
+            # next SSH admission.  Replay-engine baselines retain their
+            # existing Tool-only lifecycle below.
+            runtime_snapshot_enabled = (
+                arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+            )
             prediction_wait = arm.inference.configuration.get("model_wait_prediction_seconds")
             if arm.policy.restore is RestorePolicy.PROACTIVE:
                 if prediction_wait is None:
@@ -516,11 +526,15 @@ class ExperimentWorker:
                 try:
                     with wait_lock:
                         wait_timer = None
-                        if not lifecycle.resident or coordinator.tool_active(session_id):
+                        if (
+                            str(event.get("request_id")) in completed_model_requests
+                            or not lifecycle.resident
+                            or coordinator.tool_active(session_id)
+                        ):
                             return
                         agent_pid_before = observe_openclaw_agent_pid("before_tool_pause")
                         started = time.time()
-                        elapsed = lifecycle.checkpoint_and_evict()
+                        tool_elapsed = lifecycle.checkpoint_and_evict()
                         agent_pid_after = observe_openclaw_agent_pid("after_tool_pause")
                         if agent_pid_before != agent_pid_after:
                             raise RuntimeError(
@@ -534,16 +548,74 @@ class ExperimentWorker:
                             "pause_request_id": event.get("request_id"),
                             "openclaw_agent_pid": agent_pid_after,
                         })
+                        runtime_elapsed = None
+                        if runtime_snapshot_enabled and runtime_lifecycle.resident:
+                            runtime_pid_before = observe_openclaw_agent_pid(
+                                "before_runtime_pause"
+                            )
+                            runtime_started = time.time()
+                            runtime_elapsed = runtime_lifecycle.checkpoint_and_evict()
+                            runtime_finished = time.time()
+                            wait_state.update({
+                                "runtime_pause_started_at": runtime_started,
+                                "runtime_pause_completed_at": runtime_finished,
+                                "runtime_agent_pid_before_pause": runtime_pid_before,
+                            })
                     coordinator.pause_count += 1
-                    coordinator.pause_service_seconds += elapsed
+                    coordinator.pause_service_seconds += tool_elapsed
                     events.write({
                         "event": "sandbox_paused", "session_id": session_id,
-                        "service_seconds": elapsed,
+                        "role": "tool", "service_seconds": tool_elapsed,
                         "reason": "model_request_wait",
                         "request_id": event.get("request_id"),
                     })
+                    if runtime_elapsed is not None:
+                        coordinator.pause_count += 1
+                        coordinator.pause_service_seconds += runtime_elapsed
+                        events.write({
+                            "event": "sandbox_paused", "session_id": session_id,
+                            "role": "runtime", "service_seconds": runtime_elapsed,
+                            "reason": "model_request_wait",
+                            "request_id": event.get("request_id"),
+                        })
                 except Exception as exc:
                     policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
+
+            def restore_runtime_for_model_wait(
+                event: dict[str, Any], *, phase: str,
+            ) -> None:
+                """Restore Runtime before its pending model HTTP call resumes."""
+                if not runtime_snapshot_enabled:
+                    return
+                with wait_lock:
+                    if runtime_lifecycle.resident:
+                        return
+                    started = time.time()
+                    agent_pid_before = wait_state.get(
+                        "runtime_agent_pid_before_pause"
+                    )
+                    self._restore_with_one_victim(
+                        arm, session_id, runtime_lifecycle, coordinator, events,
+                        role="runtime",
+                    )
+                    agent_pid_after = observe_openclaw_agent_pid(
+                        f"after_runtime_restore_{phase}"
+                    )
+                    if (
+                        agent_pid_before is not None
+                        and agent_pid_before != agent_pid_after
+                    ):
+                        raise RuntimeError(
+                            "OpenClaw agent PID changed across Runtime pause/restore: "
+                            f"{agent_pid_before} -> {agent_pid_after}"
+                        )
+                    finished = time.time()
+                    wait_state.update({
+                        "runtime_restore_started_at": started,
+                        "runtime_restore_completed_at": finished,
+                        "runtime_restore_request_id": event.get("request_id"),
+                        "runtime_agent_pid_after_restore": agent_pid_after,
+                    })
 
             def restore_for_model_wait(event: dict[str, Any]) -> None:
                 nonlocal restore_timer
@@ -552,7 +624,10 @@ class ExperimentWorker:
                         restore_timer = None
                         if str(event.get("request_id")) in completed_model_requests:
                             return
-                        if lifecycle.resident:
+                        runtime_resident = (
+                            not runtime_snapshot_enabled or runtime_lifecycle.resident
+                        )
+                        if lifecycle.resident and runtime_resident:
                             target = wait_state.get("scheduled_restore_time")
                             remaining = max(
                                 0.05,
@@ -565,21 +640,27 @@ class ExperimentWorker:
                             restore_timer.daemon = True
                             restore_timer.start()
                             return
-                        wait_state["restore_started_at"] = time.time()
+                        restore_tool = not lifecycle.resident
+                    restore_runtime_for_model_wait(event, phase="scheduled")
+                    if restore_tool:
+                        with wait_lock:
+                            wait_state["restore_started_at"] = time.time()
                         agent_pid_before = observe_openclaw_agent_pid("before_tool_restore")
                     elapsed = self._restore_with_one_victim(
                         arm, session_id, lifecycle, coordinator, events,
-                    )
-                    agent_pid_after = observe_openclaw_agent_pid("after_tool_restore")
-                    if agent_pid_before != agent_pid_after:
-                        raise RuntimeError(
-                            "OpenClaw agent PID changed across Tool restore: "
-                            f"{agent_pid_before} -> {agent_pid_after}"
-                        )
+                    ) if restore_tool else 0.0
+                    if restore_tool:
+                        agent_pid_after = observe_openclaw_agent_pid("after_tool_restore")
+                        if agent_pid_before != agent_pid_after:
+                            raise RuntimeError(
+                                "OpenClaw agent PID changed across Tool restore: "
+                                f"{agent_pid_before} -> {agent_pid_after}"
+                            )
                     with wait_lock:
                         wait_state["restore_completed_at"] = time.time()
                         wait_state["restore_request_id"] = event.get("request_id")
-                        wait_state["openclaw_agent_pid"] = agent_pid_after
+                        if restore_tool:
+                            wait_state["openclaw_agent_pid"] = agent_pid_after
                     # _restore_with_one_victim already records the service
                     # event; retain the explicit timing for gateway provenance.
                     _ = elapsed
@@ -651,6 +732,11 @@ class ExperimentWorker:
             def before_model_response_ready(step: int | None, message: dict[str, Any],
                                             event: dict[str, Any]) -> dict[str, Any]:
                 nonlocal wait_timer, restore_timer
+                # A paused Runtime cannot receive the pending HTTP response.
+                # Restore it synchronously in the gateway producer before the
+                # response becomes visible to OpenClaw. Tool restore remains
+                # admission-scoped and happens on the next SSH invocation.
+                restore_runtime_for_model_wait(event, phase="response")
                 with wait_lock:
                     completed_model_requests.add(str(event.get("request_id")))
                     if wait_timer is not None:
@@ -666,6 +752,7 @@ class ExperimentWorker:
                     admission = {
                         "request_id": event.get("request_id"),
                         "model_step": step,
+                        "runtime_snapshot_enabled": runtime_snapshot_enabled,
                         "predicted_wait_seconds": prediction_wait,
                         "prediction_source": (
                             "configured_request_time_prediction"
@@ -676,8 +763,28 @@ class ExperimentWorker:
                             None if prediction_wait is None else actual_wait - prediction_wait
                         ),
                         "scheduled_restore_time": wait_state.get("scheduled_restore_time"),
+                        "tool_pause_started_at": wait_state.get("pause_started_at"),
+                        "tool_pause_completed_at": wait_state.get("pause_completed_at"),
                         "restore_started_at": wait_state.get("restore_started_at"),
                         "restore_completed_at": wait_state.get("restore_completed_at"),
+                        "runtime_pause_started_at": wait_state.get(
+                            "runtime_pause_started_at"
+                        ),
+                        "runtime_pause_completed_at": wait_state.get(
+                            "runtime_pause_completed_at"
+                        ),
+                        "runtime_restore_started_at": wait_state.get(
+                            "runtime_restore_started_at"
+                        ),
+                        "runtime_restore_completed_at": wait_state.get(
+                            "runtime_restore_completed_at"
+                        ),
+                        "runtime_agent_pid_before_pause": wait_state.get(
+                            "runtime_agent_pid_before_pause"
+                        ),
+                        "runtime_agent_pid_after_restore": wait_state.get(
+                            "runtime_agent_pid_after_restore"
+                        ),
                         "tool_call_count": len(message.get("tool_calls") or []),
                     }
                     return admission
@@ -994,7 +1101,7 @@ class ExperimentWorker:
                             coordinator.pause_service_seconds += pause_s
                             events.write({
                                 "event": "sandbox_paused", "session_id": session_id,
-                                "service_seconds": pause_s,
+                                "role": "tool", "service_seconds": pause_s,
                                 "reason": "openclaw_tool_complete",
                             })
                     if (arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
@@ -1302,12 +1409,14 @@ class ExperimentWorker:
 
     def _restore_with_one_victim(self, arm: ExperimentArm, session_id: str,
                                  lifecycle: CubeSandboxLifecycle,
-                                 coordinator: PolicyCoordinator, events: EventWriter) -> None:
+                                 coordinator: PolicyCoordinator, events: EventWriter,
+                                 *, role: str = "tool") -> float:
         elapsed = coordinator.restore(
             session_id, lifecycle.restore, arm.execution.arm_timeout_seconds,
         )
         events.write({"event": "sandbox_restored", "session_id": session_id,
-                      "service_seconds": elapsed})
+                      "role": role, "service_seconds": elapsed})
+        return elapsed
 
     def _tool_reservation_mib(self, arm: ExperimentArm,
                               action: ReplayAction | None = None, *,

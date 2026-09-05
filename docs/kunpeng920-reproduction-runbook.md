@@ -221,7 +221,11 @@ The validation order is:
 
 The logical agent must remain exactly two VMs: Runtime owns OpenClaw and
 prediction instrumentation; Tool owns `/workspace`, repository commands, and
-command telemetry. Tool-only pause is the accepted reclamation behavior.
+command telemetry. In the final native OpenClaw topology, `snapshot_pause`
+checkpoints both VMs during model waits and restores Runtime before releasing
+the model response; the Tool is restored at the next SSH admission. This
+diagnostic Kubernetes profile predates that paired-VM path and must not be used
+to claim native lifecycle evidence.
 Run the pair smoke from the host process with a host address reachable from the
 Runtime VM. Policy control is a metadata-only listener on port `18080`; the
 Runtime-to-Tool command and stdio path is native OpenSSH. No WorkerBridge,

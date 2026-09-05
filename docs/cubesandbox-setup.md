@@ -103,6 +103,15 @@ the official SDK `update_network` call before returning `ADMIT`; a changed
 mapped port needs no network-policy update. This is still a direct Runtime to
 Tool TCP connection and does not cache, allocate, or proxy the route.
 
+For a native OpenClaw arm using `snapshot_pause`, the model-wait lifecycle
+applies the same CubeSandbox checkpoint/swap operation to both VMs. The Runtime
+is restored before the pending ModelGateway response is released so its
+long-lived Agent can continue; the Tool can stay swapped until the next
+`/v1/tool/admit`, which restores it and resolves the current endpoint. A
+`resident` arm keeps both VMs resident. Replay-engine compatibility runs keep
+their historical Tool-only lifecycle and are not evidence for this native
+paired-VM behavior.
+
 ## Existing machine
 
 Set the API and CubeProxy transport variables for the already-installed

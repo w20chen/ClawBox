@@ -32,6 +32,15 @@ blocking-child regression proving `/complete` is not posted while the SSH child
 is still active. Commit `98d3f5d` also rejects an admission for any container
 port other than the Tool SSH port 2222 before OpenSSH starts.
 
+Native OpenClaw `snapshot_pause` now checkpoints/swap-outs both the Runtime and
+Tool VMs during a model wait. Runtime is restored synchronously before the
+ModelGateway releases the pending response, and Tool remains eligible to stay
+swapped until the next SSH admission. The OpenClaw Agent PID is witnessed before
+Runtime checkpoint and after restore; gateway records include paired role
+timings and the response-release hold. Resident arms keep both VMs resident,
+while replay-engine compatibility baselines retain their historical Tool-only
+lifecycle.
+
 When an experiment pins `image_digest`, Worker now checks the official
 CubeSandbox Template record before creating a VM and rejects a `READY` record
 whose image digest does not match. This makes the currently stale Runtime

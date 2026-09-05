@@ -25,9 +25,13 @@ an idempotent completion. `(session_id, execution_id)` joins prediction,
 admission, SSH, Tool cgroup/eBPF telemetry, and completion.
 
 During model waits, lightweight ModelGateway events are queued to policy workers.
-Policy decides when an idle Tool VM should be swapped out and restored;
-CubeSandbox performs create, pause/checkpoint, connect/restore, placement, and
-destroy. Gateway locks never contain slow lifecycle work.
+For native OpenClaw with `snapshot_pause`, policy snapshots both the Runtime and
+Tool VMs when reclamation is selected. Runtime is restored before the pending
+model response is released, while Tool may remain swapped until the next SSH
+admission. Resident arms keep both VMs running. CubeSandbox performs create,
+pause/checkpoint, connect/restore, placement, and destroy; gateway locks never
+contain slow lifecycle work. The replay-engine compatibility path retains its
+historical Tool-only lifecycle.
 
 ClawBox does not use SandboxTask CRDs, controllers, Jobs/Pods, Services,
 NodePorts, Kubernetes scheduling, or direct Firecracker management. Some legacy

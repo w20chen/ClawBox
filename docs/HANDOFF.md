@@ -19,7 +19,11 @@ CubeSandbox plus one Tool CubeSandbox. OpenClaw uses its native SSH sandbox for
 `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`; the mutable
 workspace is in Tool. PolicyCoordinator synchronously gates execution but never
 proxies commands or output. ModelGateway emits request-start, generated,
-released, and delivered events that drive Tool residency.
+released, and delivered events that drive model-wait residency. Native
+OpenClaw `snapshot_pause` checkpoints both Runtime and Tool; Runtime is restored
+before the response is released, and Tool is restored on the next SSH
+admission. Resident arms keep both VMs running. Replay-engine compatibility
+arms retain their historical Tool-only lifecycle.
 
 Kubernetes/SandboxTask/WorkerBridge/cube_shell/direct-Firecracker paths are not
 supported. Legacy files still present in the tree are deletion work, not an
@@ -73,6 +77,14 @@ requiring an address change, strict host-key settings, and the OpenClaw Agent
 PID surviving Tool pause/restore. A semantic raw endpoint must include its
 explicit mapped TCP port; a missing port is rejected rather than interpreted as
 OpenSSH's default port 22.
+
+The current native lifecycle continuation also snapshots the Runtime during a
+model wait for `snapshot_pause` arms. It witnesses the OpenClaw Agent PID before
+Runtime checkpoint and after Runtime restore, restores Runtime synchronously in
+the ModelGateway response-release barrier, and records Runtime/Tool role,
+service-time, and response-hold fields in the event and gateway JSONL. The
+Runtime remains resident for `resident` arms, and the replay-engine compatibility
+path remains Tool-only by design.
 
 Recent continuation milestones `a6c3263`, `74fb823`, `72be43b`, and `1a6349a`
 align the baseline catalog and matrix audit with schema-v2, use actual native
