@@ -32,6 +32,12 @@ Runtime/Tool pair creation (eight by default) and records any queue wait as a
 `sandbox.create.queue` span. This protects Cubelet/containerd during a stress
 run without changing the endpoint contract or SSH data path.
 
+Tool admission now marks the session active before restore or memory waiting,
+so a competing pressure admission cannot pause that Tool in the admission
+window. Failed admission clears the marker, and native route resolution occurs
+only after the reservation/restore boundary. The focused race regression is
+covered alongside the existing SSH-child completion-order test.
+
 Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
 admission/completion service spans, FIFO admission wait distributions, and
 explicit Runtime-local versus Tool-VM tool policy. Commit `743c68a` adds

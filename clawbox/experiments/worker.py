@@ -856,19 +856,28 @@ class ExperimentWorker:
                         ) if prediction_provider is not None else request.get("prediction")
                     )
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
+                    reservation_acquired = False
                     with wait_lock:
-                        if not lifecycle.resident:
-                            self._restore_with_one_victim(
-                                arm, session_id, lifecycle, coordinator, events,
+                        try:
+                            admission_wait = coordinator.begin_tool_admission(
+                                session_id, amount, arm.execution.arm_timeout_seconds
                             )
-                        route = resolve_native_ssh_route("admit")
-                        admission_wait = coordinator.acquire(
-                            session_id, amount, arm.execution.arm_timeout_seconds
-                        )
-                        with reservation_lock:
-                            active_reservations[execution_id] = amount
-                            admitted_routes[execution_id] = route
-                            coordinator.set_tool_active(session_id, True)
+                            reservation_acquired = True
+                            if not lifecycle.resident:
+                                self._restore_with_one_victim(
+                                    arm, session_id, lifecycle, coordinator, events,
+                                )
+                            # Resolve only after the active mark and memory
+                            # reservation. Restore may replace the mapping.
+                            route = resolve_native_ssh_route("admit")
+                            with reservation_lock:
+                                active_reservations[execution_id] = amount
+                                admitted_routes[execution_id] = route
+                        except Exception:
+                            if reservation_acquired:
+                                coordinator.release(session_id, amount)
+                            coordinator.set_tool_active(session_id, False)
+                            raise
                     prediction_record = dict(prediction or {})
                     prediction_record.update({
                                  "session_id": session_id,
@@ -1076,12 +1085,15 @@ class ExperimentWorker:
                         model_steps += 1
                         self._model_wait(arm, action, session_id, lifecycle, coordinator, events)
                         continue
-                    if not lifecycle.resident:
-                        self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
                     amount = self._tool_reservation_mib(arm, action)
-                    coordinator.acquire(session_id, amount, arm.execution.arm_timeout_seconds)
-                    coordinator.set_tool_active(session_id, True)
+                    coordinator.begin_tool_admission(
+                        session_id, amount, arm.execution.arm_timeout_seconds,
+                    )
                     try:
+                        if not lifecycle.resident:
+                            self._restore_with_one_victim(
+                                arm, session_id, lifecycle, coordinator, events,
+                            )
                         result = execute_observed(
                             action.shell_command(), arm.execution.command_timeout_seconds,
                             f"{session_id}:replay:{action_index}:"

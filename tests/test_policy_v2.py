@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -51,6 +52,43 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     coordinator.set_tool_active("active", True)
     coordinator.set_eviction_eligible("idle", True)
     assert coordinator.victim_for_restore("requester").session_id == "idle"
+
+
+def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
+    """A delayed admission cannot be selected for pause by another waiter."""
+    policy = PolicySpec(name="snapshot", admission="tool_static",
+                        reclamation="snapshot_pause", eviction="eager",
+                        restore="reactive")
+    entered = threading.Event()
+
+    def pressured_sample() -> tuple[int, int]:
+        entered.set()
+        return 2 * 1024**2, 100 * 1024**2
+
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
+        physical_sample=pressured_sample,
+    )
+    lifecycle = Lifecycle()
+    coordinator.register("tool", lifecycle)
+    coordinator.set_eviction_eligible("tool", True)
+    result: list[BaseException] = []
+
+    def delayed_admission() -> None:
+        try:
+            coordinator.begin_tool_admission("tool", 1, 0.05)
+        except BaseException as exc:
+            result.append(exc)
+
+    thread = threading.Thread(target=delayed_admission)
+    thread.start()
+    assert entered.wait(timeout=1)
+    assert coordinator.tool_active("tool")
+    assert coordinator.victim_for_restore("other") is None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert result and isinstance(result[0], AdmissionTimeout)
+    assert coordinator.victim_for_restore("other").session_id == "tool"
 
 
 def test_admission_is_fifo_and_exports_overhead_metrics() -> None:

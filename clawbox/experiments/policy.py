@@ -93,6 +93,22 @@ class PolicyCoordinator:
             state.last_used = time.monotonic()
             self._condition.notify_all()
 
+    def begin_tool_admission(self, session_id: str, amount_mib: int,
+                             timeout_s: float) -> float:
+        """Protect a Tool before any restore or memory wait begins.
+
+        A competing admission may pause only sessions marked idle.  Marking
+        this session active before entering ``acquire`` closes the race where
+        another waiter could otherwise select its resident Tool as a victim
+        while its SSH admission is still being established.
+        """
+        self.set_tool_active(session_id, True)
+        try:
+            return self.acquire(session_id, amount_mib, timeout_s)
+        except Exception:
+            self.set_tool_active(session_id, False)
+            raise
+
     def tool_active(self, session_id: str) -> bool:
         with self._condition:
             return self._sessions[session_id].tool_active

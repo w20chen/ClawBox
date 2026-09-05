@@ -240,6 +240,9 @@ Current-source runs after `a4be792` emit `session_timing` events containing
 `7a0740f` additionally records failed lifecycle attempts, control admission and
 completion service spans, FIFO admission wait distributions, and keeps the
 Runtime-local retrieval/memory tool set separate from the six Tool-VM tools.
+The current Worker marks a Tool active before restore or memory admission and
+resolves its native route only after that boundary; this closes the competing
+pressure-admission pause race and is covered by a focused regression.
 The reproducible OpenClaw replay c40 smoke input is
 `examples/experiments/openclaw-cube-replay-c40.yaml` with its checked-in model
 trace; it is a pending live gate, not a passed run. A 2026-09-05 replay-contract
