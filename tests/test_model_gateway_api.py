@@ -5,7 +5,38 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 from clawbox.replay.model_gateway import ModelGateway
+
+
+def test_replay_divergence_is_persisted_before_store_directory_exists(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
+        "iteration": 0, "ts_start": 0, "ts_end": 0.1,
+        "data": {
+            "raw_request": {"messages": [{"role": "user", "content": "expected"}]},
+            "raw_response": {"content": "ok"},
+        },
+    }) + "\n", encoding="utf-8")
+    gateway = ModelGateway(
+        tmp_path / "not-created" / "session.json", mode="replay", trace=trace,
+    )
+
+    with pytest.raises(ValueError, match="replay request diverged at model step 0"):
+        gateway.complete({
+            "model": "recorded-model",
+            "messages": [{"role": "user", "content": "actual"}],
+        })
+
+    rejection = tmp_path / "not-created" / "session.rejected-request-0000.json"
+    record = json.loads(rejection.read_text(encoding="utf-8"))
+    assert record["model_step"] == 0
+    assert record["actual"] != record["expected"]
+    assert record["actual_sha256"] != record["expected_sha256"]
 
 
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(

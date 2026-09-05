@@ -196,8 +196,9 @@ class ModelGateway:
                         replay_input_expected_sha256 = _canonical_sha256(expected_identity)
                         replay_input_actual_sha256 = _canonical_sha256(actual_identity)
                     if replay_input_match is False:
+                        self.store_path.parent.mkdir(parents=True, exist_ok=True)
                         rejection = self.store_path.with_name(
-                            f"model-rejected-request-{index:04d}.json"
+                            f"{self.store_path.stem}.rejected-request-{index:04d}.json"
                         )
                         temporary = rejection.with_name(rejection.name + ".next")
                         temporary.write_text(json.dumps({

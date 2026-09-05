@@ -14,7 +14,10 @@ copied its environment. That token is now inserted into the lifecycle payload
 before VM creation and covered by a regression test. Live OpenClaw subsequently
 reached the managed replay gateway; the checked-in smoke trace mismatched the
 actual OpenClaw request and failed closed with zero leaked sandboxes, as it
-must. This is an infrastructure gate result, not representative replay evidence.
+must. Divergence now writes a session-qualified expected/actual canonical
+request witness even when the gateway output directory does not exist yet, so
+concurrent sessions cannot overwrite one another's rejection evidence. This is
+an infrastructure gate result, not representative replay evidence.
 
 The earlier deployment-topology blocker described later in this document has
 been resolved in CubeSandbox, not bypassed in ClawBox. CubeSandbox source commit
