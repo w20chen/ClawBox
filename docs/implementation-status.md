@@ -22,6 +22,11 @@ blocking-child regression proving `/complete` is not posted while the SSH child
 is still active. Commit `98d3f5d` also rejects an admission for any container
 port other than the Tool SSH port 2222 before OpenSSH starts.
 
+When an experiment pins `image_digest`, Worker now checks the official
+CubeSandbox Template record before creating a VM and rejects a `READY` record
+whose image digest does not match. This makes the currently stale Runtime
+template fail closed instead of silently running an older artifact.
+
 The Worker keeps c40 session concurrency at 40 while bounding simultaneous
 Runtime/Tool pair creation (eight by default) and records any queue wait as a
 `sandbox.create.queue` span. This protects Cubelet/containerd during a stress
@@ -72,6 +77,7 @@ The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
 | Policy c60 HOL/session isolation | passed in unit test |
 | ARM64 Toolbridge Go suite | passed in pinned Go container |
 | Bounded Cube command stream | passed; client deadline regression covered |
+| Pinned Template provenance gate | passed; mismatched READY image is rejected before VM creation |
 | Structured agent/sandbox spans | passed; `session_timing` JSONL, lifecycle failure records, and ordered event timestamps |
 | Managed replay gateway | passed; session-local cursor/delivery/HOL tests |
 | Managed API gateway | passed; upstream-compatible forwarding contract test |

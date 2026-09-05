@@ -79,6 +79,12 @@ canonical baseline catalog; and raw CubeSandbox routes without an explicit
 mapped port fail closed instead of defaulting to SSH port 22. `bdf6fba` records
 the live Runtime template provenance mismatch described below.
 
+Commit `53b1733` adds a creation-time provenance gate: whenever schema-v2 pins
+an image digest, Worker verifies the corresponding CubeSandbox Template record
+through the official Template API before creating either VM. A `READY` status
+alone is insufficient, so the currently mismatched Runtime template fails
+closed rather than producing misleading live evidence.
+
 The local c40 Worker gate now also materializes every implemented schema-v2
 policy recipe directly from the canonical baseline catalog against a
 concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete, all
