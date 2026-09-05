@@ -98,7 +98,80 @@ def percentile(values: list[float], quantile: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, float | str]]:
+def _make_time_span(
+    name: str, start: Any, end: Any, *, role: str | None = None,
+    operation: str | None = None, execution_id: str | None = None,
+    start_monotonic: Any = None, end_monotonic: Any = None,
+    service_seconds: Any = None, status: str | None = None,
+    state_before: str | None = None, state_after: str | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any] | None:
+    """Render one span with wall and, when available, monotonic timing.
+
+    Wall-clock fields make JSONL/results easy to correlate across processes;
+    monotonic fields keep durations valid when the system clock is adjusted.
+    Optional lifecycle fields are retained only when they are well-typed so a
+    malformed observer record cannot make a result look like valid evidence.
+    """
+    if (
+        isinstance(start, bool) or not isinstance(start, (int, float))
+        or isinstance(end, bool) or not isinstance(end, (int, float))
+        or not math.isfinite(float(start)) or not math.isfinite(float(end))
+    ):
+        return None
+    start_wall = float(start)
+    end_wall = float(end)
+    start_mono = (
+        float(start_monotonic)
+        if isinstance(start_monotonic, (int, float))
+        and not isinstance(start_monotonic, bool)
+        and math.isfinite(float(start_monotonic))
+        else None
+    )
+    end_mono = (
+        float(end_monotonic)
+        if isinstance(end_monotonic, (int, float))
+        and not isinstance(end_monotonic, bool)
+        and math.isfinite(float(end_monotonic))
+        else None
+    )
+    duration = (
+        max(0.0, end_mono - start_mono)
+        if start_mono is not None and end_mono is not None
+        else max(0.0, end_wall - start_wall)
+    )
+    span: dict[str, Any] = {
+        "name": str(name),
+        "start_unix_s": start_wall,
+        "end_unix_s": end_wall,
+        "duration_seconds": duration,
+    }
+    optional = {
+        "role": role,
+        "operation": operation,
+        "execution_id": execution_id,
+        "start_monotonic_s": start_mono,
+        "end_monotonic_s": end_mono,
+        "service_seconds": service_seconds,
+        "status": status,
+        "state_before": state_before,
+        "state_after": state_after,
+        "error_type": error_type,
+    }
+    for key, value in optional.items():
+        if value is not None:
+            span[key] = value
+    return span
+
+
+def _record_time_span(timeline: dict[str, Any], name: str, start: Any, end: Any,
+                      **kwargs: Any) -> None:
+    span = _make_time_span(name, start, end, **kwargs)
+    if span is not None:
+        timeline.setdefault("recorded_time_spans", []).append(span)
+
+
+def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, Any]]:
     """Build stable, machine-readable spans from session lifecycle markers."""
     pairs = (
         ("session", "session_started", "session_finished"),
@@ -118,12 +191,31 @@ def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, float | str]]:
         end = timeline.get(end_key)
         if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
             continue
-        spans.append({
-            "name": name,
-            "start_unix_s": float(start),
-            "end_unix_s": float(end),
-            "duration_seconds": max(0.0, float(end) - float(start)),
-        })
+        span = _make_time_span(name, start, end)
+        if span is not None:
+            spans.append(span)
+    for item in timeline.get("recorded_time_spans", []):
+        if isinstance(item, dict) and item.get("name"):
+            spans.append(dict(item))
+    for item in timeline.get("lifecycle_timings", []):
+        if not isinstance(item, dict):
+            continue
+        operation = str(item.get("operation") or "").strip()
+        if not operation:
+            continue
+        role = str(item.get("role") or "sandbox").strip() or "sandbox"
+        span = _make_time_span(
+            f"sandbox.{role}.{operation}",
+            item.get("started_unix_s"), item.get("completed_unix_s"),
+            role=role, operation=operation,
+            start_monotonic=item.get("started_monotonic_s"),
+            end_monotonic=item.get("completed_monotonic_s"),
+            service_seconds=item.get("service_seconds"),
+            status=item.get("status"), state_before=item.get("state_before"),
+            state_after=item.get("state_after"), error_type=item.get("error_type"),
+        )
+        if span is not None:
+            spans.append(span)
     return spans
 
 
@@ -949,9 +1041,25 @@ class ExperimentWorker:
                                  execution_id: str, *, tool_name: str = "exec",
                                  prediction: dict[str, Any] | None = None,
                                  phase: str = "agent"):
-                observed = executor.execute_observed(
-                    command, min(timeout_s, arm.execution.command_timeout_seconds),
-                    execution_id=execution_id,
+                started_wall, started_mono = time.time(), time.monotonic()
+                try:
+                    observed = executor.execute_observed(
+                        command, min(timeout_s, arm.execution.command_timeout_seconds),
+                        execution_id=execution_id,
+                    )
+                except Exception:
+                    _record_time_span(
+                        timeline, "tool.operation", started_wall, time.time(),
+                        role="tool", operation=tool_name, execution_id=execution_id,
+                        start_monotonic=started_mono, end_monotonic=time.monotonic(),
+                        status="error",
+                    )
+                    raise
+                _record_time_span(
+                    timeline, "tool.operation", started_wall, time.time(),
+                    role="tool", operation=tool_name, execution_id=execution_id,
+                    start_monotonic=started_mono, end_monotonic=time.monotonic(),
+                    status="ok" if observed.result.exit_code == 0 else "error",
                 )
                 observed_by_execution[execution_id] = observed
                 trace_writer.record(
@@ -1091,6 +1199,21 @@ class ExperimentWorker:
                         admitted_routes.pop(execution_id)
                         coordinator.release(session_id, amount)
                         coordinator.set_tool_active(session_id, bool(active_reservations))
+                        _record_time_span(
+                            timeline, "tool.operation",
+                            timestamps["execution_started_at"],
+                            timestamps["execution_completed_at"],
+                            role="tool", operation=str(request.get("operation") or "exec"),
+                            execution_id=execution_id,
+                            service_seconds=(
+                                timestamps["execution_completed_at"]
+                                - timestamps["execution_started_at"]
+                            ),
+                            status=(
+                                "ok" if int(request.get("exit_code", 1)) == 0
+                                else "error"
+                            ),
+                        )
 
                     def eager_pause() -> None:
                         with wait_lock, reservation_lock:
@@ -1208,13 +1331,39 @@ class ExperimentWorker:
                         "path": str(model_trace_path),
                         "sha256": hashlib.sha256(model_trace_path.read_bytes()).hexdigest(),
                     })
+                for gateway_record in gateway_session.records():
+                    request_id = str(gateway_record.get("request_id") or "")
+                    _record_time_span(
+                        timeline, "model.wait",
+                        gateway_record.get("request_started_at"),
+                        gateway_record.get("model_generated_at"),
+                        role="runtime", operation="model_wait",
+                        execution_id=request_id,
+                    )
+                    _record_time_span(
+                        timeline, "model.response_hold",
+                        gateway_record.get("model_generated_at"),
+                        gateway_record.get("response_released_at"),
+                        role="runtime", operation="response_hold",
+                        execution_id=request_id,
+                    )
+                    _record_time_span(
+                        timeline, "model.response_delivery",
+                        gateway_record.get("response_released_at"),
+                        gateway_record.get("response_delivered_at"),
+                        role="runtime", operation="response_delivery",
+                        execution_id=request_id,
+                    )
                 timeline["final_agent_completion"] = time.time()
             else:
                 actions = self._actions(arm)
                 for action_index, action in enumerate(actions):
                     if action.kind == "llm":
                         model_steps += 1
-                        self._model_wait(arm, action, session_id, lifecycle, coordinator, events)
+                        self._model_wait(
+                            arm, action, session_id, lifecycle, coordinator, events,
+                            timeline=timeline,
+                        )
                         continue
                     amount = self._tool_reservation_mib(arm, action)
                     coordinator.begin_tool_admission(
@@ -1360,6 +1509,13 @@ class ExperimentWorker:
                         "lifecycle_timing": runtime_lifecycle.timings[-1],
                     })
                 finally:
+                    timeline["lifecycle_timings"] = [
+                        {"role": "tool", **timing}
+                        for timing in lifecycle.timings
+                    ] + [
+                        {"role": "runtime", **timing}
+                        for timing in runtime_lifecycle.timings
+                    ]
                     timeline["sandbox_cleanup_end"] = time.time()
                     timeline["session_finished"] = timeline["sandbox_cleanup_end"]
                     timeline["time_spans"] = build_time_spans(timeline)
@@ -1383,28 +1539,36 @@ class ExperimentWorker:
 
     def _model_wait(self, arm: ExperimentArm, action: ReplayAction, session_id: str,
                     lifecycle: CubeSandboxLifecycle, coordinator: PolicyCoordinator,
-                    events: EventWriter) -> None:
+                    events: EventWriter, *, timeline: dict[str, Any]) -> None:
         scale = float(arm.inference.configuration.get("time_scale", 1.0))
         duration = max(0.0, action.duration_s * scale)
         coordinator.set_eviction_eligible(session_id, True)
         delay, prefetch_lead = coordinator.model_wait_plan(duration)
         should_pause = delay is not None
         wait_started = time.monotonic()
-        if should_pause:
-            time.sleep(min(delay, duration))
-            pause_s = lifecycle.checkpoint_and_evict()
-            coordinator.pause_count += 1
-            coordinator.pause_service_seconds += pause_s
-            events.write({"event": "sandbox_paused", "session_id": session_id,
-                          "service_seconds": pause_s})
-            remaining = max(0.0, duration - (time.monotonic() - wait_started))
-            if prefetch_lead is not None:
-                time.sleep(max(0.0, remaining - prefetch_lead))
-                self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
+        wait_started_wall = time.time()
+        try:
+            if should_pause:
+                time.sleep(min(delay, duration))
+                pause_s = lifecycle.checkpoint_and_evict()
+                coordinator.pause_count += 1
+                coordinator.pause_service_seconds += pause_s
+                events.write({"event": "sandbox_paused", "session_id": session_id,
+                              "service_seconds": pause_s})
+                remaining = max(0.0, duration - (time.monotonic() - wait_started))
+                if prefetch_lead is not None:
+                    time.sleep(max(0.0, remaining - prefetch_lead))
+                    self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
+                else:
+                    time.sleep(remaining)
             else:
-                time.sleep(remaining)
-        else:
-            time.sleep(duration)
+                time.sleep(duration)
+        finally:
+            _record_time_span(
+                timeline, "model.wait", wait_started_wall, time.time(),
+                role="runtime", operation="model_wait", execution_id=action.action_id,
+                start_monotonic=wait_started, end_monotonic=time.monotonic(),
+            )
         coordinator.set_eviction_eligible(session_id, not lifecycle.resident)
 
     def _restore_with_one_victim(self, arm: ExperimentArm, session_id: str,

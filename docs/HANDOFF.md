@@ -155,6 +155,13 @@ substitute for the blocked live Runtime-to-Tool route gate. The policy shim
 tests cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
 fail-closed behavior for an unenveloped Agent SSH operation.
 
+The session timing contract is now richer than the original aggregate metrics:
+`session_timing` and result `performance.session_time_spans` include role-labeled
+Runtime/Tool lifecycle spans, native Tool-operation spans, replay model-wait
+spans, and managed model response-hold/delivery spans. CubeSandbox lifecycle
+spans retain wall-clock and monotonic timestamps, service time, state
+transitions, and status for machine-readable cross-process analysis.
+
 The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
 was reviewed against this post-`50db717` tree and is intentionally not
 cherry-picked. Its useful lifecycle-failure, per-execution timing, FIFO

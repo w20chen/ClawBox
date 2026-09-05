@@ -449,6 +449,20 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     )
     assert admission["runtime_agent_pid_before_pause"] == 4242
     assert admission["runtime_agent_pid_after_restore"] == 4242
+    session_spans = result.performance["session_time_spans"][0]
+    span_names = {span["name"] for span in session_spans}
+    assert {
+        "model.wait", "model.response_hold", "model.response_delivery",
+        "tool.operation", "sandbox.tool.create", "sandbox.tool.checkpoint",
+        "sandbox.tool.restore", "sandbox.tool.destroy",
+        "sandbox.runtime.create", "sandbox.runtime.checkpoint",
+        "sandbox.runtime.restore", "sandbox.runtime.destroy",
+    } <= span_names
+    for span in session_spans:
+        assert span["end_unix_s"] >= span["start_unix_s"]
+        assert span["duration_seconds"] >= 0
+        if "start_monotonic_s" in span:
+            assert span["end_monotonic_s"] >= span["start_monotonic_s"]
 
 
 def test_lifecycle_records_failed_create_with_state_and_error_type() -> None:

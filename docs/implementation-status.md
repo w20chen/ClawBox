@@ -41,6 +41,13 @@ timings and the response-release hold. Resident arms keep both VMs resident,
 while replay-engine compatibility baselines retain their historical Tool-only
 lifecycle.
 
+Every session result and `session_timing` JSONL event now carries role-labeled
+time spans for Runtime and Tool lifecycle operations, native Tool operations,
+replay model waits, and managed model response hold/delivery. Lifecycle spans
+include wall-clock and monotonic timestamps plus service time, state transition,
+and status fields, so cross-process correlation does not depend on a single
+adjustable clock.
+
 When an experiment pins `image_digest`, Worker now checks the official
 CubeSandbox Template record before creating a VM and rejects a `READY` record
 whose image digest does not match. This makes the currently stale Runtime

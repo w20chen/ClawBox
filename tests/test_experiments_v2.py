@@ -82,12 +82,32 @@ def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
         "session_finished": 11.0,
         "sandbox_create_gate_wait_start": 1.0,
         "sandbox_create_gate_acquired": 2.0,
+        "recorded_time_spans": [{
+            "name": "tool.operation", "role": "tool", "operation": "exec",
+            "start_unix_s": 4.6, "end_unix_s": 4.8,
+            "duration_seconds": 0.2,
+        }],
+        "lifecycle_timings": [{
+            "role": "runtime", "operation": "checkpoint",
+            "started_unix_s": 6.0, "completed_unix_s": 6.25,
+            "started_monotonic_s": 100.0, "completed_monotonic_s": 100.25,
+            "service_seconds": 0.25, "state_before": "running",
+            "state_after": "swapped", "status": "ok",
+        }],
     })
     by_name = {item["name"]: item for item in spans}
     assert by_name["agent"]["duration_seconds"] == 4.5
     assert by_name["sandbox.create"]["duration_seconds"] == 2.0
     assert by_name["sandbox.create.queue"]["duration_seconds"] == 1.0
     assert by_name["sandbox.cleanup"]["duration_seconds"] == 1.0
+    assert by_name["tool.operation"]["role"] == "tool"
+    checkpoint = by_name["sandbox.runtime.checkpoint"]
+    assert checkpoint["duration_seconds"] == 0.25
+    assert checkpoint["start_monotonic_s"] == 100.0
+    assert checkpoint["end_monotonic_s"] == 100.25
+    assert checkpoint["service_seconds"] == 0.25
+    assert checkpoint["state_before"] == "running"
+    assert checkpoint["state_after"] == "swapped"
 
 
 def test_worker_provenance_separates_runtime_and_tool_artifacts() -> None:
