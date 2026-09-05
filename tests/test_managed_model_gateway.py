@@ -136,6 +136,12 @@ def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(
             assert session.token != "upstream-secret"
             assert session.records()[0]["delivered"] is True
             assert session.replay_completeness()["complete"] is True
+            replay_trace = tmp_path / "api-export.jsonl"
+            session.write_replay_trace(replay_trace)
+            exported = json.loads(replay_trace.read_text(encoding="utf-8").splitlines()[0])
+            assert exported["action_type"] == "llm_call"
+            assert exported["data"]["model"] == "server-model"
+            assert exported["data"]["raw_response"]["content"] == "managed-api-ok"
     finally:
         upstream.shutdown()
         upstream.server_close()
