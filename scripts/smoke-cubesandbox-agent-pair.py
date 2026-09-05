@@ -242,9 +242,23 @@ def validate_tool_artifacts(tool, policy_session, expected_ids: set[str]) -> dic
     for execution_id in sorted(expected_ids):
         record = by_id[execution_id][0]
         if record.get("telemetry_state") != "complete":
-            raise AssertionError(f"{execution_id}: incomplete Tool telemetry")
+            raise AssertionError(
+                f"{execution_id}: incomplete Tool telemetry: "
+                f"{json.dumps(record, sort_keys=True)}"
+            )
         if record.get("telemetry_collection_validity") != "valid":
-            raise AssertionError(f"{execution_id}: invalid Tool telemetry collection")
+            telemetry_detail = None
+            artifact_path = str(record.get("telemetry_artifact") or "")
+            if artifact_path.startswith(ARTIFACT_ROOT):
+                try:
+                    telemetry_detail = json.loads(tool.files.read(artifact_path))
+                except Exception as exc:
+                    telemetry_detail = {"read_error": f"{type(exc).__name__}: {exc}"}
+            raise AssertionError(
+                f"{execution_id}: invalid Tool telemetry collection: "
+                f"record={json.dumps(record, sort_keys=True)} "
+                f"artifact={json.dumps(telemetry_detail, sort_keys=True)}"
+            )
         if record.get("telemetry_cleanup") != "ok":
             raise AssertionError(f"{execution_id}: Tool telemetry cleanup failed")
         if int(record.get("telemetry_loss_total") or 0) != 0:
@@ -422,6 +436,9 @@ def main() -> int:
             )
             if result.exit_code != 0 or result.stdout.strip() != tool_id:
                 raise AssertionError(f"native SSH reached the wrong Tool before pause: {result}")
+            pre_pause_validation = validate_tool_artifacts(
+                tool, policy_session, {before_id},
+            )
             unwrapped = unwrapped_ssh_call(
                 runtime, initial_ssh, identity, known_hosts, policy_session,
             )
@@ -468,6 +485,15 @@ def main() -> int:
             tool_holder["sandbox"] = tool
             restore_seconds.append(time.monotonic() - started)
             restore_count += 1
+            bridge_restart = tool.commands.run(
+                native_tool_bridge_setup_command(restart=True),
+                timeout=45, cwd="/workspace",
+            )
+            if bridge_restart.exit_code != 0:
+                raise RuntimeError(
+                    "Tool telemetry bridge did not recover after restore: "
+                    + bridge_restart.stderr[-1000:]
+                )
             endpoint_after = cube.get_tcp_endpoint(tool, 2222)
             if endpoint_after.sandbox_id != tool_id:
                 raise AssertionError("resumed endpoint identity changed")
@@ -523,7 +549,9 @@ def main() -> int:
                 "ssh_config_before": ssh_policy_before,
                 "ssh_config_after": ssh_policy_after,
                 "restore_count": restore_count, "timings": timings,
-                "telemetry": validation, "exact_id_validation": True,
+                "telemetry": validation,
+                "pre_pause_telemetry": pre_pause_validation,
+                "exact_id_validation": True,
             }
             if args.output is not None:
                 args.output.parent.mkdir(parents=True, exist_ok=True)

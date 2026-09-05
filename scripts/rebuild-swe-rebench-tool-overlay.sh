@@ -36,13 +36,19 @@ chmod 0555 .artifacts/tool-bridge-overlay
 
 KATA_SHARE="${KATA_SHARE:-/opt/kata/share/kata-containers}"
 debug_kernel="${KATA_SHARE}/vmlinux-debug.container"
-debug_release="$(basename "$(readlink -f "${debug_kernel}")")"
-debug_release="${debug_release#vmlinux-}"
-kernel_version="${debug_release%%-*}"
-debug_config="${KATA_SHARE}/config-${debug_release}"
+if [[ -n "${KERNEL_VERSION_OVERRIDE:-}" ]]; then
+  kernel_version="${KERNEL_VERSION_OVERRIDE}"
+  debug_config="${KERNEL_CONFIG:?set KERNEL_CONFIG with KERNEL_VERSION_OVERRIDE}"
+else
+  debug_release="$(basename "$(readlink -f "${debug_kernel}")")"
+  debug_release="${debug_release#vmlinux-}"
+  kernel_version="${debug_release%%-*}"
+  debug_config="${KATA_SHARE}/config-${debug_release}"
+fi
 [[ -r "${debug_config}" ]] || { echo "missing ${debug_config}" >&2; exit 66; }
 cp "${debug_config}" .artifacts/kata-debug.config
 case "${kernel_version}" in
+  6.6.119) kernel_source_sha256="3da09b980bb404cc28793479bb2d6c636522679215ffa65a04c893575253e5e8" ;;
   6.18.28) kernel_source_sha256="f360789483586cf8a20b4ab2bffe76ead6b62c0db1eeb0d917294456c4d77b74" ;;
   *) kernel_source_sha256="${KERNEL_SOURCE_SHA256:-}" ;;
 esac
@@ -76,6 +82,24 @@ docker build --platform linux/arm64 --network host \
   --build-arg "KERNEL_SOURCE_SHA256=${kernel_source_sha256}" \
   --build-arg "APT_MIRROR=${APT_MIRROR:-}" \
   -f docker/Dockerfile.swe-rebench-tool-telemetry -t "$TASK_IMAGE" .
+if [[ -n "${KERNEL_SOURCE_DIR:-}" ]]; then
+  kernel_release="${KERNEL_RELEASE_OVERRIDE:?set KERNEL_RELEASE_OVERRIDE with KERNEL_SOURCE_DIR}"
+  kernel_output="${KERNEL_OUTPUT_DIR_OVERRIDE:?set KERNEL_OUTPUT_DIR_OVERRIDE with KERNEL_SOURCE_DIR}"
+  [[ -f "${KERNEL_SOURCE_DIR}/include/linux/sched.h" ]] || {
+    echo "prepared kernel source is incomplete: ${KERNEL_SOURCE_DIR}" >&2
+    exit 66
+  }
+  [[ -f "${kernel_output}/include/generated/autoconf.h" ]] || {
+    echo "prepared kernel output is incomplete: ${kernel_output}" >&2
+    exit 66
+  }
+  docker build --platform linux/arm64 \
+    --build-context "kernel-source=${KERNEL_SOURCE_DIR}" \
+    --build-context "kernel-output=${kernel_output}" \
+    --build-arg "BASE_IMAGE=${TASK_IMAGE}" \
+    --build-arg "KERNEL_RELEASE=${kernel_release}" \
+    -f docker/Dockerfile.swe-rebench-tool-kernel-overlay -t "$TASK_IMAGE" .
+fi
 docker run --rm --entrypoint /usr/local/bin/tool-bridge "$TASK_IMAGE" --self-test \
   | grep '"arch":"arm64"'
 docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source.clawtune.revision"}}' \

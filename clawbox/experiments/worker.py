@@ -1267,10 +1267,19 @@ class ExperimentWorker:
                                 session_id, amount, arm.execution.arm_timeout_seconds
                             )
                             reservation_acquired = True
-                            if not lifecycle.resident:
+                            restored_tool = not lifecycle.resident
+                            if restored_tool:
                                 self._restore_with_one_victim(
                                     arm, session_id, lifecycle, coordinator, events,
                                 )
+                                bridge_result = executor.execute(
+                                    native_tool_bridge_setup_command(restart=True), 45,
+                                )
+                                if bridge_result.exit_code != 0:
+                                    raise RuntimeError(
+                                        "Tool telemetry bridge did not recover after restore: "
+                                        + bridge_result.stderr[-1000:]
+                                    )
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
                             route = resolve_native_ssh_route("admit")

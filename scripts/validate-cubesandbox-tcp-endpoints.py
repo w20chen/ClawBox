@@ -345,6 +345,15 @@ def main() -> int:
                     if str(state_item.get("state", "")).lower() == "paused":
                         tool = cube.connect_sandbox(tool.sandbox_id)
                         tool_holders[index] = tool
+                        bridge_restart = tool.commands.run(
+                            native_tool_bridge_setup_command(restart=True),
+                            timeout=45, cwd="/workspace",
+                        )
+                        if bridge_restart.exit_code != 0:
+                            raise RuntimeError(
+                                "Tool telemetry bridge did not recover after restore: "
+                                + bridge_restart.stderr[-1000:]
+                            )
                     route_epochs[index] += 1
                     endpoint = cube.get_tcp_endpoint(tool, 2222)
                     route = endpoint_route(endpoint, route_epochs[index])
@@ -449,17 +458,10 @@ def main() -> int:
                     raise AssertionError(f"stale endpoint remained usable for {tool.sandbox_id}: {stale}")
                 stale_probes.append(stale)
 
-                resumed = cube.get_tcp_endpoint(tool_holders[index], 2222)
-                if resumed.sandbox_id != tool.sandbox_id or resumed.container_port != 2222:
-                    raise AssertionError(f"resumed endpoint identity mismatch: {endpoint_record(resumed)}")
-                resumed_ssh = endpoint_ssh(resumed, credentials[index])
-                wait_for_ssh(
-                    runtime, resumed_ssh, identity, known_hosts,
-                    f"cat {MARKER}", tool.sandbox_id,
-                )
                 execution_after = f"{owner}-{index}-after"
                 # Deliberately pass the pre-pause target. The admission response
-                # must be the only source of the current route for this call.
+                # must restore the Tool and be the only source of the current
+                # route for this call.
                 result = policy_ssh_call(
                     runtime, ssh, identity, known_hosts, sessions[index],
                     execution_after, f"cat {MARKER}",
@@ -470,6 +472,14 @@ def main() -> int:
                                      "stdout": result.stdout})
                 tool = tool_holders[index]
                 tools[index] = tool
+                resumed = cube.get_tcp_endpoint(tool, 2222)
+                if resumed.sandbox_id != tool.sandbox_id or resumed.container_port != 2222:
+                    raise AssertionError(f"resumed endpoint identity mismatch: {endpoint_record(resumed)}")
+                resumed_ssh = endpoint_ssh(resumed, credentials[index])
+                wait_for_ssh(
+                    runtime, resumed_ssh, identity, known_hosts,
+                    f"cat {MARKER}", tool.sandbox_id,
+                )
                 endpoints_after.append(resumed)
                 after_ssh_config.append(
                     ssh_config_dump(runtime, resumed_ssh, identity, known_hosts)

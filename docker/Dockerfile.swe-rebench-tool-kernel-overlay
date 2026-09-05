@@ -1,0 +1,19 @@
+# Replace generic upstream headers with the exact prepared Cube guest-kernel
+# tree.  ClawTune reads task_struct fields from these headers, so an upstream
+# tree with the same numeric version is insufficient for a patched kernel.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG KERNEL_RELEASE
+USER root
+COPY --from=kernel-source / /usr/src/linux-${KERNEL_RELEASE}
+COPY --from=kernel-output / /usr/src/linux-${KERNEL_RELEASE}
+RUN test -n "${KERNEL_RELEASE}" \
+ && test -f "/usr/src/linux-${KERNEL_RELEASE}/include/linux/sched.h" \
+ && test -f "/usr/src/linux-${KERNEL_RELEASE}/include/generated/autoconf.h" \
+ && mkdir -p "/lib/modules/${KERNEL_RELEASE}" \
+ && ln -sfn "/usr/src/linux-${KERNEL_RELEASE}" "/lib/modules/${KERNEL_RELEASE}/build"
+
+ENV BCC_KERNEL_SOURCE=/lib/modules/${KERNEL_RELEASE}/build
+USER 10001:10001
+WORKDIR /testbed

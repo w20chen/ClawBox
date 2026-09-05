@@ -153,7 +153,7 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
     return f"{user}@{rendered}:{port}"
 
 
-def native_tool_bridge_setup_command() -> str:
+def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
     Cube restores a template snapshot before applying per-sandbox environment
@@ -161,16 +161,33 @@ def native_tool_bridge_setup_command() -> str:
     The setup phase therefore materializes those keys through envd and starts
     the native bridge before any Agent operation is admitted.
     """
+    restart_command = ""
+    if restart:
+        restart_command = (
+            "pkill -x tool-bridge 2>/dev/null || true; "
+            "i=0; while grep -Eq ':08AE[[:space:]]' /proc/net/tcp && [ $i -lt 50 ]; do "
+            "i=$((i + 1)); sleep 0.1; done; "
+            "rm -f /run/clawtune/guest-collector.sock "
+            "/run/clawtune/guest-collector.token "
+            "/var/log/clawtune-guest-collector.unavailable; "
+        )
     return (
         "set -eu; "
         "mkdir -p /run/clawbox-ssh; "
         "printf '%s' \"$CLAWBOX_TOOL_HOST_KEY_B64\" | base64 -d > /run/clawbox-ssh/host_key; "
         "printf '%s' \"$CLAWBOX_TOOL_AUTHORIZED_KEY_B64\" | base64 -d > /run/clawbox-ssh/authorized_key; "
         "chmod 600 /run/clawbox-ssh/host_key /run/clawbox-ssh/authorized_key; "
-        "if ! grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then "
+        + restart_command
+        + "kernel_source=/lib/modules/$(uname -r)/build; test -d \"$kernel_source\"; "
+        + "if ! grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then "
         "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
+        "CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py "
+        "CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python "
+        "PYTHONPATH=/opt/clawtune-guest/services/sidecar/src "
+        "XDG_CACHE_HOME=/opt/clawtune/cache "
+        "BCC_KERNEL_SOURCE=\"$kernel_source\" "
         "/usr/local/bin/tool-bridge </dev/null >/var/log/tool-bridge.log 2>&1 & "
         "fi; "
         "ready=0; i=0; while [ $i -lt 50 ]; do "

@@ -26,12 +26,14 @@ set -e
 uname -a
 test -r /proc/config.gz && zcat /proc/config.gz | grep -E 'CONFIG_(KPROBES|KRETPROBES|FTRACE_SYSCALLS)=' || true
 grep -w __arm64_sys_execve /proc/kallsyms || true
+mkdir -p /sys/kernel/tracing
+test -e /sys/kernel/tracing/kprobe_events || mount -t tracefs tracefs /sys/kernel/tracing
 ls -l /sys/kernel/tracing/kprobe_events /sys/kernel/debug/tracing/kprobe_events /sys/bus/event_source/devices/kprobe/type 2>&1 || true
 cat /sys/bus/event_source/devices/kprobe/type 2>&1 || true
 cat /proc/sys/kernel/kptr_restrict /proc/sys/kernel/perf_event_paranoid 2>&1 || true
 echo 'p:clawbox_test __arm64_sys_execve' > /sys/kernel/tracing/kprobe_events
 grep -q 'kprobes/clawbox_test' /sys/kernel/tracing/kprobe_events
-echo '-:kprobes/clawbox_test' > /sys/kernel/tracing/kprobe_events
+echo '-:clawbox_test' > /sys/kernel/tracing/kprobe_events
 ! grep -q 'kprobes/clawbox_test' /sys/kernel/tracing/kprobe_events
 dmesg | tail -n 30
 """

@@ -123,6 +123,12 @@ def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:
     assert "nohup env TOOL_BRIDGE_HOST_KEY" in command
     assert ":08AE" in command
     assert "exit 1" in command
+    assert "CLAWTUNE_GUEST_COLLECTOR_HELPER" in command
+    assert "pkill" not in command
+
+    restart = native_tool_bridge_setup_command(restart=True)
+    assert "pkill -x tool-bridge" in restart
+    assert "guest-collector.sock" in restart
 
 
 def test_native_ssh_target_rejects_malformed_explicit_port() -> None:
