@@ -80,6 +80,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
+    agent_command = next(command for command in commands if " agent " in command)
+    assert "agent.pid" in agent_command
+    assert "exec " in agent_command
     assert result["tool_calls"] == 1
     assert result["tool_latencies"] == [0.25]
 

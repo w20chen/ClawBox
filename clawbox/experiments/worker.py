@@ -472,13 +472,21 @@ class ExperimentWorker:
                         wait_timer = None
                         if not lifecycle.resident or coordinator.tool_active(session_id):
                             return
+                        agent_pid_before = observe_openclaw_agent_pid("before_tool_pause")
                         started = time.time()
                         elapsed = lifecycle.checkpoint_and_evict()
+                        agent_pid_after = observe_openclaw_agent_pid("after_tool_pause")
+                        if agent_pid_before != agent_pid_after:
+                            raise RuntimeError(
+                                "OpenClaw agent PID changed across Tool pause: "
+                                f"{agent_pid_before} -> {agent_pid_after}"
+                            )
                         finished = time.time()
                         wait_state.update({
                             "pause_started_at": started,
                             "pause_completed_at": finished,
                             "pause_request_id": event.get("request_id"),
+                            "openclaw_agent_pid": agent_pid_after,
                         })
                     coordinator.pause_count += 1
                     coordinator.pause_service_seconds += elapsed
@@ -512,12 +520,20 @@ class ExperimentWorker:
                             restore_timer.start()
                             return
                         wait_state["restore_started_at"] = time.time()
+                        agent_pid_before = observe_openclaw_agent_pid("before_tool_restore")
                     elapsed = self._restore_with_one_victim(
                         arm, session_id, lifecycle, coordinator, events,
                     )
+                    agent_pid_after = observe_openclaw_agent_pid("after_tool_restore")
+                    if agent_pid_before != agent_pid_after:
+                        raise RuntimeError(
+                            "OpenClaw agent PID changed across Tool restore: "
+                            f"{agent_pid_before} -> {agent_pid_after}"
+                        )
                     with wait_lock:
                         wait_state["restore_completed_at"] = time.time()
                         wait_state["restore_request_id"] = event.get("request_id")
+                        wait_state["openclaw_agent_pid"] = agent_pid_after
                     # _restore_with_one_victim already records the service
                     # event; retain the explicit timing for gateway provenance.
                     _ = elapsed
@@ -685,6 +701,35 @@ class ExperimentWorker:
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
             )
             executor = CubeCommandExecutor(self.client, lambda: lifecycle.sandbox, cwd=arm.sandbox.workspace)
+            agent_pid_file = f"/state/openclaw/{session_id}/agent.pid"
+            agent_pid_observations: list[dict[str, Any]] = []
+
+            def observe_openclaw_agent_pid(phase: str) -> int | None:
+                """Prove the long-lived Runtime agent remains alive across Tool lifecycle work."""
+                if arm.agent.driver is not AgentDriver.OPENCLAW:
+                    return None
+                result = runtime_executor.execute(
+                    "pid=$(cat " + shlex.quote(agent_pid_file) + ") && "
+                    "case $pid in ''|*[!0-9]*) exit 1;; esac && "
+                    "kill -0 $pid && printf '%s' $pid",
+                    15,
+                )
+                if result.exit_code:
+                    raise RuntimeError(
+                        f"OpenClaw agent PID is not alive during {phase}: {result.stderr[-500:]}"
+                    )
+                try:
+                    pid = int(result.stdout.strip())
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"OpenClaw agent PID was invalid during {phase}: {result.stdout!r}"
+                    ) from exc
+                agent_pid_observations.append({"phase": phase, "pid": pid})
+                events.write({
+                    "event": "openclaw_agent_pid_observed", "session_id": session_id,
+                    "phase": phase, "pid": pid, "alive": True,
+                })
+                return pid
 
             def resolve_native_ssh_route(phase: str) -> NativeSSHRoute:
                 """Resolve CubeSandbox's current route at an operation boundary."""
@@ -919,6 +964,9 @@ class ExperimentWorker:
                     prediction_manifest=(prediction_provider.manifest
                                          if prediction_provider is not None else None),
                 )
+                if outcome.get("agent_pid_file") != agent_pid_file:
+                    raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
                 policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"
                 atomic_json(policy_control_path, outcome["policy_control_records"])

@@ -224,6 +224,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     ssh_dir = f"{home}/ssh"
     identity_file = f"{ssh_dir}/id_ed25519"
     known_hosts_file = f"{ssh_dir}/known_hosts"
+    agent_pid_file = f"{home}/agent.pid"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
     prefix = (
         f"export HOME={shlex.quote(home)} OPENCLAW_HOME={shlex.quote(home + '/.openclaw')} "
@@ -237,7 +238,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
 
-    def invoke(args: list[str], *, input_value: str | None = None) -> CommandResult:
+    def invoke(args: list[str], *, input_value: str | None = None,
+               pid_file: str | None = None) -> CommandResult:
+        if input_value is not None and pid_file is not None:
+            raise ValueError("pid_file cannot be combined with stdin input")
         argv = " ".join(
             f'"${{{item.removeprefix("$ENV:")}}}"' if item.startswith("$ENV:")
             else shlex.quote(item) for item in [executable, *args]
@@ -245,6 +249,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         if input_value is not None:
             encoded = base64.b64encode(input_value.encode()).decode()
             command = prefix + f"printf %s {shlex.quote(encoded)} | base64 -d | {argv}"
+        elif pid_file is not None:
+            command = prefix + f"printf '%s\\n' $$ > {shlex.quote(pid_file)}; exec {argv}"
         else:
             command = prefix + argv
         result = runtime_executor.execute(command, timeout_seconds)
@@ -331,7 +337,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     )
     result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
                      "--model", f"vllm/{model}", "--message", instruction,
-                     "--timeout", str(timeout_seconds), "--json"])
+                     "--timeout", str(timeout_seconds), "--json"],
+                    pid_file=agent_pid_file)
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
@@ -366,6 +373,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     ]
     return {"stdout": result.stdout, "stderr": result.stderr,
             "tool_calls": len(completed), "tool_latencies": latencies,
+            "agent_pid_file": agent_pid_file,
             "runtime_traces": copied, "policy_control_records": control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],
             "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None}
