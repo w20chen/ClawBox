@@ -84,6 +84,12 @@ assigns command normalization, duration/resource prediction, P50/P90 and
 fallback behavior, cgroup-v2 collection, and eBPF/kprobe telemetry to the
 pinned sibling ClawTune implementation. ClawBox owns the surrounding managed
 admission, VM residency, exact joins, freezing, and reporting layers.
+The legacy ClawBox compatibility projector no longer copies ClawTune's shell
+lexer, fallback-node layout, target calculations, or snapshot serialization.
+It now constructs native `CompletedCall` records and uses the pinned
+`RuntimeToolResourceKB` and `ToolCallQuery` APIs to causally advance, serialize,
+and reload-check the frozen snapshot. Managed command keys likewise call
+ClawTune's native normalizer through this thin adapter.
 
 Schema-v2 now supports deterministic heterogeneous managed workloads without
 splitting each trace into a different policy arm. With

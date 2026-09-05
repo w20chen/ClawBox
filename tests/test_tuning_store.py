@@ -280,9 +280,10 @@ def test_clawtune_snapshot_loadable_shape(db):
             assert isinstance(kind, str)
             assert isinstance(key, str)
             assert isinstance(values, list) and all(isinstance(v, float) for v in values)
-    # pending must be empty and last_query_ts null for a clean snapshot.
+    # Native ClawTune causally advances past the recording corpus before the
+    # snapshot is frozen, leaving no held-out/future calls pending.
     assert clawtune["pending"] == []
-    assert clawtune["last_query_ts"] is None
+    assert isinstance(clawtune["last_query_ts"], float)
 
 
 def test_concurrent_ingest_loses_no_observations(tmp_path):
