@@ -63,6 +63,12 @@ cross-Tool rejection before subprocess launch, endpoint epoch refresh without
 requiring an address change, strict host-key settings, and the OpenClaw Agent
 PID surviving Tool pause/restore.
 
+Recent continuation milestones `a6c3263`, `74fb823`, `72be43b`, and `1a6349a`
+align the baseline catalog and matrix audit with schema-v2, use actual native
+Tool names in replay telemetry, document that distinction, and expose the
+catalog through the read-only experiment CLI. They are all pushed to
+`origin/main`.
+
 The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
 was reviewed against this post-`50db717` tree and is intentionally not
 cherry-picked. Its useful lifecycle-failure, per-execution timing, FIFO
@@ -211,9 +217,10 @@ name, and checks every policy tuple against the immutable baseline catalog.
 The four paper matrices plan c20/c40/c60; the native OpenClaw replay fixture
 plans c40; the remaining c1/c4 files remain intentionally small gates. The
 old baseline names are retained only as explicit schema-v2 compatibility
-aliases. The pre-schema-v2 direct-Firecracker `clawbox replay study` path now
-fails closed with a migration message rather than importing removed workflow
-types or selecting a second backend.
+aliases. The pre-schema-v2 non-paper study translator now fails closed with a
+migration message rather than importing removed workflow types or selecting a
+second backend. The older `paper_experiment` direct-Firecracker runner remains
+legacy code and is not part of the supported native Worker path.
 
 The current replay-worker observation path also uses the actual replay/OpenClaw
 Tool name (for example `exec`) in ClawTune spans and worker events; it no

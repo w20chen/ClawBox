@@ -47,8 +47,10 @@ The checked-in baseline matrix audit is also green: all eight schema-v2
 experiment files load and plan with the expected c1/c4/c20/c40/c60 levels,
 all policy tuples resolve through the immutable current catalog, and no
 removed Tool template or `cube_shell` OpenClaw prompt is present. The old
-direct-Firecracker study compatibility entry point is now explicit and
-fail-closed; it cannot silently select a removed workflow schema.
+non-paper direct-Firecracker study translator is now explicit and fail-closed;
+it cannot silently select a removed workflow schema. The older
+`paper_experiment` runner remains legacy code and is outside the supported
+native Worker path.
 Current replay-worker telemetry likewise records the actual Tool operation name
 (for example `exec`) instead of the retired `cube_shell` label.
 
