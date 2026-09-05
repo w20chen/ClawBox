@@ -15,7 +15,9 @@ epoch; the existing Runtime policy shim applies the returned route only to the
 current SSH process. The OpenClaw target watcher was removed after verifying
 that the installed backend captures its target at construction. Stable
 HostKeyAlias/host keys preserve Tool identity, and completion is ordered after
-SSH reaping. Commit `147cb8e` fixes the timestamp sampling order and adds a
+SSH reaping. Raw semantic endpoints without an explicit mapped port now fail
+closed instead of falling back to SSH port 22. Commit `147cb8e` fixes the
+timestamp sampling order and adds a
 blocking-child regression proving `/complete` is not posted while the SSH child
 is still active. Commit `98d3f5d` also rejects an admission for any container
 port other than the Tool SSH port 2222 before OpenSSH starts.
@@ -54,9 +56,12 @@ native Worker path.
 Current replay-worker telemetry likewise records the actual Tool operation name
 (for example `exec`) instead of the retired `cube_shell` label.
 
-A local c40 Worker regression exercises all ten current policy recipes with 40
-concurrent sessions per arm and verifies successful completion, complete
-session/sandbox/agent/cleanup spans, and zero remaining fake owned sandboxes.
+A local c40 Worker regression materializes all ten implemented policy recipes
+directly from the canonical baseline catalog with 40 concurrent sessions per
+arm and verifies successful completion, complete session/sandbox/agent/cleanup
+spans, and zero remaining fake owned sandboxes. The policy shim tests also
+cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
+fail-closed behavior for an unenveloped Agent SSH operation.
 The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
 
 ## Evidence

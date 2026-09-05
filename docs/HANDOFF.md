@@ -61,7 +61,9 @@ completion requires the recorded SSH subprocess to have been reaped before
 completion can release the Tool reservation or trigger pause. Unit tests cover
 cross-Tool rejection before subprocess launch, endpoint epoch refresh without
 requiring an address change, strict host-key settings, and the OpenClaw Agent
-PID surviving Tool pause/restore.
+PID surviving Tool pause/restore. A semantic raw endpoint must include its
+explicit mapped TCP port; a missing port is rejected rather than interpreted as
+OpenSSH's default port 22.
 
 Recent continuation milestones `a6c3263`, `74fb823`, `72be43b`, and `1a6349a`
 align the baseline catalog and matrix audit with schema-v2, use actual native
@@ -69,11 +71,22 @@ Tool names in replay telemetry, document that distinction, and expose the
 catalog through the read-only experiment CLI. They are all pushed to
 `origin/main`.
 
-The local c40 Worker gate now also runs every current schema-v2 policy recipe
-against a concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete,
-all session/sandbox/agent/cleanup spans are present, and the owned-sandbox set
+The follow-up source gates `50ccc45`, `f1701e9`, and `802bfbc` are also pushed:
+the policy shim now has regression coverage for all six native Tool-VM
+operation names and rejects unenveloped Agent SSH before subprocess launch;
+the local c40 gate materializes every implemented recipe directly from the
+canonical baseline catalog; and raw CubeSandbox routes without an explicit
+mapped port fail closed instead of defaulting to SSH port 22. `bdf6fba` records
+the live Runtime template provenance mismatch described below.
+
+The local c40 Worker gate now also materializes every implemented schema-v2
+policy recipe directly from the canonical baseline catalog against a
+concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete, all
+session/sandbox/agent/cleanup spans are present, and the owned-sandbox set
 returns to zero. This is scheduler and logging evidence only; it is not a
-substitute for the blocked live Runtime-to-Tool route gate.
+substitute for the blocked live Runtime-to-Tool route gate. The policy shim
+tests cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
+fail-closed behavior for an unenveloped Agent SSH operation.
 
 The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
 was reviewed against this post-`50db717` tree and is intentionally not
