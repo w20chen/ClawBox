@@ -90,11 +90,13 @@ address is not a valid substitute.
 
 During diagnosis, a temporary `hostNetwork=true` CubeNode experiment was
 reverted and its failed replacement/debug pods were removed. The node then
-required a root-initiated reboot to clear stale containerd tasks; recovery must
-be rechecked before any further live test. That recovery check is now complete:
-the node is Ready, CubeNode is 3/3 Running, no debug pod remains, and the owned
-sandbox list is empty. Existing kernel, S3lvol, templates, and results were not
-intentionally modified or deleted. The remote ClawBox checkout is at
+required a root-initiated reboot to clear stale containerd tasks. The first
+post-reboot health check was green, but the subsequent c40 replay stress left
+CubeNode in CrashLoopBackOff (`gateway mac for eth0 via 169.254.1.1 not found`)
+and the host later stopped completing SSH handshakes. This is a deployment
+recovery blocker, not a reason to add a ClawBox networking layer. Existing
+kernel, S3lvol, templates, and results were not intentionally modified or
+deleted. The remote ClawBox checkout is at
 `d42da58` with the native-endpoint production files synchronized in its working
 tree; pre-existing untracked `results/` and `uv.lock` are preserved.
 
@@ -142,15 +144,23 @@ Two failed template records are expected from discovery and must not be reused:
 
 ## Current continuation result
 
-The replay worker was run at concurrency 40 for all prepared baseline suites:
-decision (12 arms), full-system (6), reclamation (6), smoke-matrix (2), spatial
-(15), and vertical-slice (1). All arms passed after retrying isolated transient
-Cube API transport failures. The decision run also reproduced and then cleared
-a broken command-stream hang with the bounded client deadline. Each run was
-checked for zero remaining Cube sandboxes. Fresh-source runs after `a4be792`
-also emit `session_timing` events containing `session`, `agent`, per-sandbox
-create, validation, hashing, and cleanup spans; the fresh decision bundle
-`baseline40-decision-a30292a` contains all 12 of those timing records.
+The pre-reboot c40 replay bundles recorded in the earlier handoff are historical
+evidence only. Their remote result directory was lost by the reboot and must
+not be presented as the current source/configuration result. A post-reboot
+smoke c40 attempt initially omitted the existing CubeProxy SDK transport
+variables and failed with virtual-host DNS errors after creating and cleaning
+all sessions. A second attempt supplied that transport and completed all
+creates/cleans, but used the legacy `sandbox-code` template without the
+ClawTune Tool bridge; its 40 sessions per arm failed validation. Commit
+`65ed9cf` now points every replay suite at the accepted instrumented Tool
+template and updates the real-LLM example to current templates. The corrected
+c40 suites remain pending CubeNode recovery.
+
+Current-source runs after `a4be792` emit `session_timing` events containing
+`session`, `agent`, per-sandbox create, validation, hashing, and cleanup spans.
+The local full Python suite passes; no new live c40 success claim is made until
+the corrected runs complete and each run is checked for zero remaining
+CubeSandbox resources.
 
 The managed gateway has both replay and API implementations. Replay is covered
 by session-local cursor, retry, delivery, and HOL tests. API mode is covered by
@@ -169,26 +179,28 @@ NodePort, a ClawBox proxy, or a second allocator.
 
 ## Highest-priority next steps
 
-1. Correct the CubeSandbox deployment topology so its existing semantic raw
+1. Recover the CubeSandbox node/Cubelet deployment and verify the existing
+   semantic endpoint still has the documented Runtime reachability boundary.
+2. Correct the CubeSandbox deployment topology so its existing semantic raw
    endpoint is reachable from Runtime, without adding a ClawBox networking
    layer. Re-run the host/Runtime reachability proof.
-2. Run the Cube-only pair smoke with Runtime template
+3. Run the Cube-only pair smoke with Runtime template
    `tpl-39efe4ad90384a1fbea3caff` and Tool template
    `tpl-b5cb6f5ee26a41448000b9c2`, then verify admitted SSH, Tool pause, demand
    restore, exact execution count, and no policy command/output leakage.
-4. Run managed OpenClaw c1 in replay and API modes with the operator-provided
+5. Run managed OpenClaw c1 in replay and API modes with the operator-provided
    credential, export the API response trace, and require replay equivalence
    before any native OpenClaw scale claim.
-5. Join Runtime ClawTune spans, PolicyControl records, Tool bridge JSONL,
+6. Join Runtime ClawTune spans, PolicyControl records, Tool bridge JSONL,
    cgroup artifacts, and eBPF artifacts by `(session_id, execution_id)` and
    retain the new `session_timing` events in the result bundle.
-6. Validate every native file tool, not merely `exec`. Confirm ClawTune applies
+7. Validate every native file tool, not merely `exec`. Confirm ClawTune applies
    its execution envelope to SSH commands produced by
    `process/read/write/edit/apply_patch`; unenveloped Agent operations must fail
    closed while setup/validation remain explicit non-agent phases.
-7. Add the focused admission-versus-delayed-pause race test, then run native
+8. Add the focused admission-versus-delayed-pause race test, then run native
    OpenClaw c4/c8 HOL/cross-routing and leak tests.
-8. Only after those native gates pass, run c20 and finally c40/c60 native
+9. Only after those native gates pass, run c20 and finally c40/c60 native
    OpenClaw policy arms. The replay c40 matrix is already green.
 
 ## Easier cleanup left intentionally
