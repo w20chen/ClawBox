@@ -110,6 +110,14 @@ Runtime/Tool pair creation (eight by default) and records any queue wait as a
 `sandbox.create.queue` span. This protects Cubelet/containerd during a stress
 run without changing the endpoint contract or SSH data path.
 
+Non-lifetime policies now reserve each VM's configured memory footprint before
+calling CubeSandbox create or restore. Tool restore therefore occurs while the
+command prediction reservation is already held, and adds the Tool VM footprint
+under the same coordinator; Runtime response-path restore reserves the Runtime
+VM footprint. The configured checkpoint/restore headroom remains in every
+capacity calculation. Lifecycle reservation waits are reported separately and
+no longer inflate Tool-admission counts or blocked-time percentiles.
+
 Tool admission now marks the session active before restore or memory waiting,
 so a competing pressure admission cannot pause that Tool in the admission
 window. Failed admission clears the marker, and native route resolution occurs

@@ -1079,10 +1079,18 @@ class ExperimentWorker:
             try:
                 timeline["sandbox_create_start"] = time.time()
                 timeline["tool_create_start"] = time.time()
-                tool_create_s = lifecycle.start()
+                if lifetime:
+                    tool_create_s, tool_create_reservation_wait = lifecycle.start(), 0.0
+                else:
+                    tool_create_s, tool_create_reservation_wait = coordinator.materialize(
+                        session_id, arm.sandbox.memory_mib, lifecycle.start,
+                        arm.execution.arm_timeout_seconds,
+                    )
                 timeline["tool_ready"] = time.time()
                 events.write({"event": "sandbox_created", "session_id": session_id,
                               "role": "tool", "service_seconds": tool_create_s,
+                              "materialization_reservation_mib": arm.sandbox.memory_mib,
+                              "materialization_reservation_wait_seconds": tool_create_reservation_wait,
                               "lifecycle_timing": lifecycle.timings[-1],
                               "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
                 setup_route = None
@@ -1100,11 +1108,19 @@ class ExperimentWorker:
                         f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
                     )
                 timeline["runtime_create_start"] = time.time()
-                runtime_create_s = runtime_lifecycle.start()
+                if lifetime:
+                    runtime_create_s, runtime_create_reservation_wait = runtime_lifecycle.start(), 0.0
+                else:
+                    runtime_create_s, runtime_create_reservation_wait = coordinator.materialize(
+                        session_id, arm.runtime.memory_mib, runtime_lifecycle.start,
+                        arm.execution.arm_timeout_seconds,
+                    )
                 timeline["runtime_ready"] = time.time()
                 timeline["sandbox_ready"] = timeline["runtime_ready"]
                 events.write({"event": "sandbox_created", "session_id": session_id,
                               "role": "runtime", "service_seconds": runtime_create_s,
+                              "materialization_reservation_mib": arm.runtime.memory_mib,
+                              "materialization_reservation_wait_seconds": runtime_create_reservation_wait,
                               "lifecycle_timing": runtime_lifecycle.timings[-1],
                               "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
             finally:
@@ -1750,11 +1766,17 @@ class ExperimentWorker:
                                  lifecycle: CubeSandboxLifecycle,
                                  coordinator: PolicyCoordinator, events: EventWriter,
                                  *, role: str = "tool") -> float:
-        elapsed = coordinator.restore(
-            session_id, lifecycle.restore, arm.execution.arm_timeout_seconds,
+        reservation_mib = (
+            arm.runtime.memory_mib if role == "runtime" else arm.sandbox.memory_mib
+        )
+        elapsed, reservation_wait = coordinator.restore(
+            session_id, reservation_mib, lifecycle.restore,
+            arm.execution.arm_timeout_seconds,
         )
         events.write({"event": "sandbox_restored", "session_id": session_id,
                       "role": role, "service_seconds": elapsed,
+                      "materialization_reservation_mib": reservation_mib,
+                      "materialization_reservation_wait_seconds": reservation_wait,
                       "lifecycle_timing": lifecycle.timings[-1]})
         return elapsed
 

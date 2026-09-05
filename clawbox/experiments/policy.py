@@ -74,6 +74,9 @@ class PolicyCoordinator:
         self.admission_count = 0
         self.max_admission_queue_depth = 0
         self._admission_wait_samples: list[float] = []
+        self._lifecycle_wait_samples: dict[str, list[float]] = {
+            "create": [], "restore": [],
+        }
         self.safety_intervention_count = 0
         self.safety_interventions_by_reason: dict[str, int] = {}
 
@@ -135,23 +138,24 @@ class PolicyCoordinator:
             reasons.append("emergency_free_memory")
         return tuple(reasons)
 
-    def acquire(self, session_id: str, amount_mib: int, timeout_s: float) -> float:
+    def acquire(self, session_id: str, amount_mib: int, timeout_s: float, *,
+                wait_class: str = "tool_admission") -> float:
         started = time.monotonic()
         amount = amount_mib * MIB
         if amount == 0:
             elapsed = time.monotonic() - started
             with self._condition:
-                self.admission_count += 1
-                self._admission_wait_samples.append(elapsed)
+                self._record_wait_locked(wait_class, elapsed)
             return elapsed
         deadline = started + timeout_s
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
             recorded_safety_reasons: set[str] = set()
-            self.max_admission_queue_depth = max(
-                self.max_admission_queue_depth, len(self._waiters),
-            )
+            if wait_class == "tool_admission":
+                self.max_admission_queue_depth = max(
+                    self.max_admission_queue_depth, len(self._waiters),
+                )
             try:
                 while True:
                     at_head = self._waiters[0] is ticket
@@ -190,22 +194,31 @@ class PolicyCoordinator:
                     self._waiters.remove(ticket)
                     self._condition.notify_all()
                 waited = time.monotonic() - started
-                self.blocked_seconds += waited
-                self.admission_count += 1
-                self._admission_wait_samples.append(waited)
+                self._record_wait_locked(wait_class, waited)
                 raise
         waited = time.monotonic() - started
         with self._condition:
+            self._record_wait_locked(wait_class, waited)
+        return waited
+
+    def _record_wait_locked(self, wait_class: str, waited: float) -> None:
+        if wait_class == "tool_admission":
             self.blocked_seconds += waited
             self.admission_count += 1
             self._admission_wait_samples.append(waited)
-        return waited
+            return
+        if wait_class not in self._lifecycle_wait_samples:
+            raise ValueError(f"unknown reservation wait class {wait_class!r}")
+        self._lifecycle_wait_samples[wait_class].append(waited)
 
     def admission_metrics(self) -> dict[str, float | int | None]:
         """Return immutable aggregate metrics for the FIFO admission ledger."""
         with self._condition:
             samples = sorted(self._admission_wait_samples)
             max_queue_depth = self.max_admission_queue_depth
+            lifecycle_samples = {
+                key: tuple(values) for key, values in self._lifecycle_wait_samples.items()
+            }
 
         def quantile(q: float) -> float | None:
             if not samples:
@@ -231,6 +244,12 @@ class PolicyCoordinator:
             "safety_intervention_count": self.safety_intervention_count,
             "safety_interventions_by_reason": dict(
                 self.safety_interventions_by_reason
+            ),
+            "lifecycle_create_reservation_wait_seconds": sum(
+                lifecycle_samples["create"]
+            ),
+            "lifecycle_restore_reservation_wait_seconds": sum(
+                lifecycle_samples["restore"]
             ),
         }
 
@@ -270,15 +289,29 @@ class PolicyCoordinator:
             if self.policy.restore is RestorePolicy.PROACTIVE else None
         return delay, lead
 
-    def restore(self, session_id: str, operation: Callable[[], float], timeout_s: float) -> float:
-        """Admit restore and make exactly one capacity-recovery attempt."""
-        self.acquire(session_id, self.operation_headroom_mib, timeout_s)
+    def materialize(self, session_id: str, amount_mib: int,
+                    operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:
+        """Reserve a VM's configured footprint before its create call."""
+        waited = self.acquire(
+            session_id, amount_mib, timeout_s, wait_class="create",
+        )
+        try:
+            return operation(), waited
+        finally:
+            self.release(session_id, amount_mib)
+
+    def restore(self, session_id: str, amount_mib: int,
+                operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:
+        """Reserve a VM footprint, restore, and try one capacity recovery."""
+        waited = self.acquire(
+            session_id, amount_mib, timeout_s, wait_class="restore",
+        )
         try:
             try:
                 elapsed = operation()
                 self.resume_count += 1
                 self.resume_service_seconds += elapsed
-                return elapsed
+                return elapsed, waited
             except Exception as first:
                 if getattr(first, "status_code", None) != 409:
                     raise
@@ -295,9 +328,9 @@ class PolicyCoordinator:
                 elapsed = operation()  # second rejection is deliberately final
                 self.resume_count += 1
                 self.resume_service_seconds += elapsed
-                return elapsed
+                return elapsed, waited
         finally:
-            self.release(session_id, self.operation_headroom_mib)
+            self.release(session_id, amount_mib)
 
     def _select_victim_locked(self, *, exclude: str) -> SessionState | None:
         if self.policy.reclamation is ReclamationPolicy.RESIDENT:

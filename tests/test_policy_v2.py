@@ -126,3 +126,36 @@ def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
     assert metrics["admission_count"] == 3
     assert metrics["max_queue_depth"] == 2
     assert metrics["wait_p95_seconds"] is not None
+
+
+def test_lifecycle_reservations_do_not_pollute_tool_admission_metrics() -> None:
+    policy = PolicySpec(name="resident", admission="tool_static", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=5, emergency_free_mib=1, operation_headroom_mib=1,
+        physical_sample=lambda: (0, 100 * 1024**2),
+    )
+
+    def create_while_reserved() -> float:
+        with pytest.raises(AdmissionTimeout):
+            coordinator.acquire("other", 1, 0)
+        return 0.25
+
+    def restore_while_reserved() -> float:
+        with pytest.raises(AdmissionTimeout):
+            coordinator.acquire("other", 1, 0)
+        return 0.5
+
+    created, create_wait = coordinator.materialize("session", 4, create_while_reserved, 1)
+    restored, restore_wait = coordinator.restore("session", 4, restore_while_reserved, 1)
+    assert (created, restored) == (0.25, 0.5)
+    assert create_wait >= 0 and restore_wait >= 0
+    # Both lifecycle reservations have been released after their operations.
+    coordinator.acquire("other", 1, 1)
+    coordinator.release("other", 1)
+    metrics = coordinator.admission_metrics()
+    # Failed nested probes plus the final successful Tool acquire are counted;
+    # create/restore waits themselves are kept in separate lifecycle metrics.
+    assert metrics["admission_count"] == 3
+    assert metrics["lifecycle_create_reservation_wait_seconds"] >= 0
+    assert metrics["lifecycle_restore_reservation_wait_seconds"] >= 0
