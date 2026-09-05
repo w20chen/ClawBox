@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
-from clawbox.experiments.worker import ExperimentWorker, build_time_spans
+from clawbox.experiments.worker import EventWriter, ExperimentWorker, build_time_spans
 
 
 def raw_spec() -> dict:
@@ -74,6 +74,19 @@ def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
     assert by_name["sandbox.create"]["duration_seconds"] == 2.0
     assert by_name["sandbox.create.queue"]["duration_seconds"] == 1.0
     assert by_name["sandbox.cleanup"]["duration_seconds"] == 1.0
+
+
+def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    writer = EventWriter(path)
+    writer.write({"event": "agent_started", "session_id": "session-a"})
+    writer.write({"event": "agent_finished", "session_id": "session-a"})
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["sequence_no"] for row in rows] == [0, 1]
+    assert all(row["schema_version"] == 1 for row in rows)
+    assert all(row["session_id"] == "session-a" for row in rows)
+    assert all(int(row["wall_time_ns"]) > 0 for row in rows)
+    assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
 
 
 def test_worker_bounds_pair_creation_for_high_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:

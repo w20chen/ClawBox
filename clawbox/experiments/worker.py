@@ -124,10 +124,19 @@ class EventWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.lock = Lock()
+        self.sequence = 0
 
     def write(self, event: dict[str, Any]) -> None:
-        row = {"wall_time": utcnow().isoformat(), **event}
         with self.lock, self.path.open("a", encoding="utf-8") as stream:
+            row = {
+                "schema_version": 1,
+                "sequence_no": self.sequence,
+                "wall_time": utcnow().isoformat(),
+                "wall_time_ns": str(time.time_ns()),
+                "monotonic_time_ns": str(time.monotonic_ns()),
+                **event,
+            }
+            self.sequence += 1
             stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             stream.flush()
 
