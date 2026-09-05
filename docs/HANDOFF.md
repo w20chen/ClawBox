@@ -94,6 +94,9 @@ template IDs, source image references, and SHA-256 digests for formal
 OpenClaw experiments. Commit `0060297` protects a Tool before restore or
 memory admission begins, resolves the native route only after that boundary,
 and adds the focused admission-versus-delayed-pause race regression.
+Commits `2c09e5a` and `3b0ce0e` make both standalone Kunpeng route gates use
+the semantic route object and fail closed for missing or non-2222 mapped
+ports.
 
 The local c40 Worker gate now also materializes every implemented schema-v2
 policy recipe directly from the canonical baseline catalog against a
