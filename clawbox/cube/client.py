@@ -73,12 +73,14 @@ class CubeSandboxClient:
     """Small synchronous wrapper around the official CubeSandbox v0.7 SDK."""
 
     def __init__(self, *, journal: OwnedSandboxJournal | None = None,
-                 sandbox_class: type | None = None, config: Any = None,
+                 sandbox_class: type | None = None, template_class: type | None = None,
+                 config: Any = None,
                  command_stream_grace_s: float = 15.0) -> None:
         if sandbox_class is None:
             from cubesandbox import Sandbox
             sandbox_class = Sandbox
         self._sandbox_class = sandbox_class
+        self._template_class = template_class
         self._config = config
         self.journal = journal
         self._handles: dict[str, Any] = {}
@@ -174,6 +176,35 @@ class CubeSandboxClient:
         if not endpoint.address:
             raise RuntimeError("CubeSandbox returned an empty raw TCP endpoint")
         return endpoint
+
+    def validate_template_image(self, template: str, expected_digest: str) -> dict[str, str]:
+        """Fail closed when a pinned experiment template is not its image.
+
+        Template provenance is checked through CubeSandbox's official Template
+        API. This is a creation-time artifact gate, separate from the semantic
+        per-sandbox TCP endpoint API and from any CubeProxy routing metadata.
+        """
+        reference = str(template or "").strip()
+        digest = str(expected_digest or "").strip()
+        if not reference or not digest:
+            raise ValueError("template and expected image digest are required")
+        template_class = self._template_class
+        if template_class is None:
+            from cubesandbox import Template
+            template_class = Template
+        info = template_class.get(reference)
+        status = str(getattr(info, "status", "")).strip().lower()
+        if status not in {"ready", "succeeded", "success", "completed"}:
+            raise RuntimeError(f"CubeSandbox template {reference!r} is not ready: {status}")
+        image_info = str(getattr(info, "image_info", "") or "").strip()
+        actual_digest = image_info.rsplit("@", 1)[-1] if "@" in image_info else ""
+        if actual_digest != digest:
+            raise RuntimeError(
+                f"CubeSandbox template {reference!r} image digest mismatch: "
+                f"expected {digest!r}, got {actual_digest or image_info!r}"
+            )
+        return {"template": reference, "status": status, "image_info": image_info,
+                "image_digest": actual_digest}
 
     def run_command(self, sandbox: Any, command: str, *, timeout_s: float,
                     cwd: str = "/workspace") -> Any:

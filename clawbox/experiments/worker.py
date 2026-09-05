@@ -231,6 +231,11 @@ class ExperimentWorker:
     def _run_arm(self, arm: ExperimentArm, result_path: Path, marker_path: Path) -> ResultEnvelope:
         started_at = utcnow()
         started = time.monotonic()
+        for role, sandbox in (("runtime", arm.runtime), ("tool", arm.sandbox)):
+            if sandbox.image_digest:
+                self.client.validate_template_image(
+                    sandbox.template, sandbox.image_digest,
+                )
         events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
         sampler = NodeMemorySampler(interval_s=arm.execution.memory_sample_interval_seconds)
         coordinator = PolicyCoordinator(

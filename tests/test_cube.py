@@ -140,6 +140,38 @@ def test_cube_client_consumes_semantic_tcp_endpoint_and_checks_identity() -> Non
         raise AssertionError("endpoint identity mismatch was not rejected")
 
 
+def test_cube_client_rejects_ready_template_with_wrong_pinned_image() -> None:
+    expected = "sha256:" + "a" * 64
+
+    class Template:
+        status = "READY"
+        image_info = "http://registry.example/clawbox/runtime@sha256:" + "b" * 64
+
+        @classmethod
+        def get(cls, _reference: str):
+            return cls
+
+    client = CubeSandboxClient(sandbox_class=_Sandbox, template_class=Template)
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        client.validate_template_image("tpl-runtime", expected)
+
+
+def test_cube_client_accepts_ready_template_with_pinned_image() -> None:
+    digest = "sha256:" + "a" * 64
+
+    class Template:
+        status = "READY"
+        image_info = "http://registry.example/clawbox/runtime@" + digest
+
+        @classmethod
+        def get(cls, _reference: str):
+            return cls
+
+    client = CubeSandboxClient(sandbox_class=_Sandbox, template_class=Template)
+    result = client.validate_template_image("tpl-runtime", digest)
+    assert result["image_digest"] == digest
+
+
 def test_cube_client_bounds_a_stalled_command_stream() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox, command_stream_grace_s=0.01)
