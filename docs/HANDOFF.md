@@ -184,9 +184,21 @@ Current-source runs after `a4be792` emit `session_timing` events containing
 `7a0740f` additionally records failed lifecycle attempts, control admission and
 completion service spans, FIFO admission wait distributions, and keeps the
 Runtime-local retrieval/memory tool set separate from the six Tool-VM tools.
-The reproducible formal OpenClaw replay c40 input is
+The reproducible OpenClaw replay c40 smoke input is
 `examples/experiments/openclaw-cube-replay-c40.yaml` with its checked-in model
-trace; it is a pending live gate, not a passed run.
+trace; it is a pending live gate, not a passed run. A 2026-09-05 replay-contract
+audit adds an important qualification: that checked-in marker trace is
+hand-authored and its `raw_request` contains only the marker conversation. A
+representative API-captured OpenClaw request contains the full six-field
+chat-completions envelope, the evolving conversation, and six configured Tool
+functions; strict replay correctly rejects that marker trace at step 0. It is
+therefore a loadable smoke fixture, not exact OpenClaw replay evidence. Exact
+OpenClaw replay evidence must come from an API-mode c1 run, the gateway's
+exported request/response trace, and a subsequent replay run. That export path
+was exercised locally against a retained 27-step API-captured artifact:
+27/27 streaming responses were delivered, all canonical inputs matched, and
+the replay completeness verdict passed. That artifact is historical and is
+not a current live c40 result.
 The local full Python suite passes; no new live c40 success claim is made until
 the corrected runs complete and each run is checked for zero remaining
 CubeSandbox resources.

@@ -29,9 +29,12 @@ Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
 admission/completion service spans, FIFO admission wait distributions, and
 explicit Runtime-local versus Tool-VM tool policy. Commit `743c68a` adds
 ordered wall-clock and monotonic nanosecond fields to experiment event JSONL.
-The formal OpenClaw replay c40 spec and checked-in model trace are
+The OpenClaw replay c40 smoke spec and hand-authored model trace are
 `examples/experiments/openclaw-cube-replay-c40.yaml` and
-`examples/traces/openclaw-cube-replay.jsonl`; their live run remains pending.
+`examples/traces/openclaw-cube-replay.jsonl`; they validate the experiment
+loader and replay response shape, but are not exact OpenClaw request evidence.
+An exact OpenClaw replay trace must be exported from a successful API-mode c1
+run before replay c40 is claimed.
 
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
 corrected ARM64 Tool image was built and a fresh kernel-bound Tool template was
@@ -68,7 +71,7 @@ native OpenClaw path.
 | Real Runtime-to-Tool native SSH | blocked; current pod-IP mapping is reachable from host but refused from Runtime |
 | Pause -> policy restore -> SSH -> telemetry | blocked by deployment topology; no live c1 claim |
 | Managed real-inference c1 | pending; operator credential is present but not sent by automation |
-| Deterministic c1 replay equivalence | replay path green; native OpenClaw c1 pending |
+| Deterministic c1 replay equivalence | prior 27-step API-captured export/replay matched 27/27; current native OpenClaw c1 pending |
 | c4/c8/c20/c40/c60 | corrected replay c40 and native OpenClaw scale pending CubeNode recovery |
 
 The earlier c40 artifacts were retained on kunpeng under
