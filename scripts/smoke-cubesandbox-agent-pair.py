@@ -60,9 +60,18 @@ def require_state(sandbox_id: str, expected: str, label: str) -> None:
         raise AssertionError(f"{label} is {actual!r}, expected {expected!r}")
 
 
+def endpoint_route(endpoint, epoch: int = 1):
+    route = native_ssh_route(endpoint, epoch=epoch)
+    if route.container_port != 2222:
+        raise AssertionError(
+            f"CubeSandbox TCP endpoint is not the Tool SSH port: {route.container_port}"
+        )
+    return route
+
+
 def endpoint_host(endpoint) -> str:
     """Extract the destination host from CubeSandbox's semantic TCP address."""
-    host = native_ssh_route(endpoint, epoch=1).host
+    host = endpoint_route(endpoint).host
     try:
         ipaddress.ip_address(host)
     except ValueError as exc:
@@ -71,7 +80,7 @@ def endpoint_host(endpoint) -> str:
 
 
 def endpoint_ssh(endpoint, credentials) -> NativeSSHConfig:
-    route = native_ssh_route(endpoint, epoch=1)
+    route = endpoint_route(endpoint)
     return NativeSSHConfig(
         target=route.target,
         identity_private_key=credentials.client_private,
@@ -391,7 +400,7 @@ def main() -> int:
                     tool_holder["sandbox"] = current_tool
                     restore_seconds.append(time.monotonic() - started_restore)
                     restore_count += 1
-                route = native_ssh_route(
+                route = endpoint_route(
                     cube.get_tcp_endpoint(current_tool, 2222),
                     epoch=len(admission_routes) + 1,
                 )

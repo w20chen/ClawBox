@@ -40,6 +40,10 @@ ENVELOPE = "__CBX_EXEC_1__"
 
 def endpoint_route(endpoint, epoch: int):
     route = native_ssh_route(endpoint, epoch=epoch)
+    if route.container_port != 2222:
+        raise AssertionError(
+            f"CubeSandbox TCP endpoint is not the Tool SSH port: {route.container_port}"
+        )
     try:
         ipaddress.ip_address(route.host)
     except ValueError as exc:
