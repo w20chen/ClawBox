@@ -1084,6 +1084,13 @@ class ExperimentWorker:
                 before_response_ready=before_model_response_ready,
             )
             runtime_env["CLAWBOX_MODEL_GATEWAY_TOKEN"] = gateway_session.token
+            # CubeSandboxLifecycle snapshots env_vars at construction time.
+            # The per-session gateway token is created later so callbacks can
+            # capture both lifecycles; copy it into the lifecycle payload
+            # before the Runtime VM is materialized.
+            runtime_lifecycle.env_vars["CLAWBOX_MODEL_GATEWAY_TOKEN"] = (
+                gateway_session.token
+            )
         # Delay coordinator registration until every pre-VM validation and
         # per-session gateway registration has succeeded.  Otherwise a bad
         # replay path or gateway setup error can leave a non-existent session

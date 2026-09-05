@@ -1,0 +1,75 @@
+diff --git a/CubeAPI/Dockerfile b/CubeAPI/Dockerfile
+index 328a8c3..ecc80e9 100644
+--- a/CubeAPI/Dockerfile
++++ b/CubeAPI/Dockerfile
+@@ -12,6 +12,7 @@
+ # the host arch for a plain `docker build` without buildx.
+ FROM rust:1.85-alpine AS builder
+ ARG TARGETARCH
++ENV RUSTUP_TOOLCHAIN=1.85.1
+ 
+ # musl-dev provides the musl C runtime/headers needed to link the static binary
+ # against the <arch>-unknown-linux-musl target (rust:alpine already ships gcc).
+diff --git a/CubeAPI/src/cubemaster/mod.rs b/CubeAPI/src/cubemaster/mod.rs
+index 863c106..8bdcaed 100644
+--- a/CubeAPI/src/cubemaster/mod.rs
++++ b/CubeAPI/src/cubemaster/mod.rs
+@@ -1949,6 +1949,8 @@ pub struct TemplateResponse {
+     pub display_name: String,
+     #[serde(default)]
+     pub created_at: String,
++    #[serde(default)]
++    pub image_info: String,
+     /// Opaque replica list (node placement). Left as raw JSON to avoid
+     /// coupling to CubeMaster-internal types.
+     #[serde(default)]
+diff --git a/CubeAPI/src/models/mod.rs b/CubeAPI/src/models/mod.rs
+index 08ea769..06c1e72 100644
+--- a/CubeAPI/src/models/mod.rs
++++ b/CubeAPI/src/models/mod.rs
+@@ -1310,6 +1310,8 @@ pub struct TemplateDetail {
+     pub last_error: Option<String>,
+     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+     pub created_at: Option<String>,
++    #[serde(rename = "imageInfo", skip_serializing_if = "Option::is_none")]
++    pub image_info: Option<String>,
+     pub replicas: Vec<serde_json::Value>,
+     #[serde(rename = "createRequest", skip_serializing_if = "Option::is_none")]
+     pub create_request: Option<serde_json::Value>,
+diff --git a/CubeAPI/src/services/templates.rs b/CubeAPI/src/services/templates.rs
+index 457a58c..d7decf0 100644
+--- a/CubeAPI/src/services/templates.rs
++++ b/CubeAPI/src/services/templates.rs
+@@ -355,6 +355,7 @@ fn template_detail_from_cubemaster(
+         status: resp.status,
+         last_error: non_empty(resp.last_error),
+         created_at: non_empty(resp.created_at),
++        image_info: non_empty(resp.image_info),
+         replicas: resp.replicas,
+         create_request: resp.create_request,
+         network_type,
+@@ -790,6 +791,24 @@ mod tests {
+         assert!(!summary.public);
+     }
+ 
++    #[test]
++    fn template_detail_preserves_source_image_provenance() {
++        let response: crate::cubemaster::TemplateResponse = serde_json::from_value(
++            serde_json::json!({
++                "ret": {"ret_code": 0, "ret_msg": "ok"},
++                "template_id": "tpl-1",
++                "status": "READY",
++                "image_info": "registry.example/tool@sha256:abc"
++            }),
++        )
++        .expect("template response");
++        let detail = template_detail_from_cubemaster(response, "tpl-fallback");
++        assert_eq!(
++            detail.image_info.as_deref(),
++            Some("registry.example/tool@sha256:abc")
++        );
++    }
++
+     #[test]
+     fn template_summary_from_cubemaster_uses_empty_aliases_without_display_name() {
+         let summary = template_summary_from_cubemaster(crate::cubemaster::TemplateSummaryItem {

@@ -8,7 +8,9 @@ recovery.
 
 The historical blocker narrative below is retained as an audit trail, but it
 is no longer the current state. CubeSandbox branch `clawbox/hostport-hairpin`
-commit `0dda1c4` fixed the supported same-node semantic HostPort datapath. Live
+commit `0dda1c4` fixed the supported same-node semantic HostPort datapath, and
+commit `559f894` preserved immutable image provenance in template-detail API
+responses. Live
 Kunpeng gates now pass at c1, c4, and c8 with the current immutable Runtime
 template `tpl-437392a8c57b48ccb32ef2ee` and Tool template
 `tpl-4a67524e1fcd41859905c77b`. The c8 gate proves 16/16 exact PolicyControl +

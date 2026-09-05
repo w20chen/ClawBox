@@ -11,6 +11,7 @@ CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PATCH_FILE=${CUBE_ENDPOINT_PATCH:-$SCRIPT_DIR/semantic-tcp-endpoint.patch}
 HAIRPIN_PATCH_FILE=${CUBE_HAIRPIN_PATCH:-$SCRIPT_DIR/hostport-hairpin.patch}
+PROVENANCE_PATCH_FILE=${CUBE_PROVENANCE_PATCH:-$SCRIPT_DIR/template-image-provenance.patch}
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 
 require() {
@@ -20,6 +21,7 @@ require() {
 require git
 [[ -f "$PATCH_FILE" ]] || { echo "missing endpoint patch: $PATCH_FILE" >&2; exit 1; }
 [[ -f "$HAIRPIN_PATCH_FILE" ]] || { echo "missing hairpin patch: $HAIRPIN_PATCH_FILE" >&2; exit 1; }
+[[ -f "$PROVENANCE_PATCH_FILE" ]] || { echo "missing provenance patch: $PROVENANCE_PATCH_FILE" >&2; exit 1; }
 
 if [[ ! -d "$SOURCE_DIR/.git" ]]; then
   mkdir -p "$(dirname "$SOURCE_DIR")"
@@ -51,6 +53,7 @@ apply_once() {
 
 apply_once "$PATCH_FILE" "semantic endpoint"
 apply_once "$HAIRPIN_PATCH_FILE" "same-node HostPort hairpin"
+apply_once "$PROVENANCE_PATCH_FILE" "template image provenance"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$SOURCE_DIR"

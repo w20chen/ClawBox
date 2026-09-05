@@ -4,6 +4,18 @@
 
 ### Superseding live update: memory reclamation and native c8 are green
 
+CubeSandbox branch commit `559f894` now preserves CubeMaster's `image_info` in
+the CubeAPI template-detail response. The deployed API returned the expected
+immutable registry digests for both current templates, and ClawBox's strict
+pre-creation provenance gate passed without weakening digest validation. The
+first managed c1 run then exposed a separate Runtime environment ordering bug:
+the per-session ModelGateway token was generated after the lifecycle object had
+copied its environment. That token is now inserted into the lifecycle payload
+before VM creation and covered by a regression test. Live OpenClaw subsequently
+reached the managed replay gateway; the checked-in smoke trace mismatched the
+actual OpenClaw request and failed closed with zero leaked sandboxes, as it
+must. This is an infrastructure gate result, not representative replay evidence.
+
 The earlier deployment-topology blocker described later in this document has
 been resolved in CubeSandbox, not bypassed in ClawBox. CubeSandbox source commit
 `0dda1c4` recognizes an exact `remote_port_mapping` route before the ordinary
@@ -62,7 +74,7 @@ The deployment contract is now written down in
 [`docs/cubesandbox-setup.md`](cubesandbox-setup.md) and linked from the
 README. It has two explicit paths: prepare a fresh standalone CubeSandbox
 deployment, or preflight an existing deployment before running ClawBox. The
-checked-in `deploy/cubesandbox/semantic-tcp-endpoint.patch` plus
+checked-in CubeSandbox endpoint, hairpin, and template-provenance patches plus
 `prepare-semantic-source.sh` makes the semantic CubeAPI route and matching SDK
 reproducible from the public v0.7.0 source tag. The Kunpeng Kubernetes profile
 is explicitly diagnostic only because its HostPort address is a Pod IP that

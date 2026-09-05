@@ -52,13 +52,16 @@ bash deploy/cubesandbox/prepare-semantic-source.sh
 export CUBE_SOURCE_DIR="$PWD/.cubesandbox"
 ```
 
-The helper refuses to overwrite a dirty checkout and applies two narrow
+The helper refuses to overwrite a dirty checkout and applies three narrow
 CubeSandbox patches: `deploy/cubesandbox/semantic-tcp-endpoint.patch` adds the
 CubeAPI route and matching Python SDK method, while
 `deploy/cubesandbox/hostport-hairpin.patch` lets one CubeSandbox VM consume
 another VM's existing mapped TCP endpoint on the same node. The latter is the
 source-identical patch from CubeSandbox commit `6b2d63e`; it reuses CubeVS's
 existing port maps and conntrack state and adds no SSH proxy or port allocator.
+`deploy/cubesandbox/template-image-provenance.patch` preserves CubeMaster's
+immutable source image reference in CubeAPI's template-detail response so
+ClawBox can verify the configured digest before creating any VM.
 Build the CubeSandbox one-click bundle from that prepared source using
 CubeSandbox's documented release-bundle flow:
 
