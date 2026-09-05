@@ -69,15 +69,16 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
-The helper applies the checked-in semantic endpoint patch to CubeSandbox
-`v0.7.0`; the public tag does not contain this API. Install the resulting
-CubeSandbox deployment using its official one-click or multi-node procedure,
+The helper applies the checked-in semantic endpoint and same-node HostPort
+hairpin patches to CubeSandbox `v0.7.0`; the public tag contains neither
+ClawBox-specific addition. Install the resulting CubeSandbox deployment using
+its official one-click or multi-node procedure,
 then run `scripts/validate-cubesandbox-tcp-endpoints.py --count 1` before any
 experiment. Do not use `Sandbox.get_host(2222)`, a guest IP, NodePort, Redis
 metadata, or a ClawBox SSH proxy.
 
-The current single-node Kunpeng diagnostic proves that CubeSandbox returns the
-right semantic mapping but its CubeVS datapath does not yet carry same-node VM
+The last unpatched single-node Kunpeng diagnostic proves that CubeSandbox
+returns the right semantic mapping but its CubeVS datapath did not carry same-node VM
 traffic to it. From a fresh Runtime, all three distinct routes—CubeNode Pod-IP
 HostPort, physical-node-IP HostPort, and the Tool's per-VM SandboxIP—were
 refused before SSH authentication; the bounded probe then left zero sandboxes.

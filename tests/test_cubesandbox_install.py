@@ -34,6 +34,9 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     patch = (ROOT / "deploy" / "cubesandbox" / "semantic-tcp-endpoint.patch").read_text(
         encoding="utf-8"
     )
+    hairpin = (ROOT / "deploy" / "cubesandbox" / "hostport-hairpin.patch").read_text(
+        encoding="utf-8"
+    )
 
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
     assert "apply --check" in helper
@@ -41,6 +44,10 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "/sandboxes/{sandboxID}/ports/{containerPort}" in patch
     assert "SandboxTcpEndpoint" in patch
     assert "get_tcp_endpoint" in patch
+    assert "HAIRPIN_PATCH_FILE" in helper
+    assert "tcp_hairpin_proxy" in hairpin
+    assert "remote_port_mapping" in hairpin
+    assert "mvmip_to_ifindex" in hairpin
 
 
 def test_setup_docs_reject_pod_ip_native_ssh_and_link_from_readme() -> None:

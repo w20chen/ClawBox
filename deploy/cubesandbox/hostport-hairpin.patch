@@ -1,0 +1,222 @@
+diff --git a/CubeNet/src/mvmtap.bpf.c b/CubeNet/src/mvmtap.bpf.c
+index bcd2f75..dae70c4 100644
+--- a/CubeNet/src/mvmtap.bpf.c
++++ b/CubeNet/src/mvmtap.bpf.c
+@@ -234,6 +234,75 @@ enum tcp_nat_result {
+ 	TCP_L7PROXY_OK,
+ };
+ 
++/* Apply the existing exposed-port DNAT on same-node traffic before it leaves
++ * the source TAP. A redirect to the node NIC's egress path will not traverse
++ * from_world on that NIC, so relying on the physical-ingress program creates
++ * a same-node HostPort black hole.
++ */
++static __always_inline int tcp_hairpin_proxy(struct __sk_buff *skb,
++					     struct ethhdr *l2,
++					     struct iphdr *l3,
++					     struct tcphdr *l4,
++					     struct mvm_port *mvm_port)
++{
++	__u32 old_daddr, new_daddr, tcp_csum_off;
++	struct nat_session *sess;
++	struct session_key pkey = {};
++	__u16 old_dport, new_dport;
++	__u16 ip_hlen;
++	__u64 now, flags;
++	long err;
++
++	now = bpf_ktime_get_ns();
++	port_mapping_key(&pkey, l3->saddr, l4->source, mvm_port->listen_port);
++	sess = bpf_map_lookup_elem(&egress_sessions, &pkey);
++	if (sess && session_is_stale(sess)) {
++		bpf_map_delete_elem(&egress_sessions, &pkey);
++		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
++	}
++	if (!sess) {
++		create_port_mapping_session(
++			l3->saddr, l4->source, mvm_port, l3->daddr, l4->dest,
++			nodenic_ifindex, now,
++			l4->syn && !l4->ack ? TCP_CONNTRACK_SYN_RECV :
++						  TCP_CONNTRACK_ESTABLISHED);
++	} else {
++		sess->access_time = now;
++	}
++
++	old_daddr = l3->daddr;
++	new_daddr = mvm_inner_ip;
++	old_dport = l4->dest;
++	new_dport = mvm_port->listen_port;
++	ip_hlen = BPF_CORE_READ_BITFIELD(l3, ihl);
++	ip_hlen <<= 2;
++	tcp_csum_off = TCP_CSUM_OFF(ip_hlen);
++	set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
++		     mvm_macaddr_p1, mvm_macaddr_p2);
++
++	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
++	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
++	if (err)
++		return TC_ACT_SHOT;
++	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport,
++				 sizeof(old_dport));
++	if (err)
++		return TC_ACT_SHOT;
++	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport,
++				  sizeof(new_dport), 0);
++	if (err)
++		return TC_ACT_SHOT;
++	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr,
++				 sizeof(old_daddr));
++	if (err)
++		return TC_ACT_SHOT;
++	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr,
++				  sizeof(new_daddr), 0);
++	if (err)
++		return TC_ACT_SHOT;
++	return bpf_redirect(mvm_port->ifindex, 0);
++}
++
+ /* do_tcp_nat() returns a 64-bit value that encodes both the status enum
+  * (low 32 bits) and the destination ifindex (upper 32 bits). This avoids
+  * passing the ifindex through a stack pointer arg, which older BPF
+@@ -954,7 +1023,7 @@ int dns_finish(struct __sk_buff *skb)
+ SEC("tc")
+ int from_cube(struct __sk_buff *skb)
+ {
+-	__u32 daddr, ifindex, dst_ifindex;
++	__u32 daddr, ifindex, dst_ifindex, hairpin_ifindex, *peer_ifindex;
+ 	__u64 tcp_ret;
+ 	struct mvm_port mvm_port = {};
+ 	struct nat_session *sess;
+@@ -1047,9 +1116,25 @@ int from_cube(struct __sk_buff *skb)
+ 				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
+ 			}
+ 
++			hairpin_ifindex = 0;
++			peer_ifindex = bpf_map_lookup_elem(&mvmip_to_ifindex, &l3->daddr);
++			if (peer_ifindex)
++				hairpin_ifindex = *peer_ifindex;
+ 			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
+ 			if (err)
+ 				return TC_ACT_SHOT;
++			if (hairpin_ifindex) {
++				if (!__pull_headers(skb, &l2, &l3, &l4))
++					return TC_ACT_SHOT;
++				err = dnat(skb, l3, mvm_inner_ip);
++				if (err)
++					return TC_ACT_SHOT;
++				if (!__pull_headers(skb, &l2, &l3, &l4))
++					return TC_ACT_SHOT;
++				set_mac_pair(l2, cubegw0_macaddr_p1, cubegw0_macaddr_p2,
++					     mvm_macaddr_p1, mvm_macaddr_p2);
++				return bpf_redirect(hairpin_ifindex, 0);
++			}
+ 
+ 			return bpf_redirect(nodenic_ifindex, 0);
+ 		}
+@@ -1069,6 +1154,21 @@ int from_cube(struct __sk_buff *skb)
+ 		 * behavior of the do_tcp_nat() path; UDP/ICMP silently drop.
+ 		 * dport is 0 because the original check was port-agnostic.
+ 		 */
++		__u16 dport = 0;
++
++		if (proto == IPPROTO_TCP) {
++			struct mvm_port *target;
++
++			if (!__pull_headers(skb, &l2, &l3, &l4))
++				return TC_ACT_SHOT;
++			dport = l4->dest;
++			if (classify_egress_flow(ifindex, daddr, dport, proto) == FLOW_REJECT)
++				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
++			target = bpf_map_lookup_elem(&remote_port_mapping, &dport);
++			if (target)
++				return tcp_hairpin_proxy(skb, l2, l3, l4, target);
++			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
++		}
+ 		switch (classify_egress_flow(ifindex, daddr, 0, proto)) {
+ 		case FLOW_REJECT:
+ 			if (proto == IPPROTO_TCP)
+diff --git a/CubeNet/src/nodenic.bpf.c b/CubeNet/src/nodenic.bpf.c
+index 4879587..fc19675 100644
+--- a/CubeNet/src/nodenic.bpf.c
++++ b/CubeNet/src/nodenic.bpf.c
+@@ -18,39 +18,6 @@
+ #include "dns_query.h"
+ #include "dns_response.h"
+ 
+-/* create_port_mapping_session installs an egress_sessions entry for a
+- * port_mapping connection. Called on the inbound path (SYN for a new
+- * connection, or a non-SYN packet whose session was reaped and is being
+- * rebuilt). */
+-static __always_inline void create_port_mapping_session(__be32 peer_ip, __be16 peer_port,
+-							struct mvm_port *mvm_port,
+-							__be32 node_ip, __be16 host_port,
+-							__u32 node_ifindex, __u64 now_ns,
+-							__u8 initial_state)
+-{
+-	struct nat_session sess = {};
+-	struct session_key pkey = {};
+-
+-	port_mapping_key(&pkey, peer_ip, peer_port, mvm_port->listen_port);
+-
+-	sess.access_time = now_ns;
+-	sess.node_ifindex = node_ifindex;
+-	sess.node_ip = node_ip;
+-	sess.node_port = host_port;
+-	sess.vm_ifindex = mvm_port->ifindex;
+-	sess.vm_ip = mvm_inner_ip;
+-	sess.vm_port = mvm_port->listen_port;
+-	sess.state = initial_state;
+-	sess.packet_class = PORT_MAPPING_PACKET;
+-	{
+-		struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
+-
+-		if (meta)
+-			sess.gen = meta->version;
+-	}
+-	bpf_map_update_elem(&egress_sessions, &pkey, &sess, BPF_ANY);
+-}
+-
+ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct tcphdr *l4,
+ 			 struct mvm_port *mvm_port)
+ {
+diff --git a/CubeNet/src/session.h b/CubeNet/src/session.h
+index bd6a718..2e93769 100644
+--- a/CubeNet/src/session.h
++++ b/CubeNet/src/session.h
+@@ -118,6 +118,36 @@ static __always_inline void port_mapping_key(struct session_key *key, __be32 pee
+ 	key->protocol = IPPROTO_TCP;
+ }
+ 
++/* Install the guest-server-side conntrack entry for an exposed-port flow. */
++static __always_inline void create_port_mapping_session(__be32 peer_ip,
++							__be16 peer_port,
++							struct mvm_port *mvm_port,
++							__be32 node_ip,
++							__be16 host_port,
++							__u32 node_ifindex,
++							__u64 now_ns,
++							__u8 initial_state)
++{
++	struct nat_session sess = {};
++	struct session_key pkey = {};
++	struct mvm_meta *meta;
++
++	port_mapping_key(&pkey, peer_ip, peer_port, mvm_port->listen_port);
++	sess.access_time = now_ns;
++	sess.node_ifindex = node_ifindex;
++	sess.node_ip = node_ip;
++	sess.node_port = host_port;
++	sess.vm_ifindex = mvm_port->ifindex;
++	sess.vm_ip = mvm_inner_ip;
++	sess.vm_port = mvm_port->listen_port;
++	sess.state = initial_state;
++	sess.packet_class = PORT_MAPPING_PACKET;
++	meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
++	if (meta)
++		sess.gen = meta->version;
++	bpf_map_update_elem(&egress_sessions, &pkey, &sess, BPF_ANY);
++}
++
+ /* delete_session_pair removes a stale session's egress entry and its ingress
+  * entry (ingress keys use version 0) so the tuple is freed for an immediate
+  * reconnect. Only used for SNAT/L7 sessions, which have an ingress entry. */

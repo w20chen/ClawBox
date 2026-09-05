@@ -52,11 +52,15 @@ bash deploy/cubesandbox/prepare-semantic-source.sh
 export CUBE_SOURCE_DIR="$PWD/.cubesandbox"
 ```
 
-The helper refuses to overwrite a dirty checkout and applies only
-`deploy/cubesandbox/semantic-tcp-endpoint.patch`. It adds the semantic
-CubeAPI route and matching Python SDK method; it does not add an SSH proxy or
-port allocator. Build the CubeSandbox one-click bundle from that prepared
-source using CubeSandbox's documented release-bundle flow:
+The helper refuses to overwrite a dirty checkout and applies two narrow
+CubeSandbox patches: `deploy/cubesandbox/semantic-tcp-endpoint.patch` adds the
+CubeAPI route and matching Python SDK method, while
+`deploy/cubesandbox/hostport-hairpin.patch` lets one CubeSandbox VM consume
+another VM's existing mapped TCP endpoint on the same node. The latter is the
+source-identical patch from CubeSandbox commit `6b2d63e`; it reuses CubeVS's
+existing port maps and conntrack state and adds no SSH proxy or port allocator.
+Build the CubeSandbox one-click bundle from that prepared source using
+CubeSandbox's documented release-bundle flow:
 
 ```bash
 cd "$CUBE_SOURCE_DIR"
