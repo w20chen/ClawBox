@@ -56,8 +56,28 @@ The helper refuses to overwrite a dirty checkout and applies only
 `deploy/cubesandbox/semantic-tcp-endpoint.patch`. It adds the semantic
 CubeAPI route and matching Python SDK method; it does not add an SSH proxy or
 port allocator. Build the CubeSandbox one-click bundle from that prepared
-source using CubeSandbox's documented release-bundle flow, then install the
-bundle on the target machine. The resulting CubeAPI must serve:
+source using CubeSandbox's documented release-bundle flow:
+
+```bash
+cd "$CUBE_SOURCE_DIR"
+test -e deploy/one-click/build.env || \
+  cp deploy/one-click/build.env.example deploy/one-click/build.env
+ONE_CLICK_BUILD_JOBS=1 ./deploy/one-click/build-release-bundle-builder.sh
+```
+
+Copy the generated `deploy/one-click/dist/*.tar.gz` to the target machine and
+install it with the official one-click procedure:
+
+```bash
+tar -xzf cube-sandbox-one-click-*.tar.gz
+cd cube-sandbox-one-click-*
+cp env.example .env
+# Set CUBE_SANDBOX_NODE_IP to this machine's routable private/physical address.
+sudo ./install.sh
+sudo ./smoke.sh
+```
+
+The resulting CubeAPI must serve:
 
 ```text
 GET /sandboxes/<sandbox_id>/ports/2222
