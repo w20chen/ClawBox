@@ -96,6 +96,13 @@ python3 -m venv .venv
 Do not use `Sandbox.get_host(2222)` as the SSH target. That value is an HTTP
 ingress authority, not the native SSH endpoint.
 
+The endpoint is resolved again after every Tool restore and before the next
+SSH admission. If CubeSandbox places the restored Tool behind a new endpoint
+host, ClawBox replaces the running Runtime's CubeSandbox egress policy through
+the official SDK `update_network` call before returning `ADMIT`; a changed
+mapped port needs no network-policy update. This is still a direct Runtime to
+Tool TCP connection and does not cache, allocate, or proxy the route.
+
 ## Existing machine
 
 Set the API and CubeProxy transport variables for the already-installed
@@ -165,6 +172,35 @@ executions, telemetry loss, and owned-sandbox leaks.
 clawbox experiment validate examples/experiments/openclaw-cube.yaml
 clawbox experiment plan examples/experiments/openclaw-cube.yaml
 ```
+
+## Run replay or a real model
+
+Replay does not need a provider credential. After the c1/c4/c8 endpoint gates
+pass, run the checked-in native OpenClaw replay arm:
+
+```bash
+clawbox --output-root /data/clawbox-results experiment run \
+  examples/experiments/openclaw-cube-replay-c40.yaml --run-id openclaw-replay-c40
+```
+
+For a real model, copy `examples/experiments/openclaw-cube.yaml` to a
+machine-local file and replace its Runtime/Tool template IDs, image digests,
+and target node with the records accepted by the endpoint gate. Set the
+credential only in the Worker environment; the YAML contains the name of that
+environment variable, not its value:
+
+```bash
+export OPENCLAW_API_KEY='<provider credential>'
+clawbox --output-root /data/clawbox-results experiment run \
+  /data/clawbox-openclaw-api.yaml --run-id openclaw-api-c1
+```
+
+The API `base_url` is reached by the Worker and must be an OpenAI-compatible
+`/v1` endpoint reachable from that machine. Runtime receives only a
+session-scoped ModelGateway token, and never receives the provider key. A
+successful local stub-gateway test is not real-model evidence; retain the
+Worker model-gateway records and the upstream request count with the c1
+result.
 
 ## Network failure classification
 

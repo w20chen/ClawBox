@@ -55,6 +55,7 @@ class _Sandbox:
         self.files = _Files()
         self.command_calls = []
         self.commands = _Commands(self)
+        self.network_updates = []
 
     @classmethod
     def create(cls, **kwargs):
@@ -85,6 +86,9 @@ class _Sandbox:
             container_port=container_port,
             address=f"192.0.2.{ordinal}:20{ordinal:03d}",
         )
+
+    def update_network(self, network):
+        self.network_updates.append(network)
 
     def kill(self):
         type(self).items.pop(self.sandbox_id, None)
@@ -162,6 +166,27 @@ def test_cube_client_retries_endpoint_publication_after_create() -> None:
     endpoint = client.get_tcp_endpoint(sandbox)
     assert endpoint.address == "192.0.2.7:20007"
     assert EventuallyPublishedSandbox.endpoint_calls == 3
+
+
+def test_lifecycle_refreshes_runtime_network_only_for_a_new_endpoint_host() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        allow_internet_access=False,
+        network_allow_out=["192.0.2.10/32"],
+        network_deny_out=["0.0.0.0/0"],
+    )
+    lifecycle.start()
+    assert lifecycle.ensure_network_allow_out("192.0.2.10/32") is False
+    assert lifecycle.ensure_network_allow_out("192.0.2.11/32") is True
+    assert lifecycle.sandbox.network_updates == [{
+        "allow_internet_access": False,
+        "allow_out": ["192.0.2.10/32", "192.0.2.11/32"],
+        "deny_out": ["0.0.0.0/0"],
+    }]
+    assert lifecycle.ensure_network_allow_out("192.0.2.11/32") is False
+    lifecycle.close()
 
 
 def test_cube_client_rejects_ready_template_with_wrong_pinned_image() -> None:

@@ -155,6 +155,42 @@ class CubeSandboxLifecycle:
                 )
                 raise
 
+    def ensure_network_allow_out(self, cidr: str) -> bool:
+        """Allow one additional destination CIDR, updating a running VM.
+
+        CubeSandbox treats an update as a replacement policy.  Keep the
+        complete desired policy on this lifecycle object and send it only when
+        the new CIDR is not already present.  This lets endpoint ports change
+        freely while still allowing a Tool to move to a different
+        deployment-owned endpoint host after restore.
+        """
+        value = str(cidr or "").strip()
+        if not value:
+            raise ValueError("network allowlist CIDR must not be empty")
+        with self._lock:
+            if value in self.network_allow_out:
+                return False
+            desired = [*self.network_allow_out, value]
+            if self._state is SandboxState.RUNNING:
+                before = self._state
+                started_wall, started_mono = time.time(), time.monotonic()
+                try:
+                    self.client.update_network(
+                        self.sandbox, allow_internet_access=self.allow_internet_access,
+                        network_allow_out=desired,
+                        network_deny_out=self.network_deny_out,
+                    )
+                except Exception as exc:
+                    self._record(
+                        "network_update", before, before, started_wall, started_mono,
+                        status="error", error_type=type(exc).__name__,
+                    )
+                    raise
+                self._record("network_update", before, self._state,
+                             started_wall, started_mono)
+            self.network_allow_out = desired
+            return True
+
     def close(self) -> float:
         with self._lock:
             if self._state is SandboxState.CLOSED:

@@ -62,6 +62,12 @@ then run `scripts/validate-cubesandbox-tcp-endpoints.py --count 1` before any
 experiment. Do not use `Sandbox.get_host(2222)`, a guest IP, NodePort, Redis
 metadata, or a ClawBox SSH proxy.
 
+After a Tool pause/restore, ClawBox asks CubeSandbox for the endpoint again.
+If the endpoint host changes, the Worker updates the Runtime's CubeSandbox
+egress policy through the official SDK before admitting the next SSH call;
+mapped-port changes remain per-invocation route data. The Runtime-to-Tool path
+is still direct TCP.
+
 ## Kunpeng 920 reproducible profile
 
 The following is the source-controlled Kunpeng/Kubernetes profile. It is useful
@@ -169,6 +175,21 @@ control-plane throttle; it does not allocate ports or proxy SSH.
 Deterministic replay is the primary comparison mode: Runtime, OpenClaw, SSH,
 Tool VM, commands, memory pressure, and telemetry remain real; only model
 generation is replayed. Replay cursors and response state are per session.
+
+Run the native replay arm after the endpoint gates:
+
+```bash
+clawbox --output-root /data/clawbox-results experiment run \
+  examples/experiments/openclaw-cube-replay-c40.yaml --run-id openclaw-replay-c40
+```
+
+For real inference, copy `examples/experiments/openclaw-cube.yaml` to a local
+machine file, replace its accepted template IDs/digests and node, then export
+the provider credential named by `inference.configuration.api_key_env`
+(`OPENCLAW_API_KEY` in the example) only in the Worker environment. The
+configured OpenAI-compatible `base_url` is called by the Worker-side managed
+gateway; the Runtime sees only a session token. Never commit the key or put it
+in the experiment YAML.
 
 Progress through c1, c4/c8 correctness, c20 policy pilot, then c40/c60. Do not
 claim an arm unless output validation passes, exact-ID join rate is 1.0,

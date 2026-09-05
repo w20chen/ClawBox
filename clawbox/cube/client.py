@@ -199,6 +199,30 @@ class CubeSandboxClient:
             raise RuntimeError("CubeSandbox returned an empty raw TCP endpoint")
         return endpoint
 
+    def update_network(self, sandbox: Any, *, allow_internet_access: bool,
+                       network_allow_out: list[str] | None = None,
+                       network_deny_out: list[str] | None = None) -> None:
+        """Replace a running sandbox's egress policy through CubeSandbox.
+
+        This is the official SDK network operation, kept behind the same small
+        client boundary as create/pause/restore.  It is used only when a
+        freshly resolved semantic TCP endpoint adds a new endpoint host to a
+        Runtime's closed-network allowlist; it does not inspect or construct
+        CubeProxy routing metadata.
+        """
+        updater = getattr(sandbox, "update_network", None)
+        if not callable(updater):
+            raise RuntimeError(
+                "CubeSandbox SDK must expose update_network(network) for "
+                "endpoint-host refresh"
+            )
+        network: dict[str, Any] = {
+            "allow_internet_access": bool(allow_internet_access),
+            "allow_out": list(network_allow_out or []),
+            "deny_out": list(network_deny_out or []),
+        }
+        updater(network)
+
     def validate_template_image(self, template: str, expected_digest: str) -> dict[str, str]:
         """Fail closed when a pinned experiment template is not its image.
 

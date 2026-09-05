@@ -742,11 +742,8 @@ class ExperimentWorker:
                         raise RuntimeError(
                             f"CubeSandbox returned a non-IP TCP endpoint host: {setup_route.host!r}"
                         ) from exc
-                    runtime_lifecycle.network_allow_out.append(
+                    runtime_lifecycle.ensure_network_allow_out(
                         f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
-                    )
-                    runtime_lifecycle.network_allow_out = list(
-                        dict.fromkeys(runtime_lifecycle.network_allow_out)
                     )
                 timeline["runtime_create_start"] = time.time()
                 runtime_create_s = runtime_lifecycle.start()
@@ -802,6 +799,16 @@ class ExperimentWorker:
                 endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
                 route_epoch += 1
                 route = native_ssh_route(endpoint, epoch=route_epoch)
+                try:
+                    endpoint_address = ipaddress.ip_address(route.host)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"CubeSandbox returned a non-IP TCP endpoint host: {route.host!r}"
+                    ) from exc
+                endpoint_cidr = (
+                    f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
+                )
+                added_endpoint_host = runtime_lifecycle.ensure_network_allow_out(endpoint_cidr)
                 if ssh_config is not None:
                     # OpenClaw captured its SSH target when run_openclaw was
                     # constructed. This local descriptor is updated only for
@@ -813,6 +820,8 @@ class ExperimentWorker:
                     "sandbox_id": route.sandbox_id, "container_port": route.container_port,
                     "endpoint_epoch": route.epoch, "host": route.host, "port": route.port,
                     "tcp_endpoint": endpoint.address, "phase": phase,
+                    "runtime_endpoint_host_allowlisted": endpoint_cidr,
+                    "runtime_endpoint_host_allowlist_added": added_endpoint_host,
                     "source": "cubesandbox_tcp_endpoint",
                 })
                 return route
