@@ -79,6 +79,28 @@ def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
     assert by_name["sandbox.cleanup"]["duration_seconds"] == 1.0
 
 
+def test_worker_provenance_separates_runtime_and_tool_artifacts() -> None:
+    raw = raw_spec()
+    raw["runtime"].update({
+        "template_id": "runtime-id", "template_alias": None,
+        "source_image_reference": "registry/runtime",
+        "image_digest": "sha256:" + "a" * 64,
+    })
+    raw["sandbox"].update({
+        "template_id": "tool-id", "template_alias": None,
+        "source_image_reference": "registry/tool",
+        "image_digest": "sha256:" + "b" * 64,
+    })
+    worker = object.__new__(ExperimentWorker)
+    worker.spec = ExperimentSpec.model_validate(raw)
+    provenance = worker._provenance()
+    assert provenance["runtime_template_reference"] == "runtime-id"
+    assert provenance["runtime_template_image_digest"] == "sha256:" + "a" * 64
+    assert provenance["tool_template_reference"] == "tool-id"
+    assert provenance["tool_template_image_digest"] == "sha256:" + "b" * 64
+    assert provenance["template_reference"] == "tool-id"  # legacy key
+
+
 def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     writer = EventWriter(path)

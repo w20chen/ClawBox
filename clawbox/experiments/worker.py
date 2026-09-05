@@ -1324,6 +1324,24 @@ class ExperimentWorker:
             "template_reference": self.spec.sandbox.template,
             "template_source_image": self.spec.sandbox.source_image_reference or "unknown",
             "template_image_digest": self.spec.sandbox.image_digest or os.environ.get("CLAWBOX_TEMPLATE_IMAGE_DIGEST", "unknown"),
+            # Keep the historical generic/template keys above for consumers
+            # that treated them as Tool provenance, but make the two VM
+            # artifacts unambiguous for new result readers.
+            "runtime_template_reference": self.spec.runtime.template,
+            "runtime_template_source_image": (
+                self.spec.runtime.source_image_reference or "unknown"
+            ),
+            "runtime_template_image_digest": (
+                self.spec.runtime.image_digest or "unknown"
+            ),
+            "tool_template_reference": self.spec.sandbox.template,
+            "tool_template_source_image": (
+                self.spec.sandbox.source_image_reference or "unknown"
+            ),
+            "tool_template_image_digest": (
+                self.spec.sandbox.image_digest
+                or os.environ.get("CLAWBOX_TEMPLATE_IMAGE_DIGEST", "unknown")
+            ),
             "measurement_scope": "node-level physical memory, baseline-subtracted per arm",
             "cube_runtime_settings": {
                 "cpu_overcommit_ratio": 1.0, "memory_overcommit_ratio": 1.0,
