@@ -27,7 +27,6 @@ from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
     native_ssh_host_key_alias,
     native_ssh_route,
-    native_ssh_target,
     native_tool_bridge_setup_command,
     split_native_ssh_target,
 )
@@ -66,12 +65,13 @@ def run(sandbox, command: str, timeout: float = 45):
 
 
 def endpoint_ssh(endpoint, credentials) -> NativeSSHConfig:
+    route = endpoint_route(endpoint, epoch=1)
     return NativeSSHConfig(
-        target=native_ssh_target(endpoint.address),
+        target=route.target,
         identity_private_key=credentials.client_private,
         host_public_key=credentials.host_public,
-        sandbox_id=endpoint.sandbox_id,
-        host_key_alias=native_ssh_host_key_alias(endpoint.sandbox_id),
+        sandbox_id=route.sandbox_id,
+        host_key_alias=native_ssh_host_key_alias(route.sandbox_id),
     )
 
 
