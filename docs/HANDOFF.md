@@ -191,6 +191,19 @@ owner-tagged SDK Tool create was attempted with the existing
 timeout; it hung before returning a sandbox ID and the post-check still showed
 zero sandboxes. No c40 retry was started and no recovery mutation was made.
 
+A further read-only `GET /templates/<id>` probe found a provenance mismatch that
+must be resolved before the next live run: the accepted Tool template
+`tpl-b5cb6f5ee26a41448000b9c2` still references the checked-in Tool digest
+`sha256:b175fea...`, and its create metadata retains the existing
+`2222:49983` exposure. The accepted Runtime ID
+`tpl-39efe4ad90384a1fbea3caff`, however, currently reports image digest
+`sha256:79a492d2...` and `CLAWBOX_REVISION=c4af3d825...`, rather than the
+checked-in Runtime pin `sha256:05cb920d...` and its recorded source revision.
+The API record is `READY`, but that is not proof that it contains the current
+Runtime artifact. Do not run or claim a native c1 gate with that Runtime ID
+until a fresh Runtime template is registered from the checked-in image digest
+or the deployed revision is independently reconciled.
+
 Current-source runs after `a4be792` emit `session_timing` events containing
 `session`, `agent`, per-sandbox create, validation, hashing, and cleanup spans.
 `7a0740f` additionally records failed lifecycle attempts, control admission and

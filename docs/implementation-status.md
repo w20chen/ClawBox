@@ -72,7 +72,7 @@ The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
 | Managed API gateway | passed; upstream-compatible forwarding contract test |
 | Runtime image build/push | passed; digest `05cb920d...` |
 | Tool image build/push | passed; digest `b175fea7...` |
-| Fresh Runtime template | passed; `tpl-39efe4ad90384a1fbea3caff` |
+| Runtime template record | mismatch; `tpl-39efe4ad90384a1fbea3caff` is `READY` but currently reports `sha256:79a492d2...` / `CLAWBOX_REVISION=c4af3d825...`, not the checked-in `sha256:05cb920d...` pin |
 | Fresh Tool template + kprobe binding | passed; `tpl-b5cb6f5ee26a41448000b9c2` |
 | Replay decision c40 | historical bundle; corrected rerun pending CubeNode recovery |
 | Replay full-system c40 | historical bundle; corrected rerun pending CubeNode recovery |
@@ -105,7 +105,13 @@ accepted templates still `READY`, but Cube API `GET /v2/sandboxes` empty,
 CubeNode port 9999 closed, and host SSH stalling during key exchange/session
 setup. A single owner-tagged SDK Tool create with the existing CubeProxy
 transport hung before returning an ID and left zero sandboxes afterward; no
-additional stress or recovery mutation was attempted.
+additional stress or recovery mutation was attempted. A subsequent
+`GET /templates/<id>` check also found that the accepted Runtime ID reports
+`sha256:79a492d2...` and an older `CLAWBOX_REVISION`, while the checked-in
+experiment pins `sha256:05cb920d...`; the Runtime template must be rebuilt or
+reconciled before live native-SSH evidence is admissible. The Tool template
+still reports the checked-in Tool digest and its create metadata exposes the
+existing `2222:49983` mapping.
 
 Live route finding: `Sandbox.get_host(2222)` is an HTTP ingress authority, not
 an OpenSSH endpoint. CubeMaster/CubeProxy metadata proves the existing
