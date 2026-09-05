@@ -394,10 +394,15 @@ The host-network diagnostic was cleaned up, reverted, and followed by a
 zero-sandbox reboot; the final state is `hostNetwork=false`, CubeNode `3/3`,
 and `GET /v2/sandboxes` equal to `[]`.
 
-The normal endpoint still reports a Kubernetes Pod IP as `HostIP`. That legacy
-deployment topology must not be optimized in ClawBox; the formal native SSH
-path remains pending a deployment-owned semantic endpoint that Runtime can
-actually reach.
+The current-template bounded probe additionally tested the same mapped port via
+the physical node address (`193.124.7.2`) and the Tool's direct SandboxIP. From
+the fresh Runtime, semantic `192.168.3.157:20019`, physical
+`193.124.7.2:20019`, and `172.16.0.2:2222` all returned TCP connection refused;
+strict identity validation was therefore never reached. Cleanup left zero
+sandboxes. The evidence script is
+`scripts/probe-cubesandbox-network-topology.py`; its diagnostic metadata read
+must not be copied into the Worker. The next implementation boundary is the
+CubeVS same-node forwarding/hairpin path, not a ClawBox proxy or fallback.
 
 The standalone one-click bundle was not installed on Kunpeng. Two build-only
 attempts were made from the prepared CubeSandbox checkout: the first stalled

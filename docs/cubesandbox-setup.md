@@ -229,6 +229,27 @@ deployment before changing ClawBox:
 - if the endpoint is a Kubernetes Pod IP, stop and move to the standalone or
   deployment-owned physical/private topology.
 
+The source-controlled topology probe performs these routes against one freshly
+created Runtime/Tool pair while keeping strict host-key and Tool-marker checks:
+
+```bash
+python scripts/probe-cubesandbox-network-topology.py \
+  --runtime-template tpl-67569219b64f4a80836a1f35 \
+  --tool-template tpl-06b699a92c694c7ba3e6465b \
+  --node hostname-txyuq.foreman.pxe \
+  --cube-master-url http://10.103.189.111 \
+  --physical-host 193.124.7.2 \
+  --output /data/clawbox-topology.json
+```
+
+`DIAGNOSTIC_COMPLETE` means the bounded comparison and cleanup completed; it
+does not mean a route passed. Inspect `route_identity_results` and
+`reachable_identity_routes`. The 2026-09-05 current-template run returned
+`false` for semantic HostPort, physical HostPort, and SandboxIP, with TCP
+connection refusal on all three and `zero_leaks=true`. This is evidence that
+same-node CubeVS forwarding must be corrected before the native c1 gate. It is
+not permission to select a diagnostic route in the Worker.
+
 Restore temporary diagnostic changes after every probe. Do not add a ClawBox
 proxy, NodePort, Redis lookup, direct guest-IP fallback, or second allocator.
 

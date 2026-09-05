@@ -214,11 +214,13 @@ existing `remote_port_mapping` and attached `from_world` BPF program, but host,
 CubeProxy, and external TCP probes all refused the advertised endpoint. The
 experiment was reverted; a root reboot then restored CubeNode to `3/3` with
 `hostNetwork=false` and left the API inventory empty.
-The follow-up normal-network probe also tested the distinct Runtime-to-Tool
-`SandboxIP:2222` path: CubeProxy setup succeeded, but Runtime's direct SSH
-attempt timed out. The single-node inventory has no second physical node or
-private NIC for an independent HostPort test, so no same-node hairpin or BPF
-hit-path success is claimed.
+The current-template follow-up used one fresh Runtime/Tool pair and tested three
+distinct routes with strict host-key and Tool-marker validation. The semantic
+endpoint `192.168.3.157:20019`, direct Tool `172.16.0.2:2222`, and physical-node
+`193.124.7.2:20019` routes were all refused before SSH authentication. The
+probe cleaned its pair and `GET /v2/sandboxes` remained empty. The result rules
+out treating direct SandboxIP or the physical address as a ClawBox fallback;
+the remaining same-node path is a CubeVS forwarding/hairpin problem.
 
 The standalone one-click bundle was not installed on Kunpeng. Two build-only
 attempts were made from the prepared CubeSandbox checkout: the first stalled
@@ -257,7 +259,7 @@ with zero sandboxes.
 | OpenClaw target semantics/PID witness | passed; target is captured and Agent PID witness is stable across lifecycle callbacks |
 | Native OpenClaw paired Runtime/Tool snapshot | passed in local integration gate; Runtime PID survives checkpoint/restore and response release is held until Runtime restore |
 | SSH completion ordering | passed; `/complete` follows child reaping and records `ssh_reaped_at <= execution_completed_at` |
-| Real Runtime-to-Tool native SSH | blocked; normal-network pod-IP mapping is reachable from host but refused from Runtime; host-network map/BPF proof still refused TCP |
+| Real Runtime-to-Tool native SSH | blocked in CubeVS; current-template Runtime gets TCP refusal from semantic Pod-IP HostPort, physical-IP HostPort, and direct SandboxIP; zero leaks |
 | Pause -> policy restore -> SSH -> telemetry | blocked by deployment topology; no live c1 claim |
 | Managed real-inference c1 | pending; operator credential is present but not sent by automation |
 | Deterministic c1 replay equivalence | prior 27-step API-captured export/replay matched 27/27; current native OpenClaw c1 pending |

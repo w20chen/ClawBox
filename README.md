@@ -76,6 +76,17 @@ then run `scripts/validate-cubesandbox-tcp-endpoints.py --count 1` before any
 experiment. Do not use `Sandbox.get_host(2222)`, a guest IP, NodePort, Redis
 metadata, or a ClawBox SSH proxy.
 
+The current single-node Kunpeng diagnostic proves that CubeSandbox returns the
+right semantic mapping but its CubeVS datapath does not yet carry same-node VM
+traffic to it. From a fresh Runtime, all three distinct routes—CubeNode Pod-IP
+HostPort, physical-node-IP HostPort, and the Tool's per-VM SandboxIP—were
+refused before SSH authentication; the bounded probe then left zero sandboxes.
+Reproduce that classification with
+`scripts/probe-cubesandbox-network-topology.py`. This script reads CubeMaster
+metadata only for diagnostics; the Worker continues to use only the semantic
+CubeSandbox endpoint API. The remaining fix belongs in CubeVS networking, not
+in a ClawBox proxy or endpoint fallback.
+
 After a Tool pause/restore, ClawBox asks CubeSandbox for the endpoint again.
 If the endpoint host changes, the Worker updates the Runtime's CubeSandbox
 egress policy through the official SDK before admitting the next SSH call;
