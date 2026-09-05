@@ -9,7 +9,7 @@ workload:
       source: recorded_trace
       source_reference: examples/traces/smoke.jsonl
       prompt: >-
-        Use cube_shell to create /workspace/result.txt containing exactly
+        Use sandboxed exec to create /workspace/result.txt containing exactly
         openclaw-cube-ok followed by a newline, then verify the file.
 agent: {driver: openclaw}
 inference:

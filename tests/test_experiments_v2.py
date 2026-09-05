@@ -102,6 +102,12 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
     ].startswith("printf openclaw-cube-replay-ok")
 
 
+def test_openclaw_cube_example_uses_native_tool_names() -> None:
+    spec = load_experiment(Path("examples/experiments/openclaw-cube.yaml"))
+    assert "cube_shell" not in spec.workload.cases[0].prompt
+    assert "sandboxed exec" in spec.workload.cases[0].prompt
+
+
 def test_worker_bounds_pair_creation_for_high_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "3")
     assert ExperimentWorker._sandbox_create_limit(40) == 3

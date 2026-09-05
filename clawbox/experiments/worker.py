@@ -1051,7 +1051,9 @@ class ExperimentWorker:
                         + json.dumps(completeness, sort_keys=True)
                     )
                 if not tool_latencies:
-                    raise RuntimeError("OpenClaw completed without using the required cube_shell tool")
+                    raise RuntimeError(
+                        "OpenClaw completed without using a required native Tool operation"
+                    )
                 if arm.inference.backend.value == "api":
                     model_trace_path = self.output_root / "model-traces" / f"{session_id}.jsonl"
                     gateway_session.write_replay_trace(model_trace_path)
