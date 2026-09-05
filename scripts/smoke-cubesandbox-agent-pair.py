@@ -433,9 +433,27 @@ def main() -> int:
             timings["tool_pause_seconds"] = time.monotonic() - started
             require_state(tool_id, "paused", "Tool after checkpoint")
             require_state(runtime.sandbox_id, "running", "Runtime while Tool paused")
-            paused_endpoint = cube.get_tcp_endpoint(tool, 2222)
-            if paused_endpoint.sandbox_id != tool_id:
-                raise AssertionError("paused endpoint identity changed")
+            # A paused sandbox has no live HostPort mapping.  CubeSandbox may
+            # therefore withdraw the semantic endpoint entirely instead of
+            # returning the last (now stale) address.  Record that withdrawal;
+            # correctness is established below by proving that the endpoint
+            # issued before pause can no longer execute against the Tool.
+            try:
+                paused_endpoint = cube.get_tcp_endpoint(tool, 2222)
+            except RuntimeError as exc:
+                paused_endpoint_record = {
+                    "available": False,
+                    "reason": str(exc),
+                    "sandbox_id": tool_id,
+                    "container_port": 2222,
+                }
+            else:
+                if paused_endpoint.sandbox_id != tool_id:
+                    raise AssertionError("paused endpoint identity changed")
+                paused_endpoint_record = {
+                    "available": True,
+                    **endpoint_record(paused_endpoint),
+                }
             stale_probe = failed_ssh_probe(
                 runtime, initial_ssh, identity, known_hosts, f"cat {marker}",
             )
@@ -492,7 +510,7 @@ def main() -> int:
                 "status": "PASS", "owner": owner,
                 "runtime_id": runtime.sandbox_id, "tool_id": tool_id,
                 "tcp_endpoint_before": endpoint_record(endpoint_before),
-                "tcp_endpoint_paused": endpoint_record(paused_endpoint),
+                "tcp_endpoint_paused": paused_endpoint_record,
                 "tcp_endpoint_after": endpoint_record(endpoint_after),
                 "admission_routes": admission_routes,
                 "stale_endpoint_probe": stale_probe,

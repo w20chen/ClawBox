@@ -152,12 +152,48 @@ def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
     target_index = len(argv) - 2
     if argv[target_index].startswith("-"):
         raise RuntimeError("SSH invocation has no stable destination argument")
+    # OpenSSH uses the first value obtained for most options.  In particular,
+    # an earlier ``-p <old-port>`` wins over a later ``-o Port=<new-port>``.
+    # Strip only per-invocation routing options before adding the admitted
+    # route; keep the destination alias so its config still supplies user,
+    # identity file, and strict host-key policy.
+    prefix: list[str] = []
+    index = 0
+    routing_options = {"hostname", "port", "hostkeyalias"}
+    original_prefix = argv[:target_index]
+    while index < len(original_prefix):
+        argument = original_prefix[index]
+        if argument == "-p":
+            if index + 1 >= len(original_prefix):
+                raise RuntimeError("SSH -p option has no port")
+            index += 2
+            continue
+        if argument.startswith("-p") and len(argument) > 2:
+            index += 1
+            continue
+        if argument == "-o":
+            if index + 1 >= len(original_prefix):
+                raise RuntimeError("SSH -o option has no value")
+            option = original_prefix[index + 1]
+            if option.split("=", 1)[0].lower() in routing_options:
+                index += 2
+                continue
+            prefix.extend((argument, option))
+            index += 2
+            continue
+        if argument.startswith("-o") and len(argument) > 2:
+            option = argument[2:]
+            if option.split("=", 1)[0].lower() in routing_options:
+                index += 1
+                continue
+        prefix.append(argument)
+        index += 1
     overrides = [
         "-o", f"HostName={route['host']}",
         "-o", f"Port={route['port']}",
         "-o", f"HostKeyAlias={route['host_key_alias']}",
     ]
-    return [*argv[:target_index], *overrides, *argv[target_index:]]
+    return [*prefix, *overrides, *argv[target_index:]]
 
 
 def main() -> int:

@@ -76,6 +76,34 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert completion["ssh_reaped_at"] <= completion["execution_completed_at"]
 
 
+def test_policy_route_replaces_stale_explicit_port_and_route_options() -> None:
+    argv = [
+        "-i", "/state/id", "-p", "20009",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "HostName=192.0.2.9",
+        "-oPort=20009",
+        "-o", "HostKeyAlias=stale-tool",
+        "executor@192.0.2.9", "true",
+    ]
+    route = {
+        "host": "192.0.2.20", "port": 20020,
+        "host_key_alias": "clawbox-tool-tool-a",
+    }
+
+    command = policy_ssh._ssh_args_for_route(argv, route)
+
+    assert "-p" not in command
+    assert "20009" not in command
+    assert "HostName=192.0.2.9" not in command
+    assert "Port=20009" not in command
+    assert "HostKeyAlias=stale-tool" not in command
+    assert "StrictHostKeyChecking=yes" in command
+    assert "HostName=192.0.2.20" in command
+    assert "Port=20020" in command
+    assert "HostKeyAlias=clawbox-tool-tool-a" in command
+    assert command[-2:] == ["executor@192.0.2.9", "true"]
+
+
 @pytest.mark.parametrize(
     "tool_name", ("exec", "process", "read", "write", "edit", "apply_patch"),
 )
