@@ -426,18 +426,12 @@ def test_worker_runs_every_current_baseline_at_c40_with_complete_spans(
         '"args":{"command":"true"},"exit_code":0}}\n',
         encoding="utf-8",
     )
-    policy_data = [
-        baseline.as_policy().model_dump(mode="json")
-        for baseline in BASELINES.values()
-        if baseline.implementation_status == "implemented"
-    ]
-    assert [item["name"] for item in policy_data] == [
-        "lifetime-full-resident", "tool-full-resident", "tool-static-resident",
-        "tool-p90-resident", "tool-oracle-resident",
-        "tool-static-eager-reactive", "tool-p90-eager-reactive",
-        "tool-p90-fixed-reactive", "tool-p90-wait-reactive",
-        "tool-p90-wait-proactive",
-    ]
+    # Exercise every catalog entry at c40. Compatibility aliases are not a
+    # second backend; they materialize the same supported schema-v2 policies
+    # under their retained historical names.
+    policy_data = [baseline.as_policy().model_dump(mode="json")
+                   for baseline in BASELINES.values()]
+    assert [item["name"] for item in policy_data] == list(BASELINES)
     spec = ExperimentSpec.model_validate({
         "schema_version": 2, "experiment_id": "baseline-c40-test",
         "workload": {"source": "recorded_trace", "input": str(trace)},

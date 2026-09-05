@@ -105,9 +105,9 @@ cannot underflow a reservation during session cleanup, and one failed sandbox
 kill no longer prevents cleanup from attempting the rest of the task-owned set.
 The cleanup operation still fails closed after a fresh ownership-list check.
 
-The local c40 Worker gate now also materializes every implemented schema-v2
-policy recipe directly from the canonical baseline catalog against a
-concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete, all
+The local c40 Worker gate now materializes every entry in the baseline catalog
+directly against a concurrent fake CubeSandbox: 17 policy arms (10 canonical
+recipes plus 7 compatibility aliases) x 40 sessions complete, all
 session/sandbox/agent/cleanup spans are present, and the owned-sandbox set
 returns to zero. This is scheduler and logging evidence only; it is not a
 substitute for the blocked live Runtime-to-Tool route gate. The policy shim

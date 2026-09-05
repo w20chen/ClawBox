@@ -78,10 +78,10 @@ Runtime and Tool by immutable template ID, source image reference, and SHA-256
 image digest. Historical replay-engine capacity matrices may retain aliases,
 but they are not admissible as OpenClaw artifact evidence.
 
-A local c40 Worker regression materializes all ten implemented policy recipes
-directly from the canonical baseline catalog with 40 concurrent sessions per
-arm and verifies successful completion, complete session/sandbox/agent/cleanup
-spans, and zero remaining fake owned sandboxes. The policy shim tests also
+A local c40 Worker regression materializes every baseline-catalog entry—10
+canonical recipes plus 7 compatibility aliases—with 40 concurrent sessions
+per arm and verifies successful completion, complete session/sandbox/agent/
+cleanup spans, and zero remaining fake owned sandboxes. The policy shim tests also
 cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
 fail-closed behavior for an unenveloped Agent SSH operation. Result bundles
 now also separate Runtime and Tool template provenance fields.
