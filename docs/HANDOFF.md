@@ -35,7 +35,8 @@ They are local commits and are not yet pushed to `origin/main`.
 
 The current native-endpoint commits are `50db717` (semantic CubeSandbox
 endpoint client and initial gates), `1b79924` (synchronous per-admission route
-refresh), and `b3a1ee7` (long-lived OpenClaw Agent PID witness). The companion
+refresh), `b3a1ee7` (long-lived OpenClaw Agent PID witness), and `147cb8e`
+(SSH reaping/completion-order proof). The companion
 CubeSandbox source commit is `64102d9`, which exposes
 `Sandbox.get_tcp_endpoint(container_port)` and keeps CubeMaster/CubeProxy route
 metadata parsing inside CubeSandbox.
@@ -90,14 +91,21 @@ address is not a valid substitute.
 During diagnosis, a temporary `hostNetwork=true` CubeNode experiment was
 reverted and its failed replacement/debug pods were removed. The node then
 required a root-initiated reboot to clear stale containerd tasks; recovery must
-be rechecked before any further live test. Existing kernel, S3lvol, templates,
-and results were not intentionally modified or deleted. Repository is at
-`de74a26` on the remote checkout with pre-existing untracked `results/` and
-`uv.lock` preserved.
+be rechecked before any further live test. That recovery check is now complete:
+the node is Ready, CubeNode is 3/3 Running, no debug pod remains, and the owned
+sandbox list is empty. Existing kernel, S3lvol, templates, and results were not
+intentionally modified or deleted. Repository is at `de74a26` on the remote
+checkout with pre-existing untracked `results/` and `uv.lock` preserved.
 
 The updated Cube API image was built and deployed as
 `127.0.0.1:5000/clawbox/cube-api:route-endpoint-b3a1ee7`, registry digest
 `sha256:5556089ac9167040f29f6bac36bfc90043f4cc2d105d43c51dcdd8c3192113de`.
+
+The post-reboot c1 route gate created a fresh Tool and resolved
+`192.168.3.157:20004` for container port 2222, then the Runtime identity probe
+returned `Connection refused`. The gate failed closed at the intended identity
+check and cleaned up; `/v2/sandboxes` was `[]` afterward. No c4/c8 run was
+started because the required c1 identity gate is not green.
 
 Published images:
 
@@ -160,13 +168,10 @@ NodePort, a ClawBox proxy, or a second allocator.
 
 ## Highest-priority next steps
 
-1. Recheck `kunpeng` after the reboot: `cube-node` must be 3/3 Running, no
-   temporary `node-debugger` pod may remain, and `GET /v2/sandboxes` must be
-   empty.
-2. Correct the CubeSandbox deployment topology so its existing semantic raw
+1. Correct the CubeSandbox deployment topology so its existing semantic raw
    endpoint is reachable from Runtime, without adding a ClawBox networking
    layer. Re-run the host/Runtime reachability proof.
-3. Run the Cube-only pair smoke with Runtime template
+2. Run the Cube-only pair smoke with Runtime template
    `tpl-39efe4ad90384a1fbea3caff` and Tool template
    `tpl-b5cb6f5ee26a41448000b9c2`, then verify admitted SSH, Tool pause, demand
    restore, exact execution count, and no policy command/output leakage.

@@ -15,7 +15,9 @@ epoch; the existing Runtime policy shim applies the returned route only to the
 current SSH process. The OpenClaw target watcher was removed after verifying
 that the installed backend captures its target at construction. Stable
 HostKeyAlias/host keys preserve Tool identity, and completion is ordered after
-SSH reaping.
+SSH reaping. Commit `147cb8e` fixes the timestamp sampling order and adds a
+blocking-child regression proving `/complete` is not posted while the SSH child
+is still active.
 
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
 corrected ARM64 Tool image was built and a fresh kernel-bound Tool template was
@@ -48,6 +50,7 @@ native OpenClaw path.
 | CubeMaster/CubeProxy existing Tool 2222 mapping | proved; semantic API returns per-sandbox raw endpoint |
 | Endpoint identity/epoch/stale/cross-Tool unit gates | passed; cross-Tool route is rejected before SSH spawn |
 | OpenClaw target semantics/PID witness | passed; target is captured and Agent PID witness is stable across lifecycle callbacks |
+| SSH completion ordering | passed; `/complete` follows child reaping and records `ssh_reaped_at <= execution_completed_at` |
 | Real Runtime-to-Tool native SSH | blocked; current pod-IP mapping is reachable from host but refused from Runtime |
 | Pause -> policy restore -> SSH -> telemetry | blocked by deployment topology; no live c1 claim |
 | Managed real-inference c1 | pending; operator credential is present but not sent by automation |
@@ -70,7 +73,9 @@ deployment reports the CubeNode pod IP as `HostIP`. The host can reach the
 mapping while the Runtime VM cannot. Guest `hostname -I` is isolated and must
 not be used. A temporary host-network experiment was reverted; the host then
 rebooted to clear stale containerd tasks and must be health-checked before
-further tests. No c4/c8/c20/c40/c60 native result is valid yet.
+further tests. Post-reboot c1 again failed at Runtime -> mapped endpoint with
+`Connection refused` and cleaned up to zero sandboxes; no c4/c8/c20/c40/c60
+native result is valid yet.
 
 See `docs/HANDOFF.md` for exact provenance, discovered failures, host state,
 and ordered continuation steps. Kubernetes-era code still in the tree is
