@@ -21,6 +21,7 @@ from typing import Any
 from .schema import (
     BridgeRecord,
     CgroupResource,
+    CollectionQuality,
     ObservationSource,
     ToolObservation,
     span_end_to_observation,
@@ -133,7 +134,9 @@ def join_trace_and_bridge(
                 if resource.memory_rss_after_bytes is not None:
                     merged.memory_rss_bytes_after = resource.memory_rss_after_bytes
                 if resource.sampling_quality in ("valid", "degraded", "invalid"):
-                    merged.collection_quality = resource.sampling_quality
+                    merged.collection_quality = CollectionQuality(
+                        resource.sampling_quality
+                    )
         merged.trusted = merged.collection_quality == "valid" and merged.complete and merged.exit_code == 0
         joined.append(merged)
         used_bridge_ids.add(bridge.execution_id)

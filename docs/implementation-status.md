@@ -73,6 +73,15 @@ c20/c40/c60 with repeated orthogonal baselines, and real-LLM c1/c2/c4. The
 checked-in single marker trace remains smoke-only and must not be presented as
 formal evidence.
 
+The ClawTune reuse path was also exercised against four preserved Kunpeng
+recording directories. Exact span/bridge joins were 100% and one observation
+per directory passed the current quality gate. This exposed a typed-enum bug in
+ClawBox's cgroup overlay: the validated `CollectionQuality` value was replaced
+with a raw string, which later broke KB snapshot construction. The join now
+retains the enum and the ClawTune-backed offline pipeline completes. Those four
+homogeneous observations are useful regression evidence only; they are too few
+and too narrow to become the frozen formal KB.
+
 The deployment contract is now written down in
 [`docs/cubesandbox-setup.md`](cubesandbox-setup.md) and linked from the
 README. It has two explicit paths: prepare a fresh standalone CubeSandbox

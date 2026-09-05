@@ -15,6 +15,7 @@ from clawbox.tuning.join import join_trace_and_bridge
 from clawbox.tuning.schema import (
     BridgeRecord,
     CgroupResource,
+    CollectionQuality,
     cgroup_artifact_to_resource,
 )
 
@@ -161,6 +162,7 @@ def test_three_source_join_attaches_cgroup():
     assert merged.cgroup.memory_rss_peak_bytes == 4096
     assert merged.cgroup.source == "cgroup-v2"
     assert merged.collection_quality == "valid"
+    assert isinstance(merged.collection_quality, CollectionQuality)
     assert merged.exit_code == 0
     assert merged.trusted is True
 
