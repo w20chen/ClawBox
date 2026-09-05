@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .baselines import BASELINES
 from .spec import expand_matrix, load_experiment, spec_digest
 
 
@@ -13,7 +14,20 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("validate", "plan"):
         command = commands.add_parser(name)
         command.add_argument("experiment", type=Path)
+    commands.add_parser("list-baselines")
     args = parser.parse_args(argv)
+    if args.command == "list-baselines":
+        print(json.dumps({
+            name: {
+                "admission": baseline.admission_policy.value,
+                "reclamation": baseline.reclamation_policy.value,
+                "eviction": baseline.eviction_policy.value,
+                "restore": baseline.restore_policy.value,
+                "implementation_status": baseline.implementation_status,
+            }
+            for name, baseline in BASELINES.items()
+        }, indent=2, sort_keys=True))
+        return 0
     try:
         spec = load_experiment(args.experiment)
         arms = expand_matrix(spec)
