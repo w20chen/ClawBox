@@ -161,6 +161,15 @@ def main() -> int:
         admission = _post("/v1/tool/admit", request, attempts=3)
         if admission.get("decision") != "ADMIT":
             raise RuntimeError(f"unexpected policy decision: {admission.get('decision')!r}")
+        if admission.get("duplicate") is True:
+            # The admission ledger is idempotent, but an idempotent response
+            # is not permission to execute the side effect again.  A caller
+            # that lost the first response must fail closed; exact-ID result
+            # validation will reject the incomplete operation and cleanup
+            # will reclaim the owning sandbox.
+            raise RuntimeError(
+                "duplicate policy admission cannot launch a second SSH subprocess"
+            )
         route = _admission_route(admission)
     except Exception as exc:
         print(f"ClawBox policy admission failed: {type(exc).__name__}: {exc}", file=sys.stderr)

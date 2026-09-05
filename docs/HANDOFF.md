@@ -127,6 +127,11 @@ The Runtime-side `/usr/local/bin/ssh` shim:
 4. launches `/usr/bin/ssh` exactly once with inherited stdio;
 5. sends an idempotent completion; it never retries the command.
 
+If admission returns an idempotent duplicate response, the shim fails closed
+before starting OpenSSH rather than repeating the Tool side effect. This keeps
+the exact execution-ID join requirement stricter than the control-plane
+idempotency mechanism.
+
 PolicyControl has per-session `ACTIVE -> DRAINING -> CLOSED` state, exact
 execution-ID idempotency, a threaded backlog of 256, and no lock held while an
 admission callback blocks. Its c60 unit HOL test proves 59 short independent

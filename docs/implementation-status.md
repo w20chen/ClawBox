@@ -38,6 +38,9 @@ window. Failed admission clears the marker, and native route resolution occurs
 only after the reservation/restore boundary. The focused race regression is
 covered alongside the existing SSH-child completion-order test.
 
+The policy shim also fails closed on a duplicate idempotent admission response;
+it never launches a second SSH subprocess for the same execution identity.
+
 Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
 admission/completion service spans, FIFO admission wait distributions, and
 explicit Runtime-local versus Tool-VM tool policy. Commit `743c68a` adds
