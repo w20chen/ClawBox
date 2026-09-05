@@ -18,9 +18,9 @@ policy_ssh = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(policy_ssh)
 
 
-def _argv() -> list[str]:
+def _argv(tool_name: str = "exec") -> list[str]:
     metadata = json.dumps(
-        {"v": 1, "execution_id": "exec-a", "tool_name": "exec"},
+        {"v": 1, "execution_id": "exec-a", "tool_name": tool_name},
         separators=(",", ":"),
     )
     return [
@@ -74,6 +74,57 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert completion["endpoint_sandbox_id"] == "tool-a"
     assert completion["endpoint_epoch"] == 9
     assert completion["ssh_reaped_at"] <= completion["execution_completed_at"]
+
+
+@pytest.mark.parametrize(
+    "tool_name", ("exec", "process", "read", "write", "edit", "apply_patch"),
+)
+def test_each_tool_vm_operation_keeps_its_native_policy_operation(
+    monkeypatch: pytest.MonkeyPatch, tool_name: str,
+) -> None:
+    """Every OpenClaw Tool-VM operation must carry the execution envelope."""
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[tuple[str, dict]] = []
+
+    def post(path: str, body: dict, *, attempts: int) -> dict:
+        posted.append((path, body))
+        if path.endswith("/admit"):
+            return {
+                "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 1,
+                "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+            }
+        return {"status": "COMPLETED"}
+
+    class Child:
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda _argv: Child())
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv(tool_name)])
+
+    assert policy_ssh.main() == 0
+    assert posted[0][1]["operation"] == tool_name
+    assert posted[1][1]["operation"] == tool_name
+
+
+def test_unenveloped_agent_ssh_is_rejected_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_POLICY_REQUIRE_ENVELOPE", "1")
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", "tool-a", "true"])
+
+    def fail_spawn(_argv: list[str]):
+        raise AssertionError("unenveloped Agent operation reached OpenSSH")
+
+    monkeypatch.setattr(policy_ssh.subprocess, "call", fail_spawn)
+    assert policy_ssh.main() == 125
 
 
 def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(
