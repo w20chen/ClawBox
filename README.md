@@ -127,6 +127,12 @@ clawbox --output-root /data/clawbox-results experiment status run-name
 clawbox --output-root /data/clawbox-results experiment collect run-name
 ```
 
+At high session concurrency the Worker keeps session execution concurrent but
+limits simultaneous Runtime/Tool pair creation to eight pairs by default, so
+Cubelet/containerd are not stampeded. Set
+`CLAWBOX_SANDBOX_CREATE_CONCURRENCY` to a positive value to tune that existing
+control-plane throttle; it does not allocate ports or proxy SSH.
+
 Deterministic replay is the primary comparison mode: Runtime, OpenClaw, SSH,
 Tool VM, commands, memory pressure, and telemetry remain real; only model
 generation is replayed. Replay cursors and response state are per session.

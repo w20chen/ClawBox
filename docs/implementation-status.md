@@ -19,6 +19,11 @@ SSH reaping. Commit `147cb8e` fixes the timestamp sampling order and adds a
 blocking-child regression proving `/complete` is not posted while the SSH child
 is still active.
 
+The Worker keeps c40 session concurrency at 40 while bounding simultaneous
+Runtime/Tool pair creation (eight by default) and records any queue wait as a
+`sandbox.create.queue` span. This protects Cubelet/containerd during a stress
+run without changing the endpoint contract or SSH data path.
+
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
 corrected ARM64 Tool image was built and a fresh kernel-bound Tool template was
 accepted on Kunpeng. The full live native SSH pair and managed real-inference
