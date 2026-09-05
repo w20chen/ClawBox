@@ -80,7 +80,7 @@ def endpoint_ssh(endpoint, credentials) -> NativeSSHConfig:
 
 
 def ssh_args(ssh: NativeSSHConfig, identity: str, known_hosts: str,
-             executable: str = "/usr/bin/ssh") -> list[str]:
+             executable: str = "/usr/bin/ssh", connect_timeout_s: int = 15) -> list[str]:
     user, host, port = split_native_ssh_target(ssh.target)
     host_argument = f"[{host}]" if ":" in host else host
     return [
@@ -90,7 +90,7 @@ def ssh_args(ssh: NativeSSHConfig, identity: str, known_hosts: str,
         "-o", "UpdateHostkeys=no",
         "-o", f"HostKeyAlias={ssh.host_key_alias}",
         "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=15",
+        "-o", f"ConnectTimeout={connect_timeout_s}",
         "-p", str(port), f"{user}@{host_argument}",
     ]
 
@@ -122,8 +122,12 @@ def setup_runtime_ssh(runtime, entries, session_id: str) -> dict[str, tuple[str,
 
 
 def ssh_probe(runtime, ssh: NativeSSHConfig, identity: str,
-              known_hosts: str, remote_command: str) -> dict[str, object]:
-    command = shlex.join([*ssh_args(ssh, identity, known_hosts), remote_command])
+              known_hosts: str, remote_command: str,
+              *, connect_timeout_s: int = 15) -> dict[str, object]:
+    command = shlex.join([
+        *ssh_args(ssh, identity, known_hosts, connect_timeout_s=connect_timeout_s),
+        remote_command,
+    ])
     started = time.monotonic()
     result = runtime.commands.run(command, timeout=45, cwd="/workspace")
     return {
@@ -133,6 +137,32 @@ def ssh_probe(runtime, ssh: NativeSSHConfig, identity: str,
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
+
+
+def wait_for_ssh(runtime, ssh: NativeSSHConfig, identity: str,
+                 known_hosts: str, remote_command: str,
+                 expected_stdout: str, timeout_s: float = 30.0) -> dict[str, object]:
+    """Wait for CubeProxy's fresh host-port route to accept native SSH.
+
+    CubeSandbox publishes the semantic mapping before the guest-side bridge
+    and CubeProxy forwarding path are necessarily accepting connections.  The
+    endpoint itself remains the only target source; this bounded readiness
+    loop does not rediscover or synthesize a route.
+    """
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        result = ssh_probe(
+            runtime, ssh, identity, known_hosts, remote_command,
+            connect_timeout_s=2,
+        )
+        last = result
+        if result["exit_code"] == 0 and result["stdout"].strip() == expected_stdout:
+            return result
+        time.sleep(0.5)
+    raise AssertionError(
+        f"native SSH route did not become ready for {ssh.sandbox_id}: {last}"
+    )
 
 
 def ssh_config_dump(runtime, ssh: NativeSSHConfig, identity: str,
@@ -285,11 +315,9 @@ def main() -> int:
         for tool, ssh in zip(tools, ssh_before):
             identity, known_hosts = ssh_files[ssh.sandbox_id]
             before_ssh_config.append(ssh_config_dump(runtime, ssh, identity, known_hosts))
-            result = ssh_probe(runtime, ssh, identity, known_hosts, f"cat {MARKER}")
-            if result["exit_code"] != 0 or result["stdout"].strip() != tool.sandbox_id:
-                raise AssertionError(
-                    f"initial endpoint reached wrong Tool: expected={tool.sandbox_id!r} result={result}"
-                )
+            result = wait_for_ssh(
+                runtime, ssh, identity, known_hosts, f"cat {MARKER}", tool.sandbox_id,
+            )
             initial_probes.append(result)
 
         server = PolicyControlServer(
@@ -421,6 +449,14 @@ def main() -> int:
                     raise AssertionError(f"stale endpoint remained usable for {tool.sandbox_id}: {stale}")
                 stale_probes.append(stale)
 
+                resumed = cube.get_tcp_endpoint(tool_holders[index], 2222)
+                if resumed.sandbox_id != tool.sandbox_id or resumed.container_port != 2222:
+                    raise AssertionError(f"resumed endpoint identity mismatch: {endpoint_record(resumed)}")
+                resumed_ssh = endpoint_ssh(resumed, credentials[index])
+                wait_for_ssh(
+                    runtime, resumed_ssh, identity, known_hosts,
+                    f"cat {MARKER}", tool.sandbox_id,
+                )
                 execution_after = f"{owner}-{index}-after"
                 # Deliberately pass the pre-pause target. The admission response
                 # must be the only source of the current route for this call.
@@ -434,11 +470,7 @@ def main() -> int:
                                      "stdout": result.stdout})
                 tool = tool_holders[index]
                 tools[index] = tool
-                resumed = cube.get_tcp_endpoint(tool, 2222)
-                if resumed.sandbox_id != tool.sandbox_id or resumed.container_port != 2222:
-                    raise AssertionError(f"resumed endpoint identity mismatch: {endpoint_record(resumed)}")
                 endpoints_after.append(resumed)
-                resumed_ssh = endpoint_ssh(resumed, credentials[index])
                 after_ssh_config.append(
                     ssh_config_dump(runtime, resumed_ssh, identity, known_hosts)
                 )
