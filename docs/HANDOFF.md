@@ -31,7 +31,7 @@ Toolbridge Go tests passed on ARM64 in `golang:1.25-bookworm` using
 
 The continuation commits `a4be792`, `a30292a`, and `493206d` add structured
 timing spans, bounded Cube command streams, and managed API-path coverage.
-They are local commits and are not yet pushed to `origin/main`.
+They are part of the fast-forward branch being published to `origin/main`.
 
 The current native-endpoint commits are `50db717` (semantic CubeSandbox
 endpoint client and initial gates), `1b79924` (synchronous per-admission route
@@ -62,6 +62,14 @@ completion can release the Tool reservation or trigger pause. Unit tests cover
 cross-Tool rejection before subprocess launch, endpoint epoch refresh without
 requiring an address change, strict host-key settings, and the OpenClaw Agent
 PID surviving Tool pause/restore.
+
+The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
+was reviewed against this post-`50db717` tree and is intentionally not
+cherry-picked. Its useful lifecycle-failure, per-execution timing, FIFO
+admission-metric, and Runtime-local-tool ideas are incorporated selectively in
+`7a0740f`; its older endpoint-keyed known-host refresh and restore-must-change-
+address assumptions are incompatible with this contract. The commit remains
+available by its original SHA; no branch or tag is force-updated or deleted.
 
 The Runtime-side `/usr/local/bin/ssh` shim:
 
@@ -173,6 +181,12 @@ zero sandboxes. No c40 retry was started and no recovery mutation was made.
 
 Current-source runs after `a4be792` emit `session_timing` events containing
 `session`, `agent`, per-sandbox create, validation, hashing, and cleanup spans.
+`7a0740f` additionally records failed lifecycle attempts, control admission and
+completion service spans, FIFO admission wait distributions, and keeps the
+Runtime-local retrieval/memory tool set separate from the six Tool-VM tools.
+The reproducible formal OpenClaw replay c40 input is
+`examples/experiments/openclaw-cube-replay-c40.yaml` with its checked-in model
+trace; it is a pending live gate, not a passed run.
 The local full Python suite passes; no new live c40 success claim is made until
 the corrected runs complete and each run is checked for zero remaining
 CubeSandbox resources.
@@ -218,7 +232,8 @@ NodePort, a ClawBox proxy, or a second allocator.
 8. Add the focused admission-versus-delayed-pause race test, then run native
    OpenClaw c4/c8 HOL/cross-routing and leak tests.
 9. Only after those native gates pass, run c20 and finally c40/c60 native
-   OpenClaw policy arms. The replay c40 matrix is already green.
+   OpenClaw policy arms. The formal replay c40 matrix is also pending a
+   corrected live run after CubeNode recovery.
 
 ## Easier cleanup left intentionally
 

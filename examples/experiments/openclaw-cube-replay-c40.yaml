@@ -1,0 +1,58 @@
+schema_version: 2
+experiment_id: openclaw-cube-replay-c40
+workload:
+  source: recorded_trace
+  input: examples/traces/openclaw-cube-replay.jsonl
+  repetitions: 1
+  cases:
+    - case_id: openclaw-cube-replay
+      source: recorded_trace
+      source_reference: examples/traces/openclaw-cube-replay.jsonl
+      replay_trace_reference: examples/traces/openclaw-cube-replay.jsonl
+      prompt: >-
+        Create /workspace/result.txt containing exactly
+        openclaw-cube-replay-ok followed by a newline, then verify the file.
+agent: {driver: openclaw}
+inference:
+  backend: replay
+  configuration:
+    model: recorded-openclaw-model
+    time_scale: 1.0
+    repo_fingerprint: local/openclaw-cube-replay
+runtime:
+  template_id: tpl-39efe4ad90384a1fbea3caff
+  source_image_reference: 127.0.0.1:5000/clawbox/runtime-cube-arm64
+  image_digest: sha256:05cb920d0c79ee381263f2d57663a8c068d889394b6a9ad942af34810931422f
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 2048
+  workspace: /workspace
+  allow_internet_access: false
+sandbox:
+  template_id: tpl-b5cb6f5ee26a41448000b9c2
+  source_image_reference: 127.0.0.1:5000/clawbox/tool-cube-arm64
+  image_digest: sha256:b175fea75b4cd43d5116d93e0c2fc1b745a68d24d84446d5af0b3c72d42a8781
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 4096
+  workspace: /workspace
+  allow_internet_access: false
+execution:
+  concurrency_levels: [40]
+  randomized_order: true
+  random_seed: 20260905
+  arm_timeout_seconds: 1800
+  command_timeout_seconds: 300
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1
+resources:
+  target_node: hostname-txyuq.foreman.pxe
+  pool_memory_budget_mib: 1600000
+  emergency_free_memory_mib: 200000
+  checkpoint_restore_headroom_mib: 8192
+  static_tool_memory_mib: 256
+policies:
+  - {name: resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
+  - {name: eager-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: eager, restore: reactive}
+validation: {command: "test \"$(cat /workspace/result.txt)\" = openclaw-cube-replay-ok"}
+output: {directory: /results}
