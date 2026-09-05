@@ -794,6 +794,10 @@ class ExperimentWorker:
                 route_epoch += 1
                 route = native_ssh_route(endpoint, epoch=route_epoch)
                 if ssh_config is not None:
+                    # OpenClaw captured its SSH target when run_openclaw was
+                    # constructed. This local descriptor is updated only for
+                    # the later Worker-owned artifact collection SSH call;
+                    # per-admission Agent routing comes from the shim response.
                     ssh_config = replace(ssh_config, target=route.target)
                 events.write({
                     "event": "native_ssh_endpoint_resolved", "session_id": session_id,

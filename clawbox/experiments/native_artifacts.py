@@ -209,6 +209,7 @@ def validate_native_tool_join(
     clause_artifacts: dict[str, dict[str, Any]],
     policy_records: list[dict[str, Any]],
     runtime_span_records: list[dict[str, Any]] | None = None,
+    expected_session_id: str | None = None,
 ) -> dict[str, Any]:
     """Validate the policy -> bridge -> cgroup/eBPF exact-ID join."""
     expected: dict[str, dict[str, Any]] = {}
@@ -216,6 +217,11 @@ def validate_native_tool_join(
         request = item.get("request")
         if not isinstance(request, dict):
             raise ValueError("policy record is missing request metadata")
+        if expected_session_id is not None and request.get("session_id") != expected_session_id:
+            raise ValueError(
+                f"policy record is routed to the wrong session: "
+                f"expected={expected_session_id!r} got={request.get('session_id')!r}"
+            )
         execution_id = str(request.get("execution_id") or "")
         if not _SAFE_EXECUTION_ID.fullmatch(execution_id):
             raise ValueError("policy record has an invalid execution identity")
@@ -234,6 +240,12 @@ def validate_native_tool_join(
     runtime_by_id: dict[str, list[dict[str, Any]]] = {}
     if runtime_span_records is not None:
         for span in runtime_span_records:
+            if (expected_session_id is not None
+                    and span.get("session_id") != expected_session_id):
+                raise ValueError(
+                    f"Runtime trace is routed to the wrong session: "
+                    f"expected={expected_session_id!r} got={span.get('session_id')!r}"
+                )
             execution = span.get("execution")
             execution_id = str(
                 execution.get("execution_id") if isinstance(execution, dict) else ""
@@ -266,6 +278,12 @@ def validate_native_tool_join(
         if len(records) != 1:
             raise ValueError(f"{execution_id}: duplicate Tool bridge executions")
         bridge = records[0]
+        if (expected_session_id is not None
+                and bridge.get("task_id") != expected_session_id):
+            raise ValueError(
+                f"{execution_id}: Tool bridge is routed to the wrong session: "
+                f"expected={expected_session_id!r} got={bridge.get('task_id')!r}"
+            )
         if bridge.get("command_sha256") != request.get("command_sha256"):
             raise ValueError(f"{execution_id}: policy and bridge command digests differ")
         if runtime_span_records is not None:
@@ -345,6 +363,7 @@ def collect_and_validate_native_tool_artifacts(
         bridge_records=bridge_records, cgroup_artifacts=cgroup_artifacts,
         clause_artifacts=clause_artifacts, policy_records=policy_records,
         runtime_span_records=runtime_span_records,
+        expected_session_id=session_id,
     )
     root = output_dir / "tool-artifacts" / session_id
     root.mkdir(parents=True, exist_ok=True)

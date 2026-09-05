@@ -43,6 +43,10 @@ it never launches a second SSH subprocess for the same execution identity.
 Commit `5b41a48` hardens zero-leak cleanup: an admission that never acquired a
 lifetime reservation cannot release one during `finally`, and cleanup attempts
 all task-owned sandboxes before reporting any kill error or remaining owner.
+The native artifact join now also fails closed when policy, Runtime trace, or
+Tool bridge records belong to a different session; the Worker’s refreshed SSH
+descriptor is used only by post-agent artifact collection, not by the captured
+OpenClaw backend.
 
 Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
 admission/completion service spans, FIFO admission wait distributions, and

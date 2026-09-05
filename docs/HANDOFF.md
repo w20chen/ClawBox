@@ -104,6 +104,11 @@ Commit `5b41a48` hardens the final ownership barrier: failed lifetime admission
 cannot underflow a reservation during session cleanup, and one failed sandbox
 kill no longer prevents cleanup from attempting the rest of the task-owned set.
 The cleanup operation still fails closed after a fresh ownership-list check.
+The follow-up artifact gate also binds policy, Runtime trace, and Tool bridge
+records to the expected session ID before accepting an exact execution-ID join;
+the Worker-only route descriptor refresh is explicitly limited to post-agent
+artifact collection and never attempts to refresh the long-lived OpenClaw
+backend.
 
 The local c40 Worker gate now materializes every entry in the baseline catalog
 directly against a concurrent fake CubeSandbox: 17 policy arms (10 canonical

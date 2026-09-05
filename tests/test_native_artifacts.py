@@ -29,6 +29,7 @@ def _policy(execution_id: str, digest: str) -> list[dict]:
 def _artifacts(execution_id: str, digest: str) -> tuple[list[dict], dict, dict]:
     bridge = [{
         "execution_source": "runtime-envelope", "execution_id": execution_id,
+        "task_id": "session-a",
         "command_sha256": digest, "telemetry_state": "complete",
         "telemetry_artifact": (
             f"/var/lib/clawtune/artifacts/tool-resource/"
@@ -69,6 +70,15 @@ def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
             policy_records=_policy(execution_id, digest),
         )
 
+    with pytest.raises(ValueError, match="wrong session"):
+        validate_native_tool_join(
+            bridge_records=[{**bridge[0], "task_id": "session-b"}],
+            cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause},
+            policy_records=_policy(execution_id, digest),
+            expected_session_id="session-a",
+        )
+
 
 class _RuntimeExecutor:
     def __init__(self, stdout: str) -> None:
@@ -97,7 +107,7 @@ def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path
     executor = _RuntimeExecutor(stdout)
     runtime_trace = tmp_path / "runtime.jsonl"
     runtime_trace.write_text(json.dumps({
-        "record_type": "span_end", "kind": "tool",
+        "record_type": "span_end", "kind": "tool", "session_id": "session-a",
         "execution": {"execution_id": execution_id, "command_digest": digest},
     }) + "\n", encoding="utf-8")
     collection = collect_and_validate_native_tool_artifacts(
