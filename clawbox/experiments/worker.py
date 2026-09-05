@@ -60,6 +60,13 @@ def _network_target(endpoint: str, *, label: str) -> str:
     return f"{address}/{32 if address.version == 4 else 128}"
 
 
+def _runtime_network_deny_out(
+    allow_internet_access: bool, allow_out: list[str],
+) -> list[str] | None:
+    """Deny default IPv4 egress only for explicitly closed Runtime arms."""
+    return ["0.0.0.0/0"] if allow_out and not allow_internet_access else None
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -448,7 +455,9 @@ class ExperimentWorker:
             allow_internet_access=arm.runtime.allow_internet_access,
             env_vars=runtime_env,
             network_allow_out=runtime_allow_out,
-            network_deny_out=["0.0.0.0/0"] if runtime_allow_out else None,
+            network_deny_out=_runtime_network_deny_out(
+                arm.runtime.allow_internet_access, runtime_allow_out,
+            ),
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {

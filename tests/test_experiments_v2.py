@@ -11,7 +11,17 @@ from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, 
 from clawbox.experiments.audit import audit_experiments
 from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
-from clawbox.experiments.worker import EventWriter, ExperimentWorker, build_time_spans
+from clawbox.experiments.worker import (
+    EventWriter, ExperimentWorker, _runtime_network_deny_out, build_time_spans,
+)
+
+
+def test_runtime_network_policy_honors_explicit_internet_access() -> None:
+    allowlist = ["192.0.2.10/32"]
+
+    assert _runtime_network_deny_out(True, allowlist) is None
+    assert _runtime_network_deny_out(False, allowlist) == ["0.0.0.0/0"]
+    assert _runtime_network_deny_out(False, []) is None
 
 
 def raw_spec() -> dict:

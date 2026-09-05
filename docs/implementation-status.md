@@ -47,6 +47,9 @@ The native artifact join now also fails closed when policy, Runtime trace, or
 Tool bridge records belong to a different session; the Worker’s refreshed SSH
 descriptor is used only by post-agent artifact collection, not by the captured
 OpenClaw backend.
+Runtime egress now honors the arm's explicit `allow_internet_access` setting:
+closed-network arms deny default IPv4 egress after applying their control-plane
+allowlist, while explicitly internet-enabled arms retain egress.
 
 Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
 admission/completion service spans, FIFO admission wait distributions, and
