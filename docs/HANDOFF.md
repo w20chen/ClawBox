@@ -36,7 +36,11 @@ They are local commits and are not yet pushed to `origin/main`.
 The current native-endpoint commits are `50db717` (semantic CubeSandbox
 endpoint client and initial gates), `1b79924` (synchronous per-admission route
 refresh), `b3a1ee7` (long-lived OpenClaw Agent PID witness), and `147cb8e`
-(SSH reaping/completion-order proof). The companion
+(SSH reaping/completion-order proof). `98d3f5d` makes the Runtime shim reject
+admissions for any container port other than the Tool SSH port 2222 before
+starting OpenSSH. `1903c59` records the current post-stress recovery probe;
+`b076890` and `f39cfe0` bound pair creation and document its queue spans. The
+companion
 CubeSandbox source commit is `64102d9`, which exposes
 `Sandbox.get_tcp_endpoint(container_port)` and keeps CubeMaster/CubeProxy route
 metadata parsing inside CubeSandbox.

@@ -17,7 +17,8 @@ that the installed backend captures its target at construction. Stable
 HostKeyAlias/host keys preserve Tool identity, and completion is ordered after
 SSH reaping. Commit `147cb8e` fixes the timestamp sampling order and adds a
 blocking-child regression proving `/complete` is not posted while the SSH child
-is still active.
+is still active. Commit `98d3f5d` also rejects an admission for any container
+port other than the Tool SSH port 2222 before OpenSSH starts.
 
 The Worker keeps c40 session concurrency at 40 while bounding simultaneous
 Runtime/Tool pair creation (eight by default) and records any queue wait as a
