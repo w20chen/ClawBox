@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
+from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import EventWriter, ExperimentWorker, build_time_spans
 
 
@@ -87,6 +88,18 @@ def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: P
     assert all(row["session_id"] == "session-a" for row in rows)
     assert all(int(row["wall_time_ns"]) > 0 for row in rows)
     assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
+
+
+def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
+    spec = load_experiment(Path("examples/experiments/openclaw-cube-replay-c40.yaml"))
+    actions = load_trace(Path("examples/traces/openclaw-cube-replay.jsonl"))
+    assert spec.agent.driver.value == "openclaw"
+    assert spec.execution.concurrency_levels == (40,)
+    assert [policy.name for policy in spec.policies] == ["resident", "eager-reactive"]
+    assert actions[0].output["tool_calls"][0]["function"]["name"] == "exec"
+    assert json.loads(actions[0].output["tool_calls"][0]["function"]["arguments"])[
+        "command"
+    ].startswith("printf openclaw-cube-replay-ok")
 
 
 def test_worker_bounds_pair_creation_for_high_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:

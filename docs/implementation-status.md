@@ -25,6 +25,14 @@ Runtime/Tool pair creation (eight by default) and records any queue wait as a
 `sandbox.create.queue` span. This protects Cubelet/containerd during a stress
 run without changing the endpoint contract or SSH data path.
 
+Commit `7a0740f` adds failed lifecycle-attempt records, per-execution
+admission/completion service spans, FIFO admission wait distributions, and
+explicit Runtime-local versus Tool-VM tool policy. Commit `743c68a` adds
+ordered wall-clock and monotonic nanosecond fields to experiment event JSONL.
+The formal OpenClaw replay c40 spec and checked-in model trace are
+`examples/experiments/openclaw-cube-replay-c40.yaml` and
+`examples/traces/openclaw-cube-replay.jsonl`; their live run remains pending.
+
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
 corrected ARM64 Tool image was built and a fresh kernel-bound Tool template was
 accepted on Kunpeng. The full live native SSH pair and managed real-inference
@@ -40,7 +48,7 @@ native OpenClaw path.
 | Policy c60 HOL/session isolation | passed in unit test |
 | ARM64 Toolbridge Go suite | passed in pinned Go container |
 | Bounded Cube command stream | passed; client deadline regression covered |
-| Structured agent/sandbox spans | passed; `session_timing` JSONL plus result spans |
+| Structured agent/sandbox spans | passed; `session_timing` JSONL, lifecycle failure records, and ordered event timestamps |
 | Managed replay gateway | passed; session-local cursor/delivery/HOL tests |
 | Managed API gateway | passed; upstream-compatible forwarding contract test |
 | Runtime image build/push | passed; digest `05cb920d...` |
@@ -61,7 +69,7 @@ native OpenClaw path.
 | Pause -> policy restore -> SSH -> telemetry | blocked by deployment topology; no live c1 claim |
 | Managed real-inference c1 | pending; operator credential is present but not sent by automation |
 | Deterministic c1 replay equivalence | replay path green; native OpenClaw c1 pending |
-| c4/c8/c20/c40/c60 | replay c40 matrices green; native OpenClaw scale pending |
+| c4/c8/c20/c40/c60 | corrected replay c40 and native OpenClaw scale pending CubeNode recovery |
 
 The earlier c40 artifacts were retained on kunpeng under
 `/tmp/clawbox-baseline-results40`, but the post-reboot cleanup removed that
