@@ -32,6 +32,8 @@ class LifecycleTiming:
     service_seconds: float
     state_before: str
     state_after: str
+    status: str = "ok"
+    error_type: str | None = None
 
 
 class CubeSandboxLifecycle:
@@ -72,13 +74,15 @@ class CubeSandboxLifecycle:
             return [asdict(item) for item in self._timings]
 
     def _record(self, operation: str, before: SandboxState, after: SandboxState,
-                started_wall: float, started_mono: float) -> float:
+                started_wall: float, started_mono: float, *,
+                status: str = "ok", error_type: str | None = None) -> float:
         completed_wall = time.time()
         completed_mono = time.monotonic()
         duration = max(0.0, completed_mono - started_mono)
         self._timings.append(LifecycleTiming(
             operation, started_wall, completed_wall, started_mono,
             completed_mono, duration, before.value, after.value,
+            status, error_type,
         ))
         return duration
 
@@ -101,8 +105,12 @@ class CubeSandboxLifecycle:
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
                                     started_wall, started_mono)
-            except Exception:
+            except Exception as exc:
                 self._state = before
+                self._record(
+                    "create", before, before, started_wall, started_mono,
+                    status="error", error_type=type(exc).__name__,
+                )
                 raise
 
     def checkpoint_and_evict(self) -> float:
@@ -117,8 +125,12 @@ class CubeSandboxLifecycle:
                 self._state = SandboxState.SWAPPED
                 return self._record("checkpoint", before, self._state,
                                     started_wall, started_mono)
-            except Exception:
+            except Exception as exc:
                 self._state = before
+                self._record(
+                    "checkpoint", before, before, started_wall, started_mono,
+                    status="error", error_type=type(exc).__name__,
+                )
                 raise
 
     pause_and_evict = checkpoint_and_evict
@@ -135,8 +147,12 @@ class CubeSandboxLifecycle:
                 self._state = SandboxState.RUNNING
                 return self._record("restore", before, self._state,
                                     started_wall, started_mono)
-            except Exception:
+            except Exception as exc:
                 self._state = before
+                self._record(
+                    "restore", before, before, started_wall, started_mono,
+                    status="error", error_type=type(exc).__name__,
+                )
                 raise
 
     def close(self) -> float:
@@ -154,6 +170,10 @@ class CubeSandboxLifecycle:
                 self._state = SandboxState.CLOSED
                 return self._record("destroy", before, self._state,
                                     started_wall, started_mono)
-            except Exception:
+            except Exception as exc:
                 self._state = before
+                self._record(
+                    "destroy", before, before, started_wall, started_mono,
+                    status="error", error_type=type(exc).__name__,
+                )
                 raise

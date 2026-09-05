@@ -336,6 +336,7 @@ class ExperimentWorker:
                 "resume_count": coordinator.resume_count,
                 "resume_service_seconds": coordinator.resume_service_seconds,
                 "blocked_admission_seconds": coordinator.blocked_seconds,
+                "admission_control": coordinator.admission_metrics(),
                 "session_timelines": [item.get("timeline") for item in sessions],
                 "session_time_spans": [
                     item.get("timeline", {}).get("time_spans", []) for item in sessions

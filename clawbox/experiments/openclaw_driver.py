@@ -15,6 +15,12 @@ from clawbox.replay.lifecycle import CommandResult
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Workspace and process tools cross the native SSH boundary. Retrieval and
+# agent-memory tools remain inside the Runtime VM and must not be instrumented
+# as Tool-sandbox operations.
+TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
+RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
+
 
 @dataclass(frozen=True, slots=True)
 class NativeSSHConfig:
@@ -305,12 +311,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                     "strictHostKeyChecking": True, "updateHostKeys": False},
         }}},
         "tools": {
-            "allow": ["exec", "process", "read", "write", "edit", "apply_patch"],
+            "allow": [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS],
             "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             "exec": {"host": "sandbox", "security": "full", "ask": "off"},
             "elevated": {"enabled": False},
             "sandbox": {"tools": {
-                "allow": ["exec", "process", "read", "write", "edit", "apply_patch"],
+                "allow": list(TOOL_VM_TOOLS),
                 "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             }},
         },
@@ -318,7 +324,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
             "instrumentHosts": ["sandbox"],
-            "instrumentTools": ["exec", "process", "read", "write", "edit", "apply_patch"],
+            "instrumentTools": list(TOOL_VM_TOOLS),
             "enableCgroup": False, "enableAffinity": False, "enableNuma": False,
             "autoStartSidecar": False, "securityBoundaryAccepted": True,
             "trace": {"schema_version": 6, "include_raw_events": True,
@@ -332,8 +338,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
             "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", model])
     instruction = (
-        "Use only the sandboxed exec/process/read/write/edit/apply_patch tools for every "
-        "workspace operation. The mutable workspace is in the Tool VM.\n\nTask:\n" + prompt
+        "Use only sandboxed exec/process/read/write/edit/apply_patch for workspace and "
+        "process operations; those execute in the Tool VM. Web search/fetch and agent "
+        "memory lookup remain Runtime-local and must not be used to access the mutable "
+        "workspace.\n\nTask:\n" + prompt
     )
     result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
                      "--model", f"vllm/{model}", "--message", instruction,

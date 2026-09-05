@@ -55,6 +55,15 @@ def test_policy_control_is_idempotent_and_drains_inflight_completion() -> None:
         assert completion["duplicate"] is False
         assert _post(session, "/v1/tool/complete", "exec-a")["duplicate"] is True
         assert completed == ["exec-a"]
+        timing = session.records()[0]["timing"]
+        assert timing["admission_started_monotonic_s"] <= timing[
+            "admission_completed_monotonic_s"
+        ]
+        assert timing["completion_started_monotonic_s"] <= timing[
+            "completion_completed_monotonic_s"
+        ]
+        assert timing["admission_service_seconds"] >= 0
+        assert timing["completion_service_seconds"] >= 0
         assert session.close(timeout=1)
         assert session.lifecycle is SessionLifecycle.CLOSED
 

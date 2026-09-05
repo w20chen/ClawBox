@@ -35,6 +35,10 @@ class _Execution:
     completion: dict[str, Any] | None = None
     admitting: bool = False
     completing: bool = False
+    admission_started_monotonic_s: float | None = None
+    admission_completed_monotonic_s: float | None = None
+    completion_started_monotonic_s: float | None = None
+    completion_completed_monotonic_s: float | None = None
 
 
 @dataclass(slots=True)
@@ -55,7 +59,10 @@ class _Session:
                 raise RuntimeError(f"session is {self.lifecycle.value}")
             execution = self.executions.get(execution_id)
             if execution is None:
-                execution = _Execution(request=dict(request), admitting=True)
+                execution = _Execution(
+                    request=dict(request), admitting=True,
+                    admission_started_monotonic_s=time.monotonic(),
+                )
                 self.executions[execution_id] = execution
                 owner = True
             else:
@@ -77,11 +84,13 @@ class _Session:
             except Exception:
                 with self.condition:
                     execution.admitting = False
+                    execution.admission_completed_monotonic_s = time.monotonic()
                     self.condition.notify_all()
                 raise
             with self.condition:
                 execution.admission = response
                 execution.admitting = False
+                execution.admission_completed_monotonic_s = time.monotonic()
                 self.condition.notify_all()
                 return dict(response), False
         raise AssertionError("unreachable")
@@ -101,17 +110,20 @@ class _Session:
             # Reserve completion ownership before leaving the lock. A duplicate
             # completion can then wait without causing a second reservation release.
             execution.completing = True
+            execution.completion_started_monotonic_s = time.monotonic()
         try:
             response = dict(self.complete(dict(request)))
             response.setdefault("status", "COMPLETED")
         except Exception:
             with self.condition:
                 execution.completing = False
+                execution.completion_completed_monotonic_s = time.monotonic()
                 self.condition.notify_all()
             raise
         with self.condition:
             execution.completion = response
             execution.completing = False
+            execution.completion_completed_monotonic_s = time.monotonic()
             self.condition.notify_all()
             return dict(response), False
 
@@ -157,6 +169,24 @@ class PolicyControlSession:
                     "request": dict(item.request),
                     "admission": dict(item.admission) if item.admission else None,
                     "completion": dict(item.completion) if item.completion else None,
+                    "timing": {
+                        "admission_started_monotonic_s": item.admission_started_monotonic_s,
+                        "admission_completed_monotonic_s": item.admission_completed_monotonic_s,
+                        "admission_service_seconds": (
+                            None if item.admission_started_monotonic_s is None
+                            or item.admission_completed_monotonic_s is None else
+                            max(0.0, item.admission_completed_monotonic_s
+                                - item.admission_started_monotonic_s)
+                        ),
+                        "completion_started_monotonic_s": item.completion_started_monotonic_s,
+                        "completion_completed_monotonic_s": item.completion_completed_monotonic_s,
+                        "completion_service_seconds": (
+                            None if item.completion_started_monotonic_s is None
+                            or item.completion_completed_monotonic_s is None else
+                            max(0.0, item.completion_completed_monotonic_s
+                                - item.completion_started_monotonic_s)
+                        ),
+                    },
                 }
                 for item in self._state.executions.values()
             ]

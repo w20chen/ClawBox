@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from clawbox.cube import (
     CubeCommandExecutor,
     CubeSandboxClient,
@@ -177,6 +179,24 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
+
+
+def test_lifecycle_records_failed_create_with_state_and_error_type() -> None:
+    class FailingClient:
+        def create_sandbox(self, **_kwargs):
+            raise TimeoutError("create timed out")
+
+    lifecycle = CubeSandboxLifecycle(
+        FailingClient(), template="tpl", node_name="node-a", ownership=_owner(),
+    )
+    with pytest.raises(TimeoutError, match="timed out"):
+        lifecycle.start()
+    assert lifecycle.state.value == "new"
+    assert lifecycle.timings[-1]["operation"] == "create"
+    assert lifecycle.timings[-1]["status"] == "error"
+    assert lifecycle.timings[-1]["error_type"] == "TimeoutError"
+    assert lifecycle.timings[-1]["state_before"] == "new"
+    assert lifecycle.timings[-1]["state_after"] == "new"
 
 
 def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> None:

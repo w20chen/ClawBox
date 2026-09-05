@@ -71,6 +71,9 @@ class PolicyCoordinator:
         self.pause_service_seconds = 0.0
         self.resume_count = 0
         self.resume_service_seconds = 0.0
+        self.admission_count = 0
+        self.max_admission_queue_depth = 0
+        self._admission_wait_samples: list[float] = []
 
     def register(self, session_id: str, lifecycle: Pausable) -> None:
         with self._condition:
@@ -107,14 +110,21 @@ class PolicyCoordinator:
         return charged > self.budget_bytes or available < self.emergency_free_bytes
 
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float) -> float:
+        started = time.monotonic()
         amount = amount_mib * MIB
         if amount == 0:
-            return 0.0
-        started = time.monotonic()
+            elapsed = time.monotonic() - started
+            with self._condition:
+                self.admission_count += 1
+                self._admission_wait_samples.append(elapsed)
+            return elapsed
         deadline = started + timeout_s
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
+            self.max_admission_queue_depth = max(
+                self.max_admission_queue_depth, len(self._waiters),
+            )
             try:
                 while self._waiters[0] is not ticket or self.pressure(amount):
                     victim = self._select_victim_locked(exclude=session_id)
@@ -141,11 +151,46 @@ class PolicyCoordinator:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
                     self._condition.notify_all()
-                self.blocked_seconds += time.monotonic() - started
+                waited = time.monotonic() - started
+                self.blocked_seconds += waited
+                self.admission_count += 1
+                self._admission_wait_samples.append(waited)
                 raise
         waited = time.monotonic() - started
-        self.blocked_seconds += waited
+        with self._condition:
+            self.blocked_seconds += waited
+            self.admission_count += 1
+            self._admission_wait_samples.append(waited)
         return waited
+
+    def admission_metrics(self) -> dict[str, float | int | None]:
+        """Return immutable aggregate metrics for the FIFO admission ledger."""
+        with self._condition:
+            samples = sorted(self._admission_wait_samples)
+            max_queue_depth = self.max_admission_queue_depth
+
+        def quantile(q: float) -> float | None:
+            if not samples:
+                return None
+            position = (len(samples) - 1) * q
+            lower = int(position)
+            upper = min(lower + 1, len(samples) - 1)
+            return samples[lower] + (samples[upper] - samples[lower]) * (
+                position - lower
+            )
+
+        count = len(samples)
+        total = sum(samples)
+        return {
+            "discipline": "fifo",
+            "admission_count": count,
+            "max_queue_depth": max_queue_depth,
+            "wait_total_seconds": total,
+            "wait_mean_seconds": total / count if count else None,
+            "wait_p50_seconds": quantile(0.50),
+            "wait_p95_seconds": quantile(0.95),
+            "wait_max_seconds": max(samples) if samples else None,
+        }
 
     def release(self, session_id: str, amount_mib: int) -> None:
         amount = amount_mib * MIB

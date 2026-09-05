@@ -10,6 +10,8 @@ import pytest
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
     NativeSSHRoute,
+    RUNTIME_LOCAL_TOOLS,
+    TOOL_VM_TOOLS,
     native_ssh_host_key_alias,
     native_ssh_target,
     native_tool_bridge_setup_command,
@@ -70,13 +72,12 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     sandbox = config["agents"]["defaults"]["sandbox"]
     assert sandbox["backend"] == "ssh"
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
-    assert config["tools"]["allow"] == [
-        "exec", "process", "read", "write", "edit", "apply_patch",
-    ]
+    assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
+    assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
     assert clawtune["sandboxExecEnvelope"] is True
-    assert clawtune["instrumentTools"] == config["tools"]["allow"]
+    assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)

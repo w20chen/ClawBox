@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from clawbox.experiments.policy import AdmissionTimeout, PolicyCoordinator
@@ -48,3 +51,35 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     coordinator.set_tool_active("active", True)
     coordinator.set_eviction_eligible("idle", True)
     assert coordinator.victim_for_restore("requester").session_id == "idle"
+
+
+def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
+    policy = PolicySpec(name="resident", admission="tool_static", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
+        physical_sample=lambda: (0, 100 * 1024**2),
+    )
+    coordinator.acquire("holder", 1, 1)
+    order: list[str] = []
+
+    def queued(session_id: str) -> None:
+        coordinator.acquire(session_id, 1, 2)
+        order.append(session_id)
+        coordinator.release(session_id, 1)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        second = pool.submit(queued, "second")
+        time.sleep(0.03)
+        third = pool.submit(queued, "third")
+        time.sleep(0.03)
+        coordinator.release("holder", 1)
+        second.result()
+        third.result()
+
+    assert order == ["second", "third"]
+    metrics = coordinator.admission_metrics()
+    assert metrics["discipline"] == "fifo"
+    assert metrics["admission_count"] == 3
+    assert metrics["max_queue_depth"] == 2
+    assert metrics["wait_p95_seconds"] is not None
