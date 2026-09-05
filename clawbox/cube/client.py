@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import threading
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
@@ -21,6 +22,15 @@ class Ownership:
 
     def metadata(self) -> dict[str, str]:
         return {f"clawbox.{key.removesuffix('_id').replace('_', '-')}": value for key, value in asdict(self).items()}
+
+
+@dataclass(frozen=True, slots=True)
+class CubeSandboxTcpEndpoint:
+    """Semantic raw TCP endpoint returned by CubeSandbox for one port."""
+
+    sandbox_id: str
+    container_port: int
+    address: str
 
 
 class OwnedSandboxJournal:
@@ -120,6 +130,50 @@ class CubeSandboxClient:
             if self._info_id(info) == sandbox_id:
                 return str(info.get("state", "")).lower() or None
         return None
+
+    def get_tcp_endpoint(self, sandbox: Any, container_port: int = 2222) -> CubeSandboxTcpEndpoint:
+        """Ask CubeSandbox for the raw TCP endpoint of a sandbox port.
+
+        The ClawBox layer consumes only this semantic contract. It does not
+        inspect CubeProxy Redis fields, guest IPs, or host-port metadata.
+        """
+        if isinstance(container_port, bool) or not isinstance(container_port, int):
+            raise ValueError("container_port must be an integer between 1 and 65535")
+        if not 1 <= container_port <= 65535:
+            raise ValueError("container_port must be between 1 and 65535")
+        getter = getattr(sandbox, "get_tcp_endpoint", None)
+        if not callable(getter):
+            raise RuntimeError(
+                "CubeSandbox SDK must expose get_tcp_endpoint(container_port)"
+            )
+        raw = getter(container_port)
+        if isinstance(raw, Mapping):
+            sandbox_id = raw.get("sandboxID") or raw.get("sandbox_id")
+            returned_port = raw.get("containerPort") or raw.get("container_port")
+            address = raw.get("address")
+        else:
+            sandbox_id = getattr(raw, "sandbox_id", None)
+            returned_port = getattr(raw, "container_port", None)
+            address = getattr(raw, "address", None)
+        endpoint = CubeSandboxTcpEndpoint(
+            sandbox_id=str(sandbox_id or ""),
+            container_port=int(returned_port or 0),
+            address=str(address or "").strip(),
+        )
+        expected_id = self.sandbox_id(sandbox)
+        if endpoint.sandbox_id != expected_id:
+            raise RuntimeError(
+                f"CubeSandbox endpoint identity mismatch: expected {expected_id!r}, "
+                f"got {endpoint.sandbox_id!r}"
+            )
+        if endpoint.container_port != container_port:
+            raise RuntimeError(
+                f"CubeSandbox endpoint port mismatch: expected {container_port}, "
+                f"got {endpoint.container_port}"
+            )
+        if not endpoint.address:
+            raise RuntimeError("CubeSandbox returned an empty raw TCP endpoint")
+        return endpoint
 
     def run_command(self, sandbox: Any, command: str, *, timeout_s: float,
                     cwd: str = "/workspace") -> Any:

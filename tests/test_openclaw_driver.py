@@ -9,6 +9,7 @@ import pytest
 
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
+    NativeSSHRouteState,
     native_ssh_target,
     native_tool_bridge_setup_command,
     native_ssh_target_from_env,
@@ -27,6 +28,17 @@ class PolicySession:
         return [{"request": {}, "admission": {}, "completion": {
             "execution_started_at": 10.0, "execution_completed_at": 10.25,
         }}]
+
+
+def test_native_ssh_route_state_updates_only_on_a_new_valid_endpoint() -> None:
+    state = NativeSSHRouteState("executor@192.0.2.10:20010")
+    assert state.get_target() == "executor@192.0.2.10:20010"
+    assert state.update("executor@192.0.2.10:20010") is False
+    assert state.update("executor@192.0.2.11:20011") is True
+    assert state.get_target() == "executor@192.0.2.11:20011"
+    with pytest.raises(ValueError, match="target"):
+        state.update("executor@192.0.2.11:not-a-port")
+    assert state.get_target() == "executor@192.0.2.11:20011"
 
 
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(

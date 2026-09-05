@@ -18,7 +18,7 @@ import traceback
 import urllib.parse
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from threading import Lock, Timer
 from types import SimpleNamespace
@@ -35,8 +35,8 @@ from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
 from .openclaw_driver import (
-    NativeSSHConfig, native_tool_bridge_setup_command,
-    native_ssh_target_from_env, run_openclaw, split_native_ssh_target,
+    NativeSSHConfig, NativeSSHRouteState, native_ssh_target,
+    native_tool_bridge_setup_command, run_openclaw, split_native_ssh_target,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .policy_control import PolicyControlServer
@@ -363,10 +363,9 @@ class ExperimentWorker:
         )
         runtime_env: dict[str, str] = {}
         runtime_allow_out: list[str] = []
-        native_ssh_target_template: str | None = None
+        route_state: NativeSSHRouteState | None = None
+        ssh_config: NativeSSHConfig | None = None
         if arm.agent.driver is AgentDriver.OPENCLAW:
-            native_ssh_target_template = native_ssh_target_from_env(sandbox_id="pending")
-            _user, native_ssh_host, _port = split_native_ssh_target(native_ssh_target_template)
             credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
             credential = os.environ.get(credential_name, "")
             if arm.inference.backend.value == "api" and not credential:
@@ -397,14 +396,6 @@ class ExperimentWorker:
             runtime_allow_out.append(
                 f"{control_address}/{32 if control_address.version == 4 else 128}"
             )
-            try:
-                native_address = ipaddress.ip_address(native_ssh_host)
-            except ValueError:
-                native_address = None
-            if native_address is not None:
-                runtime_allow_out.append(
-                    f"{native_address}/{32 if native_address.version == 4 else 128}"
-                )
             # ModelGateway and PolicyControl share the host address and have
             # distinct direct listeners; Kubernetes/NodePort is not involved.
             if self.model_gateway is None:
@@ -524,6 +515,7 @@ class ExperimentWorker:
                     elapsed = self._restore_with_one_victim(
                         arm, session_id, lifecycle, coordinator, events,
                     )
+                    refresh_native_ssh_route()
                     with wait_lock:
                         wait_state["restore_completed_at"] = time.time()
                         wait_state["restore_request_id"] = event.get("request_id")
@@ -664,6 +656,24 @@ class ExperimentWorker:
                           "role": "tool", "service_seconds": tool_create_s,
                           "lifecycle_timing": lifecycle.timings[-1],
                           "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
+            tool_endpoint = None
+            if arm.agent.driver is AgentDriver.OPENCLAW:
+                tool_endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
+                _user, endpoint_host, _port = split_native_ssh_target(
+                    native_ssh_target(tool_endpoint.address)
+                )
+                try:
+                    endpoint_address = ipaddress.ip_address(endpoint_host)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"CubeSandbox returned a non-IP TCP endpoint host: {endpoint_host!r}"
+                    ) from exc
+                runtime_lifecycle.network_allow_out.append(
+                    f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
+                )
+                runtime_lifecycle.network_allow_out = list(
+                    dict.fromkeys(runtime_lifecycle.network_allow_out)
+                )
             timeline["runtime_create_start"] = time.time()
             runtime_create_s = runtime_lifecycle.start()
             timeline["runtime_ready"] = time.time()
@@ -677,6 +687,34 @@ class ExperimentWorker:
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
             )
             executor = CubeCommandExecutor(self.client, lambda: lifecycle.sandbox, cwd=arm.sandbox.workspace)
+
+            def refresh_native_ssh_route() -> None:
+                nonlocal ssh_config
+                if route_state is None or ssh_config is None or lifecycle.sandbox is None:
+                    raise RuntimeError("native SSH route state is not initialized")
+                endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
+                target = native_ssh_target(endpoint.address)
+                if not route_state.update(target):
+                    return
+                _user, host, port = split_native_ssh_target(target)
+                known_host = f"[{host}]:{port} {ssh_credentials.host_public}\n"
+                encoded = base64.b64encode(known_host.encode()).decode()
+                updated = runtime_executor.execute(
+                    f"printf %s {shlex.quote(encoded)} | base64 -d > "
+                    f"/state/openclaw/{session_id}/ssh/known_hosts", 30,
+                )
+                if updated.exit_code:
+                    raise RuntimeError(
+                        "Runtime known-host refresh failed: " + updated.stderr[-1000:]
+                    )
+                ssh_config = replace(ssh_config, target=target)
+                events.write({
+                    "event": "native_ssh_endpoint_refreshed", "session_id": session_id,
+                    "container_port": endpoint.container_port,
+                    "tcp_endpoint": endpoint.address,
+                    "source": "cubesandbox_tcp_endpoint",
+                })
+
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
@@ -735,6 +773,7 @@ class ExperimentWorker:
                             self._restore_with_one_victim(
                                 arm, session_id, lifecycle, coordinator, events,
                             )
+                            refresh_native_ssh_route()
                         admission_wait = coordinator.acquire(
                             session_id, amount, arm.execution.arm_timeout_seconds
                         )
@@ -801,18 +840,21 @@ class ExperimentWorker:
                     session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
                 )
-                tool_host = lifecycle.sandbox.get_host(2222)
                 tool_bridge_result = executor.execute(native_tool_bridge_setup_command(), 30)
                 if tool_bridge_result.exit_code != 0:
                     raise RuntimeError(
                         "Tool setup could not start native SSH bridge: "
                         + tool_bridge_result.stderr[-1000:]
                     )
-                ssh_target = native_ssh_target_from_env(sandbox_id=lifecycle.sandbox_id or "")
+                if tool_endpoint is None:
+                    raise RuntimeError("OpenClaw Tool endpoint was not resolved")
+                ssh_target = native_ssh_target(tool_endpoint.address)
+                route_state = NativeSSHRouteState(ssh_target)
                 events.write({
                     "event": "native_ssh_endpoint_resolved", "session_id": session_id,
-                    "get_host_2222": str(tool_host), "target": ssh_target,
-                    "phase": "setup", "source": "explicit_deployment_endpoint",
+                    "target": ssh_target, "container_port": tool_endpoint.container_port,
+                    "tcp_endpoint": tool_endpoint.address,
+                    "phase": "setup", "source": "cubesandbox_tcp_endpoint",
                 })
                 ssh_config = NativeSSHConfig(
                     target=ssh_target,
@@ -828,6 +870,7 @@ class ExperimentWorker:
                     output_dir=self.output_root,
                     timeout_seconds=arm.execution.arm_timeout_seconds,
                     model_gateway=gateway_session,
+                    ssh_target_provider=route_state.get_target,
                     prediction_manifest=(prediction_provider.manifest
                                          if prediction_provider is not None else None),
                 )
@@ -843,6 +886,7 @@ class ExperimentWorker:
                         self._restore_with_one_victim(
                             arm, session_id, lifecycle, coordinator, events,
                         )
+                        refresh_native_ssh_route()
                     native_artifacts = collect_and_validate_native_tool_artifacts(
                         runtime_executor=runtime_executor, ssh=ssh_config,
                         session_id=session_id, output_dir=self.output_root,

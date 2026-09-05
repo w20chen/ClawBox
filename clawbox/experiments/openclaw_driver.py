@@ -6,9 +6,10 @@ import json
 import os
 import re
 import shlex
+from threading import Event, Lock, Thread
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from clawbox.replay.lifecycle import CommandResult
 
@@ -22,6 +23,27 @@ class NativeSSHConfig:
     identity_private_key: str
     host_public_key: str
     workspace_root: str = "/workspace"
+
+
+class NativeSSHRouteState:
+    """Thread-safe current target shared with a running OpenClaw process."""
+
+    def __init__(self, target: str) -> None:
+        split_native_ssh_target(target)
+        self._target = target
+        self._lock = Lock()
+
+    def get_target(self) -> str:
+        with self._lock:
+            return self._target
+
+    def update(self, target: str) -> bool:
+        split_native_ssh_target(target)
+        with self._lock:
+            if target == self._target:
+                return False
+            self._target = target
+            return True
 
 
 def split_native_ssh_target(target: str, *, default_port: int = 22) -> tuple[str, str, int]:
@@ -146,7 +168,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  ssh: NativeSSHConfig, policy_control: Any,
                  runtime_executor: Any, output_dir: Path, timeout_seconds: int,
                  model_gateway: Any | None = None,
-                 prediction_manifest: dict[str, dict[str, Any]] | None = None) -> dict:
+                 prediction_manifest: dict[str, dict[str, Any]] | None = None,
+                 ssh_target_provider: Callable[[], str] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -277,9 +300,50 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "Use only the sandboxed exec/process/read/write/edit/apply_patch tools for every "
         "workspace operation. The mutable workspace is in the Tool VM.\n\nTask:\n" + prompt
     )
-    result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
-                     "--model", f"vllm/{model}", "--message", instruction,
-                     "--timeout", str(timeout_seconds), "--json"])
+    refresh_stop = Event()
+    refresh_errors: list[BaseException] = []
+    refresh_thread: Thread | None = None
+    if ssh_target_provider is not None:
+        current_target = ssh.target
+
+        def refresh_target() -> None:
+            nonlocal current_target
+            while not refresh_stop.wait(0.2):
+                try:
+                    target = str(ssh_target_provider()).strip()
+                    split_native_ssh_target(target)
+                    if target == current_target:
+                        continue
+                    invoke(
+                        ["config", "patch", "--stdin"],
+                        input_value=json.dumps({
+                            "agents": {"defaults": {"sandbox": {
+                                "ssh": {"target": target},
+                            }}}
+                        }),
+                    )
+                    current_target = target
+                except BaseException as exc:  # propagate after agent exit
+                    refresh_errors.append(exc)
+                    refresh_stop.set()
+                    return
+
+        refresh_thread = Thread(
+            target=refresh_target, name=f"openclaw-ssh-refresh-{session_id}", daemon=True,
+        )
+        refresh_thread.start()
+    try:
+        result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
+                         "--model", f"vllm/{model}", "--message", instruction,
+                         "--timeout", str(timeout_seconds), "--json"])
+    finally:
+        refresh_stop.set()
+        if refresh_thread is not None:
+            refresh_thread.join(timeout=5)
+        if refresh_errors:
+            raise RuntimeError(
+                f"native SSH endpoint refresh failed: {refresh_errors[0]}"
+            ) from refresh_errors[0]
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")

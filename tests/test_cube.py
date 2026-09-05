@@ -11,6 +11,7 @@ from clawbox.cube import (
     CubeCommandExecutor,
     CubeSandboxClient,
     CubeSandboxLifecycle,
+    CubeSandboxTcpEndpoint,
     OwnedSandboxJournal,
     Ownership,
 )
@@ -74,6 +75,14 @@ class _Sandbox:
     def pause(self, wait=True):
         self.state = "paused"
 
+    def get_tcp_endpoint(self, container_port):
+        ordinal = int(self.sandbox_id.rsplit("-", 1)[-1]) if "-" in self.sandbox_id else 1
+        return SimpleNamespace(
+            sandbox_id=self.sandbox_id,
+            container_port=container_port,
+            address=f"192.0.2.{ordinal}:20{ordinal:03d}",
+        )
+
     def kill(self):
         type(self).items.pop(self.sandbox_id, None)
 
@@ -104,6 +113,29 @@ def test_cube_client_adds_only_explicit_narrow_egress_allowlist() -> None:
     assert _Sandbox.create_kwargs["network"] == {
         "allow_out": ["10.244.1.23/32"], "deny_out": ["0.0.0.0/0"],
     }
+
+
+def test_cube_client_consumes_semantic_tcp_endpoint_and_checks_identity() -> None:
+    sandbox = _Sandbox({"sandboxID": "sb-7"})
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    endpoint = client.get_tcp_endpoint(sandbox)
+    assert endpoint == CubeSandboxTcpEndpoint(
+        sandbox_id="sb-7", container_port=2222, address="192.0.2.7:20007",
+    )
+
+    class WrongEndpoint(_Sandbox):
+        def get_tcp_endpoint(self, container_port):
+            return SimpleNamespace(
+                sandbox_id="another-sandbox", container_port=container_port,
+                address="192.0.2.99:20099",
+            )
+
+    try:
+        client.get_tcp_endpoint(WrongEndpoint({"sandboxID": "sb-8"}))
+    except RuntimeError as exc:
+        assert "identity mismatch" in str(exc)
+    else:
+        raise AssertionError("endpoint identity mismatch was not rejected")
 
 
 def test_cube_client_bounds_a_stalled_command_stream() -> None:
