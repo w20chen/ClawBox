@@ -136,6 +136,9 @@ template must expose both `49983` (Cube readiness) and `2222` (SSH), and the
 Runtime/Tool image digests must match the experiment file. Register templates
 with `scripts/register-cube-template.py`; never reuse a failed, stale, or
 pre-kernel template as evidence.
+Pass the target node's exact current replica kernel component with
+`--expected-kernel-version`; registration intentionally has no default because
+a stale default can silently bind a paper arm to the wrong guest kernel.
 
 Run the endpoint and identity gate from a host that can reach CubeAPI,
 CubeProxy, and the policy listener:

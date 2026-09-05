@@ -292,6 +292,17 @@ kernel: sha256-f84e3fa28ae6
 image: http://172.17.0.1:5001/clawbox/tool-cube-arm64@sha256:b175fea...
 ```
 
+That block is historical. The 2026-09-06 live inventory reports current kernel
+component `sha256-a63aa77e9c2d` for both accepted templates. Current immutable
+records are Runtime `tpl-67569219b64f4a80836a1f35` / image
+`sha256:e3b0bb69751c40d48421eaef53dbfd7b8d6b9bb5735eb1aa259b88862d4718ab`
+(ClawBox `346da48`) and Tool `tpl-06b699a92c694c7ba3e6465b` / image
+`sha256:b175fea75b4cd43d5116d93e0c2fc1b745a68d24d84446d5af0b3c72d42a8781`.
+One first registration attempt is a reconciled `FAILED` record because the
+private registry relay was absent; the successful alias was submitted once.
+The temporary relay and isolated build checkout were removed, and the sandbox
+inventory remained empty.
+
 The public port-5001 registry mirror was absent after reboot. Do not expose it
 again. A user-owned `socat` process is currently bound only to private Docker
 bridge address `172.17.0.1:5001` and forwards to the loopback registry at
@@ -398,18 +409,12 @@ host-network setting, or persistent Cube data was changed by either attempt.
 The current host remains the healthy diagnostic Kubernetes profile described
 above.
 
-A further read-only `GET /templates/<id>` probe found a provenance mismatch that
-must be resolved before the next live run: the accepted Tool template
-`tpl-b5cb6f5ee26a41448000b9c2` still references the checked-in Tool digest
-`sha256:b175fea...`, and its create metadata retains the existing
-`2222:49983` exposure. The accepted Runtime ID
-`tpl-39efe4ad90384a1fbea3caff`, however, currently reports image digest
-`sha256:79a492d2...` and `CLAWBOX_REVISION=c4af3d825...`, rather than the
-checked-in Runtime pin `sha256:05cb920d...` and its recorded source revision.
-The API record is `READY`, but that is not proof that it contains the current
-Runtime artifact. Do not run or claim a native c1 gate with that Runtime ID
-until a fresh Runtime template is registered from the checked-in image digest
-or the deployed revision is independently reconciled.
+A former read-only `GET /templates/<id>` probe found that Runtime
+`tpl-39efe4ad90384a1fbea3caff` reported image `sha256:79a492d2...` rather than
+the digest declared by the checked-in matrix. That ID is retired from current
+examples. The mismatch was resolved by building and registering the immutable
+Runtime/Tool records listed above; live runs must use those current IDs and
+must still call `validate_template_image` before creating a VM.
 
 The same inventory shows the Runtime alias used by the older replay matrices,
 `clawbox-runtime-arm64-2g-v3`, resolves to
@@ -496,7 +501,7 @@ NodePort, a ClawBox proxy, or a second allocator.
    endpoint is reachable from Runtime, without adding a ClawBox networking
    layer. Re-run the host/Runtime reachability proof.
 3. Run the Cube-only pair smoke with Runtime template
-   `tpl-e682eb059452495ca0ac4c17` and Tool template
+   `tpl-67569219b64f4a80836a1f35` and Tool template
    `tpl-06b699a92c694c7ba3e6465b`, then verify admitted SSH, Tool pause, demand
    restore, exact execution count, and no policy command/output leakage.
 4. Rerun the corrected replay c40 suites sequentially with the accepted

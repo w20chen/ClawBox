@@ -29,8 +29,10 @@ def main() -> int:
     # code-interpreter/Jupyter service, so 49999 is not the probe endpoint.
     parser.add_argument("--probe-port", type=int, default=49983)
     parser.add_argument("--timeout", type=float, default=1200)
-    parser.add_argument("--expected-kernel-version",
-                        default="sha256-f84e3fa28ae6")
+    parser.add_argument(
+        "--expected-kernel-version", required=True,
+        help="exact Cube guest-kernel component ID reported by the target node",
+    )
     args = parser.parse_args()
 
     templates = read_with_backoff(Template.list, label="Template.list before build")

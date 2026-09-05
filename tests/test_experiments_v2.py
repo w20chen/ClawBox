@@ -209,8 +209,8 @@ def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
     assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
     assert all(item["tool_template"] != "sandbox-code" for item in audits)
     openclaw = by_id["openclaw-cube-replay-c40"]["artifact_provenance"]
-    assert openclaw["runtime"]["template_id"] == "tpl-39efe4ad90384a1fbea3caff"
-    assert openclaw["tool"]["template_id"] == "tpl-b5cb6f5ee26a41448000b9c2"
+    assert openclaw["runtime"]["template_id"] == "tpl-67569219b64f4a80836a1f35"
+    assert openclaw["tool"]["template_id"] == "tpl-06b699a92c694c7ba3e6465b"
     assert openclaw["runtime"]["image_digest"].startswith("sha256:")
     assert openclaw["tool"]["image_digest"].startswith("sha256:")
 

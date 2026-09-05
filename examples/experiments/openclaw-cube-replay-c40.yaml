@@ -20,16 +20,16 @@ inference:
     time_scale: 1.0
     repo_fingerprint: local/openclaw-cube-replay
 runtime:
-  template_id: tpl-39efe4ad90384a1fbea3caff
+  template_id: tpl-67569219b64f4a80836a1f35
   source_image_reference: 127.0.0.1:5000/clawbox/runtime-cube-arm64
-  image_digest: sha256:05cb920d0c79ee381263f2d57663a8c068d889394b6a9ad942af34810931422f
+  image_digest: sha256:e3b0bb69751c40d48421eaef53dbfd7b8d6b9bb5735eb1aa259b88862d4718ab
   architecture: arm64
   vcpu: 2
   memory_mib: 2048
   workspace: /workspace
   allow_internet_access: false
 sandbox:
-  template_id: tpl-b5cb6f5ee26a41448000b9c2
+  template_id: tpl-06b699a92c694c7ba3e6465b
   source_image_reference: 127.0.0.1:5000/clawbox/tool-cube-arm64
   image_digest: sha256:b175fea75b4cd43d5116d93e0c2fc1b745a68d24d84446d5af0b3c72d42a8781
   architecture: arm64

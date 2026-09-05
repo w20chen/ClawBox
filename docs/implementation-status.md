@@ -241,7 +241,8 @@ with zero sandboxes.
 | Managed API gateway | passed; HTTP listener and upstream-compatible forwarding tests |
 | Runtime image build/push | passed; digest `05cb920d...` |
 | Tool image build/push | passed; digest `b175fea7...` |
-| Runtime template record | mismatch; `tpl-39efe4ad90384a1fbea3caff` is `READY` but currently reports `sha256:79a492d2...` / `CLAWBOX_REVISION=c4af3d825...`, not the checked-in `sha256:05cb920d...` pin |
+| Runtime template record | reconciled; `tpl-67569219b64f4a80836a1f35` is `READY` on `sha256-a63aa77e9c2d` and pins Runtime image `sha256:e3b0bb69751c...` built from ClawBox `346da48` |
+| Tool template record | reconciled; `tpl-06b699a92c694c7ba3e6465b` is `READY` on the same guest kernel and pins Tool image `sha256:b175fea75b4c...` |
 | Fresh normal-network Runtime template + kprobe binding | passed; `tpl-3871262f976946fa835f3035` |
 | Fresh normal-network Tool template + kprobe binding | passed; `tpl-bc7533c482984dcc9594efdf` |
 | Host-network diagnostic templates | not reusable after rollback; Runtime `tpl-55ad06ce2a3a4d61b5682ef2`, Tool `tpl-980d2310ac4c4dfcbd077128` |
