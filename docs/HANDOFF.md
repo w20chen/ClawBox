@@ -1,7 +1,7 @@
 # ClawBox continuation handoff
 
-Updated 2026-09-05 after the native-SSH architecture cutover, c40 replay
-matrices, and managed-gateway validation.
+Updated 2026-09-05 after the semantic CubeSandbox TCP-endpoint cutover and
+native-SSH route-gate investigation.
 
 ## Fixed direction
 
@@ -33,6 +33,31 @@ The continuation commits `a4be792`, `a30292a`, and `493206d` add structured
 timing spans, bounded Cube command streams, and managed API-path coverage.
 They are local commits and are not yet pushed to `origin/main`.
 
+The current native-endpoint commits are `50db717` (semantic CubeSandbox
+endpoint client and initial gates), `1b79924` (synchronous per-admission route
+refresh), and `b3a1ee7` (long-lived OpenClaw Agent PID witness). The companion
+CubeSandbox source commit is `64102d9`, which exposes
+`Sandbox.get_tcp_endpoint(container_port)` and keeps CubeMaster/CubeProxy route
+metadata parsing inside CubeSandbox.
+
+OpenClaw 2026.7.1 was inspected in the installed Runtime image. Its native SSH
+backend captures `agents.defaults.sandbox.ssh.target` when the backend is
+constructed and reuses that target for later sessions. The old 200 ms config
+patch/watch approach is therefore not a valid refresh mechanism and has been
+removed. ClawBox now resolves a semantic raw endpoint synchronously during
+`/v1/tool/admit`; the admission returns `sandbox_id`, `epoch`, `host`, and
+`port`, and the existing policy shim injects that route into only the current
+`/usr/bin/ssh` invocation. No allocator, proxy, NodePort, Redis lookup, or
+guest-IP discovery was added.
+
+The route contract is identity-bound: stable `HostKeyAlias` and a unique SSH
+host key identify the Tool, while `host:port` is treated as ephemeral. Worker
+completion requires the recorded SSH subprocess to have been reaped before
+completion can release the Tool reservation or trigger pause. Unit tests cover
+cross-Tool rejection before subprocess launch, endpoint epoch refresh without
+requiring an address change, strict host-key settings, and the OpenClaw Agent
+PID surviving Tool pause/restore.
+
 The Runtime-side `/usr/local/bin/ssh` shim:
 
 1. reads the ClawTune `__CBX_EXEC_1__` envelope;
@@ -51,9 +76,28 @@ sessions finish admission before one slow session.
 
 Host: `weitianc@193.124.7.2`
 
-Cube services were healthy; `cube-node` was 3/3 Running. Existing kernel,
-S3lvol, templates, and results were not modified or deleted. Repository is at
-`de74a26` with pre-existing untracked `results/` and `uv.lock` preserved.
+The semantic CubeSandbox route was proved from CubeMaster/CubeProxy metadata:
+Tool port 2222 already produces a per-sandbox `HostIP:mappedPort` mapping, and
+pause/resume can change the mapped port. The public SDK contract now exposes
+that route without exposing those internal fields. The local route gate then
+found a deployment-topology blocker: the current CubeNode is a normal pod, so
+the semantic endpoint resolves to its pod IP (for example
+`192.168.3.166:mappedPort`). The host can reach that mapping, but a Runtime VM
+cannot; the Runtime receives `Connection refused` even though the Tool bridge
+is listening and the host-side TCP probe succeeds. The isolated Tool guest
+address is not a valid substitute.
+
+During diagnosis, a temporary `hostNetwork=true` CubeNode experiment was
+reverted and its failed replacement/debug pods were removed. The node then
+required a root-initiated reboot to clear stale containerd tasks; recovery must
+be rechecked before any further live test. Existing kernel, S3lvol, templates,
+and results were not intentionally modified or deleted. Repository is at
+`de74a26` on the remote checkout with pre-existing untracked `results/` and
+`uv.lock` preserved.
+
+The updated Cube API image was built and deployed as
+`127.0.0.1:5000/clawbox/cube-api:route-endpoint-b3a1ee7`, registry digest
+`sha256:5556089ac9167040f29f6bac36bfc90043f4cc2d105d43c51dcdd8c3192113de`.
 
 Published images:
 
@@ -106,35 +150,39 @@ server-side credential handling. A real upstream model request was not sent by
 automation: the operator credential is sensitive, and the live native SSH route
 is still unavailable.
 
-The remaining live blocker is concrete. On kunpeng, `get_host(2222)` returns an
-HTTP ingress authority; the Tool VM's per-sandbox raw mapping is reachable from
-the CubeProxy pod but not from the host node or Runtime VM. Guest `hostname -I`
-values are isolated link addresses and must not be used as a native target.
-Supply a deployment-owned raw TCP endpoint, then run the pair smoke and managed
-OpenClaw c1 before claiming the native path or scaling it.
+The remaining live blocker is concrete and is not a ClawBox endpoint-resolution
+bug: this deployment does not route the already-existing CubeSandbox mapping
+from a Runtime VM. `get_host(2222)` remains an HTTP ingress authority and is not
+an OpenSSH endpoint. Do not claim native c1/c4/c8 or scale results until the
+CubeSandbox deployment supplies a deployment-owned, Runtime-reachable raw TCP
+endpoint for the same semantic API. Do not work around this with guest IPs,
+NodePort, a ClawBox proxy, or a second allocator.
 
 ## Highest-priority next steps
 
-1. Provide a deployment-owned raw TCP endpoint for each Tool sandbox and set
-   `CLAWBOX_NATIVE_SSH_TARGET` (or `CLAWBOX_NATIVE_SSH_HOST` plus port). Do not
-   derive it from guest `hostname -I` or `get_host(2222)`.
-2. Run the Cube-only pair smoke with Runtime template
+1. Recheck `kunpeng` after the reboot: `cube-node` must be 3/3 Running, no
+   temporary `node-debugger` pod may remain, and `GET /v2/sandboxes` must be
+   empty.
+2. Correct the CubeSandbox deployment topology so its existing semantic raw
+   endpoint is reachable from Runtime, without adding a ClawBox networking
+   layer. Re-run the host/Runtime reachability proof.
+3. Run the Cube-only pair smoke with Runtime template
    `tpl-39efe4ad90384a1fbea3caff` and Tool template
    `tpl-b5cb6f5ee26a41448000b9c2`, then verify admitted SSH, Tool pause, demand
    restore, exact execution count, and no policy command/output leakage.
-3. Run managed OpenClaw c1 in replay and API modes with the operator-provided
+4. Run managed OpenClaw c1 in replay and API modes with the operator-provided
    credential, export the API response trace, and require replay equivalence
    before any native OpenClaw scale claim.
-4. Join Runtime ClawTune spans, PolicyControl records, Tool bridge JSONL,
+5. Join Runtime ClawTune spans, PolicyControl records, Tool bridge JSONL,
    cgroup artifacts, and eBPF artifacts by `(session_id, execution_id)` and
    retain the new `session_timing` events in the result bundle.
-5. Validate every native file tool, not merely `exec`. Confirm ClawTune applies
+6. Validate every native file tool, not merely `exec`. Confirm ClawTune applies
    its execution envelope to SSH commands produced by
    `process/read/write/edit/apply_patch`; unenveloped Agent operations must fail
    closed while setup/validation remain explicit non-agent phases.
-6. Add the focused admission-versus-delayed-pause race test, then run native
+7. Add the focused admission-versus-delayed-pause race test, then run native
    OpenClaw c4/c8 HOL/cross-routing and leak tests.
-7. Only after those native gates pass, run c20 and finally c40/c60 native
+8. Only after those native gates pass, run c20 and finally c40/c60 native
    OpenClaw policy arms. The replay c40 matrix is already green.
 
 ## Easier cleanup left intentionally
