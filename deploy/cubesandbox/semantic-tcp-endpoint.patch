@@ -2,7 +2,10 @@ diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.
 index 911fbef..18e06d6 100644
 --- a/CubeAPI/src/handlers/sandboxes.rs
 +++ b/CubeAPI/src/handlers/sandboxes.rs
-@@ -165,0 +166,49 @@ pub async fn get_sandbox(
+@@ -163,6 +163,55 @@ pub async fn get_sandbox(
+     Ok(Json(detail))
+ }
+ 
 +// GET /sandboxes/:sandboxID/ports/:containerPort
 +
 +#[utoipa::path(
@@ -52,11 +55,17 @@ index 911fbef..18e06d6 100644
 +    Ok(Json(endpoint))
 +}
 +
+ // ─── POST /sandboxes ──────────────────────────────────────────────────────────
+ 
+ #[utoipa::path(
 diff --git a/CubeAPI/src/models/mod.rs b/CubeAPI/src/models/mod.rs
 index 7dce334..08ea769 100644
 --- a/CubeAPI/src/models/mod.rs
 +++ b/CubeAPI/src/models/mod.rs
-@@ -556,0 +557,9 @@ pub struct ListedSandbox {
+@@ -554,6 +554,15 @@ pub struct ListedSandbox {
+     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+ }
+ 
 +/// Resolved raw TCP endpoint for a requested sandbox container port.
 +#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 +pub struct SandboxTcpEndpoint {
@@ -66,19 +75,37 @@ index 7dce334..08ea769 100644
 +    pub container_port: u16,
 +    pub address: String,
 +}
+ /// Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
+ #[derive(Debug, Serialize, Deserialize, ToSchema)]
+ pub struct SandboxDetail {
 diff --git a/CubeAPI/src/routes.rs b/CubeAPI/src/routes.rs
 index a0ea88f..05c62fc 100644
 --- a/CubeAPI/src/routes.rs
 +++ b/CubeAPI/src/routes.rs
-@@ -91,0 +92 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
+@@ -89,6 +89,7 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
+         .route("/sandboxes", post(sandboxes::create_sandbox))
+         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
+         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
 +        .route("/sandboxes/:sandboxID/ports/:containerPort", get(sandboxes::get_sandbox_port))
+         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
+         .route(
+             "/sandboxes/:sandboxID/logs",
 diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
 index f2c945e..69f306a 100644
 --- a/CubeAPI/src/services/sandboxes.rs
 +++ b/CubeAPI/src/services/sandboxes.rs
-@@ -21,0 +22 @@ use crate::{
+@@ -19,6 +19,7 @@ use crate::{
+     models::{
+         EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
+         SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
 +        SandboxTcpEndpoint,
-@@ -154,0 +156,71 @@ impl SandboxService {
+         SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
+         SandboxVolumeMount,
+     },
+@@ -152,6 +153,77 @@ impl SandboxService {
+         })
+     }
+ 
 +    pub async fn get_sandbox_port_endpoint(
 +        &self,
 +        sandbox_id: &str,
@@ -150,19 +177,37 @@ index f2c945e..69f306a 100644
 +            address: endpoint.to_string(),
 +        })
 +    }
+     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
+         let NewSandbox {
+             template_id,
 diff --git a/sdk/python/cubesandbox/__init__.py b/sdk/python/cubesandbox/__init__.py
 index fdc1fe4..d9d78ab 100644
 --- a/sdk/python/cubesandbox/__init__.py
 +++ b/sdk/python/cubesandbox/__init__.py
-@@ -6,0 +7 @@ from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, Sna
+@@ -4,6 +4,7 @@
+ from .sandbox import Sandbox, NEVER_TIMEOUT
+ from ._config import Config
+ from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo, SandboxInfo, SandboxState
 +from ._models import SandboxTcpEndpoint
-@@ -24,0 +26 @@ __all__ = [
+ from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError, VolumeNotFoundError, FilesystemNotFoundError, PartialWriteError
+ from ._commands import CommandResult
+ from ._pty import Pty, PtyHandle, PtyOutput, PtySize
+@@ -22,6 +23,7 @@ __all__ = [
+     "OutputMessage",
+     "SnapshotInfo",
+     "SandboxInfo",
 +    "SandboxTcpEndpoint",
+     "SandboxState",
+     "CubeSandboxError",
+     "SandboxNotFoundError",
 diff --git a/sdk/python/cubesandbox/_models.py b/sdk/python/cubesandbox/_models.py
 index 0f85fc4..aee071e 100644
 --- a/sdk/python/cubesandbox/_models.py
 +++ b/sdk/python/cubesandbox/_models.py
-@@ -208,0 +209,16 @@ class SnapshotInfo:
+@@ -206,6 +206,22 @@ class SnapshotInfo:
+         )
+ 
+ 
 +@dataclass(frozen=True)
 +class SandboxTcpEndpoint:
 +    """CubeSandbox's semantic raw TCP endpoint for one container port."""
@@ -179,13 +224,25 @@ index 0f85fc4..aee071e 100644
 +            address=str(data.get("address", "")),
 +        )
 +
+ class SandboxState(str, Enum):
+     """E2B-compatible sandbox lifecycle state.
+ 
 diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
 index e397568..b49b1c7 100644
 --- a/sdk/python/cubesandbox/sandbox.py
 +++ b/sdk/python/cubesandbox/sandbox.py
-@@ -16,0 +17 @@ from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxIn
+@@ -14,6 +14,7 @@ from ._config import Config, _auth_headers
+ from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
+ from ._filesystem import Filesystem
+ from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
 +from ._models import SandboxTcpEndpoint
-@@ -168,0 +170,29 @@ class Sandbox:
+ from ._policy import (
+     Rule,
+     _build_network_payload,
+@@ -166,6 +167,35 @@ class Sandbox:
+         e.g. ``49999-<sandboxID>.cube.app``
+         """
+         return f"{port}-{self.sandbox_id}.{self.domain}"
 +    def get_tcp_endpoint(self, container_port: int) -> SandboxTcpEndpoint:
 +        """Resolve CubeSandbox's existing L4 host-port mapping.
 +
@@ -215,3 +272,7 @@ index e397568..b49b1c7 100644
 +            )
 +        return mapping
 +
+ 
+     @property
+     def commands(self) -> "Commands":
+
