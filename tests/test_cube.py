@@ -17,7 +17,7 @@ from clawbox.cube import (
     OwnedSandboxJournal,
     Ownership,
 )
-from clawbox.experiments import ExperimentSpec
+from clawbox.experiments import BASELINES, ExperimentSpec
 from clawbox.experiments.worker import ExperimentWorker
 
 
@@ -325,29 +325,16 @@ def test_worker_runs_every_current_baseline_at_c40_with_complete_spans(
         encoding="utf-8",
     )
     policy_data = [
-        {"name": "lifetime-full", "admission": "lifetime_full",
-         "reclamation": "resident", "eviction": "none", "restore": "none"},
-        {"name": "tool-full", "admission": "tool_full",
-         "reclamation": "resident", "eviction": "none", "restore": "none"},
-        {"name": "tool-static", "admission": "tool_static",
-         "reclamation": "resident", "eviction": "none", "restore": "none"},
-        {"name": "tool-p90", "admission": "tool_p90",
-         "reclamation": "resident", "eviction": "none", "restore": "none"},
-        {"name": "tool-oracle", "admission": "tool_oracle",
-         "reclamation": "resident", "eviction": "none", "restore": "none"},
-        {"name": "tool-static-eager", "admission": "tool_static",
-         "reclamation": "snapshot_pause", "eviction": "eager", "restore": "reactive"},
-        {"name": "tool-p90-eager", "admission": "tool_p90",
-         "reclamation": "snapshot_pause", "eviction": "eager", "restore": "reactive"},
-        {"name": "tool-p90-fixed", "admission": "tool_p90",
-         "reclamation": "snapshot_pause", "eviction": "fixed_delay",
-         "restore": "reactive", "fixed_delay_seconds": 0},
-        {"name": "tool-p90-wait", "admission": "tool_p90",
-         "reclamation": "snapshot_pause", "eviction": "wait_aware_pressure",
-         "restore": "reactive"},
-        {"name": "tool-p90-proactive", "admission": "tool_p90",
-         "reclamation": "snapshot_pause", "eviction": "wait_aware_pressure",
-         "restore": "proactive", "prefetch_lead_seconds": 0},
+        baseline.as_policy().model_dump(mode="json")
+        for baseline in BASELINES.values()
+        if baseline.implementation_status == "implemented"
+    ]
+    assert [item["name"] for item in policy_data] == [
+        "lifetime-full-resident", "tool-full-resident", "tool-static-resident",
+        "tool-p90-resident", "tool-oracle-resident",
+        "tool-static-eager-reactive", "tool-p90-eager-reactive",
+        "tool-p90-fixed-reactive", "tool-p90-wait-reactive",
+        "tool-p90-wait-proactive",
     ]
     spec = ExperimentSpec.model_validate({
         "schema_version": 2, "experiment_id": "baseline-c40-test",
