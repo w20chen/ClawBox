@@ -282,6 +282,37 @@ enabled. No c40 retry was started and no native c1 was claimed after recovery;
 the normal-network c1 identity probe still fails at Runtime-to-mapped-endpoint
 TCP reachability.
 
+### HostPort reachability classification
+
+The latest diagnostic separates CubeProxy's same-host path from CubeSandbox's
+physical-NIC HostPort path. The cluster has exactly one Kubernetes node and the
+node has only one addressed physical interface (`enp193s0f0` at
+`193.124.7.2`), so a second cluster node/private-NIC probe is unavailable.
+
+In normal networking, a fresh Tool returned semantic endpoint
+`192.168.3.190:20002`; direct CubeMaster metadata for that same Tool reported
+`sandbox_ip=172.16.0.2`. CubeProxy command setup succeeded, but a Runtime
+attempt to `executor@172.16.0.2:2222` timed out. Thus CubeProxy's same-host
+control path does not establish Runtime-to-Tool SSH reachability, and no
+same-node SandboxIP-to-HostPort hairpin support is claimed.
+
+With the temporary host-network diagnostic, a Tool returned
+`193.124.7.2:20000`. Cubelet's root-visible map contained
+`ifindex=33, host_port=20000, guest_port=2222`, and `tc` showed the JITed
+`from_world` program attached to `enp193s0f0` (program id 511, the expected
+program tag). A workstation probe to mapped port 20000 failed while the same
+workstation reached node SSH port 22. This proves mapping publication and TC
+attachment, but not a BPF hit: this build exposes no per-filter BPF counter,
+and the aggregate ingress qdisc counter cannot attribute packets to the probe.
+The host-network diagnostic was cleaned up, reverted, and followed by a
+zero-sandbox reboot; the final state is `hostNetwork=false`, CubeNode `3/3`,
+and `GET /v2/sandboxes` equal to `[]`.
+
+The normal endpoint still reports a Kubernetes Pod IP as `HostIP`. That legacy
+deployment topology must not be optimized in ClawBox; the formal native SSH
+path remains pending a deployment-owned semantic endpoint that Runtime can
+actually reach.
+
 A further read-only `GET /templates/<id>` probe found a provenance mismatch that
 must be resolved before the next live run: the accepted Tool template
 `tpl-b5cb6f5ee26a41448000b9c2` still references the checked-in Tool digest

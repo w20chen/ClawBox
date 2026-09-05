@@ -109,6 +109,11 @@ existing `remote_port_mapping` and attached `from_world` BPF program, but host,
 CubeProxy, and external TCP probes all refused the advertised endpoint. The
 experiment was reverted; a root reboot then restored CubeNode to `3/3` with
 `hostNetwork=false` and left the API inventory empty.
+The follow-up normal-network probe also tested the distinct Runtime-to-Tool
+`SandboxIP:2222` path: CubeProxy setup succeeded, but Runtime's direct SSH
+attempt timed out. The single-node inventory has no second physical node or
+private NIC for an independent HostPort test, so no same-node hairpin or BPF
+hit-path success is claimed.
 
 ## Evidence
 
