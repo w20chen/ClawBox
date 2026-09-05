@@ -97,6 +97,17 @@ The latest bounded Kunpeng probe completes SSH authentication but stalls before
 the session channel opens, so the remote host still cannot be used for the
 required read-only recovery or native pair gates.
 
+The semantic CubeSandbox API route is now deployed on Kunpeng from the existing
+CubeSandbox source commit `64102d9`; before that rollout the API returned an
+empty-body 404 even though direct CubeMaster metadata contained the per-sandbox
+`HostIP:mappedPort` route. Fresh current-kernel Runtime/Tool templates were
+registered and the SDK endpoint call now returns the expected raw endpoint.
+The host-side Tool probe succeeds, but Runtime-to-CubeNode-Pod traffic is still
+refused, so this remains a deployment-topology blocker rather than a ClawBox
+endpoint-resolution gap. A temporary CubeNode host-network patch was reverted
+after Cubelet failed its startup probe; a root reboot was invoked with zero
+sandboxes to recover the node before the next gate.
+
 ## Evidence
 
 | Boundary | Status |

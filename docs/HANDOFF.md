@@ -1,7 +1,7 @@
 # ClawBox continuation handoff
 
-Updated 2026-09-05 after the semantic CubeSandbox TCP-endpoint cutover and
-native-SSH route-gate investigation.
+Updated 2026-09-05 after the semantic CubeSandbox TCP-endpoint cutover,
+native-SSH route-gate investigation, and Kunpeng recovery attempt.
 
 ## Fixed direction
 
@@ -215,6 +215,40 @@ bridge address `172.17.0.1:5001` and forwards to the loopback registry at
 127.0.0.1:5000; Cube API pods successfully fetched `/v2/` through it. PID was
 written to `/tmp/clawbox-registry-mirror.pid`; it is not reboot-persistent.
 
+## Resumed Kunpeng audit
+
+After SSH recovery, the old Cube API image was found not to contain the
+semantic `/sandboxes/<id>/ports/<containerPort>` route: it returned an empty
+body 404 even while direct CubeMaster `/cube/sandbox/info` returned the
+existing `host_port` mapping. CubeSandbox source commit `64102d9` already
+contains the route and its SDK implementation, so no ClawBox metadata fallback
+was added. The already-built ARM64 API image
+`127.0.0.1:5000/clawbox/cube-api:route-endpoint-b3a1ee7` was rolled out through
+the node-local registry. A live Tool then returned JSON from the semantic SDK
+path, for example `192.168.3.175:20019` for container port 2222.
+
+The fresh post-reboot templates used for subsequent gates are Runtime
+`tpl-e682eb059452495ca0ac4c17` (digest `sha256:05cb920d...`, current kernel
+binding `sha256-a63aa77e9c2d`) and Tool
+`tpl-06b699a92c694c7ba3e6465b` (digest `sha256:b175fea...`, exposure
+`2222:49983`, same current kernel binding). The Tool bridge listens on guest
+2222 and the host can connect through the semantic mapping, but a Runtime VM
+cannot reach the CubeNode Pod IP even with the explicit Runtime `allow_out`
+rule; it can reach the node's public SSH IP. Thus c1 still fails at the
+Runtime-to-Tool identity check, with no successful native c1/c4/c8 claim.
+
+The route gate now includes a bounded readiness wait after the semantic route
+is resolved (commit `c8debc4`); it does not change the endpoint or retry the
+SSH command. A temporary CubeNode `hostNetwork=true` patch was tested while
+the sandbox inventory was zero. It changed the advertised endpoint to the
+node's public IP but Cubelet failed its startup probe and was killed, so the
+patch was reverted to `hostNetwork=false`/`ClusterFirst`. The reverted Cubelet
+entered CrashLoopBackOff. With no live sandboxes, root `systemctl reboot` was
+then invoked on Kunpeng to clear the known containerd/CubeNode recovery state;
+verify post-boot Cubelet readiness before creating anything. Do not leave the
+hostNetwork experiment enabled and do not work around the topology with a
+proxy, NodePort, Redis lookup, or guest IP.
+
 Two failed template records are expected from discovery and must not be reused:
 
 - initial image URL used unavailable public `193.124.7.2:5001`;
@@ -340,8 +374,8 @@ NodePort, a ClawBox proxy, or a second allocator.
    endpoint is reachable from Runtime, without adding a ClawBox networking
    layer. Re-run the host/Runtime reachability proof.
 3. Run the Cube-only pair smoke with Runtime template
-   `tpl-39efe4ad90384a1fbea3caff` and Tool template
-   `tpl-b5cb6f5ee26a41448000b9c2`, then verify admitted SSH, Tool pause, demand
+   `tpl-e682eb059452495ca0ac4c17` and Tool template
+   `tpl-06b699a92c694c7ba3e6465b`, then verify admitted SSH, Tool pause, demand
    restore, exact execution count, and no policy command/output leakage.
 4. Rerun the corrected replay c40 suites sequentially with the accepted
    instrumented Tool template, bounded pair creation, and a zero-leak audit.
