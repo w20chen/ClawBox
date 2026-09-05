@@ -7,6 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
+from clawbox.experiments.audit import audit_experiments
+from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import EventWriter, ExperimentWorker, build_time_spans
 
@@ -100,6 +102,29 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
     assert json.loads(actions[0].output["tool_calls"][0]["function"]["arguments"])[
         "command"
     ].startswith("printf openclaw-cube-replay-ok")
+
+
+def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
+    paths = list(Path("examples/experiments").glob("*.yaml"))
+    audits = audit_experiments(paths)
+    assert len(audits) == 8
+    by_id = {str(item["experiment_id"]): item for item in audits}
+    for experiment_id in ("decision", "full-system", "reclamation", "spatial"):
+        assert by_id[experiment_id]["concurrency_levels"] == [20, 40, 60]
+    assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
+    assert all(item["tool_template"] != "sandbox-code" for item in audits)
+
+
+def test_baseline_catalog_materializes_only_current_policy_tuples() -> None:
+    assert BASELINES
+    for name, baseline in BASELINES.items():
+        policy = baseline.as_policy()
+        assert policy.name == name
+        assert policy.admission == baseline.admission_policy
+        assert policy.reclamation == baseline.reclamation_policy
+    assert resolve_baseline("p90-elastic-pressure-checkpoint").as_policy().eviction.value == (
+        "wait_aware_pressure"
+    )
 
 
 def test_openclaw_cube_example_uses_native_tool_names() -> None:

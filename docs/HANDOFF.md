@@ -203,6 +203,18 @@ The local full Python suite passes; no new live c40 success claim is made until
 the corrected runs complete and each run is checked for zero remaining
 CubeSandbox resources.
 
+The schema-v2 baseline audit is now independent of the unavailable host. The
+read-only `scripts/audit-experiment-matrices.py` command loads all eight
+checked-in experiment YAMLs, verifies their deterministic arm counts, rejects
+the removed `sandbox-code` Tool template and `cube_shell` OpenClaw prompt
+name, and checks every policy tuple against the immutable baseline catalog.
+The four paper matrices plan c20/c40/c60; the native OpenClaw replay fixture
+plans c40; the remaining c1/c4 files remain intentionally small gates. The
+old baseline names are retained only as explicit schema-v2 compatibility
+aliases. The pre-schema-v2 direct-Firecracker `clawbox replay study` path now
+fails closed with a migration message rather than importing removed workflow
+types or selecting a second backend.
+
 The managed gateway has both replay and API implementations. Replay is covered
 by session-local cursor, retry, delivery, and HOL tests. API mode is covered by
 an upstream-compatible integration test that verifies model forwarding and

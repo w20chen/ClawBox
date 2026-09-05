@@ -1,5 +1,6 @@
 """Canonical schema-v2 experiment primitives."""
 
+from .baselines import BASELINES, Baseline, resolve_baseline
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for
 from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
@@ -8,9 +9,9 @@ from .spec import (
 )
 
 __all__ = [
-    "AdmissionPolicy", "AgentDriver", "EvictionPolicy", "ExperimentArm",
+    "AdmissionPolicy", "AgentDriver", "BASELINES", "Baseline", "EvictionPolicy", "ExperimentArm",
     "ExperimentSpec", "FailureCategory", "InferenceBackend", "PolicySpec",
     "ReclamationPolicy", "RestorePolicy", "ResultEnvelope", "RunStatus",
     "WorkloadCase", "WorkloadSource", "expand_matrix", "failure_category_for",
-    "load_experiment", "load_workload_cases", "spec_digest",
+    "load_experiment", "load_workload_cases", "resolve_baseline", "spec_digest",
 ]

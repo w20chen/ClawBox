@@ -12,11 +12,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from clawbox.experiments import (
-    ExperimentSpec,
-    expand_matrix,
-    validate_workflow,
-)
 from clawbox.experiments.results import (
     ResultEnvelope, RunStatus, failure_category_for, utcnow,
 )
@@ -192,55 +187,19 @@ def _predictive_tool_memory_mib(
     return selected
 
 
-def study_experiment_spec(raw: dict[str, Any], *, base: Path | None = None) -> ExperimentSpec:
-    """Translate the established paper-study JSON into the canonical schema.
+def study_experiment_spec(raw: dict[str, Any], *, base: Path | None = None) -> None:
+    """Reject the pre-schema-v2 direct-Firecracker study format explicitly.
 
-    The old file is intentionally retained: ``memory_policies.snapshot`` is a
-    compatibility spelling for the direct-Firecracker LLM-wait checkpoint arm.
+    The implementation remains in this file for historical source-tree
+    provenance, but the supported runner is schema-v2 ``ExperimentWorker``.
+    Keeping this failure explicit prevents an old config from accidentally
+    selecting a removed backend.
     """
-    source = raw["source"]
-    inference = list(raw.get("inference_backends", ["replay", "api"]))
-    if not set(inference) <= {"replay", "api"}:
-        raise ValueError("unsupported inference backend")
-    baselines = _sizing_baselines(raw)
-    prediction = _p90_prediction(raw, base)
-    resources = raw.get("resources", {})
-    def configured_path(value: object) -> str:
-        return str(_path(base, value)) if base is not None else str(value)
-
-    return ExperimentSpec.model_validate({
-        "workload": {"source": "recorded_trace", "input": configured_path(source["trace"]),
-                     "repetitions": int(raw.get("repetitions", 1))},
-        "agent": {"driver": "openclaw"},
-        "inference": {"backends": inference, "configuration": {
-            "replay": {"time_scale": raw.get("replay", {}).get("time_scale", 1.0)},
-            "api": {"base_url": raw.get("api", {}).get("base_url"),
-                    "model": raw.get("api", {}).get("model"),
-                    "key_env": raw.get("api", {}).get("key_env", "OPENAI_API_KEY")},
-        }},
-        "sandbox": {
-            "backend": "direct_firecracker", "tool_transport": "ssh",
-            "materialization": {"runtime_rootfs": configured_path(source["runtime_rootfs"]),
-                                "tool_rootfs": configured_path(source["tool_rootfs"]),
-                                "prompt": configured_path(source["prompt"]),
-                                "network_cidr": raw.get(
-                                    "network_cidr", "172.30.0.0/16"
-                                ),
-                                "exposed_model": raw.get("exposed_model", "experiment-model")},
-        },
-        "scheduling": {"baselines": baselines},
-        "execution": {"concurrency": int(raw.get("sessions", 1)),
-                      "timeout_seconds": int(raw.get("timeout_s", 900)),
-                      "command_timeout_seconds": 300},
-        "resources": {"runtime_memory_mib": resources.get("runtime_memory_mib", 2048),
-                      "tool_memory_mib": resources.get("tool_memory_mib", 4096),
-                      "kb_generation": prediction.generation if prediction else None,
-                      "cpu_first": resources.get("cpu_first", 0),
-                      "numa_node": resources.get("numa_node", 0)},
-        "validation": {"command": raw.get("validation_command",
-                       "cd /testbed && git diff --binary --no-ext-diff HEAD")},
-        "output": {"directory": configured_path(raw["output"])},
-    })
+    del raw, base
+    raise ValueError(
+        "legacy direct-Firecracker study configs are unsupported; use a "
+        "schema-v2 examples/experiments/*.yaml with the clawbox experiment CLI"
+    )
 
 
 _PAPER_ADMISSION_POLICIES = {

@@ -43,6 +43,13 @@ c1 gates remain pending because this Cube deployment does not expose the
 per-sandbox mapped SSH port to Runtime; no c20+ paper claim is made for the
 native OpenClaw path.
 
+The checked-in baseline matrix audit is also green: all eight schema-v2
+experiment files load and plan with the expected c1/c4/c20/c40/c60 levels,
+all policy tuples resolve through the immutable current catalog, and no
+removed Tool template or `cube_shell` OpenClaw prompt is present. The old
+direct-Firecracker study compatibility entry point is now explicit and
+fail-closed; it cannot silently select a removed workflow schema.
+
 ## Evidence
 
 | Boundary | Status |
