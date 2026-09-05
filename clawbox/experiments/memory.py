@@ -120,3 +120,86 @@ class NodeMemorySampler:
         except OSError:
             return 0
         return usage.total - usage.free
+
+
+def sandbox_process_rss_bytes(sandbox_id: str, *,
+                              proc_root: Path = Path("/proc")) -> int | None:
+    """Sum host RSS for Cube processes whose argv contains ``sandbox_id``."""
+    total = 0
+    matched = False
+    try:
+        entries = tuple(proc_root.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes()
+            if sandbox_id.encode() not in command:
+                continue
+            for line in (entry / "status").read_text(encoding="ascii").splitlines():
+                if line.startswith("VmRSS:"):
+                    total += int(line.split()[1]) * 1024
+                    matched = True
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+            continue
+    return total if matched else None
+
+
+class SandboxRSSSampler:
+    """Execution-window host RSS sampler for one CubeSandbox microVM."""
+
+    def __init__(self, sandbox_id: str, *, proc_root: Path = Path("/proc"),
+                 interval_s: float = 0.05) -> None:
+        self.sandbox_id = sandbox_id
+        self.proc_root = proc_root
+        self.interval_s = interval_s
+        self._stop = Event()
+        self._lock = Lock()
+        self._samples: list[int] = []
+        self._thread: Thread | None = None
+        self.baseline_bytes = sandbox_process_rss_bytes(
+            sandbox_id, proc_root=proc_root,
+        )
+
+    def start(self) -> None:
+        self._sample()
+        self._thread = Thread(
+            target=self._run, name=f"sandbox-rss-{self.sandbox_id[:8]}", daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> dict[str, int | str | None]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        self._sample()
+        with self._lock:
+            samples = tuple(self._samples)
+        peak = max(samples) if samples else self.baseline_bytes
+        increment = (
+            max(0, peak - self.baseline_bytes)
+            if peak is not None and self.baseline_bytes is not None else None
+        )
+        return {
+            "metric": "host_proc_vm_rss",
+            "host_vm_rss_baseline_bytes": self.baseline_bytes,
+            "host_vm_rss_peak_bytes": peak,
+            "actual_host_execution_increment_bytes": increment,
+            "sample_count": len(samples),
+            "validity": "valid" if increment is not None else "unavailable",
+        }
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self._sample()
+
+    def _sample(self) -> None:
+        value = sandbox_process_rss_bytes(
+            self.sandbox_id, proc_root=self.proc_root,
+        )
+        if value is not None:
+            with self._lock:
+                self._samples.append(value)

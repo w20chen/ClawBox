@@ -26,6 +26,49 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _quantile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * q
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def _host_increment_calibration(paths: list[Path]) -> dict[str, Any]:
+    ratios: list[float] = []
+    source = hashlib.sha256()
+    for index, path in enumerate(paths):
+        raw = path.read_bytes()
+        source.update(f"calibration-{index}/{path.name}".encode() + b"\0" + raw + b"\0")
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            rows = (payload.get("performance") or {}).get(
+                "tool_execution_observations", []
+            )
+        else:
+            rows = payload
+        for row in rows if isinstance(rows, list) else []:
+            guest = row.get("actual_measured_memory_mib")
+            host = row.get("actual_host_execution_increment_mib")
+            if guest is None or host is None or float(guest) <= 0 or float(host) < 0:
+                continue
+            ratios.append(float(host) / float(guest))
+    if len(ratios) < 5:
+        raise ValueError(
+            f"only {len(ratios)} valid guest/host calibration pairs; need at least 5"
+        )
+    return {
+        "target": "host_vm_rss_execution_increment",
+        "source_sha256": source.hexdigest(),
+        "source_paths": [str(path.resolve()) for path in paths],
+        "pair_count": len(ratios),
+        "ratio_p50": _quantile(ratios, 0.5),
+        "ratio_p90": _quantile(ratios, 0.9),
+        "ratio_min": min(ratios),
+        "ratio_max": max(ratios),
+    }
+
+
 def _evidence_paths(trace_dir: Path, bridge: Path) -> list[Path]:
     paths = {bridge, *trace_dir.glob("*.jsonl"), *trace_dir.glob("cgroup-resource-*.json")}
     tool_resource = trace_dir / "tool-resource"
@@ -78,6 +121,7 @@ def _per_tool_memory_plan(
     idle_safety_margin_fraction: float,
     command_headroom_fraction: float,
     size_classes_mib: list[int],
+    host_calibration: dict[str, Any],
 ) -> dict[str, Any]:
     if idle_tool_vm_rss_mib <= 0:
         raise ValueError("idle Tool-VM RSS must be positive")
@@ -106,11 +150,16 @@ def _per_tool_memory_plan(
             if prediction.conditional_p90 is None:
                 raise ValueError("per-tool memory prediction is unavailable")
             command_p90_mib = float(prediction.conditional_p90)
+            host_ratio_p90 = float(host_calibration["ratio_p90"])
             incremental_p90_kib = math.ceil(
                 command_p90_mib * (1 + command_headroom_fraction) * 1024.0
             )
+            host_increment_p90_kib = math.ceil(
+                command_p90_mib * host_ratio_p90
+                * (1 + command_headroom_fraction) * 1024.0
+            )
             reservation_kib = math.ceil(
-                idle_floor_mib * 1024.0 + incremental_p90_kib
+                idle_floor_mib * 1024.0 + host_increment_p90_kib
             )
             reservation_mib = reservation_kib / 1024.0
             reservations.append({
@@ -120,8 +169,15 @@ def _per_tool_memory_plan(
                     if call["command"] is not None else None
                 ),
                 "predicted_command_memory_p90_mib": command_p90_mib,
+                "predicted_host_execution_increment_mib": (
+                    command_p90_mib * host_ratio_p90
+                ),
+                "host_mapping_source": host_calibration["source_sha256"],
+                "host_mapping_ratio_p90": host_ratio_p90,
                 "incremental_p90_kib": incremental_p90_kib,
                 "incremental_p90_mib": incremental_p90_kib / 1024.0,
+                "host_increment_p90_kib": host_increment_p90_kib,
+                "host_increment_p90_mib": host_increment_p90_kib / 1024.0,
                 "reservation_kib": reservation_kib,
                 "reservation_mib": reservation_mib,
                 "scope": prediction.scope,
@@ -267,6 +323,10 @@ def main() -> None:
     parser.add_argument("--idle-safety-margin-fraction", type=float, default=0.25)
     parser.add_argument("--command-headroom-fraction", type=float, default=0.25)
     parser.add_argument("--tool-memory-size-class-mib", type=int, action="append", default=[])
+    parser.add_argument(
+        "--host-calibration-observations", type=Path, action="append", default=[],
+        help="recording result JSON containing guest and host execution increments",
+    )
     parser.add_argument(
         "--oracle-run", action="append", default=[], metavar="WORKLOAD=PATH",
         help="held-out measured run for prediction-error/oracle analysis only",
@@ -432,6 +492,14 @@ def main() -> None:
     if args.idle_tool_vm_rss_mib is not None:
         if not args.evaluation_trace:
             parser.error("per-tool memory planning requires --evaluation-trace")
+        if not args.host_calibration_observations:
+            parser.error(
+                "per-tool memory planning requires --host-calibration-observations"
+            )
+        host_calibration = _host_increment_calibration(
+            args.host_calibration_observations
+        )
+        payload["host_increment_calibration"] = host_calibration
         trace_paths = {
             configured.partition("=")[0]: Path(configured.partition("=")[2])
             for configured in args.evaluation_trace
@@ -446,6 +514,7 @@ def main() -> None:
             idle_safety_margin_fraction=args.idle_safety_margin_fraction,
             command_headroom_fraction=args.command_headroom_fraction,
             size_classes_mib=args.tool_memory_size_class_mib,
+            host_calibration=host_calibration,
         )
         oracle_runs: dict[str, Path] = {}
         for configured in args.oracle_run:

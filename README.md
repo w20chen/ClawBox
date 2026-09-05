@@ -239,6 +239,16 @@ checkpoint/restore; those values are not Tool-process RSS. The frozen KB hash,
 prediction fallback/error summaries, evidence class, configured trace hash,
 and memory-safety interventions are retained with each arm.
 
+Recording runs also sample the host RSS of the specific Cube microVM shim over
+each admitted SSH execution. Build a formal `tool_p90` artifact only from a
+separate recording set: `scripts/train-p90-from-runs.py` consumes ClawTune's
+guest cgroup/eBPF observations plus `--host-calibration-observations` result
+JSON files. It records the empirical P90 host/guest increment ratio and emits
+both the guest command P90 and the calibrated host execution increment used by
+admission. An uncalibrated guest-memory-only artifact fails closed. Freeze and
+hash that output, then reuse the exact file in every compared arm; held-out
+observations remain a shadow/reporting stream and never mutate it.
+
 ## Local verification
 
 ```bash

@@ -31,7 +31,7 @@ from clawbox.cube import (
 )
 from clawbox.replay.trace import ReplayAction, load_trace
 
-from .memory import NodeMemorySampler
+from .memory import NodeMemorySampler, SandboxRSSSampler
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
@@ -262,15 +262,24 @@ def enrich_tool_execution_observations(
             "telemetry_validity": "valid",
             "telemetry_eligible_for_kb": True,
         })
-        predicted = row.get("predicted_incremental_memory_mib")
-        if predicted is not None:
-            predicted_mib = float(predicted)
+        predicted_guest = row.get("predicted_guest_memory_p90_mib")
+        if predicted_guest is not None:
+            predicted_mib = float(predicted_guest)
             signed_error = predicted_mib - actual_mib
             row.update({
                 "prediction_error_mib": signed_error,
                 "prediction_absolute_error_mib": abs(signed_error),
                 "prediction_underestimate_mib": max(0.0, -signed_error),
                 "prediction_covered_actual": predicted_mib >= actual_mib,
+            })
+        predicted_host = row.get("predicted_incremental_memory_mib")
+        actual_host = row.get("actual_host_execution_increment_mib")
+        if predicted_host is not None and actual_host is not None:
+            host_error = float(predicted_host) - float(actual_host)
+            row.update({
+                "host_increment_prediction_error_mib": host_error,
+                "host_increment_prediction_absolute_error_mib": abs(host_error),
+                "host_increment_prediction_covered_actual": host_error >= 0,
             })
         enriched.append(row)
     records[:] = enriched
@@ -301,6 +310,45 @@ def summarize_tool_execution_observations(
         item for item in prediction_records
         if item.get("fallback_level") != "exact_command"
     ]
+    covered = [
+        bool(item["prediction_covered_actual"])
+        for item in records if item.get("prediction_covered_actual") is not None
+    ]
+    relative_errors = [
+        float(item["prediction_absolute_error_mib"])
+        / float(item["actual_measured_memory_mib"])
+        for item in records
+        if item.get("prediction_absolute_error_mib") is not None
+        and float(item.get("actual_measured_memory_mib") or 0) > 0
+    ]
+    over_reservation_ratios = [
+        float(item["admitted_reservation_mib"])
+        / float(item["actual_host_execution_increment_mib"])
+        for item in records
+        if item.get("admitted_reservation_mib") is not None
+        and float(item.get("actual_host_execution_increment_mib") or 0) > 0
+    ]
+    pinball_losses = []
+    for item in records:
+        predicted = item.get("predicted_guest_memory_p90_mib")
+        actual = item.get("actual_measured_memory_mib")
+        if predicted is None or actual is None:
+            continue
+        residual = float(actual) - float(predicted)
+        pinball_losses.append(0.9 * residual if residual >= 0 else -0.1 * residual)
+    host_coverage = [
+        bool(item["host_increment_prediction_covered_actual"])
+        for item in records
+        if item.get("host_increment_prediction_covered_actual") is not None
+    ]
+
+    def distribution(field: str) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for item in records:
+            value = str(item.get(field) or "unknown")
+            result[value] = result.get(value, 0) + 1
+        return result
+
     return {
         "tool_execution_observation_count": len(records),
         "telemetry_valid_count": sum(
@@ -319,6 +367,31 @@ def summarize_tool_execution_observations(
         "prediction_error_p90_mib": percentile(errors, 0.90),
         "prediction_absolute_error_p90_mib": percentile(absolute_errors, 0.90),
         "prediction_underestimate_p90_mib": percentile(underestimates, 0.90),
+        "prediction_coverage_fraction": (
+            sum(covered) / len(covered) if covered else None
+        ),
+        "prediction_exceedance_rate": (
+            1.0 - sum(covered) / len(covered) if covered else None
+        ),
+        "prediction_relative_absolute_error_mean": (
+            statistics.fmean(relative_errors) if relative_errors else None
+        ),
+        "reservation_over_actual_mean_ratio": (
+            statistics.fmean(over_reservation_ratios)
+            if over_reservation_ratios else None
+        ),
+        "prediction_p90_pinball_loss_mean_mib": (
+            statistics.fmean(pinball_losses) if pinball_losses else None
+        ),
+        "host_increment_prediction_coverage_fraction": (
+            sum(host_coverage) / len(host_coverage) if host_coverage else None
+        ),
+        "host_increment_prediction_exceedance_rate": (
+            1.0 - sum(host_coverage) / len(host_coverage)
+            if host_coverage else None
+        ),
+        "prediction_source_distribution": distribution("prediction_source"),
+        "prediction_fallback_level_distribution": distribution("fallback_level"),
     }
 
 
@@ -1215,6 +1288,7 @@ class ExperimentWorker:
             if arm.agent.driver is AgentDriver.OPENCLAW:
                 active_reservations: dict[str, int] = {}
                 admitted_routes: dict[str, NativeSSHRoute] = {}
+                host_rss_samplers: dict[str, SandboxRSSSampler] = {}
                 reservation_lock = Lock()
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
@@ -1248,9 +1322,12 @@ class ExperimentWorker:
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
                             route = resolve_native_ssh_route("admit")
+                            host_sampler = SandboxRSSSampler(route.sandbox_id)
+                            host_sampler.start()
                             with reservation_lock:
                                 active_reservations[execution_id] = amount
                                 admitted_routes[execution_id] = route
+                                host_rss_samplers[execution_id] = host_sampler
                         except Exception:
                             if reservation_acquired:
                                 coordinator.release(session_id, amount)
@@ -1328,7 +1405,8 @@ class ExperimentWorker:
                     with wait_lock, reservation_lock:
                         amount = active_reservations.get(execution_id)
                         admitted_route = admitted_routes.get(execution_id)
-                        if amount is None or admitted_route is None:
+                        host_sampler = host_rss_samplers.get(execution_id)
+                        if amount is None or admitted_route is None or host_sampler is None:
                             raise RuntimeError(f"completion has no active admission for {execution_id}")
                         completion_route = (
                             request.get("endpoint_sandbox_id"),
@@ -1347,6 +1425,19 @@ class ExperimentWorker:
                             )
                         active_reservations.pop(execution_id)
                         admitted_routes.pop(execution_id)
+                        host_rss_samplers.pop(execution_id)
+                        host_observation = host_sampler.stop()
+                        for prediction_record in prediction_records:
+                            if prediction_record.get("execution_id") == execution_id:
+                                prediction_record.update(host_observation)
+                                increment = host_observation.get(
+                                    "actual_host_execution_increment_bytes"
+                                )
+                                prediction_record["actual_host_execution_increment_mib"] = (
+                                    float(increment) / (1024.0 * 1024.0)
+                                    if isinstance(increment, int) else None
+                                )
+                                break
                         coordinator.release(session_id, amount)
                         coordinator.set_tool_active(session_id, bool(active_reservations))
                         _record_time_span(
@@ -1651,6 +1742,8 @@ class ExperimentWorker:
                 self.model_gateway.unregister(gateway_session.token, timeout=30)
             if policy_session is not None:
                 policy_drained = policy_session.close(timeout=30)
+            for host_sampler in tuple(locals().get("host_rss_samplers", {}).values()):
+                host_sampler.stop()
             try:
                 tool_destroy_s = lifecycle.close()
                 events.write({

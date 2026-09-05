@@ -189,9 +189,11 @@ def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
         "canonical_prediction_key": "printf ok",
         "prediction_source": "runtime_clawtune_immutable_kb",
         "fallback_level": "exact_command",
-        "predicted_incremental_memory_mib": 3.0,
-        "admitted_reservation_mib": 3,
+        "predicted_guest_memory_p90_mib": 3.0,
+        "predicted_incremental_memory_mib": 4.0,
+        "admitted_reservation_mib": 4,
         "admission_blocked_seconds": 0.25,
+        "actual_host_execution_increment_mib": 3.0,
     }]
     _bridge, cgroup, _clause = _artifacts(
         "exec-1", hashlib.sha256(b"printf ok").hexdigest()
@@ -208,6 +210,17 @@ def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
     summary = summarize_tool_execution_observations(enriched)
     assert summary["prediction_fallback_rate"] == 0.0
     assert summary["prediction_error_p90_mib"] == 1.0
+    assert summary["prediction_coverage_fraction"] == 1.0
+    assert summary["prediction_exceedance_rate"] == 0.0
+    assert summary["prediction_relative_absolute_error_mean"] == 0.5
+    assert summary["reservation_over_actual_mean_ratio"] == pytest.approx(4 / 3)
+    assert summary["prediction_p90_pinball_loss_mean_mib"] == pytest.approx(0.1)
+    assert summary["host_increment_prediction_coverage_fraction"] == 1.0
+    assert summary["host_increment_prediction_exceedance_rate"] == 0.0
+    assert summary["prediction_source_distribution"] == {
+        "runtime_clawtune_immutable_kb": 1,
+    }
+    assert summary["prediction_fallback_level_distribution"] == {"exact_command": 1}
     assert summary["telemetry_invalid_count"] == 0
 
 

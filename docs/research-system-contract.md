@@ -65,7 +65,7 @@ every arm. Model-wait decisions follow the same rule: wait-aware/proactive
 formal arms must declare a request-time estimate and its source. The held-out
 recorded response latency is used only to make replay's clock advance and may
 not be passed into the policy decision.
-all arms. Held-out replay does not update its own predictor unless the arm is
+Held-out replay does not update its own predictor unless the arm is
 explicitly an online-learning experiment. Prediction error and fallback rate
 are first-class results.
 
@@ -92,6 +92,15 @@ Guest execution memory and host physical VM memory are different quantities.
 Guest cgroup/eBPF measurements train Tool predictions. Host process/cgroup and
 `MemAvailable` measurements establish density, memory-time, restore cost, and
 actual snapshot reclamation.
+
+The admission target is explicit. A recording run samples each Tool VM shim's
+host RSS during the exact SSH execution window and pairs its host increment
+with ClawTune's guest cgroup peak. A separate calibration set produces a P90
+host/guest increment ratio. The frozen artifact maps each ClawTune command P90
+to `predicted_host_execution_increment`; an uncalibrated guest-only prediction
+is rejected. The shared ledger charges observed host use, this incremental
+execution reservation, any pending VM restore/materialization footprint, and
+configured headroom before materialization or SSH begins.
 
 ## Evaluation contract
 

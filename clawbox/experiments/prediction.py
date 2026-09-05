@@ -69,13 +69,20 @@ class CommandPredictionProvider:
 
     @staticmethod
     def _metadata(item: dict[str, Any], command: str, digest: str) -> dict[str, Any]:
-        value = item.get("predicted_command_memory_p90_mib")
-        if value is None:
-            value = item.get("incremental_p90_mib")
-        if value is None and item.get("incremental_p90_kib") is not None:
-            value = float(item["incremental_p90_kib"]) / 1024.0
-        if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+        guest_value = item.get("predicted_command_memory_p90_mib")
+        if guest_value is None:
+            guest_value = item.get("incremental_p90_mib")
+        if guest_value is None and item.get("incremental_p90_kib") is not None:
+            guest_value = float(item["incremental_p90_kib"]) / 1024.0
+        if guest_value is None or not math.isfinite(float(guest_value)) \
+                or float(guest_value) <= 0:
             raise ValueError(f"P90 entry for {digest} has no positive command prediction")
+        host_value = item.get("predicted_host_execution_increment_mib")
+        if host_value is None or not math.isfinite(float(host_value)) \
+                or float(host_value) <= 0:
+            raise ValueError(
+                f"P90 entry for {digest} has no calibrated positive host increment"
+            )
         normalized = " ".join(shell_command_prefix_tokens(command))
         return {
             "raw_command_sha256": digest,
@@ -83,7 +90,11 @@ class CommandPredictionProvider:
             "prediction_source": "runtime_clawtune_immutable_kb",
             "fallback_level": item.get("key_kind") or item.get("scope") or "unknown",
             "fallback_path": list(item.get("fallback_path") or []),
-            "predicted_incremental_memory_mib": float(value),
+            "predicted_guest_memory_p90_mib": float(guest_value),
+            "predicted_incremental_memory_mib": float(host_value),
+            "admission_prediction_target": "host_vm_rss_execution_increment",
+            "host_mapping_source": item.get("host_mapping_source"),
+            "host_mapping_ratio_p90": item.get("host_mapping_ratio_p90"),
             "evidence_count": int(item.get("evidence_count") or 0),
             "kb_generation": item.get("kb_generation") or item.get("generation"),
         }

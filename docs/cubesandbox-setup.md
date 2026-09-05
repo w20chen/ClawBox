@@ -238,8 +238,8 @@ created Runtime/Tool pair while keeping strict host-key and Tool-marker checks:
 
 ```bash
 python scripts/probe-cubesandbox-network-topology.py \
-  --runtime-template tpl-67569219b64f4a80836a1f35 \
-  --tool-template tpl-06b699a92c694c7ba3e6465b \
+  --runtime-template tpl-437392a8c57b48ccb32ef2ee \
+  --tool-template tpl-4a67524e1fcd41859905c77b \
   --node hostname-txyuq.foreman.pxe \
   --cube-master-url http://10.103.189.111 \
   --physical-host 193.124.7.2 \

@@ -17,6 +17,9 @@ def test_prediction_provider_uses_exact_runtime_command_metadata_and_freezes_has
             "command": command,
             "command_sha256": __import__("hashlib").sha256(command.encode()).hexdigest(),
             "predicted_command_memory_p90_mib": 42.5,
+            "predicted_host_execution_increment_mib": 51.0,
+            "host_mapping_source": "recording-set-a",
+            "host_mapping_ratio_p90": 1.2,
             "key_kind": "exact_command",
             "fallback_path": ["repo:exact_command"],
             "evidence_count": 12,
@@ -26,7 +29,9 @@ def test_prediction_provider_uses_exact_runtime_command_metadata_and_freezes_has
     metadata = provider.manifest[provider.manifest.keys().__iter__().__next__()]
     resolved = provider.resolve(command, metadata)
     assert resolved["canonical_prediction_key"] == "pytest -q tests/test_one.py"
-    assert resolved["predicted_incremental_memory_mib"] == 42.5
+    assert resolved["predicted_guest_memory_p90_mib"] == 42.5
+    assert resolved["predicted_incremental_memory_mib"] == 51.0
+    assert resolved["admission_prediction_target"] == "host_vm_rss_execution_increment"
     assert resolved["fallback_level"] == "exact_command"
     assert provider.provenance()["sha256"] == __import__("hashlib").sha256(path.read_bytes()).hexdigest()
 
@@ -36,9 +41,19 @@ def test_prediction_provider_fails_closed_for_missing_or_cross_command_metadata(
     path = tmp_path / "p90.json"
     path.write_text(json.dumps({"tool_invocations": [{
         "command": command, "predicted_command_memory_p90_mib": 1,
+        "predicted_host_execution_increment_mib": 1,
     }]}), encoding="utf-8")
     provider = CommandPredictionProvider(path)
     with pytest.raises(PredictionUnavailable):
         provider.resolve("false", provider.manifest[next(iter(provider.manifest))])
     with pytest.raises(PredictionUnavailable):
         provider.resolve(command, None)
+
+
+def test_prediction_provider_rejects_uncalibrated_guest_memory(tmp_path: Path) -> None:
+    path = tmp_path / "uncalibrated.json"
+    path.write_text(json.dumps({"tool_invocations": [{
+        "command": "true", "predicted_command_memory_p90_mib": 1,
+    }]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="calibrated positive host increment"):
+        CommandPredictionProvider(path)
