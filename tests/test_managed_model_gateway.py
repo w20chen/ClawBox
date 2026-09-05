@@ -5,6 +5,7 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,68 @@ def test_managed_gateway_keeps_replay_cursors_and_delivery_state_session_local(t
         gateway.unregister(first.token, timeout=1)
         gateway.unregister(second.token, timeout=1)
         assert gateway.session_count == 0
+
+
+def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(
+    tmp_path: Path,
+) -> None:
+    upstream_requests: list[tuple[dict, str]] = []
+
+    class UpstreamHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            upstream_requests.append((payload, self.headers.get("Authorization", "")))
+            body = json.dumps({
+                "id": "chatcmpl-managed-api",
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant", "content": "managed-api-ok",
+                }, "finish_reason": "stop"}],
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    gateway = ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    )
+    try:
+        with gateway:
+            session = gateway.register(
+                session_id="api-session", store_path=tmp_path / "api-store.json",
+                mode="api", trace=None, time_scale=0,
+                upstream_base_url=f"http://127.0.0.1:{upstream.server_port}/v1",
+                upstream_api_key="upstream-secret",
+                upstream_model="server-model",
+            )
+            response = post(gateway.url, session.token, {
+                "model": "guest-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+            assert response["choices"][0]["message"]["content"] == "managed-api-ok"
+            assert session.token != "upstream-secret"
+            assert session.records()[0]["delivered"] is True
+            assert session.replay_completeness()["complete"] is True
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=2)
+
+    assert upstream_requests == [(
+        {"model": "server-model", "messages": [
+            {"role": "user", "content": "hello"},
+        ]},
+        "Bearer upstream-secret",
+    )]
 
 
 def test_managed_gateway_retries_do_not_create_logical_steps(tmp_path: Path) -> None:

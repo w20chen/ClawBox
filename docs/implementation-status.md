@@ -102,7 +102,7 @@ The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
 | Pinned Template provenance gate | passed; mismatched READY image is rejected before VM creation |
 | Structured agent/sandbox spans | passed; `session_timing` JSONL, lifecycle failure records, and ordered event timestamps |
 | Managed replay gateway | passed; session-local cursor/delivery/HOL tests |
-| Managed API gateway | passed; upstream-compatible forwarding contract test |
+| Managed API gateway | passed; HTTP listener and upstream-compatible forwarding tests |
 | Runtime image build/push | passed; digest `05cb920d...` |
 | Tool image build/push | passed; digest `b175fea7...` |
 | Runtime template record | mismatch; `tpl-39efe4ad90384a1fbea3caff` is `READY` but currently reports `sha256:79a492d2...` / `CLAWBOX_REVISION=c4af3d825...`, not the checked-in `sha256:05cb920d...` pin |

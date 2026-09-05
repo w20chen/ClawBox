@@ -310,10 +310,10 @@ longer emits the retired `cube_shell` label.
 
 The managed gateway has both replay and API implementations. Replay is covered
 by session-local cursor, retry, delivery, and HOL tests. API mode is covered by
-an upstream-compatible integration test that verifies model forwarding and
-server-side credential handling. A real upstream model request was not sent by
-automation: the operator credential is sensitive, and the live native SSH route
-is still unavailable.
+both the lower-level forwarding test and an HTTP-listener integration test that
+verifies model forwarding and server-side credential handling. A real upstream
+model request was not sent by automation: the operator credential is sensitive,
+and the live native SSH route is still unavailable.
 
 The remaining live blocker is concrete and is not a ClawBox endpoint-resolution
 bug: this deployment does not route the already-existing CubeSandbox mapping
