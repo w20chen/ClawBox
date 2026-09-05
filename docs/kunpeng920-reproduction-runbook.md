@@ -8,6 +8,15 @@ guest kernel.
 
 ## 1. Prepare the host
 
+Start from the checked-in operator input instead of reconstructing environment
+variables from shell history:
+
+```bash
+cp deploy/kunpeng-research.env.example ~/clawbox-kunpeng.env
+$EDITOR ~/clawbox-kunpeng.env
+. ~/clawbox-kunpeng.env
+```
+
 Use an ARM64 Kunpeng 920B host with Kubernetes, containerd/CRI v1, Helm,
 `/dev/kvm`, cgroup v2, and at least 210 GiB free under `/data`. The host must
 have a reflink-capable XFS filesystem at `/data/cubelet`, or the installer can
@@ -45,6 +54,14 @@ export CUBE_REDIS_PASSWORD='...'
 bash scripts/install-cubesandbox-kunpeng920.sh check
 bash scripts/install-cubesandbox-kunpeng920.sh install
 ```
+
+The installer uses a private cache checkout, applies
+`deploy/cubesandbox/semantic-tcp-endpoint-v0.7.0.patch`, builds the custom
+CubeAPI, and selects it through Helm. On a fresh release it first starts the
+control plane without cube-node, configures the host S3lvol service from the
+new MinIO deployment, and only then enables cube-node. It also installs a
+boot-persistent `clawbox-registry-mirror.service`; no hand-started `socat`
+process is required after reboot.
 
 The installer pins CubeSandbox v0.7.0 and layers
 `deploy/cubesandbox/runtime-values-kunpeng920.yaml`. It also deterministically
@@ -171,6 +188,18 @@ building templates.
 
 ## 5. Build fresh templates and validate in order
 
+The reproducible wrapper for the image/template portion is:
+
+```bash
+bash scripts/provision-kunpeng-openclaw.sh check
+bash scripts/provision-kunpeng-openclaw.sh build
+bash scripts/provision-kunpeng-openclaw.sh verify
+```
+
+It records immutable image references and fresh template IDs in
+`.artifacts/kunpeng-openclaw.env`. The detailed commands below describe what
+the wrapper performs and remain useful for diagnosis.
+
 Run the SDK scripts from an environment with the project dependencies:
 
 ```bash
@@ -227,9 +256,10 @@ and starts OpenSSH exactly once after `ADMIT`; command text and all stdio stay
 on the Runtime-to-Tool SSH connection.
 
 The Worker advertises direct host listeners for PolicyControl (`18080`) and
-ModelGateway (`18081`) and allows Runtime egress only to the configured host
-IP. The gateway remains session-local: it retains the upstream credential on the
-host, gives Runtime a per-session token, and requires complete replay
+ModelGateway (`18081`). Before Runtime creation, it asks CubeSandbox for Tool's
+semantic raw TCP endpoint and adds that endpoint host to Runtime's fixed egress
+policy. The gateway remains session-local: it retains the upstream credential
+on the host, gives Runtime a per-session token, and requires complete replay
 consumption, canonical input matches, and delivered responses.
 
 For native SSH acceptance, run the local tests and then the real pair smoke:
@@ -244,14 +274,15 @@ python scripts/smoke-cubesandbox-agent-pair.py \
   --policy-port 18080
 ```
 
-The pair smoke records the exact `tool.get_host(2222)` value, probes it from
-Runtime without assuming a port, verifies that an unenveloped Agent SSH
-operation fails closed, checks native SSH output before and after Tool pause,
-triggers demand restore through PolicyControl, validates cgroup/eBPF artifacts
-by exact execution ID, confirms policy records contain no command/output, and
-audits zero owned Sandbox leaks. It is a boundary smoke rather than the full
-40/60-agent experiment; preserve its JSON output and the worker's per-session
-artifacts for later analysis.
+The pair smoke records `tool.get_tcp_endpoint(2222)`, verifies Tool identity,
+and checks that the old route fails while Tool is paused. It then issues an
+enveloped operation that still contains the old mapped port. PolicyControl
+restores Tool, atomically refreshes Runtime's known-host entry, returns the new
+route with `ADMIT`, and the Runtime SSH hook rewrites that same invocation.
+The smoke also rejects unenveloped Agent SSH, validates cgroup/eBPF artifacts by
+exact execution ID, confirms policy records contain no command/output, and
+audits zero owned Sandbox leaks. Preserve its JSON output and the worker's
+per-session artifacts for later analysis.
 
 ## 6. Reboot and rollback notes
 

@@ -6,15 +6,21 @@ import json
 import os
 import re
 import shlex
-from threading import Event, Lock, Thread
+from threading import Lock
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from clawbox.replay.lifecycle import CommandResult
 
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Only workspace/process tools cross native SSH and require Tool admission.
+# Retrieval and agent-memory tools are implemented by OpenClaw itself and stay
+# in the Runtime VM even though they are visible to the same agent process.
+TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
+RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,34 +115,6 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
     return f"{user}@{rendered}:{port}"
 
 
-def native_ssh_target_from_env(*, sandbox_id: str = "",
-                               explicit: str | None = None) -> str:
-    """Resolve the raw TCP endpoint used by native OpenSSH.
-
-    Cube's ``get_host`` value is an HTTP ingress authority, not a raw TCP
-    endpoint.  A deployment must therefore provide the actual route (for
-    example a node host-port mapping) explicitly.  The optional
-    ``{sandbox_id}`` placeholder makes per-sandbox endpoint helpers possible
-    without ever guessing from guest ``hostname -I`` output.
-    """
-    value = (explicit if explicit is not None else
-             os.environ.get("CLAWBOX_NATIVE_SSH_TARGET", "")).strip()
-    if value:
-        value = value.replace("{sandbox_id}", str(sandbox_id))
-        split_native_ssh_target(value)
-        return value
-    host = os.environ.get("CLAWBOX_NATIVE_SSH_HOST", "").strip()
-    if not host:
-        raise ValueError(
-            "native SSH requires CLAWBOX_NATIVE_SSH_TARGET or "
-            "CLAWBOX_NATIVE_SSH_HOST; Cube get_host is HTTP-only"
-        )
-    rendered_port = os.environ.get("CLAWBOX_NATIVE_SSH_PORT", "2222").strip()
-    if not rendered_port.isdigit():
-        raise ValueError("CLAWBOX_NATIVE_SSH_PORT must be an integer")
-    return native_ssh_target(host, port=int(rendered_port))
-
-
 def native_tool_bridge_setup_command() -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
@@ -168,8 +146,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  ssh: NativeSSHConfig, policy_control: Any,
                  runtime_executor: Any, output_dir: Path, timeout_seconds: int,
                  model_gateway: Any | None = None,
-                 prediction_manifest: dict[str, dict[str, Any]] | None = None,
-                 ssh_target_provider: Callable[[], str] | None = None) -> dict:
+                 prediction_manifest: dict[str, dict[str, Any]] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -270,12 +247,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                     "strictHostKeyChecking": True, "updateHostKeys": False},
         }}},
         "tools": {
-            "allow": ["exec", "process", "read", "write", "edit", "apply_patch"],
+            "allow": [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS],
             "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             "exec": {"host": "sandbox", "security": "full", "ask": "off"},
             "elevated": {"enabled": False},
             "sandbox": {"tools": {
-                "allow": ["exec", "process", "read", "write", "edit", "apply_patch"],
+                "allow": list(TOOL_VM_TOOLS),
                 "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             }},
         },
@@ -283,7 +260,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
             "instrumentHosts": ["sandbox"],
-            "instrumentTools": ["exec", "process", "read", "write", "edit", "apply_patch"],
+            "instrumentTools": list(TOOL_VM_TOOLS),
             "enableCgroup": False, "enableAffinity": False, "enableNuma": False,
             "autoStartSidecar": False, "securityBoundaryAccepted": True,
             "trace": {"schema_version": 6, "include_raw_events": True,
@@ -297,53 +274,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
             "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", model])
     instruction = (
-        "Use only the sandboxed exec/process/read/write/edit/apply_patch tools for every "
-        "workspace operation. The mutable workspace is in the Tool VM.\n\nTask:\n" + prompt
+        "Use only sandboxed exec/process/read/write/edit/apply_patch for workspace and "
+        "process operations; those execute in the Tool VM. Web search/fetch and agent "
+        "memory lookup remain Runtime-local and must not be used to access the mutable "
+        "workspace.\n\nTask:\n" + prompt
     )
-    refresh_stop = Event()
-    refresh_errors: list[BaseException] = []
-    refresh_thread: Thread | None = None
-    if ssh_target_provider is not None:
-        current_target = ssh.target
-
-        def refresh_target() -> None:
-            nonlocal current_target
-            while not refresh_stop.wait(0.2):
-                try:
-                    target = str(ssh_target_provider()).strip()
-                    split_native_ssh_target(target)
-                    if target == current_target:
-                        continue
-                    invoke(
-                        ["config", "patch", "--stdin"],
-                        input_value=json.dumps({
-                            "agents": {"defaults": {"sandbox": {
-                                "ssh": {"target": target},
-                            }}}
-                        }),
-                    )
-                    current_target = target
-                except BaseException as exc:  # propagate after agent exit
-                    refresh_errors.append(exc)
-                    refresh_stop.set()
-                    return
-
-        refresh_thread = Thread(
-            target=refresh_target, name=f"openclaw-ssh-refresh-{session_id}", daemon=True,
-        )
-        refresh_thread.start()
-    try:
-        result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
-                         "--model", f"vllm/{model}", "--message", instruction,
-                         "--timeout", str(timeout_seconds), "--json"])
-    finally:
-        refresh_stop.set()
-        if refresh_thread is not None:
-            refresh_thread.join(timeout=5)
-        if refresh_errors:
-            raise RuntimeError(
-                f"native SSH endpoint refresh failed: {refresh_errors[0]}"
-            ) from refresh_errors[0]
+    result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
+                     "--model", f"vllm/{model}", "--message", instruction,
+                     "--timeout", str(timeout_seconds), "--json"])
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
@@ -376,8 +314,23 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         max(0.0, float(item["completion"]["execution_completed_at"])
             - float(item["completion"]["execution_started_at"])) for item in completed
     ]
+    admission_round_trips = [
+        float(item["completion"].get("admission_round_trip_seconds", 0.0))
+        for item in completed
+    ]
+    admission_control_overheads = [
+        max(
+            0.0,
+            float(item["completion"].get("admission_round_trip_seconds", 0.0))
+            - float(item["admission"].get("admission_blocked_seconds", 0.0))
+            - float(item["admission"].get("restore_seconds", 0.0)),
+        )
+        for item in completed
+    ]
     return {"stdout": result.stdout, "stderr": result.stderr,
             "tool_calls": len(completed), "tool_latencies": latencies,
+            "admission_round_trip_seconds": admission_round_trips,
+            "admission_control_overhead_seconds": admission_control_overheads,
             "runtime_traces": copied, "policy_control_records": control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],
             "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None}

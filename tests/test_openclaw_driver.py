@@ -10,9 +10,10 @@ import pytest
 from clawbox.experiments.openclaw_driver import (
     NativeSSHConfig,
     NativeSSHRouteState,
+    RUNTIME_LOCAL_TOOLS,
+    TOOL_VM_TOOLS,
     native_ssh_target,
     native_tool_bridge_setup_command,
-    native_ssh_target_from_env,
     run_openclaw,
     split_native_ssh_target,
 )
@@ -71,13 +72,12 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     sandbox = config["agents"]["defaults"]["sandbox"]
     assert sandbox["backend"] == "ssh"
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
-    assert config["tools"]["allow"] == [
-        "exec", "process", "read", "write", "edit", "apply_patch",
-    ]
+    assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
+    assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
     assert clawtune["sandboxExecEnvelope"] is True
-    assert clawtune["instrumentTools"] == config["tools"]["allow"]
+    assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
@@ -101,30 +101,6 @@ def test_native_ssh_target_does_not_append_a_second_port() -> None:
     target = native_ssh_target("tool.example:2200", port=2222)
     assert target == "executor@tool.example:2200"
     assert split_native_ssh_target(target) == ("executor", "tool.example", 2200)
-
-
-def test_native_ssh_target_from_env_requires_explicit_raw_endpoint(monkeypatch) -> None:
-    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_TARGET", raising=False)
-    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_HOST", raising=False)
-    with pytest.raises(ValueError, match="get_host is HTTP-only"):
-        native_ssh_target_from_env()
-
-
-def test_native_ssh_target_from_env_renders_per_sandbox_target(monkeypatch) -> None:
-    monkeypatch.setenv(
-        "CLAWBOX_NATIVE_SSH_TARGET",
-        "executor@192.168.3.166:20055",
-    )
-    assert native_ssh_target_from_env(sandbox_id="sandbox-a") == (
-        "executor@192.168.3.166:20055"
-    )
-
-
-def test_native_ssh_target_from_env_supports_host_and_port(monkeypatch) -> None:
-    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_TARGET", raising=False)
-    monkeypatch.setenv("CLAWBOX_NATIVE_SSH_HOST", "192.168.3.166")
-    monkeypatch.setenv("CLAWBOX_NATIVE_SSH_PORT", "20055")
-    assert native_ssh_target_from_env() == "executor@192.168.3.166:20055"
 
 
 def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:

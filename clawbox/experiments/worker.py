@@ -35,7 +35,8 @@ from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
 from .openclaw_driver import (
-    NativeSSHConfig, NativeSSHRouteState, native_ssh_target,
+    NativeSSHConfig, NativeSSHRouteState, RUNTIME_LOCAL_TOOLS, TOOL_VM_TOOLS,
+    native_ssh_target,
     native_tool_bridge_setup_command, run_openclaw, split_native_ssh_target,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
@@ -122,10 +123,19 @@ class EventWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.lock = Lock()
+        self.sequence = 0
 
     def write(self, event: dict[str, Any]) -> None:
-        row = {"wall_time": utcnow().isoformat(), **event}
         with self.lock, self.path.open("a", encoding="utf-8") as stream:
+            row = {
+                "schema_version": 1,
+                "sequence_no": self.sequence,
+                "wall_time": utcnow().isoformat(),
+                "wall_time_ns": str(time.time_ns()),
+                "monotonic_time_ns": str(time.monotonic_ns()),
+                **event,
+            }
+            self.sequence += 1
             stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             stream.flush()
 
@@ -257,6 +267,14 @@ class ExperimentWorker:
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
                              for item in sessions]
         tool_latencies = [float(value) for item in sessions for value in item["tool_latencies"]]
+        admission_round_trips = [
+            float(value) for item in sessions
+            for value in item.get("admission_round_trip_seconds", [])
+        ]
+        admission_overheads = [
+            float(value) for item in sessions
+            for value in item.get("admission_control_overhead_seconds", [])
+        ]
         tool_steps = sum(int(item["tool_steps"]) for item in sessions)
         model_steps = sum(int(item["model_steps"]) for item in sessions)
         workload_starts = [float(item["timeline"]["agent_execution_start"])
@@ -316,6 +334,17 @@ class ExperimentWorker:
                 "resume_count": coordinator.resume_count,
                 "resume_service_seconds": coordinator.resume_service_seconds,
                 "blocked_admission_seconds": coordinator.blocked_seconds,
+                "admission_control": coordinator.admission_metrics(),
+                "admission_round_trip_mean_seconds": (
+                    statistics.fmean(admission_round_trips) if admission_round_trips else None
+                ),
+                "admission_round_trip_p95_seconds": percentile(admission_round_trips, 0.95),
+                "admission_control_overhead_mean_seconds": (
+                    statistics.fmean(admission_overheads) if admission_overheads else None
+                ),
+                "admission_control_overhead_p95_seconds": percentile(
+                    admission_overheads, 0.95,
+                ),
                 "session_timelines": [item.get("timeline") for item in sessions],
                 "session_time_spans": [
                     item.get("timeline", {}).get("time_spans", []) for item in sessions
@@ -353,6 +382,19 @@ class ExperimentWorker:
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
         timeline: dict[str, Any] = {"session_started": time.time()}
+        events.write({
+            "event": "session_started",
+            "session_id": session_id,
+            "agent_driver": arm.agent.driver.value,
+            "inference_backend": arm.inference.backend.value,
+            "formal_openclaw_path": arm.agent.driver is AgentDriver.OPENCLAW,
+            "tool_vm_tools": (
+                list(TOOL_VM_TOOLS) if arm.agent.driver is AgentDriver.OPENCLAW else []
+            ),
+            "runtime_local_tools": (
+                list(RUNTIME_LOCAL_TOOLS) if arm.agent.driver is AgentDriver.OPENCLAW else []
+            ),
+        })
         runtime_ownership = Ownership(
             self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
             f"{session_id}-runtime", arm.policy.name,
@@ -365,6 +407,7 @@ class ExperimentWorker:
         runtime_allow_out: list[str] = []
         route_state: NativeSSHRouteState | None = None
         ssh_config: NativeSSHConfig | None = None
+        native_route_host: str | None = None
         if arm.agent.driver is AgentDriver.OPENCLAW:
             credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
             credential = os.environ.get(credential_name, "")
@@ -412,7 +455,13 @@ class ExperimentWorker:
             allow_internet_access=arm.runtime.allow_internet_access,
             env_vars=runtime_env,
             network_allow_out=runtime_allow_out,
-            network_deny_out=["0.0.0.0/0"] if runtime_allow_out else None,
+            # Runtime-local web and memory tools remain usable when the
+            # experiment explicitly permits Internet access. Closed-network
+            # arms allow only PolicyControl, ModelGateway, KB, and Tool SSH.
+            network_deny_out=(
+                ["0.0.0.0/0"]
+                if runtime_allow_out and not arm.runtime.allow_internet_access else None
+            ),
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {
@@ -674,6 +723,7 @@ class ExperimentWorker:
                 runtime_lifecycle.network_allow_out = list(
                     dict.fromkeys(runtime_lifecycle.network_allow_out)
                 )
+                native_route_host = endpoint_host
             timeline["runtime_create_start"] = time.time()
             runtime_create_s = runtime_lifecycle.start()
             timeline["runtime_ready"] = time.time()
@@ -692,32 +742,49 @@ class ExperimentWorker:
                 nonlocal ssh_config
                 if route_state is None or ssh_config is None or lifecycle.sandbox is None:
                     raise RuntimeError("native SSH route state is not initialized")
+                discovery_started = time.monotonic()
                 endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
                 target = native_ssh_target(endpoint.address)
-                if not route_state.update(target):
-                    return
                 _user, host, port = split_native_ssh_target(target)
+                if native_route_host is not None and host != native_route_host:
+                    raise RuntimeError(
+                        "CubeSandbox changed the semantic TCP endpoint host across restore; "
+                        "the Runtime VM network allowlist cannot be mutated safely "
+                        f"({native_route_host!r} -> {host!r})"
+                    )
+                discovery_seconds = time.monotonic() - discovery_started
+                if target == route_state.get_target():
+                    return
                 known_host = f"[{host}]:{port} {ssh_credentials.host_public}\n"
                 encoded = base64.b64encode(known_host.encode()).decode()
+                known_host_started = time.monotonic()
                 updated = runtime_executor.execute(
                     f"printf %s {shlex.quote(encoded)} | base64 -d > "
+                    f"/state/openclaw/{session_id}/ssh/known_hosts.next && "
+                    f"mv /state/openclaw/{session_id}/ssh/known_hosts.next "
                     f"/state/openclaw/{session_id}/ssh/known_hosts", 30,
                 )
                 if updated.exit_code:
                     raise RuntimeError(
                         "Runtime known-host refresh failed: " + updated.stderr[-1000:]
                     )
+                known_host_seconds = time.monotonic() - known_host_started
+                route_state.update(target)
                 ssh_config = replace(ssh_config, target=target)
                 events.write({
                     "event": "native_ssh_endpoint_refreshed", "session_id": session_id,
                     "container_port": endpoint.container_port,
                     "tcp_endpoint": endpoint.address,
+                    "endpoint_discovery_seconds": discovery_seconds,
+                    "known_host_update_seconds": known_host_seconds,
                     "source": "cubesandbox_tcp_endpoint",
                 })
 
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
+            admission_round_trip_seconds: list[float] = []
+            admission_control_overhead_seconds: list[float] = []
             prediction_records: list[dict[str, Any]] = []
             observed_by_execution: dict[str, Any] = {}
             trace_writer = ClawTuneTraceWriter(
@@ -761,6 +828,7 @@ class ExperimentWorker:
                 reservation_lock = Lock()
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
+                    admission_started = time.monotonic()
                     execution_id = str(request["execution_id"])
                     prediction = (
                         prediction_provider.resolve_digest(
@@ -768,12 +836,15 @@ class ExperimentWorker:
                         ) if prediction_provider is not None else request.get("prediction")
                     )
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
+                    restore_seconds = 0.0
                     with wait_lock:
                         if not lifecycle.resident:
+                            restore_started = time.monotonic()
                             self._restore_with_one_victim(
                                 arm, session_id, lifecycle, coordinator, events,
                             )
                             refresh_native_ssh_route()
+                            restore_seconds = time.monotonic() - restore_started
                         admission_wait = coordinator.acquire(
                             session_id, amount, arm.execution.arm_timeout_seconds
                         )
@@ -803,9 +874,21 @@ class ExperimentWorker:
                         ),
                         "admitted_memory_mib": amount,
                         "admission_blocked_seconds": admission_wait,
+                        "restore_seconds": restore_seconds,
+                        "policy_service_seconds": time.monotonic() - admission_started,
                     })
-                    return {"decision": "ADMIT", "admitted_memory_mib": amount,
-                            "admission_blocked_seconds": admission_wait}
+                    if route_state is None:
+                        raise RuntimeError("native SSH route state is not initialized")
+                    return {
+                        "decision": "ADMIT",
+                        "admitted_memory_mib": amount,
+                        "admission_blocked_seconds": admission_wait,
+                        "restore_seconds": restore_seconds,
+                        "policy_service_seconds": time.monotonic() - admission_started,
+                        # The Runtime shim applies this to the invocation that
+                        # caused admission, closing the restore/old-port race.
+                        "ssh_target": route_state.get_target(),
+                    }
 
                 def complete_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     execution_id = str(request["execution_id"])
@@ -870,11 +953,16 @@ class ExperimentWorker:
                     output_dir=self.output_root,
                     timeout_seconds=arm.execution.arm_timeout_seconds,
                     model_gateway=gateway_session,
-                    ssh_target_provider=route_state.get_target,
                     prediction_manifest=(prediction_provider.manifest
                                          if prediction_provider is not None else None),
                 )
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
+                admission_round_trip_seconds.extend(
+                    float(item) for item in outcome["admission_round_trip_seconds"]
+                )
+                admission_control_overhead_seconds.extend(
+                    float(item) for item in outcome["admission_control_overhead_seconds"]
+                )
                 policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"
                 atomic_json(policy_control_path, outcome["policy_control_records"])
                 # A completed Agent call may have triggered eager Tool eviction.
@@ -909,7 +997,7 @@ class ExperimentWorker:
                         + json.dumps(completeness, sort_keys=True)
                     )
                 if not tool_latencies:
-                    raise RuntimeError("OpenClaw completed without using the required cube_shell tool")
+                    raise RuntimeError("OpenClaw completed without using a Tool-VM workspace tool")
                 if arm.inference.backend.value == "api":
                     model_trace_path = self.output_root / "model-traces" / f"{session_id}.jsonl"
                     gateway_session.write_replay_trace(model_trace_path)
@@ -1009,6 +1097,8 @@ class ExperimentWorker:
                     ),
                     "tool_steps": len(tool_latencies), "model_steps": model_steps,
                     "tool_latencies": tool_latencies, "output_hash": output_hash,
+                    "admission_round_trip_seconds": admission_round_trip_seconds,
+                    "admission_control_overhead_seconds": admission_control_overhead_seconds,
                     "prediction_records": prediction_records,
                     "prediction_provenance": (
                         prediction_provider.provenance(prediction_records)
@@ -1070,8 +1160,12 @@ class ExperimentWorker:
                     timeline["sandbox_cleanup_end"] = time.time()
                     timeline["session_finished"] = timeline["sandbox_cleanup_end"]
                     timeline["time_spans"] = build_time_spans(timeline)
-                    events.write({"event": "session_timing", "session_id": session_id,
-                                  "time_spans": timeline["time_spans"]})
+                    events.write({
+                        "event": "session_timing", "session_id": session_id,
+                        "time_spans": timeline["time_spans"],
+                        "runtime_lifecycle": runtime_lifecycle.timings,
+                        "tool_lifecycle": lifecycle.timings,
+                    })
                     if timeline.get("validation_end"):
                         timeline["cleanup_overhead_seconds"] = max(
                             0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]

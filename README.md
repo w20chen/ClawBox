@@ -24,6 +24,20 @@ metadata and blocks until admission returns `ADMIT`; after SSH finishes it sends
 an idempotent completion. `(session_id, execution_id)` joins prediction,
 admission, SSH, Tool cgroup/eBPF telemetry, and completion.
 
+Tool placement follows execution semantics rather than the name "tool". The
+workspace/process tools (`exec`, `process`, `read`, `write`, `edit`, and
+`apply_patch`) execute in Tool over SSH and are individually admitted. OpenClaw
+in-process services such as `web_search`, `web_fetch`, `memory_search`, and
+`memory_get` remain in Runtime and do not wake or reserve memory for Tool.
+
+CubeSandbox supplies a semantic raw TCP endpoint for Tool port 2222. After a
+checkpoint/restore, PolicyControl resolves the replacement endpoint, refreshes
+Runtime's pinned known-host entry, and returns the route with `ADMIT`. The SSH
+hook rewrites the invocation that requested admission before launching OpenSSH;
+it does not depend on a later OpenClaw configuration refresh. Endpoint hosts
+must remain stable across restore because Runtime network policy is fixed at VM
+creation; mapped ports may change.
+
 During model waits, lightweight ModelGateway events are queued to policy workers.
 Policy decides when an idle Tool VM should be swapped out and restored;
 CubeSandbox performs create, pause/checkpoint, connect/restore, placement, and
@@ -33,6 +47,9 @@ ClawBox does not use SandboxTask CRDs, controllers, Jobs/Pods, Services,
 NodePorts, Kubernetes scheduling, or direct Firecracker management. Some legacy
 modules and deployment files still await deletion after the native SSH live gate;
 they are not supported architecture.
+
+Current continuation state and unresolved Kunpeng gates are recorded in
+[`docs/HANDOFF-2026-09-05-KUNPENG.md`](docs/HANDOFF-2026-09-05-KUNPENG.md).
 
 ## Set up a research host
 
@@ -49,12 +66,20 @@ On the validated Kunpeng deployment, inspect first and avoid changing a healthy
 kernel or storage installation:
 
 ```bash
+cp deploy/kunpeng-research.env.example ~/clawbox-kunpeng.env
+# Edit the copy, then source it. Do not commit it.
+. ~/clawbox-kunpeng.env
 bash scripts/install-cubesandbox-kunpeng920.sh check
-python -m venv .venv
-.venv/bin/pip install -e '.[dev,postgres]'
-CUBE_API_URL=http://127.0.0.1:30030 \
-  .venv/bin/python scripts/audit-cube-sandboxes.py --json
+bash scripts/install-cubesandbox-kunpeng920.sh install
+bash scripts/provision-kunpeng-openclaw.sh build
+bash scripts/provision-kunpeng-openclaw.sh verify
 ```
+
+`install` now reproduces the ClawBox CubeAPI semantic-TCP patch, persistent
+loopback registry plus guest-only bridge, staged MinIO/S3lvol/node bootstrap,
+CoreDNS routing, and patched SDK. `provision` builds both VM images, pins their
+registry digests, registers fresh templates, and writes the selected IDs to
+`.artifacts/kunpeng-openclaw.env`.
 
 Build immutable pair images. Replace the base-image digests in the Dockerfiles
 only when intentionally publishing a new base generation:
@@ -123,15 +148,52 @@ clawbox --output-root /data/clawbox-results experiment status run-name
 clawbox --output-root /data/clawbox-results experiment collect run-name
 ```
 
-Deterministic replay is the primary comparison mode: Runtime, OpenClaw, SSH,
-Tool VM, commands, memory pressure, and telemetry remain real; only model
-generation is replayed. Replay cursors and response state are per session.
+Deterministic OpenClaw replay is the primary formal comparison mode: Runtime,
+OpenClaw, ClawTune, native SSH, Tool VM, commands, admission, memory pressure,
+and telemetry remain real. Only model generation is replaced by a session-local
+ModelGateway that waits for the recorded latency and returns the recorded
+OpenAI-compatible response. API mode uses the same Runtime/OpenClaw path and
+gateway interface but forwards to the configured upstream model. An API run can
+export its successful responses as the exact input for a later replay run.
+
+`agent.driver=replay_engine` is a lightweight systems-only trace driver retained
+for inexpensive capacity exploration. It does not represent OpenClaw overhead
+and must not be used for formal end-to-end agent claims. Use
+`examples/experiments/openclaw-cube-replay-c40.yaml` for the formal c40 path
+after recording a valid c1 API trace.
 
 Progress through c1, c4/c8 correctness, c20 policy pilot, then c40/c60. Do not
 claim an arm unless output validation passes, exact-ID join rate is 1.0,
 telemetry loss and duplicate execution are zero, routing is session-correct,
 and all owned sandboxes are destroyed. Agent JCT excludes validation, hashing,
 cleanup, and stabilization.
+
+Before c1, validate the deployment route and the admission-triggered restore:
+
+```bash
+python scripts/validate-cubesandbox-tcp-endpoints.py \
+  --runtime-template RUNTIME_TEMPLATE --tool-template TOOL_TEMPLATE \
+  --node NODE --control-host HOST_IP --count 4 --output route-gate.json
+python scripts/smoke-cubesandbox-agent-pair.py \
+  --runtime-template RUNTIME_TEMPLATE --tool-template TOOL_TEMPLATE \
+  --node NODE --control-host HOST_IP --output pair-smoke.json
+```
+
+The result envelope reports FIFO admission count/depth/wait percentiles,
+Runtime-to-PolicyControl round-trip latency, control overhead after subtracting
+intentional queue and restore time, lifecycle service times, model lifecycle
+times, and exact-ID Tool telemetry.
+
+Measure the metadata path separately from Cube and Tool work before a campaign:
+
+```bash
+python scripts/benchmark-policy-control.py --concurrency 40 \
+  --requests-per-session 25
+```
+
+Set `--max-p95-ms` to the campaign's preregistered host-specific limit. Also
+report control overhead as a fraction of Tool latency; do not hide intentional
+FIFO waiting or restore service time inside the overhead number.
 
 ## Local verification
 
@@ -141,5 +203,6 @@ docker run --rm -e GOPROXY=https://goproxy.cn,direct \
   -v "$PWD/toolbridge:/src" -w /src golang:1.25-bookworm go test ./...
 ```
 
-See [docs/HANDOFF.md](docs/HANDOFF.md) for the exact current live boundary and
-next implementation tasks.
+See [docs/research-system-design.md](docs/research-system-design.md) for the
+paper-facing component, protocol, and measurement design, and
+[docs/HANDOFF.md](docs/HANDOFF.md) for the exact current live boundary.

@@ -133,7 +133,9 @@ def refresh_known_hosts(runtime, ssh: NativeSSHConfig, credentials,
     _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"[{host}]:{port} {credentials.host_public}\n"
     encoded = base64.b64encode(known_host.encode()).decode()
-    run(runtime, f"printf %s {shlex.quote(encoded)} | base64 -d > {shlex.quote(known_hosts)}")
+    temporary = known_hosts + ".next"
+    run(runtime, f"printf %s {shlex.quote(encoded)} | base64 -d > {shlex.quote(temporary)}; "
+                 f"mv {shlex.quote(temporary)} {shlex.quote(known_hosts)}")
 
 
 def direct_ssh_probe(runtime, ssh: NativeSSHConfig, identity: str,
@@ -342,6 +344,7 @@ def main() -> int:
         timings["runtime_create_seconds"] = time.monotonic() - started
         ssh = endpoint_ssh(endpoint_before, credentials)
         identity, known_hosts = setup_runtime_ssh(runtime, ssh, credentials, session_id)
+        endpoint_holder = {"endpoint": endpoint_before}
         probe = direct_ssh_probe(runtime, ssh, identity, known_hosts, f"cat {marker}")
         if probe["stdout"].strip() != tool_id:
             raise AssertionError(
@@ -365,7 +368,20 @@ def main() -> int:
                     tool_holder["sandbox"] = current_tool
                     restore_seconds.append(time.monotonic() - started_restore)
                     restore_count += 1
-                return {"decision": "ADMIT", "restore_count": restore_count}
+                    restored_endpoint = cube.get_tcp_endpoint(current_tool, 2222)
+                    if endpoint_host(restored_endpoint) != endpoint_host(endpoint_before):
+                        raise RuntimeError(
+                            "semantic endpoint host changed across restore and is outside "
+                            "the Runtime network allowlist"
+                        )
+                    restored_ssh = endpoint_ssh(restored_endpoint, credentials)
+                    refresh_known_hosts(runtime, restored_ssh, credentials, known_hosts)
+                    endpoint_holder["endpoint"] = restored_endpoint
+                current_endpoint = endpoint_holder["endpoint"]
+                return {
+                    "decision": "ADMIT", "restore_count": restore_count,
+                    "ssh_target": native_ssh_target(current_endpoint.address),
+                }
 
             def complete(_request: dict) -> dict:
                 return {"status": "COMPLETED"}
@@ -401,12 +417,19 @@ def main() -> int:
                     f"{stale_probe}"
                 )
 
-            started = time.monotonic()
-            tool = cube.connect_sandbox(tool_id)
-            tool_holder["sandbox"] = tool
-            restore_seconds.append(time.monotonic() - started)
-            restore_count += 1
-            endpoint_after = cube.get_tcp_endpoint(tool, 2222)
+            # This call is deliberately built with the stale pre-pause target.
+            # Admission restores Tool and the Runtime shim must retarget this
+            # same invocation before launching the real OpenSSH client.
+            expected_ids.add(after_id)
+            result = policy_ssh_call(
+                runtime, ssh, identity, known_hosts, policy_session, after_id,
+                f"cat {marker}",
+            )
+            if result.exit_code != 0 or result.stdout.strip() != tool_id:
+                raise AssertionError(f"admission-triggered restore/reroute failed: {result}")
+
+            tool = tool_holder["sandbox"]
+            endpoint_after = endpoint_holder["endpoint"]
             if endpoint_after.sandbox_id != tool_id:
                 raise AssertionError("resumed endpoint identity changed")
             if endpoint_after.address == endpoint_before.address:
@@ -424,13 +447,6 @@ def main() -> int:
                     f"resumed native SSH reached the wrong Tool: {resumed_probe}"
                 )
 
-            expected_ids.add(after_id)
-            result = policy_ssh_call(
-                runtime, ssh, identity, known_hosts, policy_session, after_id,
-                f"cat {marker}",
-            )
-            if result.exit_code != 0 or result.stdout.strip() != tool_id:
-                raise AssertionError(f"native SSH reached the wrong Tool after restore: {result}")
             timings["tool_restore_seconds"] = restore_seconds[-1]
             require_state(tool_id, "running", "Tool after demand restore")
             require_state(runtime.sandbox_id, "running", "Runtime after Tool restore")

@@ -5,12 +5,17 @@ CUBE_TAG=v0.7.0
 CUBE_COMMIT=d0081641c59822e4e5653b7462e914410b81910a
 NAMESPACE=${CUBE_NAMESPACE:-cube-system}
 RELEASE=${CUBE_RELEASE:-cube}
-SOURCE_DIR=${CUBE_SOURCE_DIR:-$HOME/CubeSandbox}
+SOURCE_DIR=${CUBE_SOURCE_DIR:-$HOME/.cache/clawbox/CubeSandbox-v0.7.0}
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RUNTIME_VALUES="$ROOT_DIR/deploy/cubesandbox/runtime-values-kunpeng920.yaml"
+SEMANTIC_ENDPOINT_PATCH="$ROOT_DIR/deploy/cubesandbox/semantic-tcp-endpoint-v0.7.0.patch"
+CUBE_API_IMAGE_REPOSITORY=${CUBE_API_IMAGE_REPOSITORY:-127.0.0.1:5000/clawbox/cube-api}
+CUBE_API_IMAGE_TAG=${CUBE_API_IMAGE_TAG:-v0.7.0-clawbox-endpoint-v1}
+REGISTRY_CONTAINER=${CLAWBOX_REGISTRY_CONTAINER:-clawbox-registry}
+REGISTRY_GUEST_PORT=${CLAWBOX_REGISTRY_GUEST_PORT:-5001}
 
 usage() {
-  echo "usage: $0 {check|install|status|uninstall}"
+  echo "usage: $0 {check|prepare|install|status|uninstall}"
 }
 
 require() {
@@ -25,6 +30,8 @@ check() {
   require git
   require helm
   require kubectl
+  require docker
+  require python3
   [[ $(uname -m) == aarch64 ]] || { echo "host must be aarch64" >&2; exit 1; }
   [[ -c /dev/kvm ]] || { echo "/dev/kvm is missing" >&2; exit 1; }
   [[ $(stat -fc %T /sys/fs/cgroup) == cgroup2fs ]] || { echo "cgroup v2 is required" >&2; exit 1; }
@@ -56,9 +63,23 @@ prepare_source() {
   # particular, never replace the chart copy with CubeMaster/conf.yaml: the
   # chart file contains Helm templates for the Kubernetes MySQL/Redis hosts.
   git -C "$SOURCE_DIR" restore --source=HEAD -- \
+    CubeAPI/src/cubemaster/mod.rs \
+    CubeAPI/src/handlers/sandboxes.rs \
+    CubeAPI/src/models/mod.rs \
+    CubeAPI/src/openapi.rs \
+    CubeAPI/src/routes.rs \
+    CubeAPI/src/services/sandboxes.rs \
     CubeMaster/conf.yaml \
     Cubelet/dynamicconf/conf.yaml \
-    deploy/kubernetes/chart/files/cube-master/conf.yaml
+    deploy/kubernetes/chart/files/cube-master/conf.yaml \
+    sdk/python/cubesandbox/__init__.py \
+    sdk/python/cubesandbox/_models.py \
+    sdk/python/cubesandbox/sandbox.py
+
+  # ClawBox needs a semantic raw-TCP lookup; upstream's HTTP virtual-host API
+  # cannot carry native SSH. Keep the exact CubeAPI and SDK delta in this repo.
+  git -C "$SOURCE_DIR" apply --check "$SEMANTIC_ENDPOINT_PATCH"
+  git -C "$SOURCE_DIR" apply "$SEMANTIC_ENDPOINT_PATCH"
 
   # v0.7.0 does not expose these research controls as Helm values. Patch the
   # pinned chart inputs deterministically before rendering it.
@@ -132,6 +153,60 @@ if volume_addition not in text:
 PY
 }
 
+install_registry() {
+  require socat
+  if ! docker inspect "$REGISTRY_CONTAINER" >/dev/null 2>&1; then
+    docker run -d --restart=always --name "$REGISTRY_CONTAINER" \
+      -p 127.0.0.1:5000:5000 registry:2 >/dev/null
+  fi
+  docker start "$REGISTRY_CONTAINER" >/dev/null
+  curl --noproxy '*' -fsS http://127.0.0.1:5000/v2/ >/dev/null
+
+  local bridge_ip
+  bridge_ip=${CLAWBOX_REGISTRY_BRIDGE_IP:-$(docker network inspect bridge \
+    --format '{{(index .IPAM.Config 0).Gateway}}')}
+  [[ "$bridge_ip" =~ ^[0-9a-fA-F:.]+$ ]] || {
+    echo "invalid Docker bridge address: $bridge_ip" >&2; exit 1;
+  }
+  sudo tee /etc/systemd/system/clawbox-registry-mirror.service >/dev/null <<EOF
+[Unit]
+Description=Expose the loopback research registry to CubeSandbox guests
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/socat TCP-LISTEN:${REGISTRY_GUEST_PORT},bind=${bridge_ip},fork,reuseaddr TCP:127.0.0.1:5000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now clawbox-registry-mirror.service
+  curl --noproxy '*' -fsS "http://${bridge_ip}:${REGISTRY_GUEST_PORT}/v2/" >/dev/null
+  printf 'registry_loopback=http://127.0.0.1:5000 registry_guest=http://%s:%s\n' \
+    "$bridge_ip" "$REGISTRY_GUEST_PORT"
+}
+
+build_cube_api() {
+  local image="${CUBE_API_IMAGE_REPOSITORY}:${CUBE_API_IMAGE_TAG}"
+  docker build --network=host \
+    --build-arg CUBE_VERSION="${CUBE_TAG}-clawbox" \
+    --build-arg CUBE_COMMIT="${CUBE_COMMIT}+semantic-endpoint-v1" \
+    -t "$image" "$SOURCE_DIR/CubeAPI"
+  docker push "$image"
+  docker image inspect "$image" --format '{{index .RepoDigests 0}}'
+}
+
+prepare() {
+  check
+  prepare_source
+  install_registry
+  build_cube_api
+  python3 -m pip install --user -e "$SOURCE_DIR/sdk/python"
+}
+
 configure_cluster_dns() {
   # CubeAPI returns per-sandbox hosts such as <id>.cube.local.  Route the
   # wildcard suffix to cube-proxy through cluster DNS.  `answer auto` is
@@ -172,20 +247,19 @@ PY
 }
 
 install_cube() {
-  check
+  prepare
   [[ ${CUBE_MYSQL_PASSWORD:-} ]] || { echo "set CUBE_MYSQL_PASSWORD" >&2; exit 1; }
   [[ ${CUBE_MYSQL_ROOT_PASSWORD:-} ]] || { echo "set CUBE_MYSQL_ROOT_PASSWORD" >&2; exit 1; }
   [[ ${CUBE_REDIS_PASSWORD:-} ]] || { echo "set CUBE_REDIS_PASSWORD" >&2; exit 1; }
   local node ip
   node=$(node_name)
   ip=${CUBE_NODE_IP:-$(kubectl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')}
-  prepare_source
   kubectl label node "$node" cube.tencent.com/cube-control=true cube.tencent.com/cube-node=true --overwrite
   local mirror_args=()
   if [[ ${CUBE_USE_CN_MIRROR:-0} == 1 ]]; then
     mirror_args=(-f "$SOURCE_DIR/deploy/kubernetes/chart/values-cn.yaml")
   fi
-  helm upgrade --install "$RELEASE" "$SOURCE_DIR/deploy/kubernetes/chart" \
+  local helm_args=(upgrade --install "$RELEASE" "$SOURCE_DIR/deploy/kubernetes/chart"
     --namespace "$NAMESPACE" --create-namespace \
     -f "$SOURCE_DIR/deploy/kubernetes/chart/values-single-node.yaml" \
     "${mirror_args[@]}" \
@@ -194,7 +268,22 @@ install_cube() {
     --set-string mysql.rootPassword="$CUBE_MYSQL_ROOT_PASSWORD" \
     --set-string redis.password="$CUBE_REDIS_PASSWORD" \
     --set-string cubeProxy.advertiseIP="$ip" \
-    --wait --timeout 20m
+    --set-string images.api.repository="$CUBE_API_IMAGE_REPOSITORY" \
+    --set-string images.api.tag="$CUBE_API_IMAGE_TAG" \
+    --set-string images.api.pullPolicy=IfNotPresent)
+
+  # A fresh chart needs MinIO and its generated secret before the host S3lvol
+  # service can be configured. Bring up control-plane services first, install
+  # S3lvol, then enable cube-node with its Socket hostPath.
+  if ! helm -n "$NAMESPACE" status "$RELEASE" >/dev/null 2>&1; then
+    helm "${helm_args[@]}" --set cubeNode.enabled=false --wait --timeout 20m
+  fi
+  if ! systemctl is-active --quiet cube-sandbox-s3lvol.service \
+     || [[ ! -S /var/run/s3lvol.sock ]]; then
+    CUBE_NAMESPACE="$NAMESPACE" CUBE_NODE_NAME="$node" \
+      bash "$ROOT_DIR/scripts/recover-cubesandbox-s3lvol-kunpeng920.sh"
+  fi
+  helm "${helm_args[@]}" --wait --timeout 20m
   configure_cluster_dns
   status
 }
@@ -203,6 +292,11 @@ status() {
   kubectl get nodes -L cube.tencent.com/cube-control,cube.tencent.com/cube-node
   kubectl -n "$NAMESPACE" get pods,svc
   helm -n "$NAMESPACE" status "$RELEASE"
+  systemctl is-active cube-sandbox-s3lvol.service
+  systemctl is-active clawbox-registry-mirror.service
+  curl --noproxy '*' -fsS http://127.0.0.1:5000/v2/ >/dev/null
+  curl --noproxy '*' -fsS http://127.0.0.1:30030/health >/dev/null
+  echo "Kunpeng CubeSandbox services are healthy"
 }
 
 uninstall_cube() {
@@ -226,6 +320,7 @@ PY
 
 case ${1:-} in
   check) check ;;
+  prepare) prepare ;;
   install) install_cube ;;
   status) status ;;
   uninstall) uninstall_cube ;;

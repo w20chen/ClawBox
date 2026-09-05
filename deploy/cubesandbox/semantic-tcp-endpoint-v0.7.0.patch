@@ -1,0 +1,363 @@
+diff --git a/CubeAPI/src/cubemaster/mod.rs b/CubeAPI/src/cubemaster/mod.rs
+index 0afde57..863c106 100644
+--- a/CubeAPI/src/cubemaster/mod.rs
++++ b/CubeAPI/src/cubemaster/mod.rs
+@@ -113,19 +113,33 @@ impl CubeMasterClient {
+         &self,
+         sandbox_id: &str,
+         instance_type: &str,
++    ) -> Result<GetSandboxResponse, CubeMasterError> {
++        self.get_sandbox_with_port(sandbox_id, instance_type, None)
++            .await
++    }
++
++    /// GET /cube/sandbox/info with an optional requested container port.
++    pub async fn get_sandbox_with_port(
++        &self,
++        sandbox_id: &str,
++        instance_type: &str,
++        container_port: Option<i32>,
+     ) -> Result<GetSandboxResponse, CubeMasterError> {
+         let url = format!("{}/cube/sandbox/info", self.base_url);
+-        let resp = self
++        let mut request = self
+             .inner
+             .get(&url)
+-            .query(&[("sandbox_id", sandbox_id), ("instance_type", instance_type)])
++            .query(&[("sandbox_id", sandbox_id), ("instance_type", instance_type)]);
++        if let Some(container_port) = container_port {
++            request = request.query(&[("container_port", container_port)]);
++        }
++        let resp = request
+             .send()
+             .await
+             .map_err(CubeMasterError::Http)?;
+         parse_response(resp).await
+     }
+-
+-    /// POST /cube/sandbox/update — pause or resume a sandbox (action: "pause" | "resume").
++    /// POST /cube/sandbox/update (action: "pause" | "resume").
+     pub async fn update_sandbox(
+         &self,
+         req: &SandboxUpdateRequest,
+@@ -1147,6 +1161,10 @@ pub struct GetSandboxDataItem {
+     #[serde(default)]
+     pub host_id: String,
+     #[serde(default)]
++    pub host_ip: String,
++    #[serde(default)]
++    pub sandbox_ip: String,
++    #[serde(default)]
+     pub template_id: String,
+     #[serde(default)]
+     pub annotations: HashMap<String, String>,
+@@ -1156,6 +1174,12 @@ pub struct GetSandboxDataItem {
+     pub containers: Vec<GetSandboxContainerItem>,
+     #[serde(default)]
+     pub namespace: String,
++    #[serde(default)]
++    pub exposed_port_endpoint: String,
++    #[serde(default)]
++    pub exposed_port_mode: String,
++    #[serde(default)]
++    pub requested_container_port: i32,
+     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+     pub end_at: Option<DateTime<Utc>>,
+     #[serde(default)]
+diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.rs
+index 911fbef..18e06d6 100644
+--- a/CubeAPI/src/handlers/sandboxes.rs
++++ b/CubeAPI/src/handlers/sandboxes.rs
+@@ -163,6 +163,55 @@ pub async fn get_sandbox(
+     Ok(Json(detail))
+ }
+ 
++// GET /sandboxes/:sandboxID/ports/:containerPort
++
++#[utoipa::path(
++    get,
++    path = "/sandboxes/{sandboxID}/ports/{containerPort}",
++    params(
++        ("sandboxID" = String, Path, description = "Sandbox identifier"),
++        ("containerPort" = u16, Path, description = "Container port")
++    ),
++    responses(
++        (status = 200, description = "Resolved sandbox host-port endpoint", body = crate::models::SandboxTcpEndpoint),
++        (status = 400, description = "Invalid container port", body = ApiError),
++        (status = 404, description = "Sandbox not found", body = ApiError),
++        (status = 500, description = "Unexpected backend error", body = ApiError)
++    )
++)]
++pub async fn get_sandbox_port(
++    State(state): State<AppState>,
++    Path((sandbox_id, container_port)): Path<(String, u16)>,
++) -> AppResult<impl IntoResponse> {
++    state
++        .logger
++        .log(
++            LogEvent::new(LogLevel::Debug, "api.request")
++                .field("handler", "get_sandbox_port")
++                .field("sandbox_id", &sandbox_id)
++                .field_value("container_port", container_port),
++        )
++        .await;
++
++    let endpoint = state
++        .services
++        .sandboxes
++        .get_sandbox_port_endpoint(&sandbox_id, container_port)
++        .await?;
++
++    state
++        .logger
++        .log(
++            LogEvent::new(LogLevel::Info, "api.response")
++                .field("handler", "get_sandbox_port")
++                .field("sandbox_id", &sandbox_id)
++                .field_value("container_port", container_port)
++                .field("address", &endpoint.address),
++        )
++        .await;
++    Ok(Json(endpoint))
++}
++
+ // ─── POST /sandboxes ──────────────────────────────────────────────────────────
+ 
+ #[utoipa::path(
+diff --git a/CubeAPI/src/models/mod.rs b/CubeAPI/src/models/mod.rs
+index 7dce334..08ea769 100644
+--- a/CubeAPI/src/models/mod.rs
++++ b/CubeAPI/src/models/mod.rs
+@@ -554,6 +554,15 @@ pub struct ListedSandbox {
+     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+ }
+ 
++/// Resolved raw TCP endpoint for a requested sandbox container port.
++#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
++pub struct SandboxTcpEndpoint {
++    #[serde(rename = "sandboxID")]
++    pub sandbox_id: String,
++    #[serde(rename = "containerPort")]
++    pub container_port: u16,
++    pub address: String,
++}
+ /// Detailed sandbox info returned by GET /sandboxes/{sandboxID}.
+ #[derive(Debug, Serialize, Deserialize, ToSchema)]
+ pub struct SandboxDetail {
+diff --git a/CubeAPI/src/openapi.rs b/CubeAPI/src/openapi.rs
+index e52e4b7..4cceb4f 100644
+--- a/CubeAPI/src/openapi.rs
++++ b/CubeAPI/src/openapi.rs
+@@ -71,6 +71,7 @@ impl Modify for SecurityAddon {
+         handlers::sandboxes::create_sandbox,
+         handlers::sandboxes::list_sandboxes_v2,
+         handlers::sandboxes::get_sandbox,
++        handlers::sandboxes::get_sandbox_port,
+         handlers::sandboxes::kill_sandbox,
+         handlers::sandboxes::pause_sandbox,
+         handlers::sandboxes::resume_sandbox,
+@@ -108,6 +109,7 @@ impl Modify for SecurityAddon {
+         SandboxVolumeMount,
+         crate::models::ListedSandbox,
+         SandboxDetail,
++        crate::models::SandboxTcpEndpoint,
+         Sandbox,
+         NewSandbox,
+         ConnectSandbox,
+diff --git a/CubeAPI/src/routes.rs b/CubeAPI/src/routes.rs
+index a0ea88f..05c62fc 100644
+--- a/CubeAPI/src/routes.rs
++++ b/CubeAPI/src/routes.rs
+@@ -89,6 +89,7 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
+         .route("/sandboxes", post(sandboxes::create_sandbox))
+         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
+         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
++        .route("/sandboxes/:sandboxID/ports/:containerPort", get(sandboxes::get_sandbox_port))
+         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
+         .route(
+             "/sandboxes/:sandboxID/logs",
+diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
+index f2c945e..69f306a 100644
+--- a/CubeAPI/src/services/sandboxes.rs
++++ b/CubeAPI/src/services/sandboxes.rs
+@@ -19,6 +19,7 @@ use crate::{
+     models::{
+         EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
+         SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
++        SandboxTcpEndpoint,
+         SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
+         SandboxVolumeMount,
+     },
+@@ -152,6 +153,77 @@ impl SandboxService {
+         })
+     }
+ 
++    pub async fn get_sandbox_port_endpoint(
++        &self,
++        sandbox_id: &str,
++        container_port: u16,
++    ) -> AppResult<SandboxTcpEndpoint> {
++        if container_port == 0 {
++            return Err(AppError::BadRequest(
++                "container port must be between 1 and 65535".to_string(),
++            ));
++        }
++
++        let response = self
++            .cubemaster
++            .get_sandbox_with_port(
++                sandbox_id,
++                &self.instance_type,
++                Some(i32::from(container_port)),
++            )
++            .await
++            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
++
++        let ret_code = response.ret.ret_code;
++        let ret_msg = response.ret.ret_msg;
++        if !is_success_ret_code(ret_code) {
++            if ret_code == RET_CODE_NOT_FOUND {
++                return Err(AppError::NotFound(format!(
++                    "sandbox {} not found",
++                    sandbox_id
++                )));
++            }
++            return Err(AppError::Internal(anyhow::anyhow!(ret_msg)));
++        }
++
++        let item = response
++            .data
++            .into_iter()
++            .find(|item| item.sandbox_id == sandbox_id)
++            .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))?;
++
++        let host_ip: std::net::IpAddr = item.host_ip.parse().map_err(|_| {
++            AppError::Internal(anyhow::anyhow!(format!(
++                "sandbox {} returned invalid HostIP {:?}",
++                sandbox_id, item.host_ip
++            )))
++        })?;
++        if item.exposed_port_mode != "host_port" {
++            return Err(AppError::Internal(anyhow::anyhow!(format!(
++                "sandbox {} returned unsupported port mode {:?}; expected host_port",
++                sandbox_id, item.exposed_port_mode
++            ))));
++        }
++
++        let endpoint: std::net::SocketAddr = item.exposed_port_endpoint.parse().map_err(|_| {
++            AppError::Internal(anyhow::anyhow!(format!(
++                "sandbox {} returned invalid exposed port endpoint {:?}",
++                sandbox_id, item.exposed_port_endpoint
++            )))
++        })?;
++        if endpoint.ip() != host_ip {
++            return Err(AppError::Internal(anyhow::anyhow!(format!(
++                "sandbox {} HostIP {:?} does not match endpoint {:?}",
++                sandbox_id, host_ip, endpoint
++            ))));
++        }
++
++        Ok(SandboxTcpEndpoint {
++            sandbox_id: sandbox_id.to_string(),
++            container_port,
++            address: endpoint.to_string(),
++        })
++    }
+     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
+         let NewSandbox {
+             template_id,
+diff --git a/sdk/python/cubesandbox/__init__.py b/sdk/python/cubesandbox/__init__.py
+index fdc1fe4..d9d78ab 100644
+--- a/sdk/python/cubesandbox/__init__.py
++++ b/sdk/python/cubesandbox/__init__.py
+@@ -4,6 +4,7 @@
+ from .sandbox import Sandbox, NEVER_TIMEOUT
+ from ._config import Config
+ from ._models import Execution, Result, Logs, ExecutionError, OutputMessage, SnapshotInfo, SandboxInfo, SandboxState
++from ._models import SandboxTcpEndpoint
+ from ._exceptions import CubeSandboxError, SandboxNotFoundError, ApiError, TemplateNotFoundError, VolumeNotFoundError, FilesystemNotFoundError, PartialWriteError
+ from ._commands import CommandResult
+ from ._pty import Pty, PtyHandle, PtyOutput, PtySize
+@@ -22,6 +23,7 @@ __all__ = [
+     "OutputMessage",
+     "SnapshotInfo",
+     "SandboxInfo",
++    "SandboxTcpEndpoint",
+     "SandboxState",
+     "CubeSandboxError",
+     "SandboxNotFoundError",
+diff --git a/sdk/python/cubesandbox/_models.py b/sdk/python/cubesandbox/_models.py
+index 0f85fc4..aee071e 100644
+--- a/sdk/python/cubesandbox/_models.py
++++ b/sdk/python/cubesandbox/_models.py
+@@ -206,6 +206,22 @@ class SnapshotInfo:
+         )
+ 
+ 
++@dataclass(frozen=True)
++class SandboxTcpEndpoint:
++    """CubeSandbox's semantic raw TCP endpoint for one container port."""
++
++    sandbox_id: str
++    container_port: int
++    address: str
++
++    @classmethod
++    def from_dict(cls, data: dict[str, Any]) -> "SandboxTcpEndpoint":
++        return cls(
++            sandbox_id=str(data.get("sandboxID", "")),
++            container_port=int(data.get("containerPort", 0)),
++            address=str(data.get("address", "")),
++        )
++
+ class SandboxState(str, Enum):
+     """E2B-compatible sandbox lifecycle state.
+ 
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+index e397568..b49b1c7 100644
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -14,6 +14,7 @@ from ._config import Config, _auth_headers
+ from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
+ from ._filesystem import Filesystem
+ from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
++from ._models import SandboxTcpEndpoint
+ from ._policy import (
+     Rule,
+     _build_network_payload,
+@@ -166,6 +167,35 @@ class Sandbox:
+         e.g. ``49999-<sandboxID>.cube.app``
+         """
+         return f"{port}-{self.sandbox_id}.{self.domain}"
++    def get_tcp_endpoint(self, container_port: int) -> SandboxTcpEndpoint:
++        """Resolve CubeSandbox's existing L4 host-port mapping.
++
++        This is the control-plane endpoint for callers that need a native
++        TCP connection to a sandbox port. It deliberately does not use
++        get_host(), which returns a virtual HTTP authority.
++        """
++        if isinstance(container_port, bool) or not isinstance(container_port, int):
++            raise ValueError("container_port must be an integer between 1 and 65535")
++        if not 1 <= container_port <= 65535:
++            raise ValueError("container_port must be between 1 and 65535")
++
++        resp = self._session.get(
++            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/ports/{container_port}"
++        )
++        _check_response(resp)
++        mapping = SandboxTcpEndpoint.from_dict(resp.json())
++        if mapping.sandbox_id != self.sandbox_id:
++            raise ApiError(
++                f"endpoint belongs to sandbox {mapping.sandbox_id!r}, "
++                f"not {self.sandbox_id!r}"
++            )
++        if mapping.container_port != container_port:
++            raise ApiError(
++                f"endpoint is for container port {mapping.container_port}, "
++                f"not {container_port}"
++            )
++        return mapping
++
+ 
+     @property
+     def commands(self) -> "Commands":

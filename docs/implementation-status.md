@@ -10,11 +10,12 @@ wall/monotonic service-time records. ModelGateway exposes all four lifecycle
 events and retains session-local replay state.
 
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
-corrected ARM64 Tool image was built and a fresh kernel-bound Tool template was
-accepted on Kunpeng. The full live native SSH pair and managed real-inference
-c1 gates remain pending because this Cube deployment does not expose the
-per-sandbox mapped SSH port to Runtime; no c20+ paper claim is made for the
-native OpenClaw path.
+corrected ARM64 Tool image and fresh kernel-bound templates were accepted on
+Kunpeng. Source now consumes CubeSandbox's semantic `get_tcp_endpoint(2222)`
+contract. Admission-triggered restore returns the current route to the Runtime
+SSH hook, which retargets the already-created invocation before execution.
+Live route, native pair, and managed real-inference c1 gates remain pending; no
+c20+ paper claim is made for the native OpenClaw path.
 
 ## Evidence
 
@@ -37,8 +38,10 @@ native OpenClaw path.
 | Replay smoke-matrix c40 | passed; 2/2 arms |
 | Replay spatial c40 | passed; 15/15 arms |
 | Replay vertical-slice c40 | passed; 1/1 arm |
-| Real Runtime-to-Tool native SSH | pending; raw mapped endpoint unavailable from Runtime |
-| Pause -> policy restore -> SSH -> telemetry | pending with live native route |
+| Semantic TCP endpoint integration | implemented at `50db717`; live gate pending |
+| Admission-time in-flight SSH reroute | implemented after `50db717`; live gate pending |
+| Real Runtime-to-Tool native SSH | pending live route gate |
+| Pause -> policy restore -> same SSH invocation -> telemetry | pending live pair smoke |
 | Managed real-inference c1 | pending; operator credential is present but not sent by automation |
 | Deterministic c1 replay equivalence | replay path green; native OpenClaw c1 pending |
 | c4/c8/c20/c40/c60 | replay c40 matrices green; native OpenClaw scale pending |
@@ -52,12 +55,18 @@ The c40 artifacts were retained on kunpeng under
 `baseline40-decision` after the command-stream fix. Every run finished with
 `GET /v2/sandboxes` returning `[]`.
 
-Live route finding: `Sandbox.get_host(2222)` is an HTTP ingress authority, not
-an OpenSSH endpoint. The Tool mapping is visible inside the CubeProxy path but
-is not listening on the host node or reachable from a Runtime VM, so the next
-deployment task is to provide an explicit raw TCP route and set
-`CLAWBOX_NATIVE_SSH_TARGET` (or `CLAWBOX_NATIVE_SSH_HOST` plus port). Existing
-host resources and templates were preserved.
+`Sandbox.get_host(2222)` remains HTTP-only and is never used for OpenSSH.
+ClawBox now asks the CubeSandbox SDK for the semantic raw TCP endpoint. The
+deployment gate must prove that endpoint is reachable from Runtime, unique per
+active Tool, invalidated across pause/restore, and stable in host identity even
+when its mapped port changes. Existing host resources and templates remain
+preserved until that gate runs.
+
+Formal replay and API experiments share the same OpenClaw process in Runtime,
+ClawTune sidecar/plugin, SSH tool path, PolicyControl, and validation. Replay
+changes only ModelGateway's response producer. The older
+`agent.driver=replay_engine` matrices remain useful systems-capacity baselines,
+but they are not end-to-end OpenClaw results.
 
 See `docs/HANDOFF.md` for exact provenance, discovered failures, host state,
 and ordered continuation steps. Kubernetes-era code still in the tree is
