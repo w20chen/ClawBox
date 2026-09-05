@@ -66,7 +66,8 @@ directly from the canonical baseline catalog with 40 concurrent sessions per
 arm and verifies successful completion, complete session/sandbox/agent/cleanup
 spans, and zero remaining fake owned sandboxes. The policy shim tests also
 cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
-fail-closed behavior for an unenveloped Agent SSH operation.
+fail-closed behavior for an unenveloped Agent SSH operation. Result bundles
+now also separate Runtime and Tool template provenance fields.
 The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
 
 ## Evidence

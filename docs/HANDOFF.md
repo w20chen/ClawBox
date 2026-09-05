@@ -85,6 +85,10 @@ through the official Template API before creating either VM. A `READY` status
 alone is insufficient, so the currently mismatched Runtime template fails
 closed rather than producing misleading live evidence.
 
+Commit `5a9598b` makes result provenance explicit for both VM roles: new
+bundles record separate Runtime and Tool template references, source images,
+and digests, while retaining the historical Tool provenance keys.
+
 The local c40 Worker gate now also materializes every implemented schema-v2
 policy recipe directly from the canonical baseline catalog against a
 concurrent fake CubeSandbox: 10 policy arms x 40 sessions complete, all
