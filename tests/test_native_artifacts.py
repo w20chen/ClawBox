@@ -11,6 +11,10 @@ from clawbox.experiments.native_artifacts import (
     collect_and_validate_native_tool_artifacts,
     validate_native_tool_join,
 )
+from clawbox.experiments.worker import (
+    enrich_tool_execution_observations,
+    summarize_tool_execution_observations,
+)
 from clawbox.experiments.openclaw_driver import NativeSSHConfig
 from clawbox.replay.lifecycle import CommandResult
 
@@ -158,4 +162,43 @@ def test_native_tool_join_rejects_non_finite_cgroup_measurements() -> None:
             cgroup_artifacts={execution_id: cgroup},
             clause_artifacts={execution_id: clause},
             policy_records=_policy(execution_id, digest),
+        )
+
+
+def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
+    records = [{
+        "session_id": "session-a", "execution_id": "exec-1",
+        "canonical_prediction_key": "printf ok",
+        "prediction_source": "runtime_clawtune_immutable_kb",
+        "fallback_level": "exact_command",
+        "predicted_incremental_memory_mib": 3.0,
+        "admitted_reservation_mib": 3,
+        "admission_blocked_seconds": 0.25,
+    }]
+    _bridge, cgroup, _clause = _artifacts(
+        "exec-1", hashlib.sha256(b"printf ok").hexdigest()
+    )
+    cgroup["memory_rss_peak_bytes"] = 2 * 1024 * 1024
+    cgroup["ts_end"] = 2.5
+
+    enriched = enrich_tool_execution_observations(records, {"exec-1": cgroup})
+    assert enriched[0]["actual_measured_memory_mib"] == 2.0
+    assert enriched[0]["actual_execution_duration_seconds"] == 1.5
+    assert enriched[0]["prediction_error_mib"] == 1.0
+    assert enriched[0]["prediction_underestimate_mib"] == 0.0
+    assert enriched[0]["telemetry_eligible_for_kb"] is True
+    summary = summarize_tool_execution_observations(enriched)
+    assert summary["prediction_fallback_rate"] == 0.0
+    assert summary["prediction_error_p90_mib"] == 1.0
+    assert summary["telemetry_invalid_count"] == 0
+
+
+def test_native_measurement_enrichment_requires_exact_execution_set() -> None:
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        enrich_tool_execution_observations(
+            [{"execution_id": "exec-1"}],
+            {"exec-2": {
+                "memory_rss_peak_bytes": 1, "ts_start": 0, "ts_end": 1,
+                "cpu_utilization_avg_cores": 1,
+            }},
         )

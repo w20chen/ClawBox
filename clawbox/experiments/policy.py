@@ -74,6 +74,8 @@ class PolicyCoordinator:
         self.admission_count = 0
         self.max_admission_queue_depth = 0
         self._admission_wait_samples: list[float] = []
+        self.safety_intervention_count = 0
+        self.safety_interventions_by_reason: dict[str, int] = {}
 
     def register(self, session_id: str, lifecycle: Pausable) -> None:
         with self._condition:
@@ -120,10 +122,18 @@ class PolicyCoordinator:
             state.last_used = time.monotonic()
 
     def pressure(self, additional_bytes: int = 0) -> bool:
+        return bool(self._pressure_reasons(additional_bytes))
+
+    def _pressure_reasons(self, additional_bytes: int = 0) -> tuple[str, ...]:
         used, available = self.physical_sample()
         committed = sum(self._reservations.values()) + additional_bytes
         charged = max(used, committed) + self.operation_headroom_bytes
-        return charged > self.budget_bytes or available < self.emergency_free_bytes
+        reasons = []
+        if charged > self.budget_bytes:
+            reasons.append("configured_memory_budget")
+        if available < self.emergency_free_bytes:
+            reasons.append("emergency_free_memory")
+        return tuple(reasons)
 
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float) -> float:
         started = time.monotonic()
@@ -138,13 +148,25 @@ class PolicyCoordinator:
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
+            recorded_safety_reasons: set[str] = set()
             self.max_admission_queue_depth = max(
                 self.max_admission_queue_depth, len(self._waiters),
             )
             try:
-                while self._waiters[0] is not ticket or self.pressure(amount):
+                while True:
+                    at_head = self._waiters[0] is ticket
+                    safety_reasons = self._pressure_reasons(amount) if at_head else ()
+                    if at_head and not safety_reasons:
+                        break
+                    for reason in safety_reasons:
+                        if reason not in recorded_safety_reasons:
+                            recorded_safety_reasons.add(reason)
+                            self.safety_intervention_count += 1
+                            self.safety_interventions_by_reason[reason] = (
+                                self.safety_interventions_by_reason.get(reason, 0) + 1
+                            )
                     victim = self._select_victim_locked(exclude=session_id)
-                    if self._waiters[0] is ticket and victim is not None:
+                    if at_head and victim is not None:
                         self._condition.release()
                         try:
                             elapsed = victim.lifecycle.checkpoint_and_evict()
@@ -206,6 +228,10 @@ class PolicyCoordinator:
             "wait_p50_seconds": quantile(0.50),
             "wait_p95_seconds": quantile(0.95),
             "wait_max_seconds": max(samples) if samples else None,
+            "safety_intervention_count": self.safety_intervention_count,
+            "safety_interventions_by_reason": dict(
+                self.safety_interventions_by_reason
+            ),
         }
 
     def release(self, session_id: str, amount_mib: int) -> None:

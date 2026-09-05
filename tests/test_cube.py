@@ -382,7 +382,14 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     monkeypatch.setattr(worker_module, "run_openclaw", fake_run_openclaw)
     monkeypatch.setattr(
         worker_module, "collect_and_validate_native_tool_artifacts",
-        lambda **_kwargs: SimpleNamespace(root=tmp_path / "native", validation={"ok": True}),
+        lambda **_kwargs: SimpleNamespace(
+            root=tmp_path / "native", validation={"ok": True},
+            cgroup_artifacts={"exec-1": {
+                "memory_rss_peak_bytes": 2 * 1024 * 1024,
+                "ts_start": 1.0, "ts_end": 1.01,
+                "cpu_utilization_avg_cores": 0.25,
+            }},
+        ),
     )
     monkeypatch.setenv("CLAWBOX_CONTROL_HOST", "127.0.0.1")
     monkeypatch.setenv("CLAWBOX_MODEL_GATEWAY_HOST", "127.0.0.1")
@@ -414,6 +421,14 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     ).run()[0]
 
     assert result.status.value == "succeeded"
+    assert result.provenance["evidence_class"] == "deterministic-managed-replay"
+    assert result.provenance["configured_trace_sha256"] == hashlib.sha256(
+        trace.read_bytes()
+    ).hexdigest()
+    observation = result.performance["tool_execution_observations"][0]
+    assert observation["actual_measured_memory_mib"] == 2.0
+    assert observation["admitted_reservation_mib"] == 1
+    assert observation["telemetry_validity"] == "valid"
     # Worker creates the Tool before the Runtime, even though the Runtime is
     # the long-lived OpenClaw process whose PID is witnessed.
     tool, runtime = SnapshotSandbox.created
@@ -481,6 +496,28 @@ def test_lifecycle_records_failed_create_with_state_and_error_type() -> None:
     assert lifecycle.timings[-1]["error_type"] == "TimeoutError"
     assert lifecycle.timings[-1]["state_before"] == "new"
     assert lifecycle.timings[-1]["state_after"] == "new"
+
+
+def test_lifecycle_records_host_physical_memory_reclamation() -> None:
+    _Sandbox.items = {}
+    samples = iter([
+        {"metric": "host_meminfo_memavailable", "host_used_bytes": 100},
+        {"metric": "host_meminfo_memavailable", "host_used_bytes": 120},
+        {"metric": "host_meminfo_memavailable", "host_used_bytes": 120},
+        {"metric": "host_meminfo_memavailable", "host_used_bytes": 70},
+    ])
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox), template="tpl",
+        node_name="node-a", ownership=_owner(),
+        physical_observation=lambda: next(samples),
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict()
+    checkpoint = lifecycle.timings[-1]
+    assert checkpoint["host_memory_before"]["host_used_bytes"] == 120
+    assert checkpoint["host_memory_after"]["host_used_bytes"] == 70
+    assert checkpoint["host_observed_reclaimed_bytes"] == 50
+    assert checkpoint["host_observed_growth_bytes"] == 0
 
 
 def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> None:

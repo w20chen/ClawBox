@@ -201,6 +201,15 @@ telemetry loss and duplicate execution are zero, routing is session-correct,
 and all owned sandboxes are destroyed. Agent JCT excludes validation, hashing,
 cleanup, and stabilization.
 
+Formal result bundles keep guest and host memory semantics separate. Native
+Tool observation rows join policy, Runtime, bridge, cgroup-v2, and eBPF records
+by `(session_id, execution_id)` and report prediction/reservation/actual peak
+RSS and execution timing. CubeSandbox lifecycle rows use node-wide
+`MemAvailable` observations to report physical-memory change around
+checkpoint/restore; those values are not Tool-process RSS. The frozen KB hash,
+prediction fallback/error summaries, evidence class, configured trace hash,
+and memory-safety interventions are retained with each arm.
+
 ## Local verification
 
 ```bash

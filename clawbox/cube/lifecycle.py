@@ -4,7 +4,8 @@ import time
 from dataclasses import asdict, dataclass
 from enum import Enum
 from threading import RLock
-from typing import Mapping
+from collections.abc import Callable
+from typing import Any, Mapping
 
 from clawbox.replay.lifecycle import LifecycleError
 
@@ -34,6 +35,10 @@ class LifecycleTiming:
     state_after: str
     status: str = "ok"
     error_type: str | None = None
+    host_memory_before: dict[str, Any] | None = None
+    host_memory_after: dict[str, Any] | None = None
+    host_observed_reclaimed_bytes: int | None = None
+    host_observed_growth_bytes: int | None = None
 
 
 class CubeSandboxLifecycle:
@@ -44,7 +49,8 @@ class CubeSandboxLifecycle:
                  allow_internet_access: bool = True,
                  env_vars: Mapping[str, str] | None = None,
                  network_allow_out: list[str] | None = None,
-                 network_deny_out: list[str] | None = None) -> None:
+                 network_deny_out: list[str] | None = None,
+                 physical_observation: Callable[[], Mapping[str, Any]] | None = None) -> None:
         self.client = client
         self.template = template
         self.node_name = node_name
@@ -53,6 +59,7 @@ class CubeSandboxLifecycle:
         self.env_vars = dict(env_vars or {})
         self.network_allow_out = list(network_allow_out or [])
         self.network_deny_out = list(network_deny_out or [])
+        self.physical_observation = physical_observation
         self.sandbox = None
         self.sandbox_id: str | None = None
         self._state = SandboxState.NEW
@@ -75,16 +82,37 @@ class CubeSandboxLifecycle:
 
     def _record(self, operation: str, before: SandboxState, after: SandboxState,
                 started_wall: float, started_mono: float, *,
-                status: str = "ok", error_type: str | None = None) -> float:
+                status: str = "ok", error_type: str | None = None,
+                host_memory_before: Mapping[str, Any] | None = None) -> float:
         completed_wall = time.time()
         completed_mono = time.monotonic()
         duration = max(0.0, completed_mono - started_mono)
+        host_memory_after = self._observe_physical()
+        before_used = self._host_used(host_memory_before)
+        after_used = self._host_used(host_memory_after)
+        reclaimed = growth = None
+        if before_used is not None and after_used is not None:
+            reclaimed = max(0, before_used - after_used)
+            growth = max(0, after_used - before_used)
         self._timings.append(LifecycleTiming(
             operation, started_wall, completed_wall, started_mono,
             completed_mono, duration, before.value, after.value,
             status, error_type,
+            dict(host_memory_before) if host_memory_before is not None else None,
+            dict(host_memory_after) if host_memory_after is not None else None,
+            reclaimed, growth,
         ))
         return duration
+
+    def _observe_physical(self) -> Mapping[str, Any] | None:
+        return self.physical_observation() if self.physical_observation is not None else None
+
+    @staticmethod
+    def _host_used(sample: Mapping[str, Any] | None) -> int | None:
+        if sample is None:
+            return None
+        value = sample.get("host_used_bytes")
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
     def start(self) -> float:
         with self._lock:
@@ -93,6 +121,7 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.CREATING
             started_wall, started_mono = time.time(), time.monotonic()
+            host_memory_before = self._observe_physical()
             try:
                 self.sandbox = self.client.create_sandbox(
                     template=self.template, node_name=self.node_name,
@@ -104,12 +133,14 @@ class CubeSandboxLifecycle:
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
-                                    started_wall, started_mono)
+                                    started_wall, started_mono,
+                                    host_memory_before=host_memory_before)
             except Exception as exc:
                 self._state = before
                 self._record(
                     "create", before, before, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
+                    host_memory_before=host_memory_before,
                 )
                 raise
 
@@ -120,16 +151,19 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.CHECKPOINTING
             started_wall, started_mono = time.time(), time.monotonic()
+            host_memory_before = self._observe_physical()
             try:
                 self.client.pause_sandbox(self.sandbox)
                 self._state = SandboxState.SWAPPED
                 return self._record("checkpoint", before, self._state,
-                                    started_wall, started_mono)
+                                    started_wall, started_mono,
+                                    host_memory_before=host_memory_before)
             except Exception as exc:
                 self._state = before
                 self._record(
                     "checkpoint", before, before, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
+                    host_memory_before=host_memory_before,
                 )
                 raise
 
@@ -142,16 +176,19 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.RESTORING
             started_wall, started_mono = time.time(), time.monotonic()
+            host_memory_before = self._observe_physical()
             try:
                 self.sandbox = self.client.connect_sandbox(self.sandbox_id)
                 self._state = SandboxState.RUNNING
                 return self._record("restore", before, self._state,
-                                    started_wall, started_mono)
+                                    started_wall, started_mono,
+                                    host_memory_before=host_memory_before)
             except Exception as exc:
                 self._state = before
                 self._record(
                     "restore", before, before, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
+                    host_memory_before=host_memory_before,
                 )
                 raise
 
@@ -174,6 +211,7 @@ class CubeSandboxLifecycle:
             if self._state is SandboxState.RUNNING:
                 before = self._state
                 started_wall, started_mono = time.time(), time.monotonic()
+                host_memory_before = self._observe_physical()
                 try:
                     self.client.update_network(
                         self.sandbox, allow_internet_access=self.allow_internet_access,
@@ -184,10 +222,12 @@ class CubeSandboxLifecycle:
                     self._record(
                         "network_update", before, before, started_wall, started_mono,
                         status="error", error_type=type(exc).__name__,
+                        host_memory_before=host_memory_before,
                     )
                     raise
                 self._record("network_update", before, self._state,
-                             started_wall, started_mono)
+                             started_wall, started_mono,
+                             host_memory_before=host_memory_before)
             self.network_allow_out = desired
             return True
 
@@ -198,6 +238,7 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.DESTROYING
             started_wall, started_mono = time.time(), time.monotonic()
+            host_memory_before = self._observe_physical()
             try:
                 if self.sandbox_id is not None:
                     self.client.kill_sandbox(self.sandbox_id)
@@ -205,11 +246,13 @@ class CubeSandboxLifecycle:
                 self.sandbox_id = None
                 self._state = SandboxState.CLOSED
                 return self._record("destroy", before, self._state,
-                                    started_wall, started_mono)
+                                    started_wall, started_mono,
+                                    host_memory_before=host_memory_before)
             except Exception as exc:
                 self._state = before
                 self._record(
                     "destroy", before, before, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
+                    host_memory_before=host_memory_before,
                 )
                 raise

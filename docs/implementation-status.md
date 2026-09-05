@@ -48,6 +48,25 @@ include wall-clock and monotonic timestamps plus service time, state transition,
 and status fields, so cross-process correlation does not depend on a single
 adjustable clock.
 
+Managed native Tool admissions now become execution-level observation rows
+after the strict policy/Runtime/bridge/cgroup/eBPF join succeeds. Each row
+retains the command prediction key and source, fallback level, predicted
+incremental memory, admitted reservation, admission wait, guest cgroup-v2 peak
+RSS, execution duration, average CPU use, telemetry validity, and prediction
+error/coverage. Arm results aggregate P90 prediction error, absolute error,
+underestimation, and fallback rate, and record the frozen prediction artifact
+SHA-256 in provenance. These observations are exportable training evidence;
+the Worker does not mutate the frozen KB during a comparison arm.
+
+CubeSandbox lifecycle records also sample node physical memory immediately
+before and after create/checkpoint/restore/destroy. The records explicitly
+label whole-host `MemAvailable`-derived usage separately from guest Tool
+cgroup memory and report observed reclamation/growth. This is a node-wide
+concurrent observation, not exclusive per-VM attribution, but it prevents a
+successful pause API response from being reported without physical-memory
+evidence. Host `oom_kill` deltas fail the arm, and admission metrics count each
+configured-budget or emergency-free-memory safety intervention.
+
 When an experiment pins `image_digest`, Worker now checks the official
 CubeSandbox Template record before creating a VM and rejects a `READY` record
 whose image digest does not match. This makes the currently stale Runtime

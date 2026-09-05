@@ -38,6 +38,11 @@ def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
     with pytest.raises(AdmissionTimeout):
         coordinator.acquire("requester", 1, 0)
     assert victim.pauses == 0
+    metrics = coordinator.admission_metrics()
+    assert metrics["safety_intervention_count"] == 1
+    assert metrics["safety_interventions_by_reason"] == {
+        "configured_memory_budget": 1,
+    }
 
 
 def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:

@@ -162,6 +162,21 @@ spans, and managed model response-hold/delivery spans. CubeSandbox lifecycle
 spans retain wall-clock and monotonic timestamps, service time, state
 transitions, and status for machine-readable cross-process analysis.
 
+The managed result path now closes the evidence join after collection: every
+admitted native Tool execution is enriched from its exact-ID cgroup-v2 record
+with guest peak RSS, duration, CPU utilization, telemetry/KB eligibility, and
+prediction error. Result provenance contains the frozen KB hash and evidence
+class; arm summaries expose fallback and error distributions. The KB remains
+immutable during a comparison arm so held-out evaluation cannot silently train
+on itself.
+
+Lifecycle timing records now include node-wide physical-memory observations
+before and after CubeSandbox operations, with observed reclaimed/growth bytes.
+These host measurements are explicitly distinct from guest Tool cgroup RSS and
+remain subject to concurrent-node noise. A host `oom_kill` delta invalidates the
+arm, while PolicyCoordinator records budget and emergency-free-memory safety
+interventions in its admission metrics.
+
 The alternate GitHub child commit `edcbd8a97f47bbe81c3119931bc449bc28f54fbd`
 was reviewed against this post-`50db717` tree and is intentionally not
 cherry-picked. Its useful lifecycle-failure, per-execution timing, FIFO

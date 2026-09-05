@@ -215,8 +215,103 @@ def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, Any]]:
             state_after=item.get("state_after"), error_type=item.get("error_type"),
         )
         if span is not None:
+            for key in (
+                "host_memory_before", "host_memory_after",
+                "host_observed_reclaimed_bytes", "host_observed_growth_bytes",
+            ):
+                if item.get(key) is not None:
+                    span[key] = item[key]
             spans.append(span)
     return spans
+
+
+def enrich_tool_execution_observations(
+    records: list[dict[str, Any]],
+    cgroup_artifacts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach validated guest execution measurements to admission records."""
+    expected_ids = {str(item.get("execution_id") or "") for item in records}
+    if "" in expected_ids or expected_ids != set(cgroup_artifacts):
+        raise RuntimeError(
+            "prediction/cgroup execution identity mismatch: "
+            f"predictions={sorted(expected_ids)!r} "
+            f"cgroups={sorted(cgroup_artifacts)!r}"
+        )
+    enriched: list[dict[str, Any]] = []
+    for item in records:
+        execution_id = str(item["execution_id"])
+        cgroup = cgroup_artifacts[execution_id]
+        actual_mib = float(cgroup["memory_rss_peak_bytes"]) / (1024.0 * 1024.0)
+        duration = max(0.0, float(cgroup["ts_end"]) - float(cgroup["ts_start"]))
+        row = dict(item)
+        row.update({
+            "actual_measured_memory_mib": actual_mib,
+            "actual_memory_metric": "tool_guest_cgroup_v2_memory_rss_peak_bytes",
+            "actual_execution_duration_seconds": duration,
+            "actual_cpu_utilization_avg_cores": float(
+                cgroup["cpu_utilization_avg_cores"]
+            ),
+            "telemetry_validity": "valid",
+            "telemetry_eligible_for_kb": True,
+        })
+        predicted = row.get("predicted_incremental_memory_mib")
+        if predicted is not None:
+            predicted_mib = float(predicted)
+            signed_error = predicted_mib - actual_mib
+            row.update({
+                "prediction_error_mib": signed_error,
+                "prediction_absolute_error_mib": abs(signed_error),
+                "prediction_underestimate_mib": max(0.0, -signed_error),
+                "prediction_covered_actual": predicted_mib >= actual_mib,
+            })
+        enriched.append(row)
+    records[:] = enriched
+    return enriched
+
+
+def summarize_tool_execution_observations(
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Produce paper-facing prediction and telemetry aggregates."""
+    errors = [
+        float(item["prediction_error_mib"])
+        for item in records if item.get("prediction_error_mib") is not None
+    ]
+    absolute_errors = [
+        float(item["prediction_absolute_error_mib"])
+        for item in records if item.get("prediction_absolute_error_mib") is not None
+    ]
+    underestimates = [
+        float(item["prediction_underestimate_mib"])
+        for item in records if item.get("prediction_underestimate_mib") is not None
+    ]
+    prediction_records = [
+        item for item in records
+        if item.get("prediction_source") == "runtime_clawtune_immutable_kb"
+    ]
+    fallback_records = [
+        item for item in prediction_records
+        if item.get("fallback_level") != "exact_command"
+    ]
+    return {
+        "tool_execution_observation_count": len(records),
+        "telemetry_valid_count": sum(
+            item.get("telemetry_validity") == "valid" for item in records
+        ),
+        "telemetry_invalid_count": sum(
+            item.get("telemetry_validity") != "valid" for item in records
+        ),
+        "prediction_observation_count": len(prediction_records),
+        "prediction_fallback_count": len(fallback_records),
+        "prediction_fallback_rate": (
+            len(fallback_records) / len(prediction_records)
+            if prediction_records else None
+        ),
+        "prediction_error_mean_mib": statistics.fmean(errors) if errors else None,
+        "prediction_error_p90_mib": percentile(errors, 0.90),
+        "prediction_absolute_error_p90_mib": percentile(absolute_errors, 0.90),
+        "prediction_underestimate_p90_mib": percentile(underestimates, 0.90),
+    }
 
 
 class EventWriter:
@@ -361,7 +456,7 @@ class ExperimentWorker:
             with ThreadPoolExecutor(max_workers=arm.concurrency, thread_name_prefix="agent") as pool:
                 futures = [pool.submit(self._run_session, arm, index, coordinator, events,
                                        policy_events, prediction_provider,
-                                       sandbox_create_gate)
+                                       sandbox_create_gate, sampler.observe)
                            for index in range(arm.concurrency)]
                 for future in as_completed(futures, timeout=arm.execution.arm_timeout_seconds):
                     try:
@@ -386,6 +481,11 @@ class ExperimentWorker:
             memory = sampler.stop()
             if cleanup_error is not None:
                 failure = failure or cleanup_error
+            if memory.host_oom_kill_events:
+                failure = failure or RuntimeError(
+                    "host OOM kill observed during arm: "
+                    f"{memory.host_oom_kill_events}"
+                )
         status = RunStatus.SUCCEEDED if failure is None else RunStatus.FAILED
         duration = time.monotonic() - started
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
@@ -393,17 +493,30 @@ class ExperimentWorker:
         tool_latencies = [float(value) for item in sessions for value in item["tool_latencies"]]
         tool_steps = sum(int(item["tool_steps"]) for item in sessions)
         model_steps = sum(int(item["model_steps"]) for item in sessions)
+        tool_execution_observations = [
+            dict(record)
+            for item in sessions for record in item.get("prediction_records", [])
+        ]
+        observation_summary = summarize_tool_execution_observations(
+            tool_execution_observations
+        )
         workload_starts = [float(item["timeline"]["agent_execution_start"])
                            for item in sessions if item.get("timeline", {}).get("agent_execution_start")]
         workload_ends = [float(item["timeline"]["final_agent_completion"])
                          for item in sessions if item.get("timeline", {}).get("final_agent_completion")]
         workload_window = (max(workload_ends) - min(workload_starts)
                            if workload_starts and workload_ends else None)
+        provenance = self._provenance()
+        provenance.update(self._arm_provenance(arm))
+        if prediction_provider is not None:
+            provenance["prediction_artifact"] = prediction_provider.provenance(
+                tool_execution_observations
+            )
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
             sandbox_task_uid=self.task_uid,
             experiment_id=self.spec.experiment_id, arm=arm,
-            provenance=self._provenance(), status=status,
+            provenance=provenance, status=status,
             failure_category=failure_category_for(status, "" if failure is None else str(failure)),
             started_at=started_at, completed_at=utcnow(),
             correctness={
@@ -451,6 +564,8 @@ class ExperimentWorker:
                 "resume_service_seconds": coordinator.resume_service_seconds,
                 "blocked_admission_seconds": coordinator.blocked_seconds,
                 "admission_control": coordinator.admission_metrics(),
+                "tool_execution_observations": tool_execution_observations,
+                **observation_summary,
                 "session_timelines": [item.get("timeline") for item in sessions],
                 "session_time_spans": [
                     item.get("timeline", {}).get("time_spans", []) for item in sessions
@@ -485,7 +600,8 @@ class ExperimentWorker:
     def _run_session(self, arm: ExperimentArm, index: int, coordinator: PolicyCoordinator,
                      events: EventWriter, policy_events: PolicyEventExecutor,
                      prediction_provider: CommandPredictionProvider | None = None,
-                     sandbox_create_gate: Semaphore | None = None) -> dict[str, Any]:
+                     sandbox_create_gate: Semaphore | None = None,
+                     physical_observation: Any = None) -> dict[str, Any]:
         session_id = f"{arm.arm_id}-{index:04d}"
         session_started = time.monotonic()
         timeline: dict[str, Any] = {"session_started": time.time()}
@@ -551,6 +667,7 @@ class ExperimentWorker:
             network_deny_out=_runtime_network_deny_out(
                 arm.runtime.allow_internet_access, runtime_allow_out,
             ),
+            physical_observation=physical_observation,
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {
@@ -572,6 +689,7 @@ class ExperimentWorker:
             node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
             ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
             env_vars=tool_env,
+            physical_observation=physical_observation,
         )
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
                     if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
@@ -660,6 +778,7 @@ class ExperimentWorker:
                         "role": "tool", "service_seconds": tool_elapsed,
                         "reason": "model_request_wait",
                         "request_id": event.get("request_id"),
+                        "lifecycle_timing": lifecycle.timings[-1],
                     })
                     if runtime_elapsed is not None:
                         coordinator.pause_count += 1
@@ -669,6 +788,7 @@ class ExperimentWorker:
                             "role": "runtime", "service_seconds": runtime_elapsed,
                             "reason": "model_request_wait",
                             "request_id": event.get("request_id"),
+                            "lifecycle_timing": runtime_lifecycle.timings[-1],
                         })
                 except Exception as exc:
                     policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
@@ -1118,6 +1238,17 @@ class ExperimentWorker:
                             coordinator.set_tool_active(session_id, False)
                             raise
                     prediction_record = dict(prediction or {})
+                    prediction_record.setdefault(
+                        "canonical_prediction_key",
+                        f"sha256:{request['command_sha256']}",
+                    )
+                    prediction_record.setdefault(
+                        "prediction_source", f"policy_{arm.policy.admission.value}"
+                    )
+                    prediction_record.setdefault("fallback_level", "not_applicable")
+                    prediction_record.setdefault(
+                        "predicted_incremental_memory_mib", float(amount)
+                    )
                     prediction_record.update({
                                  "session_id": session_id,
                                  "execution_id": execution_id,
@@ -1226,6 +1357,7 @@ class ExperimentWorker:
                                 "event": "sandbox_paused", "session_id": session_id,
                                 "role": "tool", "service_seconds": pause_s,
                                 "reason": "openclaw_tool_complete",
+                                "lifecycle_timing": lifecycle.timings[-1],
                             })
                     if (arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
                             and arm.policy.eviction is EvictionPolicy.EAGER):
@@ -1302,6 +1434,9 @@ class ExperimentWorker:
                         session_id=session_id, output_dir=self.output_root,
                         policy_records=outcome["policy_control_records"],
                         runtime_trace_paths=outcome["runtime_traces"],
+                    )
+                    enrich_tool_execution_observations(
+                        prediction_records, native_artifacts.cgroup_artifacts,
                     )
                 events.write({
                     "event": "native_tool_artifacts_collected",
@@ -1554,7 +1689,8 @@ class ExperimentWorker:
                 coordinator.pause_count += 1
                 coordinator.pause_service_seconds += pause_s
                 events.write({"event": "sandbox_paused", "session_id": session_id,
-                              "service_seconds": pause_s})
+                              "role": "tool", "service_seconds": pause_s,
+                              "lifecycle_timing": lifecycle.timings[-1]})
                 remaining = max(0.0, duration - (time.monotonic() - wait_started))
                 if prefetch_lead is not None:
                     time.sleep(max(0.0, remaining - prefetch_lead))
@@ -1579,7 +1715,8 @@ class ExperimentWorker:
             session_id, lifecycle.restore, arm.execution.arm_timeout_seconds,
         )
         events.write({"event": "sandbox_restored", "session_id": session_id,
-                      "role": role, "service_seconds": elapsed})
+                      "role": role, "service_seconds": elapsed,
+                      "lifecycle_timing": lifecycle.timings[-1]})
         return elapsed
 
     def _tool_reservation_mib(self, arm: ExperimentArm,
@@ -1655,6 +1792,45 @@ class ExperimentWorker:
             "cube_runtime_settings": {
                 "cpu_overcommit_ratio": 1.0, "memory_overcommit_ratio": 1.0,
                 "paused_resource_release_ratio": 1.0,
+            },
+        }
+
+    @staticmethod
+    def _arm_provenance(arm: ExperimentArm) -> dict[str, Any]:
+        if arm.agent.driver is AgentDriver.OPENCLAW:
+            evidence_class = (
+                "real-llm" if arm.inference.backend.value == "api"
+                else "deterministic-managed-replay"
+            )
+        else:
+            evidence_class = "synthetic-stress"
+        trace_reference = (
+            arm.case.replay_trace_reference or arm.case.source_reference
+        )
+        trace_path = Path(trace_reference)
+        trace_sha256 = (
+            hashlib.sha256(trace_path.read_bytes()).hexdigest()
+            if trace_path.is_file() else None
+        )
+        configuration = arm.inference.configuration
+        return {
+            "evidence_class": evidence_class,
+            "workload_case_id": arm.case.case_id,
+            "configured_trace_reference": trace_reference,
+            "configured_trace_sha256": trace_sha256,
+            "session_assignment": "single-case-per-arm",
+            "random_seed": arm.execution.random_seed,
+            "resource_scope": {
+                "target_node": arm.resources.target_node,
+                "pool_memory_budget_mib": arm.resources.pool_memory_budget_mib,
+                "emergency_free_memory_mib": arm.resources.emergency_free_memory_mib,
+            },
+            "model_provenance": {
+                "backend": arm.inference.backend.value,
+                "model": configuration.get("model"),
+                "base_url": configuration.get("base_url"),
+                "time_scale": configuration.get("time_scale"),
+                "credential_environment": configuration.get("api_key_env"),
             },
         }
 
