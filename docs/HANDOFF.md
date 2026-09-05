@@ -240,9 +240,10 @@ Kubernetes API is alive (`/version`, `/readyz`, and `/livez` returned 200), the
 Cube API health endpoint is alive, and both accepted templates still report
 `READY` with the expected CubeNode replica metadata. However,
 `GET /v2/sandboxes` remains empty, the CubeNode daemon port 9999 is closed, and
-the host SSH service now stalls during key exchange or session setup. A fresh
-probe still returns Cube API health 200 with zero sandboxes, while `ssh kunpeng`
-does not complete after the authorization banner. One
+the host SSH service now authenticates the configured public key but stalls
+while opening the session channel. A fresh probe completes TCP, KEX, host-key
+verification, and public-key authentication, then times out before
+`printf live-ssh-ok` runs; Cube API health remains 200 with zero sandboxes. One
 owner-tagged SDK Tool create was attempted with the existing
 `CUBE_PROXY_NODE_IP`/`CUBE_PROXY_PORT_HTTP` transport and a 20-second request
 timeout; it hung before returning a sandbox ID and the post-check still showed

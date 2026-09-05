@@ -93,6 +93,9 @@ cover `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`, plus
 fail-closed behavior for an unenveloped Agent SSH operation. Result bundles
 now also separate Runtime and Tool template provenance fields.
 The live CubeSandbox c40 result remains pending the Runtime-reachable endpoint.
+The latest bounded Kunpeng probe completes SSH authentication but stalls before
+the session channel opens, so the remote host still cannot be used for the
+required read-only recovery or native pair gates.
 
 ## Evidence
 
