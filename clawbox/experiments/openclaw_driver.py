@@ -153,34 +153,6 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
     return f"{user}@{rendered}:{port}"
 
 
-def native_ssh_target_from_env(*, sandbox_id: str = "",
-                               explicit: str | None = None) -> str:
-    """Resolve the raw TCP endpoint used by native OpenSSH.
-
-    Cube's ``get_host`` value is an HTTP ingress authority, not a raw TCP
-    endpoint.  A deployment must therefore provide the actual route (for
-    example a node host-port mapping) explicitly.  The optional
-    ``{sandbox_id}`` placeholder makes per-sandbox endpoint helpers possible
-    without ever guessing from guest ``hostname -I`` output.
-    """
-    value = (explicit if explicit is not None else
-             os.environ.get("CLAWBOX_NATIVE_SSH_TARGET", "")).strip()
-    if value:
-        value = value.replace("{sandbox_id}", str(sandbox_id))
-        split_native_ssh_target(value)
-        return value
-    host = os.environ.get("CLAWBOX_NATIVE_SSH_HOST", "").strip()
-    if not host:
-        raise ValueError(
-            "native SSH requires CLAWBOX_NATIVE_SSH_TARGET or "
-            "CLAWBOX_NATIVE_SSH_HOST; Cube get_host is HTTP-only"
-        )
-    rendered_port = os.environ.get("CLAWBOX_NATIVE_SSH_PORT", "2222").strip()
-    if not rendered_port.isdigit():
-        raise ValueError("CLAWBOX_NATIVE_SSH_PORT must be an integer")
-    return native_ssh_target(host, port=int(rendered_port))
-
-
 def native_tool_bridge_setup_command() -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 

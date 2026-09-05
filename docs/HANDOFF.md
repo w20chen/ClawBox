@@ -97,6 +97,9 @@ and adds the focused admission-versus-delayed-pause race regression.
 Commits `2c09e5a` and `3b0ce0e` make both standalone Kunpeng route gates use
 the semantic route object and fail closed for missing or non-2222 mapped
 ports.
+The obsolete environment-based endpoint fallback and standalone
+known-host refresh were removed afterward; no supported path can supply a
+route outside CubeSandbox resolution plus the per-invocation policy shim.
 
 The local c40 Worker gate now also materializes every implemented schema-v2
 policy recipe directly from the canonical baseline catalog against a

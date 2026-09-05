@@ -16,7 +16,6 @@ from clawbox.experiments.openclaw_driver import (
     native_ssh_route,
     native_ssh_target,
     native_tool_bridge_setup_command,
-    native_ssh_target_from_env,
     run_openclaw,
     split_native_ssh_target,
 )
@@ -116,30 +115,6 @@ def test_native_ssh_target_does_not_append_a_second_port() -> None:
     target = native_ssh_target("tool.example:2200", port=2222)
     assert target == "executor@tool.example:2200"
     assert split_native_ssh_target(target) == ("executor", "tool.example", 2200)
-
-
-def test_native_ssh_target_from_env_requires_explicit_raw_endpoint(monkeypatch) -> None:
-    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_TARGET", raising=False)
-    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_HOST", raising=False)
-    with pytest.raises(ValueError, match="get_host is HTTP-only"):
-        native_ssh_target_from_env()
-
-
-def test_native_ssh_target_from_env_renders_per_sandbox_target(monkeypatch) -> None:
-    monkeypatch.setenv(
-        "CLAWBOX_NATIVE_SSH_TARGET",
-        "executor@192.168.3.166:20055",
-    )
-    assert native_ssh_target_from_env(sandbox_id="sandbox-a") == (
-        "executor@192.168.3.166:20055"
-    )
-
-
-def test_native_ssh_target_from_env_supports_host_and_port(monkeypatch) -> None:
-    monkeypatch.delenv("CLAWBOX_NATIVE_SSH_TARGET", raising=False)
-    monkeypatch.setenv("CLAWBOX_NATIVE_SSH_HOST", "192.168.3.166")
-    monkeypatch.setenv("CLAWBOX_NATIVE_SSH_PORT", "20055")
-    assert native_ssh_target_from_env() == "executor@192.168.3.166:20055"
 
 
 def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:

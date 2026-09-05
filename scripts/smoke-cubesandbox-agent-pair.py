@@ -139,13 +139,6 @@ def setup_runtime_ssh(runtime, ssh: NativeSSHConfig, credentials,
     return identity, known_hosts
 
 
-def refresh_known_hosts(runtime, ssh: NativeSSHConfig, credentials,
-                        known_hosts: str) -> None:
-    known_host = f"{ssh.host_key_alias} {credentials.host_public}\n"
-    encoded = base64.b64encode(known_host.encode()).decode()
-    run(runtime, f"printf %s {shlex.quote(encoded)} | base64 -d > {shlex.quote(known_hosts)}")
-
-
 def direct_ssh_probe(runtime, ssh: NativeSSHConfig, identity: str,
                      known_hosts: str, remote_command: str = "true") -> dict:
     command = shlex.join([*ssh_args(ssh, identity, known_hosts), remote_command])
@@ -461,7 +454,6 @@ def main() -> int:
             if endpoint_after.sandbox_id != tool_id:
                 raise AssertionError("resumed endpoint identity changed")
             ssh = endpoint_ssh(endpoint_after, credentials)
-            refresh_known_hosts(runtime, ssh, credentials, known_hosts)
             resumed_probe = direct_ssh_probe(
                 runtime, ssh, identity, known_hosts, f"cat {marker}",
             )
