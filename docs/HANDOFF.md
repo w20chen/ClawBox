@@ -156,6 +156,17 @@ ClawTune Tool bridge; its 40 sessions per arm failed validation. Commit
 template and updates the real-LLM example to current templates. The corrected
 c40 suites remain pending CubeNode recovery.
 
+The latest read-only recovery probe on 2026-09-05 confirmed that the public
+Kubernetes API is alive (`/version`, `/readyz`, and `/livez` returned 200), the
+Cube API health endpoint is alive, and both accepted templates still report
+`READY` with the expected CubeNode replica metadata. However,
+`GET /v2/sandboxes` remains empty, the CubeNode daemon port 9999 is closed, and
+the host SSH service now stalls during key exchange or session setup. One
+owner-tagged SDK Tool create was attempted with the existing
+`CUBE_PROXY_NODE_IP`/`CUBE_PROXY_PORT_HTTP` transport and a 20-second request
+timeout; it hung before returning a sandbox ID and the post-check still showed
+zero sandboxes. No c40 retry was started and no recovery mutation was made.
+
 Current-source runs after `a4be792` emit `session_timing` events containing
 `session`, `agent`, per-sandbox create, validation, hashing, and cleanup spans.
 The local full Python suite passes; no new live c40 success claim is made until
@@ -188,6 +199,8 @@ NodePort, a ClawBox proxy, or a second allocator.
    `tpl-39efe4ad90384a1fbea3caff` and Tool template
    `tpl-b5cb6f5ee26a41448000b9c2`, then verify admitted SSH, Tool pause, demand
    restore, exact execution count, and no policy command/output leakage.
+4. Rerun the corrected replay c40 suites sequentially with the accepted
+   instrumented Tool template, bounded pair creation, and a zero-leak audit.
 5. Run managed OpenClaw c1 in replay and API modes with the operator-provided
    credential, export the API response trace, and require replay equivalence
    before any native OpenClaw scale claim.

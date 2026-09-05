@@ -72,6 +72,13 @@ wrapped by the required Tool bridge. Commit `65ed9cf` corrects the suite
 templates. The corrected c40 run is pending recovery of CubeNode, which is
 currently not healthy after the stress attempt.
 
+The latest read-only recovery probe found the Kubernetes API ready and both
+accepted templates still `READY`, but Cube API `GET /v2/sandboxes` empty,
+CubeNode port 9999 closed, and host SSH stalling during key exchange/session
+setup. A single owner-tagged SDK Tool create with the existing CubeProxy
+transport hung before returning an ID and left zero sandboxes afterward; no
+additional stress or recovery mutation was attempted.
+
 Live route finding: `Sandbox.get_host(2222)` is an HTTP ingress authority, not
 an OpenSSH endpoint. CubeMaster/CubeProxy metadata proves the existing
 per-sandbox mapping, and the semantic CubeSandbox API exposes it, but this
