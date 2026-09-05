@@ -269,24 +269,25 @@ class PolicyCoordinator:
         with self._condition:
             return self._select_victim_locked(exclude=session_id)
 
-    def model_wait_plan(self, duration_s: float) -> tuple[float | None, float | None]:
-        """Return (pause delay, proactive restore lead); None means no operation."""
+    def model_wait_plan(
+        self, predicted_duration_s: float | None,
+    ) -> tuple[float | None, float | None]:
+        """Plan from request-time information only; never consume the actual wait."""
         if self.policy.reclamation is ReclamationPolicy.RESIDENT:
             return None, None
         if self.policy.eviction is EvictionPolicy.EAGER:
             delay = 0.0
         elif self.policy.eviction is EvictionPolicy.FIXED_DELAY:
             delay = self.policy.fixed_delay_seconds or 0.0
-            if duration_s <= delay:
-                return None, None
         elif self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
-            if duration_s <= 0 or not self.pressure():
+            if predicted_duration_s is None or predicted_duration_s <= 0 or not self.pressure():
                 return None, None
             delay = 0.0
         else:
             return None, None
         lead = (self.policy.prefetch_lead_seconds or 0.0) \
-            if self.policy.restore is RestorePolicy.PROACTIVE else None
+            if (self.policy.restore is RestorePolicy.PROACTIVE
+                and predicted_duration_s is not None) else None
         return delay, lead
 
     def materialize(self, session_id: str, amount_mib: int,

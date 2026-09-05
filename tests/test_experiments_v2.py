@@ -35,7 +35,10 @@ def raw_spec() -> dict:
                        "source_reference": "trace.jsonl", "replay_trace_reference": "trace.jsonl"}],
         },
         "agent": {"driver": "replay_engine"},
-        "inference": {"backend": "replay"},
+        "inference": {"backend": "replay", "configuration": {
+            "model_wait_prediction_seconds": 1.0,
+            "model_wait_prediction_source": "separate-recording-fixed",
+        }},
         "runtime": {"template_alias": "runtime-arm64", "vcpu": 1, "memory_mib": 2048},
         "sandbox": {"template_alias": "task-arm64", "vcpu": 2, "memory_mib": 4096},
         "execution": {"concurrency_levels": [1, 4], "random_seed": 17},

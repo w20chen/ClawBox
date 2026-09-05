@@ -1,6 +1,7 @@
 """Read-only audit of checked-in schema-v2 experiment matrices."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -91,6 +92,25 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
         if any("cube_shell" in prompt for prompt in prompts):
             raise ValueError(f"{path}: OpenClaw workload still names removed cube_shell")
     artifact_provenance = _artifact_provenance(spec, path)
+    wait_prediction_required = any(
+        policy.eviction.value == "wait_aware_pressure"
+        or policy.restore.value == "proactive"
+        for policy in spec.policies
+    )
+    if wait_prediction_required:
+        wait = spec.inference.configuration.get("model_wait_prediction_seconds")
+        source = spec.inference.configuration.get("model_wait_prediction_source")
+        if (isinstance(wait, bool) or not isinstance(wait, (int, float))
+                or not math.isfinite(float(wait)) or float(wait) < 0):
+            raise ValueError(
+                f"{path}: wait-aware/proactive formal arm requires a finite "
+                "non-negative model_wait_prediction_seconds"
+            )
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(
+                f"{path}: wait-aware/proactive formal arm requires "
+                "model_wait_prediction_source"
+            )
     catalog_keys = _catalog_keys()
     missing = [
         policy.name for policy in spec.policies

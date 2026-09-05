@@ -109,7 +109,8 @@ def _make_time_span(
     start_monotonic: Any = None, end_monotonic: Any = None,
     service_seconds: Any = None, status: str | None = None,
     state_before: str | None = None, state_after: str | None = None,
-    error_type: str | None = None,
+    error_type: str | None = None, predicted_wait_seconds: Any = None,
+    prediction_source: str | None = None,
 ) -> dict[str, Any] | None:
     """Render one span with wall and, when available, monotonic timing.
 
@@ -162,6 +163,8 @@ def _make_time_span(
         "state_before": state_before,
         "state_after": state_after,
         "error_type": error_type,
+        "predicted_wait_seconds": predicted_wait_seconds,
+        "prediction_source": prediction_source,
     }
     for key, value in optional.items():
         if value is not None:
@@ -752,19 +755,16 @@ class ExperimentWorker:
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
             )
             prediction_wait = arm.inference.configuration.get("model_wait_prediction_seconds")
-            if arm.policy.restore is RestorePolicy.PROACTIVE:
-                if prediction_wait is None:
-                    raise ValueError(
-                        "proactive restore requires explicit model_wait_prediction_seconds"
-                    )
+            prediction_source = arm.inference.configuration.get(
+                "model_wait_prediction_source"
+            )
+            if prediction_wait is not None:
                 try:
                     prediction_wait = float(prediction_wait)
                 except (TypeError, ValueError) as exc:
                     raise ValueError("model_wait_prediction_seconds must be finite") from exc
-                if prediction_wait < 0:
+                if not math.isfinite(prediction_wait) or prediction_wait < 0:
                     raise ValueError("model_wait_prediction_seconds must be non-negative")
-            else:
-                prediction_wait = None
 
             def pause_for_model_wait(event: dict[str, Any]) -> None:
                 nonlocal wait_timer
@@ -944,10 +944,7 @@ class ExperimentWorker:
                         "request_id": event.get("request_id"),
                         "request_started_at": event.get("request_started_at"),
                         "predicted_wait_seconds": prediction_wait,
-                        "prediction_source": (
-                            "configured_request_time_prediction"
-                            if prediction_wait is not None else None
-                        ),
+                        "prediction_source": prediction_source,
                     })
                     elapsed_since_request = max(
                         0.0, time.time() - float(event["request_started_at"])
@@ -1001,10 +998,7 @@ class ExperimentWorker:
                         "model_step": step,
                         "runtime_snapshot_enabled": runtime_snapshot_enabled,
                         "predicted_wait_seconds": prediction_wait,
-                        "prediction_source": (
-                            "configured_request_time_prediction"
-                            if prediction_wait is not None else None
-                        ),
+                        "prediction_source": prediction_source,
                         "actual_wait_seconds": actual_wait,
                         "prediction_error_seconds": (
                             None if prediction_wait is None else actual_wait - prediction_wait
@@ -1733,25 +1727,40 @@ class ExperimentWorker:
         scale = float(arm.inference.configuration.get("time_scale", 1.0))
         duration = max(0.0, action.duration_s * scale)
         coordinator.set_eviction_eligible(session_id, True)
-        delay, prefetch_lead = coordinator.model_wait_plan(duration)
+        raw_prediction = arm.inference.configuration.get("model_wait_prediction_seconds")
+        predicted_wait = float(raw_prediction) if raw_prediction is not None else None
+        prediction_source = arm.inference.configuration.get("model_wait_prediction_source")
+        delay, prefetch_lead = coordinator.model_wait_plan(predicted_wait)
         should_pause = delay is not None
         wait_started = time.monotonic()
         wait_started_wall = time.time()
         try:
             if should_pause:
                 time.sleep(min(delay, duration))
-                pause_s = lifecycle.checkpoint_and_evict()
-                coordinator.pause_count += 1
-                coordinator.pause_service_seconds += pause_s
-                events.write({"event": "sandbox_paused", "session_id": session_id,
-                              "role": "tool", "service_seconds": pause_s,
-                              "lifecycle_timing": lifecycle.timings[-1]})
-                remaining = max(0.0, duration - (time.monotonic() - wait_started))
-                if prefetch_lead is not None:
-                    time.sleep(max(0.0, remaining - prefetch_lead))
-                    self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
-                else:
-                    time.sleep(remaining)
+                # This is the model-completion race, not advance knowledge: if
+                # the recorded response becomes ready before the delay timer,
+                # the pending pause is cancelled just as it is in ModelGateway.
+                if time.monotonic() - wait_started < duration:
+                    pause_s = lifecycle.checkpoint_and_evict()
+                    coordinator.pause_count += 1
+                    coordinator.pause_service_seconds += pause_s
+                    events.write({"event": "sandbox_paused", "session_id": session_id,
+                                  "role": "tool", "service_seconds": pause_s,
+                                  "lifecycle_timing": lifecycle.timings[-1]})
+                    remaining = max(0.0, duration - (time.monotonic() - wait_started))
+                    if prefetch_lead is not None:
+                        restore_at = max(
+                            0.0, float(predicted_wait or 0.0) - prefetch_lead,
+                        )
+                        until_restore = max(
+                            0.0, restore_at - (time.monotonic() - wait_started),
+                        )
+                        time.sleep(min(remaining, until_restore))
+                        if time.monotonic() - wait_started < duration:
+                            self._restore_with_one_victim(
+                                arm, session_id, lifecycle, coordinator, events,
+                            )
+                    time.sleep(max(0.0, duration - (time.monotonic() - wait_started)))
             else:
                 time.sleep(duration)
         finally:
@@ -1759,6 +1768,8 @@ class ExperimentWorker:
                 timeline, "model.wait", wait_started_wall, time.time(),
                 role="runtime", operation="model_wait", execution_id=action.action_id,
                 start_monotonic=wait_started, end_monotonic=time.monotonic(),
+                predicted_wait_seconds=predicted_wait,
+                prediction_source=prediction_source,
             )
         coordinator.set_eviction_eligible(session_id, not lifecycle.resident)
 

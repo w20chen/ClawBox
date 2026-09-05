@@ -159,3 +159,27 @@ def test_lifecycle_reservations_do_not_pollute_tool_admission_metrics() -> None:
     assert metrics["admission_count"] == 3
     assert metrics["lifecycle_create_reservation_wait_seconds"] >= 0
     assert metrics["lifecycle_restore_reservation_wait_seconds"] >= 0
+
+
+def test_wait_plan_uses_only_request_time_prediction() -> None:
+    policy = PolicySpec(
+        name="predicted", admission="tool_static", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="proactive",
+        prefetch_lead_seconds=0.5,
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
+        physical_sample=lambda: (2 * 1024**2, 100 * 1024**2),
+    )
+    # A missing estimate cannot be replaced with the held-out actual duration.
+    assert coordinator.model_wait_plan(None) == (None, None)
+    assert coordinator.model_wait_plan(3.0) == (0.0, 0.5)
+
+    fixed = PolicySpec(
+        name="fixed", admission="tool_static", reclamation="snapshot_pause",
+        eviction="fixed_delay", restore="reactive", fixed_delay_seconds=0.25,
+    )
+    fixed_coordinator = PolicyCoordinator(
+        fixed, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
+    )
+    assert fixed_coordinator.model_wait_plan(None) == (0.25, None)

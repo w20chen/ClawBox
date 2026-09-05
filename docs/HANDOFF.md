@@ -473,6 +473,13 @@ verifies model forwarding and server-side credential handling. A real upstream
 model request was not sent by automation: the operator credential is sensitive,
 and the live native SSH route is still unavailable.
 
+The compatibility replay worker's snapshot planner is now causal as well: the
+actual trace latency terminates the wait but is never supplied as a policy
+prediction. Wait-aware/proactive formal matrices must provide
+`model_wait_prediction_seconds` and `model_wait_prediction_source`. Proactive
+restore is scheduled from that estimate and the full recorded model delay is
+preserved after prefetch.
+
 The remaining live blocker is concrete and is not a ClawBox endpoint-resolution
 bug: this deployment does not route the already-existing CubeSandbox mapping
 from a Runtime VM. `get_host(2222)` remains an HTTP ingress authority and is not

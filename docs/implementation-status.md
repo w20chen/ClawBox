@@ -158,6 +158,14 @@ loader and replay response shape, but are not exact OpenClaw request evidence.
 An exact OpenClaw replay trace must be exported from a successful API-mode c1
 run before replay c40 is claimed.
 
+The replay-engine compatibility planner no longer receives the held-out model
+wait as a prediction. Fixed-delay timers race model completion causally, and
+wait-aware/proactive decisions consume only the configured request-time wait
+estimate. Proactive restore uses the predicted target and replay still waits
+the full recorded duration; it no longer shortens a model wait by the prefetch
+lead. The matrix audit requires both the estimate and its provenance source for
+formal wait-aware/proactive arms.
+
 Source, unit, concurrency, replay, and managed-gateway validation are green. A
 corrected ARM64 Tool image was built and fresh kernel-bound Runtime/Tool
 templates were accepted on Kunpeng. The full live native SSH pair and managed

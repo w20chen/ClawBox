@@ -2,7 +2,7 @@ schema_version: 2
 experiment_id: decision
 workload: {source: recorded_trace, input: examples/traces/smoke.jsonl, repetitions: 3}
 agent: {driver: replay_engine}
-inference: {backend: replay}
+inference: {backend: replay, configuration: {model_wait_prediction_seconds: 0.01, model_wait_prediction_source: smoke-fixture-fixed}}
 runtime: {template_alias: clawbox-runtime-arm64-2g-v3, vcpu: 1, memory_mib: 2048}
 sandbox: {template_alias: clawbox-tool-native-ssh-de74a26, vcpu: 2, memory_mib: 4096}
 execution: {concurrency_levels: [20, 40, 60], random_seed: 20260903}

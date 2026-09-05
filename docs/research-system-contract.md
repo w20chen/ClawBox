@@ -61,6 +61,10 @@ called directly.
 
 Formal evaluation trains or calibrates the KB from separate recording data,
 freezes it before policy comparison, and uses the same immutable artifact in
+every arm. Model-wait decisions follow the same rule: wait-aware/proactive
+formal arms must declare a request-time estimate and its source. The held-out
+recorded response latency is used only to make replay's clock advance and may
+not be passed into the policy decision.
 all arms. Held-out replay does not update its own predictor unless the arm is
 explicitly an online-learning experiment. Prediction error and fallback rate
 are first-class results.
