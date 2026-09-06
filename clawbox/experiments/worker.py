@@ -855,6 +855,8 @@ class ExperimentWorker:
         restore_timer: Timer | None = None
         wait_state: dict[str, Any] = {}
         completed_model_requests: set[str] = set()
+        generated_model_requests: set[str] = set()
+        generated_model_requests_lock = Lock()
         policy_event_errors: list[str] = []
         pending_policy_events: list[Any] = []
         pending_policy_events_lock = Lock()
@@ -904,8 +906,12 @@ class ExperimentWorker:
                 try:
                     with wait_lock:
                         wait_timer = None
+                        request_id = str(event.get("request_id"))
+                        with generated_model_requests_lock:
+                            response_generated = request_id in generated_model_requests
                         if (
-                            str(event.get("request_id")) in completed_model_requests
+                            request_id in completed_model_requests
+                            or response_generated
                             or not lifecycle.resident
                             or coordinator.tool_active(session_id)
                         ):
@@ -1044,11 +1050,14 @@ class ExperimentWorker:
             def handle_model_request_started(event: dict[str, Any]) -> None:
                 nonlocal wait_timer, restore_timer
                 timeline.setdefault("first_model_request", float(event["request_started_at"]))
+                request_id = str(event.get("request_id"))
                 with wait_lock:
+                    with generated_model_requests_lock:
+                        response_generated = request_id in generated_model_requests
                     # A zero-scaled replay response can arrive before the
                     # executor gets scheduled. Never create a late checkpoint
                     # for an already completed model request.
-                    if str(event.get("request_id")) in completed_model_requests:
+                    if request_id in completed_model_requests or response_generated:
                         return
                 coordinator.set_eviction_eligible(session_id, True)
                 if arm.policy.reclamation is ReclamationPolicy.RESIDENT:
@@ -1099,6 +1108,12 @@ class ExperimentWorker:
             def before_model_response_ready(step: int | None, message: dict[str, Any],
                                             event: dict[str, Any]) -> dict[str, Any]:
                 nonlocal wait_timer, restore_timer
+                request_id = str(event.get("request_id"))
+                # Publish generation before waiting for lifecycle serialization.
+                # A queued eager-pause callback must not start checkpointing a
+                # Runtime after its model response already exists.
+                with generated_model_requests_lock:
+                    generated_model_requests.add(request_id)
                 # A paused Runtime cannot receive the pending HTTP response.
                 # Restore it synchronously in the gateway producer before the
                 # response becomes visible to OpenClaw. Tool restore remains
@@ -1108,7 +1123,7 @@ class ExperimentWorker:
                     # queued eager pause can run between a resident check and
                     # this marker, snapshotting Runtime after the response is
                     # ready and leaving no callback able to restore it.
-                    completed_model_requests.add(str(event.get("request_id")))
+                    completed_model_requests.add(request_id)
                     if wait_timer is not None:
                         wait_timer.cancel()
                         wait_timer = None
@@ -1121,7 +1136,6 @@ class ExperimentWorker:
                     started = float(event["request_started_at"])
                     generated = float(event["model_generated_at"])
                     actual_wait = max(0.0, generated - started)
-                    request_id = str(event.get("request_id"))
                     request_state = (
                         dict(wait_state)
                         if str(wait_state.get("request_id")) == request_id
