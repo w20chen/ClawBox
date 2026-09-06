@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -47,6 +48,7 @@ class SessionGatewayState:
         self._condition = threading.Condition()
         self._active_requests = 0
         self._draining = False
+        self._delivery_generation = 0
 
     @property
     def mode(self) -> str:
@@ -68,6 +70,19 @@ class SessionGatewayState:
             self._active_requests -= 1
             if self._active_requests == 0:
                 self._condition.notify_all()
+
+    def delivery_generation(self) -> int:
+        with self._condition:
+            return self._delivery_generation
+
+    def invalidate_pending_delivery(self) -> None:
+        """Force pre-checkpoint HTTP attempts to reconnect after restore."""
+        with self._condition:
+            self._delivery_generation += 1
+
+    def may_deliver(self, generation: int) -> bool:
+        with self._condition:
+            return generation == self._delivery_generation
 
     def drain(self, timeout: float | None = None) -> bool:
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -138,6 +153,7 @@ class ManagedModelGateway:
                     self.send_error(HTTPStatus.UNAUTHORIZED)
                     return
                 request_id: str | None = None
+                delivery_generation = state.delivery_generation()
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     if length < 1 or length > 8 * 1024 * 1024:
@@ -146,6 +162,23 @@ class ManagedModelGateway:
                     if not isinstance(payload, dict):
                         raise ValueError("request body must be an object")
                     status, content_type, body, request_id = state.complete_http(payload)
+                    if not state.may_deliver(delivery_generation):
+                        # Runtime checkpoint destroys the live transport path.
+                        # Do not write a response to that pre-checkpoint TCP
+                        # attempt: OpenClaw reconnects and receives the cached
+                        # logical response without consuming another replay step.
+                        self.close_connection = True
+                        state.mark_delivery(request_id, delivered=False)
+                        # ``close_connection`` alone only closes after the
+                        # handler unwinds and can leave the restored guest's
+                        # streaming client waiting for its idle watchdog.
+                        # Actively tear down this pre-checkpoint transport so
+                        # OpenClaw reconnects immediately for the cached reply.
+                        try:
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        return
                     self._send(status, body, content_type=content_type)
                     state.mark_delivery(request_id, delivered=True)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:

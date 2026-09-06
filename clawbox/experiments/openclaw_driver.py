@@ -6,9 +6,10 @@ import json
 import os
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from clawbox.replay.lifecycle import CommandResult
 
@@ -215,7 +216,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  ssh: NativeSSHConfig, policy_control: Any,
                  runtime_executor: Any, output_dir: Path, timeout_seconds: int,
                  model_gateway: Any | None = None,
-                 prediction_manifest: dict[str, dict[str, Any]] | None = None) -> dict:
+                 prediction_manifest: dict[str, dict[str, Any]] | None = None,
+                 resident_poll: Callable[[str, float], CommandResult | None] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -251,6 +253,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     launcher_dir = f"{home}/bin"
     ssh_launcher = f"{launcher_dir}/ssh"
     agent_pid_file = f"{home}/agent.pid"
+    agent_stdout_file = f"{home}/logs/agent.stdout"
+    agent_stderr_file = f"{home}/logs/agent.stderr"
+    agent_exit_file = f"{home}/agent.exit"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
     prefix = (
         f"export HOME={shlex.quote(home)} OPENCLAW_HOME={shlex.quote(home + '/.openclaw')} "
@@ -382,10 +387,61 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "memory lookup remain Runtime-local and must not be used to access the mutable "
         "workspace.\n\nTask:\n" + prompt
     )
-    result = invoke(["agent", "--local", "--agent", "main", "--session-id", session_id,
-                     "--model", f"vllm/{model}", "--message", instruction,
-                     "--timeout", str(timeout_seconds), "--json"],
-                    pid_file=agent_pid_file)
+    agent_args = [
+        "agent", "--local", "--agent", "main", "--session-id", session_id,
+        "--model", f"vllm/{model}", "--message", instruction,
+        "--timeout", str(timeout_seconds), "--json",
+    ]
+    if resident_poll is None:
+        result = invoke(agent_args, pid_file=agent_pid_file)
+    else:
+        argv = " ".join(shlex.quote(item) for item in [executable, *agent_args])
+        body = (
+            f"{argv}; status=$?; printf '%s\\n' \"$status\" > "
+            f"{shlex.quote(agent_exit_file)}; exit \"$status\""
+        )
+        launched = runtime_executor.execute(
+            prefix
+            + f"rm -f {shlex.quote(agent_exit_file)} "
+            + f"{shlex.quote(agent_stdout_file)} {shlex.quote(agent_stderr_file)}; "
+            + f"nohup /bin/sh -c {shlex.quote(body)} </dev/null "
+            + f">{shlex.quote(agent_stdout_file)} 2>{shlex.quote(agent_stderr_file)} & "
+            + f"printf '%s\\n' $! > {shlex.quote(agent_pid_file)}",
+            30,
+        )
+        if launched.exit_code:
+            raise RuntimeError(
+                f"OpenClaw Runtime VM launch failed: {launched.stderr[-2000:]}"
+            )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            status = resident_poll(
+                f"test -s {shlex.quote(agent_exit_file)}", 10,
+            )
+            if status is not None and status.exit_code == 0:
+                break
+            if time.monotonic() >= deadline:
+                resident_poll(
+                    f"kill -TERM $(cat {shlex.quote(agent_pid_file)}) 2>/dev/null || true",
+                    10,
+                )
+                raise TimeoutError("OpenClaw detached Agent timed out")
+            time.sleep(0.2)
+        exit_result = resident_poll(f"cat {shlex.quote(agent_exit_file)}", 10)
+        stdout_result = resident_poll(f"cat {shlex.quote(agent_stdout_file)}", 30)
+        stderr_result = resident_poll(f"cat {shlex.quote(agent_stderr_file)}", 30)
+        if exit_result is None or stdout_result is None or stderr_result is None:
+            raise RuntimeError("Runtime became non-resident while collecting Agent result")
+        try:
+            exit_code = int(exit_result.stdout.strip())
+        except ValueError as exc:
+            raise RuntimeError("OpenClaw detached Agent wrote an invalid exit status") from exc
+        result = CommandResult(
+            exit_code, stdout_result.stdout, stderr_result.stdout,
+            max(0.0, timeout_seconds - max(0.0, deadline - time.monotonic())),
+        )
+        if result.exit_code:
+            raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")

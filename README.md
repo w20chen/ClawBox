@@ -62,6 +62,14 @@ The current Kunpeng c1 managed-replay gate is green on the real architecture:
 two exact model steps, one logical Agent `exec`, five admitted native SSH
 processes including backend setup, 100% PolicyControl/Runtime/bridge/cgroup/eBPF
 execution-ID join, successful workspace validation, and zero leaked sandboxes.
+The paired `snapshot_pause` variant is also green: Tool and Runtime were both
+checkpointed during the model wait, 596,877,312 bytes of whole-host memory were
+observed reclaimed across the pair, Runtime PID 141 survived restore, Runtime
+was restored before response release, Tool demand-restore advanced its semantic
+endpoint from epoch 1 to epoch 2, and the same exact-ID validation passed. The
+current OpenClaw/ClawTune stream needs one reconnect after Runtime restore; this
+is recorded as two HTTP attempts for one logical replay step, never as a second
+model step.
 This is an infrastructure smoke trajectory, not a representative paper
 workload; formal c20/c40/c60 results still require separately captured held-out
 trajectories and a frozen ClawTune-derived KB.

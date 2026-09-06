@@ -29,6 +29,7 @@ from clawbox.cube import (
     CubeCommandExecutor, CubeSandboxClient, CubeSandboxLifecycle,
     OwnedSandboxJournal, Ownership,
 )
+from clawbox.replay.lifecycle import CommandResult
 from clawbox.replay.trace import ReplayAction, load_trace
 
 from .memory import NodeMemorySampler, SandboxRSSSampler
@@ -858,6 +859,9 @@ class ExperimentWorker:
                             or coordinator.tool_active(session_id)
                         ):
                             return
+                        if gateway_session is None:
+                            raise RuntimeError("model wait has no gateway session")
+                        gateway_session.invalidate_pending_delivery()
                         agent_pid_before = observe_openclaw_agent_pid("before_tool_pause")
                         started = time.time()
                         tool_elapsed = lifecycle.checkpoint_and_evict()
@@ -875,16 +879,19 @@ class ExperimentWorker:
                             "openclaw_agent_pid": agent_pid_after,
                         })
                         runtime_elapsed = None
+                        runtime_pause_timing = None
                         if runtime_snapshot_enabled and runtime_lifecycle.resident:
                             runtime_pid_before = observe_openclaw_agent_pid(
                                 "before_runtime_pause"
                             )
                             runtime_started = time.time()
                             runtime_elapsed = runtime_lifecycle.checkpoint_and_evict()
+                            runtime_pause_timing = dict(runtime_lifecycle.timings[-1])
                             runtime_finished = time.time()
                             wait_state.update({
                                 "runtime_pause_started_at": runtime_started,
                                 "runtime_pause_completed_at": runtime_finished,
+                                "runtime_pause_request_id": event.get("request_id"),
                                 "runtime_agent_pid_before_pause": runtime_pid_before,
                             })
                     coordinator.pause_count += 1
@@ -904,7 +911,7 @@ class ExperimentWorker:
                             "role": "runtime", "service_seconds": runtime_elapsed,
                             "reason": "model_request_wait",
                             "request_id": event.get("request_id"),
-                            "lifecycle_timing": runtime_lifecycle.timings[-1],
+                            "lifecycle_timing": runtime_pause_timing,
                         })
                 except Exception as exc:
                     policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
@@ -1036,38 +1043,51 @@ class ExperimentWorker:
                     started = float(event["request_started_at"])
                     generated = float(event["model_generated_at"])
                     actual_wait = max(0.0, generated - started)
-                    wait_state["model_generated_at"] = generated
+                    request_id = str(event.get("request_id"))
+                    request_state = (
+                        dict(wait_state)
+                        if str(wait_state.get("request_id")) == request_id
+                        else {}
+                    )
+                    if request_state:
+                        wait_state["model_generated_at"] = generated
                     admission = {
                         "request_id": event.get("request_id"),
                         "model_step": step,
                         "runtime_snapshot_enabled": runtime_snapshot_enabled,
+                        "tool_snapshot_performed": (
+                            str(request_state.get("pause_request_id")) == request_id
+                        ),
+                        "runtime_snapshot_performed": (
+                            str(request_state.get("runtime_pause_request_id")) == request_id
+                        ),
                         "predicted_wait_seconds": prediction_wait,
                         "prediction_source": prediction_source,
                         "actual_wait_seconds": actual_wait,
                         "prediction_error_seconds": (
                             None if prediction_wait is None else actual_wait - prediction_wait
                         ),
-                        "scheduled_restore_time": wait_state.get("scheduled_restore_time"),
-                        "tool_pause_started_at": wait_state.get("pause_started_at"),
-                        "tool_pause_completed_at": wait_state.get("pause_completed_at"),
-                        "restore_started_at": wait_state.get("restore_started_at"),
-                        "restore_completed_at": wait_state.get("restore_completed_at"),
-                        "runtime_pause_started_at": wait_state.get(
+                        "scheduled_restore_time": request_state.get("scheduled_restore_time"),
+                        "tool_pause_started_at": request_state.get("pause_started_at"),
+                        "tool_pause_completed_at": request_state.get("pause_completed_at"),
+                        "restore_started_at": request_state.get("restore_started_at"),
+                        "restore_completed_at": request_state.get("restore_completed_at"),
+                        "runtime_pause_started_at": request_state.get(
                             "runtime_pause_started_at"
                         ),
-                        "runtime_pause_completed_at": wait_state.get(
+                        "runtime_pause_completed_at": request_state.get(
                             "runtime_pause_completed_at"
                         ),
-                        "runtime_restore_started_at": wait_state.get(
+                        "runtime_restore_started_at": request_state.get(
                             "runtime_restore_started_at"
                         ),
-                        "runtime_restore_completed_at": wait_state.get(
+                        "runtime_restore_completed_at": request_state.get(
                             "runtime_restore_completed_at"
                         ),
-                        "runtime_agent_pid_before_pause": wait_state.get(
+                        "runtime_agent_pid_before_pause": request_state.get(
                             "runtime_agent_pid_before_pause"
                         ),
-                        "runtime_agent_pid_after_restore": wait_state.get(
+                        "runtime_agent_pid_after_restore": request_state.get(
                             "runtime_agent_pid_after_restore"
                         ),
                         "tool_call_count": len(message.get("tool_calls") or []),
@@ -1555,6 +1575,19 @@ class ExperimentWorker:
                     sandbox_id=setup_route.sandbox_id,
                     host_key_alias=native_ssh_host_key_alias(setup_route.sandbox_id),
                 )
+
+                def poll_resident_runtime(
+                    command: str, timeout: float,
+                ) -> CommandResult | None:
+                    # Do not open a Cube command stream while Runtime is being
+                    # snapshotted. The short poll and pause/restore operations
+                    # share this lock, so the host never causes an implicit
+                    # resume or replays the detached Agent invocation.
+                    with wait_lock:
+                        if not runtime_lifecycle.resident:
+                            return None
+                        return runtime_executor.execute(command, timeout)
+
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
                     configuration=arm.inference.configuration,
@@ -1565,6 +1598,7 @@ class ExperimentWorker:
                     model_gateway=gateway_session,
                     prediction_manifest=(prediction_provider.manifest
                                          if prediction_provider is not None else None),
+                    resident_poll=poll_resident_runtime,
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")

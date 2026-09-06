@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import urllib.request
+from http.client import RemoteDisconnected
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -178,6 +179,114 @@ def test_managed_gateway_retries_do_not_create_logical_steps(tmp_path: Path) -> 
         records = session.records()
         assert records[0]["http_attempts"] == 2
         assert records[0]["reconnect_attempts"] == 1
+
+
+def test_runtime_checkpoint_invalidates_old_http_attempt_but_not_logical_step(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    payload = write_trace(trace)
+    started = threading.Event()
+    gateway = ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    )
+    with gateway:
+        session = gateway.register(
+            session_id="checkpoint-session", store_path=tmp_path / "store.json",
+            mode="replay", trace=trace, time_scale=50,
+            on_request_started=lambda _event: started.set(),
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            old_attempt = pool.submit(post, gateway.url, session.token, payload)
+            assert started.wait(1)
+            session.invalidate_pending_delivery()
+            with pytest.raises(RemoteDisconnected):
+                old_attempt.result(timeout=3)
+
+        retry_payload = {
+            "messages": [*payload["messages"], payload["messages"][-1]],
+        }
+        response = post(gateway.url, session.token, retry_payload)
+        assert response["choices"][0]["message"]["content"] == "reply-0"
+        deadline = time.monotonic() + 1
+        while not session.records()[0]["delivered"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        records = session.records()
+        assert len(records) == 1
+        assert records[0]["http_attempts"] == 2
+        assert records[0]["reconnect_attempts"] == 1
+        assert records[0]["delivery_failures"] == 1
+        assert records[0]["delivered"] is True
+
+
+def test_checkpoint_retry_artifact_is_removed_from_later_replay_steps(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    initial = {"messages": [{"role": "user", "content": "task"}]}
+    continued = {"messages": [
+        *initial["messages"],
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {"name": "exec", "arguments": '{"command":"true"}'},
+        }]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+    ]}
+    trace.write_text("".join(json.dumps({
+        "type": "action", "action_type": "llm_call",
+        "action_id": f"model-{index}", "ts_start": index, "ts_end": index,
+        "data": {"model": "test-model", "raw_request": payload,
+                 "raw_response": {"content": f"reply-{index}"},
+                 "llm_latency_ms": 0},
+    }) + "\n" for index, payload in enumerate((initial, continued))), encoding="utf-8")
+
+    gateway = ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    )
+    with gateway:
+        session = gateway.register(
+            session_id="checkpoint-history", store_path=tmp_path / "store.json",
+            mode="replay", trace=trace, time_scale=0,
+        )
+        _, _, _, request_id = session.gateway.complete_http(initial)
+        session.mark_delivery(request_id, delivered=False)
+        duplicate_initial = {"messages": [initial["messages"][0], initial["messages"][0]]}
+        _, _, _, retry_id = session.gateway.complete_http(duplicate_initial)
+        assert retry_id == request_id
+        session.mark_delivery(retry_id, delivered=True)
+
+        continued_with_retry_artifact = {
+            "messages": [initial["messages"][0], initial["messages"][0],
+                         *continued["messages"][1:]],
+        }
+        _, _, _, second_id = session.gateway.complete_http(continued_with_retry_artifact)
+        session.mark_delivery(second_id, delivered=True)
+        assert session.gateway.logical_model_steps() == 2
+        assert session.replay_completeness()["complete"] is True
+        assert session.records()[1]["replay_input_match_mode"] == (
+            "volatile_fields_v1+checkpoint_reconnect_v1"
+        )
+
+
+def test_duplicate_user_turn_without_checkpoint_retry_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    payload = write_trace(trace)
+    gateway = ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    )
+    with gateway:
+        session = gateway.register(
+            session_id="ordinary-duplicate", store_path=tmp_path / "store.json",
+            mode="replay", trace=trace, time_scale=0,
+        )
+        duplicate = {"messages": [payload["messages"][0], payload["messages"][0]]}
+        with pytest.raises(ValueError, match="replay request diverged"):
+            session.gateway.complete_http(duplicate)
 
 
 def test_request_started_callback_does_not_create_gateway_hol(tmp_path: Path) -> None:

@@ -6,15 +6,29 @@ recovery.
 
 ## Latest superseding continuation
 
-The real managed OpenClaw replay path is now green at c1. Kunpeng result
+The real managed OpenClaw replay path is now green at c1 for both `resident`
+and paired `snapshot_pause`. Resident result
 `/tmp/clawbox-managed-c1/live-c1-two-step` completed two exact model steps and
 one logical Agent `exec` with synchronous admission, native SSH, valid cgroup
 and native eBPF telemetry, exact Runtime/Policy/Tool execution identity, final
 workspace validation, and zero CubeSandbox leaks. Its summary SHA-256 is
 `47f43e0f10fca147740b86b77a0e3443a890cc93877c917b10f95dff5093e235`.
-The temporary marker trace is smoke-only. Next live gates are the same managed
-path under paired Runtime/Tool `snapshot_pause`, then c4/c8 with frozen exact
-smoke inputs; representative capture, frozen ClawTune KB calibration, formal
+The superseding snapshot result is
+`/tmp/clawbox-managed-c1/live-c1-snapshot-fast-reconnect` (summary SHA-256
+`9b7ae97b0011895e9f097a67e5cec9bea558e352c685829224b1fc45ae194a16`).
+It checkpointed Tool then Runtime, observed 31,440,896 and 565,436,416 bytes
+reclaimed respectively, restored Runtime before response release, preserved OpenClaw
+PID 141, left Tool swapped until admission, advanced endpoint epochs after each
+Tool restore, completed the real SSH command with valid cgroup/eBPF telemetry,
+passed final validation, and leaked zero sandboxes. OpenClaw retries the local
+ClawTune stream after checkpoint; the gateway recognizes only the exact
+undelivered reconnect shape and retains one logical replay step. Subsequent
+model requests remove that proven duplicate user-message artifact for replay
+comparison, while an ordinary duplicate still fails closed. Per-request
+snapshot metadata is now request-scoped rather than reusing a prior wait.
+
+The temporary marker trace is smoke-only. Next live gates are c4/c8 with frozen
+exact smoke inputs; representative capture, frozen ClawTune KB calibration, formal
 c20/c40/c60 comparisons, and real-provider c1/c2/c4 remain outstanding.
 
 Installed OpenClaw 2026.7.1 sanitizes inherited `_TOKEN` variables before its

@@ -115,6 +115,47 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert result["tool_latencies"] == [0.25]
 
 
+def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    commands: list[str] = []
+
+    class RuntimeExecutor:
+        def execute(self, command, _timeout):
+            commands.append(command)
+            return CommandResult(0, "", "", 0.01)
+
+    def resident_poll(command: str, _timeout: float) -> CommandResult:
+        commands.append("POLL " + command)
+        if "cat /state/openclaw/session-a/agent.exit" in command:
+            return CommandResult(0, "0\n", "", 0.01)
+        if "cat /state/openclaw/session-a/logs/agent.stdout" in command:
+            return CommandResult(0, '{"ok":true}\n', "", 0.01)
+        if "cat /state/openclaw/session-a/logs/agent.stderr" in command:
+            return CommandResult(0, "", "", 0.01)
+        return CommandResult(0, "", "", 0.01)
+
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    result = run_openclaw(
+        prompt="Create /workspace/result.txt", session_id="session-a",
+        configuration={"base_url": "http://model.test/v1", "model": "test-model"},
+        ssh=NativeSSHConfig(
+            target="executor@192.0.2.20:2222",
+            identity_private_key="PRIVATE KEY\n",
+            host_public_key="ssh-ed25519 AAAATEST",
+            sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
+        ),
+        policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+        output_dir=tmp_path, timeout_seconds=60,
+        resident_poll=resident_poll,
+    )
+
+    launch = next(command for command in commands if "nohup /bin/sh" in command)
+    assert "agent.exit" in launch
+    assert "agent.pid" in launch
+    assert result["stdout"] == '{"ok":true}\n'
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

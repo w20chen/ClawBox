@@ -83,6 +83,7 @@ class ModelGateway:
         self.before_response_ready = before_response_ready
         self._requests: dict[str, GatewayRequest] = {}
         self._replay_failure: str | None = None
+        self._checkpoint_retry_messages: set[str] = set()
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
         self._server: ThreadingHTTPServer | None = None
@@ -202,6 +203,19 @@ class ModelGateway:
             # An undelivered response may be retried after a broken connection.
             # Once delivered, an identical payload is a new logical model step.
             request = matching[-1] if matching and not matching[-1].delivered else None
+            if request is None and self.mode == "replay":
+                undelivered = [
+                    item for item in self._requests.values() if not item.delivered
+                ]
+                if undelivered and _checkpoint_retry_matches(
+                    undelivered[-1].request_payload, canonical,
+                ):
+                    request = undelivered[-1]
+                    duplicate = _checkpoint_retry_duplicate_message(
+                        undelivered[-1].request_payload, canonical,
+                    )
+                    if duplicate is not None:
+                        self._checkpoint_retry_messages.add(_canonical_json(duplicate))
             if request is None:
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
@@ -226,8 +240,16 @@ class ModelGateway:
                     if actual_input is not None:
                         expected_identity = _canonical_replay_input(expected)
                         actual_identity = _canonical_replay_input(actual_input)
+                        if self._checkpoint_retry_messages:
+                            actual_identity = _collapse_checkpoint_retry_messages(
+                                actual_identity, self._checkpoint_retry_messages,
+                            )
                         replay_input_match = expected_identity == actual_identity
-                        replay_input_match_mode = "volatile_fields_v1"
+                        replay_input_match_mode = (
+                            "volatile_fields_v1+checkpoint_reconnect_v1"
+                            if self._checkpoint_retry_messages
+                            else "volatile_fields_v1"
+                        )
                         replay_input_expected_sha256 = _canonical_sha256(expected_identity)
                         replay_input_actual_sha256 = _canonical_sha256(actual_identity)
                     if replay_input_match is False:
@@ -586,6 +608,74 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode()).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _checkpoint_retry_duplicate_message(
+    previous: dict[str, Any], current: dict[str, Any],
+) -> Any | None:
+    """Return the sole adjacent user-message insertion in a reconnect request."""
+    left = _canonical_replay_input(previous)
+    right = _canonical_replay_input(current)
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return None
+    left_messages = left.get("messages")
+    right_messages = right.get("messages")
+    if not isinstance(left_messages, list) or not isinstance(right_messages, list):
+        return None
+    if ({key: value for key, value in left.items() if key != "messages"}
+            != {key: value for key, value in right.items() if key != "messages"}):
+        return None
+    if len(right_messages) != len(left_messages) + 1:
+        return None
+    for index in range(1, len(right_messages)):
+        duplicate = right_messages[index]
+        if duplicate != right_messages[index - 1]:
+            continue
+        if not isinstance(duplicate, dict) or duplicate.get("role") != "user":
+            continue
+        if right_messages[:index] + right_messages[index + 1:] == left_messages:
+            return duplicate
+    return None
+
+
+def _collapse_checkpoint_retry_messages(value: Any, duplicates: set[str]) -> Any:
+    """Remove only duplicate user turns previously proven to be reconnect artifacts."""
+    if isinstance(value, dict):
+        return {
+            key: (_collapse_checkpoint_retry_messages(item, duplicates)
+                  if key == "messages" else item)
+            for key, item in value.items()
+        }
+    if not isinstance(value, list):
+        return value
+    collapsed: list[Any] = []
+    for item in value:
+        if (
+            collapsed
+            and item == collapsed[-1]
+            and isinstance(item, dict)
+            and item.get("role") == "user"
+            and _canonical_json(item) in duplicates
+        ):
+            continue
+        collapsed.append(item)
+    return collapsed
+
+
+def _checkpoint_retry_matches(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Recognize OpenClaw's narrow retry shape after a Runtime checkpoint.
+
+    When an in-flight TCP connection disappears, OpenClaw retries the same
+    turn by inserting one duplicate adjacent user message. Only an undelivered
+    request is eligible for this equivalence, and every other canonical field
+    must remain identical. The insertion can precede already-recorded assistant
+    and Tool messages on later turns.
+    """
+    return _checkpoint_retry_duplicate_message(previous, current) is not None
 
 
 def _replay_response(action: ReplayAction, stream: bool) -> tuple[int, str, bytes]:

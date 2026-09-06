@@ -344,7 +344,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
 
     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
                           policy_control, runtime_executor, output_dir,
-                          timeout_seconds, model_gateway, prediction_manifest=None):
+                          timeout_seconds, model_gateway, prediction_manifest=None,
+                          resident_poll=None):
+        assert resident_poll is not None
         assert (
             SnapshotSandbox.created[1].create_kwargs["env_vars"]
             ["CLAWBOX_MODEL_GATEWAY_TOKEN"]
@@ -470,6 +472,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     gateway_record = json.loads(gateway_path.read_text())[0]
     admission = gateway_record["admission"]
     assert admission["runtime_snapshot_enabled"] is True
+    assert admission["tool_snapshot_performed"] is True
+    assert admission["runtime_snapshot_performed"] is True
     assert admission["runtime_pause_started_at"] <= admission["runtime_pause_completed_at"]
     assert admission["runtime_restore_started_at"] <= admission["runtime_restore_completed_at"]
     assert (
