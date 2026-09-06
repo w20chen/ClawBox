@@ -549,6 +549,7 @@ class ModelGateway:
                          "raw_response": message,
                          "llm_latency_ms": (end - start) * 1000.0},
             })
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".next")
         temporary.write_text(
             "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
