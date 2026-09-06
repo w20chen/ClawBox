@@ -1474,6 +1474,50 @@ class ExperimentWorker:
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
                             route = resolve_native_ssh_route("admit")
+                            # Cube may publish a restored mapping slightly
+                            # before CubeProxy accepts its fresh route. Prove
+                            # reachability and the stable Tool identity from
+                            # the Runtime before returning ADMIT; the Agent's
+                            # actual SSH subprocess has not started yet.
+                            identity_file = f"/state/openclaw/{session_id}/ssh/id_ed25519"
+                            known_hosts_file = f"/state/openclaw/{session_id}/ssh/known_hosts"
+                            endpoint_host = (
+                                f"[{route.host}]" if ":" in route.host else route.host
+                            )
+                            identity_command = shlex.join([
+                                "/usr/bin/ssh", "-i", identity_file,
+                                "-o", f"UserKnownHostsFile={known_hosts_file}",
+                                "-o", "StrictHostKeyChecking=yes",
+                                "-o", "UpdateHostKeys=no",
+                                "-o", f"HostKeyAlias={native_ssh_host_key_alias(route.sandbox_id)}",
+                                "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
+                                "-p", str(route.port), f"executor@{endpoint_host}",
+                                "printf %s \"$TASK_ID\"",
+                            ])
+                            identity_started = time.monotonic()
+                            identity_result = None
+                            for identity_attempt in range(1, 31):
+                                candidate = runtime_executor.execute(identity_command, 10)
+                                if (candidate.exit_code == 0
+                                        and candidate.stdout.strip() == session_id):
+                                    identity_result = candidate
+                                    break
+                                if identity_attempt < 30:
+                                    time.sleep(0.5)
+                            if identity_result is None:
+                                raise RuntimeError(
+                                    "native SSH endpoint did not present the intended Tool "
+                                    f"identity for {session_id} after {identity_attempt} attempts"
+                                )
+                            events.write({
+                                "event": "native_ssh_identity_ready",
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "sandbox_id": route.sandbox_id,
+                                "endpoint_epoch": route.epoch,
+                                "attempts": identity_attempt,
+                                "service_seconds": time.monotonic() - identity_started,
+                            })
                             host_sampler = SandboxRSSSampler(route.sandbox_id)
                             host_sampler.start()
                             with reservation_lock:
@@ -1617,25 +1661,6 @@ class ExperimentWorker:
                             ),
                         )
 
-                    def eager_pause() -> None:
-                        with wait_lock, reservation_lock:
-                            if (active_reservations or coordinator.tool_active(session_id)
-                                    or not lifecycle.resident):
-                                return
-                            pause_s = lifecycle.checkpoint_and_evict()
-                            if pause_s is None:
-                                return
-                            coordinator.pause_count += 1
-                            coordinator.pause_service_seconds += pause_s
-                            events.write({
-                                "event": "sandbox_paused", "session_id": session_id,
-                                "role": "tool", "service_seconds": pause_s,
-                                "reason": "openclaw_tool_complete",
-                                "lifecycle_timing": lifecycle.timings[-1],
-                            })
-                    if (arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
-                            and arm.policy.eviction is EvictionPolicy.EAGER):
-                        submit_policy_event(eager_pause)
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
                                   "exit_code": request.get("exit_code"),

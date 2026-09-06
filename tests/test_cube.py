@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -274,6 +275,12 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             self.owner.command_calls.append((command, kwargs))
             if "kill -0 $pid" in command:
                 return SimpleNamespace(exit_code=0, stdout="4242", stderr="")
+            if 'printf %s "$TASK_ID"' in command:
+                match = re.search(r"/state/openclaw/([^/]+)/ssh/id_ed25519", command)
+                assert match is not None
+                return SimpleNamespace(
+                    exit_code=0, stdout=match.group(1), stderr="",
+                )
             return SimpleNamespace(exit_code=0, stdout="", stderr="")
 
     class SnapshotSandbox(_Sandbox):
