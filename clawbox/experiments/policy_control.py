@@ -243,12 +243,18 @@ class PolicyControlServer:
                     record.update(status=200, duplicate=duplicate)
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                     record["status"] = 400
+                    record["error_type"] = type(exc).__name__
+                    record["error"] = str(exc)
                     self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"})
                 except RuntimeError as exc:
                     record["status"] = 409
+                    record["error_type"] = type(exc).__name__
+                    record["error"] = str(exc)
                     self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
                 except Exception as exc:
                     record["status"] = 503
+                    record["error_type"] = type(exc).__name__
+                    record["error"] = str(exc)
                     self._json(HTTPStatus.SERVICE_UNAVAILABLE,
                                {"error": f"{type(exc).__name__}: {exc}"})
                 finally:

@@ -115,6 +115,28 @@ def test_policy_control_rejects_completion_for_a_different_command() -> None:
         assert session.close(timeout=1)
 
 
+def test_policy_control_records_callback_failure_detail() -> None:
+    server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
+                                 bind_host="127.0.0.1", bind_port=0)
+    server.advertised_port = server.actual_port
+    with server:
+        session = server.register(
+            "session-a",
+            admit=lambda _request: (_ for _ in ()).throw(OSError("route unavailable")),
+            complete=lambda _request: {},
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post(session, "/v1/tool/admit", "exec-a")
+        assert error.value.code == 503
+        for _ in range(50):
+            if server.requests:
+                break
+            time.sleep(0.01)
+        record = server.requests[-1]
+        assert record["error_type"] == "OSError"
+        assert record["error"] == "route unavailable"
+
+
 def test_policy_control_c60_has_no_cross_session_head_of_line_blocking() -> None:
     server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
                                  bind_host="127.0.0.1", bind_port=0)
