@@ -1,8 +1,20 @@
 diff --git a/CubeAPI/src/cubemaster/mod.rs b/CubeAPI/src/cubemaster/mod.rs
-index 863c106..7ec2d3a 100644
+index 863c106..260b1e2 100644
 --- a/CubeAPI/src/cubemaster/mod.rs
 +++ b/CubeAPI/src/cubemaster/mod.rs
-@@ -1487,12 +1487,18 @@ pub struct SandboxUpdateRequest {
+@@ -133,10 +133,7 @@ impl CubeMasterClient {
+         if let Some(container_port) = container_port {
+             request = request.query(&[("container_port", container_port)]);
+         }
+-        let resp = request
+-            .send()
+-            .await
+-            .map_err(CubeMasterError::Http)?;
++        let resp = request.send().await.map_err(CubeMasterError::Http)?;
+         parse_response(resp).await
+     }
+     /// POST /cube/sandbox/update (action: "pause" | "resume").
+@@ -1487,12 +1484,18 @@ pub struct SandboxUpdateRequest {
      pub sandbox_id: String,
      #[serde(rename = "instance_type")]
      pub instance_type: String,
@@ -23,17 +35,21 @@ index 863c106..7ec2d3a 100644
  
  #[derive(Debug, Deserialize)]
 diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.rs
-index 18e06d6..1bd0615 100644
+index 18e06d6..d7970fd 100644
 --- a/CubeAPI/src/handlers/sandboxes.rs
 +++ b/CubeAPI/src/handlers/sandboxes.rs
-@@ -15,6 +15,7 @@ use crate::{
+@@ -15,8 +15,9 @@ use crate::{
      logging::{LogEvent, LogLevel},
      models::{
          ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
-+        PauseSandboxRequest, RelocateSnapshotRequest,
-         RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-         SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
+-        RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
+-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
++        PauseSandboxRequest, RefreshRequest, RelocateSnapshotRequest, ResumedSandbox, Sandbox,
++        SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response,
++        SetTimeoutRequest, UpdateSandboxNetworkRequest,
      },
+     state::AppState,
+ };
 @@ -318,6 +319,7 @@ pub async fn kill_sandbox(
  pub async fn pause_sandbox(
      State(state): State<AppState>,
@@ -42,18 +58,20 @@ index 18e06d6..1bd0615 100644
  ) -> AppResult<impl IntoResponse> {
      state
          .logger
-@@ -328,7 +330,9 @@ pub async fn pause_sandbox(
+@@ -328,7 +330,11 @@ pub async fn pause_sandbox(
          )
          .await;
      tracing::info!(sandbox_id = %sandbox_id, "pause sandbox request");
 -    state.services.sandboxes.pause_sandbox(&sandbox_id).await?;
-+    state.services.sandboxes.pause_sandbox(
-+        &sandbox_id, payload.as_ref().map(|Json(value)| value),
-+    ).await?;
++    state
++        .services
++        .sandboxes
++        .pause_sandbox(&sandbox_id, payload.as_ref().map(|Json(value)| value))
++        .await?;
  
      tracing::info!(sandbox_id = %sandbox_id, "pause_sandbox: success");
      state
-@@ -338,6 +342,15 @@ pub async fn pause_sandbox(
+@@ -338,6 +344,19 @@ pub async fn pause_sandbox(
      Ok(StatusCode::NO_CONTENT)
  }
  
@@ -62,7 +80,11 @@ index 18e06d6..1bd0615 100644
 +    Path(sandbox_id): Path<String>,
 +    Json(body): Json<RelocateSnapshotRequest>,
 +) -> AppResult<impl IntoResponse> {
-+    state.services.sandboxes.relocate_snapshot(&sandbox_id, &body).await?;
++    state
++        .services
++        .sandboxes
++        .relocate_snapshot(&sandbox_id, &body)
++        .await?;
 +    Ok(StatusCode::NO_CONTENT)
 +}
 +
@@ -97,10 +119,22 @@ index 08ea769..1e62df0 100644
  #[serde(deny_unknown_fields)]
  pub struct UpdateSandboxNetworkRequest {
 diff --git a/CubeAPI/src/routes.rs b/CubeAPI/src/routes.rs
-index 05c62fc..e767a3e 100644
+index 05c62fc..e63f767 100644
 --- a/CubeAPI/src/routes.rs
 +++ b/CubeAPI/src/routes.rs
-@@ -124,6 +124,10 @@ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Rou
+@@ -89,7 +89,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
+         .route("/sandboxes", post(sandboxes::create_sandbox))
+         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
+         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
+-        .route("/sandboxes/:sandboxID/ports/:containerPort", get(sandboxes::get_sandbox_port))
++        .route(
++            "/sandboxes/:sandboxID/ports/:containerPort",
++            get(sandboxes::get_sandbox_port),
++        )
+         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
+         .route(
+             "/sandboxes/:sandboxID/logs",
+@@ -124,6 +127,10 @@ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Rou
              "/sandboxes/:sandboxID/pause",
              post(sandboxes::pause_sandbox),
          )
@@ -112,25 +146,35 @@ index 05c62fc..e767a3e 100644
              "/sandboxes/:sandboxID/resume",
              post(sandboxes::resume_sandbox),
 diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
-index 69f306a..f1bd581 100644
+index 69f306a..9c71025 100644
 --- a/CubeAPI/src/services/sandboxes.rs
 +++ b/CubeAPI/src/services/sandboxes.rs
-@@ -17,7 +17,7 @@ use crate::{
+@@ -17,11 +17,10 @@ use crate::{
      },
      error::{AppError, AppResult},
      models::{
 -        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
-+        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, PauseSandboxRequest, RelocateSnapshotRequest, Sandbox,
-         SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
-         SandboxTcpEndpoint,
-         SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
-@@ -386,10 +386,11 @@ impl SandboxService {
+-        SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
+-        SandboxTcpEndpoint,
+-        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
+-        SandboxVolumeMount,
++        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, PauseSandboxRequest,
++        RelocateSnapshotRequest, Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig,
++        SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
++        SandboxOnTimeout, SandboxState, SandboxTcpEndpoint, SandboxVolumeMount,
+     },
+ };
+ 
+@@ -386,10 +385,14 @@ impl SandboxService {
          Ok(())
      }
  
 -    pub async fn pause_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
-+    pub async fn pause_sandbox(&self, sandbox_id: &str,
-+                               placement: Option<&PauseSandboxRequest>) -> AppResult<()> {
++    pub async fn pause_sandbox(
++        &self,
++        sandbox_id: &str,
++        placement: Option<&PauseSandboxRequest>,
++    ) -> AppResult<()> {
          let resp = self
              .cubemaster
 -            .update_sandbox(&self.build_update_request(sandbox_id, "pause", None))
@@ -138,7 +182,7 @@ index 69f306a..f1bd581 100644
              .await
              .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
  
-@@ -401,6 +402,29 @@ impl SandboxService {
+@@ -401,6 +404,34 @@ impl SandboxService {
          )
      }
  
@@ -160,15 +204,20 @@ index 69f306a..f1bd581 100644
 +                None,
 +                Some(&pause_placement),
 +            ))
-+            .await?;
-+        ensure_update_success(response, sandbox_id, "cannot relocate paused snapshot")?;
-+        Ok(())
++            .await
++            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
++        ensure_update_result(
++            response.ret.ret_code,
++            response.ret.ret_msg,
++            sandbox_id,
++            "cannot relocate paused snapshot",
++        )
 +    }
 +
      pub async fn resume_sandbox(
          &self,
          sandbox_id: &str,
-@@ -408,7 +432,7 @@ impl SandboxService {
+@@ -408,7 +439,7 @@ impl SandboxService {
      ) -> AppResult<Sandbox> {
          let resp = self
              .cubemaster
@@ -177,7 +226,7 @@ index 69f306a..f1bd581 100644
              .await
              .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
  
-@@ -444,7 +468,7 @@ impl SandboxService {
+@@ -444,7 +475,7 @@ impl SandboxService {
          if d.status == SandboxStatus::Paused {
              let resp = self
                  .cubemaster
@@ -186,7 +235,7 @@ index 69f306a..f1bd581 100644
                  .await
                  .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
  
-@@ -708,6 +732,7 @@ impl SandboxService {
+@@ -708,6 +739,7 @@ impl SandboxService {
          sandbox_id: &str,
          action: &str,
          timeout: Option<i32>,
@@ -194,7 +243,7 @@ index 69f306a..f1bd581 100644
      ) -> SandboxUpdateRequest {
          SandboxUpdateRequest {
              request_id: new_request_id(),
-@@ -715,6 +740,9 @@ impl SandboxService {
+@@ -715,6 +747,9 @@ impl SandboxService {
              instance_type: self.instance_type.clone(),
              action: action.to_string(),
              timeout,
@@ -204,7 +253,7 @@ index 69f306a..f1bd581 100644
          }
      }
  
-@@ -2087,6 +2115,9 @@ mod tests {
+@@ -2087,6 +2122,9 @@ mod tests {
              instance_type: "cubebox".to_string(),
              action: "resume".to_string(),
              timeout: None,
@@ -214,7 +263,7 @@ index 69f306a..f1bd581 100644
          };
          let json = serde_json::to_value(&req).unwrap();
          assert!(
-@@ -2101,6 +2132,9 @@ mod tests {
+@@ -2101,6 +2139,9 @@ mod tests {
                  instance_type: "cubebox".to_string(),
                  action: "resume".to_string(),
                  timeout: Some(value),
@@ -239,8 +288,24 @@ index d580a8a..38b4490 100644
    # Per-instance-type overcommit ratio (takes precedence over the global
    # overcommit_ratio).
    # overcommit_ratio_conf:
+diff --git a/CubeMaster/docker/Dockerfile b/CubeMaster/docker/Dockerfile
+index 1347a5a..69e87c9 100644
+--- a/CubeMaster/docker/Dockerfile
++++ b/CubeMaster/docker/Dockerfile
+@@ -11,9 +11,11 @@
+ # ── Build stage ────────────────────────────────────────────────────────────────
+ FROM golang:1.25-bookworm AS builder
+ ARG TARGETARCH
++ARG GOPROXY=https://goproxy.cn,direct
+ ARG CUBE_VERSION=0.0.0-dev
+ ARG CUBE_COMMIT=unknown
+ ARG CUBE_BUILD_TIME=unknown
++ENV GOPROXY=${GOPROXY}
+ 
+ WORKDIR /src
+ 
 diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
-index 37cbbec..94320b6 100644
+index 37cbbec..fafe4d5 100644
 --- a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
 +++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
 @@ -90,6 +90,19 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
@@ -263,7 +328,7 @@ index 37cbbec..94320b6 100644
  	log.G(ctx).Infof("pause: sandbox=%s snap=%s host=%s", req.SandboxID, snapID, hostIP)
  	cubeRsp, err := cubelet.UpdateWithTimeout(ctx, calleeEndpoint, cubeletReq, pauseCubeletRPCTimeout)
  	if err != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
-@@ -140,6 +153,45 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+@@ -140,6 +153,49 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
  	return rsp
  }
  
@@ -288,17 +353,21 @@ index 37cbbec..94320b6 100644
 +		RequestID: req.RequestID,
 +		SandboxID: req.SandboxID,
 +		Annotations: map[string]string{
-+			constants.CubeAnnotationsUpdateAction: "relocate_snapshot",
++			constants.CubeAnnotationsUpdateAction:   "relocate_snapshot",
 +			constants.CubeAnnotationPauseSnapshotID: rec.SnapshotID,
-+			"clawbox.snapshot.tier": "cold",
-+			"clawbox.snapshot.memory.path": req.MemorySnapshotPath,
-+			"clawbox.snapshot.generation": strconv.FormatUint(req.SnapshotGeneration, 10),
++			"clawbox.snapshot.tier":                 "cold",
++			"clawbox.snapshot.memory.path":          req.MemorySnapshotPath,
++			"clawbox.snapshot.generation":           strconv.FormatUint(req.SnapshotGeneration, 10),
 +		},
 +	}
 +	cubeRsp, callErr := cubelet.UpdateWithTimeout(ctx, cubelet.GetCubeletAddr(targetIP), cubeReq, pauseCubeletRPCTimeout)
 +	if callErr != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
 +		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
-+		if callErr != nil { rsp.Ret.RetMsg = callErr.Error() } else { rsp.Ret.RetMsg = "cubelet relocation response is nil" }
++		if callErr != nil {
++			rsp.Ret.RetMsg = callErr.Error()
++		} else {
++			rsp.Ret.RetMsg = "cubelet relocation response is nil"
++		}
 +		return rsp
 +	}
 +	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
@@ -341,13 +410,15 @@ index fc8b0d0..8b0ed81 100644
  		return nil
  	})
 diff --git a/CubeMaster/pkg/service/sandbox/types/types.go b/CubeMaster/pkg/service/sandbox/types/types.go
-index 0dc1f3f..582540e 100644
+index 0dc1f3f..29a09f9 100644
 --- a/CubeMaster/pkg/service/sandbox/types/types.go
 +++ b/CubeMaster/pkg/service/sandbox/types/types.go
-@@ -829,6 +829,9 @@ type UpdateRequest struct {
+@@ -828,7 +828,10 @@ type UpdateRequest struct {
+ 	Action       string `json:"action"`
  	// Backend is the CoW store (xfs｜s3) forwarded to Cubelet as
  	// cube.master.storage.backend. Empty means xfs.
- 	Backend string `json:"backend,omitempty"`
+-	Backend string `json:"backend,omitempty"`
++	Backend            string `json:"backend,omitempty"`
 +	SnapshotTier       string `json:"snapshot_tier,omitempty"`
 +	MemorySnapshotPath string `json:"memory_snapshot_path,omitempty"`
 +	SnapshotGeneration uint64 `json:"snapshot_generation,omitempty"`
@@ -368,19 +439,33 @@ index 74cc3a5..60b1390 100644
      code_expiration_time: "72h"
      image_expiration_time: "24h"
 diff --git a/Cubelet/pkg/constants/const.go b/Cubelet/pkg/constants/const.go
-index d910745..9f6658a 100644
+index d910745..0036da9 100644
 --- a/Cubelet/pkg/constants/const.go
 +++ b/Cubelet/pkg/constants/const.go
-@@ -351,6 +351,7 @@ const (
- 	UpdateActionPause        = "pause"
- 	UpdateActionResume       = "resume"
- 	UpdateActionNetwork      = "network"
-+	UpdateActionRelocateSnapshot = "relocate_snapshot"
- 	PreStopTypePause         = "pause"
- 	PreStopTypeDestroy       = "destroy"
+@@ -346,13 +346,14 @@ const (
  )
+ 
+ const (
+-	UpdateActionAddDevice    = "addDevice"
+-	UpdateActionRemoveDevice = "removeDevice"
+-	UpdateActionPause        = "pause"
+-	UpdateActionResume       = "resume"
+-	UpdateActionNetwork      = "network"
+-	PreStopTypePause         = "pause"
+-	PreStopTypeDestroy       = "destroy"
++	UpdateActionAddDevice        = "addDevice"
++	UpdateActionRemoveDevice     = "removeDevice"
++	UpdateActionPause            = "pause"
++	UpdateActionResume           = "resume"
++	UpdateActionNetwork          = "network"
++	UpdateActionRelocateSnapshot = "relocate_snapshot"
++	PreStopTypePause             = "pause"
++	PreStopTypeDestroy           = "destroy"
+ )
+ 
+ type contextKey string
 diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
-index 285289e..f5d6ab6 100644
+index 285289e..70283bf 100644
 --- a/Cubelet/services/cubebox/pause_cow.go
 +++ b/Cubelet/services/cubebox/pause_cow.go
 @@ -10,6 +10,7 @@ import (
@@ -497,7 +582,7 @@ index 285289e..f5d6ab6 100644
 -		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
 +		if directMemory {
 +			_ = os.Remove(directMemoryPath)
-+			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, rootfsObject)
++			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, nil, rootfsObject)
 +		} else {
 +			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
 +		}
@@ -509,11 +594,11 @@ index 285289e..f5d6ab6 100644
  	}
  	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
 -	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
-+	deactivateObjects := []*storage.CowSnapshotObject{memoryObject, rootfsObject}
++	deactivateMemory := memoryObject
 +	if directMemory {
-+		deactivateObjects = []*storage.CowSnapshotObject{rootfsObject}
++		deactivateMemory = nil
 +	}
-+	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, deactivateObjects...); err != nil {
++	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, deactivateMemory, rootfsObject); err != nil {
  		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
  	}
  	if layout.usesTmpRename() {
@@ -550,10 +635,10 @@ index 285289e..f5d6ab6 100644
  	// to apply those deltas on an explicit Pause failure.
 diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
 new file mode 100644
-index 0000000..32ebcf9
+index 0000000..8ee8458
 --- /dev/null
 +++ b/Cubelet/services/cubebox/relocate_snapshot.go
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,155 @@
 +// Copyright (c) 2026 Tencent Inc.
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -585,7 +670,9 @@ index 0000000..32ebcf9
 +) (*cubebox.UpdateCubeSandboxResponse, error) {
 +	destination, direct, err := directPauseMemoryPath(req)
 +	if err != nil || !direct || strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"]) != "cold" {
-+		if err == nil { err = fmt.Errorf("relocation requires a direct COLD destination") }
++		if err == nil {
++			err = fmt.Errorf("relocation requires a direct COLD destination")
++		}
 +		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 +		rsp.Ret.RetMsg = err.Error()
 +		return rsp, nil
@@ -598,7 +685,9 @@ index 0000000..32ebcf9
 +	}
 +	entry, err := storage.GetLocalSnapshotFor(ctx, cow.BackendXFS, snapshotID)
 +	if err != nil || entry.Kind != storage.CatalogKindPauseSnapshot || entry.MemoryKind != directMemoryKind {
-+		if err == nil { err = fmt.Errorf("snapshot %s is not a direct pause snapshot", snapshotID) }
++		if err == nil {
++			err = fmt.Errorf("snapshot %s is not a direct pause snapshot", snapshotID)
++		}
 +		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
 +		rsp.Ret.RetMsg = err.Error()
 +		return rsp, nil
@@ -627,9 +716,13 @@ index 0000000..32ebcf9
 +	if err == nil {
 +		var destinationHash [sha256.Size]byte
 +		destinationHash, err = hashFile(tmp)
-+		if err == nil && destinationHash != sourceHash { err = fmt.Errorf("relocation hash mismatch") }
++		if err == nil && destinationHash != sourceHash {
++			err = fmt.Errorf("relocation hash mismatch")
++		}
 +	}
-+	if err == nil { err = os.Rename(tmp, destination) }
++	if err == nil {
++		err = os.Rename(tmp, destination)
++	}
 +	if err != nil {
 +		_ = os.Remove(tmp)
 +		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
@@ -648,7 +741,9 @@ index 0000000..32ebcf9
 +	if err = os.Remove(source); err != nil {
 +		entry.MemoryVol = previous
 +		revertErr := storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry)
-+		if revertErr == nil { _ = os.Remove(destination) }
++		if revertErr == nil {
++			_ = os.Remove(destination)
++		}
 +		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 +		rsp.Ret.RetMsg = fmt.Sprintf("relocation copied %d bytes but could not remove WARM source: %v (catalog revert: %v)", copied, err, revertErr)
 +		return rsp, nil
@@ -659,16 +754,26 @@ index 0000000..32ebcf9
 +func copyAndHash(source, destination string) ([sha256.Size]byte, int64, error) {
 +	var zero [sha256.Size]byte
 +	in, err := os.Open(source)
-+	if err != nil { return zero, 0, err }
++	if err != nil {
++		return zero, 0, err
++	}
 +	defer in.Close()
 +	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-+	if err != nil { return zero, 0, err }
++	if err != nil {
++		return zero, 0, err
++	}
 +	h := sha256.New()
 +	written, copyErr := io.Copy(io.MultiWriter(out, h), in)
-+	if copyErr == nil { copyErr = out.Sync() }
++	if copyErr == nil {
++		copyErr = out.Sync()
++	}
 +	closeErr := out.Close()
-+	if copyErr == nil { copyErr = closeErr }
-+	if copyErr != nil { return zero, written, copyErr }
++	if copyErr == nil {
++		copyErr = closeErr
++	}
++	if copyErr != nil {
++		return zero, written, copyErr
++	}
 +	var sum [sha256.Size]byte
 +	copy(sum[:], h.Sum(nil))
 +	return sum, written, nil
@@ -677,10 +782,14 @@ index 0000000..32ebcf9
 +func hashFile(path string) ([sha256.Size]byte, error) {
 +	var zero [sha256.Size]byte
 +	f, err := os.Open(path)
-+	if err != nil { return zero, err }
++	if err != nil {
++		return zero, err
++	}
 +	defer f.Close()
 +	h := sha256.New()
-+	if _, err = io.Copy(h, f); err != nil { return zero, err }
++	if _, err = io.Copy(h, f); err != nil {
++		return zero, err
++	}
 +	var sum [sha256.Size]byte
 +	copy(sum[:], h.Sum(nil))
 +	return sum, nil

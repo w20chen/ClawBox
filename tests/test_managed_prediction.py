@@ -69,6 +69,22 @@ def test_prediction_provider_rejects_uncalibrated_guest_memory(tmp_path: Path) -
         CommandPredictionProvider(path)
 
 
+def test_prediction_provider_can_freeze_heldout_oracle_source(tmp_path: Path) -> None:
+    path = tmp_path / "oracle.json"
+    path.write_text(json.dumps({"tool_invocations": [{
+        "command": "true",
+        "predicted_command_memory_p90_mib": 2,
+        "predicted_host_execution_increment_mib": 3,
+    }]}), encoding="utf-8")
+    provider = CommandPredictionProvider(
+        path, prediction_source="runtime_tool_oracle_heldout"
+    )
+    metadata = provider.manifest[next(iter(provider.manifest))]
+
+    assert metadata["prediction_source"] == "runtime_tool_oracle_heldout"
+    assert provider.resolve("true", metadata)["predicted_incremental_memory_mib"] == 3
+
+
 def test_host_calibration_excludes_backend_maintenance(tmp_path: Path) -> None:
     path = tmp_path / "result.json"
     path.write_text(json.dumps({"performance": {"tool_execution_observations": [

@@ -23,9 +23,11 @@ def command_sha256(command: str) -> str:
 class CommandPredictionProvider:
     """Load one immutable P90 artifact once and resolve exact commands."""
 
-    def __init__(self, path: Path, *, repository: str | None = None) -> None:
+    def __init__(self, path: Path, *, repository: str | None = None,
+                 prediction_source: str = "runtime_clawtune_immutable_kb") -> None:
         self.path = path
         self.repository = repository
+        self.prediction_source = prediction_source
         self.sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -67,8 +69,8 @@ class CommandPredictionProvider:
                 raise ValueError(f"P90 artifact has conflicting entries for command {digest}")
             self._by_digest[digest] = metadata
 
-    @staticmethod
-    def _metadata(item: dict[str, Any], command: str, digest: str) -> dict[str, Any]:
+    def _metadata(self, item: dict[str, Any], command: str,
+                  digest: str) -> dict[str, Any]:
         guest_value = item.get("predicted_command_memory_p90_mib")
         if guest_value is None:
             guest_value = item.get("incremental_p90_mib")
@@ -87,7 +89,7 @@ class CommandPredictionProvider:
         return {
             "raw_command_sha256": digest,
             "canonical_prediction_key": normalized,
-            "prediction_source": "runtime_clawtune_immutable_kb",
+            "prediction_source": self.prediction_source,
             "fallback_level": item.get("key_kind") or item.get("scope") or "unknown",
             "fallback_path": list(item.get("fallback_path") or []),
             "predicted_guest_memory_p90_mib": float(guest_value),

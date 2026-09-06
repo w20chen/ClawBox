@@ -1,0 +1,384 @@
+{
+  "heldout_trace_dir": "/data/recording-evidence/session-0000/traces",
+  "kind": "heldout_rec_a_tool_oracle",
+  "missing_command_sha256": [
+    "a0d405790a875f0dc66a9ee591ada3d3ea865d2dfb26946b282e548ed8236a9b",
+    "36720d151c78669e1e97d94ca07e1b6065181a93fc1f71d06ee7e4e4d2fed3d5",
+    "b0346852d831fc7baecf75da548e48ae387cd1a5feef021a89d5d7453917bf0b",
+    "f6a15254c4036f4f6d84eb1acd8adc69185181207c0d710a109eff164fb8358b",
+    "0d210fa87726dfdb58a189fe9a022eb33f11fcfaca2d31fe659adb1dae88fe16",
+    "ead9340cb28c45e872fe8f98534f09446c153fdefce15ec56a16491d039a6630"
+  ],
+  "repository": "15five/scim2-filter-parser",
+  "schema": "clawbox_command_memory_v1",
+  "selected_trace": {
+    "path": "/home/weitianc/ClawBox/results/paper_replay_20260901_128g_v4/selected-traces/rec-a-enriched.jsonl",
+    "sha256": "12541145678c9f65c5b1388410f82a2d9954a26b100a3a781db5fa837eb83ae5"
+  },
+  "tool_invocations": [
+    {
+      "command": "ls -la /testbed && ls /testbed/src/scim2_filter_parser/transpilers/ 2>/dev/null",
+      "command_sha256": "b8ebcfbdb4c89d602f3da2b9fb45221454ec80a7d934323355333d046698542f",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3671875,
+      "predicted_host_execution_increment_mib": 3833.1552734375
+    },
+    {
+      "command": "cd /testbed && git log --oneline -5 && git status && git branch -a",
+      "command_sha256": "4ce223ec5ca68de2386dbab1217703cf26a8603c353d78dd8888e1fb1b16ccfc",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.38671875,
+      "predicted_host_execution_increment_mib": 3887.9150390625
+    },
+    {
+      "command": "cd /testbed && git config --global --add safe.directory /testbed && git log --oneline -5 && git status --short && git branch -a",
+      "command_sha256": "92a20acc3a3c559ccaca1ee5d54694d9333a49e24da43f228fb8de4901f1bb2b",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3828125,
+      "predicted_host_execution_increment_mib": 3876.962890625
+    },
+    {
+      "command": "cat -n /testbed/src/scim2_filter_parser/transpilers/sql.py",
+      "command_sha256": "d60ba9722af8bfb11f2e7ea9265792f293680840db570d59fa49bf15014ed70a",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.37109375,
+      "predicted_host_execution_increment_mib": 3844.107421875
+    },
+    {
+      "command": "cd /testbed && cat -n src/scim2_filter_parser/ast.py && grep -rn \"attr_paths\" --include=\"*.py\" . | grep -v \".eggs\"",
+      "command_sha256": "9c8ad3d0bfd5177d63a5baa776cedfb8daf523181088a68a66627eaf700b7bc9",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.38671875,
+      "predicted_host_execution_increment_mib": 3887.9150390625
+    },
+    {
+      "command": "cd /testbed && cat -n src/scim2_filter_parser/attr_paths.py && echo \"=====TESTS=====\" && cat -n tests/test_attr_paths.py | sed -n '1,110p'",
+      "command_sha256": "b8588de39c79ac9eec7ae9136ab9aee71df2490992a672cc6ea28eabe3e692b6",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.36328125,
+      "predicted_host_execution_increment_mib": 3822.2041015625
+    },
+    {
+      "command": "cd /testbed && grep -rn \"namedtuple\\|NamedTuple\\|\\.attr_name\\|\\.sub_attr\\|\\.uri\" --include=\"*.py\" tests/ src/ | grep -v \".eggs\" | head -40",
+      "command_sha256": "62f125a52ce799103b0268693456dd1f7053c5ca45ec22bdf2afdce788e8e1c4",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.38671875,
+      "predicted_host_execution_increment_mib": 3887.9150390625
+    },
+    {
+      "command": "cd /testbed && git log --oneline --all | head -20 && git show --stat HEAD | head -30",
+      "command_sha256": "d7757b834fc3a9b8faeb820101d4b90249efc927aa0bf0112a282c8d082f6431",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.375,
+      "predicted_host_execution_increment_mib": 3855.0595703125
+    },
+    {
+      "command": "cd /testbed && sed -n '160,185p' src/scim2_filter_parser/transpilers/django_q_object.py && git remote -v && git log --all --oneline -- src/scim2_filter_parser/transpilers/sql.py | head",
+      "command_sha256": "aea75eda4a7b16db5037db1f69ebab6b75da7c48903a046c0cfae9e3e607335b",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.37109375,
+      "predicted_host_execution_increment_mib": 3844.107421875
+    },
+    {
+      "command": "cd /testbed && git show 7eb7707 --stat && git show 7eb7707 | head -120",
+      "command_sha256": "7e164bf9522fa9099e6ad3b8e3b17b7f79d3b6d53cffdc52a08185232fe9ac7e",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.37109375,
+      "predicted_host_execution_increment_mib": 3844.107421875
+    },
+    {
+      "command": "cd /testbed && git merge-base --is-ancestor 7eb7707 HEAD && echo \"IS ANCESTOR\" || echo \"NOT ANCESTOR\"; git log --all --oneline --follow -- src/scim2_filter_parser/transpilers/sql.py | head -30",
+      "command_sha256": "3bdb986b797553ccf1813229e2d4baafe8258fc1d0dfaae158ed90b2f42a01ca",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.37109375,
+      "predicted_host_execution_increment_mib": 3844.107421875
+    },
+    {
+      "command": "cd /testbed && cat setup.py && sed -n '110,360p' tests/test_attr_paths.py",
+      "command_sha256": "5f80def014e90e606d2b847eb3d91584683f2869f3ffea352bcdcd16f5149089",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.37109375,
+      "predicted_host_execution_increment_mib": 3844.107421875
+    },
+    {
+      "command": "cd /testbed && git branch -a && git tag | tail -5 && timeout 15 git ls-remote https://github.com/15five/scim2-filter-parser.git HEAD 2>&1 | head -3",
+      "command_sha256": "1ea1a894464ae7ceada878d92590ae4cb8c678ff769205836eb648f96703fc20",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.38671875,
+      "predicted_host_execution_increment_mib": 3887.9150390625
+    },
+    {
+      "command": "cd /testbed && git show-ref && echo \"---\" && git log --oneline -S \"AttrPath = collections\" -- src/scim2_filter_parser/transpilers/sql.py && echo \"---SEARCH---\" && git log --all --oneline -S \"namedtuple\" -- src/ && echo \"---DIFF 7eb7707..752626b sql---\" && git diff 7eb7707 752626b -- src/scim2_filter_parser/transpilers/sql.py | head -60",
+      "command_sha256": "7bc8796d24ff14d6d2254a10f1faa89f204df50550efc28abc17c4783098a3f6",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3828125,
+      "predicted_host_execution_increment_mib": 3876.962890625
+    },
+    {
+      "command": "cd /testbed && git merge-base --is-ancestor 7eb7707 HEAD; echo \"exit=$?\"; git tag --contains 7eb7707 | head; echo \"---\"; git rev-list HEAD | grep -c 7eb7707; echo \"---\"; git log --oneline HEAD | grep -n \"7eb7707\\|namedtuple\" ; echo \"---refs---\"; git for-each-ref | head",
+      "command_sha256": "9de1d03bde51ab53f6f60425d3e6367434a7d67891228129fe393df26ee63cfc",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3828125,
+      "predicted_host_execution_increment_mib": 3876.962890625
+    },
+    {
+      "command": "cd /testbed && git show 7eb7707 --stat && echo \"===TESTS AT 0.3.5 vs HEAD===\" && git diff HEAD 0.3.5 -- tests/test_attr_paths.py | head -80",
+      "command_sha256": "cf35a253af763520129c2c7fa8e32367b69d010e440e95efd89d27d2798e4223",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3671875,
+      "predicted_host_execution_increment_mib": 3833.1552734375
+    },
+    {
+      "command": "cd /testbed && python3 - <<'EOF'\npath = 'src/scim2_filter_parser/transpilers/sql.py'\nwith open(path) as f:\n    content = f.read()\n\nold1 = \"import ast\\nimport string\\n\\nfrom .. import ast as scim2ast\\n\\n\\nclass Transpiler(ast.NodeTransformer):\"\nnew1 = \"import ast\\nimport collections\\nimport string\\n\\nfrom .. import ast as scim2ast\\n\\nAttrPath = collections.namedtuple('AttrPath', ['attr_name', 'sub_attr', 'uri'])\\n\\n\\nclass Transpiler(ast.NodeTransformer):\"\n\nold2 = \"        attr_path_tuple = (attr_name_value, sub_attr_value, uri_value)\"\nnew2 = \"        attr_path_tuple = AttrPath(attr_name_value, sub_attr_value, uri_value)\"\n\nassert content.count(old1) == 1, f\"old1 count={content.count(old1)}\"\nassert content.count(old2) == 1, f\"old2 count={content.count(old2)}\"\n\ncontent = content.replace(old1, new1).replace(old2, new2)\n\nwith open(path, 'w') as f:\n    f.write(content)\n\nprint(\"done\")\nEOF",
+      "command_sha256": "19dfcf89c9e34f9c65f574b5cef6e4b5fd13e81f67d9e344664f0ea139720371",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.38671875,
+      "predicted_host_execution_increment_mib": 3887.9150390625
+    },
+    {
+      "command": "cd /testbed && sed -n '1,15p' src/scim2_filter_parser/transpilers/sql.py && echo \"...\" && sed -n '135,155p' src/scim2_filter_parser/transpilers/sql.py",
+      "command_sha256": "3cccd71ab6d2b4243f5b7756f3a76281c6ae0b6074d3292f89936482615a0899",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3828125,
+      "predicted_host_execution_increment_mib": 3876.962890625
+    },
+    {
+      "command": "cd /testbed && python3 -m pytest tests/ -q 2>&1 | tail -15",
+      "command_sha256": "f82dfc205abdbf7942f30dc2e4e91ff65507d463ff20ba4996c6ef7176943470",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3828125,
+      "predicted_host_execution_increment_mib": 3876.962890625
+    },
+    {
+      "command": "cd /testbed && python3 - <<'EOF'\nfrom scim2_filter_parser.attr_paths import AttrPath as AttrPathWrapper\nfrom scim2_filter_parser.transpilers.sql import AttrPath, Transpiler\n\nattr_map = {\n    ('emails', 'type', None): 'emails.type',\n    ('emails', 'value', None): 'emails.value',\n    ('userName', None, None): 'username',\n}\n\n# Named access on first_path / iteration\nq = AttrPathWrapper('emails[type eq \"Primary\"].value eq \"001750ca-8202-47cd-b553-c63f4f245940\"', attr_map)\nfirst = q.first_path\nprint(\"first_path:\", first)\nprint(\"first_path.attr_name:\", first.attr_name)\nprint(\"first_path.sub_attr:\", first.sub_attr)\nprint(\"first_path.uri:\", first.uri)\nfor p in q:\n    assert (p.attr_name, p.sub_attr, p.uri) == tuple(p), \"named vs index mismatch\"\n    print(\"path:\", p.attr_name, p.sub_attr, p.uri)\n\n# Backward compat: equality with plain tuple\nassert first == ('emails', 'type', None)\n# hash equality with plain tuple (dict key lookup in attr_map)\nassert attr_map[AttrPath('userName', None, None)] == 'username'\nassert Transpiler(attr_map).attr_map.get(AttrPath('userName', None, None)) == 'username'\n\n# json serialization still works\nimport json\nassert json.loads(str(q)) == [[\"emails\", \"type\", None], [\"emails\", \"value\", None]], str(q)\nprint(\"str(q):\", str(q).replace('\\n', ' '))\nprint(\"ALL CHECKS PASSED\")\nEOF",
+      "command_sha256": "37a20431ded3d12b3007bba45f026896c86b34669e08ea4feb9aaab2b84ec14f",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.38671875,
+      "predicted_host_execution_increment_mib": 3887.9150390625
+    },
+    {
+      "command": "cd /testbed && cat tox.ini setup.cfg && python3 --version && pip --version 2>&1 | head -1 && ls .eggs 2>/dev/null; ls -d .venv venv 2>/dev/null; which pytest tox 2>/dev/null",
+      "command_sha256": "342607ab31ffa448897fd38447268e94e87780e55ac238aed0db4a63222148e6",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.3828125,
+      "predicted_host_execution_increment_mib": 3876.962890625
+    },
+    {
+      "command": "cd /testbed && python3 -c \"import sly; print('sly', sly.__version__)\" 2>&1; python3 -c \"import django; print('django', django.get_version())\" 2>&1; timeout 12 pip install -q pytest 2>&1 | tail -2; python3 -c \"import pytest; print('pytest', pytest.__version__)\" 2>&1",
+      "command_sha256": "f151ba2c1cffb007527a8c7ccc2989802dc840b1e88dcde2242d554fe2023597",
+      "evidence_count": 1,
+      "fallback_path": [
+        "exact_command_heldout"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "exact_command_heldout",
+      "predicted_command_memory_p90_mib": 1.375,
+      "predicted_host_execution_increment_mib": 3855.0595703125
+    },
+    {
+      "command": "find / -name \"sly*\" -not -path \"*/proc/*\" 2>/dev/null | head; echo \"---django---\"; find / -maxdepth 6 -name \"django\" -type d -not -path \"*/proc/*\" 2>/dev/null | head; echo \"---pytest---\"; find / -name \"pytest\" -maxdepth 8 -not -path \"*/proc/*\" 2>/dev/null | head; echo \"---wheels---\"; find / -name \"*.whl\" -not -path \"*/proc/*\" 2>/dev/null | head; echo \"---pipcache---\"; ls ~/.cache/pip 2>/dev/null | head",
+      "command_sha256": "a0d405790a875f0dc66a9ee591ada3d3ea865d2dfb26946b282e548ed8236a9b",
+      "evidence_count": 0,
+      "fallback_path": [
+        "heldout_missing_conservative_full"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "heldout_missing_conservative_full",
+      "predicted_command_memory_p90_mib": 1.4609375,
+      "predicted_host_execution_increment_mib": 4096.0
+    },
+    {
+      "command": "ls /opt/miniconda3/envs/testbed/lib/python3.7/site-packages/ | grep -i -E \"django|sly|pytest\" ; echo \"---\"; ls /testbed/tests/; echo \"---init---\"; cat /testbed/src/scim2_filter_parser/__init__.py; echo \"---transpilers init---\"; cat /testbed/src/scim2_filter_parser/transpilers/__init__.py; echo \"---queries---\"; ls /testbed/src/scim2_filter_parser/queries/ 2>/dev/null; grep -rn \"django\" /testbed/tests/*.py | head",
+      "command_sha256": "36720d151c78669e1e97d94ca07e1b6065181a93fc1f71d06ee7e4e4d2fed3d5",
+      "evidence_count": 0,
+      "fallback_path": [
+        "heldout_missing_conservative_full"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "heldout_missing_conservative_full",
+      "predicted_command_memory_p90_mib": 1.4609375,
+      "predicted_host_execution_increment_mib": 4096.0
+    },
+    {
+      "command": "cd /testbed && PYTHONPATH=/testbed/src /opt/miniconda3/envs/testbed/bin/python -m pytest tests/ -q 2>&1 | tail -15",
+      "command_sha256": "b0346852d831fc7baecf75da548e48ae387cd1a5feef021a89d5d7453917bf0b",
+      "evidence_count": 0,
+      "fallback_path": [
+        "heldout_missing_conservative_full"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "heldout_missing_conservative_full",
+      "predicted_command_memory_p90_mib": 1.4609375,
+      "predicted_host_execution_increment_mib": 4096.0
+    },
+    {
+      "command": "cd /testbed && PYTHONPATH=/testbed/src /opt/miniconda3/envs/testbed/bin/python - <<'EOF'\nimport json\nfrom scim2_filter_parser.attr_paths import AttrPath as AttrPathWrapper\nfrom scim2_filter_parser.transpilers.sql import AttrPath, Transpiler\n\nattr_map = {\n    ('emails', 'type', None): 'emails.type',\n    ('emails', 'value', None): 'emails.value',\n    ('userName', None, None): 'username',\n}\n\n# 1) Named access on first_path / iteration\nq = AttrPathWrapper('emails[type eq \"Primary\"].value eq \"001750ca-8202-47cd-b553-c63f4f245940\"', attr_map)\nfirst = q.first_path\nprint(\"first_path:\", first)\nprint(\"first_path.attr_name:\", first.attr_name)\nprint(\"first_path.sub_attr:\", first.sub_attr)\nprint(\"first_path.uri:\", first.uri)\nfor p in q:\n    assert (p.attr_name, p.sub_attr, p.uri) == tuple(p), \"named vs index mismatch\"\n    print(\"path:\", p.attr_name, p.sub_attr, p.uri)\n\n# 2) Backward compat: equality with plain tuple\nassert first == ('emails', 'type', None)\n\n# 3) Hashable + usable as dict key alongside plain-tuple keys in attr_map\nassert hash(first) == hash(('emails', 'type', None))\nassert attr_map[AttrPath('userName', None, None)] == 'username'\nassert Transpiler(attr_map).attr_map.get(AttrPath('userName', None, None)) == 'username'\n\n# 4) json serialization (str(AttrPath) -> json.dumps of list) still works\nassert json.loads(str(q)) == [[\"emails\", \"type\", None], [\"emails\", \"value\", None]], str(q)\n\n# 5) It's still a tuple subclass\nassert isinstance(first, tuple) and isinstance(first, AttrPath)\n\nprint(\"ALL CHECKS PASSED\")\nEOF",
+      "command_sha256": "f6a15254c4036f4f6d84eb1acd8adc69185181207c0d710a109eff164fb8358b",
+      "evidence_count": 0,
+      "fallback_path": [
+        "heldout_missing_conservative_full"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "heldout_missing_conservative_full",
+      "predicted_command_memory_p90_mib": 1.4609375,
+      "predicted_host_execution_increment_mib": 4096.0
+    },
+    {
+      "command": "cd /testbed && git add src/scim2_filter_parser/transpilers/sql.py && git commit -m \"Return AttrPath namedtuple instead of tuple in SQL transpiler\n\nMake each attribute path accessible by name (attr_name, sub_attr, uri)\nrather than by index, while remaining backward compatible: the\nnamedtuple still hashes/compares equal to the plain tuple it replaces,\nso attr_map lookups and existing tuple-based consumers keep working.\" && git log --oneline -2 && git status --short",
+      "command_sha256": "0d210fa87726dfdb58a189fe9a022eb33f11fcfaca2d31fe659adb1dae88fe16",
+      "evidence_count": 0,
+      "fallback_path": [
+        "heldout_missing_conservative_full"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "heldout_missing_conservative_full",
+      "predicted_command_memory_p90_mib": 1.4609375,
+      "predicted_host_execution_increment_mib": 4096.0
+    },
+    {
+      "command": "cd /testbed && git config user.email \"agent@openclaw.local\" && git config user.name \"OpenClaw Agent\" && git commit -m \"Return AttrPath namedtuple instead of tuple in SQL transpiler\n\nMake each attribute path accessible by name (attr_name, sub_attr, uri)\nrather than by index, while remaining backward compatible: the\nnamedtuple still hashes/compares equal to the plain tuple it replaces,\nso attr_map lookups and existing tuple-based consumers keep working.\" && git log --oneline -2 && git status --short",
+      "command_sha256": "ead9340cb28c45e872fe8f98534f09446c153fdefce15ec56a16491d039a6630",
+      "evidence_count": 0,
+      "fallback_path": [
+        "heldout_missing_conservative_full"
+      ],
+      "host_mapping_ratio_p90": 2803.6791443850266,
+      "host_mapping_source": "heldout_rec_a_guest_peak_with_conservative_host_ratio",
+      "key_kind": "heldout_missing_conservative_full",
+      "predicted_command_memory_p90_mib": 1.4609375,
+      "predicted_host_execution_increment_mib": 4096.0
+    }
+  ]
+}

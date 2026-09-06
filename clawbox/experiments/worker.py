@@ -574,12 +574,27 @@ class ExperimentWorker:
             arm.resources.warm_memory_capacity_mib * 1024 * 1024
         )
         prediction_provider = None
-        if arm.agent.driver is AgentDriver.OPENCLAW and arm.policy.admission is AdmissionPolicy.TOOL_P90:
-            if not arm.resources.p90_predictions:
-                raise ValueError("tool_p90 requires an immutable command prediction artifact")
+        if (arm.agent.driver is AgentDriver.OPENCLAW
+                and arm.policy.admission in {
+                    AdmissionPolicy.TOOL_P90, AdmissionPolicy.TOOL_ORACLE,
+                }):
+            source = (
+                arm.resources.p90_predictions
+                if arm.policy.admission is AdmissionPolicy.TOOL_P90
+                else arm.resources.oracle_measurements
+            )
+            if not source:
+                raise ValueError(
+                    f"{arm.policy.admission.value} requires an immutable command artifact"
+                )
             prediction_provider = CommandPredictionProvider(
-                Path(arm.resources.p90_predictions),
+                Path(source),
                 repository=arm.case.repository or arm.case.case_id,
+                prediction_source=(
+                    "runtime_clawtune_immutable_kb"
+                    if arm.policy.admission is AdmissionPolicy.TOOL_P90
+                    else "runtime_tool_oracle_heldout"
+                ),
             )
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
@@ -2269,9 +2284,11 @@ class ExperimentWorker:
             return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
         if policy is AdmissionPolicy.TOOL_STATIC:
             return int(arm.resources.static_tool_memory_mib or 1)
-        if policy is AdmissionPolicy.TOOL_P90 and prediction is None and arm.agent.driver is AgentDriver.OPENCLAW:
+        if (policy in {AdmissionPolicy.TOOL_P90, AdmissionPolicy.TOOL_ORACLE}
+                and prediction is None
+                and arm.agent.driver is AgentDriver.OPENCLAW):
             raise PredictionUnavailable(
-                "managed tool_p90 cannot admit without Runtime command prediction metadata"
+                f"managed {policy.value} cannot admit without Runtime command metadata"
             )
         source = arm.resources.p90_predictions if policy is AdmissionPolicy.TOOL_P90 else arm.resources.oracle_measurements
         if prediction is not None:
