@@ -8,6 +8,7 @@ import pytest
 
 from clawbox.experiments.policy import AdmissionTimeout, PolicyCoordinator
 from clawbox.experiments.spec import PolicySpec
+from clawbox.experiments.spec_types import SnapshotTier
 
 
 class Lifecycle:
@@ -257,3 +258,38 @@ def test_time_oracle_wait_plan_uses_actual_replay_duration_at_break_even() -> No
     assert coordinator.model_wait_plan(None, oracle_duration_s=4.0) == (
         0.0, None,
     )
+
+
+def test_tiered_time_oracle_uses_exact_two_and_twenty_second_boundaries() -> None:
+    policy = PolicySpec(
+        name="tiered-time", admission="tool_p90", reclamation="snapshot_pause",
+        eviction="tiered_time_oracle", restore="reactive",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=64, emergency_free_mib=1, operation_headroom_mib=0,
+    )
+    assert coordinator.oracle_tier(1.999) is SnapshotTier.LOCAL
+    assert coordinator.oracle_tier(2.0) is SnapshotTier.WARM
+    assert coordinator.oracle_tier(19.999) is SnapshotTier.WARM
+    assert coordinator.oracle_tier(20.0) is SnapshotTier.COLD
+    assert coordinator.model_wait_plan(None, oracle_duration_s=1.999) == (None, None)
+    assert coordinator.model_wait_plan(None, oracle_duration_s=2.0) == (0.0, None)
+
+
+def test_tiered_lru_prefers_remaining_wait_of_at_least_two_seconds() -> None:
+    policy = PolicySpec(
+        name="tiered-lru", admission="tool_p90", reclamation="snapshot_pause",
+        eviction="tiered_lru_oracle", restore="reactive",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=64, emergency_free_mib=1, operation_headroom_mib=0,
+    )
+    short, useful = Lifecycle(), Lifecycle()
+    coordinator.register("old-short", short)
+    coordinator.begin_model_wait("old-short", "wait-short", 1.0)
+    coordinator.register("new-useful", useful)
+    coordinator.begin_model_wait("new-useful", "wait-useful", 3.0)
+    victim = coordinator.victim_for_restore("requester")
+    assert victim is not None and victim.session_id == "new-useful"
+    assert coordinator.pressure_oracle_tier(victim) is SnapshotTier.WARM
+    coordinator.release_victim(victim)

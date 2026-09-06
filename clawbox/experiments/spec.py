@@ -123,6 +123,12 @@ class ResourcesSpec(StrictFrozenModel):
     full_tool_memory_mib: int | None = Field(default=None, ge=1)
     p90_predictions: str | None = None
     oracle_measurements: str | None = None
+    local_memory_capacity_mib: int | None = Field(default=None, ge=1)
+    warm_memory_capacity_mib: int = Field(default=0, ge=0)
+    warm_snapshot_root: str | None = None
+    cold_snapshot_root: str | None = None
+    local_numa_node: int | None = Field(default=None, ge=0)
+    warm_numa_node: int | None = Field(default=None, ge=0)
 
 
 class PolicySpec(StrictFrozenModel):
@@ -195,6 +201,24 @@ class ExperimentSpec(StrictFrozenModel):
         if any(policy.eviction is EvictionPolicy.TIME_ORACLE for policy in self.policies):
             if self.inference.backend is not InferenceBackend.REPLAY:
                 raise ValueError("time_oracle is evaluation-only and requires inference.backend=replay")
+        if any(policy.eviction in {
+            EvictionPolicy.TIERED_LRU_ORACLE,
+            EvictionPolicy.TIERED_TIME_ORACLE,
+        } for policy in self.policies):
+            if self.inference.backend is not InferenceBackend.REPLAY:
+                raise ValueError("tiered oracle policies require inference.backend=replay")
+            required_tier_fields = {
+                "local_memory_capacity_mib": self.resources.local_memory_capacity_mib,
+                "warm_snapshot_root": self.resources.warm_snapshot_root,
+                "cold_snapshot_root": self.resources.cold_snapshot_root,
+                "local_numa_node": self.resources.local_numa_node,
+                "warm_numa_node": self.resources.warm_numa_node,
+            }
+            missing = [name for name, value in required_tier_fields.items() if value is None]
+            if missing:
+                raise ValueError("tiered oracle policies require resources." + ", resources.".join(missing))
+            if self.resources.local_numa_node == self.resources.warm_numa_node:
+                raise ValueError("LOCAL and WARM must use distinct NUMA nodes")
         if AdmissionPolicy.TOOL_ORACLE in admissions:
             if self.inference.backend is not InferenceBackend.REPLAY:
                 raise ValueError("tool_oracle is evaluation-only and requires inference.backend=replay")

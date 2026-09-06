@@ -80,8 +80,16 @@ class _Sandbox:
         return [{"sandboxID": item.sandbox_id, "templateID": item.template_id,
                  "metadata": item.metadata, "state": item.state} for item in cls.items.values()]
 
-    def pause(self, wait=True):
+    def pause(self, wait=True, **kwargs):
         self.state = "paused"
+        if kwargs:
+            return {
+                "memory_snapshot_path": kwargs["memory_snapshot_path"],
+                "logical_bytes": 1024, "allocated_bytes": 1024,
+                "transferred_bytes": 1024,
+                "generation": kwargs["snapshot_generation"],
+                "tier": kwargs["snapshot_tier"],
+            }
 
     def get_tcp_endpoint(self, container_port):
         ordinal = int(self.sandbox_id.rsplit("-", 1)[-1]) if "-" in self.sandbox_id else 1
@@ -760,7 +768,11 @@ def test_worker_runs_every_current_baseline_at_c40_with_complete_spans(
             "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 8192,
             "static_tool_memory_mib": 256, "full_tool_memory_mib": 4096,
             "p90_predictions": "examples/predictions/smoke-p90.json",
-            "oracle_measurements": "examples/predictions/smoke-oracle.json",
+                "oracle_measurements": "examples/predictions/smoke-oracle.json",
+                "local_memory_capacity_mib": 65536,
+                "warm_memory_capacity_mib": 65536,
+                "warm_snapshot_root": "/warm", "cold_snapshot_root": "/cold",
+                "local_numa_node": 0, "warm_numa_node": 1,
         },
         "policies": policy_data,
         "output": {"directory": str(tmp_path / "output")},

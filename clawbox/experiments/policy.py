@@ -9,6 +9,7 @@ from threading import Condition
 from typing import Protocol
 
 from .spec import EvictionPolicy, PolicySpec, ReclamationPolicy, RestorePolicy
+from .spec_types import SnapshotTier
 
 MIB = 1024 * 1024
 
@@ -27,6 +28,11 @@ class SessionState:
     eviction_eligible: bool = False
     eviction_in_progress: bool = False
     last_used: float = 0.0
+    runtime_lifecycle: Pausable | None = None
+    wait_id: str | None = None
+    wait_started_monotonic_s: float | None = None
+    wait_deadline_monotonic_s: float | None = None
+    response_ready: bool = False
 
 
 class AdmissionTimeout(RuntimeError):
@@ -92,6 +98,49 @@ class PolicyCoordinator:
     def register(self, session_id: str, lifecycle: Pausable) -> None:
         with self._condition:
             self._sessions[session_id] = SessionState(session_id, lifecycle, last_used=time.monotonic())
+
+    def register_runtime(self, session_id: str, lifecycle: Pausable) -> None:
+        with self._condition:
+            self._sessions[session_id].runtime_lifecycle = lifecycle
+
+    def begin_model_wait(self, session_id: str, wait_id: str,
+                         oracle_duration_s: float) -> None:
+        if oracle_duration_s < 0:
+            raise ValueError("oracle_duration_s must be non-negative")
+        now = time.monotonic()
+        with self._condition:
+            state = self._sessions[session_id]
+            state.wait_id = wait_id
+            state.wait_started_monotonic_s = now
+            state.wait_deadline_monotonic_s = now + oracle_duration_s
+            state.response_ready = False
+            state.eviction_eligible = True
+            state.last_used = now
+            self._condition.notify_all()
+
+    def complete_model_wait(self, session_id: str, wait_id: str) -> None:
+        with self._condition:
+            state = self._sessions[session_id]
+            if state.wait_id == wait_id:
+                state.response_ready = True
+                state.eviction_eligible = False
+                self._condition.notify_all()
+
+    @staticmethod
+    def oracle_tier(duration_s: float) -> SnapshotTier:
+        if duration_s < 2.0:
+            return SnapshotTier.LOCAL
+        if duration_s < 20.0:
+            return SnapshotTier.WARM
+        return SnapshotTier.COLD
+
+    def pressure_oracle_tier(self, state: SessionState, *, now: float | None = None
+                             ) -> SnapshotTier:
+        current = time.monotonic() if now is None else now
+        deadline = state.wait_deadline_monotonic_s
+        remaining = max(0.0, deadline - current) if deadline is not None else 0.0
+        # A's documented short-wait pressure fallback always targets WARM.
+        return SnapshotTier.COLD if remaining >= 20.0 else SnapshotTier.WARM
 
     def unregister(self, session_id: str) -> None:
         with self._condition:
@@ -199,7 +248,19 @@ class PolicyCoordinator:
                     if at_head and victim is not None:
                         self._condition.release()
                         try:
-                            elapsed = victim.lifecycle.checkpoint_and_evict()
+                            target = (
+                                self.pressure_oracle_tier(victim)
+                                if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE
+                                else None
+                            )
+                            elapsed = (
+                                victim.lifecycle.checkpoint_and_evict(tier=target)
+                                if target is not None
+                                else victim.lifecycle.checkpoint_and_evict()
+                            )
+                            if (target is not None and victim.runtime_lifecycle is not None
+                                    and victim.runtime_lifecycle.resident):
+                                victim.runtime_lifecycle.checkpoint_and_evict(tier=target)
                         finally:
                             self._condition.acquire()
                             victim.eviction_in_progress = False
@@ -345,6 +406,14 @@ class PolicyCoordinator:
             if oracle_duration_s is None or oracle_duration_s < break_even:
                 return None, None
             delay = 0.0
+        elif self.policy.eviction is EvictionPolicy.TIERED_TIME_ORACLE:
+            if oracle_duration_s is None or self.oracle_tier(
+                oracle_duration_s
+            ) is SnapshotTier.LOCAL:
+                return None, None
+            delay = 0.0
+        elif self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
+            return None, None
         else:
             return None, None
         lead = (self.policy.prefetch_lead_seconds or 0.0) \
@@ -409,6 +478,15 @@ class PolicyCoordinator:
                       if state.session_id != exclude and state.eviction_eligible
                       and not state.eviction_in_progress and not state.tool_active
                       and state.lifecycle.resident]
+        if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
+            now = time.monotonic()
+            candidates = [state for state in candidates
+                          if state.wait_id is not None and not state.response_ready
+                          and state.wait_deadline_monotonic_s is not None]
+            worthwhile = [state for state in candidates
+                           if state.wait_deadline_monotonic_s - now >= 2.0]
+            if worthwhile:
+                candidates = worthwhile
         return min(candidates, key=lambda state: state.last_used, default=None)
 
     def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:

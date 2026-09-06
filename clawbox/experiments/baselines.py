@@ -124,6 +124,14 @@ BASELINES = MappingProxyType({
         "tool-static-time-oracle-reactive", AdmissionPolicy.TOOL_STATIC,
         EvictionPolicy.TIME_ORACLE, checkpoint_break_even_seconds=4.0,
     ),
+    "tool-p90-tiered-lru-oracle-reactive": _snapshot(
+        "tool-p90-tiered-lru-oracle-reactive", AdmissionPolicy.TOOL_P90,
+        EvictionPolicy.TIERED_LRU_ORACLE,
+    ),
+    "tool-p90-tiered-time-oracle-reactive": _snapshot(
+        "tool-p90-tiered-time-oracle-reactive", AdmissionPolicy.TOOL_P90,
+        EvictionPolicy.TIERED_TIME_ORACLE,
+    ),
 
     # Pre-schema-v2 names retained as explicit compatibility aliases. They no
     # longer select Kubernetes, direct Firecracker, or any other backend.

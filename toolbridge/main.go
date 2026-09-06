@@ -402,6 +402,15 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		_ = stdinWrite.Close()
 		record.ExitCode = commandExitCode(err, record.TimedOut)
 		if telemetryBegun {
+			// The guest collector consumes kernel events asynchronously.  In
+			// particular, a short command can exit before the collector's poll
+			// loop has drained the exec event that was emitted after Begin.
+			// Keep validation fail-closed, but give that already-emitted event a
+			// bounded drain window before asking the collector to finalize.
+			drainMS := envInt("CLAWBOX_GUEST_COLLECTOR_DRAIN_MS", 50)
+			if drainMS > 0 {
+				time.Sleep(time.Duration(drainMS) * time.Millisecond)
+			}
 			response, finishErr := guestCollector.Finish(executionID, record.ExitCode)
 			if finishErr != nil {
 				record.TelemetryState = "failed"

@@ -46,6 +46,14 @@ class EvictionPolicy(StrEnum):
     FIXED_DELAY = "fixed_delay"
     WAIT_AWARE_PRESSURE = "wait_aware_pressure"
     TIME_ORACLE = "time_oracle"
+    TIERED_LRU_ORACLE = "tiered_lru_oracle"
+    TIERED_TIME_ORACLE = "tiered_time_oracle"
+
+
+class SnapshotTier(StrEnum):
+    LOCAL = "local"
+    WARM = "warm"
+    COLD = "cold"
 
 
 class RestorePolicy(StrEnum):

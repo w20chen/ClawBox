@@ -310,8 +310,35 @@ class CubeSandboxClient:
         sandbox.files.write(path, data)
 
     @staticmethod
-    def pause_sandbox(sandbox: Any) -> None:
-        sandbox.pause(wait=True)
+    def pause_sandbox(sandbox: Any, *, tier: str | None = None,
+                      memory_snapshot_path: str | None = None,
+                      generation: int | None = None) -> Mapping[str, Any] | None:
+        if tier is None:
+            sandbox.pause(wait=True)
+            return None
+        if not memory_snapshot_path or generation is None:
+            raise ValueError("tiered pause requires memory_snapshot_path and generation")
+        try:
+            result = sandbox.pause(
+                wait=True, snapshot_tier=tier,
+                memory_snapshot_path=memory_snapshot_path,
+                snapshot_generation=generation,
+            )
+        except TypeError as exc:
+            raise RuntimeError(
+                "installed CubeSandbox SDK lacks the required direct tiered pause API"
+            ) from exc
+        if not isinstance(result, Mapping):
+            raise RuntimeError("tiered pause did not return a snapshot manifest")
+        required = {"memory_snapshot_path", "logical_bytes", "allocated_bytes",
+                    "transferred_bytes", "generation", "tier"}
+        if missing := sorted(required.difference(result)):
+            raise RuntimeError("tiered pause manifest missing: " + ", ".join(missing))
+        if str(result["tier"]).lower() != tier or int(result["generation"]) != generation:
+            raise RuntimeError("tiered pause manifest identity mismatch")
+        if str(result["memory_snapshot_path"]) != memory_snapshot_path:
+            raise RuntimeError("tiered pause used an unexpected memory snapshot path")
+        return result
 
     def kill_sandbox(self, sandbox_or_id: Any) -> None:
         if not isinstance(sandbox_or_id, str):

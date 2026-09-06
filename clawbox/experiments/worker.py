@@ -42,6 +42,8 @@ from .openclaw_driver import (
     run_openclaw,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
+from .snapshot_pool import WarmSnapshotPool
+from .spec_types import SnapshotTier
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, PredictionUnavailable
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
@@ -561,6 +563,9 @@ class ExperimentWorker:
             physical_sample=sampler.current,
             on_pressure_pause=record_pressure_pause,
         )
+        snapshot_pool = WarmSnapshotPool(
+            arm.resources.warm_memory_capacity_mib * 1024 * 1024
+        )
         prediction_provider = None
         if arm.agent.driver is AgentDriver.OPENCLAW and arm.policy.admission is AdmissionPolicy.TOOL_P90:
             if not arm.resources.p90_predictions:
@@ -583,6 +588,7 @@ class ExperimentWorker:
                         self._run_session, arm, index, coordinator, events,
                         policy_events, prediction_provider, sandbox_create_gate,
                         sampler.observe, arm_started_wall, arm_started_monotonic,
+                        snapshot_pool,
                     ): index
                     for index in range(arm.concurrency)
                 }
@@ -747,7 +753,8 @@ class ExperimentWorker:
                      sandbox_create_gate: Semaphore | None = None,
                      physical_observation: Any = None,
                      arm_started_wall: float | None = None,
-                     arm_started_monotonic: float | None = None) -> dict[str, Any]:
+                     arm_started_monotonic: float | None = None,
+                     snapshot_pool: WarmSnapshotPool | None = None) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         if session_case != arm.case:
             arm = arm.model_copy(update={"case": session_case})
@@ -831,6 +838,11 @@ class ExperimentWorker:
                 arm.runtime.allow_internet_access, runtime_allow_out,
             ),
             physical_observation=physical_observation,
+            role="runtime",
+            warm_snapshot_root=arm.resources.warm_snapshot_root,
+            cold_snapshot_root=arm.resources.cold_snapshot_root,
+            snapshot_pool=snapshot_pool,
+            snapshot_reservation_bytes=(arm.runtime.memory_mib + 256) * 1024 * 1024,
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {
@@ -853,6 +865,11 @@ class ExperimentWorker:
             ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
             env_vars=tool_env,
             physical_observation=physical_observation,
+            role="tool",
+            warm_snapshot_root=arm.resources.warm_snapshot_root,
+            cold_snapshot_root=arm.resources.cold_snapshot_root,
+            snapshot_pool=snapshot_pool,
+            snapshot_reservation_bytes=(arm.sandbox.memory_mib + 256) * 1024 * 1024,
         )
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
                     if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
@@ -931,7 +948,11 @@ class ExperimentWorker:
                         gateway_session.invalidate_pending_delivery()
                         agent_pid_before = observe_openclaw_agent_pid("before_tool_pause")
                         started = time.time()
-                        tool_elapsed = lifecycle.checkpoint_and_evict()
+                        target_tier = (
+                            SnapshotTier(str(wait_state["target_tier"]))
+                            if wait_state.get("target_tier") else None
+                        )
+                        tool_elapsed = lifecycle.checkpoint_and_evict(tier=target_tier)
                         agent_pid_after = observe_openclaw_agent_pid("after_tool_pause")
                         if agent_pid_before != agent_pid_after:
                             raise RuntimeError(
@@ -952,7 +973,9 @@ class ExperimentWorker:
                                 "before_runtime_pause"
                             )
                             runtime_started = time.time()
-                            runtime_elapsed = runtime_lifecycle.checkpoint_and_evict()
+                            runtime_elapsed = runtime_lifecycle.checkpoint_and_evict(
+                                tier=target_tier
+                            )
                             runtime_pause_timing = dict(runtime_lifecycle.timings[-1])
                             runtime_finished = time.time()
                             wait_state.update({
@@ -969,6 +992,7 @@ class ExperimentWorker:
                             "role": "tool", "service_seconds": tool_elapsed,
                             "reason": "model_request_wait",
                             "request_id": event.get("request_id"),
+                            "snapshot_tier": lifecycle.tier.value,
                             "lifecycle_timing": lifecycle.timings[-1],
                         })
                     if runtime_elapsed is not None:
@@ -979,6 +1003,7 @@ class ExperimentWorker:
                             "role": "runtime", "service_seconds": runtime_elapsed,
                             "reason": "model_request_wait",
                             "request_id": event.get("request_id"),
+                            "snapshot_tier": runtime_lifecycle.tier.value,
                             "lifecycle_timing": runtime_pause_timing,
                         })
                 except Exception as exc:
@@ -1070,8 +1095,19 @@ class ExperimentWorker:
                     if request_id in completed_model_requests or response_generated:
                         return
                 coordinator.set_eviction_eligible(session_id, True)
+                oracle_wait = event.get("oracle_model_wait_seconds")
+                if arm.policy.eviction in {
+                    EvictionPolicy.TIERED_LRU_ORACLE,
+                    EvictionPolicy.TIERED_TIME_ORACLE,
+                }:
+                    if oracle_wait is None:
+                        raise RuntimeError("tiered oracle wait is missing frozen replay duration")
+                    coordinator.begin_model_wait(
+                        session_id, request_id, float(oracle_wait),
+                    )
                 if arm.policy.reclamation is ReclamationPolicy.RESIDENT:
                     return
+                target_tier = None
                 if arm.policy.eviction is EvictionPolicy.EAGER:
                     delay = 0.0
                 elif arm.policy.eviction is EvictionPolicy.FIXED_DELAY:
@@ -1079,7 +1115,6 @@ class ExperimentWorker:
                 elif arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
                     delay = 0.0 if coordinator.pressure() else None
                 elif arm.policy.eviction is EvictionPolicy.TIME_ORACLE:
-                    oracle_wait = event.get("oracle_model_wait_seconds")
                     break_even = float(
                         arm.policy.checkpoint_break_even_seconds or 0.0
                     )
@@ -1089,6 +1124,12 @@ class ExperimentWorker:
                         and float(oracle_wait) >= break_even
                         else None
                     )
+                elif arm.policy.eviction is EvictionPolicy.TIERED_TIME_ORACLE:
+                    target_tier = coordinator.oracle_tier(float(oracle_wait))
+                    delay = 0.0 if target_tier is not SnapshotTier.LOCAL else None
+                elif arm.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
+                    target_tier = None
+                    delay = None
                 else:
                     delay = None
                 with wait_lock:
@@ -1107,6 +1148,7 @@ class ExperimentWorker:
                         "checkpoint_break_even_seconds": (
                             arm.policy.checkpoint_break_even_seconds
                         ),
+                        "target_tier": target_tier.value if target_tier is not None else None,
                     })
                     elapsed_since_request = max(
                         0.0, time.time() - float(event["request_started_at"])
@@ -1139,6 +1181,7 @@ class ExperimentWorker:
                                             event: dict[str, Any]) -> dict[str, Any]:
                 nonlocal wait_timer, restore_timer
                 request_id = str(event.get("request_id"))
+                coordinator.complete_model_wait(session_id, request_id)
                 # Publish generation before waiting for lifecycle serialization.
                 # A queued eager-pause callback must not start checkpointing a
                 # Runtime after its model response already exists.
@@ -1256,6 +1299,7 @@ class ExperimentWorker:
         # occupying policy state even though the main cleanup block was never
         # entered.
         coordinator.register(session_id, lifecycle)
+        coordinator.register_runtime(session_id, runtime_lifecycle)
         try:
             if lifetime:
                 coordinator.acquire_capacity(
@@ -2122,6 +2166,11 @@ class ExperimentWorker:
                     events: EventWriter, *, timeline: dict[str, Any]) -> None:
         scale = float(arm.inference.configuration.get("time_scale", 1.0))
         duration = max(0.0, action.duration_s * scale)
+        if arm.policy.eviction in {
+            EvictionPolicy.TIERED_LRU_ORACLE,
+            EvictionPolicy.TIERED_TIME_ORACLE,
+        }:
+            coordinator.begin_model_wait(session_id, action.action_id, duration)
         coordinator.set_eviction_eligible(session_id, True)
         raw_prediction = arm.inference.configuration.get("model_wait_prediction_seconds")
         predicted_wait = float(raw_prediction) if raw_prediction is not None else None
@@ -2139,7 +2188,12 @@ class ExperimentWorker:
                 # the recorded response becomes ready before the delay timer,
                 # the pending pause is cancelled just as it is in ModelGateway.
                 if time.monotonic() - wait_started < duration:
-                    pause_s = lifecycle.checkpoint_and_evict()
+                    target_tier = (
+                        coordinator.oracle_tier(duration)
+                        if arm.policy.eviction is EvictionPolicy.TIERED_TIME_ORACLE
+                        else None
+                    )
+                    pause_s = lifecycle.checkpoint_and_evict(tier=target_tier)
                     if pause_s is not None:
                         coordinator.pause_count += 1
                         coordinator.pause_service_seconds += pause_s
@@ -2163,6 +2217,11 @@ class ExperimentWorker:
             else:
                 time.sleep(duration)
         finally:
+            if arm.policy.eviction in {
+                EvictionPolicy.TIERED_LRU_ORACLE,
+                EvictionPolicy.TIERED_TIME_ORACLE,
+            }:
+                coordinator.complete_model_wait(session_id, action.action_id)
             _record_time_span(
                 timeline, "model.wait", wait_started_wall, time.time(),
                 role="runtime", operation="model_wait", execution_id=action.action_id,

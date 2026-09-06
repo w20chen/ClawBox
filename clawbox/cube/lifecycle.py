@@ -10,6 +10,8 @@ from typing import Any, Mapping
 from clawbox.replay.lifecycle import LifecycleError
 
 from .client import CubeSandboxClient, Ownership
+from clawbox.experiments.snapshot_pool import SnapshotKey, WarmSnapshotPool
+from clawbox.experiments.spec_types import SnapshotTier
 
 
 class SandboxState(str, Enum):
@@ -53,7 +55,11 @@ class CubeSandboxLifecycle:
                  env_vars: Mapping[str, str] | None = None,
                  network_allow_out: list[str] | None = None,
                  network_deny_out: list[str] | None = None,
-                 physical_observation: Callable[[], Mapping[str, Any]] | None = None) -> None:
+                 physical_observation: Callable[[], Mapping[str, Any]] | None = None,
+                 role: str = "tool", warm_snapshot_root: str | None = None,
+                 cold_snapshot_root: str | None = None,
+                 snapshot_pool: WarmSnapshotPool | None = None,
+                 snapshot_reservation_bytes: int | None = None) -> None:
         self.client = client
         self.template = template
         self.node_name = node_name
@@ -63,11 +69,19 @@ class CubeSandboxLifecycle:
         self.network_allow_out = list(network_allow_out or [])
         self.network_deny_out = list(network_deny_out or [])
         self.physical_observation = physical_observation
+        self.role = role
+        self.warm_snapshot_root = warm_snapshot_root
+        self.cold_snapshot_root = cold_snapshot_root
+        self.snapshot_pool = snapshot_pool
+        self.snapshot_reservation_bytes = snapshot_reservation_bytes
         self.sandbox = None
         self.sandbox_id: str | None = None
         self._state = SandboxState.NEW
         self._lock = RLock()
         self._timings: list[LifecycleTiming] = []
+        self._tier = SnapshotTier.LOCAL
+        self._generation = 0
+        self._snapshot_key: SnapshotKey | None = None
 
     @property
     def state(self) -> SandboxState:
@@ -77,6 +91,11 @@ class CubeSandboxLifecycle:
     @property
     def resident(self) -> bool:
         return self.state is SandboxState.RUNNING
+
+    @property
+    def tier(self) -> SnapshotTier:
+        with self._lock:
+            return self._tier
 
     @property
     def timings(self) -> list[dict[str, object]]:
@@ -156,7 +175,7 @@ class CubeSandboxLifecycle:
                 )
                 raise
 
-    def checkpoint_and_evict(self) -> float | None:
+    def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None:
         """Ask CubeSandbox to snapshot the VM and destroy its live runtime.
 
         CubeSandbox commit 64102d9 implements its pause API as
@@ -178,13 +197,48 @@ class CubeSandboxLifecycle:
             self._state = SandboxState.CHECKPOINTING
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
+            key = None
             try:
-                self.client.pause_sandbox(self.sandbox)
+                manifest = None
+                if tier is None:
+                    self.client.pause_sandbox(self.sandbox)
+                else:
+                    if tier is SnapshotTier.LOCAL:
+                        raise ValueError("cannot checkpoint a sandbox to LOCAL")
+                    root = (self.warm_snapshot_root if tier is SnapshotTier.WARM
+                            else self.cold_snapshot_root)
+                    if not root or self.sandbox_id is None:
+                        raise RuntimeError(f"{tier.value.upper()} snapshot root is not configured")
+                    self._generation += 1
+                    key = SnapshotKey(self.ownership.session_id, self.role, self._generation)
+                    if tier is SnapshotTier.WARM:
+                        if self.snapshot_pool is None or self.snapshot_reservation_bytes is None:
+                            raise RuntimeError("WARM snapshot accounting is not configured")
+                        self.snapshot_pool.reserve(key, self.snapshot_reservation_bytes)
+                    path = (
+                        f"{root.rstrip('/')}/{self.sandbox_id}/"
+                        f"{self.role}-g{self._generation}.mem"
+                    )
+                    manifest = self.client.pause_sandbox(
+                        self.sandbox, tier=tier.value,
+                        memory_snapshot_path=path, generation=self._generation,
+                    )
+                    if tier is SnapshotTier.WARM:
+                        self.snapshot_pool.commit(
+                            key, path=path,
+                            logical_bytes=int(manifest["logical_bytes"]),
+                            allocated_bytes=int(manifest["allocated_bytes"]),
+                            transferred_bytes=int(manifest["transferred_bytes"]),
+                        )
+                    self._snapshot_key = key
+                    self._tier = tier
                 self._state = SandboxState.SWAPPED
                 return self._record("checkpoint", before, self._state,
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before)
             except Exception as exc:
+                if key is not None and self.snapshot_pool is not None:
+                    self.snapshot_pool.abort(key)
                 self._state = before
                 self._record(
                     "checkpoint", before, before, started_wall, started_mono,
@@ -205,6 +259,12 @@ class CubeSandboxLifecycle:
             host_memory_before = self._observe_physical()
             try:
                 self.sandbox = self.client.connect_sandbox(self.sandbox_id)
+                if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
+                    if self.snapshot_pool is None:
+                        raise RuntimeError("WARM snapshot accounting disappeared before restore")
+                    self.snapshot_pool.remove(self._snapshot_key)
+                self._snapshot_key = None
+                self._tier = SnapshotTier.LOCAL
                 self._state = SandboxState.RUNNING
                 return self._record("restore", before, self._state,
                                     started_wall, started_mono,
