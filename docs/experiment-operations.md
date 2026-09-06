@@ -229,6 +229,11 @@ and never hide admission behavior behind a session cap.
 
 ## 6. Run every baseline
 
+The exact semantics and intended comparison for each tuple are specified in
+[baselines.md](baselines.md). Use that document when naming a policy in a
+paper or interpreting a result; the YAML controls the tuple but does not
+explain its scientific meaning.
+
 One YAML can list all policies. ClawBox expands each policy, concurrency, case,
 and repetition into a distinct arm with the same hashed inputs:
 

@@ -2,12 +2,12 @@
 
 ClawBox is a research system for high-density CPU-side LLM Agent execution on
 Kunpeng. It uses [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) as its only VM/sandbox substrate and adds
-Agent-aware memory admission, [ClawTune](https://github.com/w20chen/ClawTune) resource prediction, and paired VM
+Agent-aware memory admission, [ClawTune](https://github.com/w20chen/ClawTune) resource prediction, and VM
 snapshot/reclamation above it.
 
 ## System design
 
-Each logical Agent owns exactly two CubeSandbox VMs:
+Each logical Agent owns exactly two CubeSandbox VMs - Runtime VM and Tool VM.
 
 ```text
 Model provider or deterministic replay
@@ -25,8 +25,8 @@ Model provider or deterministic replay
                  +------> cgroup-v2 + eBPF telemetry
 ```
 
-Runtime performs OpenClaw/model-side execution. Tool owns the mutable workspace
-and executes `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`
+Runtime VM performs [OpenClaw](https://github.com/openclaw/openclaw) execution. Tool VM owns the mutable workspace
+and executes the OpenClaw tools `exec`, `process`, `read`, `write`, `edit`, and `apply_patch`
 through native SSH. PolicyControl returns `ADMIT` or blocks before SSH begins;
 it never proxies commands, output, or files.
 
@@ -35,9 +35,9 @@ admission, SSH, cgroup/eBPF measurement, completion, and ClawTune feedback.
 Guest Tool memory profiles commands; host VM memory measures density and
 snapshot reclamation. These metrics are intentionally separate.
 
-During a useful model wait, `snapshot_pause` can pause Tool and Runtime after
-active SSH completes. Runtime is restored before ModelGateway releases the
-pending response. Tool remains paused until the next Tool admission, when its
+During a useful model wait, `snapshot_pause` can pause Tool VM and Runtime VM after
+active SSH completes. Runtime VM is restored before ModelGateway releases the
+pending response. Tool VM remains paused until the next Tool admission, when its
 CubeSandbox TCP endpoint is resolved again and its epoch advances. `resident`
 keeps both VMs in memory for the Agent lifetime.
 
@@ -52,6 +52,8 @@ The complete scientific invariants are in
 - [Results guide](docs/results-guide.md): where run artifacts live, how to copy
   them from Kunpeng, validity gates, and how to interpret throughput, memory,
   admission, P90, and snapshot metrics.
+- [Baseline definitions](docs/baselines.md): exact admission/residency
+  semantics and the intended scientific question for every policy.
 - [CubeSandbox setup](docs/cubesandbox-setup.md): semantic port 2222 API,
   standalone deployment, network/identity gates, and pause/restore behavior.
 - [Kunpeng reproduction](docs/kunpeng920-reproduction-runbook.md): historical
