@@ -443,15 +443,17 @@ def collect_and_validate_native_tool_artifacts(
     )
     result: CommandResult | None = None
     collection_attempt = 0
-    for collection_attempt in range(1, 4):
+    max_collection_attempts = 8
+    for collection_attempt in range(1, max_collection_attempts + 1):
         try:
             candidate: CommandResult = runtime_executor.execute(command, 60)
         except Exception as exc:
-            if collection_attempt == 3:
+            if collection_attempt == max_collection_attempts:
                 raise RuntimeError(
-                    "Tool artifact collection transport failed after 3 attempts"
+                    "Tool artifact collection transport failed after "
+                    f"{max_collection_attempts} attempts"
                 ) from exc
-            time.sleep(0.05 * collection_attempt)
+            time.sleep(min(0.1 * (2 ** (collection_attempt - 1)), 1.0))
             continue
         if candidate.exit_code != 0:
             raise RuntimeError(
@@ -459,12 +461,12 @@ def collect_and_validate_native_tool_artifacts(
                 f"{candidate.stderr[-2000:]}"
             )
         if "__CLAWBOX_ARTIFACT_END__" not in candidate.stdout:
-            if collection_attempt == 3:
+            if collection_attempt == max_collection_attempts:
                 raise RuntimeError(
                     "Tool artifact collection produced no complete framed stream "
-                    "after 3 attempts"
+                    f"after {max_collection_attempts} attempts"
                 )
-            time.sleep(0.05 * collection_attempt)
+            time.sleep(min(0.1 * (2 ** (collection_attempt - 1)), 1.0))
             continue
         result = candidate
         break

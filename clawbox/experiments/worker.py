@@ -182,6 +182,27 @@ def _record_time_span(timeline: dict[str, Any], name: str, start: Any, end: Any,
         timeline.setdefault("recorded_time_spans", []).append(span)
 
 
+def _execute_idempotent(executor: Any, command: str, timeout_s: float,
+                        *, attempts: int = 8) -> CommandResult:
+    """Retry read-only/setup Cube command streams during high fan-out.
+
+    Agent Tool commands never use this helper: retrying those could duplicate a
+    workspace mutation.  It is reserved for idempotent readiness, validation,
+    hashing, PID observation, and artifact-copy operations.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return executor.execute(command, timeout_s)
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(min(0.1 * (2 ** (attempt - 1)), 1.0))
+    raise RuntimeError(
+        f"idempotent Cube command transport failed after {attempts} attempts"
+    ) from last_error
+
+
 def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, Any]]:
     """Build stable, machine-readable spans from session lifecycle markers."""
     pairs = (
@@ -1229,7 +1250,7 @@ class ExperimentWorker:
                 """Prove the long-lived Runtime agent remains alive across Tool lifecycle work."""
                 if arm.agent.driver is not AgentDriver.OPENCLAW:
                     return None
-                result = runtime_executor.execute(
+                result = _execute_idempotent(runtime_executor,
                     "pid=$(cat " + shlex.quote(agent_pid_file) + ") && "
                     "case $pid in ''|*[!0-9]*) exit 1;; esac && "
                     "kill -0 $pid && printf '%s' $pid",
@@ -1777,13 +1798,13 @@ class ExperimentWorker:
             timeline.setdefault("agent_execution_start", timeline.get("sandbox_ready", time.time()))
             timeline["validation_start"] = time.time()
             if validation:
-                validation_result = executor.execute(
+                validation_result = _execute_idempotent(executor,
                     validation, arm.execution.command_timeout_seconds,
                 )
                 valid = valid and validation_result.exit_code == 0
             timeline["validation_end"] = time.time()
             timeline["output_hash_start"] = time.time()
-            hash_result = executor.execute(
+            hash_result = _execute_idempotent(executor,
                 "find . -type f -exec sha256sum {} \\; | LC_ALL=C sort | sha256sum",
                 arm.execution.command_timeout_seconds,
             )

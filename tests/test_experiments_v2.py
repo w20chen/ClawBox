@@ -12,9 +12,10 @@ from clawbox.experiments.audit import audit_experiments
 from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
-    EventWriter, ExperimentWorker, _runtime_network_deny_out, build_time_spans,
+    EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
     session_case_for,
 )
+from clawbox.replay.lifecycle import CommandResult
 
 
 def test_runtime_network_policy_honors_explicit_internet_access() -> None:
@@ -202,6 +203,25 @@ def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: P
     assert all(row["session_id"] == "session-a" for row in rows)
     assert all(int(row["wall_time_ns"]) > 0 for row in rows)
     assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
+
+
+def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:
+    monkeypatch.setattr("clawbox.experiments.worker.time.sleep", lambda _: None)
+
+    class Executor:
+        calls = 0
+
+        def execute(self, command: str, timeout_s: float) -> CommandResult:
+            self.calls += 1
+            if self.calls < 3:
+                raise ConnectionError("transient")
+            return CommandResult(0, command, "", timeout_s)
+
+    executor = Executor()
+    result = _execute_idempotent(executor, "test -f result.txt", 12)
+
+    assert executor.calls == 3
+    assert result.exit_code == 0
 
 
 def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
