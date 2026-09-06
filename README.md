@@ -1,8 +1,8 @@
 # ClawBox
 
 ClawBox is a research system for high-density CPU-side LLM Agent execution on
-Kunpeng. It uses CubeSandbox as its only VM/sandbox substrate and adds
-Agent-aware memory admission, ClawTune resource prediction, and paired VM
+Kunpeng. It uses [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) as its only VM/sandbox substrate and adds
+Agent-aware memory admission, [ClawTune](https://github.com/w20chen/ClawTune) resource prediction, and paired VM
 snapshot/reclamation above it.
 
 ## System design
@@ -49,6 +49,9 @@ The complete scientific invariants are in
 - [Experiment operations](docs/experiment-operations.md): new machine,
   existing machine, disk/volume sizing, templates, every baseline and
   hyperparameter, replay, real LLM, P90 training, c60, and cleanup.
+- [Results guide](docs/results-guide.md): where run artifacts live, how to copy
+  them from Kunpeng, validity gates, and how to interpret throughput, memory,
+  admission, P90, and snapshot metrics.
 - [CubeSandbox setup](docs/cubesandbox-setup.md): semantic port 2222 API,
   standalone deployment, network/identity gates, and pause/restore behavior.
 - [Kunpeng reproduction](docs/kunpeng920-reproduction-runbook.md): historical

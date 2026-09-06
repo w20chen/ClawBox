@@ -355,6 +355,9 @@ run is not command-specific P90 evidence.
 
 ## 9. Scale, monitoring, and cleanup
 
+After a run, use [results-guide.md](results-guide.md) to copy and interpret
+the complete evidence bundle. Do not base a comparison on `summary.md` alone.
+
 Pair creation is bounded separately from Agent execution. Eight is the
 validated default control-plane throttle:
 
