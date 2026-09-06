@@ -330,14 +330,52 @@ class CubeSandboxClient:
             ) from exc
         if not isinstance(result, Mapping):
             raise RuntimeError("tiered pause did not return a snapshot manifest")
-        required = {"memory_snapshot_path", "logical_bytes", "allocated_bytes",
-                    "transferred_bytes", "generation", "tier"}
+        required = {"memory_snapshot_path", "generation", "tier"}
         if missing := sorted(required.difference(result)):
             raise RuntimeError("tiered pause manifest missing: " + ", ".join(missing))
         if str(result["tier"]).lower() != tier or int(result["generation"]) != generation:
             raise RuntimeError("tiered pause manifest identity mismatch")
         if str(result["memory_snapshot_path"]) != memory_snapshot_path:
             raise RuntimeError("tiered pause used an unexpected memory snapshot path")
+        if "logical_bytes" in result and "allocated_bytes" in result:
+            logical_bytes = int(result["logical_bytes"])
+            allocated_bytes = int(result["allocated_bytes"])
+        else:
+            try:
+                stat = os.stat(memory_snapshot_path)
+            except OSError as exc:
+                raise RuntimeError(
+                    "tiered pause completed without an accessible direct memory snapshot"
+                ) from exc
+            logical_bytes = stat.st_size
+            allocated_bytes = stat.st_blocks * 512
+        return {
+            **result,
+            "logical_bytes": logical_bytes,
+            "allocated_bytes": allocated_bytes,
+            "transferred_bytes": result.get("transferred_bytes"),
+            "transferred_bytes_unavailable_reason": (
+                "CubeSandbox pause API does not expose shim bytes written"
+            ),
+        }
+
+    @staticmethod
+    def relocate_snapshot(sandbox: Any, *, tier: str,
+                          memory_snapshot_path: str, generation: int) -> Mapping[str, Any]:
+        method = getattr(sandbox, "relocate_snapshot", None)
+        if method is None:
+            raise RuntimeError("installed CubeSandbox SDK lacks snapshot relocation")
+        result = method(
+            snapshot_tier=tier,
+            memory_snapshot_path=memory_snapshot_path,
+            snapshot_generation=generation,
+        )
+        if not isinstance(result, Mapping):
+            raise RuntimeError("snapshot relocation did not return an identity")
+        if (str(result.get("tier", "")).lower() != tier or
+                int(result.get("generation", 0)) != generation or
+                str(result.get("memory_snapshot_path", "")) != memory_snapshot_path):
+            raise RuntimeError("snapshot relocation identity mismatch")
         return result
 
     def kill_sandbox(self, sandbox_or_id: Any) -> None:

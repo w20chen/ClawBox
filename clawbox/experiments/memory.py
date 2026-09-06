@@ -30,6 +30,17 @@ def read_vmstat_counter(path: Path, key: str) -> int:
     return 0
 
 
+def read_numa_meminfo(path: Path) -> tuple[int, int]:
+    values: dict[str, int] = {}
+    for line in path.read_text(encoding="ascii").splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[2] in {"MemTotal:", "MemFree:"}:
+            values[fields[2].removesuffix(":")] = int(fields[3]) * 1024
+    if set(values) != {"MemTotal", "MemFree"}:
+        raise ValueError(f"incomplete NUMA meminfo: {path}")
+    return values["MemTotal"], values["MemFree"]
+
+
 @dataclass(frozen=True, slots=True)
 class MemorySummary:
     mem_total_bytes: int
@@ -120,6 +131,51 @@ class NodeMemorySampler:
         except OSError:
             return 0
         return usage.total - usage.free
+
+
+class NumaNodeMemorySampler(NodeMemorySampler):
+    """Admission sampler scoped to the configured LOCAL NUMA node."""
+
+    def __init__(self, node: int, *, sys_root: Path = Path("/host/sys"),
+                 vmstat: Path = Path("/host/proc/vmstat"),
+                 storage: Path = Path("/data/cubelet"), interval_s: float = 0.2) -> None:
+        if node < 0:
+            raise ValueError("NUMA node must be non-negative")
+        host_path = sys_root / "devices/system/node" / f"node{node}" / "meminfo"
+        fallback = Path("/sys/devices/system/node") / f"node{node}" / "meminfo"
+        self.numa_meminfo = host_path if host_path.exists() else fallback
+        if not self.numa_meminfo.exists():
+            raise FileNotFoundError(f"NUMA meminfo is unavailable for node {node}")
+        self.numa_node = node
+        self.meminfo = self.numa_meminfo
+        self.vmstat = vmstat if vmstat.exists() else Path("/proc/vmstat")
+        self.storage = storage
+        self.interval_s = interval_s
+        self._stop = Event()
+        self._lock = Lock()
+        self._samples: list[tuple[float, int, int]] = []
+        self._thread = None
+        total, free = read_numa_meminfo(self.numa_meminfo)
+        self.total = total
+        self.baseline_used = total - free
+        self.storage_used_before = self._storage_used()
+        self.oom_kill_before = read_vmstat_counter(self.vmstat, "oom_kill")
+
+    def current(self) -> tuple[int, int]:
+        total, free = read_numa_meminfo(self.numa_meminfo)
+        return max(0, total - free - self.baseline_used), free
+
+    def observe(self) -> dict[str, int | str]:
+        total, free = read_numa_meminfo(self.numa_meminfo)
+        used = max(0, total - free)
+        return {
+            "metric": "numa_node_memfree",
+            "numa_node": self.numa_node,
+            "host_mem_total_bytes": total,
+            "host_used_bytes": used,
+            "host_available_bytes": free,
+            "experiment_used_delta_bytes": max(0, used - self.baseline_used),
+        }
 
 
 def sandbox_process_rss_bytes(sandbox_id: str, *,

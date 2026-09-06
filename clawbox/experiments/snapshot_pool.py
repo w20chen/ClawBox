@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from threading import RLock
 
@@ -30,7 +31,7 @@ class SnapshotManifest:
     path: str
     logical_bytes: int
     allocated_bytes: int
-    transferred_bytes: int
+    transferred_bytes: int | None
     last_used_monotonic_s: float
     committed_monotonic_s: float
     pinned: int = 0
@@ -44,13 +45,15 @@ class WarmSnapshotPool:
     both ledgers, and every mutation checks the configured hard capacity.
     """
 
-    def __init__(self, capacity_bytes: int) -> None:
+    def __init__(self, capacity_bytes: int, *, clock: Callable[[], float] = time.monotonic) -> None:
         if capacity_bytes < 0:
             raise ValueError("capacity_bytes must be non-negative")
         self.capacity_bytes = capacity_bytes
+        self._clock = clock
         self._lock = RLock()
         self._reservations: dict[SnapshotKey, int] = {}
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
+        self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
 
     @property
     def reserved_bytes(self) -> int:
@@ -79,8 +82,11 @@ class WarmSnapshotPool:
             self._assert_capacity_locked()
 
     def commit(self, key: SnapshotKey, *, path: str, logical_bytes: int,
-               allocated_bytes: int, transferred_bytes: int) -> SnapshotManifest:
-        if min(logical_bytes, allocated_bytes, transferred_bytes) < 0:
+               allocated_bytes: int, transferred_bytes: int | None,
+               spiller: Callable[[SnapshotManifest], None] | None = None) -> SnapshotManifest:
+        if logical_bytes < 0 or allocated_bytes < 0 or (
+            transferred_bytes is not None and transferred_bytes < 0
+        ):
             raise ValueError("snapshot byte counts must be non-negative")
         with self._lock:
             reserved = self._reservations.pop(key, None)
@@ -91,7 +97,7 @@ class WarmSnapshotPool:
                 raise RuntimeError(
                     f"allocated WARM bytes {allocated_bytes} exceed reservation {reserved}"
                 )
-            now = time.monotonic()
+            now = self._clock()
             manifest = SnapshotManifest(
                 key=key, tier=SnapshotTier.WARM, path=path,
                 logical_bytes=logical_bytes, allocated_bytes=allocated_bytes,
@@ -99,8 +105,38 @@ class WarmSnapshotPool:
                 last_used_monotonic_s=now, committed_monotonic_s=now,
             )
             self._manifests[key] = manifest
+            if spiller is not None:
+                self._spillers[key] = spiller
             self._assert_capacity_locked()
             return manifest
+
+    def spill_for_admission(self, required_bytes: int, *,
+                            exclude: set[SnapshotKey] | None = None
+                            ) -> tuple[SnapshotManifest, ...]:
+        """Relocate and retire the deterministic pinned LRU prefix."""
+        victims = self.lru_victims(required_bytes, exclude=exclude)
+        completed: list[SnapshotManifest] = []
+        try:
+            for item in victims:
+                with self._lock:
+                    spiller = self._spillers.get(item.key)
+                if spiller is None:
+                    raise WarmCapacityError(f"WARM snapshot has no spill path: {item.key}")
+                spiller(item)
+                with self._lock:
+                    current = self._manifests.get(item.key)
+                    if current is not item or current.pinned != 1:
+                        raise RuntimeError(f"WARM spill identity changed: {item.key}")
+                    self._manifests.pop(item.key)
+                    self._spillers.pop(item.key, None)
+                    completed.append(item)
+                    self._assert_capacity_locked()
+            return tuple(completed)
+        finally:
+            with self._lock:
+                for item in victims:
+                    if item.key in self._manifests and item.pinned > 0:
+                        item.pinned -= 1
 
     def abort(self, key: SnapshotKey) -> None:
         with self._lock:
@@ -121,13 +157,14 @@ class WarmSnapshotPool:
 
     def touch(self, key: SnapshotKey) -> None:
         with self._lock:
-            self._manifests[key].last_used_monotonic_s = time.monotonic()
+            self._manifests[key].last_used_monotonic_s = self._clock()
 
     def remove(self, key: SnapshotKey) -> SnapshotManifest:
         with self._lock:
             item = self._manifests[key]
             if item.pinned:
                 raise RuntimeError(f"cannot remove pinned snapshot: {key}")
+            self._spillers.pop(key, None)
             return self._manifests.pop(key)
 
     def lru_victims(self, required_bytes: int, *, exclude: set[SnapshotKey] | None = None

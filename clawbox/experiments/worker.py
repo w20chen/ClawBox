@@ -32,7 +32,7 @@ from clawbox.cube import (
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.replay.trace import ReplayAction, load_trace
 
-from .memory import NodeMemorySampler, SandboxRSSSampler
+from .memory import NodeMemorySampler, NumaNodeMemorySampler, SandboxRSSSampler
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
@@ -545,7 +545,14 @@ class ExperimentWorker:
                     sandbox.template, sandbox.image_digest,
                 )
         events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
-        sampler = NodeMemorySampler(interval_s=arm.execution.memory_sample_interval_seconds)
+        sampler = (
+            NumaNodeMemorySampler(
+                arm.resources.local_numa_node,
+                interval_s=arm.execution.memory_sample_interval_seconds,
+            )
+            if arm.resources.local_numa_node is not None and os.name != "nt"
+            else NodeMemorySampler(interval_s=arm.execution.memory_sample_interval_seconds)
+        )
         def record_pressure_pause(state: Any, elapsed: float, reason: str) -> None:
             timings = state.lifecycle.timings
             events.write({

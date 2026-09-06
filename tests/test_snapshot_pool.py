@@ -36,7 +36,7 @@ def test_oversize_and_capacity_pressure_fail_closed() -> None:
 
 
 def test_lru_victims_are_pinned_and_deterministic() -> None:
-    pool = WarmSnapshotPool(100)
+    pool = WarmSnapshotPool(100, clock=lambda: 1.0)
     commit(pool, 2, 30)
     commit(pool, 1, 30)
     victims = pool.lru_victims(60)
@@ -63,3 +63,20 @@ def test_concurrent_reservations_conserve_capacity() -> None:
         accepted = list(executor.map(reserve, range(16)))
     assert sum(accepted) == 4
     assert pool.reserved_bytes == 64
+
+
+def test_spill_for_admission_relocates_lru_and_reclaims_accounting() -> None:
+    pool = WarmSnapshotPool(100, clock=lambda: 1.0)
+    spilled: list[SnapshotKey] = []
+    for index in (1, 2):
+        item_key = key(index)
+        pool.reserve(item_key, 50)
+        pool.commit(
+            item_key, path=f"/warm/{index}", logical_bytes=50,
+            allocated_bytes=50, transferred_bytes=50,
+            spiller=lambda item: spilled.append(item.key),
+        )
+    victims = pool.spill_for_admission(50)
+    assert [item.key for item in victims] == [key(1)]
+    assert spilled == [key(1)]
+    assert pool.committed_bytes == 50

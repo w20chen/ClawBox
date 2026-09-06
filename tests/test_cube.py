@@ -23,6 +23,8 @@ from clawbox.cube import (
 from clawbox.experiments import BASELINES, ExperimentSpec
 import clawbox.experiments.worker as worker_module
 from clawbox.experiments.policy import PolicyCoordinator
+from clawbox.experiments.snapshot_pool import WarmSnapshotPool
+from clawbox.experiments.spec_types import SnapshotTier
 from clawbox.experiments.worker import ExperimentWorker
 
 
@@ -90,6 +92,13 @@ class _Sandbox:
                 "generation": kwargs["snapshot_generation"],
                 "tier": kwargs["snapshot_tier"],
             }
+
+    def relocate_snapshot(self, **kwargs):
+        return {
+            "memory_snapshot_path": kwargs["memory_snapshot_path"],
+            "generation": kwargs["snapshot_generation"],
+            "tier": kwargs["snapshot_tier"],
+        }
 
     def get_tcp_endpoint(self, container_port):
         ordinal = int(self.sandbox_id.rsplit("-", 1)[-1]) if "-" in self.sandbox_id else 1
@@ -273,6 +282,32 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
+
+
+def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1024, clock=lambda: 1.0)
+    owners = [
+        Ownership("run", "attempt", "task", "experiment", f"session-{index}", "policy")
+        for index in (1, 2)
+    ]
+    lifecycles = [
+        CubeSandboxLifecycle(
+            client, template="tpl", node_name="node-a", ownership=owner,
+            warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+            snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        )
+        for owner in owners
+    ]
+    for lifecycle in lifecycles:
+        lifecycle.start()
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycles[0].tier is SnapshotTier.COLD
+    assert lifecycles[1].tier is SnapshotTier.WARM
+    assert pool.committed_bytes == 1024
+    spill = next(item for item in lifecycles[0].timings if item["operation"] == "spill")
+    assert spill["tier_from"] == "warm" and spill["tier_to"] == "cold"
 
 
 def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(

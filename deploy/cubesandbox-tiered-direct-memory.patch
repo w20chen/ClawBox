@@ -1,0 +1,901 @@
+diff --git a/CubeAPI/src/cubemaster/mod.rs b/CubeAPI/src/cubemaster/mod.rs
+index 863c106..7ec2d3a 100644
+--- a/CubeAPI/src/cubemaster/mod.rs
++++ b/CubeAPI/src/cubemaster/mod.rs
+@@ -1487,12 +1487,18 @@ pub struct SandboxUpdateRequest {
+     pub sandbox_id: String,
+     #[serde(rename = "instance_type")]
+     pub instance_type: String,
+-    /// "pause" | "resume"
++    /// "pause" | "resume" | "relocate_snapshot"
+     #[serde(rename = "action")]
+     pub action: String,
+     /// TTL in seconds (for resume; 0 = keep original). Optional for pause.
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub timeout: Option<i32>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub snapshot_tier: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub memory_snapshot_path: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub snapshot_generation: Option<u64>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.rs
+index 18e06d6..1bd0615 100644
+--- a/CubeAPI/src/handlers/sandboxes.rs
++++ b/CubeAPI/src/handlers/sandboxes.rs
+@@ -15,6 +15,7 @@ use crate::{
+     logging::{LogEvent, LogLevel},
+     models::{
+         ApiError, ConnectSandbox, ListSandboxesQuery, ListSandboxesV2Query, NewSandbox,
++        PauseSandboxRequest, RelocateSnapshotRequest,
+         RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
+         SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
+     },
+@@ -318,6 +319,7 @@ pub async fn kill_sandbox(
+ pub async fn pause_sandbox(
+     State(state): State<AppState>,
+     Path(sandbox_id): Path<String>,
++    payload: Option<Json<PauseSandboxRequest>>,
+ ) -> AppResult<impl IntoResponse> {
+     state
+         .logger
+@@ -328,7 +330,9 @@ pub async fn pause_sandbox(
+         )
+         .await;
+     tracing::info!(sandbox_id = %sandbox_id, "pause sandbox request");
+-    state.services.sandboxes.pause_sandbox(&sandbox_id).await?;
++    state.services.sandboxes.pause_sandbox(
++        &sandbox_id, payload.as_ref().map(|Json(value)| value),
++    ).await?;
+ 
+     tracing::info!(sandbox_id = %sandbox_id, "pause_sandbox: success");
+     state
+@@ -338,6 +342,15 @@ pub async fn pause_sandbox(
+     Ok(StatusCode::NO_CONTENT)
+ }
+ 
++pub async fn relocate_snapshot(
++    State(state): State<AppState>,
++    Path(sandbox_id): Path<String>,
++    Json(body): Json<RelocateSnapshotRequest>,
++) -> AppResult<impl IntoResponse> {
++    state.services.sandboxes.relocate_snapshot(&sandbox_id, &body).await?;
++    Ok(StatusCode::NO_CONTENT)
++}
++
+ // ─── POST /sandboxes/:sandboxID/resume ────────────────────────────────────────
+ 
+ #[utoipa::path(
+diff --git a/CubeAPI/src/models/mod.rs b/CubeAPI/src/models/mod.rs
+index 08ea769..1e62df0 100644
+--- a/CubeAPI/src/models/mod.rs
++++ b/CubeAPI/src/models/mod.rs
+@@ -805,6 +805,22 @@ fn default_log_limit() -> i32 {
+ /// Failing the request is the only outcome that cannot be mistaken for success.
+ /// E2B's own update body carries only `allowOut`, `denyOut`, `rules` and
+ /// `allowInternetAccess`, all accepted here, so strictness costs no compatibility.
++#[derive(Debug, Default, Deserialize, ToSchema)]
++#[serde(deny_unknown_fields)]
++pub struct PauseSandboxRequest {
++    pub snapshot_tier: Option<String>,
++    pub memory_snapshot_path: Option<String>,
++    pub snapshot_generation: Option<u64>,
++}
++
++#[derive(Debug, Deserialize, ToSchema)]
++#[serde(deny_unknown_fields)]
++pub struct RelocateSnapshotRequest {
++    pub snapshot_tier: String,
++    pub memory_snapshot_path: String,
++    pub snapshot_generation: u64,
++}
++
+ #[derive(Debug, Deserialize, ToSchema)]
+ #[serde(deny_unknown_fields)]
+ pub struct UpdateSandboxNetworkRequest {
+diff --git a/CubeAPI/src/routes.rs b/CubeAPI/src/routes.rs
+index 05c62fc..e767a3e 100644
+--- a/CubeAPI/src/routes.rs
++++ b/CubeAPI/src/routes.rs
+@@ -124,6 +124,10 @@ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Rou
+             "/sandboxes/:sandboxID/pause",
+             post(sandboxes::pause_sandbox),
+         )
++        .route(
++            "/sandboxes/:sandboxID/snapshot/relocate",
++            post(sandboxes::relocate_snapshot),
++        )
+         .route(
+             "/sandboxes/:sandboxID/resume",
+             post(sandboxes::resume_sandbox),
+diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
+index 69f306a..f1bd581 100644
+--- a/CubeAPI/src/services/sandboxes.rs
++++ b/CubeAPI/src/services/sandboxes.rs
+@@ -17,7 +17,7 @@ use crate::{
+     },
+     error::{AppError, AppResult},
+     models::{
+-        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
++        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, PauseSandboxRequest, RelocateSnapshotRequest, Sandbox,
+         SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
+         SandboxTcpEndpoint,
+         SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
+@@ -386,10 +386,11 @@ impl SandboxService {
+         Ok(())
+     }
+ 
+-    pub async fn pause_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
++    pub async fn pause_sandbox(&self, sandbox_id: &str,
++                               placement: Option<&PauseSandboxRequest>) -> AppResult<()> {
+         let resp = self
+             .cubemaster
+-            .update_sandbox(&self.build_update_request(sandbox_id, "pause", None))
++            .update_sandbox(&self.build_update_request(sandbox_id, "pause", None, placement))
+             .await
+             .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+ 
+@@ -401,6 +402,29 @@ impl SandboxService {
+         )
+     }
+ 
++    pub async fn relocate_snapshot(
++        &self,
++        sandbox_id: &str,
++        placement: &RelocateSnapshotRequest,
++    ) -> AppResult<()> {
++        let pause_placement = PauseSandboxRequest {
++            snapshot_tier: Some(placement.snapshot_tier.clone()),
++            memory_snapshot_path: Some(placement.memory_snapshot_path.clone()),
++            snapshot_generation: Some(placement.snapshot_generation),
++        };
++        let response = self
++            .cubemaster
++            .update_sandbox(&self.build_update_request(
++                sandbox_id,
++                "relocate_snapshot",
++                None,
++                Some(&pause_placement),
++            ))
++            .await?;
++        ensure_update_success(response, sandbox_id, "cannot relocate paused snapshot")?;
++        Ok(())
++    }
++
+     pub async fn resume_sandbox(
+         &self,
+         sandbox_id: &str,
+@@ -408,7 +432,7 @@ impl SandboxService {
+     ) -> AppResult<Sandbox> {
+         let resp = self
+             .cubemaster
+-            .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
++            .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout, None))
+             .await
+             .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+ 
+@@ -444,7 +468,7 @@ impl SandboxService {
+         if d.status == SandboxStatus::Paused {
+             let resp = self
+                 .cubemaster
+-                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
++                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout, None))
+                 .await
+                 .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+ 
+@@ -708,6 +732,7 @@ impl SandboxService {
+         sandbox_id: &str,
+         action: &str,
+         timeout: Option<i32>,
++        placement: Option<&PauseSandboxRequest>,
+     ) -> SandboxUpdateRequest {
+         SandboxUpdateRequest {
+             request_id: new_request_id(),
+@@ -715,6 +740,9 @@ impl SandboxService {
+             instance_type: self.instance_type.clone(),
+             action: action.to_string(),
+             timeout,
++            snapshot_tier: placement.and_then(|value| value.snapshot_tier.clone()),
++            memory_snapshot_path: placement.and_then(|value| value.memory_snapshot_path.clone()),
++            snapshot_generation: placement.and_then(|value| value.snapshot_generation),
+         }
+     }
+ 
+@@ -2087,6 +2115,9 @@ mod tests {
+             instance_type: "cubebox".to_string(),
+             action: "resume".to_string(),
+             timeout: None,
++            snapshot_tier: None,
++            memory_snapshot_path: None,
++            snapshot_generation: None,
+         };
+         let json = serde_json::to_value(&req).unwrap();
+         assert!(
+@@ -2101,6 +2132,9 @@ mod tests {
+                 instance_type: "cubebox".to_string(),
+                 action: "resume".to_string(),
+                 timeout: Some(value),
++                snapshot_tier: None,
++                memory_snapshot_path: None,
++                snapshot_generation: None,
+             };
+             let json = serde_json::to_value(&req).unwrap();
+             assert_eq!(
+diff --git a/CubeMaster/conf.yaml b/CubeMaster/conf.yaml
+index d580a8a..38b4490 100644
+--- a/CubeMaster/conf.yaml
++++ b/CubeMaster/conf.yaml
+@@ -85,8 +85,8 @@ scheduler:
+   # Global CPU/Mem overcommit ratio applied to the node-reported quota capacity.
+   # Defaults to CPU=3, Mem=2.
+   overcommit_ratio:
+-    cpu_ratio: 3.0
+-    mem_ratio: 2.0
++    cpu_ratio: 1.0
++    mem_ratio: 1.0
+   # Per-instance-type overcommit ratio (takes precedence over the global
+   # overcommit_ratio).
+   # overcommit_ratio_conf:
+diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+index 37cbbec..94320b6 100644
+--- a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
++++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+@@ -90,6 +90,19 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+ 	if b := strings.TrimSpace(req.Backend); b != "" {
+ 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
+ 	}
++	if tier := strings.TrimSpace(req.SnapshotTier); tier != "" {
++		if (tier != "warm" && tier != "cold") || req.SnapshotGeneration == 0 ||
++			strings.TrimSpace(req.MemorySnapshotPath) == "" {
++			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
++			rsp.Ret.RetMsg = "invalid tiered pause placement"
++			return rsp
++		}
++		cubeletReq.Annotations["clawbox.snapshot.tier"] = tier
++		cubeletReq.Annotations["clawbox.snapshot.memory.path"] = req.MemorySnapshotPath
++		cubeletReq.Annotations["clawbox.snapshot.generation"] = strconv.FormatUint(
++			req.SnapshotGeneration, 10,
++		)
++	}
+ 	log.G(ctx).Infof("pause: sandbox=%s snap=%s host=%s", req.SandboxID, snapID, hostIP)
+ 	cubeRsp, err := cubelet.UpdateWithTimeout(ctx, calleeEndpoint, cubeletReq, pauseCubeletRPCTimeout)
+ 	if err != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
+@@ -140,6 +153,45 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+ 	return rsp
+ }
+ 
++func relocatePauseSnapshot(ctx context.Context, req *types.UpdateRequest, hostIP string) *types.Res {
++	rsp := &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: errorcode.ErrorCode_Success.String()}}
++	rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID)
++	if err != nil || rec == nil || !strings.EqualFold(strings.TrimSpace(rec.Status), "READY") {
++		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
++		rsp.Ret.RetMsg = "paused snapshot is not ready for relocation"
++		return rsp
++	}
++	if strings.TrimSpace(req.SnapshotTier) != "cold" || req.SnapshotGeneration == 0 || strings.TrimSpace(req.MemorySnapshotPath) == "" {
++		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
++		rsp.Ret.RetMsg = "invalid cold relocation placement"
++		return rsp
++	}
++	targetIP := strings.TrimSpace(rec.NodeIP)
++	if targetIP == "" {
++		targetIP = strings.TrimSpace(hostIP)
++	}
++	cubeReq := &cubebox.UpdateCubeSandboxRequest{
++		RequestID: req.RequestID,
++		SandboxID: req.SandboxID,
++		Annotations: map[string]string{
++			constants.CubeAnnotationsUpdateAction: "relocate_snapshot",
++			constants.CubeAnnotationPauseSnapshotID: rec.SnapshotID,
++			"clawbox.snapshot.tier": "cold",
++			"clawbox.snapshot.memory.path": req.MemorySnapshotPath,
++			"clawbox.snapshot.generation": strconv.FormatUint(req.SnapshotGeneration, 10),
++		},
++	}
++	cubeRsp, callErr := cubelet.UpdateWithTimeout(ctx, cubelet.GetCubeletAddr(targetIP), cubeReq, pauseCubeletRPCTimeout)
++	if callErr != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
++		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
++		if callErr != nil { rsp.Ret.RetMsg = callErr.Error() } else { rsp.Ret.RetMsg = "cubelet relocation response is nil" }
++		return rsp
++	}
++	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
++	rsp.Ret.RetMsg = cubeRsp.GetRet().GetRetMsg()
++	return rsp
++}
++
+ func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
+ 	listRsp, err := cubelet.List(ctx, cubelet.GetCubeletAddr(hostIP), &cubebox.ListCubeSandboxRequest{
+ 		Id: &sandboxID,
+diff --git a/CubeMaster/pkg/service/sandbox/sandbox_update.go b/CubeMaster/pkg/service/sandbox/sandbox_update.go
+index fc8b0d0..8b0ed81 100644
+--- a/CubeMaster/pkg/service/sandbox/sandbox_update.go
++++ b/CubeMaster/pkg/service/sandbox/sandbox_update.go
+@@ -44,7 +44,7 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
+ 		rsp.Ret.RetMsg = "should provide InstanceType,SandboxID,Action"
+ 		return
+ 	}
+-	if req.Action != "pause" && req.Action != "resume" {
++	if req.Action != "pause" && req.Action != "resume" && req.Action != "relocate_snapshot" {
+ 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+ 		rsp.Ret.RetMsg = "action should be pause or resume"
+ 		return
+@@ -63,6 +63,8 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
+ 		lockOpts.TTL = sandboxlock.PauseTTL
+ 	case "resume":
+ 		lockOpts.TTL = sandboxlock.ResumeTTL
++	case "relocate_snapshot":
++		lockOpts.TTL = sandboxlock.PauseTTL
+ 	}
+ 	err := sandboxlock.WithLock(ctx, req.SandboxID, lockOpts, func(ctx context.Context) error {
+ 		// Client/HTTP cancel must not abort bookkeeping or release the lock
+@@ -91,6 +93,8 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
+ 			*rsp = *pauseSandbox(ctx, req, hostIP)
+ 		case "resume":
+ 			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
++		case "relocate_snapshot":
++			*rsp = *relocatePauseSnapshot(ctx, req, hostIP)
+ 		}
+ 		return nil
+ 	})
+diff --git a/CubeMaster/pkg/service/sandbox/types/types.go b/CubeMaster/pkg/service/sandbox/types/types.go
+index 0dc1f3f..582540e 100644
+--- a/CubeMaster/pkg/service/sandbox/types/types.go
++++ b/CubeMaster/pkg/service/sandbox/types/types.go
+@@ -829,6 +829,9 @@ type UpdateRequest struct {
+ 	// Backend is the CoW store (xfs｜s3) forwarded to Cubelet as
+ 	// cube.master.storage.backend. Empty means xfs.
+ 	Backend string `json:"backend,omitempty"`
++	SnapshotTier       string `json:"snapshot_tier,omitempty"`
++	MemorySnapshotPath string `json:"memory_snapshot_path,omitempty"`
++	SnapshotGeneration uint64 `json:"snapshot_generation,omitempty"`
+ }
+ 
+ // UpdateNetworkRequest is the wire shape for POST /cube/sandbox/network. The
+diff --git a/Cubelet/dynamicconf/conf.yaml b/Cubelet/dynamicconf/conf.yaml
+index 74cc3a5..60b1390 100644
+--- a/Cubelet/dynamicconf/conf.yaml
++++ b/Cubelet/dynamicconf/conf.yaml
+@@ -40,7 +40,7 @@ host:
+     #                 still shows up in QuotaCpuUsage/QuotaMemUsage, so
+     #                 pause-heavy nodes are deprioritised by the cpu/mem scoring
+     #                 factors.
+-    paused_resource_release_ratio: 0.0
++    paused_resource_release_ratio: 1.0
+   gc:
+     code_expiration_time: "72h"
+     image_expiration_time: "24h"
+diff --git a/Cubelet/pkg/constants/const.go b/Cubelet/pkg/constants/const.go
+index d910745..9f6658a 100644
+--- a/Cubelet/pkg/constants/const.go
++++ b/Cubelet/pkg/constants/const.go
+@@ -351,6 +351,7 @@ const (
+ 	UpdateActionPause        = "pause"
+ 	UpdateActionResume       = "resume"
+ 	UpdateActionNetwork      = "network"
++	UpdateActionRelocateSnapshot = "relocate_snapshot"
+ 	PreStopTypePause         = "pause"
+ 	PreStopTypeDestroy       = "destroy"
+ )
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index 285289e..f5d6ab6 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -10,6 +10,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"os"
++	"path/filepath"
+ 	"strings"
+ 	"time"
+ 
+@@ -33,6 +34,33 @@ type pauseSnapshotConfig struct {
+ 	MemoryVolURL   *string `json:"memory_vol_url,omitempty"`
+ }
+ 
++const directMemoryKind = "clawbox-direct-file"
++
++func directPauseMemoryPath(req *cubebox.UpdateCubeSandboxRequest) (string, bool, error) {
++	ann := req.GetAnnotations()
++	tier := strings.TrimSpace(ann["clawbox.snapshot.tier"])
++	if tier == "" {
++		return "", false, nil
++	}
++	rootName := "CLAWBOX_COLD_SNAPSHOT_ROOT"
++	if tier == "warm" {
++		rootName = "CLAWBOX_WARM_SNAPSHOT_ROOT"
++	} else if tier != "cold" {
++		return "", false, fmt.Errorf("invalid snapshot tier %q", tier)
++	}
++	root := filepath.Clean(strings.TrimSpace(os.Getenv(rootName)))
++	target := filepath.Clean(strings.TrimSpace(ann["clawbox.snapshot.memory.path"]))
++	if root == "." || !filepath.IsAbs(root) || !filepath.IsAbs(target) {
++		return "", false, fmt.Errorf("%s and memory path must be absolute", rootName)
++	}
++	rel, err := filepath.Rel(root, target)
++	if err != nil || rel == "." || rel == ".." ||
++		strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
++		return "", false, fmt.Errorf("memory path %q escapes %s", target, rootName)
++	}
++	return target, true, nil
++}
++
+ // resolvePauseSnapshotID requires Master-allocated snap-* id (same format as
+ // normal Commit snapshots). Distinction is catalog Kind + Master DB type.
+ func resolvePauseSnapshotID(req *cubebox.UpdateCubeSandboxRequest) (string, error) {
+@@ -107,6 +135,18 @@ func (s *service) updateWithPauseCow(
+ 		"step":      "pauseCow",
+ 		"sandboxID": req.SandboxID,
+ 	})
++	snapshotPhaseStarted := time.Now()
++	snapshotPhaseLogged := false
++	defer func() {
++		if !snapshotPhaseLogged {
++			stepLog.WithFields(CubeLog.Fields{
++				"operation":   "checkpoint",
++				"phase":       "snapshot_create",
++				"status":      "error",
++				"duration_ms": time.Since(snapshotPhaseStarted).Milliseconds(),
++			}).Info("sandbox lifecycle phase completed")
++		}
++	}()
+ 
+ 	snapID, err := resolvePauseSnapshotID(req)
+ 	if err != nil {
+@@ -172,7 +212,31 @@ func (s *service) updateWithPauseCow(
+ 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
+ 		return rsp, nil
+ 	}
+-	memoryObject, err := storage.CreateMemoryVolumeFor(ctx, backend, snapID, memorySizeBytes)
++	directMemoryPath, directMemory, err := directPauseMemoryPath(req)
++	var memoryObject *storage.CowSnapshotObject
++	if err == nil && directMemory {
++		err = os.MkdirAll(filepath.Dir(directMemoryPath), 0700)
++		if err == nil {
++			var file *os.File
++			file, err = os.OpenFile(
++				directMemoryPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600,
++			)
++			if err == nil {
++				err = file.Truncate(int64(memorySizeBytes))
++				_ = file.Close()
++			}
++		}
++		if err == nil {
++			memoryObject = &storage.CowSnapshotObject{
++				Name: directMemoryPath, Kind: directMemoryKind,
++				DevPath: directMemoryPath, SizeBytes: memorySizeBytes,
++			}
++		}
++	} else if err == nil {
++		memoryObject, err = storage.CreateMemoryVolumeFor(
++			ctx, backend, snapID, memorySizeBytes,
++		)
++	}
+ 	if err != nil {
+ 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
+ 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+@@ -186,7 +250,11 @@ func (s *service) updateWithPauseCow(
+ 		return rsp, nil
+ 	}
+ 	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
+-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, nil)
++		if directMemory {
++			_ = os.Remove(directMemoryPath)
++		} else {
++			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, nil)
++		}
+ 		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 		rsp.Ret.RetMsg = err.Error()
+@@ -196,7 +264,12 @@ func (s *service) updateWithPauseCow(
+ 	var rootfsObject *storage.CowSnapshotObject
+ 	cleanupArtifacts := func() {
+ 		layout.releaseMetadata(ctx)
+-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
++		if directMemory {
++			_ = os.Remove(directMemoryPath)
++			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, rootfsObject)
++		} else {
++			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
++		}
+ 		layout.discardTmpDir()
+ 		if !layout.usesTmpRename() {
+ 			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+@@ -308,7 +381,11 @@ func (s *service) updateWithPauseCow(
+ 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write pause sandbox_spec: %v", err))
+ 	}
+ 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
+-	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
++	deactivateObjects := []*storage.CowSnapshotObject{memoryObject, rootfsObject}
++	if directMemory {
++		deactivateObjects = []*storage.CowSnapshotObject{rootfsObject}
++	}
++	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, deactivateObjects...); err != nil {
+ 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
+ 	}
+ 	if layout.usesTmpRename() {
+@@ -370,8 +447,30 @@ func (s *service) updateWithPauseCow(
+ 
+ 	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
+ 
++	snapshotPhaseLogged = true
++	stepLog.WithFields(CubeLog.Fields{
++		"operation":    "checkpoint",
++		"phase":        "snapshot_create",
++		"status":       "ok",
++		"duration_ms":  time.Since(snapshotPhaseStarted).Milliseconds(),
++		"snapshotID":   snapID,
++		"snapshotPath": snapshotPath,
++	}).Info("sandbox lifecycle phase completed")
++
+ 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
++	swapOutPhaseStarted := time.Now()
+ 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
++	swapOutStatus := "ok"
++	if err != nil {
++		swapOutStatus = "error"
++	}
++	stepLog.WithFields(CubeLog.Fields{
++		"operation":   "checkpoint",
++		"phase":       "swap_out",
++		"status":      swapOutStatus,
++		"duration_ms": time.Since(swapOutPhaseStarted).Milliseconds(),
++		"snapshotID":  snapID,
++	}).Info("sandbox lifecycle phase completed")
+ 	// Always attach whatever volume ref events were observed — Detach may have
+ 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
+ 	// to apply those deltas on an explicit Pause failure.
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+new file mode 100644
+index 0000000..32ebcf9
+--- /dev/null
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -0,0 +1,131 @@
++// Copyright (c) 2026 Tencent Inc.
++// SPDX-License-Identifier: Apache-2.0
++
++package cubebox
++
++import (
++	"context"
++	"crypto/sha256"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
++)
++
++// relocatePauseSnapshot performs WARM -> COLD without an SSD staging file:
++// copy to a temporary file in COLD, hash-verify, atomically publish, persist the
++// authoritative catalog, then remove WARM. Any failure before the catalog
++// update leaves the original snapshot authoritative and restorable.
++func (s *service) relocatePauseSnapshot(
++	ctx context.Context,
++	req *cubebox.UpdateCubeSandboxRequest,
++	rsp *cubebox.UpdateCubeSandboxResponse,
++) (*cubebox.UpdateCubeSandboxResponse, error) {
++	destination, direct, err := directPauseMemoryPath(req)
++	if err != nil || !direct || strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"]) != "cold" {
++		if err == nil { err = fmt.Errorf("relocation requires a direct COLD destination") }
++		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
++		rsp.Ret.RetMsg = err.Error()
++		return rsp, nil
++	}
++	snapshotID, err := resolvePauseSnapshotID(req)
++	if err != nil {
++		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
++		rsp.Ret.RetMsg = err.Error()
++		return rsp, nil
++	}
++	entry, err := storage.GetLocalSnapshotFor(ctx, cow.BackendXFS, snapshotID)
++	if err != nil || entry.Kind != storage.CatalogKindPauseSnapshot || entry.MemoryKind != directMemoryKind {
++		if err == nil { err = fmt.Errorf("snapshot %s is not a direct pause snapshot", snapshotID) }
++		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
++		rsp.Ret.RetMsg = err.Error()
++		return rsp, nil
++	}
++	source := filepath.Clean(entry.MemoryVol)
++	warmRoot := filepath.Clean(strings.TrimSpace(os.Getenv("CLAWBOX_WARM_SNAPSHOT_ROOT")))
++	rel, relErr := filepath.Rel(warmRoot, source)
++	if warmRoot == "." || relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
++		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
++		rsp.Ret.RetMsg = "authoritative source is not in the configured WARM root"
++		return rsp, nil
++	}
++	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
++		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++		rsp.Ret.RetMsg = err.Error()
++		return rsp, nil
++	}
++	if _, statErr := os.Stat(destination); statErr == nil || !os.IsNotExist(statErr) {
++		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
++		rsp.Ret.RetMsg = "COLD relocation destination already exists or cannot be inspected"
++		return rsp, nil
++	}
++	tmp := destination + ".copying"
++	_ = os.Remove(tmp)
++	sourceHash, copied, err := copyAndHash(source, tmp)
++	if err == nil {
++		var destinationHash [sha256.Size]byte
++		destinationHash, err = hashFile(tmp)
++		if err == nil && destinationHash != sourceHash { err = fmt.Errorf("relocation hash mismatch") }
++	}
++	if err == nil { err = os.Rename(tmp, destination) }
++	if err != nil {
++		_ = os.Remove(tmp)
++		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++		rsp.Ret.RetMsg = err.Error()
++		return rsp, nil
++	}
++	previous := entry.MemoryVol
++	entry.MemoryVol = destination
++	if err = storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry); err != nil {
++		entry.MemoryVol = previous
++		_ = os.Remove(destination)
++		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++		rsp.Ret.RetMsg = fmt.Sprintf("persist relocated catalog: %v", err)
++		return rsp, nil
++	}
++	if err = os.Remove(source); err != nil {
++		entry.MemoryVol = previous
++		revertErr := storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry)
++		if revertErr == nil { _ = os.Remove(destination) }
++		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++		rsp.Ret.RetMsg = fmt.Sprintf("relocation copied %d bytes but could not remove WARM source: %v (catalog revert: %v)", copied, err, revertErr)
++		return rsp, nil
++	}
++	return rsp, nil
++}
++
++func copyAndHash(source, destination string) ([sha256.Size]byte, int64, error) {
++	var zero [sha256.Size]byte
++	in, err := os.Open(source)
++	if err != nil { return zero, 0, err }
++	defer in.Close()
++	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
++	if err != nil { return zero, 0, err }
++	h := sha256.New()
++	written, copyErr := io.Copy(io.MultiWriter(out, h), in)
++	if copyErr == nil { copyErr = out.Sync() }
++	closeErr := out.Close()
++	if copyErr == nil { copyErr = closeErr }
++	if copyErr != nil { return zero, written, copyErr }
++	var sum [sha256.Size]byte
++	copy(sum[:], h.Sum(nil))
++	return sum, written, nil
++}
++
++func hashFile(path string) ([sha256.Size]byte, error) {
++	var zero [sha256.Size]byte
++	f, err := os.Open(path)
++	if err != nil { return zero, err }
++	defer f.Close()
++	h := sha256.New()
++	if _, err = io.Copy(h, f); err != nil { return zero, err }
++	var sum [sha256.Size]byte
++	copy(sum[:], h.Sum(nil))
++	return sum, nil
++}
+diff --git a/Cubelet/services/cubebox/template_ops.go b/Cubelet/services/cubebox/template_ops.go
+index 3abfe11..f6f5db1 100644
+--- a/Cubelet/services/cubebox/template_ops.go
++++ b/Cubelet/services/cubebox/template_ops.go
+@@ -635,7 +635,9 @@ func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatal
+ 	if name := strings.TrimSpace(entry.RootfsVol); name != "" {
+ 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.RootfsKind, Role: "rootfs"})
+ 	}
+-	if name := strings.TrimSpace(entry.MemoryVol); name != "" {
++	if name := strings.TrimSpace(entry.MemoryVol); name != "" && entry.MemoryKind == directMemoryKind {
++		_ = os.Remove(name)
++	} else if name != "" {
+ 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.MemoryKind, Role: "memory"})
+ 	}
+ 	if name := strings.TrimSpace(entry.BuildRootfsVol); name != "" {
+diff --git a/Cubelet/services/cubebox/update.go b/Cubelet/services/cubebox/update.go
+index 5530005..497991b 100644
+--- a/Cubelet/services/cubebox/update.go
++++ b/Cubelet/services/cubebox/update.go
+@@ -112,6 +112,8 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
+ 		return s.updateWithPauseCow(ctx, req, sb)
+ 	case constants.UpdateActionNetwork:
+ 		return s.updateNetworkPolicy(ctx, req, sb, rsp)
++	case constants.UpdateActionRelocateSnapshot:
++		return s.relocatePauseSnapshot(ctx, req, rsp)
+ 	case constants.UpdateActionResume:
+ 		// Resume is Master Create(same sandboxID from pause snap), not Update(resume).
+ 		rsp.Ret.RetMsg = "pause resume is owned by CubeMaster Create; Update(resume) is not supported"
+diff --git a/Cubelet/storage/local.go b/Cubelet/storage/local.go
+index f6c3256..0acae64 100644
+--- a/Cubelet/storage/local.go
++++ b/Cubelet/storage/local.go
+@@ -1023,6 +1023,32 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
+ 	if volumeName == "" {
+ 		return "", "", nil
+ 	}
++	if volumeKind == "clawbox-direct-file" {
++		clean := filepath.Clean(volumeName)
++		allowed := false
++		for _, name := range []string{
++			"CLAWBOX_WARM_SNAPSHOT_ROOT", "CLAWBOX_COLD_SNAPSHOT_ROOT",
++		} {
++			root := filepath.Clean(strings.TrimSpace(os.Getenv(name)))
++			rel, relErr := filepath.Rel(root, clean)
++			if root != "." && relErr == nil && rel != "." && rel != ".." &&
++				!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
++				allowed = true
++				break
++			}
++		}
++		if !allowed {
++			return "", "", fmt.Errorf("direct snapshot path is outside configured roots")
++		}
++		info, statErr := os.Stat(clean)
++		if statErr != nil {
++			return "", "", fmt.Errorf("direct snapshot memory is unavailable: %w", statErr)
++		}
++		if !info.Mode().IsRegular() {
++			return "", "", fmt.Errorf("direct snapshot memory is not a regular file")
++		}
++		return cowFileURLFromPath(clean), "", nil
++	}
+ 	if pauseOwner != "" {
+ 		store, err := l.storeForBackend(backend)
+ 		if err != nil {
+diff --git a/configs/kernel-oc9.aarch64.config b/configs/kernel-oc9.aarch64.config
+index fcc8036..eabb5a6 100644
+--- a/configs/kernel-oc9.aarch64.config
++++ b/configs/kernel-oc9.aarch64.config
+@@ -778,7 +778,8 @@ CONFIG_ARCH_HAS_SUBPAGE_FAULTS=y
+ CONFIG_HOTPLUG_SMT=y
+ CONFIG_HOTPLUG_CORE_SYNC=y
+ CONFIG_HOTPLUG_CORE_SYNC_DEAD=y
+-# CONFIG_KPROBES is not set
++CONFIG_KPROBES=y
++CONFIG_KPROBES_ON_FTRACE=y
+ CONFIG_JUMP_LABEL=y
+ # CONFIG_STATIC_KEYS_SELFTEST is not set
+ CONFIG_UPROBES=y
+diff --git a/deploy/kubernetes/chart/files/cube-master/conf.yaml b/deploy/kubernetes/chart/files/cube-master/conf.yaml
+index f9e87d0..7ff8758 100644
+--- a/deploy/kubernetes/chart/files/cube-master/conf.yaml
++++ b/deploy/kubernetes/chart/files/cube-master/conf.yaml
+@@ -81,6 +81,9 @@ scheduler:
+   priority_select_num: 1
+   metric_update_timeout: 300s
+   local_metric_update_timeout: 300s
++  overcommit_ratio:
++    cpu_ratio: 1.0
++    mem_ratio: 1.0
+   filter:
+     enable_filters:
+       - "cpu"
+diff --git a/deploy/kubernetes/chart/templates/_helpers.tpl b/deploy/kubernetes/chart/templates/_helpers.tpl
+index a07491f..b9279db 100644
+--- a/deploy/kubernetes/chart/templates/_helpers.tpl
++++ b/deploy/kubernetes/chart/templates/_helpers.tpl
+@@ -920,6 +920,8 @@ Toolbox is mounted whole at the fixed path.
+   mountPath: /run/containerd
+ - name: run-vc
+   mountPath: /run/vc
++- name: s3lvol-socket
++  mountPath: /var/run/s3lvol.sock
+ - name: cube-pid
+   mountPath: /run/cube-node
+ {{- end -}}
+diff --git a/deploy/kubernetes/chart/templates/node-daemonset.yaml b/deploy/kubernetes/chart/templates/node-daemonset.yaml
+index 268af16..5ef774f 100644
+--- a/deploy/kubernetes/chart/templates/node-daemonset.yaml
++++ b/deploy/kubernetes/chart/templates/node-daemonset.yaml
+@@ -334,6 +334,10 @@ spec:
+           hostPath:
+             path: {{ .Values.hostPaths.runVc }}
+             type: DirectoryOrCreate
++        - name: s3lvol-socket
++          hostPath:
++            path: /var/run/s3lvol.sock
++            type: Socket
+       {{- if .Values.volumeCos.enabled }}
+         - name: volume-cos-conf
+           secret:
+diff --git a/docker/Dockerfile.builder b/docker/Dockerfile.builder
+index dd6d0a6..18232d2 100644
+--- a/docker/Dockerfile.builder
++++ b/docker/Dockerfile.builder
+@@ -209,6 +209,9 @@ RUN . /etc/buildenv \
+     && cp -r /tmp/protoc/include/* /usr/local/include/ \
+     && rm -rf /tmp/protoc /tmp/protoc.zip
+ 
++ARG GOPROXY=https://goproxy.cn,direct
++ENV GOPROXY=${GOPROXY}
++
+ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
+     && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1 \
+     && go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@v1.5.1
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+index b49b1c7..fca1fe4 100644
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -481,7 +481,10 @@ class Sandbox:
+         return execution
+ 
+ 
+-    def pause(self, *, wait: bool = True, timeout: float = 30, interval: float = 1.0) -> None:
++    def pause(self, *, wait: bool = True, timeout: float = 30, interval: float = 1.0,
++              snapshot_tier: str | None = None,
++              memory_snapshot_path: str | None = None,
++              snapshot_generation: int | None = None) -> dict | None:
+         """POST /sandboxes/:sandboxID/pause - Pause a sandbox.
+ 
+         Preserves the sandbox memory snapshot. The sandbox can be resumed
+@@ -501,17 +504,60 @@ class Sandbox:
+                 ``"paused"`` state within ``timeout`` seconds.
+         """
+         import time
+-        resp = self._session.post(f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause")
++        body = None
++        if snapshot_tier is not None:
++            if snapshot_tier not in {"warm", "cold"}:
++                raise ValueError("snapshot_tier must be warm or cold")
++            if not memory_snapshot_path or snapshot_generation is None or snapshot_generation < 1:
++                raise ValueError("tiered pause requires a path and positive generation")
++            body = {
++                "snapshot_tier": snapshot_tier,
++                "memory_snapshot_path": memory_snapshot_path,
++                "snapshot_generation": snapshot_generation,
++            }
++        resp = self._session.post(
++            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause", json=body,
++        )
+         _check_response(resp)
++        result = ({
++            "tier": snapshot_tier,
++            "memory_snapshot_path": memory_snapshot_path,
++            "generation": snapshot_generation,
++        } if body else None)
+         if wait:
+             deadline = time.monotonic() + timeout
+             while time.monotonic() < deadline:
+                 if self.get_info().get("state") == "paused":
+-                    return
++                    return result
+                 time.sleep(interval)
+             raise TimeoutError(
+                 f"Sandbox {self.sandbox_id!r} did not reach 'paused' state within {timeout}s"
+             )
++        return result
++
++    def relocate_snapshot(self, *, snapshot_tier: str,
++                          memory_snapshot_path: str,
++                          snapshot_generation: int) -> dict:
++        """Move a paused direct-memory snapshot between managed tiers."""
++        if snapshot_tier != "cold":
++            raise ValueError("snapshot relocation destination must be cold")
++        if not memory_snapshot_path or snapshot_generation < 1:
++            raise ValueError("snapshot relocation requires a path and positive generation")
++        body = {
++            "snapshot_tier": snapshot_tier,
++            "memory_snapshot_path": memory_snapshot_path,
++            "snapshot_generation": snapshot_generation,
++        }
++        resp = self._session.post(
++            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshot/relocate",
++            json=body,
++        )
++        _check_response(resp)
++        return {
++            "tier": snapshot_tier,
++            "memory_snapshot_path": memory_snapshot_path,
++            "generation": snapshot_generation,
++        }
+ 
+     def resume(self, timeout: int | None = None) -> None:
+         """POST /sandboxes/:sandboxID/resume - Resume a paused sandbox.
