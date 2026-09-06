@@ -39,6 +39,7 @@ RUN test -n "${KERNEL_VERSION}" \
  && rm /tmp/kata-debug.config \
  && make -C "/usr/src/linux-${KERNEL_VERSION}" olddefconfig prepare modules_prepare \
  && mkdir -p "/lib/modules/${KERNEL_VERSION}" \
+ && rm -rf "/lib/modules/${KERNEL_VERSION}/build" \
  && ln -s "/usr/src/linux-${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/build"
 
 COPY --from=clawtune services/sidecar /opt/clawtune-guest/services/sidecar
