@@ -2,6 +2,33 @@
 
 ## Current milestone
 
+### Frozen ClawTune P90 admission loop is live-green
+
+Commit `249231c` passes a c5 two-arm managed replay using an immutable KB built
+from a separate c5 recording run. ClawBox reused ClawTune's native span
+projection and profiling path, collapsed mirrored host/Tool records by exact
+execution identity, reconstructed execution intervals from measured duration,
+and froze the calibrated artifact at
+`/home/weitianc/clawbox-results-current/frozen-kb/smoke-c5-static-calibrated-p90.json`.
+Its SHA-256 is
+`5b87c90b506aca99e940de3b11d5f36d23d0d8aaa0b6e7df38d66747b5d23b7f`.
+
+Run `final-network-c5-p90-24923-r2` completed 5/5 Agents in both
+`tool_p90 + resident` and `tool_p90 + snapshot_pause`. Each arm recorded five
+Agent predictions, all sourced from `runtime_clawtune_immutable_kb` at the
+`exact_command` level with fallback rate 0.0. Both arms passed workspace
+validation with a 1.0 exact-ID join rate, zero telemetry loss, zero host OOM,
+and zero safety intervention. The snapshot arm performed 16 pauses and 16
+restores. The result summary SHA-256 is
+`a3a933097acf68eccd722e732a27996ad2aab40b92d00f8feccd68bbcb8a79ec`.
+
+This closes the implementation-level telemetry -> ClawTune profile -> frozen
+KB -> Runtime prediction -> synchronous PolicyControl admission -> native SSH
+-> measured feedback loop. It is deliberately classified as smoke evidence:
+the training data and replay each contain one tiny command. A formal prediction
+claim still requires separate representative recording trajectories, a frozen
+multi-command KB, held-out heterogeneous replay, and repeated baseline arms.
+
 ### Constrained-memory c60 resident/snapshot comparison is green
 
 Commit `70f7b31` passes a current same-spec c60 comparison on Kunpeng. The

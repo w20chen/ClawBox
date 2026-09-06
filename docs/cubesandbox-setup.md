@@ -153,6 +153,9 @@ CubeProxy, and the policy listener:
 ```bash
 export CLAWBOX_CONTROL_HOST='<address reachable from Runtime VMs>'
 export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
+# Required when ClawBox and ClawTune are separate source checkouts rather than
+# installed together. Point at ClawTune's sidecar Python source directory.
+export CLAWTUNE_SIDECAR_SRC="$HOME/ClawTune/services/sidecar/src"
 
 .venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
   --runtime-template '<fresh-runtime-template-id>' \
@@ -162,6 +165,13 @@ export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
   --count 1 \
   --output results/endpoint-c1.json
 ```
+
+For a frozen `tool_p90` run, build the KB from a different recording run,
+record its SHA-256, and pass the immutable JSON artifact in
+`resources.p90_predictions`. Keep `CLAWTUNE_SIDECAR_SRC` in the Worker
+environment so Runtime prediction uses the same ClawTune implementation that
+created the artifact. Never train from the held-out comparison run unless the
+experiment is explicitly labeled online learning.
 
 This gate creates and destroys its own pair. It must prove all of the
 following before the result is usable: semantic endpoint identity, strict

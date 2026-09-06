@@ -1,5 +1,25 @@
 # ClawBox continuation handoff
 
+## 2026-09-06 frozen P90 loop gate
+
+The live telemetry-to-admission loop is now green. Separate observations from
+`final-network-c5-e1b40-r3` were projected through ClawTune and frozen as
+`/home/weitianc/clawbox-results-current/frozen-kb/smoke-c5-static-calibrated-p90.json`
+(SHA-256
+`5b87c90b506aca99e940de3b11d5f36d23d0d8aaa0b6e7df38d66747b5d23b7f`).
+Run `final-network-c5-p90-24923-r2` used that exact artifact for both
+`tool_p90 + resident` and `tool_p90 + snapshot_pause`; each arm passed 5/5,
+joined telemetry at 1.0, lost no telemetry, recorded no host OOM or safety
+intervention, and used five immutable-KB exact-command predictions with zero
+fallback. Snapshot performed 16 pauses/restores. Summary SHA-256 is
+`a3a933097acf68eccd722e732a27996ad2aab40b92d00f8feccd68bbcb8a79ec`.
+
+This is the completed implementation smoke for the full loop, not formal
+paper evidence: it has only one tiny command. The remaining work is experiment
+production—capture representative heterogeneous traces, build and freeze the
+multi-command KB from disjoint recordings, and repeat the formal baseline
+matrix under the selected memory/NUMA scope.
+
 ## 2026-09-06 current constrained-memory gate
 
 The latest deployed and pushed ClawBox commit is `70f7b31`. A corrected c60

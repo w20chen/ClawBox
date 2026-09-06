@@ -105,6 +105,23 @@ These remain scale/correctness evidence, not the formal paper result: the
 workload is one tiny repeated trace and admission is static rather than a
 separately trained frozen P90 KB.
 
+The missing live P90 wiring gate is now green at c5. Separate recording data
+from `final-network-c5-e1b40-r3` was deduplicated and converted through the
+ClawTune dataset/profile path, then frozen as
+`/home/weitianc/clawbox-results-current/frozen-kb/smoke-c5-static-calibrated-p90.json`
+(SHA-256
+`5b87c90b506aca99e940de3b11d5f36d23d0d8aaa0b6e7df38d66747b5d23b7f`).
+In `final-network-c5-p90-24923-r2`, both `tool_p90 + resident` and
+`tool_p90 + snapshot_pause` completed 5/5 Agents with validation, a 1.0 exact
+telemetry join, zero loss/OOM/safety interventions, and zero Agent prediction
+fallbacks. All ten Agent predictions came from the immutable ClawTune KB at
+the `exact_command` level; the snapshot arm performed 16 paired
+pauses/restores. Summary SHA-256 is
+`a3a933097acf68eccd722e732a27996ad2aab40b92d00f8feccd68bbcb8a79ec`.
+This proves the complete telemetry -> frozen KB -> synchronous admission loop,
+but remains a one-command infrastructure smoke, not a representative formal
+P90 result.
+
 The conservative admission implementations were also rechecked on the same
 real managed architecture at c5. Both `lifetime_full + resident` and
 `tool_full + resident` passed 5/5 with identical output hashes, 1.0 exact
