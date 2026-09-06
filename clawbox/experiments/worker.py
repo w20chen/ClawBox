@@ -1385,14 +1385,39 @@ class ExperimentWorker:
                                 self._restore_with_one_victim(
                                     arm, session_id, lifecycle, coordinator, events,
                                 )
-                                bridge_result = executor.execute(
-                                    native_tool_bridge_setup_command(restart=True), 45,
-                                )
-                                if bridge_result.exit_code != 0:
+                                bridge_ready_started = time.monotonic()
+                                bridge_error: Exception | None = None
+                                bridge_result = None
+                                for bridge_attempt in range(1, 9):
+                                    try:
+                                        candidate = executor.execute(
+                                            native_tool_bridge_setup_command(restart=True), 45,
+                                        )
+                                        if candidate.exit_code == 0:
+                                            bridge_result = candidate
+                                            break
+                                        bridge_error = RuntimeError(
+                                            "bridge setup exited "
+                                            f"{candidate.exit_code}: {candidate.stderr[-1000:]}"
+                                        )
+                                    except Exception as exc:
+                                        bridge_error = exc
+                                    if bridge_attempt < 8:
+                                        time.sleep(min(0.1 * (2 ** (bridge_attempt - 1)), 1.0))
+                                if bridge_result is None:
                                     raise RuntimeError(
-                                        "Tool telemetry bridge did not recover after restore: "
-                                        + bridge_result.stderr[-1000:]
-                                    )
+                                        "Tool telemetry bridge did not recover after restore "
+                                        "within 8 readiness attempts"
+                                    ) from bridge_error
+                                events.write({
+                                    "event": "tool_restore_ready",
+                                    "session_id": session_id,
+                                    "execution_id": execution_id,
+                                    "attempts": bridge_attempt,
+                                    "service_seconds": (
+                                        time.monotonic() - bridge_ready_started
+                                    ),
+                                })
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
                             route = resolve_native_ssh_route("admit")
