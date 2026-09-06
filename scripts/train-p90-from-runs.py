@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -318,6 +319,13 @@ def main() -> None:
     parser.add_argument("--generation", type=int, default=1)
     parser.add_argument("--training-set-id", default="training")
     parser.add_argument(
+        "--clawtune-root", type=Path,
+        default=Path(os.environ.get(
+            "CLAWTUNE_ROOT", Path(__file__).resolve().parents[2] / "ClawTune",
+        )),
+        help="exact ClawTune checkout used to interpret and fit native telemetry",
+    )
+    parser.add_argument(
         "--observed-repo-fingerprint",
         default=None,
         help="expected repo field in the raw agent trace when it differs from --repository",
@@ -441,8 +449,8 @@ def main() -> None:
     latency, cpu, memory = (predictions[name] for name in
                             ("latency_ms", "peak_cpu_cores", "peak_memory_mb"))
     revision = subprocess.run(
-        ["git", "-C", str(Path(__file__).resolve().parents[2] / "ClawTune"),
-         "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+        ["git", "-C", str(args.clawtune_root.resolve()), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
     ).stdout.strip()
     source_digest = source.hexdigest()
     pair_digest = hashlib.sha256(
