@@ -16,7 +16,7 @@ and the KB.  It is deliberately immutable (frozen) and extra-forbidden.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -267,14 +267,6 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
         end_time = datetime.fromtimestamp(int(record["wall_time_ns"]) / 1e9, tz=timezone.utc)
     except (KeyError, TypeError, ValueError):
         end_time = None
-    start_time = None
-    try:
-        start_time = datetime.fromtimestamp(
-            int(resources.get("monitor_start_wall_time_ns") or record["wall_time_ns"]) / 1e9,
-            tz=timezone.utc,
-        )
-    except (KeyError, TypeError, ValueError):
-        start_time = end_time
     duration_sec = _as_float(record.get("duration_sec"))
     if duration_sec is None:
         action_duration_ns = _as_float(resources.get("action_duration_ns"))
@@ -284,6 +276,19 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
         duration_ns = _as_float(record.get("duration_ns"))
         if duration_ns is not None:
             duration_sec = duration_ns / 1e9
+    start_time = None
+    monitor_start_ns = _as_int(resources.get("monitor_start_wall_time_ns"))
+    if monitor_start_ns is not None:
+        try:
+            candidate = datetime.fromtimestamp(monitor_start_ns / 1e9, tz=timezone.utc)
+            if end_time is None or candidate < end_time:
+                start_time = candidate
+        except (OverflowError, OSError, ValueError):
+            pass
+    if start_time is None and end_time is not None and duration_sec is not None:
+        start_time = end_time - timedelta(seconds=duration_sec)
+    if start_time is None:
+        start_time = end_time
     coverage_ratio = _as_float(resources.get("coverage_ratio"))
     status_code = status.get("code")
     exit_code = output.get("exit_code")

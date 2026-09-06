@@ -150,6 +150,7 @@ def test_span_end_to_observation_valid():
     assert result.collection_quality == CollectionQuality.VALID
     assert result.complete is True
     assert result.duration_sec == 5.0
+    assert (result.end_time - result.start_time).total_seconds() == 5.0
     assert result.latency_bucket == "medium"
     assert result.cpu_utilization_avg_cores == 1.5
     assert result.rss_peak_bytes == 1024**2
@@ -164,6 +165,16 @@ def test_span_end_duration_falls_back_from_action_nanoseconds():
 
     assert result is not None
     assert result.duration_sec == 5.0
+
+
+def test_span_end_reconstructs_start_when_monitor_timestamp_is_not_a_window():
+    record = span_end("exec-unattributed", duration_sec=7.0)
+    record["resources"]["monitor_start_wall_time_ns"] = record["wall_time_ns"]
+
+    result = span_end_to_observation(record)
+
+    assert result is not None
+    assert (result.end_time - result.start_time).total_seconds() == 7.0
 
 
 def test_span_end_to_observation_ignores_non_tool_and_missing_id():
