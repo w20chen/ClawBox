@@ -62,7 +62,7 @@ clawtune_revision="${CLAWTUNE_REVISION:-$(git -C "${CLAWTUNE_ROOT}" rev-parse HE
   exit 65
 }
 actual_clawtune_revision="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD)"
-expected_clawtune_revision="${EXPECTED_CLAWTUNE_REVISION:-5bde9d82b8d6b0faa2d2cb49d0c22df30ada422d}"
+expected_clawtune_revision="${EXPECTED_CLAWTUNE_REVISION:-e1c6f0ba24d20d91fb4c89106ca2d94d3554c400}"
 [[ "${clawtune_revision}" == "${actual_clawtune_revision}" ]] || {
   echo "CLAWTUNE_REVISION ${clawtune_revision} does not match checkout ${actual_clawtune_revision}" >&2
   exit 65
