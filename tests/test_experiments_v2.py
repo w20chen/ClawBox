@@ -239,15 +239,16 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
 def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
     paths = list(Path("examples/experiments").glob("*.yaml"))
     audits = audit_experiments(paths)
-    assert len(audits) == 8
+    assert len(audits) == 9
     by_id = {str(item["experiment_id"]): item for item in audits}
     for experiment_id in ("decision", "full-system", "reclamation", "spatial"):
         assert by_id[experiment_id]["concurrency_levels"] == [20, 40, 60]
     assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
+    assert by_id["openclaw-cube-replay-c60-overcommit"]["concurrency_levels"] == [60]
     assert all(item["tool_template"] != "sandbox-code" for item in audits)
     openclaw = by_id["openclaw-cube-replay-c40"]["artifact_provenance"]
-    assert openclaw["runtime"]["template_id"] == "tpl-437392a8c57b48ccb32ef2ee"
-    assert openclaw["tool"]["template_id"] == "tpl-4a67524e1fcd41859905c77b"
+    assert openclaw["runtime"]["template_id"] == "tpl-ec97143fa76e409981055c2f"
+    assert openclaw["tool"]["template_id"] == "tpl-72f8a42d8fe746279d0bb80a"
     assert openclaw["runtime"]["image_digest"].startswith("sha256:")
     assert openclaw["tool"]["image_digest"].startswith("sha256:")
 

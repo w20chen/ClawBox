@@ -1,5 +1,47 @@
 # ClawBox continuation handoff
 
+## 2026-09-06 current constrained-memory gate
+
+The latest deployed and pushed ClawBox commit is `70f7b31`. A corrected c60
+`tool_static + snapshot_pause` run and its same-spec `tool_static + resident`
+comparison are both green under a 65,536 MiB policy pool while offering
+368,640 MiB of configured Runtime/Tool VM memory (5.625x scoped overcommit).
+Both completed 60/60 real managed OpenClaw Agents, produced identical output
+hashes, joined native Tool telemetry at 1.0 with zero loss, recorded zero host
+OOM, and left zero semantic CubeSandbox sandboxes.
+
+Snapshot result:
+`/home/weitianc/clawbox-results-current/final-network-c60-70f7b-r3`
+(`summary.json` SHA-256
+`0af45bdc8b8b1eeaa8c3f569ff0a8c270d0e9dface4781c4a4d471f8ff315222`).
+Mean/peak host-memory delta was 40.70/45.21 GB with 178/178 pauses/restores.
+
+Resident result:
+`/home/weitianc/clawbox-results-current/final-network-c60-resident-70f7b-r1`
+(`summary.json` SHA-256
+`49877c403a72794eae46536fd9bb4551f6d55add6163eca46f07c082d60742f1`).
+Mean/peak was 48.67/55.77 GB with 229 recorded
+`configured_memory_budget` admission interventions and zero host OOM.
+
+The remaining paper gates are not implementation-smoke work: capture multiple
+representative current-ARM64 trajectories, train/calibrate and freeze one
+ClawTune P90 artifact from separate recording data, repeat every formal arm on
+the held-out heterogeneous assignment, and rerun real DeepSeek c1/c2 after a
+valid credential is supplied. The last real-provider attempt reached DeepSeek
+through the managed architecture but received HTTP 401 before inference.
+
+The conservative paths are also current-green at c5. Run
+`/home/weitianc/clawbox-results-current/final-network-c5-conservative-70f7b-r1`
+contains `lifetime_full + resident` and `tool_full + resident`; each passed 5/5
+with exact joins and zero leaks. Its summary SHA-256 is
+`943c59c8cfd5fe6c4caaf738a11c9b7007a41ae0ee62bfebb393ed5d20d5d21e`.
+
+On this machine invoke current source with
+`cd /tmp/clawbox-current && /home/weitianc/ClawBox/.venv/bin/python -m clawbox.cli`;
+the installed console entry point still resolves the older
+`/home/weitianc/ClawBox` checkout. Preserve all local `.tmp-*` files. After the
+last run, CubeSandbox semantic inventory was zero and `/` had about 784 GB free.
+
 Updated 2026-09-06 after the semantic CubeSandbox TCP-endpoint cutover,
 native-SSH route-gate investigation, host-network datapath audit, and Kunpeng
 recovery.

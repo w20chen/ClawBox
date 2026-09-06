@@ -75,14 +75,55 @@ This is an infrastructure smoke trajectory, not a representative paper
 workload; formal c20/c40/c60 results still require separately captured held-out
 trajectories and a frozen ClawTune-derived KB.
 
+### Latest constrained-memory c60 gate
+
+Commit `70f7b31` is live-green on Kunpeng for a same-spec c60 comparison with a
+64 GiB ClawBox policy pool. Sixty Agent pairs offer 360 GiB of configured VM
+memory (60 x (2 GiB Runtime + 4 GiB Tool)), so the policy scope is deliberately
+overcommitted by 5.625x even though the physical host itself has about 2 TiB.
+This distinction matters: the claim is overcommit relative to the experiment's
+fixed physical-memory budget, not exhaustion of the entire shared machine.
+
+Both `resident` and eager `snapshot_pause` completed 60/60 Agents, produced one
+identical final-output hash, joined native Tool telemetry at 1.0 with zero loss,
+had zero host OOMs, and cleaned CubeSandbox inventory to zero. With the same
+trace, templates, fixed-stagger arrival schedule, replay timing, and budget,
+resident mean/peak host-memory deltas were 48.67/55.77 GB; paired snapshot was
+40.70/45.21 GB. Snapshot therefore reduced mean memory by 7.97 GB and peak by
+10.57 GB. It performed 178 pauses and 178 restores, taking 322.91 s and 36.22 s
+of aggregate service time respectively. Resident was faster on this short
+smoke (9.38 versus 6.54 correct Agents/min), while its memory budget caused 229
+recorded admission guard interventions and 4,541.89 aggregate blocked seconds;
+the snapshot arm needed no such intervention and blocked for 1.60 seconds.
+
+The raw result bundles are
+`/home/weitianc/clawbox-results-current/final-network-c60-resident-70f7b-r1`
+and `/home/weitianc/clawbox-results-current/final-network-c60-70f7b-r3`.
+Their summary SHA-256 values are `49877c403a72794eae46536fd9bb4551f6d55add6163eca46f07c082d60742f1`
+and `0af45bdc8b8b1eeaa8c3f569ff0a8c270d0e9dface4781c4a4d471f8ff315222`.
+These remain scale/correctness evidence, not the formal paper result: the
+workload is one tiny repeated trace and admission is static rather than a
+separately trained frozen P90 KB.
+
+The conservative admission implementations were also rechecked on the same
+real managed architecture at c5. Both `lifetime_full + resident` and
+`tool_full + resident` passed 5/5 with identical output hashes, 1.0 exact
+native Tool telemetry joins, zero telemetry loss/OOM, and zero sandbox leaks.
+That bundle is
+`/home/weitianc/clawbox-results-current/final-network-c5-conservative-70f7b-r1`
+(summary SHA-256
+`943c59c8cfd5fe6c4caaf738a11c9b7007a41ae0ee62bfebb393ed5d20d5d21e`).
+
 The same managed path is green at c4 and c8 for resident and paired snapshot.
 The c8 gate completed 8/8 Agents and 16/16 model steps per arm with 100% exact
 Agent Tool telemetry joins, zero OOMs, and zero leaks. Snapshot reduced mean
 host-memory delta from 6.34 GB to 4.27 GB in this burst smoke.
 `openclaw_exec_yield_ms` is explicit because OpenClaw backgrounds a command
 after 10 seconds by default; this smoke uses 120000 ms so incidental concurrent
-SSH startup does not alter its frozen trajectory. Representative traces must
-reuse the value recorded during capture.
+SSH startup does not alter its frozen trajectory. ClawBox writes the value to
+both the Runtime environment and OpenClaw's `tools.exec.backgroundMs` setting;
+the latter is required for long-lived/restored Runtime processes at c60.
+Representative traces must reuse the value recorded during capture.
 
 The identical-trace burst gate is also live-green at c20, c40, and c60 for
 resident and eager paired-snapshot policies. Every final arm completed all
@@ -253,11 +294,17 @@ Run the native replay arm after the endpoint gates:
 
 ```bash
 clawbox --output-root /data/clawbox-results experiment run \
-  examples/experiments/openclaw-cube-replay-c40.yaml --run-id openclaw-replay-c40
+  examples/experiments/openclaw-cube-replay-c60-overcommit.yaml \
+  --run-id openclaw-replay-c60-overcommit
 ```
 
+That checked-in smoke spec offers 360 GiB of VM allocations against a 64 GiB
+policy pool and compares resident with paired snapshot under identical inputs.
+Verify its pinned template IDs/digests and target node whenever the deployment
+is rebuilt; provenance validation intentionally rejects stale templates.
+
 For real inference, copy `examples/experiments/openclaw-cube.yaml` to a local
-machine file, replace its accepted template IDs/digests and node, then export
+machine file, verify its accepted template IDs/digests and node, then export
 the provider credential named by `inference.configuration.api_key_env`
 (`OPENCLAW_API_KEY` in the example) only in the Worker environment. The
 configured OpenAI-compatible `base_url` is called by the Worker-side managed

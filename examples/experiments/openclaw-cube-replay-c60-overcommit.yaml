@@ -1,5 +1,5 @@
 schema_version: 2
-experiment_id: openclaw-cube-replay-c40
+experiment_id: openclaw-cube-replay-c60-overcommit
 workload:
   source: recorded_trace
   input: examples/traces/openclaw-cube-replay.jsonl
@@ -39,8 +39,10 @@ sandbox:
   workspace: /workspace
   allow_internet_access: false
 execution:
-  concurrency_levels: [40]
+  concurrency_levels: [60]
   randomized_order: true
+  arrival_schedule: fixed_stagger
+  stagger_interval_seconds: 0.2
   random_seed: 20260905
   arm_timeout_seconds: 1800
   command_timeout_seconds: 300
@@ -48,9 +50,9 @@ execution:
   stabilization_seconds: 1
 resources:
   target_node: hostname-txyuq.foreman.pxe
-  pool_memory_budget_mib: 1600000
+  pool_memory_budget_mib: 65536
   emergency_free_memory_mib: 200000
-  checkpoint_restore_headroom_mib: 8192
+  checkpoint_restore_headroom_mib: 2048
   static_tool_memory_mib: 256
 policies:
   - {name: resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}

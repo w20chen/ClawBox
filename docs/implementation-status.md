@@ -2,6 +2,59 @@
 
 ## Current milestone
 
+### Constrained-memory c60 resident/snapshot comparison is green
+
+Commit `70f7b31` passes a current same-spec c60 comparison on Kunpeng. The
+experiment offered 60 real Runtime/Tool pairs, or 368,640 MiB of configured VM
+memory, against a 65,536 MiB ClawBox policy pool: 5.625x scoped memory
+overcommit. The host has about 2 TiB total RAM, so this is a controlled
+experiment-budget overcommit rather than a claim that the entire host was
+overfilled.
+
+| Run | Policy | Correct | Mean / peak host-memory delta | Agents/min | Admission blocked | Pauses / restores |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `final-network-c60-resident-70f7b-r1` | `tool_static` + resident | 60/60 | 48,668,725,577 / 55,773,052,928 B | 9.38 | 4,541.89 s | 0 / 0 |
+| `final-network-c60-70f7b-r3` | `tool_static` + eager paired snapshot | 60/60 | 40,703,573,263 / 45,207,425,024 B | 6.54 | 1.60 s | 178 / 178 |
+
+Both arms used the same immutable Runtime/Tool template IDs and image digests,
+trace SHA-256 `c6680fe3534234b07eb273c213a856300dfc69b0299a5c19241a1427bf87e007`,
+fixed-stagger schedule, replay `time_scale: 1.0`, and OpenClaw foreground
+timeout. Both produced 60 identical output hashes, a 1.0 native Tool exact-ID
+join rate, zero telemetry loss, zero host OOM, and zero remaining semantic
+sandboxes. Snapshot reduced mean host memory by 7.97 GB and peak by 10.57 GB.
+Its aggregate pause/restore service times were 322.91/36.22 s. Resident's 229
+`configured_memory_budget` interventions are recorded admission blocks, not
+unexpected host OOMs; snapshot recorded none.
+
+The result directories are under `/home/weitianc/clawbox-results-current/` on
+Kunpeng. Resident summary SHA-256 is
+`49877c403a72794eae46536fd9bb4551f6d55add6163eca46f07c082d60742f1`;
+snapshot is
+`0af45bdc8b8b1eeaa8c3f569ff0a8c270d0e9dface4781c4a4d471f8ff315222`.
+This is deterministic-managed-replay scale/correctness evidence, not the final
+paper comparison: it repeats one small trace and uses static admission. Formal
+evidence still needs representative heterogeneous held-out captures, a
+separately trained and frozen ClawTune P90 artifact, repetitions across the
+baseline matrix, and valid-provider real-LLM c1/c2 confirmation.
+
+The c60 fan-out also established that setting only
+`OPENCLAW_BASH_YIELD_MS` is insufficient for a long-lived/restored Runtime.
+ClawBox now writes `openclaw_exec_yield_ms` to OpenClaw's
+`tools.exec.backgroundMs` configuration as well. This prevents a foreground
+Tool command from silently becoming an OpenClaw background process under load;
+replay continues to fail closed if the captured semantics diverge.
+
+The same deployed commit passed a two-arm conservative baseline gate at c5:
+`lifetime_full + resident` and `tool_full + resident` each completed 5/5 with
+identical output hashes, 1.0 exact joins, zero telemetry loss, zero OOM, and
+zero remaining sandboxes. The bundle is
+`/home/weitianc/clawbox-results-current/final-network-c5-conservative-70f7b-r1`;
+summary SHA-256 is
+`943c59c8cfd5fe6c4caaf738a11c9b7007a41ae0ee62bfebb393ed5d20d5d21e`.
+Together with the static resident and paired-snapshot runs, this verifies the
+real managed code paths for the non-P90 baselines. It does not substitute for
+the frozen-KB policy comparison.
+
 ### Superseding live update: native managed c1 is green
 
 The real managed deterministic-replay path now passes c1 on Kunpeng. OpenClaw

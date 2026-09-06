@@ -20,17 +20,17 @@ inference:
     api_key_env: OPENCLAW_API_KEY
     repo_fingerprint: local/openclaw-cube-smoke
 runtime:
-  template_id: tpl-437392a8c57b48ccb32ef2ee
+  template_id: tpl-ec97143fa76e409981055c2f
   source_image_reference: 127.0.0.1:5000/clawbox/runtime-cube-arm64
-  image_digest: sha256:f4009d045edd932e0246e790af6e43bff36a295b9fb0dd41d2aa38864ea132d0
+  image_digest: sha256:f687b22f7ccf39ac81f30ac6bf1e47979837a3a95bb3e20e52c546e26dac8186
   architecture: arm64
   vcpu: 2
   memory_mib: 2048
   workspace: /workspace
 sandbox:
-  template_id: tpl-4a67524e1fcd41859905c77b
+  template_id: tpl-72f8a42d8fe746279d0bb80a
   source_image_reference: 127.0.0.1:5000/clawbox/tool-cube-arm64
-  image_digest: sha256:95ef090dc3036f7f2acd9190234f04d07a226b95b6855e855adf76a4e69aa092
+  image_digest: sha256:f0d65d4474aa97ca471062771bda8b0bdffa831e34b8536a522d56d4e0b7cc10
   architecture: arm64
   vcpu: 2
   memory_mib: 4096
