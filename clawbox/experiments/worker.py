@@ -1402,7 +1402,15 @@ class ExperimentWorker:
                                 active_reservations[execution_id] = amount
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
-                        except Exception:
+                        except Exception as exc:
+                            events.write({
+                                "event": "tool_admission_failed",
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "reservation_acquired": reservation_acquired,
+                            })
                             if reservation_acquired:
                                 coordinator.release(session_id, amount)
                             coordinator.set_tool_active(session_id, False)
