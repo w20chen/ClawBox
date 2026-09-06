@@ -16,7 +16,7 @@ MIB = 1024 * 1024
 class Pausable(Protocol):
     @property
     def resident(self) -> bool: ...
-    def checkpoint_and_evict(self) -> float: ...
+    def checkpoint_and_evict(self) -> float | None: ...
 
 
 @dataclass(slots=True)
@@ -40,10 +40,10 @@ class PolicyEventExecutor:
             max_workers=max(1, workers), thread_name_prefix="policy-event"
         )
 
-    def submit(self, operation: Callable[..., object], *args: object, **kwargs: object) -> None:
+    def submit(self, operation: Callable[..., object], *args: object, **kwargs: object):
         # ThreadPoolExecutor.submit only enqueues work; callers are never
         # allowed to perform checkpoint/restore work in the gateway callback.
-        self._executor.submit(operation, *args, **kwargs)
+        return self._executor.submit(operation, *args, **kwargs)
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=False)
@@ -54,13 +54,16 @@ class PolicyCoordinator:
 
     def __init__(self, policy: PolicySpec, *, budget_mib: int,
                  emergency_free_mib: int, operation_headroom_mib: int,
-                 physical_sample: Callable[[], tuple[int, int]] | None = None) -> None:
+                 physical_sample: Callable[[], tuple[int, int]] | None = None,
+                 on_pressure_pause: Callable[[SessionState, float, str], None] | None = None,
+                 ) -> None:
         self.policy = policy
         self.budget_bytes = budget_mib * MIB
         self.emergency_free_bytes = emergency_free_mib * MIB
         self.operation_headroom_bytes = operation_headroom_mib * MIB
         self.operation_headroom_mib = operation_headroom_mib
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
+        self.on_pressure_pause = on_pressure_pause
         self._condition = Condition()
         # Incremental reservations cover memory not represented by the current
         # host sample yet (VM create/restore) or memory a Tool is predicted to
@@ -192,8 +195,13 @@ class PolicyCoordinator:
                         finally:
                             self._condition.acquire()
                         victim.eviction_eligible = False
-                        self.pause_count += 1
-                        self.pause_service_seconds += elapsed
+                        if elapsed is not None:
+                            self.pause_count += 1
+                            self.pause_service_seconds += elapsed
+                            if self.on_pressure_pause is not None:
+                                self.on_pressure_pause(
+                                    victim, elapsed, "memory_admission",
+                                )
                         continue
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -356,8 +364,13 @@ class PolicyCoordinator:
                 elapsed = victim.lifecycle.checkpoint_and_evict()
                 with self._condition:
                     victim.eviction_eligible = False
-                    self.pause_count += 1
-                    self.pause_service_seconds += elapsed
+                    if elapsed is not None:
+                        self.pause_count += 1
+                        self.pause_service_seconds += elapsed
+                        if self.on_pressure_pause is not None:
+                            self.on_pressure_pause(
+                                victim, elapsed, "cube_restore_capacity",
+                            )
                 elapsed = operation()  # second rejection is deliberately final
                 self.resume_count += 1
                 self.resume_service_seconds += elapsed

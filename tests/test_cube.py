@@ -259,6 +259,7 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert executor.execute("printf ok", 5).stdout == "ok"
     lifecycle.checkpoint_and_evict()
     assert not lifecycle.resident
+    assert lifecycle.checkpoint_and_evict() is None
     lifecycle.restore()
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()

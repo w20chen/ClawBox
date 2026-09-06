@@ -156,7 +156,7 @@ class CubeSandboxLifecycle:
                 )
                 raise
 
-    def checkpoint_and_evict(self) -> float:
+    def checkpoint_and_evict(self) -> float | None:
         """Ask CubeSandbox to snapshot the VM and destroy its live runtime.
 
         CubeSandbox commit 64102d9 implements its pause API as
@@ -165,6 +165,13 @@ class CubeSandboxLifecycle:
         before/after host observations below remain explicit in every record.
         """
         with self._lock:
+            # Pressure eviction and the session's delayed eager callback can
+            # converge on the same idle VM. The lifecycle lock serializes the
+            # calls; the loser observes the already-swapped state and treats
+            # the desired state as satisfied instead of failing an unrelated
+            # Tool admission.
+            if self._state is SandboxState.SWAPPED:
+                return None
             if self.sandbox is None or self._state is not SandboxState.RUNNING:
                 raise LifecycleError("CubeSandbox is not resident")
             before = self._state

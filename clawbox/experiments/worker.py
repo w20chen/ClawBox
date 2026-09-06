@@ -544,11 +544,22 @@ class ExperimentWorker:
                 )
         events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
         sampler = NodeMemorySampler(interval_s=arm.execution.memory_sample_interval_seconds)
+        def record_pressure_pause(state: Any, elapsed: float, reason: str) -> None:
+            timings = state.lifecycle.timings
+            events.write({
+                "event": "sandbox_paused",
+                "session_id": state.session_id,
+                "role": "tool",
+                "service_seconds": elapsed,
+                "reason": reason,
+                "lifecycle_timing": timings[-1] if timings else None,
+            })
         coordinator = PolicyCoordinator(
             arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
             emergency_free_mib=arm.resources.emergency_free_memory_mib,
             operation_headroom_mib=arm.resources.checkpoint_restore_headroom_mib,
             physical_sample=sampler.current,
+            on_pressure_pause=record_pressure_pause,
         )
         prediction_provider = None
         if arm.agent.driver is AgentDriver.OPENCLAW and arm.policy.admission is AdmissionPolicy.TOOL_P90:
@@ -845,6 +856,23 @@ class ExperimentWorker:
         wait_state: dict[str, Any] = {}
         completed_model_requests: set[str] = set()
         policy_event_errors: list[str] = []
+        pending_policy_events: list[Any] = []
+        pending_policy_events_lock = Lock()
+
+        def submit_policy_event(operation: Any, *args: Any) -> None:
+            future = policy_events.submit(operation, *args)
+            with pending_policy_events_lock:
+                pending_policy_events.append(future)
+
+        def drain_policy_events() -> None:
+            """Finish this session's queued lifecycle work before validation."""
+            while True:
+                with pending_policy_events_lock:
+                    pending = [item for item in pending_policy_events if not item.done()]
+                if not pending:
+                    return
+                for future in pending:
+                    future.result(timeout=arm.execution.arm_timeout_seconds)
 
         if arm.agent.driver is AgentDriver.OPENCLAW:
             if self.model_gateway is None:
@@ -916,15 +944,16 @@ class ExperimentWorker:
                                 "runtime_pause_request_id": event.get("request_id"),
                                 "runtime_agent_pid_before_pause": runtime_pid_before,
                             })
-                    coordinator.pause_count += 1
-                    coordinator.pause_service_seconds += tool_elapsed
-                    events.write({
-                        "event": "sandbox_paused", "session_id": session_id,
-                        "role": "tool", "service_seconds": tool_elapsed,
-                        "reason": "model_request_wait",
-                        "request_id": event.get("request_id"),
-                        "lifecycle_timing": lifecycle.timings[-1],
-                    })
+                    if tool_elapsed is not None:
+                        coordinator.pause_count += 1
+                        coordinator.pause_service_seconds += tool_elapsed
+                        events.write({
+                            "event": "sandbox_paused", "session_id": session_id,
+                            "role": "tool", "service_seconds": tool_elapsed,
+                            "reason": "model_request_wait",
+                            "request_id": event.get("request_id"),
+                            "lifecycle_timing": lifecycle.timings[-1],
+                        })
                     if runtime_elapsed is not None:
                         coordinator.pause_count += 1
                         coordinator.pause_service_seconds += runtime_elapsed
@@ -1012,7 +1041,7 @@ class ExperimentWorker:
 
             def on_model_request_started(event: dict[str, Any]) -> None:
                 """Enqueue lifecycle work; never checkpoint in the gateway callback."""
-                policy_events.submit(handle_model_request_started, event)
+                submit_policy_event(handle_model_request_started, event)
 
             def handle_model_request_started(event: dict[str, Any]) -> None:
                 nonlocal wait_timer, restore_timer
@@ -1056,7 +1085,7 @@ class ExperimentWorker:
                     if delay is not None:
                         wait_timer = Timer(
                             max(0.0, float(delay) - elapsed_since_request),
-                            lambda: policy_events.submit(pause_for_model_wait, event),
+                            lambda: submit_policy_event(pause_for_model_wait, event),
                         )
                         wait_timer.daemon = True
                         wait_timer.start()
@@ -1064,7 +1093,7 @@ class ExperimentWorker:
                         lead = float(arm.policy.prefetch_lead_seconds or 0.0)
                         restore_timer = Timer(
                             max(0.0, prediction_wait - lead - elapsed_since_request),
-                            lambda: policy_events.submit(restore_for_model_wait, event),
+                            lambda: submit_policy_event(restore_for_model_wait, event),
                         )
                         restore_timer.daemon = True
                         restore_timer.start()
@@ -1590,6 +1619,8 @@ class ExperimentWorker:
                             if active_reservations or not lifecycle.resident:
                                 return
                             pause_s = lifecycle.checkpoint_and_evict()
+                            if pause_s is None:
+                                return
                             coordinator.pause_count += 1
                             coordinator.pause_service_seconds += pause_s
                             events.write({
@@ -1600,7 +1631,7 @@ class ExperimentWorker:
                             })
                     if (arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
                             and arm.policy.eviction is EvictionPolicy.EAGER):
-                        policy_events.submit(eager_pause)
+                        submit_policy_event(eager_pause)
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
                                   "exit_code": request.get("exit_code"),
@@ -1681,6 +1712,17 @@ class ExperimentWorker:
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                # No Agent SSH process remains after run_openclaw returns.
+                # Drain callbacks already queued by model/tool completions so
+                # none can pause a VM underneath collection or validation.
+                with wait_lock:
+                    if wait_timer is not None:
+                        wait_timer.cancel()
+                        wait_timer = None
+                    if restore_timer is not None:
+                        restore_timer.cancel()
+                        restore_timer = None
+                drain_policy_events()
                 timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
                 policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"
@@ -1975,11 +2017,12 @@ class ExperimentWorker:
                 # the pending pause is cancelled just as it is in ModelGateway.
                 if time.monotonic() - wait_started < duration:
                     pause_s = lifecycle.checkpoint_and_evict()
-                    coordinator.pause_count += 1
-                    coordinator.pause_service_seconds += pause_s
-                    events.write({"event": "sandbox_paused", "session_id": session_id,
-                                  "role": "tool", "service_seconds": pause_s,
-                                  "lifecycle_timing": lifecycle.timings[-1]})
+                    if pause_s is not None:
+                        coordinator.pause_count += 1
+                        coordinator.pause_service_seconds += pause_s
+                        events.write({"event": "sandbox_paused", "session_id": session_id,
+                                      "role": "tool", "service_seconds": pause_s,
+                                      "lifecycle_timing": lifecycle.timings[-1]})
                     remaining = max(0.0, duration - (time.monotonic() - wait_started))
                     if prefetch_lead is not None:
                         restore_at = max(
