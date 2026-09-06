@@ -578,15 +578,25 @@ class ExperimentWorker:
         arm_started_monotonic = time.monotonic()
         try:
             with ThreadPoolExecutor(max_workers=arm.concurrency, thread_name_prefix="agent") as pool:
-                futures = [pool.submit(self._run_session, arm, index, coordinator, events,
-                                       policy_events, prediction_provider,
-                                       sandbox_create_gate, sampler.observe,
-                                       arm_started_wall, arm_started_monotonic)
-                           for index in range(arm.concurrency)]
+                futures = {
+                    pool.submit(
+                        self._run_session, arm, index, coordinator, events,
+                        policy_events, prediction_provider, sandbox_create_gate,
+                        sampler.observe, arm_started_wall, arm_started_monotonic,
+                    ): index
+                    for index in range(arm.concurrency)
+                }
                 for future in as_completed(futures, timeout=arm.execution.arm_timeout_seconds):
                     try:
                         sessions.append(future.result())
                     except Exception as exc:  # one failed session fails the whole arm
+                        index = futures[future]
+                        events.write({
+                            "event": "session_failed",
+                            "session_id": f"{arm.arm_id}-{index:04d}",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        })
                         failure = failure or exc
             if failure is not None:
                 raise failure
@@ -1756,7 +1766,9 @@ class ExperimentWorker:
                     with wait_lock:
                         if not runtime_lifecycle.resident:
                             return None
-                        return runtime_executor.execute(command, timeout)
+                        return _execute_idempotent(
+                            runtime_executor, command, timeout,
+                        )
 
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
