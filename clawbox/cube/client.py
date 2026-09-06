@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from .api_retry import read_with_backoff
+from .api_retry import read_with_backoff, retry_with_backoff
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +78,7 @@ class CubeSandboxClient:
                  sandbox_class: type | None = None, template_class: type | None = None,
                  config: Any = None,
                  command_stream_grace_s: float = 15.0,
-                 tcp_endpoint_attempts: int = 5,
+                 tcp_endpoint_attempts: int = 10,
                  tcp_endpoint_initial_delay_s: float = 0.25,
                  tcp_endpoint_max_delay_s: float = 2.0) -> None:
         if sandbox_class is None:
@@ -135,7 +135,18 @@ class CubeSandboxClient:
         return sandbox
 
     def connect_sandbox(self, sandbox_id: str) -> Any:
-        sandbox = self._sandbox_class.connect(sandbox_id, **self._sdk_kwargs())
+        # Resuming the same immutable sandbox ID is idempotent. CubeMaster can
+        # transiently reject or drop HTTP requests during a large restore
+        # wave, so retry the control-plane transport without creating a new VM.
+        sandbox = retry_with_backoff(
+            lambda: self._sandbox_class.connect(
+                sandbox_id, **self._sdk_kwargs()
+            ),
+            label=f"resume sandbox {sandbox_id}",
+            attempts=10,
+            initial_delay_s=0.25,
+            max_delay_s=2.0,
+        )
         self._handles[sandbox_id] = sandbox
         return sandbox
 
