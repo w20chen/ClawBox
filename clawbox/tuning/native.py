@@ -11,7 +11,7 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -21,6 +21,10 @@ NATIVE_MANIFEST_SCHEMA = "clawbox.native_telemetry_manifest_v1"
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
+_COLD_START_FILES = {
+    "clause": "clause-resource-kb.json",
+    "runtime": "runtime-tool-resource-kb.json",
+}
 
 
 class NativeArtifact(BaseModel):
@@ -163,6 +167,58 @@ def _clawtune_api():
         ToolCallQuery,
         _observations_from_call,
         _validate_artifact,
+    )
+
+
+def _cold_start_directory() -> Path:
+    """Resolve the pinned ClawTune public-prior directory."""
+
+    candidates = [
+        os.getenv("CLAWTUNE_COLD_START_DIR"),
+        str(Path(__file__).resolve().parents[3] / "ClawTune" / "traces" / "tool-resource"),
+        "/opt/clawtune/cold-start/tool-resource",
+        "/opt/clawtune/traces/tool-resource",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        directory = Path(candidate)
+        if all((directory / name).is_file() for name in _COLD_START_FILES.values()):
+            return directory
+    raise RuntimeError(
+        "pinned ClawTune cold-start KB is unavailable; set CLAWTUNE_COLD_START_DIR"
+    )
+
+
+def _load_cold_start_pair(
+    ClauseResourceKB: Any, RuntimeToolResourceKB: Any,
+) -> tuple[Any, Any, dict[str, str]]:
+    """Load a public-only cold-start pair and reject state leakage."""
+
+    directory = _cold_start_directory()
+    payloads: dict[str, dict[str, Any]] = {}
+    digests: dict[str, str] = {}
+    for kind, filename in _COLD_START_FILES.items():
+        path = directory / filename
+        raw = path.read_bytes()
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid ClawTune cold-start snapshot {path}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"ClawTune cold-start snapshot {path} must be an object")
+        if payload.get("repo"):
+            raise ValueError(f"ClawTune cold-start snapshot {path} contains repo state")
+        if payload.get("pending"):
+            raise ValueError(f"ClawTune cold-start snapshot {path} contains pending state")
+        if payload.get("last_query_ts") is not None:
+            raise ValueError(f"ClawTune cold-start snapshot {path} has query history")
+        payloads[kind] = payload
+        digests[kind] = hashlib.sha256(raw).hexdigest()
+    return (
+        ClauseResourceKB.from_json_obj(payloads["clause"]),
+        RuntimeToolResourceKB.from_json_obj(payloads["runtime"]),
+        digests,
     )
 
 
@@ -317,9 +373,20 @@ def project_native_manifests(
             }
         )
 
-    runtime_kb = RuntimeToolResourceKB.fit_public(completed_calls)
+    # The public layer is the pinned ClawTune cold-start corpus.  Observations
+    # belonging to this (tenant, repo) identity refine only its repo layer.
+    # Rebuilding from all accepted manifests makes each published generation
+    # cumulative while preserving the same immutable public prior.
+    clause_kb, runtime_kb, cold_start_digests = _load_cold_start_pair(
+        ClauseResourceKB, RuntimeToolResourceKB,
+    )
     for call in completed_calls:
         runtime_kb.observe_completed_call(call)
+        if call.command is not None:
+            # Keep a causal per-domain outer-tool aggregate for admission
+            # queries made before the next concrete command is known.  The
+            # original record still trains exact/prefix/head repo nodes.
+            runtime_kb.observe_completed_call(replace(call, command=None))
     advance_ts = max(call.ts_end for call in completed_calls) + 1e-6
     first = completed_calls[0]
     runtime_kb.query(
@@ -332,7 +399,6 @@ def project_native_manifests(
         )
     )
 
-    clause_kb = ClauseResourceKB.fit_public(clause_observations)
     for observation in clause_observations:
         clause_kb.observe_completed_clause(observation)
     clause_kb._advance(max(obs.ts_end for obs in clause_observations) + 1e-6)
@@ -342,7 +408,11 @@ def project_native_manifests(
     # The pinned native readers are the compatibility gate, not shape checks.
     RuntimeToolResourceKB.from_json_obj(runtime_snapshot)
     ClauseResourceKB.from_json_obj(clause_snapshot)
-    source_digest = hashlib.sha256("\n".join(sorted(digests)).encode()).hexdigest()
+    source_inputs = [
+        *(f"artifact:{digest}" for digest in sorted(digests)),
+        *(f"cold-start:{kind}:{digest}" for kind, digest in sorted(cold_start_digests.items())),
+    ]
+    source_digest = hashlib.sha256("\n".join(source_inputs).encode()).hexdigest()
     return NativeProjection(
         clause_snapshot=clause_snapshot,
         runtime_snapshot=runtime_snapshot,
@@ -352,5 +422,10 @@ def project_native_manifests(
         evidence={
             "runs": sorted({item.run_id for item in manifests}),
             "executions": evidence_rows,
+            "cold_start": {
+                "source": "pinned_clawtune",
+                "clause_sha256": cold_start_digests["clause"],
+                "runtime_sha256": cold_start_digests["runtime"],
+            },
         },
     )

@@ -6,8 +6,8 @@ described in [experiment operations](../docs/experiment-operations.md) and
 
 `deploy/cubesandbox/` contains the active CubeSandbox integration assets:
 
-- pinned semantic TCP endpoint, HostPort hairpin, and template-provenance
-  patches;
+- pinned semantic TCP endpoint, HostPort hairpin, template-provenance, and
+  checkpoint phase-timing patches;
 - the Kunpeng CubeSandbox values overlay;
 - kprobe-capable guest-kernel metadata and configuration;
 - source preparation helpers.

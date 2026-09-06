@@ -19,9 +19,9 @@ A Kubernetes Pod IP is not a valid final Tool address. The old Kunpeng
 Kubernetes deployment remains documented in
 `kunpeng920-reproduction-runbook.md` for historical diagnosis only.
 
-CubeSandbox base version: `v0.7.0`. ClawBox applies three source-controlled
-patches for the semantic TCP endpoint, same-node port forwarding, and template
-image provenance.
+CubeSandbox base version: `v0.7.0`. ClawBox applies four source-controlled
+patches for the semantic TCP endpoint, same-node port forwarding, template
+image provenance, and checkpoint phase timing.
 
 ## Install on a new machine
 

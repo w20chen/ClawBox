@@ -249,6 +249,35 @@ def test_run_b_native_prediction_loads_exact_run_a_generation(db):
     assert runtime["peak_cpu_cores"].evidence_count == 1
 
 
+def test_each_identity_domain_refines_the_same_cold_start_independently(db):
+    ingest(db, make_manifest("exec-a", tenant="tenant-a", rss=16 * 1024**2))
+    ingest(db, make_manifest("exec-a", tenant="tenant-b", rss=64 * 1024**2))
+
+    snapshots = [
+        native_snapshot_to_dict(latest_native_snapshot(
+            db, tenant_id=tenant, repo_fingerprint=REPO,
+        ))
+        for tenant in ("tenant-a", "tenant-b")
+    ]
+    from tool_resource.runtime_kb import RuntimeToolResourceKB, ToolCallQuery
+
+    predictions = []
+    for snapshot in snapshots:
+        kb = RuntimeToolResourceKB.from_json_obj(snapshot["runtime_snapshot"])
+        predictions.append(kb.query(ToolCallQuery(
+            repo=REPO,
+            tool_name="exec",
+            command="python -m pytest -q",
+            ts_start=1_800_000_000.0,
+            ambient_before_mb=0.0,
+        ))["peak_memory_mb"])
+
+    assert [snapshot["generation"] for snapshot in snapshots] == [1, 1]
+    assert [prediction.scope for prediction in predictions] == ["repo", "repo"]
+    assert [prediction.conditional_p90 for prediction in predictions] == [16.0, 64.0]
+    assert snapshots[0]["evidence"]["cold_start"] == snapshots[1]["evidence"]["cold_start"]
+
+
 def test_runtime_loader_publishes_the_exact_atomic_pair(db, tmp_path):
     ingest(db, make_manifest("exec-a", run_id="run-a"))
     snapshot = native_snapshot_to_dict(latest_native_snapshot(

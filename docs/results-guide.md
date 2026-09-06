@@ -134,6 +134,22 @@ prove that host memory was reclaimed. Use
 memory samples for that conclusion. Any asynchronous reclamation after the API
 returns is outside the recorded service time.
 
+Because CubeSandbox exposes checkpoint-and-evict as one synchronous Pause API,
+ClawBox's `checkpoint.service_seconds` remains the end-to-end value. The patched
+Cubelet additionally emits two structured `sandbox lifecycle phase completed`
+log records for every successful pause:
+
+| `operation` | `phase` | Meaning |
+| --- | --- | --- |
+| `checkpoint` | `snapshot_create` | Build and persist the resumable memory, rootfs, metadata, catalog, and remote package |
+| `checkpoint` | `swap_out` | Remove the live runtime while retaining the paused tombstone |
+
+Each record contains `sandboxID`, `status`, and `duration_ms`; successful phase
+records also carry `snapshotID`. Snapshot failures emit an error phase record,
+while swap-out records report either `ok` or `error`. This separates phase
+costs without misrepresenting the public Pause API as two independently callable
+operations.
+
 Creation is reported separately from Agent completion time. Checkpoint and
 restore delays that occur during workload execution affect completion time;
 final destroy time is cleanup overhead.
