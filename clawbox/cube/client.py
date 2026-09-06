@@ -320,15 +320,37 @@ class CubeSandboxClient:
             return
         sandbox_id = sandbox_or_id
         handle = self._handles.pop(sandbox_id, None)
-        if handle is None:
-            info = next((item for item in self._sandbox_class.list_v2(**self._sdk_kwargs())
-                         if self._info_id(item) == sandbox_id), None)
-            if info is None:
-                return
-            # Constructing an SDK handle from list data lets kill use the official
-            # SDK without connect(), which would unnecessarily resume a paused VM.
-            handle = self._sandbox_class(info, self._config)
-        handle.kill()
+
+        def kill_once() -> None:
+            nonlocal handle
+            if handle is None:
+                info = next((
+                    item for item in self._sandbox_class.list_v2(**self._sdk_kwargs())
+                    if self._info_id(item) == sandbox_id
+                ), None)
+                if info is None:
+                    return
+                # Constructing an SDK handle from list data lets kill use the
+                # official API without unnecessarily resuming a paused VM.
+                handle = self._sandbox_class(info, self._config)
+            try:
+                handle.kill()
+            except Exception:
+                # A lost delete response is successful if a fresh semantic
+                # list proves the exact sandbox identity is already absent.
+                still_present = any(
+                    self._info_id(item) == sandbox_id
+                    for item in self._sandbox_class.list_v2(**self._sdk_kwargs())
+                )
+                if not still_present:
+                    return
+                handle = None
+                raise
+
+        retry_with_backoff(
+            kill_once, label=f"kill sandbox {sandbox_id}", attempts=10,
+            initial_delay_s=0.25, max_delay_s=2.0,
+        )
 
     def get_sandbox_metrics(self, sandbox: Any) -> dict[str, Any] | None:
         getter = getattr(sandbox, "get_metrics", None)

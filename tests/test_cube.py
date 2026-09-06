@@ -608,7 +608,7 @@ def test_cleanup_uses_journal_and_metadata_fallback(tmp_path: Path) -> None:
     assert second.sandbox_id not in _Sandbox.items
 
 
-def test_cleanup_attempts_every_owned_sandbox_after_one_kill_fails() -> None:
+def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> None:
     class PartiallyFailingSandbox(_Sandbox):
         failed = False
 
@@ -622,13 +622,9 @@ def test_cleanup_attempts_every_owned_sandbox_after_one_kill_fails() -> None:
     client = CubeSandboxClient(sandbox_class=PartiallyFailingSandbox)
     first = client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
     second = client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
-    with pytest.raises(RuntimeError, match="kill errors="):
-        client.kill_owned_sandboxes("task")
-    # The first failure is reported, but the second owned sandbox was still
-    # attempted and removed.  A retry can reclaim the failed first handle.
-    assert second.sandbox_id not in PartiallyFailingSandbox.items
-    assert first.sandbox_id in PartiallyFailingSandbox.items
     client.kill_owned_sandboxes("task")
+    assert second.sandbox_id not in PartiallyFailingSandbox.items
+    assert first.sandbox_id not in PartiallyFailingSandbox.items
     assert PartiallyFailingSandbox.items == {}
 
 
