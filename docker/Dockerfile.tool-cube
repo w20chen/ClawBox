@@ -10,7 +10,7 @@ COPY toolbridge/*.go ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath \
       -ldflags='-s -w -buildid=' -o /out/tool-bridge .
 
-FROM 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:8669adcd874da84287102b68ca9d83e045a7ec6b82a6783878ae3612050d19a2
+FROM 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:f74f1cb744c70836966e9162deea8ae237b72547b34b4275855eb50d18cb7423
 ARG CUBE_GUEST_KERNEL_DIGEST=unspecified
 LABEL io.clawbox.cube-guest-kernel-digest="${CUBE_GUEST_KERNEL_DIGEST}"
 USER root
