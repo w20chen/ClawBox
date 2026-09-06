@@ -30,9 +30,26 @@ narrow duplicate-user reconnect matcher remains as fail-closed compatibility,
 but the relay run did not need it. Per-request snapshot metadata is request-scoped
 rather than reusing a prior wait.
 
-The temporary marker trace is smoke-only. Next live gates are c4/c8 with frozen
-exact smoke inputs; representative capture, frozen ClawTune KB calibration, formal
-c20/c40/c60 comparisons, and real-provider c1/c2/c4 remain outstanding.
+The temporary marker trace is smoke-only. Managed c4 and c8 are now green for
+resident and paired snapshot policies. The superseding c8 result is
+`/tmp/clawbox-managed-scale-smoke/live-c8-yield120` (summary SHA-256
+`ba1bbecb605ec39441007082e40abf3b6afbe5baa8a58437c5cbc709a48607dc`).
+Each arm completed 8/8 Agents, 16/16 exact model steps, and 8/8 logical Agent
+Tool observations with 100% joins, zero telemetry loss, zero OOM, and zero
+leaks. Snapshot mean host-memory delta was 4,268,019,033 bytes versus
+6,336,559,752 bytes resident. These are burst infrastructure numbers, not paper
+results.
+
+The initial c8 pilot remains at
+`/tmp/clawbox-managed-scale-smoke/live-c4-c8-resident-snapshot`. Under
+contention, OpenClaw's implicit 10-second exec foreground window returned
+`Command still running` for the trivial SSH command; exact replay rejected the
+changed next request. ClawBox now exposes the installed
+`OPENCLAW_BASH_YIELD_MS` behavior as `openclaw_exec_yield_ms`, validates its
+10--120000 ms range, and records it in the hashed experiment spec. The smoke
+rerun used 120000; formal trajectories must reuse their capture value. Next
+gates are representative exact-input capture, frozen ClawTune KB calibration,
+formal c20/c40/c60 comparisons, and real-provider c1/c2/c4.
 
 Installed OpenClaw 2026.7.1 sanitizes inherited `_TOKEN` variables before its
 SSH backend spawn and resolves a missing hook `host` only after

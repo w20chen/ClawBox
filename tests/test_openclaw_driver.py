@@ -75,7 +75,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
     result = run_openclaw(
         prompt="Create /workspace/result.txt", session_id="session-a",
-        configuration={"base_url": "http://model.test/v1", "model": "test-model"},
+        configuration={"base_url": "http://model.test/v1", "model": "test-model",
+                       "openclaw_exec_yield_ms": 120000},
         ssh=NativeSSHConfig(
             target="executor@2222-tool.cube.local:2222",
             identity_private_key="PRIVATE KEY\n",
@@ -102,6 +103,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
+    assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "/bin/ssh" in "\n".join(commands)
     assert config["agents"]["defaults"]["sandbox"]["ssh"]["command"].endswith(
         "/bin/ssh"
@@ -247,6 +249,23 @@ def test_openclaw_runner_rejects_unsafe_credential_environment(
             configuration={"base_url": "http://model.test/v1", "model": "test-model",
                            "api_key_env": "OPENCLAW_API_KEY;env"},
             ssh=NativeSSHConfig("executor@tool:2222", "private", "ssh-ed25519 public"),
+            policy_control=PolicySession(), runtime_executor=object(),
+            output_dir=tmp_path, timeout_seconds=60,
+        )
+
+
+@pytest.mark.parametrize("value", [True, 9, 120001, 10.5, "ten"])
+def test_openclaw_runner_rejects_invalid_exec_yield(value, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    with pytest.raises(ValueError, match="openclaw_exec_yield_ms"):
+        run_openclaw(
+            prompt="test", session_id="session-a",
+            configuration={"base_url": "http://model.test/v1", "model": "test-model",
+                           "openclaw_exec_yield_ms": value},
+            ssh=NativeSSHConfig(
+                "executor@tool:2222", "private", "ssh-ed25519 public",
+                sandbox_id="tool-a",
+            ),
             policy_control=PolicySession(), runtime_executor=object(),
             output_dir=tmp_path, timeout_seconds=60,
         )

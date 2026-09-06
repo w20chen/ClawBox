@@ -43,6 +43,25 @@ OpenClaw's duplicate-user reconnect remains as compatibility for older Runtime
 paths, but unrelated duplicate turns still fail closed and the relay gate did
 not require normalization.
 
+Managed concurrency correctness is now green at c4 and c8 for resident and
+paired snapshot policies. The c8 result is
+`/tmp/clawbox-managed-scale-smoke/live-c8-yield120`; summary SHA-256 is
+`ba1bbecb605ec39441007082e40abf3b6afbe5baa8a58437c5cbc709a48607dc`.
+Both arms completed eight Agents, sixteen exact model steps, and eight logical
+Agent Tool observations with 100% exact joins, no telemetry loss, no OOM, and
+no sandbox leaks. Resident mean/peak host-memory deltas were 6,336,559,752 /
+7,512,735,744 bytes; snapshot was 4,268,019,033 / 5,233,737,728 bytes. Because
+all sessions ran the same tiny trace as a simultaneous burst, these values are
+infrastructure evidence only.
+
+The first c8 attempt proved that OpenClaw's default 10-second exec foreground
+window is a workload-semantic parameter: ARM contention caused a trivial SSH
+command to return a background-session handle, so exact replay rejected the
+next request rather than concealing the change. `openclaw_exec_yield_ms` now
+maps explicitly to the installed `OPENCLAW_BASH_YIELD_MS`, is range-validated,
+and remains in the hashed experiment configuration. The successful smoke used
+120000 ms. Formal replay must use the value captured with each trajectory.
+
 This gate exposed and fixed four installed-version integration details. The
 OpenClaw environment sanitizer removes names ending in `_TOKEN`, so ClawBox
 passes the per-session policy capability as `CLAWBOX_POLICY_CONTROL_AUTH` and

@@ -238,6 +238,20 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     gateway_key_env = "CLAWBOX_MODEL_GATEWAY_TOKEN"
     upstream_url = model_gateway.url if model_gateway is not None else base_url
     upstream_key_env = gateway_key_env if model_gateway is not None else key_env
+    exec_yield_value = configuration.get("openclaw_exec_yield_ms")
+    exec_yield_export = ""
+    if exec_yield_value is not None:
+        if isinstance(exec_yield_value, bool):
+            raise ValueError("openclaw_exec_yield_ms must be an integer from 10 to 120000")
+        try:
+            exec_yield_ms = int(exec_yield_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "openclaw_exec_yield_ms must be an integer from 10 to 120000"
+            ) from exc
+        if str(exec_yield_ms) != str(exec_yield_value).strip() or not 10 <= exec_yield_ms <= 120000:
+            raise ValueError("openclaw_exec_yield_ms must be an integer from 10 to 120000")
+        exec_yield_export = f"OPENCLAW_BASH_YIELD_MS={exec_yield_ms} "
     if "api_key" in configuration:
         raise ValueError("OpenClaw API keys must come from an environment variable")
     if not ssh.sandbox_id:
@@ -275,7 +289,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
         f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
         f"CLAWBOX_SSH_HOST_KEY_ALIAS={shlex.quote(host_key_alias)} "
-        f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
+        + exec_yield_export
+        + f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
 
     def invoke(args: list[str], *, input_value: str | None = None,

@@ -75,6 +75,15 @@ This is an infrastructure smoke trajectory, not a representative paper
 workload; formal c20/c40/c60 results still require separately captured held-out
 trajectories and a frozen ClawTune-derived KB.
 
+The same managed path is green at c4 and c8 for resident and paired snapshot.
+The c8 gate completed 8/8 Agents and 16/16 model steps per arm with 100% exact
+Agent Tool telemetry joins, zero OOMs, and zero leaks. Snapshot reduced mean
+host-memory delta from 6.34 GB to 4.27 GB in this burst smoke.
+`openclaw_exec_yield_ms` is explicit because OpenClaw backgrounds a command
+after 10 seconds by default; this smoke uses 120000 ms so incidental concurrent
+SSH startup does not alter its frozen trajectory. Representative traces must
+reuse the value recorded during capture.
+
 For a fresh deployment, prepare the pinned CubeSandbox source and its matching
 SDK before building the CubeSandbox API/release bundle:
 
