@@ -471,6 +471,13 @@ def collect_and_validate_native_tool_artifacts(
     if result is None:  # Defensive: the final retry branch above always raises.
         raise RuntimeError("Tool artifact collection produced no result")
     raw_files = _decode_framed_artifacts(result.stdout)
+    root = output_dir / "tool-artifacts" / session_id
+    root.mkdir(parents=True, exist_ok=True)
+    for name, raw in raw_files.items():
+        target = root / name
+        temporary = target.with_name(target.name + ".next")
+        temporary.write_bytes(raw)
+        temporary.replace(target)
     bridge_raw = raw_files.pop("tool-bridge.jsonl", None)
     if bridge_raw is None:
         raise ValueError("Tool artifact collection is missing tool-bridge.jsonl")
@@ -499,21 +506,22 @@ def collect_and_validate_native_tool_artifacts(
         _runtime_spans(runtime_trace_paths)
         if runtime_trace_paths is not None else None
     )
-    validation = validate_native_tool_join(
-        bridge_records=bridge_records, cgroup_artifacts=cgroup_artifacts,
-        clause_artifacts=clause_artifacts, policy_records=policy_records,
-        runtime_span_records=runtime_span_records,
-        expected_session_id=session_id,
-    )
+    try:
+        validation = validate_native_tool_join(
+            bridge_records=bridge_records, cgroup_artifacts=cgroup_artifacts,
+            clause_artifacts=clause_artifacts, policy_records=policy_records,
+            runtime_span_records=runtime_span_records,
+            expected_session_id=session_id,
+        )
+    except Exception as exc:
+        (root / "validation.json").write_text(json.dumps({
+            "valid": False,
+            "artifact_collection_attempts": collection_attempt,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        raise
     validation["artifact_collection_attempts"] = collection_attempt
-    root = output_dir / "tool-artifacts" / session_id
-    root.mkdir(parents=True, exist_ok=True)
-    files = {"tool-bridge.jsonl": bridge_raw, **raw_files}
-    for name, raw in files.items():
-        target = root / name
-        temporary = target.with_name(target.name + ".next")
-        temporary.write_bytes(raw)
-        temporary.replace(target)
     validation_path = root / "validation.json"
     validation_path.write_text(
         json.dumps(validation, sort_keys=True, separators=(",", ":")) + "\n",

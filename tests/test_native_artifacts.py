@@ -329,6 +329,11 @@ def test_native_tool_artifact_collection_fails_closed_on_missing_cgroup(tmp_path
             session_id="session-a", output_dir=tmp_path,
             policy_records=_policy(execution_id, digest),
         )
+    failure_root = tmp_path / "tool-artifacts" / "session-a"
+    assert (failure_root / "tool-bridge.jsonl").read_bytes() == files["tool-bridge.jsonl"]
+    validation = json.loads((failure_root / "validation.json").read_text())
+    assert validation["valid"] is False
+    assert "cgroup" in validation["error"]
 
 
 def test_native_tool_join_rejects_non_finite_cgroup_measurements() -> None:
