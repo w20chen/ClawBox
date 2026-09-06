@@ -582,6 +582,23 @@ _GIT_COMMIT_HEADER_RE = re.compile(r"(?m)^(\[master )[0-9a-f]{7,40}(\] )")
 _GIT_LOG_HEAD_RE = re.compile(
     r"(?m)^[0-9a-f]{7,40}(?= .+\n(?:[0-9a-f]{7,40} |\?\? ))"
 )
+_LS_LONG_ENTRY_RE = re.compile(
+    r"(?m)^[bcdlps-][rwxStTs-]{9}\.?(?:\s+\d+)(?:\s+\S+){2}"
+    r"\s+(?P<size>\d+)\s+"
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+    r"\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(?P<name>[^\n]+)$"
+)
+
+
+def _canonicalize_ls_long_entry(match: re.Match[str]) -> str:
+    """Retain listing content while dropping image/build-time stat metadata."""
+    name = match.group("name")
+    # Older recorder images created this telemetry scratch directory in the
+    # Tool workspace. Current native telemetry is stored outside the mutable
+    # repository, so its presence is not part of Agent-visible semantics.
+    if name == ".clawbox":
+        return "LS-IGNORED-WORKSPACE-METADATA"
+    return f"LS-META {match.group('size')} {name}"
 
 
 def _canonical_replay_text(value: str) -> str:
@@ -592,6 +609,8 @@ def _canonical_replay_text(value: str) -> str:
     value = _OPENCLAW_WORKSPACE_RE.sub(
         "/state/openclaw/session-N/runtime-workspace", value,
     )
+    value = _LS_LONG_ENTRY_RE.sub(_canonicalize_ls_long_entry, value)
+    value = re.sub(r"(?m)^LS-IGNORED-WORKSPACE-METADATA(?:\n|$)", "", value)
     value = _GENERATED_DIRECTORY_MTIME_RE.sub(r"\1REPLAY-MTIME \2", value)
     value = _PYTEST_TIME_RE.sub(r"\1N.NNs", value)
     value = _GIT_COMMIT_HEADER_RE.sub(r"\1COMMIT\2", value)

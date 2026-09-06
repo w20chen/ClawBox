@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from clawbox.replay.model_gateway import ModelGateway
+from clawbox.replay.model_gateway import ModelGateway, _canonical_replay_input
 
 
 def test_replay_divergence_is_persisted_before_store_directory_exists(
@@ -140,6 +140,26 @@ def test_replay_canonicalization_masks_openclaw_session_workspace(
 
     assert status == 200
     assert gateway.records()[0]["replay_input_match"] is True
+
+
+def test_replay_canonicalization_masks_ls_metadata_not_listing_content(
+    tmp_path: Path,
+) -> None:
+    expected = (
+        "total 8\n"
+        "drwxr-xr-x. 3 1001 1001 4096 Aug 31 19:16 .\n"
+        "drwxr-xr-x 3 root root 4096 Aug 31 19:16 .clawbox\n"
+        "-rw-r--r--. 1 1001 1001 34 Aug 17 04:01 setup.cfg\n"
+    )
+    actual = (
+        "total 8\n"
+        "drwxrwxrwx. 1 10001 10001 4096 Sep  6 04:55 .\n"
+        "-rw-r--r--. 1 10001 10001 34 Aug 17 04:01 setup.cfg\n"
+    )
+    assert _canonical_replay_input(expected) == _canonical_replay_input(actual)
+    assert _canonical_replay_input(actual.replace("setup.cfg", "other.cfg")) != (
+        _canonical_replay_input(expected)
+    )
 
 
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(
