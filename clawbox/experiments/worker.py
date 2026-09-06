@@ -2094,6 +2094,9 @@ class ExperimentWorker:
                 ),
             })
         configuration = arm.inference.configuration
+        pair_memory_mib = arm.runtime.memory_mib + arm.sandbox.memory_mib
+        offered_provisioned_memory_mib = pair_memory_mib * arm.concurrency
+        pool_memory_budget_mib = arm.resources.pool_memory_budget_mib
         return {
             "evidence_class": evidence_class,
             "workload_case_ids": [case.case_id for case in cases],
@@ -2112,8 +2115,18 @@ class ExperimentWorker:
             },
             "resource_scope": {
                 "target_node": arm.resources.target_node,
-                "pool_memory_budget_mib": arm.resources.pool_memory_budget_mib,
+                "pool_memory_budget_mib": pool_memory_budget_mib,
                 "emergency_free_memory_mib": arm.resources.emergency_free_memory_mib,
+                "runtime_memory_mib_per_agent": arm.runtime.memory_mib,
+                "tool_memory_mib_per_agent": arm.sandbox.memory_mib,
+                "pair_memory_mib_per_agent": pair_memory_mib,
+                "offered_provisioned_memory_mib": offered_provisioned_memory_mib,
+                "offered_to_policy_pool_ratio": (
+                    offered_provisioned_memory_mib / pool_memory_budget_mib
+                ),
+                "clawbox_memory_overcommit_enabled": (
+                    offered_provisioned_memory_mib > pool_memory_budget_mib
+                ),
             },
             "model_provenance": {
                 "backend": arm.inference.backend.value,

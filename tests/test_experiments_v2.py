@@ -174,6 +174,23 @@ def test_worker_provenance_separates_runtime_and_tool_artifacts() -> None:
     assert provenance["template_reference"] == "tool-id"  # legacy key
 
 
+def test_arm_provenance_records_clawbox_memory_overcommit() -> None:
+    raw = raw_spec()
+    raw["execution"]["concurrency_levels"] = [60]
+    raw["runtime"]["memory_mib"] = 2048
+    raw["sandbox"]["memory_mib"] = 4096
+    raw["resources"]["pool_memory_budget_mib"] = 16384
+    spec = ExperimentSpec.model_validate(raw)
+    arm = expand_matrix(spec)[0]
+
+    scope = ExperimentWorker._arm_provenance(arm)["resource_scope"]
+
+    assert scope["pair_memory_mib_per_agent"] == 6144
+    assert scope["offered_provisioned_memory_mib"] == 368640
+    assert scope["offered_to_policy_pool_ratio"] == 22.5
+    assert scope["clawbox_memory_overcommit_enabled"] is True
+
+
 def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     writer = EventWriter(path)
