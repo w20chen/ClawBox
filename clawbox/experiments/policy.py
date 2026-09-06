@@ -25,6 +25,7 @@ class SessionState:
     lifecycle: Pausable
     tool_active: bool = False
     eviction_eligible: bool = False
+    eviction_in_progress: bool = False
     last_used: float = 0.0
 
 
@@ -102,6 +103,12 @@ class PolicyCoordinator:
     def set_tool_active(self, session_id: str, active: bool) -> None:
         with self._condition:
             state = self._sessions[session_id]
+            # Victim selection claims a session before dropping the coordinator
+            # lock for the blocking Cube checkpoint.  A new Tool operation (or
+            # final validation) must wait for that already-committed eviction,
+            # then restore through the normal managed path.
+            while active and state.eviction_in_progress:
+                self._condition.wait()
             state.tool_active = active
             state.eviction_eligible = not active
             state.last_used = time.monotonic()
@@ -187,14 +194,17 @@ class PolicyCoordinator:
                             self.safety_interventions_by_reason[reason] = (
                                 self.safety_interventions_by_reason.get(reason, 0) + 1
                             )
-                    victim = self._select_victim_locked(exclude=session_id)
+                    victim = (self._claim_victim_locked(exclude=session_id)
+                              if at_head else None)
                     if at_head and victim is not None:
                         self._condition.release()
                         try:
                             elapsed = victim.lifecycle.checkpoint_and_evict()
                         finally:
                             self._condition.acquire()
-                        victim.eviction_eligible = False
+                            victim.eviction_in_progress = False
+                            victim.eviction_eligible = False
+                            self._condition.notify_all()
                         if elapsed is not None:
                             self.pause_count += 1
                             self.pause_service_seconds += elapsed
@@ -307,7 +317,13 @@ class PolicyCoordinator:
 
     def victim_for_restore(self, session_id: str) -> SessionState | None:
         with self._condition:
-            return self._select_victim_locked(exclude=session_id)
+            return self._claim_victim_locked(exclude=session_id)
+
+    def release_victim(self, victim: SessionState) -> None:
+        with self._condition:
+            victim.eviction_in_progress = False
+            victim.eviction_eligible = False
+            self._condition.notify_all()
 
     def model_wait_plan(
         self, predicted_duration_s: float | None,
@@ -361,9 +377,11 @@ class PolicyCoordinator:
                     raise RuntimeError(
                         "CubeSandbox restore capacity rejection with no eligible victim"
                     ) from first
-                elapsed = victim.lifecycle.checkpoint_and_evict()
+                try:
+                    elapsed = victim.lifecycle.checkpoint_and_evict()
+                finally:
+                    self.release_victim(victim)
                 with self._condition:
-                    victim.eviction_eligible = False
                     if elapsed is not None:
                         self.pause_count += 1
                         self.pause_service_seconds += elapsed
@@ -383,5 +401,12 @@ class PolicyCoordinator:
             return None
         candidates = [state for state in self._sessions.values()
                       if state.session_id != exclude and state.eviction_eligible
-                      and not state.tool_active and state.lifecycle.resident]
+                      and not state.eviction_in_progress and not state.tool_active
+                      and state.lifecycle.resident]
         return min(candidates, key=lambda state: state.last_used, default=None)
+
+    def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:
+        victim = self._select_victim_locked(exclude=exclude)
+        if victim is not None:
+            victim.eviction_in_progress = True
+        return victim

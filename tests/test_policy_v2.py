@@ -56,7 +56,9 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     coordinator.register("idle", idle)
     coordinator.set_tool_active("active", True)
     coordinator.set_eviction_eligible("idle", True)
-    assert coordinator.victim_for_restore("requester").session_id == "idle"
+    victim = coordinator.victim_for_restore("requester")
+    assert victim is not None and victim.session_id == "idle"
+    coordinator.release_victim(victim)
 
 
 def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
@@ -93,7 +95,34 @@ def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
     thread.join(timeout=1)
     assert not thread.is_alive()
     assert result and isinstance(result[0], AdmissionTimeout)
-    assert coordinator.victim_for_restore("other").session_id == "tool"
+    victim = coordinator.victim_for_restore("other")
+    assert victim is not None and victim.session_id == "tool"
+    coordinator.release_victim(victim)
+
+
+def test_tool_activation_waits_for_an_atomic_eviction_claim() -> None:
+    policy = PolicySpec(name="snapshot", admission="tool_static",
+                        reclamation="snapshot_pause", eviction="eager",
+                        restore="reactive")
+    coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
+                                    operation_headroom_mib=0)
+    lifecycle = Lifecycle()
+    coordinator.register("tool", lifecycle)
+    coordinator.set_eviction_eligible("tool", True)
+    victim = coordinator.victim_for_restore("other")
+    assert victim is not None
+    assert coordinator.victim_for_restore("third") is None
+
+    activated = threading.Event()
+    thread = threading.Thread(
+        target=lambda: (coordinator.set_tool_active("tool", True), activated.set())
+    )
+    thread.start()
+    assert not activated.wait(timeout=0.05)
+    coordinator.release_victim(victim)
+    assert activated.wait(timeout=1)
+    thread.join(timeout=1)
+    assert coordinator.tool_active("tool")
 
 
 def test_admission_is_fifo_and_exports_overhead_metrics() -> None:

@@ -858,6 +858,7 @@ class ExperimentWorker:
         policy_event_errors: list[str] = []
         pending_policy_events: list[Any] = []
         pending_policy_events_lock = Lock()
+        finalization_active = False
 
         def submit_policy_event(operation: Any, *args: Any) -> None:
             future = policy_events.submit(operation, *args)
@@ -1616,7 +1617,8 @@ class ExperimentWorker:
 
                     def eager_pause() -> None:
                         with wait_lock, reservation_lock:
-                            if active_reservations or not lifecycle.resident:
+                            if (active_reservations or coordinator.tool_active(session_id)
+                                    or not lifecycle.resident):
                                 return
                             pause_s = lifecycle.checkpoint_and_evict()
                             if pause_s is None:
@@ -1712,6 +1714,8 @@ class ExperimentWorker:
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                coordinator.set_tool_active(session_id, True)
+                finalization_active = True
                 # No Agent SSH process remains after run_openclaw returns.
                 # Drain callbacks already queued by model/tool completions so
                 # none can pause a VM underneath collection or validation.
@@ -1835,6 +1839,9 @@ class ExperimentWorker:
             validation = arm.validation.command or (
                 arm.case.validation if isinstance(arm.case.validation, str) else None)
             valid = exit_mismatches == 0
+            if not finalization_active:
+                coordinator.set_tool_active(session_id, True)
+                finalization_active = True
             timeline.setdefault("agent_execution_start", timeline.get("sandbox_ready", time.time()))
             # A delayed eager-pause callback from the final Tool completion
             # must not swap the Tool between collection and validation. Keep
@@ -1866,6 +1873,8 @@ class ExperimentWorker:
                            and hash_result.stdout.split() else hashlib.sha256(
                                json.dumps({"valid": valid, "mismatches": exit_mismatches},
                                           sort_keys=True).encode()).hexdigest())
+            coordinator.set_tool_active(session_id, False)
+            finalization_active = False
             events.write({"event": "session_complete", "session_id": session_id, "valid": valid})
             if not valid:
                 raise RuntimeError(f"validation failed for {session_id}")
@@ -1940,6 +1949,9 @@ class ExperimentWorker:
                      ),
                      "timeline": timeline}
         finally:
+            if finalization_active:
+                coordinator.set_tool_active(session_id, False)
+                finalization_active = False
             timeline["sandbox_cleanup_start"] = time.time()
             with wait_lock:
                 if wait_timer is not None:
