@@ -1441,10 +1441,13 @@ class ExperimentWorker:
                                 bridge_ready_started = time.monotonic()
                                 bridge_error: Exception | None = None
                                 bridge_result = None
-                                for bridge_attempt in range(1, 9):
+                                for bridge_attempt in range(1, 31):
                                     try:
                                         candidate = executor.execute(
-                                            native_tool_bridge_setup_command(restart=True), 45,
+                                            native_tool_bridge_setup_command(
+                                                restart=bridge_attempt == 1,
+                                            ),
+                                            45,
                                         )
                                         if candidate.exit_code == 0:
                                             bridge_result = candidate
@@ -1455,12 +1458,12 @@ class ExperimentWorker:
                                         )
                                     except Exception as exc:
                                         bridge_error = exc
-                                    if bridge_attempt < 8:
-                                        time.sleep(min(0.1 * (2 ** (bridge_attempt - 1)), 1.0))
+                                    if bridge_attempt < 30:
+                                        time.sleep(0.5)
                                 if bridge_result is None:
                                     raise RuntimeError(
                                         "Tool telemetry bridge did not recover after restore "
-                                        "within 8 readiness attempts"
+                                        "within 30 readiness attempts"
                                     ) from bridge_error
                                 events.write({
                                     "event": "tool_restore_ready",
