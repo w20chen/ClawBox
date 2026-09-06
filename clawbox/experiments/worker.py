@@ -1790,25 +1790,33 @@ class ExperimentWorker:
                         coordinator.set_tool_active(session_id, False)
                         coordinator.release(session_id, amount)
                 timeline["final_agent_completion"] = time.time()
-            if not lifecycle.resident:
-                self._restore_with_one_victim(arm, session_id, lifecycle, coordinator, events)
             validation = arm.validation.command or (
                 arm.case.validation if isinstance(arm.case.validation, str) else None)
             valid = exit_mismatches == 0
             timeline.setdefault("agent_execution_start", timeline.get("sandbox_ready", time.time()))
-            timeline["validation_start"] = time.time()
-            if validation:
-                validation_result = _execute_idempotent(executor,
-                    validation, arm.execution.command_timeout_seconds,
+            # A delayed eager-pause callback from the final Tool completion
+            # must not swap the Tool between collection and validation. Keep
+            # restore, validation, and hashing in the same lifecycle critical
+            # section; Agent commands have already terminated at this point.
+            with wait_lock:
+                if not lifecycle.resident:
+                    self._restore_with_one_victim(
+                        arm, session_id, lifecycle, coordinator, events,
+                    )
+                timeline["validation_start"] = time.time()
+                if validation:
+                    validation_result = _execute_idempotent(
+                        executor, validation, arm.execution.command_timeout_seconds,
+                    )
+                    valid = valid and validation_result.exit_code == 0
+                timeline["validation_end"] = time.time()
+                timeline["output_hash_start"] = time.time()
+                hash_result = _execute_idempotent(
+                    executor,
+                    "find . -type f -exec sha256sum {} \\; | LC_ALL=C sort | sha256sum",
+                    arm.execution.command_timeout_seconds,
                 )
-                valid = valid and validation_result.exit_code == 0
-            timeline["validation_end"] = time.time()
-            timeline["output_hash_start"] = time.time()
-            hash_result = _execute_idempotent(executor,
-                "find . -type f -exec sha256sum {} \\; | LC_ALL=C sort | sha256sum",
-                arm.execution.command_timeout_seconds,
-            )
-            timeline["output_hash_end"] = time.time()
+                timeline["output_hash_end"] = time.time()
             timeline["output_hash_overhead_seconds"] = max(
                 0.0, timeline["output_hash_end"] - timeline["validation_end"]
             )
