@@ -79,15 +79,45 @@ set +a
 
 curl -fsS "$CUBE_API_URL/health"
 .venv/bin/python scripts/audit-cube-sandboxes.py --json
-.venv/bin/python -m clawbox.cli experiment validate <experiment.yaml>
-.venv/bin/python -m clawbox.cli experiment plan <experiment.yaml>
-.venv/bin/python -m clawbox.cli --output-root "$CLAWBOX_OUTPUT_ROOT" \
-  experiment run <experiment.yaml> --run-id <unique-run-id>
-.venv/bin/python -m clawbox.cli --output-root "$CLAWBOX_OUTPUT_ROOT" \
-  experiment status <unique-run-id>
-.venv/bin/python -m clawbox.cli --output-root "$CLAWBOX_OUTPUT_ROOT" \
-  experiment collect <unique-run-id>
 ```
+
+Create a machine-local experiment from the validated c60 shape. This command
+changes only configuration and does not start VMs:
+
+```bash
+.venv/bin/python -m clawbox.cli experiment baselines
+
+.venv/bin/python -m clawbox.cli experiment configure \
+  examples/experiments/openclaw-cube-replay-c60-overcommit.yaml \
+  /data/clawbox-specs/my-experiment.yaml \
+  --experiment-id my-experiment \
+  --concurrency 1,5,60 \
+  --runtime-memory-gib 2 --tool-memory-gib 4 \
+  --pool-memory-gib 64 --checkpoint-headroom-gib 2 \
+  --baseline tool-static-resident \
+  --baseline tool-static-eager-reactive
+
+.venv/bin/python -m clawbox.cli experiment describe \
+  /data/clawbox-specs/my-experiment.yaml
+.venv/bin/python -m clawbox.cli experiment validate \
+  /data/clawbox-specs/my-experiment.yaml
+.venv/bin/python -m clawbox.cli experiment plan \
+  /data/clawbox-specs/my-experiment.yaml
+RUN_ID="my-experiment-$(git rev-parse --short HEAD)-$(date -u +%Y%m%dT%H%M%SZ)"
+.venv/bin/python -m clawbox.cli --output-root "$CLAWBOX_OUTPUT_ROOT" \
+  experiment run /data/clawbox-specs/my-experiment.yaml --run-id "$RUN_ID"
+.venv/bin/python -m clawbox.cli --output-root "$CLAWBOX_OUTPUT_ROOT" \
+  experiment status "$RUN_ID"
+.venv/bin/python -m clawbox.cli --output-root "$CLAWBOX_OUTPUT_ROOT" \
+  experiment collect "$RUN_ID"
+```
+
+`configure` accepts friendly GiB values and canonical baseline names, writes a
+normal schema-v2 YAML, and refuses to overwrite an existing file unless
+`--force` is supplied. `describe` prints VM count, offered vCPU and memory,
+policy-pool size, overcommit ratio, policy tuples, and total arm count before a
+run. See [Experiment operations](docs/experiment-operations.md#5-yaml-parameters-and-memory-overcommit)
+for all supported overrides and new-machine template provenance.
 
 Before experiments, validate current immutable Runtime/Tool template IDs and
 digests at c1, then c4/c8:

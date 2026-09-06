@@ -183,9 +183,57 @@ an open TCP port is not sufficient.
 
 ## 5. YAML parameters and memory overcommit
 
-Copy a checked-in experiment to a machine-local path and replace template IDs,
-digests, node, traces, KB path, and memory budget. The schema rejects unknown
-fields.
+The recommended path is to generate a machine-local YAML from a checked-in,
+validated example. This is a non-interactive wrapper over the existing schema;
+it does not create VMs or introduce another execution path:
+
+```bash
+.venv/bin/python -m clawbox.cli experiment configure \
+  examples/experiments/openclaw-cube-replay-c60-overcommit.yaml \
+  /data/clawbox-specs/my-c60.yaml \
+  --experiment-id my-c60 \
+  --concurrency 1,5,60 \
+  --runtime-memory-gib 2 --tool-memory-gib 4 \
+  --pool-memory-gib 64 --checkpoint-headroom-gib 2 \
+  --arrival-schedule fixed_stagger --stagger-seconds 0.2 \
+  --baseline tool-static-resident \
+  --baseline tool-static-eager-reactive
+
+.venv/bin/python -m clawbox.cli experiment describe \
+  /data/clawbox-specs/my-c60.yaml
+```
+
+The terminal description shows the number of VMs, offered vCPU, Runtime/Tool
+memory totals, policy pool, overcommit ratio, concrete policy tuples, and arm
+count. Use `describe --json` for scripts. `configure` validates the generated
+schema and refuses to replace an existing file unless `--force` is present.
+List selectable baseline names and their required resource input with:
+
+```bash
+clawbox experiment baselines
+```
+
+Frequently used override groups are:
+
+| Purpose | Options |
+| --- | --- |
+| Workload | `--trace`, `--case-id`, `--prompt`, `--validation-command`, `--repetitions`, `--session-assignment` |
+| Scale/schedule | `--concurrency`, `--arrival-schedule`, `--stagger-seconds`, `--random-seed` |
+| VM shape | `--runtime-vcpu`, `--tool-vcpu`, `--runtime-memory-gib`, `--tool-memory-gib` |
+| Cube provenance | `--runtime-template-id`, `--tool-template-id`, image-reference and image-digest options, `--target-node` |
+| Memory policy | `--pool-memory-gib`, `--emergency-free-memory-gib`, `--checkpoint-headroom-gib`, static/full Tool memory, `--p90-kb` |
+| Baselines | repeat `--baseline`; choices are checked by `--help` and materialize complete policy tuples |
+| Timing | arm/command timeouts, memory sample interval, stabilization, replay time scale, fixed delay, prefetch lead |
+| Real model | `--inference-backend api`, `--base-url`, `--model`, `--api-key-env`; the key value remains only in that environment variable |
+
+Run `clawbox experiment configure --help` for exact names. A new Runtime or
+Tool template ID should be supplied together with its matching image reference
+and digest; the helper never queries Cube internals or invents provenance. VM
+writable-disk size still requires registering a new immutable template.
+
+Advanced users may instead copy a checked-in experiment and edit YAML
+directly. Replace template IDs, digests, node, traces, KB path, and memory
+budget. The schema rejects unknown fields.
 
 | Field | Meaning and guidance |
 | --- | --- |

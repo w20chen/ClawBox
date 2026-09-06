@@ -3,6 +3,18 @@
 The supported user entry point is `.venv/bin/python -m clawbox.cli`. Most users
 need only the following helpers:
 
+Before using a helper script, prefer the built-in configuration workflow:
+
+```bash
+clawbox experiment configure <base.yaml> <new.yaml> [options]
+clawbox experiment describe <new.yaml>
+clawbox experiment validate <new.yaml>
+clawbox --output-root <results> experiment run <new.yaml>
+```
+
+`configure` and `describe` are thin schema-v2 front ends; all VM and Tool work
+still uses the single managed experiment Worker.
+
 | Script | Purpose |
 | --- | --- |
 | `register-cube-template.py` | Build an immutable Runtime or Tool template, including per-VM writable-disk size. |

@@ -70,7 +70,22 @@ is not an extra per-Agent allocation.
 
 Start from
 `examples/experiments/openclaw-cube-replay-c60-overcommit.yaml` and change only
-the intended dimensions:
+the intended dimensions. The `experiment configure` command can make these
+changes without hand-editing policy tuples:
+
+```bash
+clawbox experiment configure \
+  examples/experiments/openclaw-cube-replay-c60-overcommit.yaml \
+  /data/clawbox-specs/comparison.yaml \
+  --concurrency 1,5,60 --pool-memory-gib 64 \
+  --baseline lifetime-full-resident \
+  --baseline tool-static-resident \
+  --baseline tool-static-eager-reactive
+
+clawbox experiment describe /data/clawbox-specs/comparison.yaml
+```
+
+The generated file remains ordinary schema-v2 YAML. The equivalent fields are:
 
 ```yaml
 runtime:
