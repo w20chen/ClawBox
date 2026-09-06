@@ -367,6 +367,11 @@ def main() -> None:
         parser.error("--evaluation-trace and --held-out-* modes are mutually exclusive")
     if bool(args.evaluation_trace) != bool(args.evaluation_set_id):
         parser.error("--evaluation-trace and --evaluation-set-id are required together")
+    if args.clawtune_root is not None:
+        sidecar_src = args.clawtune_root.resolve() / "services" / "sidecar" / "src"
+        if not sidecar_src.is_dir():
+            parser.error(f"ClawTune sidecar source is missing: {sidecar_src}")
+        os.environ["CLAWTUNE_SIDECAR_SRC"] = str(sidecar_src)
     _, CompletedCall, RuntimeToolResourceKB, ToolCallQuery, _, _ = _clawtune_api()
     calls = []
     source = hashlib.sha256()

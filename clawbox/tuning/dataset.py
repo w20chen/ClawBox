@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from clawbox.experiments.native_artifacts import _runtime_spans
+
 from .join import JoinResult, join_trace_and_bridge
 from .schema import (
     BridgeRecord,
@@ -114,8 +116,13 @@ def build_joined_dataset(
     # Validation and output-hash commands are harness work, not agent
     # trajectory observations. They may be retained in raw artifacts, but
     # cannot enter Tool latency/P90 training or policy statistics.
+    # Use the same strict Runtime mirror collapse and exact envelope-ID
+    # recovery as live artifact validation. Otherwise ClawTune's direct and
+    # normalized writers can train twice on one physical execution.
     span_records = [
-        record for record in iter_trace_dir(trace_dir)
+        record for record in _runtime_spans([
+            str(path) for path in sorted(trace_dir.rglob("*.jsonl"))
+        ])
         if record.get("phase", "agent") == "agent"
     ]
     bridges = [

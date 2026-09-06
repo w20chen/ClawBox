@@ -67,6 +67,7 @@ def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
     base = {
         "record_type": "span_end", "kind": "tool", "name": "exec",
         "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "repo": "workspace",
         "status": {"code": "ok"}, "output": {"exit_code": 0},
         "execution": {"execution_id": execution_id, "mode": "launcher"},
     }
@@ -87,6 +88,7 @@ def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
 
     assert len(spans) == 1
     assert spans[0]["execution"]["requested_command"] == "printf ok"
+    assert spans[0]["repo"] == "workspace"
 
     distinct = {**base, "span_id": "call-b"}
     second.write_text(json.dumps(distinct) + "\n", encoding="utf-8")

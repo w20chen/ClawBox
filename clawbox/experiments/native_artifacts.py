@@ -205,7 +205,19 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
             "requested_command", "effective_command", "payload_command",
         ))
         if incoming_detail > current_detail:
-            candidates[candidates.index(matching)] = span
+            preferred, fallback = span, matching
+        else:
+            preferred, fallback = matching, span
+        merged = dict(preferred)
+        for key, value in fallback.items():
+            if merged.get(key) is None and value is not None:
+                merged[key] = value
+        merged_execution = dict(preferred.get("execution") or {})
+        for key, value in (fallback.get("execution") or {}).items():
+            if merged_execution.get(key) is None and value is not None:
+                merged_execution[key] = value
+        merged["execution"] = merged_execution
+        candidates[candidates.index(matching)] = merged
     return [span for candidates in by_execution.values() for span in candidates]
 
 
