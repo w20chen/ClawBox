@@ -36,7 +36,7 @@ type guestCollectorResponse struct {
 }
 
 type guestCollectorAPI interface {
-	Begin(executionID, command, cgroupPath string, trustedRootPID int, repo string) (guestCollectorResponse, error)
+	Begin(executionID, command, executionCommand, cgroupPath string, trustedRootPID int, repo string) (guestCollectorResponse, error)
 	Finish(executionID string, returnCode int) (guestCollectorResponse, error)
 	Abort(executionID string) error
 }
@@ -82,14 +82,15 @@ func (c *guestCollectorClient) request(values map[string]any) (guestCollectorRes
 	return response, nil
 }
 
-func (c *guestCollectorClient) Begin(executionID, command, cgroupPath string, trustedRootPID int, repo string) (guestCollectorResponse, error) {
+func (c *guestCollectorClient) Begin(executionID, command, executionCommand, cgroupPath string, trustedRootPID int, repo string) (guestCollectorResponse, error) {
 	return c.request(map[string]any{
-		"op":               "begin",
-		"execution_id":     executionID,
-		"command":          command,
-		"cgroup_path":      cgroupPath,
-		"trusted_root_pid": trustedRootPID,
-		"repo":             repo,
+		"op":                "begin",
+		"execution_id":      executionID,
+		"command":           command,
+		"execution_command": executionCommand,
+		"cgroup_path":       cgroupPath,
+		"trusted_root_pid":  trustedRootPID,
+		"repo":              repo,
 	})
 }
 

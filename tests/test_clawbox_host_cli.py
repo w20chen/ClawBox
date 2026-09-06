@@ -212,7 +212,7 @@ def test_platform_build_handoff_and_standard_image_env_names_are_supported():
 def test_swe_overlay_build_fails_closed_on_clawtune_revision_drift():
     source = (ROOT / "scripts/rebuild-swe-rebench-tool-overlay.sh").read_text(encoding="utf-8")
     assert 'actual_clawtune_revision="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD)"' in source
-    assert 'EXPECTED_CLAWTUNE_REVISION:-a477144a96882a4be706d506594918e5592e86ff' in source
+    assert 'EXPECTED_CLAWTUNE_REVISION:-5bde9d82b8d6b0faa2d2cb49d0c22df30ada422d' in source
     assert 'does not match checkout' in source
 
 

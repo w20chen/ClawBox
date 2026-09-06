@@ -367,7 +367,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				repo = os.Getenv("TASK_ID")
 			}
 			response, beginErr := guestCollector.Begin(
-				executionID, profileCommand, cgroupPath, cmd.Process.Pid, repo,
+				executionID, profileCommand, command, cgroupPath, cmd.Process.Pid, repo,
 			)
 			if beginErr != nil {
 				record.TelemetryState = "failed"

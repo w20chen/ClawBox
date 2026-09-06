@@ -46,7 +46,10 @@ func TestGuestCollectorClientAuthenticatedLifecycle(t *testing.T) {
 	}()
 
 	client := &guestCollectorClient{socket: socket, token: token, timeout: time.Second}
-	begin, err := client.Begin("exec-1", "echo ok", "/sys/fs/cgroup/clawbox-exec-1", 42, "owner/repo")
+	begin, err := client.Begin(
+		"exec-1", "echo ok", "env /bin/sh -c 'echo ok'",
+		"/sys/fs/cgroup/clawbox-exec-1", 42, "owner/repo",
+	)
 	if err != nil || begin.ArtifactPath == "" {
 		t.Fatalf("begin failed: response=%+v error=%v", begin, err)
 	}
@@ -62,6 +65,9 @@ func TestGuestCollectorClientAuthenticatedLifecycle(t *testing.T) {
 		request := <-requests
 		if request["op"] != operation || request["token"] != token || request["v"] != float64(1) {
 			t.Fatalf("unexpected %s request: %#v", operation, request)
+		}
+		if operation == "begin" && request["execution_command"] != "env /bin/sh -c 'echo ok'" {
+			t.Fatalf("begin execution command mismatch: %#v", request)
 		}
 	}
 }
