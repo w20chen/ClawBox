@@ -281,6 +281,14 @@ class ModelGateway:
                     "request_started_at": request.started_unix_s,
                     "request_fingerprint": fingerprint,
                 }
+                if self.mode == "replay":
+                    assert index is not None
+                    started_event.update({
+                        "oracle_model_wait_seconds": max(
+                            0.0, self.actions[index].duration_s * self.time_scale,
+                        ),
+                        "oracle_model_wait_source": "held_out_replay_trace",
+                    })
             else:
                 request_id = request.request_id
             if http_attempt:

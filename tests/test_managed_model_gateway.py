@@ -181,6 +181,34 @@ def test_managed_gateway_retries_do_not_create_logical_steps(tmp_path: Path) -> 
         assert records[0]["reconnect_attempts"] == 1
 
 
+def test_replay_request_event_exposes_scaled_time_oracle_duration(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    payload = write_trace(trace)
+    started = []
+    gateway = ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    )
+    with gateway:
+        session = gateway.register(
+            session_id="time-oracle-session",
+            store_path=tmp_path / "store.json", mode="replay",
+            trace=trace, time_scale=3.0,
+            on_request_started=started.append,
+        )
+        status, _content_type, _body, request_id = session.gateway.complete_http(
+            payload
+        )
+        session.mark_delivery(request_id, delivered=True)
+
+    assert status == 200
+    assert len(started) == 1
+    assert started[0]["oracle_model_wait_seconds"] == pytest.approx(0.003)
+    assert started[0]["oracle_model_wait_source"] == "held_out_replay_trace"
+
+
 def test_runtime_checkpoint_invalidates_old_http_attempt_but_not_logical_step(
     tmp_path: Path,
 ) -> None:

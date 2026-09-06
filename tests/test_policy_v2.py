@@ -238,3 +238,22 @@ def test_wait_plan_uses_only_request_time_prediction() -> None:
         fixed, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
     )
     assert fixed_coordinator.model_wait_plan(None) == (0.25, None)
+
+
+def test_time_oracle_wait_plan_uses_actual_replay_duration_at_break_even() -> None:
+    policy = PolicySpec(
+        name="time-oracle", admission="tool_static",
+        reclamation="snapshot_pause", eviction="time_oracle",
+        restore="reactive", checkpoint_break_even_seconds=4.0,
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=1, emergency_free_mib=1,
+        operation_headroom_mib=0,
+    )
+
+    assert coordinator.model_wait_plan(None, oracle_duration_s=3.999) == (
+        None, None,
+    )
+    assert coordinator.model_wait_plan(None, oracle_duration_s=4.0) == (
+        0.0, None,
+    )

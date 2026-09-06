@@ -45,6 +45,7 @@ class EvictionPolicy(StrEnum):
     EAGER = "eager"
     FIXED_DELAY = "fixed_delay"
     WAIT_AWARE_PRESSURE = "wait_aware_pressure"
+    TIME_ORACLE = "time_oracle"
 
 
 class RestorePolicy(StrEnum):

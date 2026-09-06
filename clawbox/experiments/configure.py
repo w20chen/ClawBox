@@ -110,6 +110,7 @@ def configure_experiment(
     model_wait_prediction_source: str | None = None,
     fixed_delay_seconds: float | None = None,
     prefetch_lead_seconds: float | None = None,
+    checkpoint_break_even_seconds: float | None = None,
     inference_backend: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
@@ -189,6 +190,16 @@ def configure_experiment(
             raise ValueError("prefetch lead was set but no proactive baseline is selected")
         for item in matching:
             item["prefetch_lead_seconds"] = prefetch_lead_seconds
+    if checkpoint_break_even_seconds is not None:
+        matching = [
+            item for item in policy_mappings if item.get("eviction") == "time_oracle"
+        ]
+        if not matching:
+            raise ValueError(
+                "checkpoint break-even was set but no time-oracle baseline is selected"
+            )
+        for item in matching:
+            item["checkpoint_break_even_seconds"] = checkpoint_break_even_seconds
 
     runtime_shape_changed = (
         (runtime_vcpu is not None and runtime_vcpu != runtime.get("vcpu"))

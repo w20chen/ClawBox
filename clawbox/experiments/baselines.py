@@ -34,6 +34,7 @@ class Baseline:
     implementation_status: str = "implemented"
     fixed_delay_seconds: float | None = None
     prefetch_lead_seconds: float | None = None
+    checkpoint_break_even_seconds: float | None = None
 
     def as_policy(self, *, name: str | None = None) -> PolicySpec:
         """Materialize this recipe as the canonical immutable policy model."""
@@ -45,6 +46,7 @@ class Baseline:
             restore=self.restore_policy,
             fixed_delay_seconds=self.fixed_delay_seconds,
             prefetch_lead_seconds=self.prefetch_lead_seconds,
+            checkpoint_break_even_seconds=self.checkpoint_break_even_seconds,
         )
 
 
@@ -69,10 +71,12 @@ def _snapshot(
     status: str = "implemented",
     fixed_delay_seconds: float | None = None,
     prefetch_lead_seconds: float | None = None,
+    checkpoint_break_even_seconds: float | None = None,
 ) -> Baseline:
     return Baseline(
         name, admission, ReclamationPolicy.SNAPSHOT_PAUSE, eviction, restore,
         status, fixed_delay_seconds, prefetch_lead_seconds,
+        checkpoint_break_even_seconds,
     )
 
 
@@ -115,6 +119,10 @@ BASELINES = MappingProxyType({
         "tool-p90-wait-proactive", AdmissionPolicy.TOOL_P90,
         EvictionPolicy.WAIT_AWARE_PRESSURE, restore=RestorePolicy.PROACTIVE,
         prefetch_lead_seconds=0.5,
+    ),
+    "tool-static-time-oracle-reactive": _snapshot(
+        "tool-static-time-oracle-reactive", AdmissionPolicy.TOOL_STATIC,
+        EvictionPolicy.TIME_ORACLE, checkpoint_break_even_seconds=4.0,
     ),
 
     # Pre-schema-v2 names retained as explicit compatibility aliases. They no

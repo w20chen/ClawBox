@@ -139,6 +139,7 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--model-wait-prediction-source")
     configure.add_argument("--fixed-delay-seconds", type=float)
     configure.add_argument("--prefetch-lead-seconds", type=float)
+    configure.add_argument("--checkpoint-break-even-seconds", type=float)
     configure.add_argument("--inference-backend", choices=("replay", "api"))
     configure.add_argument("--model")
     configure.add_argument("--base-url")
@@ -169,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
                         "inference.configuration.model_wait_prediction_seconds",
                         "inference.configuration.model_wait_prediction_source",
                     ])
+                if value.eviction_policy.value == "time_oracle":
+                    required_settings.append("inference.backend=replay")
                 rows.append({
                     "name": name,
                     "admission": value.admission_policy.value,
@@ -244,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 model_wait_prediction_source=args.model_wait_prediction_source,
                 fixed_delay_seconds=args.fixed_delay_seconds,
                 prefetch_lead_seconds=args.prefetch_lead_seconds,
+                checkpoint_break_even_seconds=args.checkpoint_break_even_seconds,
                 inference_backend=args.inference_backend,
                 model=args.model,
                 base_url=args.base_url,

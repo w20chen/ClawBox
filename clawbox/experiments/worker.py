@@ -1078,6 +1078,17 @@ class ExperimentWorker:
                     delay = float(arm.policy.fixed_delay_seconds or 0.0)
                 elif arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
                     delay = 0.0 if coordinator.pressure() else None
+                elif arm.policy.eviction is EvictionPolicy.TIME_ORACLE:
+                    oracle_wait = event.get("oracle_model_wait_seconds")
+                    break_even = float(
+                        arm.policy.checkpoint_break_even_seconds or 0.0
+                    )
+                    delay = (
+                        0.0
+                        if oracle_wait is not None
+                        and float(oracle_wait) >= break_even
+                        else None
+                    )
                 else:
                     delay = None
                 with wait_lock:
@@ -1087,6 +1098,15 @@ class ExperimentWorker:
                         "request_started_at": event.get("request_started_at"),
                         "predicted_wait_seconds": prediction_wait,
                         "prediction_source": prediction_source,
+                        "oracle_wait_seconds": event.get(
+                            "oracle_model_wait_seconds"
+                        ),
+                        "oracle_wait_source": event.get(
+                            "oracle_model_wait_source"
+                        ),
+                        "checkpoint_break_even_seconds": (
+                            arm.policy.checkpoint_break_even_seconds
+                        ),
                     })
                     elapsed_since_request = max(
                         0.0, time.time() - float(event["request_started_at"])
@@ -1165,6 +1185,15 @@ class ExperimentWorker:
                         ),
                         "predicted_wait_seconds": prediction_wait,
                         "prediction_source": prediction_source,
+                        "oracle_wait_seconds": request_state.get(
+                            "oracle_wait_seconds"
+                        ),
+                        "oracle_wait_source": request_state.get(
+                            "oracle_wait_source"
+                        ),
+                        "checkpoint_break_even_seconds": request_state.get(
+                            "checkpoint_break_even_seconds"
+                        ),
                         "actual_wait_seconds": actual_wait,
                         "prediction_error_seconds": (
                             None if prediction_wait is None else actual_wait - prediction_wait
@@ -2097,7 +2126,9 @@ class ExperimentWorker:
         raw_prediction = arm.inference.configuration.get("model_wait_prediction_seconds")
         predicted_wait = float(raw_prediction) if raw_prediction is not None else None
         prediction_source = arm.inference.configuration.get("model_wait_prediction_source")
-        delay, prefetch_lead = coordinator.model_wait_plan(predicted_wait)
+        delay, prefetch_lead = coordinator.model_wait_plan(
+            predicted_wait, oracle_duration_s=duration,
+        )
         should_pause = delay is not None
         wait_started = time.monotonic()
         wait_started_wall = time.time()

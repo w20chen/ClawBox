@@ -133,6 +133,7 @@ class PolicySpec(StrictFrozenModel):
     restore: RestorePolicy
     fixed_delay_seconds: float | None = Field(default=None, ge=0)
     prefetch_lead_seconds: float | None = Field(default=None, ge=0)
+    checkpoint_break_even_seconds: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def valid_tuple(self) -> "PolicySpec":
@@ -145,6 +146,12 @@ class PolicySpec(StrictFrozenModel):
             raise ValueError("fixed_delay_seconds is required only for eviction=fixed_delay")
         if (self.restore is RestorePolicy.PROACTIVE) != (self.prefetch_lead_seconds is not None):
             raise ValueError("prefetch_lead_seconds is required only for restore=proactive")
+        if (self.eviction is EvictionPolicy.TIME_ORACLE) != (
+            self.checkpoint_break_even_seconds is not None
+        ):
+            raise ValueError(
+                "checkpoint_break_even_seconds is required only for eviction=time_oracle"
+            )
         return self
 
 
@@ -185,6 +192,9 @@ class ExperimentSpec(StrictFrozenModel):
         if len(names) != len(set(names)):
             raise ValueError("policy names must be unique")
         admissions = {policy.admission for policy in self.policies}
+        if any(policy.eviction is EvictionPolicy.TIME_ORACLE for policy in self.policies):
+            if self.inference.backend is not InferenceBackend.REPLAY:
+                raise ValueError("time_oracle is evaluation-only and requires inference.backend=replay")
         if AdmissionPolicy.TOOL_ORACLE in admissions:
             if self.inference.backend is not InferenceBackend.REPLAY:
                 raise ValueError("tool_oracle is evaluation-only and requires inference.backend=replay")

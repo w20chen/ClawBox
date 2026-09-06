@@ -82,6 +82,7 @@ The names below are accepted by `experiment configure`.
 | `tool-p90-fixed-reactive` | Command-specific P90 | Wait 0.5 s by default, then checkpoint | `p90_predictions` |
 | `tool-p90-wait-reactive` | Command-specific P90 | Checkpoint only when predicted wait and memory pressure justify it | `p90_predictions` and a request-time model-wait estimate with source |
 | `tool-p90-wait-proactive` | Command-specific P90 | Same decision, but restore Runtime before the predicted response time | P90 file, model-wait estimate/source, and prefetch lead |
+| `tool-static-time-oracle-reactive` | Fixed amount | Replay-only oracle: checkpoint immediately only when the held-out actual model wait is at least 4.0 s by default | `static_tool_memory_mib` and replay inference |
 
 Compatibility names still appear with `clawbox experiment baselines --all` so
 old result files can be read. Do not use them for new experiments.
@@ -125,6 +126,10 @@ The checkpoint decision can be:
 - `fixed_delay`: wait for `fixed_delay_seconds` first;
 - `wait_aware_pressure`: checkpoint only when a request-time wait estimate is
   available and the memory-pressure check is true.
+- `time_oracle`: evaluation-only. Read the held-out model-wait duration from the
+  replay trace and checkpoint only when it is at least
+  `checkpoint_break_even_seconds` (4.0 s in the catalog baseline). This is an
+  upper-bound baseline and cannot be used with live API inference.
 
 With reactive restore, Runtime restoration begins when the model response is
 ready. With proactive restore, it starts `prefetch_lead_seconds` before the

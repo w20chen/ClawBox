@@ -288,6 +288,29 @@ def test_baseline_catalog_materializes_only_current_policy_tuples() -> None:
     assert resolve_baseline("p90-elastic-pressure-checkpoint").as_policy().eviction.value == (
         "wait_aware_pressure"
     )
+    oracle = resolve_baseline("tool-static-time-oracle-reactive").as_policy()
+    assert oracle.eviction.value == "time_oracle"
+    assert oracle.checkpoint_break_even_seconds == 4.0
+
+
+def test_time_oracle_is_replay_only_and_requires_break_even() -> None:
+    raw = raw_spec()
+    raw["policies"] = [{
+        "name": "time-oracle", "admission": "tool_static",
+        "reclamation": "snapshot_pause", "eviction": "time_oracle",
+        "restore": "reactive", "checkpoint_break_even_seconds": 4.0,
+    }]
+    raw["resources"]["static_tool_memory_mib"] = 256
+    assert ExperimentSpec.model_validate(raw).policies[0].eviction.value == "time_oracle"
+
+    raw["inference"]["backend"] = "api"
+    with pytest.raises(ValidationError, match="time_oracle.*replay"):
+        ExperimentSpec.model_validate(raw)
+
+    raw["inference"]["backend"] = "replay"
+    del raw["policies"][0]["checkpoint_break_even_seconds"]
+    with pytest.raises(ValidationError, match="checkpoint_break_even_seconds"):
+        ExperimentSpec.model_validate(raw)
 
 
 def test_openclaw_cube_example_uses_native_tool_names() -> None:

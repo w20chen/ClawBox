@@ -326,9 +326,10 @@ class PolicyCoordinator:
             self._condition.notify_all()
 
     def model_wait_plan(
-        self, predicted_duration_s: float | None,
+        self, predicted_duration_s: float | None, *,
+        oracle_duration_s: float | None = None,
     ) -> tuple[float | None, float | None]:
-        """Plan from request-time information only; never consume the actual wait."""
+        """Plan a model wait; only the explicit oracle policy may see its duration."""
         if self.policy.reclamation is ReclamationPolicy.RESIDENT:
             return None, None
         if self.policy.eviction is EvictionPolicy.EAGER:
@@ -337,6 +338,11 @@ class PolicyCoordinator:
             delay = self.policy.fixed_delay_seconds or 0.0
         elif self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
             if predicted_duration_s is None or predicted_duration_s <= 0 or not self.pressure():
+                return None, None
+            delay = 0.0
+        elif self.policy.eviction is EvictionPolicy.TIME_ORACLE:
+            break_even = float(self.policy.checkpoint_break_even_seconds or 0.0)
+            if oracle_duration_s is None or oracle_duration_s < break_even:
                 return None, None
             delay = 0.0
         else:
