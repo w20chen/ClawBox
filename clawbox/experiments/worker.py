@@ -1458,9 +1458,15 @@ class ExperimentWorker:
                                 bridge_result = None
                                 for bridge_attempt in range(1, 31):
                                     try:
+                                        # A snapshot restore normally resumes
+                                        # the existing bridge process. Probe it
+                                        # first; killing a healthy resumed
+                                        # bridge creates avoidable races at
+                                        # high concurrency. Periodic restarts
+                                        # remain an idempotent recovery path.
                                         candidate = executor.execute(
                                             native_tool_bridge_setup_command(
-                                                restart=bridge_attempt == 1,
+                                                restart=bridge_attempt in (2, 10, 20),
                                             ),
                                             45,
                                         )
@@ -1478,7 +1484,8 @@ class ExperimentWorker:
                                 if bridge_result is None:
                                     raise RuntimeError(
                                         "Tool telemetry bridge did not recover after restore "
-                                        "within 30 readiness attempts"
+                                        "within 30 readiness attempts; last error: "
+                                        f"{type(bridge_error).__name__}: {bridge_error}"
                                     ) from bridge_error
                                 events.write({
                                     "event": "tool_restore_ready",
