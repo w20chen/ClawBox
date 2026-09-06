@@ -18,24 +18,30 @@ It is infrastructure evidence only because the temporary two-step marker trace
 is not a representative held-out coding trajectory.
 
 The paired `snapshot_pause` c1 path is now live-green as well. Result
-`/tmp/clawbox-managed-c1/live-c1-snapshot-fast-reconnect` checkpointed Tool and
+`/tmp/clawbox-managed-c1/live-c1-snapshot-relay` checkpointed Tool and
 Runtime during the pending model request, restored Runtime before releasing the
-response, preserved OpenClaw PID 141, and restored Tool only at the subsequent
+response, preserved OpenClaw PID 153, and restored Tool only at the subsequent
 SSH admission. The endpoint was re-resolved and its epoch advanced even though
 Tool identity stayed constant. The run completed two replay model steps, one
 logical Agent Tool operation, a 100% exact telemetry join, final workspace
-validation, and cleanup to an empty CubeSandbox inventory. Each model record
+validation, and cleanup to an empty CubeSandbox inventory. Its summary SHA-256
+is `04258b448e345a37b4f2fec52f03d34adc70ac9eb4652e8059d6aded43a29e3b`.
+Each model record
 now states whether a snapshot was actually performed for that request; the
 short second wait correctly reports false and contains no stale timestamps.
 
-Runtime checkpoint invalidates the pre-checkpoint upstream HTTP delivery. An
-OpenClaw reconnect receives the cached response under the same request ID and
-does not consume another replay entry. OpenClaw 2026.7.1 duplicates its original
-user turn when it performs that reconnect, so replay normalization is enabled
-only after the gateway has proved the exact one-message insertion against an
-undelivered request. The proven artifact is then removed from later comparisons;
-unrelated duplicate turns continue to fail closed. This is transport recovery,
-not relaxed replay matching.
+Runtime checkpoint invalidates the pre-checkpoint host-facing HTTP delivery.
+A small Runtime-local relay sits between ClawTune's existing model proxy and
+ModelGateway, so the OpenClaw-to-ClawTune connection and the ClawTune-to-relay
+connection remain entirely inside the VM snapshot. After Runtime restore,
+Worker notifies the relay to reissue the identical host request; ModelGateway's
+idempotency ledger returns the already-produced response without another model
+call. The live gate recorded two HTTP attempts, one logical model step, and only
+1.1 ms between response release and successful delivery, reducing arm duration
+from 185.2 to 67.0 seconds without changing replay timing. A narrow matcher for
+OpenClaw's duplicate-user reconnect remains as compatibility for older Runtime
+paths, but unrelated duplicate turns still fail closed and the relay gate did
+not require normalization.
 
 This gate exposed and fixed four installed-version integration details. The
 OpenClaw environment sanitizer removes names ending in `_TOKEN`, so ClawBox

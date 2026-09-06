@@ -21,6 +21,7 @@ from clawbox.experiments.openclaw_driver import (
     split_native_ssh_target,
 )
 from clawbox.replay.lifecycle import CommandResult
+from clawbox.experiments.runtime_model_relay import RUNTIME_MODEL_RELAY_SCRIPT
 
 
 def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
@@ -154,6 +155,49 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
     assert "agent.exit" in launch
     assert "agent.pid" in launch
     assert result["stdout"] == '{"ok":true}\n'
+
+
+def test_checkpoint_relay_keeps_clawtune_in_model_path(tmp_path: Path) -> None:
+    commands: list[str] = []
+
+    class RuntimeExecutor:
+        def execute(self, command, _timeout):
+            commands.append(command)
+            if " agent " in command:
+                return CommandResult(0, '{"ok":true}\n', "", 0.1)
+            return CommandResult(0, "", "", 0.01)
+
+    class Gateway:
+        url = "http://192.0.2.30:18081/v1"
+
+        @staticmethod
+        def records():
+            return []
+
+        @staticmethod
+        def replay_completeness():
+            return {"complete": True}
+
+    compile(RUNTIME_MODEL_RELAY_SCRIPT, "model-relay.py", "exec")
+    result = run_openclaw(
+        prompt="test", session_id="session-relay",
+        configuration={"model": "test-model"},
+        ssh=NativeSSHConfig(
+            target="executor@192.0.2.20:2222",
+            identity_private_key="PRIVATE KEY\n",
+            host_public_key="ssh-ed25519 AAAATEST", sandbox_id="tool-a",
+            host_key_alias="clawbox-tool-tool-a",
+        ),
+        policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+        output_dir=tmp_path, timeout_seconds=60,
+        model_gateway=Gateway(), checkpoint_relay=True,
+    )
+    setup = commands[0]
+    assert "model-relay.py" in setup
+    assert "CLAWBOX_RELAY_UPSTREAM=http://192.0.2.30:18081/v1" in setup
+    assert "CLAWTUNE_LLM_UPSTREAM_BASE_URL=http://127.0.0.1:8766/v1" in setup
+    assert "http://127.0.0.1:8766/healthz" in "\n".join(commands)
+    assert result["checkpoint_model_relay"] is True
 
 
 @pytest.mark.parametrize(

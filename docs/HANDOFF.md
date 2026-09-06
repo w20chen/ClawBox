@@ -14,18 +14,21 @@ and native eBPF telemetry, exact Runtime/Policy/Tool execution identity, final
 workspace validation, and zero CubeSandbox leaks. Its summary SHA-256 is
 `47f43e0f10fca147740b86b77a0e3443a890cc93877c917b10f95dff5093e235`.
 The superseding snapshot result is
-`/tmp/clawbox-managed-c1/live-c1-snapshot-fast-reconnect` (summary SHA-256
-`9b7ae97b0011895e9f097a67e5cec9bea558e352c685829224b1fc45ae194a16`).
-It checkpointed Tool then Runtime, observed 31,440,896 and 565,436,416 bytes
+`/tmp/clawbox-managed-c1/live-c1-snapshot-relay` (summary SHA-256
+`04258b448e345a37b4f2fec52f03d34adc70ac9eb4652e8059d6aded43a29e3b`).
+It checkpointed Tool then Runtime, observed 40,185,856 and 567,648,256 bytes
 reclaimed respectively, restored Runtime before response release, preserved OpenClaw
-PID 141, left Tool swapped until admission, advanced endpoint epochs after each
+PID 153, left Tool swapped until admission, advanced endpoint epochs after each
 Tool restore, completed the real SSH command with valid cgroup/eBPF telemetry,
-passed final validation, and leaked zero sandboxes. OpenClaw retries the local
-ClawTune stream after checkpoint; the gateway recognizes only the exact
-undelivered reconnect shape and retains one logical replay step. Subsequent
-model requests remove that proven duplicate user-message artifact for replay
-comparison, while an ordinary duplicate still fails closed. Per-request
-snapshot metadata is now request-scoped rather than reusing a prior wait.
+passed final validation, and leaked zero sandboxes. A Runtime-local relay keeps
+the OpenClaw-to-ClawTune stream within the checkpoint and reissues only the
+host-facing request after restore. ModelGateway returned the cached logical
+response: two HTTP attempts, one failed pre-checkpoint delivery, one model step,
+and 1.1 ms from response release to successful delivery. This reduced the c1
+arm from 185.2 seconds to 67.0 seconds without compressing replay time. The
+narrow duplicate-user reconnect matcher remains as fail-closed compatibility,
+but the relay run did not need it. Per-request snapshot metadata is request-scoped
+rather than reusing a prior wait.
 
 The temporary marker trace is smoke-only. Next live gates are c4/c8 with frozen
 exact smoke inputs; representative capture, frozen ClawTune KB calibration, formal

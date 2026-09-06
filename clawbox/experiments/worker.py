@@ -44,6 +44,7 @@ from .openclaw_driver import (
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, PredictionUnavailable
+from .runtime_model_relay import RELAY_CHECKPOINT_URL
 from .ssh_credentials import generate_ssh_credentials
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
 from .spec import (
@@ -933,6 +934,29 @@ class ExperimentWorker:
                         arm, session_id, runtime_lifecycle, coordinator, events,
                         role="runtime",
                     )
+                    relay_started = time.time()
+                    relay_result = runtime_executor.execute(
+                        f"curl -fsS -X POST {shlex.quote(RELAY_CHECKPOINT_URL)}",
+                        10,
+                    )
+                    if relay_result.exit_code:
+                        raise RuntimeError(
+                            "Runtime model relay checkpoint notification failed: "
+                            f"{relay_result.stderr[-1000:]}"
+                        )
+                    relay_finished = time.time()
+                    _record_time_span(
+                        timeline, "model.relay_reconnect",
+                        relay_started, relay_finished,
+                        role="runtime", operation="model_relay_reconnect",
+                        execution_id=str(event.get("request_id") or ""),
+                    )
+                    events.write({
+                        "event": "model_relay_reconnected",
+                        "session_id": session_id,
+                        "request_id": event.get("request_id"),
+                        "service_seconds": max(0.0, relay_finished - relay_started),
+                    })
                     agent_pid_after = observe_openclaw_agent_pid(
                         f"after_runtime_restore_{phase}"
                     )
@@ -1599,6 +1623,7 @@ class ExperimentWorker:
                     prediction_manifest=(prediction_provider.manifest
                                          if prediction_provider is not None else None),
                     resident_poll=poll_resident_runtime,
+                    checkpoint_relay=runtime_snapshot_enabled,
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")

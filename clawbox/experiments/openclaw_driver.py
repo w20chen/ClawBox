@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from clawbox.replay.lifecycle import CommandResult
+from .runtime_model_relay import RELAY_PORT, RUNTIME_MODEL_RELAY_SCRIPT
 
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -217,7 +218,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  runtime_executor: Any, output_dir: Path, timeout_seconds: int,
                  model_gateway: Any | None = None,
                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
-                 resident_poll: Callable[[str, float], CommandResult | None] | None = None) -> dict:
+                 resident_poll: Callable[[str, float], CommandResult | None] | None = None,
+                 checkpoint_relay: bool = False) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -256,6 +258,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     agent_stdout_file = f"{home}/logs/agent.stdout"
     agent_stderr_file = f"{home}/logs/agent.stderr"
     agent_exit_file = f"{home}/agent.exit"
+    relay_script_file = f"{launcher_dir}/model-relay.py"
+    relay_pid_file = f"{home}/model-relay.pid"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
     prefix = (
         f"export HOME={shlex.quote(home)} OPENCLAW_HOME={shlex.quote(home + '/.openclaw')} "
@@ -304,6 +308,24 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         b"${CLAWBOX_POLICY_CONTROL_AUTH:-${CLAWBOX_POLICY_CONTROL_TOKEN:-}}\n"
         b"exec /usr/local/bin/ssh \"$@\"\n"
     ).decode()
+    relay_b64 = base64.b64encode(RUNTIME_MODEL_RELAY_SCRIPT.encode()).decode()
+    relay_setup = ""
+    sidecar_upstream_url = upstream_url
+    if checkpoint_relay:
+        if model_gateway is None:
+            raise ValueError("checkpoint model relay requires managed ModelGateway")
+        sidecar_upstream_url = f"http://127.0.0.1:{RELAY_PORT}/v1"
+        relay_setup = (
+            f"printf %s {shlex.quote(relay_b64)} | base64 -d > "
+            f"{shlex.quote(relay_script_file)}; "
+            f"chmod 700 {shlex.quote(relay_script_file)}; "
+            f"nohup env CLAWBOX_RELAY_UPSTREAM={shlex.quote(upstream_url)} "
+            f"CLAWBOX_RELAY_TOKEN=\"${{{upstream_key_env}}}\" "
+            f"CLAWBOX_RELAY_PORT={RELAY_PORT} "
+            f"/opt/clawtune/venv/bin/python {shlex.quote(relay_script_file)} </dev/null "
+            f">{shlex.quote(home + '/logs/model-relay.log')} 2>&1 & "
+            f"echo $! >{shlex.quote(relay_pid_file)}; "
+        )
     encoded_predictions = base64.b64encode(json.dumps(
         prediction_manifest or {}, sort_keys=True, separators=(",", ":"),
     ).encode()).decode()
@@ -315,6 +337,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"printf %s {shlex.quote(private_b64)} | base64 -d > {shlex.quote(identity_file)}; "
         + f"printf %s {shlex.quote(known_b64)} | base64 -d > {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher)}; "
+        + relay_setup
         + f"chmod 700 {shlex.quote(ssh_launcher)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
@@ -324,7 +347,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
-        + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(upstream_url)} "
+        + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
@@ -334,8 +357,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     )
     if setup.exit_code:
         raise RuntimeError(f"ClawTune sidecar setup failed: {setup.stderr[-2000:]}")
+    relay_ready = (
+        f"curl -fsS http://127.0.0.1:{RELAY_PORT}/healthz >/dev/null 2>&1 && "
+        if checkpoint_relay else ""
+    )
     ready = runtime_executor.execute(
-        prefix + "for i in $(seq 1 120); do curl -fsS http://127.0.0.1:8765/health/ready "
+        prefix + "for i in $(seq 1 120); do " + relay_ready
+        + "curl -fsS http://127.0.0.1:8765/health/ready "
         + ">/dev/null 2>&1 && exit 0; sleep 0.5; done; exit 1", 70,
     )
     if ready.exit_code:
@@ -447,7 +475,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
     runtime_executor.execute(
         prefix + f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
-        + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi", 10,
+        + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi; "
+        + (f"if [ -s {shlex.quote(relay_pid_file)} ]; then "
+           f"kill -TERM $(cat {shlex.quote(relay_pid_file)}) 2>/dev/null || true; fi"
+           if checkpoint_relay else "true"), 10,
     )
     listing = runtime_executor.execute(
         prefix + f"find {shlex.quote(trace_dir)} -type f "
@@ -488,6 +519,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "native_ssh_executions": len(completed), "tool_latencies": latencies,
             "native_ssh_latencies": native_ssh_latencies,
             "agent_pid_file": agent_pid_file,
+            "checkpoint_model_relay": checkpoint_relay,
             "runtime_traces": copied, "policy_control_records": control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],
             "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None}
