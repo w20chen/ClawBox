@@ -162,9 +162,19 @@ jq -s '[.[]
 | Operation | What is timed | Included in Agent JCT? |
 | --- | --- | --- |
 | `create` | CubeSandbox VM creation and readiness for one Runtime or Tool VM | Pair provisioning is reported separately; do not charge it to workload JCT. |
-| `checkpoint` | CubeSandbox pause/checkpoint plus eviction of the live VM | Yes, when it occurs during the workload model wait. |
+| `checkpoint` | Synchronous `sandbox.pause(wait=True)`: CubeSandbox snapshot/checkpoint plus the live-VM pause/eviction operation | Yes, when it occurs during the workload model wait. |
 | `restore` | Recreating the VM from the checkpoint and readiness verification | Yes, when it delays response release or Tool admission. |
 | `destroy` | Cleanup of the VM at session end | No; report cleanup time separately. |
+
+The checkpoint duration is therefore an end-to-end CubeSandbox control-operation
+time, not merely the time to create a snapshot metadata record. It includes
+whatever snapshot serialization/copy and live-VM eviction work CubeSandbox has
+completed before `pause(wait=True)` returns. It does **not** by itself prove
+that all host physical pages have already been reclaimed: that is reported
+separately by `host_observed_reclaimed_bytes` and
+`host_reclamation_evidence`, sampled around the operation. If the backend
+performs any final asynchronous reclamation after the API returns, that tail is
+not included in `service_seconds`.
 
 For paired snapshot mode, Runtime and Tool have separate records. Therefore
 `pause_count`/`pause_service_seconds` are sums of recorded role-level pause
