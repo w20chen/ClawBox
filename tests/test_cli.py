@@ -33,3 +33,17 @@ def test_status_and_collect_read_standalone_results(tmp_path, capsys) -> None:
     assert '"status": "succeeded"' in capsys.readouterr().out
     assert cli.main([*prefix, "collect", "run-1"]) == 0
     assert '"arm_id": "arm-a"' in capsys.readouterr().out
+
+
+def test_status_reads_current_wrapped_summary(tmp_path, capsys) -> None:
+    run = tmp_path / "run-current"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps({
+        "run_id": "run-current",
+        "arms": [{"arm": {"arm_id": "arm-b"}, "status": "succeeded"}],
+    }), encoding="utf-8")
+    prefix = ["--output-root", str(tmp_path), "experiment"]
+    assert cli.main([*prefix, "status", "run-current"]) == 0
+    output = capsys.readouterr().out
+    assert '"armId": "arm-b"' in output
+    assert '"status": "succeeded"' in output

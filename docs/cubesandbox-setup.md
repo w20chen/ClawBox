@@ -6,6 +6,10 @@ TCP endpoint for container port `2222`. ClawBox does not allocate ports,
 interpret Redis/CubeProxy metadata, proxy SSH, create NodePorts, or discover a
 guest IP.
 
+For complete experiment commands, baseline tuples, hyperparameters, and disk
+sizing, continue with [experiment-operations.md](experiment-operations.md)
+after this CubeSandbox gate passes.
+
 ## Choose the deployment path
 
 Use one of these two paths:
@@ -146,6 +150,9 @@ pre-kernel template as evidence.
 Pass the target node's exact current replica kernel component with
 `--expected-kernel-version`; registration intentionally has no default because
 a stale default can silently bind a paper arm to the wrong guest kernel.
+Set each template's root/workspace disk with `--writable-layer-size` (default
+`20G`). This is separate from VM `memory_mib`, CubeSandbox backing storage, and
+the host experiment-results directory.
 
 Run the endpoint and identity gate from a host that can reach CubeAPI,
 CubeProxy, and the policy listener:
@@ -198,8 +205,8 @@ executions, telemetry loss, and owned-sandbox leaks.
   --node '<cube-node-name>' --control-host "$CLAWBOX_CONTROL_HOST" \
   --count 8 --output results/endpoint-c8.json
 
-clawbox experiment validate examples/experiments/openclaw-cube.yaml
-clawbox experiment plan examples/experiments/openclaw-cube.yaml
+.venv/bin/python -m clawbox.cli experiment validate examples/experiments/openclaw-cube.yaml
+.venv/bin/python -m clawbox.cli experiment plan examples/experiments/openclaw-cube.yaml
 ```
 
 ## Run replay or a real model
@@ -208,7 +215,7 @@ Replay does not need a provider credential. After the c1/c4/c8 endpoint gates
 pass, run the checked-in native OpenClaw replay arm:
 
 ```bash
-clawbox --output-root /data/clawbox-results experiment run \
+.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results experiment run \
   examples/experiments/openclaw-cube-replay-c40.yaml --run-id openclaw-replay-c40
 ```
 
@@ -220,7 +227,7 @@ environment variable, not its value:
 
 ```bash
 export OPENCLAW_API_KEY='<provider credential>'
-clawbox --output-root /data/clawbox-results experiment run \
+.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results experiment run \
   /data/clawbox-openclaw-api.yaml --run-id openclaw-api-c1
 ```
 
@@ -259,13 +266,11 @@ python scripts/probe-cubesandbox-network-topology.py \
   --output /data/clawbox-topology.json
 ```
 
-`DIAGNOSTIC_COMPLETE` means the bounded comparison and cleanup completed; it
-does not mean a route passed. Inspect `route_identity_results` and
-`reachable_identity_routes`. The 2026-09-05 current-template run returned
-`false` for semantic HostPort, physical HostPort, and SandboxIP, with TCP
-connection refusal on all three and `zero_leaks=true`. This is evidence that
-same-node CubeVS forwarding must be corrected before the native c1 gate. It is
-not permission to select a diagnostic route in the Worker.
+`DIAGNOSTIC_COMPLETE` means only that the bounded comparison and cleanup
+completed. Inspect `route_identity_results` and `reachable_identity_routes`;
+promote the machine only when the semantic endpoint reaches the intended Tool
+identity from Runtime. A failed diagnostic is not permission to select another
+route in the Worker.
 
 Restore temporary diagnostic changes after every probe. Do not add a ClawBox
 proxy, NodePort, Redis lookup, direct guest-IP fallback, or second allocator.
@@ -282,10 +287,12 @@ export CUBE_PROXY_PORT_HTTP='<CubeProxy HTTP port>'
 export CLAWBOX_CONTROL_HOST='<address reachable from Runtime VMs>'
 export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
 
-clawbox --output-root /data/clawbox-results experiment run \
+.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results experiment run \
   examples/experiments/openclaw-cube.yaml --run-id openclaw-run
-clawbox --output-root /data/clawbox-results experiment status openclaw-run
-clawbox --output-root /data/clawbox-results experiment collect openclaw-run
+.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results \
+  experiment status openclaw-run
+.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results \
+  experiment collect openclaw-run
 ```
 
 Keep the endpoint-gate JSON, Worker result bundle, exact template records,

@@ -71,10 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         if not summary.exists():
             raise ValueError(f"run summary does not exist: {summary}")
         value = json.loads(summary.read_text(encoding="utf-8"))
+        arms = value.get("arms", []) if isinstance(value, dict) else value
+        if not isinstance(arms, list):
+            raise ValueError(f"run summary has invalid arms: {summary}")
         emit(value if args.command == "collect" else {
             "runId": args.run_id, "output": str(run_root),
             "arms": [{"armId": item.get("arm", {}).get("arm_id"),
-                      "status": item.get("status")} for item in value],
+                      "status": item.get("status")} for item in arms],
         })
         return 0
     except (OSError, ValueError, RuntimeError) as exc:

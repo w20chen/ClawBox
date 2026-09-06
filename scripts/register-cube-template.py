@@ -24,6 +24,13 @@ def main() -> int:
         help="template CPU quota in millicores (default: 2000 = 2 vCPU)",
     )
     parser.add_argument("--memory-mib", type=int, default=4096)
+    parser.add_argument(
+        "--writable-layer-size", default="20G",
+        help=(
+            "per-VM writable root/workspace disk size passed to CubeSandbox "
+            "(default: 20G; examples: 40G, 100G)"
+        ),
+    )
     parser.add_argument("--exposed-port", type=int, action="append")
     # Both ClawBox Cube images start envd on 49983. They do not start the
     # code-interpreter/Jupyter service, so 49999 is not the probe endpoint.
@@ -49,7 +56,8 @@ def main() -> int:
         build = Template.build(
             name=args.alias, image=args.image, nodes=[args.node],
             cpu_count=args.cpu_millicores,
-            memory_mb=args.memory_mib, writable_layer_size="20G",
+            memory_mb=args.memory_mib,
+            writable_layer_size=args.writable_layer_size,
             exposed_ports=args.exposed_port or [49983], probe_port=args.probe_port,
         )
     except Exception as exc:

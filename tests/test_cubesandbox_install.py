@@ -25,6 +25,8 @@ def test_template_helper_exposes_cube_command_ports() -> None:
     assert 'action="append"' in helper
     assert "args.exposed_port or [49983]" in helper
     assert "default=49983" in helper
+    assert '"--writable-layer-size", default="20G"' in helper
+    assert "writable_layer_size=args.writable_layer_size" in helper
 
 
 def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
