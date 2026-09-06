@@ -219,7 +219,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  model_gateway: Any | None = None,
                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
-                 checkpoint_relay: bool = False) -> dict:
+                 checkpoint_relay: bool = False,
+                 replay_compatibility: bool = False) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -285,7 +286,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # provider credential; use a name that survives the installed
         # backend's environment sanitizer.
         f"CLAWBOX_POLICY_CONTROL_AUTH={shlex.quote(policy_control.token)} "
-        f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
+        + (f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
+           if replay_compatibility else "")
+        + f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
         f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
@@ -398,7 +401,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     patch = {
         "agents": {"defaults": {"workspace": runtime_workspace, "sandbox": {
             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
-            "ssh": {"target": ssh.target, "command": ssh_launcher,
+            "ssh": {"target": ssh.target,
                     "workspaceRoot": ssh.workspace_root,
                     "identityFile": identity_file, "knownHostsFile": known_hosts_file,
                     "strictHostKeyChecking": True, "updateHostKeys": False},
@@ -430,10 +433,20 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                       "trace_dir": trace_dir},
         }}}},
     }
+    if not replay_compatibility:
+        patch["agents"]["defaults"]["sandbox"]["ssh"]["command"] = ssh_launcher
     invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
             "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", model])
+    if replay_compatibility:
+        # The selected rec-a request was recorded before OpenClaw's vLLM
+        # onboarding began materializing ``reasoning: false``. That descriptor
+        # adds ``thinking: {type: disabled}`` to every request. Remove only the
+        # generated capability field through the supported config CLI so the
+        # runtime recreates the frozen wire request; replay canonicalization
+        # and all message/tool validation remain unchanged.
+        invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
     instruction = (
         "Use only sandboxed exec/process/read/write/edit/apply_patch for workspace and "
         "process operations; those execute in the Tool VM. Web search/fetch and agent "

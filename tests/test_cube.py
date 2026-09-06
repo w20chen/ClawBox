@@ -396,9 +396,11 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
-                          resident_poll=None, checkpoint_relay=False):
+                          resident_poll=None, checkpoint_relay=False,
+                          replay_compatibility=False):
         assert resident_poll is not None
         assert checkpoint_relay is True
+        assert replay_compatibility is True
         assert (
             SnapshotSandbox.created[1].create_kwargs["env_vars"]
             ["CLAWBOX_MODEL_GATEWAY_TOKEN"]

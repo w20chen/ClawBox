@@ -43,7 +43,7 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .snapshot_pool import WarmSnapshotPool
-from .spec_types import SnapshotTier
+from .spec_types import InferenceBackend, SnapshotTier
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, PredictionUnavailable
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
@@ -1862,6 +1862,9 @@ class ExperimentWorker:
                                          if prediction_provider is not None else None),
                     resident_poll=poll_resident_runtime,
                     checkpoint_relay=runtime_snapshot_enabled,
+                    replay_compatibility=(
+                        arm.inference.backend is InferenceBackend.REPLAY
+                    ),
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
