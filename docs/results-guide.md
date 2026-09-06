@@ -1,53 +1,43 @@
-# Reading ClawBox experiment results
+# Results guide
 
-ClawBox produces one result directory per run. The directory is the evidence
-bundle; `summary.md` is only a convenient index and does not replace the raw
-JSONL and per-arm records.
+Each run writes one result directory. Treat the whole directory as the result;
+`summary.md` is only a quick index.
 
-## Get a result bundle
-
-When an experiment runs locally, the bundle is `<output-root>/<run-id>/`.
-The CLI prints this path after `experiment run`. For a completed run:
+## Find or copy a run
 
 ```bash
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results \
-  experiment status <run-id>
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results \
-  experiment collect <run-id> > /data/clawbox-results/<run-id>.collect.json
+clawbox --output-root /data/clawbox-results experiment status <run-id>
+clawbox --output-root /data/clawbox-results experiment collect <run-id>
 ```
 
-To copy a Kunpeng result, copy the whole directory:
+To copy a Kunpeng run:
 
 ```bash
 scp -r kunpeng:/home/weitianc/clawbox-results-current/<run-id> ./results/
 ```
 
-For large runs, archive the directory on Kunpeng first and copy the archive.
-Keep its SHA-256 beside it. Do not rename individual arm files: their arm ID is
-the join key used by summaries and provenance.
+For a large run, archive the complete directory first and store its SHA-256.
 
-## What is in the directory?
+## Directory contents
 
 ```text
-summary.json       machine-readable run summary, all arms
-summary.csv        compact arm table for spreadsheets
-summary.md         human-readable arm table
-arms/<arm-id>.json complete ResultEnvelope for one policy/concurrency arm
-events/<arm-id>.jsonl ordered lifecycle and decision events
-model-gateway/     model requests, waits, holds, and response delivery
-policy-control/    admission/completion records
-runtime-traces/    Runtime/OpenClaw and ClawTune traces
-tool-artifacts/    SSH bridge, cgroup-v2, eBPF, and validation artifacts
-model-traces/      API-mode traces that can be frozen for replay
-owned-sandboxes.jsonl creation/cleanup ownership journal
+summary.json       complete machine-readable summary
+summary.csv        small table for spreadsheets
+summary.md         small table for people
+arms/              one complete JSON result per experiment variant
+events/            ordered lifecycle and policy events
+model-gateway/     model request and response timing
+policy-control/    Tool admission and completion records
+runtime-traces/    Runtime and ClawTune records
+tool-artifacts/    SSH, cgroup, eBPF, and validation data
+model-traces/      model responses recorded during API runs
+owned-sandboxes.jsonl  VM ownership and cleanup journal
 ```
 
-Some directories are absent for a failed arm or compatibility driver. That is
-evidence; do not silently fill them from another run.
+A missing directory in a failed run is evidence of where the run stopped. Do
+not copy replacement data from another run.
 
-## First-pass validity gate
-
-Inspect every arm in `summary.json`:
+## 1. Check correctness first
 
 ```bash
 jq '.arms[] | {
@@ -57,163 +47,98 @@ jq '.arms[] | {
   completed: .correctness.completed_sessions,
   failed: .correctness.failed_sessions,
   validation: .correctness.validation_passed,
-  join: .correctness.native_tool_exact_id_join_rate,
+  telemetry_join: .correctness.native_tool_exact_id_join_rate,
   telemetry_loss: .correctness.native_tool_telemetry_loss_total,
-  oom: .memory.host_oom_kill_events,
-  safety: .performance.admission_control.safety_intervention_count
+  host_oom: .memory.host_oom_kill_events,
+  safety_events: .performance.admission_control.safety_intervention_count
 }' summary.json
 ```
 
-A successful paper arm normally requires `status: succeeded`, all sessions
-completed, validation true, exact Tool telemetry join `1.0`, telemetry loss
-`0`, host OOM `0`, and no unexplained safety intervention. Also inspect the
-ownership journal and post-run CubeSandbox inventory for zero owned sandboxes.
-A failed arm is retained as rejection evidence, not omitted from an average.
+A usable result normally has all sessions completed, validation passing,
+telemetry join rate `1.0`, telemetry loss `0`, no host OOM, and no unexplained
+safety event. Also confirm that the post-run CubeSandbox inventory contains no
+VM owned by the run. Keep failed runs, but do not include them as successful
+samples.
 
-## Performance
+## 2. Read performance
 
-Compare arms only when workload, workspace, template/image/kernel provenance,
-NUMA/resource scope, memory budget, replay timing, seed, and session-to-trace
-assignment are identical.
+| Field | Meaning |
+| --- | --- |
+| `agents_per_minute` | Correctly completed agents per minute |
+| `steps_per_minute` | Completed model and Tool steps per minute |
+| `jct_mean/p50/p90/p95_seconds` | Agent completion-time distribution |
+| `tool_latency_*_seconds` | Native SSH Tool-command latency |
+| `blocked_admission_seconds` | Sum of memory-wait time across commands; waits may overlap |
+| `admission_control.wait_*` | Distribution of individual memory waits |
+| `duration_seconds` | Complete experiment-variant wall time |
+| `sandbox_create_mean_seconds` | Mean Runtime+Tool creation service time per agent |
 
-| Field | Meaning | Interpretation |
-| --- | --- | --- |
-| `agents_per_minute` | Valid Agents divided by workload window | Primary Agent throughput; higher is better. |
-| `steps_per_minute` | Model + Tool steps per workload window | Useful for different-length trajectories. |
-| `jct_mean/p50/p90/p95_seconds` | Agent completion distribution | Lower is better; p90/p95 show contention tails. |
-| `tool_latency_*_seconds` | Native Tool operation latency | Separate SSH/tool delay from model wait. |
-| `blocked_admission_seconds` | Sum of admission waits | May overlap across Agents; not wall-clock runtime. |
-| `admission_control.wait_*` | Individual admission-wait distribution | Use p95 and queue depth to explain blocking. |
-| `duration_seconds` | Arm wall-clock duration | Includes configured workload and lifecycle work. |
-| `sandbox_create_mean_seconds` | Pair provisioning service time | Report separately from Agent JCT. |
+Compare only variants using the same workload, templates, replay timing,
+arrival schedule, random seed, memory pool, and host scope.
 
-Use `summary.json` and raw timelines for figures, not manually copied Markdown
-values.
+## 3. Read memory
 
-## Memory
+| Field | Measurement |
+| --- | --- |
+| `memory.mean_used_delta_bytes` | Mean increase in host physical-memory use from the pre-variant baseline |
+| `memory.peak_used_delta_bytes` | Peak increase in host physical-memory use |
+| `memory.memory_time_integral_byte_seconds` | Host memory use integrated over time |
+| `tool_execution_observations[].actual_measured_memory_mib` | Tool process memory measured inside the Tool VM |
+| `actual_host_execution_increment_mib` | Host VM-memory increase around one Tool command |
 
-Guest Tool memory and host VM memory are different measurements:
+Guest Tool memory is used to profile commands. Host memory is used to evaluate
+VM density and checkpoint reclamation. These values are not interchangeable.
 
-| Field | Scope | Use |
-| --- | --- | --- |
-| `memory.mean_used_delta_bytes` | Host-wide baseline-subtracted physical memory | Resident footprint and efficiency. |
-| `memory.peak_used_delta_bytes` | Host-wide peak physical-memory delta | Safety and maximum density. |
-| `memory.memory_time_integral_byte_seconds` | Host physical memory-time | Memory-time efficiency. |
-| `tool_execution_observations[].actual_measured_memory_mib` | Tool guest cgroup RSS peak | Command profiling and prediction error. |
-| `actual_host_execution_increment_mib` | Host VM RSS increment around one Tool call | Host-side admission calibration. |
+## 4. Read checkpoint and restore time
 
-Never substitute guest Tool RSS for host VM footprint. Snapshot should normally
-reduce host mean/peak memory while adding pause/restore service time.
-
-## Snapshots
-
-Inspect pause/restore and host-memory fields with:
+Arm-level totals are available in `summary.json`:
 
 ```bash
 jq '.arms[] | {
   policy: .arm.policy.name,
-  pauses: .performance.pause_count,
-  restores: .performance.resume_count,
-  pause_service_s: .performance.pause_service_seconds,
-  restore_service_s: .performance.resume_service_seconds,
+  checkpoint_count: .performance.pause_count,
+  checkpoint_total_s: .performance.pause_service_seconds,
+  restore_count: .performance.resume_count,
+  restore_total_s: .performance.resume_service_seconds,
   mean_host_bytes: .memory.mean_used_delta_bytes,
   peak_host_bytes: .memory.peak_used_delta_bytes
 }' summary.json
 ```
 
-The event/timeline sequence should be model wait → Tool idle → paired pause →
-Runtime restore → response release → lazy Tool restore at admission. A
-successful pause API response alone is not reclamation evidence; use host
-memory samples and lifecycle `host_observed_reclaimed_bytes`.
-
-`resident` is the no-reclamation baseline. A lower snapshot memory number with
-different traces, compressed waits, or a different budget is not a policy
-effect.
-
-### Per-operation lifecycle timing
-
-The summary fields above are arm-level aggregates. To answer how long one
-CubeSandbox operation took, use the lifecycle records rather than estimating
-from Agent JCT:
+For each Runtime or Tool VM operation:
 
 ```bash
-# Exact Runtime/Tool operations for every session in an arm.
 jq '.arms[] | .performance.session_timelines[]
   | .lifecycle_timings[]
   | {role, operation, service_seconds, status, state_before, state_after,
      host_observed_reclaimed_bytes, host_reclamation_evidence}' summary.json
 ```
 
-The same records are emitted in the ordered event JSONL, which is convenient
-for one arm or for time-series analysis:
+The operations are:
 
-```bash
-jq -s '[.[]
-  | select(.event == "sandbox_created" or
-           .event == "sandbox_destroyed" or
-           .event == "sandbox_paused" or
-           .event == "sandbox_restored")
-  | {event, session_id, role, service_seconds,
-     timing: .lifecycle_timing}]' events/<arm-id>.jsonl
-```
+| Name | Timed work |
+| --- | --- |
+| `create` | Create and prepare one Runtime or Tool VM |
+| `checkpoint` | Synchronous `sandbox.pause(wait=True)` call, including work CubeSandbox completes before returning |
+| `restore` | Restore the VM and wait for CubeSandbox readiness |
+| `destroy` | End-of-session VM cleanup |
 
-`operation` has the following meaning:
+Runtime and Tool records are separate. For one paired checkpoint, add the two
+matching service times. `pause_count` and `resume_count` count these role-level
+operations, not model requests.
 
-| Operation | What is timed | Included in Agent JCT? |
-| --- | --- | --- |
-| `create` | CubeSandbox VM creation and readiness for one Runtime or Tool VM | Pair provisioning is reported separately; do not charge it to workload JCT. |
-| `checkpoint` | Synchronous `sandbox.pause(wait=True)`: CubeSandbox snapshot/checkpoint plus the live-VM pause/eviction operation | Yes, when it occurs during the workload model wait. |
-| `restore` | Recreating the VM from the checkpoint and readiness verification | Yes, when it delays response release or Tool admission. |
-| `destroy` | Cleanup of the VM at session end | No; report cleanup time separately. |
+`checkpoint.service_seconds` includes snapshot serialization and live-VM
+eviction completed before the CubeSandbox call returns. It does not by itself
+prove that host memory was reclaimed. Use
+`host_observed_reclaimed_bytes`, `host_reclamation_evidence`, and the host
+memory samples for that conclusion. Any asynchronous reclamation after the API
+returns is outside the recorded service time.
 
-The checkpoint duration is therefore an end-to-end CubeSandbox control-operation
-time, not merely the time to create a snapshot metadata record. It includes
-whatever snapshot serialization/copy and live-VM eviction work CubeSandbox has
-completed before `pause(wait=True)` returns. It does **not** by itself prove
-that all host physical pages have already been reclaimed: that is reported
-separately by `host_observed_reclaimed_bytes` and
-`host_reclamation_evidence`, sampled around the operation. If the backend
-performs any final asynchronous reclamation after the API returns, that tail is
-not included in `service_seconds`.
+Creation is reported separately from Agent completion time. Checkpoint and
+restore delays that occur during workload execution affect completion time;
+final destroy time is cleanup overhead.
 
-For paired snapshot mode, Runtime and Tool have separate records. Therefore
-`pause_count`/`pause_service_seconds` are sums of recorded role-level pause
-events, not necessarily the number of logical model-wait episodes. Use
-`session_timelines[].lifecycle_timings[]` to distinguish Runtime from Tool and
-to reconstruct each paired episode. The `service_seconds` value is the
-monotonic elapsed service time; wall-clock timestamps are retained for joining
-it to model waits, admissions, and host-memory samples.
-
-For a compact operation table (count, mean, minimum, and maximum) from an arm's
-event log:
-
-```bash
-jq -s '
-  [ .[]
-    | select(.event == "sandbox_created" or
-             .event == "sandbox_destroyed" or
-             .event == "sandbox_paused" or
-             .event == "sandbox_restored")
-    | {operation: .lifecycle_timing.operation,
-       role, seconds: (.lifecycle_timing.service_seconds // .service_seconds)} ]
-  | group_by(.operation)
-  | map({operation: .[0].operation, count: length,
-         mean_seconds: (map(.seconds) | add / length),
-         min_seconds: (map(.seconds) | min),
-         max_seconds: (map(.seconds) | max)})
-' events/<arm-id>.jsonl
-```
-
-As a reference, the recorded c60 snapshot arm currently reports 178 role-level
-pause records totalling about 322.91 s and 178 role-level restore records
-totalling about 36.22 s. The resident c60 arm reports no pause/restore
-operations. Those are arm totals; use the commands above for the individual
-create, destroy, checkpoint, and restore distributions. Creation and cleanup
-are intentionally kept separate from the workload snapshot overhead.
-
-## P90 admission
-
-Inspect prediction source, fallback, error, and KB provenance:
+## 5. Read P90 prediction results
 
 ```bash
 jq '.arms[] | {
@@ -221,35 +146,26 @@ jq '.arms[] | {
   predictions: .performance.prediction_observation_count,
   fallback_rate: .performance.prediction_fallback_rate,
   sources: .performance.prediction_source_distribution,
-  levels: .performance.prediction_fallback_level_distribution,
-  abs_error_p90_mib: .performance.prediction_absolute_error_p90_mib,
+  fallback_levels: .performance.prediction_fallback_level_distribution,
+  absolute_error_p90_mib: .performance.prediction_absolute_error_p90_mib,
   underestimate_p90_mib: .performance.prediction_underestimate_p90_mib,
   coverage: .performance.prediction_coverage_fraction,
   kb: .provenance.prediction_artifact
 }' summary.json
 ```
 
-For a defensible command-specific result, compared arms use the same immutable
-KB hash, source identifies that KB, and fallback rate is reported. A low
-average error does not rescue a run dominated by a global fallback.
+A command-specific result should use the same frozen KB hash in every compared
+variant and report its fallback rate. If most commands use a global fallback,
+the result does not demonstrate command-specific P90 admission.
 
-## Reading a comparison
+## Recommended reading order
 
-1. Reject invalid arms using the correctness gate.
-2. Compare throughput and JCT on the same valid Agent set.
-3. Compare host mean/peak and memory-time; then explain guest Tool RSS.
-4. Account for snapshot pause/restore service and response hold.
-5. Report P90 source, fallback, error, and reservation accuracy.
-6. Check provenance hashes, trace assignment, resource scope, and raw paths.
+1. Reject failed or incomplete variants using the correctness fields.
+2. Compare throughput and Agent completion time.
+3. Compare mean, peak, and time-integrated host memory.
+4. Account for memory-wait, checkpoint, restore, and response-hold time.
+5. For P90 policies, check prediction source, fallback rate, and error.
+6. Confirm identical workload and environment provenance.
 
-Typical interpretations are:
-
-- resident is faster but consumes more host memory;
-- snapshot uses less host memory but can worsen JCT through lifecycle service;
-- P90 reduces blocking but underestimation or safety interventions invalidate a
-  formal claim until KB/calibration improves;
-- high throughput with invalid joins, missing eBPF, wrong identity, OOM, or
-  leaked sandboxes is infrastructure output, not a successful Agent result.
-
-For formal reports, retain the raw bundle, experiment YAML, commits,
-template/image/kernel provenance, trace hashes, KB hash, and summary hash.
+Keep the original YAML, source commits, template and guest-kernel identifiers,
+trace hashes, KB hash, raw events, and validation output with the final report.

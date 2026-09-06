@@ -1,86 +1,37 @@
-# Reproducible Kunpeng 920B CubeSandbox setup
+# Historical Kunpeng Kubernetes deployment
 
-> This is a historical/reproducible Kubernetes profile for the Kunpeng host.
-> It is not the final native-SSH topology: the current single-node deployment
-> publishes a Pod-IP HostPort that Runtime cannot reach. Use
-> [docs/cubesandbox-setup.md](cubesandbox-setup.md) for fresh-machine and
-> already-setup-machine instructions, and do not promote this runbook's
-> lifecycle smoke to native c1/c4/c8 evidence.
+> Historical record only. This deployment returned a Kubernetes Pod IP that
+> the Runtime VM could not use as the final native-SSH address. Do not use it
+> for new ClawBox results. Follow [CubeSandbox setup](cubesandbox-setup.md).
 
-This is the shortest verified path to reproduce the ARM64 CubeSandbox
-environment used by ClawBox. It records the important live-host steps as well
-as the source-controlled files that implement them. Do not use old READY
-templates as acceptance evidence: templates must be rebuilt after changing the
-guest kernel.
+This file retains the host-specific facts needed to understand earlier
+Kunpeng diagnostics without presenting them as the normal installation path.
 
-## 1. Prepare the host
+## Host and storage
 
-Use an ARM64 Kunpeng 920B host with Kubernetes, containerd/CRI v1, Helm,
-`/dev/kvm`, cgroup v2, and at least 210 GiB free under `/data`. The host must
-have a reflink-capable XFS filesystem at `/data/cubelet`, or the installer can
-create its 200 GiB loopback filesystem there.
+The historical host used ARM64 Kunpeng 920B, Kubernetes, containerd/CRI v1,
+Helm, KVM, cgroup v2, and a reflink-capable XFS filesystem at `/data/cubelet`.
+CubeS3lvol ran as a host service and exposed `/var/run/s3lvol.sock` to the
+CubeSandbox node components.
 
-Install and start CubeS3lvol as a host systemd service before CubeSandbox:
+The source-controlled installer is:
 
 ```bash
-sudo systemctl enable --now s3lvol
-sudo systemctl is-active s3lvol
-test -S /var/run/s3lvol.sock
-```
-
-The S3 backend (MinIO in the default profile) must be reachable before the
-cube-node rollout. If the socket is recreated, restart cube-node so the new
-socket inode is mounted into the cubelet container:
-
-```bash
-kubectl -n cube-system rollout restart daemonset/cube-node
-kubectl -n cube-system rollout status daemonset/cube-node --timeout=10m
-```
-
-Do not delete `/data/cubelet`, MinIO data, S3 objects, results, or kernel
-backups during recovery.
-
-## 2. Install the pinned CubeSandbox chart
-
-From this repository, set secrets without committing them and run the normal
-installer:
-
-```bash
-export CUBE_MYSQL_PASSWORD='...'
-export CUBE_MYSQL_ROOT_PASSWORD='...'
-export CUBE_REDIS_PASSWORD='...'
+export CUBE_MYSQL_PASSWORD='<value>'
+export CUBE_MYSQL_ROOT_PASSWORD='<value>'
+export CUBE_REDIS_PASSWORD='<value>'
 bash scripts/install-cubesandbox-kunpeng920.sh check
 bash scripts/install-cubesandbox-kunpeng920.sh install
 ```
 
-The installer pins CubeSandbox v0.7.0 and layers
-`deploy/cubesandbox/runtime-values-kunpeng920.yaml`. It also deterministically
-patches the pinned chart to mount exactly `/var/run/s3lvol.sock` into the
-cubelet container using a `hostPath` whose type is `Socket`. It must not mount
-all of `/var/run` or use `FileOrCreate`.
+It pins CubeSandbox `v0.7.0`, applies
+`deploy/cubesandbox/runtime-values-kunpeng920.yaml`, and mounts only the
+S3lvol socket into Cubelet. The node was considered ready only when every
+cube-node container was running and Cubelet could use S3lvol.
 
-Verify both source rendering and the installed manifest:
+## Guest kernel
 
-```bash
-helm template cube ... | grep -A5 -B2 s3lvol-socket
-helm -n cube-system get manifest cube | grep -A5 -B2 s3lvol-socket
-kubectl -n cube-system get pods -o wide
-kubectl -n cube-system exec <cube-node-pod> -c cubelet -- test -S /var/run/s3lvol.sock
-```
-
-The node is ready only when all three cube-node containers are running. Also
-check that the cubelet logs show successful S3lvol/CubeCoW initialization.
-
-## 3. Build and install the kprobe guest kernel
-
-Use the pinned OpenCloudOS 6.6.119-49.6 source and the checked-in config patch:
-
-```text
-deploy/cubesandbox/kernel-oc9-arm64-kprobes.config.patch
-```
-
-Build it through the CubeSandbox ARM64 `scripts/build-kernel.sh` flow. The
-required result is:
+The diagnostic build used OpenCloudOS kernel `6.6.119-49.6` with:
 
 ```text
 CONFIG_KPROBES=y
@@ -89,82 +40,29 @@ CONFIG_FTRACE_SYSCALLS=y
 sha256:f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
 ```
 
-Install it through the privileged `cube-kernel-install` container, preserving
-the vendor files as `*.original-a63aa77e` backups. The active files are
-`vmlinux-bm`, `version`, and `version.json`; make `vmlinux` point to
-`vmlinux-bm`. Use the checked-in metadata:
+The configuration and version records remain in:
 
 ```text
+deploy/cubesandbox/kernel-oc9-arm64-kprobes.config.patch
 deploy/cubesandbox/kernel-oc9-arm64-kprobes.version
 deploy/cubesandbox/kernel-oc9-arm64-kprobes.version.json
 ```
 
-The repository provides the idempotent installer below. It verifies the local
-artifact checksum, stages it under persistent `/data/cubelet`, preserves vendor
-backups, registers the component only when it is missing or different, and
-restarts cube-node only when a change was made:
+Installation was performed by the idempotent helper, which verifies the
+checksum, preserves the vendor kernel, registers the component version, and
+restarts cube-node only when necessary:
 
 ```bash
-bash scripts/install-kprobe-kernel-kunpeng920.sh /path/to/vmlinux <cube-node>
+bash scripts/install-kprobe-kernel-kunpeng920.sh \
+  /path/to/vmlinux <cube-node>
 ```
 
-Its underlying installation shape is:
+The active component name was `sha256-f84e3fa28ae6`. Templates built with a
+different kernel record were rejected rather than silently reused.
 
-```bash
-POD=$(kubectl -n cube-system get pod -l app=cube-node-installer \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl -n cube-system cp /path/to/vmlinux "$POD:/tmp/vmlinux-kprobes" \
-  -c cube-kernel-install
-kubectl -n cube-system exec "$POD" -c cube-kernel-install -- sh -s <<'EOF'
-set -eu
-ROOT=/usr/local/services/cubetoolbox/cube-kernel-scf
-test -f /tmp/vmlinux-kprobes
-test -f "$ROOT/vmlinux-bm-original-a63aa77e" || cp -a "$ROOT/vmlinux-bm" "$ROOT/vmlinux-bm-original-a63aa77e"
-test -f "$ROOT/version.original-a63aa77e" || cp -a "$ROOT/version" "$ROOT/version.original-a63aa77e"
-test -f "$ROOT/version.json.original-a63aa77e" || cp -a "$ROOT/version.json" "$ROOT/version.json.original-a63aa77e"
-install -m 0644 /tmp/vmlinux-kprobes "$ROOT/vmlinux-bm"
-ln -sfn vmlinux-bm "$ROOT/vmlinux"
-EOF
-```
+## Historical image records
 
-Copy the two checked-in metadata files into the same container and install
-them as `version` and `version.json`. Then register the component copy below;
-the directory name and the contents of `version` must match exactly.
-
-The active component identity is `sha256-f84e3fa28ae6`. Register the same
-kernel under the component-version store, otherwise CubeMaster will reject a
-new VM even when the template metadata is correct:
-
-```text
-/data/cubelet/root/component_versions/cube-kernel-scf/sha256-f84e3fa28ae6/
-  vmlinux-bm
-  vmlinux -> vmlinux-bm
-  variant  # bm
-  version  # sha256:f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f
-```
-
-The component registration can be completed with:
-
-```bash
-kubectl -n cube-system exec "$POD" -c cube-kernel-install -- sh -s <<'EOF'
-set -eu
-C=/data/cubelet/root/component_versions/cube-kernel-scf/sha256-f84e3fa28ae6
-mkdir -p "$C"
-install -m 0644 /tmp/vmlinux-kprobes "$C/vmlinux-bm"
-printf 'bm\n' > "$C/variant"
-printf 'sha256:f84e3fa28ae692f34645aa3c7034999242760eb25aab0ea667b43f16ac12c27f\n' > "$C/version"
-ln -sfn vmlinux-bm "$C/vmlinux"
-EOF
-```
-
-Restart cube-node and wait for `3/3 Running`. Never mutate old template
-metadata and never disable the kernel compatibility check.
-
-## 4. Publish immutable ARM64 images
-
-Build and publish the Runtime, Tool, and Worker images to the reachable
-registry. The Runtime and Tool Dockerfiles support the
-`CUBE_GUEST_KERNEL_DIGEST` OCI label. The verified image digests are:
+The images used by that deployment were recorded as:
 
 ```text
 runtime: sha256:5d1ea3cee703da47b031b26d8439e240b9d39ffb978e084c482fae1e17764ca7
@@ -172,120 +70,35 @@ tool:    sha256:750b71f97322467a23537973c77b23160ff37d2adcdcd32aa7bba07d78c4725b
 worker:  sha256:f5fd49858a242efda1e0ea1cc1a896161b048e93348fc2402ad1019ccc8e6056
 ```
 
-Use image references containing the immutable digest, not a mutable tag. After
-a host reboot, confirm the registry container/service is running before
-building templates.
+These hashes are historical provenance, not current template defaults.
 
-## 5. Build fresh templates and validate in order
+## Validation order used at the time
 
-Run the SDK scripts from an environment with the project dependencies:
+1. Check CubeS3lvol and cube-node health.
+2. Build a new Tool template against the recorded kernel.
+3. Run `scripts/diagnose-cube-kprobes.py`.
+4. Check Tool pause and restore.
+5. Build a new Runtime template.
+6. Run `scripts/smoke-cubesandbox-agent-pair.py`.
+7. Verify the exact execution-ID join for cgroup and eBPF data.
+8. Verify that no owned sandbox remains.
 
-```bash
-python -m pip install -e '.[dev,postgres]'
-export CUBE_API_URL=http://<cube-host>:30030
-export CUBE_PROXY_NODE_IP=<cube-host>
-export CUBE_PROXY_PORT_HTTP=30080
-# Python SDK traffic must bypass any workstation HTTP proxy for the host API.
-export NO_PROXY=<cube-host>,localhost,127.0.0.1
-export no_proxy="$NO_PROXY"
-```
+These checks established VM lifecycle and telemetry only. They did not prove
+the final Runtime-to-Tool network route, which is why this topology was
+retired from the supported path.
 
-Build unique Runtime and Tool aliases from the two immutable image digests:
+## Reboot and rollback notes
 
-```bash
-python scripts/register-cube-template.py \
-  'http://<cube-host>:5001/clawbox/tool-cube-arm64@sha256:750b71f...' \
-  --alias clawbox-tool-<kernel-generation> \
-  --node <cube-node> --probe-port 49983
+After a reboot, the registry, S3lvol socket, cube-node, guest-kernel component,
+and template records all had to be checked again. The vendor installer could
+restore the vendor guest kernel during startup, so the custom component might
+need to be reinstalled before creating a new template.
 
-python scripts/register-cube-template.py \
-  'http://<cube-host>:5001/clawbox/runtime-cube-arm64@sha256:5d1ea3...' \
-  --alias clawbox-runtime-<kernel-generation> \
-  --node <cube-node> --probe-port 49983
-```
+One observed reboot failure was caused by a missing `cube-dev` interface while
+S3lvol remained healthy. That was a CubeVS/node-network startup problem, not a
+reason to change the Tool route or disable telemetry.
 
-For each returned template ID, query `GET /templates/<id>` and require every
-replica to report `kernel_version=sha256-f84e3fa28ae6` before launching it.
-The validation order is:
-
-1. `cube-node` healthy and socket visible/usable inside cubelet.
-2. Fresh Tool template builds successfully.
-3. `scripts/diagnose-cube-kprobes.py` passes, including the manual probe on
-   `__arm64_sys_execve`.
-4. Tool VM pause/resume succeeds.
-5. Fresh Runtime template builds successfully.
-6. `scripts/smoke-cubesandbox-agent-pair.py` passes with the fresh IDs.
-7. Telemetry is `complete`, joined by the exact execution ID, with valid
-   cgroup-v2 and eBPF artifacts.
-8. `scripts/audit-cube-sandboxes.py` reports no leaked sandboxes.
-
-The logical agent must remain exactly two VMs: Runtime owns OpenClaw and
-prediction instrumentation; Tool owns `/workspace`, repository commands, and
-command telemetry. In the final native OpenClaw topology, `snapshot_pause`
-checkpoints both VMs during model waits and restores Runtime before releasing
-the model response; the Tool is restored at the next SSH admission. This
-diagnostic Kubernetes profile predates that paired-VM path and must not be used
-to claim native lifecycle evidence.
-Run the pair smoke from the host process with a host address reachable from the
-Runtime VM. Policy control is a metadata-only listener on port `18080`; the
-Runtime-to-Tool command and stdio path is native OpenSSH. No WorkerBridge,
-NodePort, Kubernetes Service, or HTTP command dispatcher is part of this gate.
-
-The Tool VM owns the ephemeral SSH host key and authorized client key for the
-session. The Runtime receives only the client key, the pinned host key, and the
-host policy endpoint. A Runtime SSH shim sends admission/completion metadata
-and starts OpenSSH exactly once after `ADMIT`; command text and all stdio stay
-on the Runtime-to-Tool SSH connection.
-
-The Worker advertises direct host listeners for PolicyControl (`18080`) and
-ModelGateway (`18081`) and allows Runtime egress only to the configured host
-IP. The gateway remains session-local: it retains the upstream credential on the
-host, gives Runtime a per-session token, and requires complete replay
-consumption, canonical input matches, and delivered responses.
-
-For native SSH acceptance, run the local tests and then the real pair smoke:
-
-```bash
-python -m pytest tests/test_openclaw_driver.py -q
-python scripts/smoke-cubesandbox-agent-pair.py \
-  --runtime-template <fresh-runtime-template> \
-  --tool-template <fresh-tool-template> \
-  --node <cube-node> \
-  --control-host <host-ip-reachable-from-runtime> \
-  --policy-port 18080
-```
-
-The pair smoke records the exact `tool.get_host(2222)` value, probes it from
-Runtime without assuming a port, verifies that an unenveloped Agent SSH
-operation fails closed, checks native SSH output before and after Tool pause,
-triggers demand restore through PolicyControl, validates cgroup/eBPF artifacts
-by exact execution ID, confirms policy records contain no command/output, and
-audits zero owned Sandbox leaks. It is a boundary smoke rather than the full
-40/60-agent experiment; preserve its JSON output and the worker's per-session
-artifacts for later analysis.
-
-## 6. Reboot and rollback notes
-
-After reboot, validate S3lvol/socket, registry, cube-node readiness, active
-guest-kernel identity, and the custom component-version directory before
-creating templates. The vendor cube-node installer may restore the vendor
-kernel during startup, so the custom kernel and component registration must be
-reapplied (or made part of the site's privileged startup procedure) before
-acceptance testing. The recovery script requires `kubectl exec -i` for its
-checksum/backup transaction and uses the pinned
-`app.kubernetes.io/component=cube-node-installer` selector.
-
-If cube-node remains below `3/3` after the kernel is restored, stop. In the
-observed reboot check, cubelet exited because host interface `cube-dev` was
-absent and cube-egress-net timed out waiting for it, while S3lvol and its
-socket were healthy. This is a CubeVS/node-network bootstrap issue, not a
-bridge or guest-kernel acceptance failure; do not compensate by changing
-network routing, containerd, kubelet, S3lvol, or existing templates.
-
-Rollback is allowed only after a zero-sandbox audit: restore the preserved
-`vmlinux-bm`, `version`, and `version.json` vendor backups in the privileged
-kernel-install container, restart cube-node, and verify `3/3 Running`. Keep
-both kernel generations and all existing template/result data.
-
-The BoostKit irqbypass XArray patch is unrelated to this setup and should not
-be applied unless later profiling demonstrates a relevant contention problem.
+Rollback was allowed only after confirming that no experiment VM remained.
+The preserved vendor kernel files were restored, cube-node was restarted, and
+all components were checked again. Existing templates and result directories
+were retained.

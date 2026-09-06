@@ -49,9 +49,15 @@ def _mapping(raw: Any, *, name: str) -> dict[str, Any]:
 
 
 def _set_template(
-    section: dict[str, Any], *, template_id: str | None,
+    section: dict[str, Any], *, label: str, template_id: str | None,
     image_reference: str | None, image_digest: str | None,
 ) -> None:
+    current_template = section.get("template_id") or section.get("template_alias")
+    if template_id is not None and template_id != current_template:
+        if image_reference is None or image_digest is None:
+            raise ValueError(
+                f"changing the {label} template requires its image reference and digest"
+            )
     if template_id is not None:
         section["template_id"] = template_id
         section.pop("template_alias", None)
@@ -184,12 +190,33 @@ def configure_experiment(
         for item in matching:
             item["prefetch_lead_seconds"] = prefetch_lead_seconds
 
+    runtime_shape_changed = (
+        (runtime_vcpu is not None and runtime_vcpu != runtime.get("vcpu"))
+        or (
+            runtime_memory_gib is not None
+            and gib_to_mib(runtime_memory_gib, name="runtime memory")
+            != runtime.get("memory_mib")
+        )
+    )
+    tool_shape_changed = (
+        (tool_vcpu is not None and tool_vcpu != tool.get("vcpu"))
+        or (
+            tool_memory_gib is not None
+            and gib_to_mib(tool_memory_gib, name="tool memory")
+            != tool.get("memory_mib")
+        )
+    )
+    if runtime_shape_changed and runtime_template_id is None:
+        raise ValueError("changing Runtime CPU or memory requires a new Runtime template")
+    if tool_shape_changed and tool_template_id is None:
+        raise ValueError("changing Tool CPU or memory requires a new Tool template")
+
     _set_template(
-        runtime, template_id=runtime_template_id,
+        runtime, label="Runtime", template_id=runtime_template_id,
         image_reference=runtime_image_reference, image_digest=runtime_image_digest,
     )
     _set_template(
-        tool, template_id=tool_template_id,
+        tool, label="Tool", template_id=tool_template_id,
         image_reference=tool_image_reference, image_digest=tool_image_digest,
     )
     if runtime_vcpu is not None:
@@ -274,6 +301,24 @@ def configure_experiment(
         configuration["base_url"] = base_url
     if api_key_env is not None:
         configuration["api_key_env"] = api_key_env
+
+    if any(item.get("eviction") == "wait_aware_pressure" for item in policy_mappings):
+        predicted_wait = configuration.get("model_wait_prediction_seconds")
+        prediction_source = str(
+            configuration.get("model_wait_prediction_source") or ""
+        ).strip()
+        try:
+            predicted_wait_value = float(predicted_wait)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "wait-aware baselines require --model-wait-prediction-seconds"
+            ) from exc
+        if not math.isfinite(predicted_wait_value) or predicted_wait_value <= 0:
+            raise ValueError("model wait prediction must be positive")
+        if not prediction_source:
+            raise ValueError(
+                "wait-aware baselines require --model-wait-prediction-source"
+            )
 
     return ExperimentSpec.model_validate(root)
 

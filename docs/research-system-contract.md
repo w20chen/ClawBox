@@ -1,127 +1,123 @@
-# ClawBox research-system contract
+# Research design and correctness rules
 
-ClawBox studies whether many concurrent LLM Agents can safely overcommit
-Kunpeng physical memory by combining Agent execution context, command-specific
-Tool demand prediction, memory admission, and reclamation during long model
-waits. Running OpenClaw in a VM is necessary infrastructure, not the research
-result.
+This document is for paper authors and developers changing ClawBox internals.
+For normal configuration and execution, use the
+[experiment guide](experiment-operations.md).
 
-## Managed architecture
+ClawBox studies whether many concurrent LLM agents can share physical memory
+safely by using command-specific memory predictions and checkpointing virtual
+machines while the model is producing a response.
 
-Each logical Agent owns one long-lived Runtime CubeSandbox VM and one Tool
-CubeSandbox VM. Runtime runs OpenClaw and model-side execution. Tool owns the
-mutable workspace and executes every sandboxed operation through native SSH.
-CubeSandbox is the only VM substrate; ClawBox is the policy and orchestration
-layer above it. PolicyControl admits and records operations but never proxies
-SSH commands or output.
+## System structure
 
-The required loop is:
+Each agent owns two CubeSandbox VMs:
+
+- Runtime VM: runs OpenClaw and communicates with the model;
+- Tool VM: owns the writable workspace and runs Tool commands over SSH.
+
+CubeSandbox is the only VM platform. ClawBox decides when work may start and
+when a VM may be checkpointed. It does not replace CubeSandbox networking or
+execute Tool commands through an HTTP proxy.
+
+The required command flow is:
 
 ```text
-Agent/OpenClaw
--> model wait or Tool request
--> observe Agent context
--> ClawTune command/resource prediction
--> synchronous physical-memory admission and reservation
--> CubeSandbox residency/restore decision
--> native SSH Tool execution
--> execution-scoped cgroup-v2 and eBPF observation
--> exact session_id + execution_id join
--> ClawTune KB feedback where training is permitted
--> next prediction and decision
+OpenClaw requests a Tool command
+-> ClawTune identifies the command and predicts its resource use
+-> ClawBox checks host memory and reserves capacity
+-> restore the Tool VM if needed
+-> resolve and verify the current SSH address
+-> run the command over native SSH
+-> collect cgroup-v2 and eBPF measurements
+-> join records by session ID and execution ID
+-> update training data when the experiment permits learning
 ```
 
-Admission precedes both VM materialization and SSH execution. One accounting
-mechanism must cover restore/materialization memory, predicted incremental Tool
-memory, and safety headroom. The reservation remains held until the actual
-remote operation has ended, the SSH process has been reaped, and completion
-telemetry is ordered correctly.
+One execution ID must be used from the memory decision through SSH completion
+and telemetry collection. The SSH process starts only after the memory check
+passes. Its reservation remains active until the process has exited and the
+completion record has been collected. Retrying an admission request must not
+start the command twice.
 
-The execution identity is attached at the lowest boundary that actually owns
-the SSH subprocess. ClawTune attaches it directly to command-bearing `exec`.
-For OpenClaw filesystem/backend SSH created below the tool-hook boundary, the
-ClawBox SSH hook attaches a new ID before synchronous admission and inserts that
-same ID into the Tool-bridge envelope. Backend-maintenance SSH is measured but
-does not count as an Agent Tool call. Runtime-span coverage is a separate metric
-from the mandatory Policy/SSH/guest-telemetry exact-ID join.
+## ClawTune responsibilities
 
-## ClawTune ownership
+Reuse the sibling ClawTune repository for:
 
-Reuse the sibling `ClawTune` repository rather than recreating its research
-logic. In particular, ClawTune owns command normalization and fallback keys,
-Tool duration and CPU/memory estimation, P50/P90 statistics, cgroup-v2
-collection, native eBPF/kprobe telemetry, and the Runtime Tool-resource KB.
-ClawBox may validate, join, freeze, and report these records and adds the
-physical-memory admission and CubeSandbox residency policy around them.
+- command normalization and fallback keys;
+- Tool duration, CPU, and memory statistics;
+- P50 and P90 prediction;
+- cgroup-v2 measurements;
+- native eBPF/kprobe data;
+- the Runtime command knowledge base.
 
-Any compatibility adapter must be tested against the pinned native ClawTune
-reader. A locally copied tokenizer, percentile estimator, or fallback lattice
-is not an acceptable substitute when the pinned ClawTune implementation can be
-called directly.
+ClawBox may validate, join, freeze, and report these records. It adds host
+physical-memory control and VM checkpoint decisions. It should not contain a
+second implementation of ClawTune's parser or percentile estimator.
 
-Formal evaluation trains or calibrates the KB from separate recording data,
-freezes it before policy comparison, and uses the same immutable artifact in
-every arm. Model-wait decisions follow the same rule: wait-aware/proactive
-formal arms must declare a request-time estimate and its source. The held-out
-recorded response latency is used only to make replay's clock advance and may
-not be passed into the policy decision.
-Held-out replay does not update its own predictor unless the arm is
-explicitly an online-learning experiment. Prediction error and fallback rate
-are first-class results.
+For a normal comparison, create the prediction file from a separate recording
+set, make it read-only, record its SHA-256, and reuse the exact file in every
+variant. The test workload must not train its own predictor unless the variant
+is explicitly studying online learning.
 
-## VM reclamation
+## Memory control
 
-For `resident`, Runtime and Tool remain resident for the Agent lifetime. For
-native `snapshot_pause`, a sufficiently long model wait may reclaim both VMs
-only after active Tool SSH operations have ended. ModelGateway owns the
-pending model result while Runtime is absent. Runtime is restored and checked
-before the response is released; Tool may remain swapped until its next
-admitted operation.
+Before VM creation, VM restore, or a Tool command, ClawBox combines current
+host memory use, existing reservations, the new reservation, and configured
+headroom. It also checks a minimum host-free-memory limit shared by all
+baselines. An underestimated command may trigger this safety limit but must not
+be allowed to cause an unexplained host OOM.
 
-On the pinned CubeSandbox source revision `64102d9`, the pause path performs a
-memory snapshot and then destroys the live microVM/shim while retaining a
-paused tombstone. A live Kunpeng probe on 2026-09-06 touched 1.5 GiB inside a
-Tool VM, observed approximately 1.69 GiB sandbox-process RSS, paused in about
-0.93 seconds, observed the sandbox process disappear and roughly 1.64 GiB
-return to `MemAvailable`, then restored the same guest PID and allocation.
-Cleanup returned the sandbox inventory to empty. These numbers are diagnostic
-evidence, not a formal policy result; formal runs must retain raw samples and
-must not infer reclamation merely from a successful pause response.
+Two memory measurements have different purposes:
 
-Guest execution memory and host physical VM memory are different quantities.
-Guest cgroup/eBPF measurements train Tool predictions. Host process/cgroup and
-`MemAvailable` measurements establish density, memory-time, restore cost, and
-actual snapshot reclamation.
+- memory measured inside Tool VM describes one Tool command and trains
+  command predictions;
+- physical memory measured on the host describes VM density, checkpoint memory
+  release, and memory use over time.
 
-The admission target is explicit. A recording run samples each Tool VM shim's
-host RSS during the exact SSH execution window and pairs its host increment
-with ClawTune's guest cgroup peak. A separate calibration set produces a P90
-host/guest increment ratio. The frozen artifact maps each ClawTune command P90
-to `predicted_host_execution_increment`; an uncalibrated guest-only prediction
-is rejected. The shared ledger charges observed host use, this incremental
-execution reservation, any pending VM restore/materialization footprint, and
-configured headroom before materialization or SSH begins.
+Do not substitute one for the other. P90 admission uses a calibration from
+Tool measurements to the expected host-memory increase during execution.
 
-## Evaluation contract
+## Checkpoint behavior
 
-Deterministic managed replay is the primary c20/c40/c60 method. Only model
-generation and its recorded timing are replayed. Runtime VM, OpenClaw, native
-SSH, Tool VM, workspace, Tool commands, admission, pause/restore, host pressure,
-cgroup telemetry, and eBPF telemetry remain real. Replay divergence fails
-closed, and primary results preserve recorded wait durations without using a
-future actual wait as a non-oracle prediction.
+With `resident`, Runtime and Tool VMs remain running until the agent ends.
 
-Use at least two or three heterogeneous, representative coding trajectories,
-clean equivalent workspaces, deterministic trace-to-session assignment, and an
-identical offered-arrival schedule across arms. Validate c1 lifecycle and
-identity, then c4/c8 isolation and leaks, c20 policy behavior, and finally
-c40/c60. Real-LLM c1/c2/c4 confirms that the same architecture works without
-replay.
+With `snapshot_pause`, ClawBox may checkpoint both VMs during a model request,
+but only after the Tool has no active SSH process. ModelGateway keeps the
+pending model response while Runtime is absent. Runtime is restored and checked
+before that response is delivered. Tool may remain checkpointed until the next
+Tool command.
 
-The final report separates evidence classes and includes throughput, JCT,
-Tool latency, blocked time, mean/peak host memory, memory-time, prediction
-error, fallback rate, reservation accuracy, pause/restore cost, reclaimed
-memory, response hold, exact telemetry joins, validation, replay divergence,
-wrong/duplicate Tool execution, OOM interventions, and sandbox leaks. Unit
-tests, SSH reachability, a successful pause API call, or simulated scale alone
-do not satisfy this contract.
+When Tool is restored, ClawBox asks CubeSandbox for port `2222` again, advances
+the endpoint generation, and verifies the Tool's SSH key and identity marker.
+It does not assume that the old host and port remain valid.
+
+The validated Kunpeng installation used local CubeSandbox commit `64102d9`,
+based on `v0.7.0` with the same changes stored under `deploy/cubesandbox/`.
+There, pause writes a memory snapshot and removes the running microVM while
+keeping enough metadata to restore it. A 2026-09-06 diagnostic touched 1.5 GiB
+inside one Tool VM, observed about 1.69 GiB host process memory, paused in about
+0.93 seconds, and observed about 1.64 GiB return to host available memory. This
+is a diagnostic example, not a paper comparison; formal results must use their
+own raw host-memory samples.
+
+## Evaluation rules
+
+Large c20/c40/c60 comparisons use recorded model responses and their original
+timing. Everything else remains real: Runtime and Tool VMs, OpenClaw, SSH,
+workspace changes, memory checks, checkpoint/restore, cgroup data, and eBPF
+data. Any mismatch between replay input and the recorded request stops the run.
+
+Use several representative coding traces, clean equivalent workspaces, a fixed
+trace-to-agent assignment, and the same arrival schedule in every compared
+variant. Validate identity and lifecycle at c1, then isolation at c4/c8, before
+large runs. Small real-model c1/c2/c4 runs confirm that replay does not hide an
+integration dependency.
+
+Every final report separates real-model, managed replay, synthetic, and unit
+test evidence. It reports throughput, agent completion time, Tool latency,
+memory-wait time, host mean/peak memory, memory over time, prediction error,
+fallback rate, checkpoint/restore cost, reclaimed memory, validation failures,
+telemetry loss, wrong or duplicate Tool execution, OOM events, and VM leaks.
+
+Unit tests, one successful SSH command, or one successful checkpoint are useful
+checks but are not sufficient evidence for the complete research result.

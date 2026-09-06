@@ -151,30 +151,41 @@ def main(argv: list[str] | None = None) -> int:
     args = root.parse_args(argv)
     try:
         if args.command == "baselines":
-            required = {
-                "tool_full": "resources.full_tool_memory_mib",
-                "tool_static": "resources.static_tool_memory_mib",
-                "tool_p90": "resources.p90_predictions",
-                "tool_oracle": "resources.oracle_measurements",
+            admission_required = {
+                "tool_full": ["resources.full_tool_memory_mib"],
+                "tool_static": ["resources.static_tool_memory_mib"],
+                "tool_p90": ["resources.p90_predictions"],
+                "tool_oracle": ["resources.oracle_measurements"],
             }
-            rows = [{
-                "name": name,
-                "admission": value.admission_policy.value,
-                "reclamation": value.reclamation_policy.value,
-                "eviction": value.eviction_policy.value,
-                "restore": value.restore_policy.value,
-                "required_resource": required.get(value.admission_policy.value),
-                "status": value.implementation_status,
-            } for name, value in BASELINES.items()
-                if args.all or value.implementation_status == "implemented"]
+            rows = []
+            for name, value in BASELINES.items():
+                if not args.all and value.implementation_status != "implemented":
+                    continue
+                required_settings = list(
+                    admission_required.get(value.admission_policy.value, [])
+                )
+                if value.eviction_policy.value == "wait_aware_pressure":
+                    required_settings.extend([
+                        "inference.configuration.model_wait_prediction_seconds",
+                        "inference.configuration.model_wait_prediction_source",
+                    ])
+                rows.append({
+                    "name": name,
+                    "admission": value.admission_policy.value,
+                    "reclamation": value.reclamation_policy.value,
+                    "eviction": value.eviction_policy.value,
+                    "restore": value.restore_policy.value,
+                    "required_settings": required_settings,
+                    "status": value.implementation_status,
+                })
             if args.as_json:
                 emit(rows)
             else:
                 print("Available baselines:")
                 for row in rows:
                     requirement = (
-                        f", requires {row['required_resource']}"
-                        if row["required_resource"] else ""
+                        f", requires {', '.join(row['required_settings'])}"
+                        if row["required_settings"] else ""
                     )
                     print(
                         f"  {row['name']}: {row['admission']} + "

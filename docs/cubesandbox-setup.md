@@ -1,300 +1,171 @@
-# CubeSandbox setup and run guide
+# CubeSandbox setup
 
-This is the operational guide for the supported ClawBox topology. ClawBox
-uses CubeSandbox for both VMs and asks CubeSandbox for the Tool's semantic raw
-TCP endpoint for container port `2222`. ClawBox does not allocate ports,
-interpret Redis/CubeProxy metadata, proxy SSH, create NodePorts, or discover a
-guest IP.
+This guide covers CubeSandbox installation, networking, and the checks required
+before a ClawBox experiment. Experiment configuration and model settings are in
+the [experiment guide](experiment-operations.md).
 
-For complete experiment commands, baseline tuples, hyperparameters, and disk
-sizing, continue with [experiment-operations.md](experiment-operations.md)
-after this CubeSandbox gate passes.
+ClawBox uses CubeSandbox for both the Runtime VM and Tool VM. It asks
+CubeSandbox for the current TCP address of Tool port `2222`; it does not read
+CubeProxy databases, allocate ports, create a NodePort, or connect directly to
+an assumed guest address.
 
-## Choose the deployment path
+## Supported deployment
 
-Use one of these two paths:
+Use CubeSandbox's standalone deployment on a Linux KVM host, or its documented
+multi-node control/compute layout. The returned Tool address must use a
+physical or private deployment address that the Runtime VM can reach.
 
-1. **Fresh machine:** install CubeSandbox's standalone one-click deployment
-   on a Linux host with KVM. For a multi-node deployment, use the official
-   control-node/compute-node layout. The Tool endpoint must resolve to a
-   deployment-owned physical or private address that the Runtime can reach.
-2. **Already set up:** keep the existing CubeSandbox deployment and run the
-   preflight below. Do not modify ClawBox networking to compensate for a
-   failed route.
+A Kubernetes Pod IP is not a valid final Tool address. The old Kunpeng
+Kubernetes deployment remains documented in
+`kunpeng920-reproduction-runbook.md` for historical diagnosis only.
 
-The final native-SSH gate does not accept a Kubernetes Pod IP as `HostIP`.
-The repository's `install-cubesandbox-kunpeng920.sh` is a reproducible
-Kunpeng/Kubernetes profile and is useful for CubeSandbox lifecycle checks, but
-the current single-node Pod-IP topology is not an admissible native-SSH
-deployment. CubeSandbox may use Kubernetes internally; ClawBox must not use
-Kubernetes objects as its execution path.
+CubeSandbox base version: `v0.7.0`. ClawBox applies three source-controlled
+patches for the semantic TCP endpoint, same-node port forwarding, and template
+image provenance.
 
-## Fresh machine
+## Install on a new machine
 
-The official CubeSandbox deployment documentation is the source of truth for
-OS packages, storage, services, firewall rules, and one-click release
-artifacts:
+Use CubeSandbox's upstream instructions for packages, firewall settings,
+storage, and service layout:
 
 - [bare-metal deployment](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/bare-metal-deploy.md)
 - [multi-node deployment](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/multi-node-deploy.md)
 - [one-click deployment files](https://github.com/TencentCloud/CubeSandbox/tree/master/deploy/one-click)
 
-For ARM64, use an ARM64 release bundle or build one from source; the official
-online installer is not the ARM64 path. The host must have Linux, `/dev/kvm`,
-cgroup v2, Docker/containerd support, eBPF support, and the storage required
-by the selected CubeSandbox deployment. Keep CubeProxy's host-network data
-path and its documented physical/private node address intact.
+The host needs `/dev/kvm`, cgroup v2, an ARM64 CubeSandbox build, and enough
+reflink-capable XFS storage for VM layers and checkpoints.
 
-The semantic endpoint API is a small CubeSandbox source addition. It is not in
-the public `v0.7.0` tag, so prepare the pinned source before building the
-CubeSandbox API/release bundle:
+Prepare a clean CubeSandbox `v0.7.0` checkout and apply the required patches:
 
 ```bash
 cd ClawBox
 export CUBE_SOURCE_DIR="$PWD/.cubesandbox"
 bash deploy/cubesandbox/prepare-semantic-source.sh
-export CUBE_SOURCE_DIR="$PWD/.cubesandbox"
 ```
 
-The helper refuses to overwrite a dirty checkout and applies three narrow
-CubeSandbox patches: `deploy/cubesandbox/semantic-tcp-endpoint.patch` adds the
-CubeAPI route and matching Python SDK method, while
-`deploy/cubesandbox/hostport-hairpin.patch` lets one CubeSandbox VM consume
-another VM's existing mapped TCP endpoint on the same node. The latter is the
-source-identical patch from CubeSandbox commit `6b2d63e`; it reuses CubeVS's
-existing port maps and conntrack state and adds no SSH proxy or port allocator.
-`deploy/cubesandbox/template-image-provenance.patch` preserves CubeMaster's
-immutable source image reference in CubeAPI's template-detail response so
-ClawBox can verify the configured digest before creating any VM.
-Build the CubeSandbox one-click bundle from that prepared source using
-CubeSandbox's documented release-bundle flow:
+The helper refuses to overwrite a dirty checkout. Build and install the
+one-click bundle using CubeSandbox's normal release process:
 
 ```bash
 cd "$CUBE_SOURCE_DIR"
 test -e deploy/one-click/build.env || \
   cp deploy/one-click/build.env.example deploy/one-click/build.env
 ONE_CLICK_BUILD_JOBS=1 ./deploy/one-click/build-release-bundle-builder.sh
-```
 
-Copy the generated `deploy/one-click/dist/*.tar.gz` to the target machine and
-install it with the official one-click procedure:
-
-```bash
-tar -xzf cube-sandbox-one-click-*.tar.gz
+tar -xzf deploy/one-click/dist/cube-sandbox-one-click-*.tar.gz
 cd cube-sandbox-one-click-*
 cp env.example .env
-# Set CUBE_SANDBOX_NODE_IP to this machine's routable private/physical address.
+# Set CUBE_SANDBOX_NODE_IP to a routable physical or private address.
 sudo ./install.sh
 sudo ./smoke.sh
 ```
 
-The resulting CubeAPI must serve:
-
-```text
-GET /sandboxes/<sandbox_id>/ports/2222
-  -> {"sandboxID":"...", "containerPort":2222, "address":"host:port"}
-```
-
-Install ClawBox and then install the SDK from the same prepared source so the
-worker and the CubeAPI agree on this contract:
+Install the Python SDK from the same prepared source used by the server:
 
 ```bash
+cd <ClawBox-checkout>
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev,postgres]'
 .venv/bin/python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
-Do not use `Sandbox.get_host(2222)` as the SSH target. That value is an HTTP
-ingress authority, not the native SSH endpoint.
+## Required TCP endpoint behavior
 
-The endpoint is resolved again after every Tool restore and before the next
-SSH admission. If CubeSandbox places the restored Tool behind a new endpoint
-host, ClawBox replaces the running Runtime's CubeSandbox egress policy through
-the official SDK `update_network` call before returning `ADMIT`; a changed
-mapped port needs no network-policy update. This is still a direct Runtime to
-Tool TCP connection and does not cache, allocate, or proxy the route.
+CubeSandbox must provide:
 
-For a native OpenClaw arm using `snapshot_pause`, the model-wait lifecycle
-applies the same CubeSandbox checkpoint/swap operation to both VMs. The Runtime
-is restored before the pending ModelGateway response is released so its
-long-lived Agent can continue; the Tool can stay swapped until the next
-`/v1/tool/admit`, which restores it and resolves the current endpoint. A
-`resident` arm keeps both VMs resident. Replay-engine compatibility runs keep
-their historical Tool-only lifecycle and are not evidence for this native
-paired-VM behavior.
+```text
+GET /sandboxes/<sandbox-id>/ports/2222
+  -> {"sandboxID":"...", "containerPort":2222, "address":"host:port"}
+```
 
-## Existing machine
+ClawBox calls the matching SDK method `get_tcp_endpoint(2222)`. Do not replace
+it with `get_host(2222)`: that method returns an HTTP service address, not the
+raw SSH address.
 
-Set the API and CubeProxy transport variables for the already-installed
-deployment. For standalone one-click, CubeAPI is normally on port `3000` and
-CubeProxy's HTTP transport is normally on its host HTTP port (often `80`);
-use the values actually configured by that deployment. A Kubernetes NodePort
-is not a replacement for the native Tool endpoint.
+After a Tool VM is restored, ClawBox asks CubeSandbox for the address again,
+increments the endpoint generation, and verifies the Tool's SSH identity before
+allowing the command. A restored VM may receive the same address; it is still
+treated as a new endpoint generation.
+
+## Check an installed machine
+
+Load the machine-specific settings and verify the services:
 
 ```bash
-export CUBE_API_URL='http://<cube-control-host>:3000'
-export CUBE_PROXY_NODE_IP='<CubeProxy transport address>'
-export CUBE_PROXY_PORT_HTTP='<CubeProxy HTTP port>'
-export NO_PROXY='<cube-control-host>,<cube-proxy-host>,localhost,127.0.0.1'
-export no_proxy="$NO_PROXY"
+set -a
+. "$HOME/.config/clawbox/machine.env"
+set +a
 
-.venv/bin/python scripts/audit-cube-sandboxes.py --json
+test -c /dev/kvm
+test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
 curl -fsS "$CUBE_API_URL/health"
+.venv/bin/python scripts/audit-cube-sandboxes.py --json
 ```
 
-Before a run, require fresh immutable Runtime and Tool templates. The Tool
-template must expose both `49983` (Cube readiness) and `2222` (SSH), and the
-Runtime/Tool image digests must match the experiment file. Register templates
-with `scripts/register-cube-template.py`; never reuse a failed, stale, or
-pre-kernel template as evidence.
-Pass the target node's exact current replica kernel component with
-`--expected-kernel-version`; registration intentionally has no default because
-a stale default can silently bind a paper arm to the wrong guest kernel.
-Set each template's root/workspace disk with `--writable-layer-size` (default
-`20G`). This is separate from VM `memory_mib`, CubeSandbox backing storage, and
-the host experiment-results directory.
+Runtime and Tool templates must be newly built immutable templates whose image
+digests and guest-kernel version match the experiment YAML. Tool must expose
+ports `49983` for readiness and `2222` for SSH. Template registration is shown
+in the [experiment guide](experiment-operations.md#2-install-clawbox-and-build-templates).
 
-Run the endpoint and identity gate from a host that can reach CubeAPI,
-CubeProxy, and the policy listener:
+## Validate c1, c4, and c8
 
-```bash
-export CLAWBOX_CONTROL_HOST='<address reachable from Runtime VMs>'
-export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
-# Required when ClawBox and ClawTune are separate source checkouts rather than
-# installed together. Point at ClawTune's sidecar Python source directory.
-export CLAWTUNE_SIDECAR_SRC="$HOME/ClawTune/services/sidecar/src"
-
-.venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template '<fresh-runtime-template-id>' \
-  --tool-template '<fresh-tool-template-id>' \
-  --node '<cube-node-name>' \
-  --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 1 \
-  --output results/endpoint-c1.json
-```
-
-For a frozen `tool_p90` run, build the KB from a different recording run,
-record its SHA-256, and pass the immutable JSON artifact in
-`resources.p90_predictions`. Keep `CLAWTUNE_SIDECAR_SRC` in the Worker
-environment so Runtime prediction uses the same ClawTune implementation that
-created the artifact. Never train from the held-out comparison run unless the
-experiment is explicitly labeled online learning.
-
-This gate creates and destroys its own pair. It must prove all of the
-following before the result is usable: semantic endpoint identity, strict
-`ssh -G` settings, Runtime reaching the intended Tool marker, stale endpoint
-rejection while paused, a new endpoint epoch after restore, cross-Tool
-identity rejection before SSH, exact Tool telemetry, and zero owned
-sandboxes. A successful TCP handshake by itself is not evidence.
-
-Only after c1 passes, repeat the same gate with `--count 4` and `--count 8`.
-Then run the pair smoke and the selected experiment. Promote to c20/c40/c60
-only after the c4/c8 results show zero wrong-Tool executions, duplicate
-executions, telemetry loss, and owned-sandbox leaks.
+Run the same connectivity, identity, checkpoint, telemetry, and cleanup check
+at increasing sizes:
 
 ```bash
 .venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template '<fresh-runtime-template-id>' \
-  --tool-template '<fresh-tool-template-id>' \
-  --node '<cube-node-name>' --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 4 --output results/endpoint-c4.json
+  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
+  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
+  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
+  --count 1 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c1.json"
 
 .venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template '<fresh-runtime-template-id>' \
-  --tool-template '<fresh-tool-template-id>' \
-  --node '<cube-node-name>' --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 8 --output results/endpoint-c8.json
+  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
+  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
+  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
+  --count 4 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c4.json"
 
-.venv/bin/python -m clawbox.cli experiment validate examples/experiments/openclaw-cube.yaml
-.venv/bin/python -m clawbox.cli experiment plan examples/experiments/openclaw-cube.yaml
+.venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
+  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
+  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
+  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
+  --count 8 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c8.json"
 ```
 
-## Run replay or a real model
+A passing check must confirm all of the following:
 
-Replay does not need a provider credential. After the c1/c4/c8 endpoint gates
-pass, run the checked-in native OpenClaw replay arm:
+- Runtime reaches the correct Tool VM over native SSH;
+- SSH host-key checking and the Tool identity marker match;
+- an old endpoint is rejected while the Tool is paused;
+- the endpoint generation advances after restore;
+- one Tool's identity cannot be used with another Tool's endpoint;
+- cgroup and eBPF records join to the exact execution ID;
+- no owned VM remains after cleanup.
 
-```bash
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results experiment run \
-  examples/experiments/openclaw-cube-replay-c40.yaml --run-id openclaw-replay-c40
-```
+Only continue to c20/c40/c60 after the smaller checks pass.
 
-For a real model, copy `examples/experiments/openclaw-cube.yaml` to a
-machine-local file and replace its Runtime/Tool template IDs, image digests,
-and target node with the records accepted by the endpoint gate. Set the
-credential only in the Worker environment; the YAML contains the name of that
-environment variable, not its value:
+## Diagnose network failures
 
-```bash
-export OPENCLAW_API_KEY='<provider credential>'
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results experiment run \
-  /data/clawbox-openclaw-api.yaml --run-id openclaw-api-c1
-```
+If CubeSandbox returns an address but Runtime cannot connect, test the route
+from the Runtime VM rather than only from the host. A populated BPF map or a
+successful host TCP connection does not prove Runtime reachability.
 
-The API `base_url` is reached by the Worker and must be an OpenAI-compatible
-`/v1` endpoint reachable from that machine. Runtime receives only a
-session-scoped ModelGateway token, and never receives the provider key. A
-successful local stub-gateway test is not real-model evidence; retain the
-Worker model-gateway records and the upstream request count with the c1
-result.
-
-## Network failure classification
-
-When the semantic endpoint is returned but Runtime cannot connect, classify the
-deployment before changing ClawBox:
-
-- verify the endpoint from the Runtime VM, not only from the host;
-- verify a cross-node/private-NIC route when the Tool is on another physical
-  node; do not infer same-node SandboxIP-to-HostPort hairpin support;
-- separately test CubeProxy's normal SandboxIP command path;
-- inspect CubeSandbox's documented physical-NIC `from_world` datapath and
-  counters, but do not treat a populated BPF map or attached program as a hit
-  proof;
-- if the endpoint is a Kubernetes Pod IP, stop and move to the standalone or
-  deployment-owned physical/private topology.
-
-The source-controlled topology probe performs these routes against one freshly
-created Runtime/Tool pair while keeping strict host-key and Tool-marker checks:
+Use the bounded topology probe:
 
 ```bash
 python scripts/probe-cubesandbox-network-topology.py \
-  --runtime-template tpl-437392a8c57b48ccb32ef2ee \
-  --tool-template tpl-4a67524e1fcd41859905c77b \
-  --node hostname-txyuq.foreman.pxe \
-  --cube-master-url http://10.103.189.111 \
-  --physical-host 193.124.7.2 \
+  --runtime-template <runtime-template-id> \
+  --tool-template <tool-template-id> \
+  --node <compute-node> \
+  --cube-master-url <CubeMaster-URL> \
+  --physical-host <routable-host-address> \
   --output /data/clawbox-topology.json
 ```
 
-`DIAGNOSTIC_COMPLETE` means only that the bounded comparison and cleanup
-completed. Inspect `route_identity_results` and `reachable_identity_routes`;
-promote the machine only when the semantic endpoint reaches the intended Tool
-identity from Runtime. A failed diagnostic is not permission to select another
-route in the Worker.
+Inspect the identity result for each tested route. Do not work around a failed
+CubeSandbox route by adding an SSH proxy, Redis lookup, NodePort, port
+allocator, or guest-IP fallback in ClawBox. Restore any temporary host-network
+diagnostic changes after the test.
 
-Restore temporary diagnostic changes after every probe. Do not add a ClawBox
-proxy, NodePort, Redis lookup, direct guest-IP fallback, or second allocator.
-
-## Run an already validated machine
-
-Once the endpoint gate is green, export the same variables in the Worker
-environment and run the standalone experiment worker:
-
-```bash
-export CUBE_API_URL='http://<cube-control-host>:3000'
-export CUBE_PROXY_NODE_IP='<CubeProxy transport address>'
-export CUBE_PROXY_PORT_HTTP='<CubeProxy HTTP port>'
-export CLAWBOX_CONTROL_HOST='<address reachable from Runtime VMs>'
-export CLAWBOX_MODEL_GATEWAY_HOST="$CLAWBOX_CONTROL_HOST"
-
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results experiment run \
-  examples/experiments/openclaw-cube.yaml --run-id openclaw-run
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results \
-  experiment status openclaw-run
-.venv/bin/python -m clawbox.cli --output-root /data/clawbox-results \
-  experiment collect openclaw-run
-```
-
-Keep the endpoint-gate JSON, Worker result bundle, exact template records,
-and the final zero-leak audit together. If a machine reboots, rerun the health,
-template, semantic endpoint, and c1 gates before resuming the experiment.
+After a host reboot, repeat service health, template provenance, c1, and
+pause/restore checks before starting a large experiment.

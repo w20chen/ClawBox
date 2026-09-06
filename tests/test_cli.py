@@ -71,6 +71,12 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
         "--concurrency", "1,5,60",
         "--runtime-memory-gib", "1",
         "--tool-memory-gib", "2",
+        "--runtime-template-id", "runtime-1g",
+        "--runtime-image-reference", "registry/runtime-1g",
+        "--runtime-image-digest", "sha256:" + "a" * 64,
+        "--tool-template-id", "tool-2g",
+        "--tool-image-reference", "registry/tool-2g",
+        "--tool-image-digest", "sha256:" + "b" * 64,
         "--pool-memory-gib", "32",
         "--baseline", "tool-static-resident",
         "--baseline", "tool-static-eager-reactive",
@@ -102,3 +108,41 @@ def test_configure_refuses_to_replace_existing_output(tmp_path, capsys) -> None:
     assert cli.main(["experiment", "configure", base, str(output)]) == 1
     assert output.read_text(encoding="utf-8") == "keep"
     assert "--force" in capsys.readouterr().err
+
+
+def test_configure_requires_wait_prediction_for_wait_aware_policy(
+    tmp_path, capsys,
+) -> None:
+    output = tmp_path / "wait-aware.yaml"
+    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+    command = [
+        "experiment", "configure", base, str(output),
+        "--baseline", "tool-p90-wait-proactive",
+        "--p90-kb", "examples/predictions/smoke-p90.json",
+    ]
+    assert cli.main(command) == 1
+    assert not output.exists()
+    assert "model-wait-prediction-seconds" in capsys.readouterr().err
+
+    assert cli.main([
+        *command,
+        "--model-wait-prediction-seconds", "3",
+        "--model-wait-prediction-source", "separate-recording-v1",
+    ]) == 0
+    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert configured["inference"]["configuration"][
+        "model_wait_prediction_source"
+    ] == "separate-recording-v1"
+
+
+def test_configure_rejects_vm_shape_change_without_new_template(
+    tmp_path, capsys,
+) -> None:
+    output = tmp_path / "wrong-shape.yaml"
+    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+    assert cli.main([
+        "experiment", "configure", base, str(output),
+        "--runtime-memory-gib", "1",
+    ]) == 1
+    assert not output.exists()
+    assert "requires a new Runtime template" in capsys.readouterr().err
