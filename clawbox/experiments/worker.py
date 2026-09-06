@@ -968,64 +968,60 @@ class ExperimentWorker:
                 except Exception as exc:
                     policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
 
-            def restore_runtime_for_model_wait(
+            def restore_runtime_for_model_wait_locked(
                 event: dict[str, Any], *, phase: str,
             ) -> None:
-                """Restore Runtime before its pending model HTTP call resumes."""
+                """Restore Runtime while the caller holds ``wait_lock``."""
                 if not runtime_snapshot_enabled:
                     return
-                with wait_lock:
-                    if runtime_lifecycle.resident:
-                        return
-                    started = time.time()
-                    agent_pid_before = wait_state.get(
-                        "runtime_agent_pid_before_pause"
+                if runtime_lifecycle.resident:
+                    return
+                started = time.time()
+                agent_pid_before = wait_state.get(
+                    "runtime_agent_pid_before_pause"
+                )
+                self._restore_with_one_victim(
+                    arm, session_id, runtime_lifecycle, coordinator, events,
+                    role="runtime",
+                )
+                relay_started = time.time()
+                relay_result = runtime_executor.execute(
+                    f"curl -fsS -X POST {shlex.quote(RELAY_CHECKPOINT_URL)}",
+                    10,
+                )
+                if relay_result.exit_code:
+                    raise RuntimeError(
+                        "Runtime model relay checkpoint notification failed: "
+                        f"{relay_result.stderr[-1000:]}"
                     )
-                    self._restore_with_one_victim(
-                        arm, session_id, runtime_lifecycle, coordinator, events,
-                        role="runtime",
+                relay_finished = time.time()
+                _record_time_span(
+                    timeline, "model.relay_reconnect",
+                    relay_started, relay_finished,
+                    role="runtime", operation="model_relay_reconnect",
+                    execution_id=str(event.get("request_id") or ""),
+                )
+                events.write({
+                    "event": "model_relay_reconnected",
+                    "session_id": session_id,
+                    "request_id": event.get("request_id"),
+                    "service_seconds": max(0.0, relay_finished - relay_started),
+                })
+                agent_pid_after = observe_openclaw_agent_pid(
+                    f"after_runtime_restore_{phase}"
+                )
+                if agent_pid_before is not None and agent_pid_before != agent_pid_after:
+                    raise RuntimeError(
+                        "OpenClaw agent PID changed across Runtime pause/restore: "
+                        f"{agent_pid_before} -> {agent_pid_after}"
                     )
-                    relay_started = time.time()
-                    relay_result = runtime_executor.execute(
-                        f"curl -fsS -X POST {shlex.quote(RELAY_CHECKPOINT_URL)}",
-                        10,
-                    )
-                    if relay_result.exit_code:
-                        raise RuntimeError(
-                            "Runtime model relay checkpoint notification failed: "
-                            f"{relay_result.stderr[-1000:]}"
-                        )
-                    relay_finished = time.time()
-                    _record_time_span(
-                        timeline, "model.relay_reconnect",
-                        relay_started, relay_finished,
-                        role="runtime", operation="model_relay_reconnect",
-                        execution_id=str(event.get("request_id") or ""),
-                    )
-                    events.write({
-                        "event": "model_relay_reconnected",
-                        "session_id": session_id,
-                        "request_id": event.get("request_id"),
-                        "service_seconds": max(0.0, relay_finished - relay_started),
-                    })
-                    agent_pid_after = observe_openclaw_agent_pid(
-                        f"after_runtime_restore_{phase}"
-                    )
-                    if (
-                        agent_pid_before is not None
-                        and agent_pid_before != agent_pid_after
-                    ):
-                        raise RuntimeError(
-                            "OpenClaw agent PID changed across Runtime pause/restore: "
-                            f"{agent_pid_before} -> {agent_pid_after}"
-                        )
-                    finished = time.time()
-                    wait_state.update({
-                        "runtime_restore_started_at": started,
-                        "runtime_restore_completed_at": finished,
-                        "runtime_restore_request_id": event.get("request_id"),
-                        "runtime_agent_pid_after_restore": agent_pid_after,
-                    })
+                finished = time.time()
+                wait_state.update({
+                    "runtime_restore_started_at": started,
+                    "runtime_restore_completed_at": finished,
+                    "runtime_restore_request_id": event.get("request_id"),
+                    "runtime_agent_pid_after_restore": agent_pid_after,
+                })
 
             def restore_for_model_wait(event: dict[str, Any]) -> None:
                 nonlocal restore_timer
@@ -1034,9 +1030,9 @@ class ExperimentWorker:
                         restore_timer = None
                         if str(event.get("request_id")) in completed_model_requests:
                             return
-                        if not runtime_snapshot_enabled or runtime_lifecycle.resident:
-                            return
-                    restore_runtime_for_model_wait(event, phase="scheduled")
+                        restore_runtime_for_model_wait_locked(
+                            event, phase="scheduled",
+                        )
                 except Exception as exc:
                     policy_event_errors.append(f"restore: {type(exc).__name__}: {exc}")
 
@@ -1106,8 +1102,11 @@ class ExperimentWorker:
                 # Restore it synchronously in the gateway producer before the
                 # response becomes visible to OpenClaw. Tool restore remains
                 # admission-scoped and happens on the next SSH invocation.
-                restore_runtime_for_model_wait(event, phase="response")
                 with wait_lock:
+                    # Claim completion before checking residency. Otherwise a
+                    # queued eager pause can run between a resident check and
+                    # this marker, snapshotting Runtime after the response is
+                    # ready and leaving no callback able to restore it.
                     completed_model_requests.add(str(event.get("request_id")))
                     if wait_timer is not None:
                         wait_timer.cancel()
@@ -1115,6 +1114,9 @@ class ExperimentWorker:
                     if restore_timer is not None:
                         restore_timer.cancel()
                         restore_timer = None
+                    restore_runtime_for_model_wait_locked(
+                        event, phase="response",
+                    )
                     started = float(event["request_started_at"])
                     generated = float(event["model_generated_at"])
                     actual_wait = max(0.0, generated - started)
