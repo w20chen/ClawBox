@@ -94,6 +94,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
     assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
     assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
+    assert config["tools"]["exec"]["backgroundMs"] == 120000
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
     assert clawtune["sandboxExecEnvelope"] is True

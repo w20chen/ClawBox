@@ -239,6 +239,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     upstream_url = model_gateway.url if model_gateway is not None else base_url
     upstream_key_env = gateway_key_env if model_gateway is not None else key_env
     exec_yield_value = configuration.get("openclaw_exec_yield_ms")
+    exec_yield_ms: int | None = None
     exec_yield_export = ""
     if exec_yield_value is not None:
         if isinstance(exec_yield_value, bool):
@@ -385,6 +386,15 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         raise RuntimeError("ClawTune sidecar did not become ready in the Runtime VM")
     invoke(["plugins", "install", "--link", clawtune_plugin])
     invoke(["plugins", "enable", "clawtune"])
+    exec_tool_config: dict[str, object] = {
+        "host": "sandbox", "security": "full", "ask": "off",
+    }
+    if exec_yield_ms is not None:
+        # Set the OpenClaw configuration as well as the process environment.
+        # The config is consumed directly by the exec tool factory and avoids
+        # a load-dependent fallback to its 10-second default in long-lived or
+        # restored Runtime processes.
+        exec_tool_config["backgroundMs"] = exec_yield_ms
     patch = {
         "agents": {"defaults": {"workspace": runtime_workspace, "sandbox": {
             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
@@ -396,7 +406,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "tools": {
             "allow": [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS],
             "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
-            "exec": {"host": "sandbox", "security": "full", "ask": "off"},
+            "exec": exec_tool_config,
             "elevated": {"enabled": False},
             "sandbox": {"tools": {
                 "allow": list(TOOL_VM_TOOLS),
