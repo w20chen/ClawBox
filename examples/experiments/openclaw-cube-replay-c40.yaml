@@ -19,6 +19,7 @@ inference:
     model: recorded-openclaw-model
     time_scale: 1.0
     repo_fingerprint: local/openclaw-cube-replay
+    openclaw_exec_yield_ms: 120000
 runtime:
   template_id: tpl-437392a8c57b48ccb32ef2ee
   source_image_reference: 127.0.0.1:5000/clawbox/runtime-cube-arm64
