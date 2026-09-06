@@ -115,6 +115,7 @@ def test_bridge_record_accepts_current_clawtune_telemetry_metadata() -> None:
     value = BridgeRecord.model_validate({
         "timestamp": "2026-08-30T00:00:00Z", "execution_id": "exec-1",
         "duration_ms": 10, "exit_code": 0,
+        "effective_command_sha256": "a" * 64, "effective_command_bytes": 123,
         "telemetry_state": "complete", "telemetry_error": "guest collector helper is not configured",
         "telemetry_artifact": "/tmp/a.json",
         "telemetry_eligible_for_kb": True, "telemetry_quality": "ok",
@@ -124,6 +125,8 @@ def test_bridge_record_accepts_current_clawtune_telemetry_metadata() -> None:
     assert value.telemetry_eligible_for_kb is True
     assert value.telemetry_loss_total == 0
     assert value.telemetry_error == "guest collector helper is not configured"
+    assert value.effective_command_sha256 == "a" * 64
+    assert value.effective_command_bytes == 123
 
 
 def test_cgroup_artifact_parser_rejects_invalid():

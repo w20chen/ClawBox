@@ -74,6 +74,8 @@ class BridgeRecord(StrictModel):
     execution_source: Literal["bridge-local", "runtime-envelope"] | None = None
     command_sha256: str | None = None
     command_bytes: int | None = None
+    effective_command_sha256: str | None = None
+    effective_command_bytes: int | None = None
     duration_ms: int
     exit_code: int
     timed_out: bool = False
