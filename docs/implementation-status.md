@@ -62,6 +62,48 @@ maps explicitly to the installed `OPENCLAW_BASH_YIELD_MS`, is range-validated,
 and remains in the hashed experiment configuration. The successful smoke used
 120000 ms. Formal replay must use the value captured with each trajectory.
 
+### Managed c20/c40/c60 infrastructure scale is green
+
+The real managed path now passes the identical-trace burst gate at c20, c40,
+and c60 for resident and eager paired-snapshot policies. Final evidence is:
+
+| Run | Policy | Correct | Mean / peak host-memory delta | JCT mean / p90 | Pauses / restores |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `live-c20-smoke` | resident | 20/20 | 15,812,247,931 / 18,947,608,576 B | 136.82 / 138.85 s | 0 / 0 |
+| `live-c20-smoke` | eager snapshot | 20/20 | 11,215,500,225 / 13,507,985,408 B | 222.25 / 226.94 s | 136 / 136 |
+| `live-c40-final-smoke` | resident | 40/40 | 32,992,467,067 / 37,016,387,584 B | 300.13 / 304.56 s | 0 / 0 |
+| `live-c40-final-smoke` | eager snapshot | 40/40 | 24,683,567,885 / 28,916,166,656 B | 424.44 / 428.75 s | 256 / 256 |
+| `live-c60-final-smoke` | resident | 60/60 | 50,338,214,389 / 55,384,567,808 B | 493.02 / 498.05 s | 0 / 0 |
+| `live-c60-final-smoke` | eager snapshot | 60/60 | 35,872,371,630 / 41,232,347,136 B | 657.53 / 664.20 s | 388 / 388 |
+
+Every arm had a 1.0 exact Agent Tool join rate, zero native telemetry loss,
+zero host OOM, zero memory-safety intervention, successful final workspace
+validation, and no owned sandbox in the post-run Cube inventory. Summary
+SHA-256 values are respectively
+`6de06c700a6859e82c4d500f8c8af8e4df950936f4bd3e0b7988abfb043c2047`,
+`98789e369bddc82da7ded726180adad364c14039a72dd9594aea272eee4ff95a`,
+and `e2fca081c361734a109dc90aa13d3f62a9f04330fc0d10b2b05af018a4d953c1`.
+
+The first high-load attempts are retained as rejection evidence. ClawTune
+occasionally preserved the exact execution ID only in its own first-line
+`__CBX_EXEC_1__` envelope while leaving the structured span field null. The
+collector now recovers only that strict envelope, records
+`effective_command_envelope_recovery`, and rejects any conflict with a
+structured ID. This path was exercised by 160 of 200 c40/c60 Agent spans in the
+final runs. A separate repeated c60 failure was a truncated Cube control-plane
+response while copying completed telemetry. Collection now retries that
+read-only, framed transfer up to three times; Agent Tool execution is never
+retried. All 200 final c40/c60 transfers completed on their first attempt.
+
+This is `deterministic-managed-replay` infrastructure evidence, not a formal
+policy comparison. It is a simultaneous burst of one two-step smoke trace,
+uses static 256 MiB Tool admission and a non-binding 1,600,000 MiB pool budget,
+and therefore cannot establish command-specific P90 admission quality or
+maximum safe density. Formal work still needs representative heterogeneous
+current-ARM64 captures, a separately trained and frozen ClawTune KB, all
+defined baselines at c40, repeated c20/c40/c60 trials under the intended
+memory/NUMA budget, and real-provider c1/c2/c4 confirmation.
+
 This gate exposed and fixed four installed-version integration details. The
 OpenClaw environment sanitizer removes names ending in `_TOKEN`, so ClawBox
 passes the per-session policy capability as `CLAWBOX_POLICY_CONTROL_AUTH` and

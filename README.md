@@ -84,6 +84,20 @@ after 10 seconds by default; this smoke uses 120000 ms so incidental concurrent
 SSH startup does not alter its frozen trajectory. Representative traces must
 reuse the value recorded during capture.
 
+The identical-trace burst gate is also live-green at c20, c40, and c60 for
+resident and eager paired-snapshot policies. Every final arm completed all
+offered Agents with 100% exact Agent Tool telemetry joins, zero telemetry loss,
+zero host OOM, zero safety interventions, and zero owned-sandbox leaks. At
+c20/c40/c60, resident mean host-memory deltas were 15.81/32.99/50.34 GB and
+snapshot deltas were 11.22/24.68/35.87 GB; corresponding resident peaks were
+18.95/37.02/55.38 GB and snapshot peaks were 13.51/28.92/41.23 GB. Raw results
+are under `/tmp/clawbox-managed-scale-smoke/{live-c20-smoke,live-c40-final-smoke,live-c60-final-smoke}`
+on Kunpeng. These runs establish real Runtime+Tool VM scale and paired lifecycle
+correctness, not the paper's policy result: they use one tiny trace, burst
+arrivals, static Tool admission, and a non-binding memory budget. Formal claims
+still require heterogeneous held-out trajectories, a frozen ClawTune KB, every
+defined baseline, repeated trials, and the intended memory/NUMA constraint.
+
 For a fresh deployment, prepare the pinned CubeSandbox source and its matching
 SDK before building the CubeSandbox API/release bundle:
 

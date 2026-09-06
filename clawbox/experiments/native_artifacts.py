@@ -13,6 +13,7 @@ import json
 import math
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ _ARTIFACT_MARKER = "__CLAWBOX_ARTIFACT_V1__"
 _ARTIFACT_END = "__CLAWBOX_ARTIFACT_END__"
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
 _SAFE_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_EXECUTION_ENVELOPE_PREFIX = "__CBX_EXEC_1__"
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _TOOL_RESOURCE_ROOT = "/var/lib/clawtune/artifacts/tool-resource"
 
@@ -157,7 +159,25 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
             if record.get("record_type") != "span_end" or record.get("kind") != "tool":
                 continue
             execution = record.get("execution")
-            if not isinstance(execution, dict) or not execution.get("execution_id"):
+            if not isinstance(execution, dict):
+                continue
+            explicit_id = str(execution.get("execution_id") or "")
+            envelope_id = _runtime_envelope_execution_id(
+                execution.get("effective_command")
+            )
+            if explicit_id and envelope_id and explicit_id != envelope_id:
+                raise ValueError(
+                    "Runtime ClawTune structured/envelope execution identity mismatch"
+                )
+            if not explicit_id and envelope_id:
+                execution = {
+                    **execution,
+                    "execution_id": envelope_id,
+                    "execution_id_source": "effective_command_envelope_recovery",
+                }
+                record = {**record, "execution": execution}
+                explicit_id = envelope_id
+            if not explicit_id:
                 continue
             spans.append(record)
     by_execution: dict[str, list[dict[str, Any]]] = {}
@@ -187,6 +207,34 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
         if incoming_detail > current_detail:
             candidates[candidates.index(matching)] = span
     return [span for candidates in by_execution.values() for span in candidates]
+
+
+def _runtime_envelope_execution_id(effective_command: Any) -> str | None:
+    """Recover an exact ID from ClawTune's own first-line exec envelope.
+
+    A Runtime span can retain the wrapped command while its structured
+    correlation field is null (observed under high scheduling contention).
+    This is not a fuzzy command join: only the versioned ClawTune envelope at
+    byte zero is accepted, and malformed or unsafe identities remain absent so
+    the normal exact-ID validation fails closed.
+    """
+    if not isinstance(effective_command, str):
+        return None
+    header, separator, _payload = effective_command.partition("\n")
+    if not separator or not header.startswith(_EXECUTION_ENVELOPE_PREFIX):
+        return None
+    encoded = header.removeprefix(_EXECUTION_ENVELOPE_PREFIX)
+    if encoded.startswith("{"):
+        try:
+            metadata = json.loads(encoded)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(metadata, dict) or metadata.get("v") != 1:
+            return None
+        execution_id = str(metadata.get("execution_id") or "")
+    else:
+        execution_id = encoded.strip()
+    return execution_id if _SAFE_EXECUTION_ID.fullmatch(execution_id) else None
 
 
 def _validate_cgroup(payload: dict[str, Any], execution_id: str) -> None:
@@ -341,6 +389,13 @@ def validate_native_tool_join(
         "runtime_trace_execution_count": (
             len(runtime_by_id) if runtime_span_records is not None else None
         ),
+        "runtime_trace_recovered_execution_count": (
+            sum(
+                (span.get("execution") or {}).get("execution_id_source")
+                == "effective_command_envelope_recovery"
+                for spans in runtime_by_id.values() for span in spans
+            ) if runtime_span_records is not None else None
+        ),
         "runtime_trace_expected_execution_count": (
             sum(request.get("runtime_trace_expected", True) is not False
                 for request in expected.values())
@@ -369,14 +424,35 @@ def collect_and_validate_native_tool_artifacts(
     command = _direct_ssh_command(
         ssh, identity_file, known_hosts_file, _collection_command(),
     )
-    result: CommandResult = runtime_executor.execute(command, 60)
-    if result.exit_code != 0:
-        raise RuntimeError(
-            f"Tool artifact collection failed with exit {result.exit_code}: "
-            f"{result.stderr[-2000:]}"
-        )
-    if "__CLAWBOX_ARTIFACT_END__" not in result.stdout:
-        raise RuntimeError("Tool artifact collection produced no complete framed stream")
+    result: CommandResult | None = None
+    collection_attempt = 0
+    for collection_attempt in range(1, 4):
+        try:
+            candidate: CommandResult = runtime_executor.execute(command, 60)
+        except Exception as exc:
+            if collection_attempt == 3:
+                raise RuntimeError(
+                    "Tool artifact collection transport failed after 3 attempts"
+                ) from exc
+            time.sleep(0.05 * collection_attempt)
+            continue
+        if candidate.exit_code != 0:
+            raise RuntimeError(
+                f"Tool artifact collection failed with exit {candidate.exit_code}: "
+                f"{candidate.stderr[-2000:]}"
+            )
+        if "__CLAWBOX_ARTIFACT_END__" not in candidate.stdout:
+            if collection_attempt == 3:
+                raise RuntimeError(
+                    "Tool artifact collection produced no complete framed stream "
+                    "after 3 attempts"
+                )
+            time.sleep(0.05 * collection_attempt)
+            continue
+        result = candidate
+        break
+    if result is None:  # Defensive: the final retry branch above always raises.
+        raise RuntimeError("Tool artifact collection produced no result")
     raw_files = _decode_framed_artifacts(result.stdout)
     bridge_raw = raw_files.pop("tool-bridge.jsonl", None)
     if bridge_raw is None:
@@ -412,6 +488,7 @@ def collect_and_validate_native_tool_artifacts(
         runtime_span_records=runtime_span_records,
         expected_session_id=session_id,
     )
+    validation["artifact_collection_attempts"] = collection_attempt
     root = output_dir / "tool-artifacts" / session_id
     root.mkdir(parents=True, exist_ok=True)
     files = {"tool-bridge.jsonl": bridge_raw, **raw_files}

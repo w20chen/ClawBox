@@ -88,6 +88,48 @@ def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
     assert len(_runtime_spans([str(first), str(second)])) == 2
 
 
+def test_runtime_spans_recovers_exact_clawtune_envelope_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.jsonl"
+    path.write_text(json.dumps({
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "status": {"code": "ok"}, "output": {"exit_code": 0},
+        "execution": {
+            "execution_id": None,
+            "effective_command": "__CBX_EXEC_1__exec-recovered\nprintf ok",
+            "payload_command": "printf ok",
+        },
+    }) + "\n", encoding="utf-8")
+
+    spans = _runtime_spans([str(path)])
+
+    assert spans[0]["execution"]["execution_id"] == "exec-recovered"
+    assert spans[0]["execution"]["execution_id_source"] == (
+        "effective_command_envelope_recovery"
+    )
+
+
+def test_runtime_spans_rejects_structured_envelope_identity_conflict(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.jsonl"
+    path.write_text(json.dumps({
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "execution": {
+            "execution_id": "exec-structured",
+            "effective_command": (
+                '__CBX_EXEC_1__{"v":1,"execution_id":"exec-envelope"}'
+                "\nprintf ok"
+            ),
+        },
+    }) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="structured/envelope"):
+        _runtime_spans([str(path)])
+
+
 def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
     execution_id = "exec-1"
     digest = hashlib.sha256(b"printf ok").hexdigest()
@@ -146,6 +188,18 @@ class _RuntimeExecutor:
         return CommandResult(0, self.stdout, "", 0.1)
 
 
+class _TransientRuntimeExecutor(_RuntimeExecutor):
+    def __init__(self, stdout: str) -> None:
+        super().__init__(stdout)
+        self.attempts = 0
+
+    def execute(self, command: str, _timeout: float) -> CommandResult:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ConnectionError("incomplete chunked read")
+        return super().execute(command, _timeout)
+
+
 def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path: Path) -> None:
     execution_id = "exec-1"
     digest = hashlib.sha256(b"printf ok").hexdigest()
@@ -174,11 +228,41 @@ def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path
         runtime_trace_paths=[str(runtime_trace)],
     )
     assert collection.validation["exact_id_join_rate"] == 1.0
+    assert collection.validation["artifact_collection_attempts"] == 1
     assert collection.validation["runtime_trace_execution_count"] == 1
     assert (collection.root / "tool-bridge.jsonl").read_bytes() == files["tool-bridge.jsonl"]
     assert (collection.root / "validation.json").is_file()
     assert "-p 2222" in executor.commands[0]
     assert "__CBX_EXEC_1__" not in executor.commands[0]
+
+
+def test_native_tool_artifact_collection_retries_transport_only(tmp_path: Path) -> None:
+    execution_id = "exec-1"
+    digest = hashlib.sha256(b"printf ok").hexdigest()
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    files = {
+        "tool-bridge.jsonl": (json.dumps(bridge[0]) + "\n").encode(),
+        "cgroup-resource-exec-1.json": (json.dumps(cgroup) + "\n").encode(),
+        "clause-telemetry-exec-1.json": (json.dumps(clause) + "\n").encode(),
+    }
+    stdout = "".join(
+        "__CLAWBOX_ARTIFACT_V1__" + name + "\n"
+        + base64.b64encode(raw).decode() + "\n"
+        for name, raw in files.items()
+    ) + "__CLAWBOX_ARTIFACT_END__\n"
+    executor = _TransientRuntimeExecutor(stdout)
+    collection = collect_and_validate_native_tool_artifacts(
+        runtime_executor=executor,
+        ssh=NativeSSHConfig(
+            target="clawbox@127.0.0.1:2222", identity_private_key="private",
+            host_public_key="ssh-ed25519 public", host_key_alias="tool-a",
+        ),
+        session_id="session-a", output_dir=tmp_path,
+        policy_records=_policy(execution_id, digest),
+    )
+
+    assert executor.attempts == 2
+    assert collection.validation["artifact_collection_attempts"] == 2
 
 
 def test_native_tool_artifact_collection_fails_closed_on_missing_cgroup(tmp_path: Path) -> None:

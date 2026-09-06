@@ -51,6 +51,32 @@ rerun used 120000; formal trajectories must reuse their capture value. Next
 gates are representative exact-input capture, frozen ClawTune KB calibration,
 formal c20/c40/c60 comparisons, and real-provider c1/c2/c4.
 
+The real managed infrastructure path is now additionally green at c20, c40,
+and c60 for resident and eager paired snapshot. Use only these final runs:
+`/tmp/clawbox-managed-scale-smoke/live-c20-smoke`,
+`live-c40-final-smoke`, and `live-c60-final-smoke`; their summary hashes are
+`6de06c700a6859e82c4d500f8c8af8e4df950936f4bd3e0b7988abfb043c2047`,
+`98789e369bddc82da7ded726180adad364c14039a72dd9594aea272eee4ff95a`,
+and `e2fca081c361734a109dc90aa13d3f62a9f04330fc0d10b2b05af018a4d953c1`.
+All six arms completed every Agent, joined Agent Tool telemetry exactly, lost
+no telemetry, recorded no OOM or safety intervention, validated the workspace,
+and left no owned sandbox. Snapshot reduced mean host-memory delta from
+15.81/32.99/50.34 GB resident to 11.22/24.68/35.87 GB at c20/c40/c60.
+
+High-load rejection evidence led to two narrow collector fixes. When ClawTune
+leaves structured `execution_id` null but retains its exact first-line
+`__CBX_EXEC_1__` envelope, collection recovers that ID, records the recovery
+source, and still rejects a structured/envelope conflict. Final c40/c60 used
+this path for 160/200 Agent spans. A read-only framed artifact transfer is now
+retried up to three times after repeated Cube HTTP incomplete-body failures;
+the Agent Tool command is never retried. Final transfers all succeeded on the
+first attempt. The earlier failed runs remain at `live-c40-c60-smoke` and
+`live-c60-envelope-recovery-smoke` and must not be reported as successful.
+
+These are identical-trace burst infrastructure smokes with static admission
+and a non-binding memory budget. They do not replace the remaining formal
+heterogeneous frozen-KB baseline matrix or real-provider c1/c2/c4 gates.
+
 Installed OpenClaw 2026.7.1 sanitizes inherited `_TOKEN` variables before its
 SSH backend spawn and resolves a missing hook `host` only after
 `before_tool_call`. The current implementation therefore binds
