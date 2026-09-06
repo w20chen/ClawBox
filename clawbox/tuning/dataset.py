@@ -100,6 +100,8 @@ def build_joined_dataset(
     trace_dir: Path,
     bridge_path: Path,
     ingest_secret: str | None = None,
+    *,
+    resource_dir: Path | None = None,
 ) -> tuple[JoinResult, list[ToolObservation]]:
     """Join + validate everything under ``trace_dir`` against the bridge log.
 
@@ -120,7 +122,7 @@ def build_joined_dataset(
         record for record in read_bridge_jsonl(bridge_path)
         if record.phase == "agent"
     ]
-    cgroup_artifacts = read_cgroup_artifacts(trace_dir)
+    cgroup_artifacts = read_cgroup_artifacts(resource_dir or trace_dir)
     joined = join_trace_and_bridge(span_records, bridges, cgroup_artifacts)
     validator = ObservationValidator(ingest_secret)
     report = classify_observations(list(joined.joined), validator)

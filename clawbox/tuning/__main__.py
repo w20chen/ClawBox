@@ -64,6 +64,32 @@ def find_run_traces(run_dir: Path) -> tuple[Path, Path]:
     return trace_dir, bridge
 
 
+def find_run_datasets(run_dir: Path) -> list[tuple[Path, Path, Path]]:
+    """Locate trace, bridge, and resource roots for every dataset in a run.
+
+    Managed Cube experiments keep Runtime spans and collected Tool artifacts in
+    separate session-keyed directories.  Legacy collected runs keep all three
+    sources together, so retain that layout as the fallback.
+    """
+    runtime_root = run_dir / "runtime-traces"
+    artifact_root = run_dir / "tool-artifacts"
+    managed: list[tuple[Path, Path, Path]] = []
+    if runtime_root.is_dir() and artifact_root.is_dir():
+        for resources in sorted(path for path in artifact_root.iterdir() if path.is_dir()):
+            traces = runtime_root / resources.name
+            bridge = resources / "tool-bridge.jsonl"
+            if (
+                traces.is_dir()
+                and bridge.is_file()
+                and any(path.name != "tool-bridge.jsonl" for path in traces.glob("*.jsonl"))
+            ):
+                managed.append((traces, bridge, resources))
+    if managed:
+        return managed
+    traces, bridge = find_run_traces(run_dir)
+    return [(traces, bridge, traces)]
+
+
 def collect_observations(
     run_dirs: list[Path], ingest_secret: str | None
 ) -> list[ToolObservation]:
@@ -71,19 +97,26 @@ def collect_observations(
     report: dict[str, object] = {}
     for run_dir in run_dirs:
         try:
-            trace_dir, bridge = find_run_traces(run_dir)
+            datasets = find_run_datasets(run_dir)
         except FileNotFoundError as exc:
             report[str(run_dir)] = str(exc)
             continue
-        joined, trusted = build_joined_dataset(trace_dir, bridge, ingest_secret=ingest_secret)
-        all_trusted.extend(trusted)
-        report[str(run_dir)] = {
-            "spans": joined.span_count,
-            "joined": len(joined.joined),
-            "unmatched_spans": len(joined.unmatched_spans),
-            "join_rate": joined.join_rate,
-            "trusted": len(trusted),
-        }
+        rows = []
+        for trace_dir, bridge, resources in datasets:
+            joined, trusted = build_joined_dataset(
+                trace_dir, bridge, ingest_secret=ingest_secret,
+                resource_dir=resources,
+            )
+            all_trusted.extend(trusted)
+            rows.append({
+                "session_id": resources.name,
+                "spans": joined.span_count,
+                "joined": len(joined.joined),
+                "unmatched_spans": len(joined.unmatched_spans),
+                "join_rate": joined.join_rate,
+                "trusted": len(trusted),
+            })
+        report[str(run_dir)] = {"datasets": rows}
     print(json.dumps({"runs": report}, indent=2, sort_keys=True))
     return all_trusted
 

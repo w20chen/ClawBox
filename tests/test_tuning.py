@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from clawbox.tuning.__main__ import find_run_traces
+from clawbox.tuning.__main__ import find_run_datasets, find_run_traces
 from clawbox.tuning.dataset import build_joined_dataset, export_dataset, read_bridge_jsonl, read_trace_jsonl
 from clawbox.tuning.estimators import (
     LatencyBucketClassifier,
@@ -506,3 +506,17 @@ def test_find_run_traces_does_not_mistake_root_bridge_for_trace(tmp_path):
     span.write_text('{"record_type":"trace_metadata"}\n', encoding="utf-8")
 
     assert find_run_traces(tmp_path) == (traces, bridge)
+
+
+def test_find_run_datasets_pairs_managed_session_artifacts(tmp_path):
+    traces = tmp_path / "runtime-traces" / "session-a"
+    resources = tmp_path / "tool-artifacts" / "session-a"
+    traces.mkdir(parents=True)
+    resources.mkdir(parents=True)
+    (traces / "span.jsonl").write_text(
+        '{"record_type":"trace_metadata"}\n', encoding="utf-8"
+    )
+    bridge = resources / "tool-bridge.jsonl"
+    bridge.write_text('{"execution_id":"exec-1"}\n', encoding="utf-8")
+
+    assert find_run_datasets(tmp_path) == [(traces, bridge, resources)]

@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 
 import pytest
 
 from clawbox.experiments.prediction import CommandPredictionProvider, PredictionUnavailable
+
+
+def _trainer_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "train-p90-from-runs.py"
+    spec = importlib.util.spec_from_file_location("train_p90_from_runs", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_prediction_provider_uses_exact_runtime_command_metadata_and_freezes_hash(tmp_path: Path) -> None:
@@ -57,3 +67,21 @@ def test_prediction_provider_rejects_uncalibrated_guest_memory(tmp_path: Path) -
     }]}), encoding="utf-8")
     with pytest.raises(ValueError, match="calibrated positive host increment"):
         CommandPredictionProvider(path)
+
+
+def test_host_calibration_excludes_backend_maintenance(tmp_path: Path) -> None:
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps({"performance": {"tool_execution_observations": [
+        {"execution_scope": "backend-maintenance",
+         "actual_measured_memory_mib": 1, "actual_host_execution_increment_mib": 1000},
+        *[
+            {"execution_scope": "agent-tool", "actual_measured_memory_mib": 2,
+             "actual_host_execution_increment_mib": value}
+            for value in (2, 4, 6, 8, 10)
+        ],
+    ]}}), encoding="utf-8")
+
+    calibration = _trainer_module()._host_increment_calibration([path])
+
+    assert calibration["pair_count"] == 5
+    assert calibration["ratio_max"] == 5

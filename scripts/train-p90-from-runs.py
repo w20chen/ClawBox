@@ -13,7 +13,7 @@ from typing import Any
 
 from clawbox.cell.p90 import AdmissionPrediction
 from clawbox.replay.trace import load_trace
-from clawbox.tuning.__main__ import find_run_traces
+from clawbox.tuning.__main__ import find_run_datasets
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts
 from clawbox.tuning.native import _clawtune_api
 
@@ -48,6 +48,8 @@ def _host_increment_calibration(paths: list[Path]) -> dict[str, Any]:
         else:
             rows = payload
         for row in rows if isinstance(rows, list) else []:
+            if row.get("execution_scope", "agent-tool") != "agent-tool":
+                continue
             guest = row.get("actual_measured_memory_mib")
             host = row.get("actual_host_execution_increment_mib")
             if guest is None or host is None or float(guest) <= 0 or float(host) < 0:
@@ -69,11 +71,15 @@ def _host_increment_calibration(paths: list[Path]) -> dict[str, Any]:
     }
 
 
-def _evidence_paths(trace_dir: Path, bridge: Path) -> list[Path]:
+def _evidence_paths(
+    trace_dir: Path, bridge: Path, resource_dir: Path | None = None,
+) -> list[Path]:
     paths = {bridge, *trace_dir.glob("*.jsonl"), *trace_dir.glob("cgroup-resource-*.json")}
     tool_resource = trace_dir / "tool-resource"
     if tool_resource.is_dir():
         paths.update(tool_resource.glob("*.json"))
+    if resource_dir is not None and resource_dir != trace_dir:
+        paths.update(resource_dir.glob("*.json"))
     return sorted(paths, key=lambda path: str(path))
 
 
@@ -241,8 +247,13 @@ def _attach_oracle_working_sets(
     for workload, run in sorted(oracle_runs.items()):
         if workload not in plan["workloads"]:
             raise ValueError(f"oracle workload {workload!r} is absent from the prediction plan")
-        trace_dir, bridge = find_run_traces(run)
-        _joined, trusted = build_joined_dataset(trace_dir, bridge)
+        trusted = [
+            item
+            for trace_dir, bridge, resource_dir in find_run_datasets(run)
+            for item in build_joined_dataset(
+                trace_dir, bridge, resource_dir=resource_dir,
+            )[1]
+        ]
         observations = sorted(
             [item for item in trusted
              if item.command and item.rss_peak_bytes is not None and item.start_time is not None],
@@ -354,57 +365,65 @@ def main() -> None:
     run_reports: list[dict[str, Any]] = []
     expected_observed_repo = args.observed_repo_fingerprint or args.repository
     for run_index, run in enumerate(sorted(args.runs, key=str)):
-        trace_dir, bridge = find_run_traces(run)
-        evidence_paths = _evidence_paths(trace_dir, bridge)
-        for path in evidence_paths:
-            try:
-                relative = path.relative_to(run)
-            except ValueError:
-                relative = Path(path.name)
-            source.update(
-                f"run-{run_index}/{relative.as_posix()}".encode()
-                + b"\0" + path.read_bytes() + b"\0"
+        for dataset_index, (trace_dir, bridge, resource_dir) in enumerate(
+            find_run_datasets(run)
+        ):
+            evidence_paths = _evidence_paths(trace_dir, bridge, resource_dir)
+            for path in evidence_paths:
+                try:
+                    relative = path.relative_to(run)
+                except ValueError:
+                    relative = Path(path.name)
+                source.update(
+                    f"run-{run_index}/dataset-{dataset_index}/{relative.as_posix()}".encode()
+                    + b"\0" + path.read_bytes() + b"\0"
+                )
+            joined, trusted = build_joined_dataset(
+                trace_dir, bridge, resource_dir=resource_dir,
             )
-        joined, trusted = build_joined_dataset(trace_dir, bridge)
-        observed_repos = sorted({item.repo_fingerprint for item in trusted if item.repo_fingerprint})
-        if observed_repos != [expected_observed_repo]:
-            raise ValueError(
-                f"{run}: observed trace repositories {observed_repos!r}; "
-                f"expected exactly {expected_observed_repo!r}"
-            )
-        eligible_count = 0
-        for item in trusted:
-            if (item.start_time is None or item.end_time is None
-                    or item.cpu_utilization_avg_cores is None or item.rss_peak_bytes is None):
-                continue
-            eligible_count += 1
-            calls.append(CompletedCall(
-                repo=args.repository, tool_name=item.tool_name or "exec", command=item.command,
-                ts_start=item.start_time.timestamp(), ts_end=item.end_time.timestamp(),
-                censored=item.exit_code not in (None, 0),
-                peak_cpu_cores=float(item.cpu_utilization_avg_cores),
-                peak_cpu_cores_eligible=True,
-                peak_memory_mb=float(item.rss_peak_bytes) / (1024.0 * 1024.0),
-                peak_memory_mb_eligible=True, ambient_before_mb=0.0,
-            ))
-        cgroup_files = [path for path in evidence_paths if path.suffix == ".json"]
-        cgroup_loaded = read_cgroup_artifacts(trace_dir)
-        run_reports.append({
-            "run_id": f"{args.training_set_id}/{run.name}",
-            "source_path": str(run.resolve()),
-            "trace_files": len(list(trace_dir.glob("*.jsonl"))),
-            "bridge_records": len({item.execution_id for item in joined.unmatched_bridges})
-                              + len({item.execution_id for item in joined.joined}),
-            "cgroup_files": len(cgroup_files),
-            "cgroup_valid": len(cgroup_loaded),
-            "cgroup_invalid_or_incomplete": len(cgroup_files) - len(cgroup_loaded),
-            "spans": joined.span_count,
-            "joined": len(joined.joined),
-            "join_rate": joined.join_rate,
-            "trusted": len(trusted),
-            "trainer_eligible": eligible_count,
-            "observed_repo_fingerprints": observed_repos,
-        })
+            observed_repos = sorted({
+                item.repo_fingerprint for item in trusted if item.repo_fingerprint
+            })
+            if observed_repos != [expected_observed_repo]:
+                raise ValueError(
+                    f"{run}/{resource_dir.name}: observed trace repositories "
+                    f"{observed_repos!r}; expected exactly {expected_observed_repo!r}"
+                )
+            eligible_count = 0
+            for item in trusted:
+                if (item.start_time is None or item.end_time is None
+                        or item.cpu_utilization_avg_cores is None
+                        or item.rss_peak_bytes is None):
+                    continue
+                eligible_count += 1
+                calls.append(CompletedCall(
+                    repo=args.repository, tool_name=item.tool_name or "exec",
+                    command=item.command,
+                    ts_start=item.start_time.timestamp(), ts_end=item.end_time.timestamp(),
+                    censored=item.exit_code not in (None, 0),
+                    peak_cpu_cores=float(item.cpu_utilization_avg_cores),
+                    peak_cpu_cores_eligible=True,
+                    peak_memory_mb=float(item.rss_peak_bytes) / (1024.0 * 1024.0),
+                    peak_memory_mb_eligible=True, ambient_before_mb=0.0,
+                ))
+            cgroup_files = list(resource_dir.glob("cgroup-resource-*.json"))
+            cgroup_loaded = read_cgroup_artifacts(resource_dir)
+            run_reports.append({
+                "run_id": f"{args.training_set_id}/{run.name}/{resource_dir.name}",
+                "source_path": str(run.resolve()),
+                "trace_files": len(list(trace_dir.glob("*.jsonl"))),
+                "bridge_records": len({item.execution_id for item in joined.unmatched_bridges})
+                                  + len({item.execution_id for item in joined.joined}),
+                "cgroup_files": len(cgroup_files),
+                "cgroup_valid": len(cgroup_loaded),
+                "cgroup_invalid_or_incomplete": len(cgroup_files) - len(cgroup_loaded),
+                "spans": joined.span_count,
+                "joined": len(joined.joined),
+                "join_rate": joined.join_rate,
+                "trusted": len(trusted),
+                "trainer_eligible": eligible_count,
+                "observed_repo_fingerprints": observed_repos,
+            })
     if len(calls) < 5:
         raise ValueError(f"only {len(calls)} trusted completed calls; need at least 5")
     kb = RuntimeToolResourceKB.fit_public(calls)

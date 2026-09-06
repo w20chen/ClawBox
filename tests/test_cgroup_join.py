@@ -194,6 +194,32 @@ def test_build_joined_dataset_carries_cgroup(tmp_path):
     assert trusted[0].cgroup.cpu_time_s == 4.2
 
 
+def test_build_joined_dataset_accepts_separate_managed_resource_dir(tmp_path):
+    trace_dir = tmp_path / "runtime-traces" / "session-a"
+    resource_dir = tmp_path / "tool-artifacts" / "session-a"
+    trace_dir.mkdir(parents=True)
+    resource_dir.mkdir(parents=True)
+    (trace_dir / "run-a.jsonl").write_text(
+        json.dumps(span_end("exec-1")) + "\n", encoding="utf-8"
+    )
+    (resource_dir / "cgroup-resource-exec-1.json").write_text(
+        json.dumps(cgroup_artifact("exec-1")), encoding="utf-8"
+    )
+    bridge = resource_dir / "tool-bridge.jsonl"
+    bridge.write_text(
+        json.dumps(bridge_record("exec-1").model_dump(mode="json")),
+        encoding="utf-8",
+    )
+
+    joined, trusted = build_joined_dataset(
+        trace_dir, bridge, resource_dir=resource_dir,
+    )
+
+    assert joined.join_rate == 1.0
+    assert len(trusted) == 1
+    assert trusted[0].cgroup is not None
+
+
 def test_degraded_process_tree_artifact_cannot_enter_trusted_kb(tmp_path):
     trace_dir = tmp_path / "traces"
     (trace_dir / "tool-resource").mkdir(parents=True)
