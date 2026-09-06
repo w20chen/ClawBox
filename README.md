@@ -114,6 +114,18 @@ That bundle is
 (summary SHA-256
 `943c59c8cfd5fe6c4caaf738a11c9b7007a41ae0ee62bfebb393ed5d20d5d21e`).
 
+The real-provider confirmation is now green with `deepseek-v4-flash` through
+`https://api.deepseek.com/v1`. Managed c1 passed 1/1 with three real model
+steps and two Agent Tool operations; managed c2 passed 2/2 with five model
+steps and three Tool operations. Both had successful workspace validation,
+1.0 exact native Tool telemetry joins, zero telemetry loss, zero host OOM, and
+zero post-run sandboxes. The c2 bundle is
+`/home/weitianc/clawbox-results-current/final-network-deepseek-c2-3fd64-r3`
+(summary SHA-256
+`c8f94562927f410e2dc6800c12fb7349c64e16809249384953e34a538c4042d9`).
+Credentials were read from the existing ClawTune operator file only in the
+Worker environment and are absent from specs and result provenance.
+
 The same managed path is green at c4 and c8 for resident and paired snapshot.
 The c8 gate completed 8/8 Agents and 16/16 model steps per arm with 100% exact
 Agent Tool telemetry joins, zero OOMs, and zero leaks. Snapshot reduced mean

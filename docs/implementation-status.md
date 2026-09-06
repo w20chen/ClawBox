@@ -35,7 +35,7 @@ This is deterministic-managed-replay scale/correctness evidence, not the final
 paper comparison: it repeats one small trace and uses static admission. Formal
 evidence still needs representative heterogeneous held-out captures, a
 separately trained and frozen ClawTune P90 artifact, repetitions across the
-baseline matrix, and valid-provider real-LLM c1/c2 confirmation.
+baseline matrix, and repeated formal trials.
 
 The c60 fan-out also established that setting only
 `OPENCLAW_BASH_YIELD_MS` is insufficient for a long-lived/restored Runtime.
@@ -54,6 +54,35 @@ summary SHA-256 is
 Together with the static resident and paired-snapshot runs, this verifies the
 real managed code paths for the non-P90 baselines. It does not substitute for
 the frozen-KB policy comparison.
+
+### Real DeepSeek c1/c2 is green
+
+Commit `3fd64f2` passes the real managed OpenClaw path with
+`deepseek-v4-flash` at c1 and c2. This is `real-llm` evidence: only the
+provider generated model responses; Runtime/OpenClaw, ModelGateway,
+PolicyControl, native SSH, Tool workspaces, commands, cgroup-v2, and eBPF all
+remained real. c1 completed 1/1 with three model steps and two Agent Tool
+operations. The isolated c2 confirmation completed 2/2 with five model steps
+and three Tool operations. Both passed final validation with a 1.0 exact-ID
+join rate, zero telemetry loss, zero host OOM, and zero leaked sandboxes.
+
+The c2 bundle is
+`/home/weitianc/clawbox-results-current/final-network-deepseek-c2-3fd64-r3`;
+summary SHA-256 is
+`c8f94562927f410e2dc6800c12fb7349c64e16809249384953e34a538c4042d9`.
+The c1-success/mixed-c2 diagnostic bundle is
+`final-network-deepseek-c1-c2-3fd64-r2`; its c1 arm is green and its c2 arm is
+retained as rejected evidence because one 83 ms OpenClaw `write` operation had
+valid cgroup accounting but no attributable eBPF exec image. The collector
+failed closed rather than silently accepting partial telemetry; an isolated
+c2 rerun then passed fully.
+
+The first real-provider rerun also exposed a trace-export bug after otherwise
+successful Agent execution: the `model-traces` parent directory did not exist.
+`3fd64f2` creates it before the atomic `.next` rename and adds a nested-path
+regression test. The DeepSeek credential is loaded only from the existing
+ClawTune operator file into the Worker environment and is never copied into a
+spec, trace, log, image, or commit.
 
 ### Superseding live update: native managed c1 is green
 

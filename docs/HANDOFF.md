@@ -26,9 +26,20 @@ Mean/peak was 48.67/55.77 GB with 229 recorded
 The remaining paper gates are not implementation-smoke work: capture multiple
 representative current-ARM64 trajectories, train/calibrate and freeze one
 ClawTune P90 artifact from separate recording data, repeat every formal arm on
-the held-out heterogeneous assignment, and rerun real DeepSeek c1/c2 after a
-valid credential is supplied. The last real-provider attempt reached DeepSeek
-through the managed architecture but received HTTP 401 before inference.
+the held-out heterogeneous assignment, and run the required repetitions.
+
+Real DeepSeek confirmation is now green. Commit `3fd64f2` passed c1 (1/1,
+three model steps, two Agent Tool operations) and an isolated c2 run (2/2,
+five model steps, three Tool operations) using `deepseek-v4-flash`. Both had
+successful validation, 1.0 exact telemetry joins, zero loss/OOM, and zero
+leaks. The c2 result is
+`/home/weitianc/clawbox-results-current/final-network-deepseek-c2-3fd64-r3`;
+summary SHA-256 is
+`c8f94562927f410e2dc6800c12fb7349c64e16809249384953e34a538c4042d9`.
+The key was read from the existing `~/ClawTune` operator credential and was not
+written into configuration or artifacts. Commit `3fd64f2` also fixes the
+real-API-only model-trace export parent-directory creation exposed by the first
+attempt.
 
 The conservative paths are also current-green at c5. Run
 `/home/weitianc/clawbox-results-current/final-network-c5-conservative-70f7b-r1`
