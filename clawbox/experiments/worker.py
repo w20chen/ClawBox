@@ -1776,8 +1776,17 @@ class ExperimentWorker:
                         policy_records=outcome["policy_control_records"],
                         runtime_trace_paths=outcome["runtime_traces"],
                     )
+                    predicted_execution_ids = {
+                        str(item.get("execution_id") or "")
+                        for item in prediction_records
+                    }
                     enrich_tool_execution_observations(
-                        prediction_records, native_artifacts.cgroup_artifacts,
+                        prediction_records, {
+                            execution_id: artifact
+                            for execution_id, artifact
+                            in native_artifacts.cgroup_artifacts.items()
+                            if execution_id in predicted_execution_ids
+                        },
                     )
                 events.write({
                     "event": "native_tool_artifacts_collected",
