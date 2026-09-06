@@ -130,6 +130,77 @@ memory samples and lifecycle `host_observed_reclaimed_bytes`.
 different traces, compressed waits, or a different budget is not a policy
 effect.
 
+### Per-operation lifecycle timing
+
+The summary fields above are arm-level aggregates. To answer how long one
+CubeSandbox operation took, use the lifecycle records rather than estimating
+from Agent JCT:
+
+```bash
+# Exact Runtime/Tool operations for every session in an arm.
+jq '.arms[] | .performance.session_timelines[]
+  | .lifecycle_timings[]
+  | {role, operation, service_seconds, status, state_before, state_after,
+     host_observed_reclaimed_bytes, host_reclamation_evidence}' summary.json
+```
+
+The same records are emitted in the ordered event JSONL, which is convenient
+for one arm or for time-series analysis:
+
+```bash
+jq -s '[.[]
+  | select(.event == "sandbox_created" or
+           .event == "sandbox_destroyed" or
+           .event == "sandbox_paused" or
+           .event == "sandbox_restored")
+  | {event, session_id, role, service_seconds,
+     timing: .lifecycle_timing}]' events/<arm-id>.jsonl
+```
+
+`operation` has the following meaning:
+
+| Operation | What is timed | Included in Agent JCT? |
+| --- | --- | --- |
+| `create` | CubeSandbox VM creation and readiness for one Runtime or Tool VM | Pair provisioning is reported separately; do not charge it to workload JCT. |
+| `checkpoint` | CubeSandbox pause/checkpoint plus eviction of the live VM | Yes, when it occurs during the workload model wait. |
+| `restore` | Recreating the VM from the checkpoint and readiness verification | Yes, when it delays response release or Tool admission. |
+| `destroy` | Cleanup of the VM at session end | No; report cleanup time separately. |
+
+For paired snapshot mode, Runtime and Tool have separate records. Therefore
+`pause_count`/`pause_service_seconds` are sums of recorded role-level pause
+events, not necessarily the number of logical model-wait episodes. Use
+`session_timelines[].lifecycle_timings[]` to distinguish Runtime from Tool and
+to reconstruct each paired episode. The `service_seconds` value is the
+monotonic elapsed service time; wall-clock timestamps are retained for joining
+it to model waits, admissions, and host-memory samples.
+
+For a compact operation table (count, mean, minimum, and maximum) from an arm's
+event log:
+
+```bash
+jq -s '
+  [ .[]
+    | select(.event == "sandbox_created" or
+             .event == "sandbox_destroyed" or
+             .event == "sandbox_paused" or
+             .event == "sandbox_restored")
+    | {operation: .lifecycle_timing.operation,
+       role, seconds: (.lifecycle_timing.service_seconds // .service_seconds)} ]
+  | group_by(.operation)
+  | map({operation: .[0].operation, count: length,
+         mean_seconds: (map(.seconds) | add / length),
+         min_seconds: (map(.seconds) | min),
+         max_seconds: (map(.seconds) | max)})
+' events/<arm-id>.jsonl
+```
+
+As a reference, the recorded c60 snapshot arm currently reports 178 role-level
+pause records totalling about 322.91 s and 178 role-level restore records
+totalling about 36.22 s. The resident c60 arm reports no pause/restore
+operations. Those are arm totals; use the commands above for the individual
+create, destroy, checkpoint, and restore distributions. Creation and cleanup
+are intentionally kept separate from the workload snapshot overhead.
+
 ## P90 admission
 
 Inspect prediction source, fallback, error, and KB provenance:
