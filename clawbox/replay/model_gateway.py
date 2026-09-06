@@ -562,6 +562,9 @@ _RUNTIME_SESSION_RE = re.compile(
     r"(?m)^(Runtime: .*?\| session=agent:main:explicit:)[A-Za-z0-9_.-]+"
     r"( \| sessionId=)[A-Za-z0-9_.-]+( \|.*)$"
 )
+_RUNTIME_HOST_RE = re.compile(
+    r"(?m)^(Runtime: .*?\| host=)[^ |]+( \|.*)$"
+)
 _PYTEST_TIME_RE = re.compile(r"(?m)^(\d+ passed in )\d+(?:\.\d+)?s$")
 _OPENCLAW_PROMPT_TIME_RE = re.compile(
     r"(?m)^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} "
@@ -584,6 +587,7 @@ _GIT_LOG_HEAD_RE = re.compile(
 def _canonical_replay_text(value: str) -> str:
     """Mask only per-session values known to be nondeterministic in this workload."""
     value = _RUNTIME_SESSION_RE.sub(r"\1session-N\2session-N\3", value)
+    value = _RUNTIME_HOST_RE.sub(r"\1runtime-N\2", value)
     value = _OPENCLAW_PROMPT_TIME_RE.sub("[REPLAY-TIME]", value)
     value = _OPENCLAW_WORKSPACE_RE.sub(
         "/state/openclaw/session-N/runtime-workspace", value,

@@ -119,7 +119,9 @@ def test_replay_canonicalization_masks_openclaw_session_workspace(
         "Runtime: agent=main | session=agent:main:explicit:arm-a-0000 "
         "| sessionId=arm-a-0000 | host=runtime"
     )
-    actual = expected.replace("arm-a-0000", "arm-b-0007")
+    actual = expected.replace("arm-a-0000", "arm-b-0007").replace(
+        "host=runtime", "host=tpl-new",
+    )
     trace = tmp_path / "trace.jsonl"
     trace.write_text(json.dumps({
         "type": "action", "action_type": "llm_call", "action_id": "llm-1",
