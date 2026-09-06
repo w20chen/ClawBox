@@ -19,6 +19,104 @@ Runtime/Tool VM pair is the offered footprint; host `MemAvailable` and VM RSS
 measure actual physical residency. The baseline controls the reservation and
 residency policy, not the Tool command semantics.
 
+## Concrete resource shape and totals
+
+The validated Kunpeng c60 overcommit experiment uses this immutable VM shape:
+
+| Resource | Runtime VM | Tool VM | Per-Agent pair |
+| --- | ---: | ---: | ---: |
+| vCPU | 2 | 2 | 4 vCPU offered |
+| configured memory | 2 GiB (2048 MiB) | 4 GiB (4096 MiB) | 6 GiB (6144 MiB) |
+| writable template disk* | 20 GiB | 40 GiB | 60 GiB |
+
+Thus the offered configured resources are:
+
+| Offered concurrency | Runtime memory | Tool memory | Pair memory | Pair writable-disk offer* |
+| ---: | ---: | ---: | ---: | ---: |
+| c1 | 2 GiB | 4 GiB | 6 GiB | 60 GiB |
+| c5 | 10 GiB | 20 GiB | 30 GiB | 300 GiB |
+| c20 | 40 GiB | 80 GiB | 120 GiB | 1.2 TiB |
+| c40 | 80 GiB | 160 GiB | 240 GiB | 2.4 TiB |
+| c60 | 120 GiB | 240 GiB | 360 GiB | 3.6 TiB |
+
+\*Disk is a template writable-layer offer, not host RSS and not necessarily
+fully allocated physical storage. It is configured when registering the
+immutable CubeSandbox template, not in the experiment YAML.
+
+The formal c60 overcommit arm sets:
+
+```yaml
+runtime: {vcpu: 2, memory_mib: 2048}
+sandbox: {vcpu: 2, memory_mib: 4096}
+execution: {concurrency_levels: [60]}
+resources:
+  pool_memory_budget_mib: 65536       # 64 GiB admission pool
+  checkpoint_restore_headroom_mib: 2048
+```
+
+The offered-memory ratio is therefore:
+
+```text
+60 * (2048 + 4096) / 65536 = 5.625x
+```
+
+This is overcommit against the experiment's 64 GiB policy pool, not a claim
+that the whole Kunpeng host has only 64 GiB. Actual host physical residency is
+reported separately by the memory sampler. `emergency_free_memory_mib` is a
+common host safety floor and must remain identical across compared policies; it
+is not an extra per-Agent allocation.
+
+## How to configure a different experiment
+
+Start from
+`examples/experiments/openclaw-cube-replay-c60-overcommit.yaml` and change only
+the intended dimensions:
+
+```yaml
+runtime:
+  template_id: <Runtime-template-id>
+  vcpu: 2
+  memory_mib: 2048
+sandbox:
+  template_id: <Tool-template-id>
+  vcpu: 2
+  memory_mib: 4096
+execution:
+  concurrency_levels: [1, 5, 60]
+resources:
+  target_node: <CubeSandbox-compute-node>
+  pool_memory_budget_mib: 65536
+  emergency_free_memory_mib: 200000
+  checkpoint_restore_headroom_mib: 2048
+  static_tool_memory_mib: 256
+  full_tool_memory_mib: 4096
+```
+
+`execution.concurrency_levels` is the offered workload, not a hidden session
+limit. To change the memory experiment, change `pool_memory_budget_mib`; to
+change the VM shape, change both the YAML values and the corresponding
+CubeSandbox templates. The YAML values must match the template's actual memory
+and vCPU metadata. Register a new immutable template ID for a new disk or
+image/kernel shape; do not mutate a template underneath an existing result.
+
+For example, a 1 GiB Runtime and 2 GiB Tool at c20 offers
+`20 * (1024 + 2048) = 60,480 MiB` before admission headroom. A 32 GiB pool
+would therefore be a 1.875× offered-memory overcommit. Always record the
+resulting formula and the exact YAML in the result provenance.
+
+Policy-specific reservation knobs are separate from VM size:
+
+- `lifetime_full` claims the configured Runtime + Tool memory for the Agent
+  lifetime.
+- `tool_full` reserves `full_tool_memory_mib` for each active Tool operation.
+- `tool_static` reserves `static_tool_memory_mib`.
+- `tool_p90` reserves the frozen ClawTune prediction for the canonical command.
+
+Changing `static_tool_memory_mib`, `full_tool_memory_mib`, the P90 KB, or the
+pool budget changes the policy experiment and requires a new result arm. Keep
+these values identical across arms in one comparison unless the parameter is
+the dimension being evaluated.
+
 ## Admission baselines
 
 ### `lifetime_full`
