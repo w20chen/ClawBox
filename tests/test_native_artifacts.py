@@ -20,12 +20,17 @@ from clawbox.experiments.openclaw_driver import NativeSSHConfig
 from clawbox.replay.lifecycle import CommandResult
 
 
-def _policy(execution_id: str, digest: str) -> list[dict]:
+def _policy(
+    execution_id: str, digest: str, effective_digest: str | None = None,
+) -> list[dict]:
+    request = {
+        "session_id": "session-a", "execution_id": execution_id,
+        "command_sha256": digest, "operation": "exec",
+    }
+    if effective_digest is not None:
+        request["effective_command_sha256"] = effective_digest
     return [{
-        "request": {
-            "session_id": "session-a", "execution_id": execution_id,
-            "command_sha256": digest, "operation": "exec",
-        },
+        "request": request,
         "admission": {"decision": "ADMIT"},
         "completion": {"status": "COMPLETED"},
     }]
@@ -111,6 +116,34 @@ def test_runtime_spans_recovers_exact_clawtune_envelope_identity(
     )
 
 
+def test_runtime_spans_recovers_base64_clawtune_envelope_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.jsonl"
+    header = base64.urlsafe_b64encode(json.dumps({
+        "v": 1,
+        "execution_id": "exec-recovered-b64",
+        "profile_command_b64": base64.urlsafe_b64encode(b"printf ok").decode(),
+    }).encode()).decode().rstrip("=")
+    path.write_text(json.dumps({
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "status": {"code": "ok"}, "output": {"exit_code": 0},
+        "execution": {
+            "execution_id": None,
+            "effective_command": f"__CBX_EXEC_1__b64:{header}\nprintf ok",
+            "payload_command": "printf ok",
+        },
+    }) + "\n", encoding="utf-8")
+
+    spans = _runtime_spans([str(path)])
+
+    assert spans[0]["execution"]["execution_id"] == "exec-recovered-b64"
+    assert spans[0]["execution"]["execution_id_source"] == (
+        "effective_command_envelope_recovery"
+    )
+
+
 def test_runtime_spans_rejects_structured_envelope_identity_conflict(
     tmp_path: Path,
 ) -> None:
@@ -148,6 +181,17 @@ def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
             cgroup_artifacts={execution_id: cgroup},
             clause_artifacts={execution_id: clause},
             policy_records=_policy(execution_id, digest),
+        )
+
+    effective_digest = hashlib.sha256(b"wrapper").hexdigest()
+    with pytest.raises(ValueError, match="effective command digests"):
+        validate_native_tool_join(
+            bridge_records=[{
+                **bridge[0], "effective_command_sha256": "b" * 64,
+            }],
+            cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause},
+            policy_records=_policy(execution_id, digest, effective_digest),
         )
 
     with pytest.raises(ValueError, match="wrong session"):

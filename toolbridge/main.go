@@ -35,6 +35,8 @@ type executionLog struct {
 	ExecutionSource    string `json:"execution_source"`
 	CommandSHA256      string `json:"command_sha256"`
 	CommandBytes       int    `json:"command_bytes"`
+	EffectiveSHA256    string `json:"effective_command_sha256"`
+	EffectiveBytes     int    `json:"effective_command_bytes"`
 	DurationMS         int64  `json:"duration_ms"`
 	ExitCode           int    `json:"exit_code"`
 	TimedOut           bool   `json:"timed_out"`
@@ -186,38 +188,53 @@ func durationMS(value time.Duration) int64 { return value.Milliseconds() }
 const clawboxExecEnvelopePrefix = "__CBX_EXEC_1__"
 
 type execEnvelope struct {
-	Version     int    `json:"v"`
-	ExecutionID string `json:"execution_id"`
+	Version           int    `json:"v"`
+	ExecutionID       string `json:"execution_id"`
+	ProfileCommandB64 string `json:"profile_command_b64"`
 }
 
 // parseExecEnvelope splits an optional runtime envelope from the actual shell
 // command.  A command that does not carry the envelope prefix is returned
 // unchanged with ok=false so the bridge stays fully backward compatible with
 // raw commands.  Any malformed envelope also degrades to the raw command.
-func parseExecEnvelope(command string) (payload string, executionID string, ok bool) {
+func parseExecEnvelope(command string) (payload string, executionID string, profileCommand string, ok bool) {
 	marker := strings.Index(command, clawboxExecEnvelopePrefix)
 	if marker < 0 {
-		return command, "", false
+		return command, "", command, false
 	}
 	rest := command[marker+len(clawboxExecEnvelopePrefix):]
 	newline := strings.IndexByte(rest, '\n')
 	if newline < 0 {
-		return command, "", false
+		return command, "", command, false
 	}
 	header := strings.TrimSpace(rest[:newline])
 	payload = command[:marker] + rest[newline+1:]
 	executionID = header
-	if strings.HasPrefix(header, "{") {
-		var envelope execEnvelope
+	var envelope execEnvelope
+	if strings.HasPrefix(header, "b64:") {
+		decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(header, "b64:"))
+		if err != nil || json.Unmarshal(decoded, &envelope) != nil || envelope.Version != 1 {
+			return command, "", command, false
+		}
+		executionID = envelope.ExecutionID
+	} else if strings.HasPrefix(header, "{") {
 		if err := json.Unmarshal([]byte(header), &envelope); err != nil || envelope.Version != 1 {
-			return command, "", false
+			return command, "", command, false
 		}
 		executionID = envelope.ExecutionID
 	}
 	if !validEnvelopeExecutionID(executionID) {
-		return command, "", false
+		return command, "", command, false
 	}
-	return payload, executionID, true
+	profileCommand = payload
+	if envelope.ProfileCommandB64 != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(envelope.ProfileCommandB64)
+		if err != nil || len(decoded) == 0 {
+			return command, "", command, false
+		}
+		profileCommand = string(decoded)
+	}
+	return payload, executionID, profileCommand, true
 }
 
 func validEnvelopeExecutionID(value string) bool {
@@ -250,7 +267,7 @@ func commandExitCode(err error, timedOut bool) int {
 
 func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Duration, outputLimit int64) executionLog {
 	started := time.Now()
-	command, envelopeExecutionID, enveloped := parseExecEnvelope(rawCommand)
+	command, envelopeExecutionID, profileCommand, enveloped := parseExecEnvelope(rawCommand)
 	executionID := envelopeExecutionID
 	if !enveloped || executionID == "" {
 		executionID = randomID()
@@ -259,7 +276,8 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	if enveloped {
 		executionSource = "runtime-envelope"
 	}
-	digest := sha256.Sum256([]byte(command))
+	digest := sha256.Sum256([]byte(profileCommand))
+	effectiveDigest := sha256.Sum256([]byte(command))
 	record := executionLog{
 		Timestamp:       started.UTC().Format(time.RFC3339Nano),
 		CellID:          os.Getenv("CELL_ID"),
@@ -267,7 +285,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		ExecutionID:     executionID,
 		ExecutionSource: executionSource,
 		CommandSHA256:   hex.EncodeToString(digest[:]),
-		CommandBytes:    len(command),
+		CommandBytes:    len(profileCommand),
+		EffectiveSHA256: hex.EncodeToString(effectiveDigest[:]),
+		EffectiveBytes:  len(command),
 		ExitCode:        127,
 		TelemetryState:  "unavailable",
 	}
@@ -347,7 +367,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				repo = os.Getenv("TASK_ID")
 			}
 			response, beginErr := guestCollector.Begin(
-				executionID, command, cgroupPath, cmd.Process.Pid, repo,
+				executionID, profileCommand, cgroupPath, cmd.Process.Pid, repo,
 			)
 			if beginErr != nil {
 				record.TelemetryState = "failed"

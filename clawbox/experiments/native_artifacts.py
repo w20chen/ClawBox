@@ -224,7 +224,18 @@ def _runtime_envelope_execution_id(effective_command: Any) -> str | None:
     if not separator or not header.startswith(_EXECUTION_ENVELOPE_PREFIX):
         return None
     encoded = header.removeprefix(_EXECUTION_ENVELOPE_PREFIX)
-    if encoded.startswith("{"):
+    if encoded.startswith("b64:"):
+        value = encoded.removeprefix("b64:")
+        try:
+            metadata = json.loads(base64.urlsafe_b64decode(
+                value + "=" * (-len(value) % 4)
+            ))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(metadata, dict) or metadata.get("v") != 1:
+            return None
+        execution_id = str(metadata.get("execution_id") or "")
+    elif encoded.startswith("{"):
         try:
             metadata = json.loads(encoded)
         except json.JSONDecodeError:
@@ -370,6 +381,12 @@ def validate_native_tool_join(
             )
         if bridge.get("command_sha256") != request.get("command_sha256"):
             raise ValueError(f"{execution_id}: policy and bridge command digests differ")
+        effective_digest = request.get("effective_command_sha256")
+        if (effective_digest is not None
+                and bridge.get("effective_command_sha256") != effective_digest):
+            raise ValueError(
+                f"{execution_id}: policy and bridge effective command digests differ"
+            )
         if (runtime_span_records is not None
                 and request.get("runtime_trace_expected", True) is not False):
             span_execution = runtime_by_id[execution_id][0]["execution"]

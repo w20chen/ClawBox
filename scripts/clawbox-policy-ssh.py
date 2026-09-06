@@ -6,6 +6,7 @@ client exactly once after admission.  HTTP carries control metadata only.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -25,8 +26,24 @@ PREFIX = "__CBX_EXEC_1__"
 _HOST_KEY_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
-def _envelope(argv: list[str]) -> tuple[dict[str, Any], str] | None:
-    for argument in argv:
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _bridge_header(metadata: dict[str, Any], profile_command: str) -> str:
+    bridge_metadata = {
+        **metadata,
+        "profile_command_b64": base64.urlsafe_b64encode(
+            profile_command.encode()
+        ).decode().rstrip("="),
+    }
+    return base64.urlsafe_b64encode(json.dumps(
+        bridge_metadata, sort_keys=True, separators=(",", ":"),
+    ).encode()).decode().rstrip("=")
+
+
+def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
+    for index, argument in enumerate(argv):
         marker = argument.find(PREFIX)
         if marker < 0:
             continue
@@ -34,18 +51,40 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str] | None:
         header, separator, payload = rest.partition("\n")
         if not separator:
             continue
-        try:
-            metadata = json.loads(header)
-        except json.JSONDecodeError:
-            metadata = {"v": 1, "execution_id": header.strip()}
+        if header.startswith("b64:"):
+            try:
+                metadata = json.loads(_b64url_decode(header[4:]))
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                continue
+        else:
+            try:
+                metadata = json.loads(header)
+            except json.JSONDecodeError:
+                metadata = {"v": 1, "execution_id": header.strip()}
         if metadata.get("v") != 1 or not metadata.get("execution_id"):
             continue
         command = argument[:marker] + payload
-        return metadata, command
+        # OpenClaw wraps the logical command in a session-specific env/shell
+        # launcher after ClawTune creates the envelope. Preserve that wrapper
+        # for execution, but carry the original payload separately so the Tool
+        # collector and KB do not learn per-session PATHs or execution IDs.
+        encoded_profile = metadata.get("profile_command_b64")
+        if isinstance(encoded_profile, str) and encoded_profile:
+            try:
+                profile_command = _b64url_decode(encoded_profile).decode()
+            except (UnicodeDecodeError, ValueError):
+                continue
+        else:
+            profile_command = payload
+        encoded = _bridge_header(metadata, profile_command)
+        argv[index] = (
+            argument[:marker] + PREFIX + "b64:" + encoded + "\n" + payload
+        )
+        return metadata, command, profile_command
     return None
 
 
-def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, Any], str] | None:
+def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
     """Adopt OpenClaw SSH-backend calls which cannot carry an exec envelope.
 
     ClawTune can put an execution envelope in the ``exec`` tool's command.
@@ -69,8 +108,8 @@ def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, Any], str] | None:
         "execution_scope": "agent-tool" if is_filesystem else "backend-maintenance",
         "runtime_trace_expected": False,
     }
-    argv[-1] = PREFIX + json.dumps(metadata, separators=(",", ":")) + "\n" + command
-    return metadata, command
+    argv[-1] = PREFIX + "b64:" + _bridge_header(metadata, command) + "\n" + command
+    return metadata, command, command
 
 
 def _prediction(command_sha256: str) -> dict[str, Any] | None:
@@ -218,9 +257,10 @@ def main() -> int:
         print("ClawBox policy control is not configured", file=sys.stderr)
         return 125
 
-    metadata, command = parsed
+    metadata, command, profile_command = parsed
     execution_id = str(metadata["execution_id"])
-    command_sha256 = hashlib.sha256(command.encode()).hexdigest()
+    command_sha256 = hashlib.sha256(profile_command.encode()).hexdigest()
+    effective_command_sha256 = hashlib.sha256(command.encode()).hexdigest()
     request = {
         "session_id": session_id,
         "execution_id": execution_id,
@@ -228,6 +268,7 @@ def main() -> int:
         "execution_scope": str(metadata.get("execution_scope") or "agent-tool"),
         "runtime_trace_expected": bool(metadata.get("runtime_trace_expected", True)),
         "command_sha256": command_sha256,
+        "effective_command_sha256": effective_command_sha256,
         "prediction": _prediction(command_sha256),
         "runtime_request_at": time.time(),
     }

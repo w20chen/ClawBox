@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import sys
@@ -197,8 +199,14 @@ def test_openclaw_filesystem_ssh_gets_admission_and_bridge_envelope(
     assert request["execution_scope"] == "agent-tool"
     assert request["runtime_trace_expected"] is False
     assert request["execution_id"]
-    assert launched[0][-1].startswith(policy_ssh.PREFIX)
+    assert launched[0][-1].startswith(policy_ssh.PREFIX + "b64:")
     assert launched[0][-1].endswith(remote)
+    header = launched[0][-1].split("\n", 1)[0].removeprefix(policy_ssh.PREFIX + "b64:")
+    bridge_metadata = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+    encoded_profile = bridge_metadata["profile_command_b64"]
+    assert base64.urlsafe_b64decode(
+        encoded_profile + "=" * (-len(encoded_profile) % 4)
+    ).decode() == remote
     assert posted[1][1]["execution_id"] == request["execution_id"]
 
 
@@ -208,11 +216,74 @@ def test_openclaw_backend_preparation_is_admitted_but_not_counted_as_agent_tool(
     argv = ["-F", "/tmp/config", "-T", "openclaw-sandbox", "pwd"]
     parsed = policy_ssh._openclaw_unenveloped(argv)
     assert parsed is not None
-    metadata, command = parsed
+    metadata, command, profile_command = parsed
     assert command == "pwd"
+    assert profile_command == "pwd"
     assert metadata["tool_name"] == "ssh_backend_maintenance"
     assert metadata["execution_scope"] == "backend-maintenance"
     assert argv[-1].startswith(policy_ssh.PREFIX)
+
+
+def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    posted: list[tuple[str, dict]] = []
+    launched: list[list[str]] = []
+
+    def post(path: str, body: dict, *, attempts: int) -> dict:
+        posted.append((path, body))
+        if path.endswith("/admit"):
+            return {
+                "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 4,
+                "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+            }
+        return {"status": "COMPLETED"}
+
+    class Child:
+        def wait(self) -> int:
+            return 0
+
+    logical = "printf logical"
+    logical_b64 = base64.urlsafe_b64encode(logical.encode()).decode().rstrip("=")
+    metadata = base64.urlsafe_b64encode(json.dumps({
+        "v": 1,
+        "execution_id": "exec-wrapped",
+        "tool_name": "exec",
+        "profile_command_b64": logical_b64,
+    }, separators=(",", ":")).encode()).decode().rstrip("=")
+    wrapper = (
+        "env PATH=/state/session-a/bin CLAWTUNE_EXECUTION_ID=exec-wrapped "
+        "/bin/sh -c 'cd /workspace && "
+    )
+    remote = wrapper + policy_ssh.PREFIX + "b64:" + metadata + "\n" + logical + "'"
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(
+        policy_ssh.subprocess, "Popen", lambda argv: (launched.append(argv) or Child()),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "clawbox-policy-ssh.py", "-F", "/tmp/config", "openclaw-sandbox", remote,
+    ])
+
+    assert policy_ssh.main() == 0
+    request = posted[0][1]
+    effective = wrapper + logical + "'"
+    assert request["command_sha256"] == hashlib.sha256(logical.encode()).hexdigest()
+    assert request["effective_command_sha256"] == hashlib.sha256(effective.encode()).hexdigest()
+    launched_remote = launched[0][-1]
+    assert launched_remote.startswith(wrapper + policy_ssh.PREFIX + "b64:")
+    header = launched_remote.split("\n", 1)[0].split(policy_ssh.PREFIX + "b64:", 1)[1]
+    bridge_metadata = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+    encoded_profile = bridge_metadata["profile_command_b64"]
+    assert base64.urlsafe_b64decode(
+        encoded_profile + "=" * (-len(encoded_profile) % 4)
+    ).decode() == logical
+    assert launched_remote.endswith("\n" + logical + "'")
 
 
 def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(

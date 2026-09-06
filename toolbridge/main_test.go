@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"testing"
 	"time"
 )
 
 func TestParseExecEnvelope_PlainCommand(t *testing.T) {
-	payload, executionID, ok := parseExecEnvelope("echo hello")
+	payload, executionID, profileCommand, ok := parseExecEnvelope("echo hello")
 	if ok {
 		t.Fatal("plain command should not report an envelope")
 	}
@@ -18,11 +22,14 @@ func TestParseExecEnvelope_PlainCommand(t *testing.T) {
 	if executionID != "" {
 		t.Fatalf("expected empty execution_id, got %q", executionID)
 	}
+	if profileCommand != "echo hello" {
+		t.Fatalf("profile command mismatch: %q", profileCommand)
+	}
 }
 
 func TestParseExecEnvelope_Valid(t *testing.T) {
 	raw := "__CBX_EXEC_1__{\"v\":1,\"execution_id\":\"exec-1234-5678\"}\npytest -q"
-	payload, executionID, ok := parseExecEnvelope(raw)
+	payload, executionID, profileCommand, ok := parseExecEnvelope(raw)
 	if !ok {
 		t.Fatal("expected a valid envelope")
 	}
@@ -32,11 +39,14 @@ func TestParseExecEnvelope_Valid(t *testing.T) {
 	if executionID != "exec-1234-5678" {
 		t.Fatalf("execution_id mismatch: %q", executionID)
 	}
+	if profileCommand != payload {
+		t.Fatalf("legacy envelope should profile payload: %q", profileCommand)
+	}
 }
 
 func TestParseExecEnvelope_ShellSafeToken(t *testing.T) {
 	raw := "__CBX_EXEC_1__exec-1234-5678\npytest -q"
-	payload, executionID, ok := parseExecEnvelope(raw)
+	payload, executionID, profileCommand, ok := parseExecEnvelope(raw)
 	if !ok {
 		t.Fatal("expected a valid shell-safe envelope")
 	}
@@ -46,11 +56,14 @@ func TestParseExecEnvelope_ShellSafeToken(t *testing.T) {
 	if executionID != "exec-1234-5678" {
 		t.Fatalf("execution_id mismatch: %q", executionID)
 	}
+	if profileCommand != payload {
+		t.Fatalf("legacy envelope should profile payload: %q", profileCommand)
+	}
 }
 
 func TestParseExecEnvelope_ShellWrappedToken(t *testing.T) {
 	raw := "cd /workspace && __CBX_EXEC_1__exec-1234-5678\npytest -q"
-	payload, executionID, ok := parseExecEnvelope(raw)
+	payload, executionID, profileCommand, ok := parseExecEnvelope(raw)
 	if !ok {
 		t.Fatal("expected a valid shell-wrapped envelope")
 	}
@@ -60,11 +73,42 @@ func TestParseExecEnvelope_ShellWrappedToken(t *testing.T) {
 	if executionID != "exec-1234-5678" {
 		t.Fatalf("execution_id mismatch: %q", executionID)
 	}
+	if profileCommand != payload {
+		t.Fatalf("legacy envelope should profile payload: %q", profileCommand)
+	}
+}
+
+func TestParseExecEnvelope_Base64ProfileCommand(t *testing.T) {
+	profile := "printf ok"
+	envelope, err := json.Marshal(execEnvelope{
+		Version:           1,
+		ExecutionID:       "exec-profile-1",
+		ProfileCommandB64: base64.RawURLEncoding.EncodeToString([]byte(profile)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "env PATH=/session/bin CLAWTUNE_EXECUTION_ID=exec-profile-1 /bin/sh -c '" +
+		clawboxExecEnvelopePrefix + "b64:" + base64.RawURLEncoding.EncodeToString(envelope) +
+		"\nprintf ok'"
+	payload, executionID, profileCommand, ok := parseExecEnvelope(raw)
+	if !ok {
+		t.Fatal("expected a valid base64 envelope")
+	}
+	if payload != "env PATH=/session/bin CLAWTUNE_EXECUTION_ID=exec-profile-1 /bin/sh -c 'printf ok'" {
+		t.Fatalf("effective payload mismatch: %q", payload)
+	}
+	if executionID != "exec-profile-1" {
+		t.Fatalf("execution_id mismatch: %q", executionID)
+	}
+	if profileCommand != profile {
+		t.Fatalf("profile command mismatch: %q", profileCommand)
+	}
 }
 
 func TestParseExecEnvelope_InvalidToken(t *testing.T) {
 	raw := "__CBX_EXEC_1__exec id with spaces\necho hi"
-	payload, _, ok := parseExecEnvelope(raw)
+	payload, _, _, ok := parseExecEnvelope(raw)
 	if ok {
 		t.Fatal("invalid token should degrade to raw command")
 	}
@@ -75,7 +119,7 @@ func TestParseExecEnvelope_InvalidToken(t *testing.T) {
 
 func TestParseExecEnvelope_PayloadMayContainNewlines(t *testing.T) {
 	raw := "__CBX_EXEC_1__{\"v\":1,\"execution_id\":\"exec-abc\"}\nprintf 'a\nb\n'"
-	payload, executionID, ok := parseExecEnvelope(raw)
+	payload, executionID, profileCommand, ok := parseExecEnvelope(raw)
 	if !ok {
 		t.Fatal("expected a valid envelope")
 	}
@@ -85,11 +129,14 @@ func TestParseExecEnvelope_PayloadMayContainNewlines(t *testing.T) {
 	if executionID != "exec-abc" {
 		t.Fatalf("execution_id mismatch: %q", executionID)
 	}
+	if profileCommand != payload {
+		t.Fatalf("legacy envelope should profile payload: %q", profileCommand)
+	}
 }
 
 func TestParseExecEnvelope_MalformedJSON(t *testing.T) {
 	raw := "__CBX_EXEC_1__{not-json}\necho hi"
-	payload, _, ok := parseExecEnvelope(raw)
+	payload, _, _, ok := parseExecEnvelope(raw)
 	if ok {
 		t.Fatal("malformed JSON should degrade to raw command (ok=false)")
 	}
@@ -100,7 +147,7 @@ func TestParseExecEnvelope_MalformedJSON(t *testing.T) {
 
 func TestParseExecEnvelope_WrongVersion(t *testing.T) {
 	raw := "__CBX_EXEC_1__{\"v\":2,\"execution_id\":\"exec-x\"}\necho hi"
-	payload, _, ok := parseExecEnvelope(raw)
+	payload, _, _, ok := parseExecEnvelope(raw)
 	if ok {
 		t.Fatal("wrong envelope version should degrade to raw command")
 	}
@@ -111,7 +158,7 @@ func TestParseExecEnvelope_WrongVersion(t *testing.T) {
 
 func TestParseExecEnvelope_EmptyExecutionID(t *testing.T) {
 	raw := "__CBX_EXEC_1__{\"v\":1,\"execution_id\":\"\"}\necho hi"
-	payload, _, ok := parseExecEnvelope(raw)
+	payload, _, _, ok := parseExecEnvelope(raw)
 	if ok {
 		t.Fatal("empty execution_id should degrade to raw command")
 	}
@@ -122,7 +169,7 @@ func TestParseExecEnvelope_EmptyExecutionID(t *testing.T) {
 
 func TestParseExecEnvelope_NoNewline(t *testing.T) {
 	raw := "__CBX_EXEC_1__{\"v\":1,\"execution_id\":\"exec-x\"}"
-	payload, _, ok := parseExecEnvelope(raw)
+	payload, _, _, ok := parseExecEnvelope(raw)
 	if ok {
 		t.Fatal("envelope without a payload line should degrade to raw command")
 	}
@@ -163,6 +210,37 @@ func TestRunCommandDoesNotWaitForSSHStdinEOF(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("runCommand deadlocked waiting for SSH stdin EOF")
+	}
+}
+
+func TestRunCommandProfilesLogicalCommandButExecutesWrapper(t *testing.T) {
+	channel := &execTestChannel{}
+	profile := "printf logical"
+	envelope, err := json.Marshal(execEnvelope{
+		Version:           1,
+		ExecutionID:       "exec-profile-2",
+		ProfileCommandB64: base64.RawURLEncoding.EncodeToString([]byte(profile)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := "printf wrapper-executed"
+	raw := "printf wrapper-" + clawboxExecEnvelopePrefix + "b64:" +
+		base64.RawURLEncoding.EncodeToString(envelope) + "\nexecuted"
+	record := runCommand(channel, raw, t.TempDir(), time.Second, 1024)
+	if record.ExitCode != 0 || channel.stdout.String() != "wrapper-executed" {
+		t.Fatalf("effective command was not executed: exit=%d stdout=%q", record.ExitCode, channel.stdout.String())
+	}
+	logicalDigest := sha256.Sum256([]byte(profile))
+	effectiveDigest := sha256.Sum256([]byte(effective))
+	if record.CommandSHA256 != hex.EncodeToString(logicalDigest[:]) {
+		t.Fatalf("logical digest mismatch: %s", record.CommandSHA256)
+	}
+	if record.EffectiveSHA256 != hex.EncodeToString(effectiveDigest[:]) {
+		t.Fatalf("effective digest mismatch: %s", record.EffectiveSHA256)
+	}
+	if record.CommandBytes != len(profile) || record.EffectiveBytes != len(effective) {
+		t.Fatalf("command byte counts mismatch: logical=%d effective=%d", record.CommandBytes, record.EffectiveBytes)
 	}
 }
 
