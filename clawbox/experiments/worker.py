@@ -985,7 +985,8 @@ class ExperimentWorker:
                     role="runtime",
                 )
                 relay_started = time.time()
-                relay_result = runtime_executor.execute(
+                relay_result = _execute_idempotent(
+                    runtime_executor,
                     f"curl -fsS -X POST {shlex.quote(RELAY_CHECKPOINT_URL)}",
                     10,
                 )
@@ -1499,8 +1500,15 @@ class ExperimentWorker:
                             ])
                             identity_started = time.monotonic()
                             identity_result = None
+                            identity_error: Exception | None = None
                             for identity_attempt in range(1, 31):
-                                candidate = runtime_executor.execute(identity_command, 10)
+                                try:
+                                    candidate = runtime_executor.execute(identity_command, 30)
+                                except Exception as exc:
+                                    identity_error = exc
+                                    if identity_attempt < 30:
+                                        time.sleep(0.5)
+                                    continue
                                 if (candidate.exit_code == 0
                                         and candidate.stdout.strip() == session_id):
                                     identity_result = candidate
@@ -1511,7 +1519,7 @@ class ExperimentWorker:
                                 raise RuntimeError(
                                     "native SSH endpoint did not present the intended Tool "
                                     f"identity for {session_id} after {identity_attempt} attempts"
-                                )
+                                ) from identity_error
                             events.write({
                                 "event": "native_ssh_identity_ready",
                                 "session_id": session_id,
