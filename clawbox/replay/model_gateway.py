@@ -486,7 +486,13 @@ class ModelGateway:
                 request.model_generated_unix_s = model_generated
                 self._persist()
             admission = {}
-            if self.before_response_ready is not None:
+            error = ""
+            if not 200 <= int(status) < 300:
+                # Preserve the actual upstream status. Do not attempt to parse
+                # an OpenAI message from an authentication/rate-limit/error
+                # object, which would mask the provider failure as KeyError.
+                error = f"upstream model returned HTTP {status}"
+            elif self.before_response_ready is not None:
                 event = {
                     "request_id": request_id,
                     "replay_index": self._requests[request_id].replay_index,
@@ -503,7 +509,6 @@ class ModelGateway:
                     admission = callback(
                         self._requests[request_id].replay_index, message,
                     )
-            error = ""
         except Exception as exc:  # surfaced to the waiting guest request
             status, content_type, body, error, admission = 500, "application/json", b"", str(exc), {}
         with self._changed:
