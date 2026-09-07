@@ -26,6 +26,14 @@ require git
 [[ -f "$PROVENANCE_PATCH_FILE" ]] || { echo "missing provenance patch: $PROVENANCE_PATCH_FILE" >&2; exit 1; }
 [[ -f "$TIER_API_PATCH_FILE" && -f "$TIER_ISOLATION_PATCH_FILE" ]] || { echo "missing tiered memory patches" >&2; exit 1; }
 
+# Later patches change some endpoint hunks, so the first patch alone cannot
+# recognize a fully prepared checkout. The final patch is applied last.
+if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$TIER_ISOLATION_PATCH_FILE" >/dev/null 2>&1; then
+  git -C "$SOURCE_DIR" diff --check
+  echo "standalone patch set already prepared: $SOURCE_DIR"
+  exit 0
+fi
+
 if [[ ! -d "$SOURCE_DIR/.git" ]]; then
   mkdir -p "$(dirname "$SOURCE_DIR")"
   git clone --branch "$CUBE_SOURCE_TAG" --depth 1 "$CUBE_SOURCE_URL" "$SOURCE_DIR"

@@ -83,6 +83,11 @@ The names below are accepted by `experiment configure`.
 | `tool-p90-wait-reactive` | Command-specific P90 | Checkpoint only when predicted wait and memory pressure justify it | `p90_predictions` and a request-time model-wait estimate with source |
 | `tool-p90-wait-proactive` | Command-specific P90 | Same decision, but restore Runtime before the predicted response time | P90 file, model-wait estimate/source, and prefetch lead |
 | `tool-static-time-oracle-reactive` | Fixed amount | Replay-only oracle: checkpoint immediately only when the held-out actual model wait is at least 4.0 s by default | `static_tool_memory_mib` and replay inference |
+| `tool-p90-tiered-lru-oracle-reactive` | Command-specific P90 | LOCAL/WARM/COLD hierarchy with LRU selection under pressure | P90 file, replay inference, WARM/COLD paths and capacities |
+| `tool-p90-tiered-time-oracle-reactive` | Command-specific P90 | LOCAL/WARM/COLD hierarchy with held-out wait duration guiding placement | P90 file, replay inference, WARM/COLD paths and capacities |
+
+The two tiered policies use the [NUMA memory-pool approximation](tiered-memory-simulation.md).
+The c40 study disables WARM for the other eleven policies.
 
 Compatibility names still appear with `clawbox experiment baselines --all` so
 old result files can be read. Do not use them for new experiments.
@@ -105,6 +110,12 @@ estimate to compare with command-specific prediction.
 normalized key. A managed OpenClaw command must provide matching prediction
 metadata before it can be admitted. Record the KB file hash and use the same
 file for every compared variant.
+
+Native file tools (`read`, `write`, `edit`, and `apply_patch`, routed as
+`filesystem`) have no shell-command KB entry. P90 and oracle arms use
+`static_tool_memory_mib` for these operations and record the source as
+`filesystem_static`. Backend maintenance also uses an explicit static budget.
+These reservations must not be described as command-specific P90 estimates.
 
 `tool_oracle` reads held-out measurements and is allowed only with replay. It
 is an evaluation upper bound, not a deployable policy and not training data for
