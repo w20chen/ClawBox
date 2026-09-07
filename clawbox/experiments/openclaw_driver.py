@@ -451,8 +451,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # and all message/tool validation remain unchanged.
         invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
     instruction = (
-        "[REPLAY-TIME] " + prompt
-        if replay_compatibility else
+        prompt if replay_compatibility else
         "Use only sandboxed exec/process/read/write/edit/apply_patch for workspace and "
         "process operations; those execute in the Tool VM. Web search/fetch and agent "
         "memory lookup remain Runtime-local and must not be used to access the mutable "
