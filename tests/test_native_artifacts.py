@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import gzip
 import json
 from pathlib import Path
 
 import pytest
 
 from clawbox.experiments.native_artifacts import (
+    _decode_framed_artifacts,
     _runtime_spans,
     collect_and_validate_native_tool_artifacts,
     validate_native_tool_join,
 )
+
+
+def test_compressed_artifact_transfer_preserves_large_payload():
+    payload = (b'{"clause":"example", "resource_bytes":12345}\n' * 120000)
+    encoded = base64.b64encode(gzip.compress(payload)).decode()
+    stream = "__CLAWBOX_ARTIFACT_GZIP_V1__clause.json\n" + encoded + "\n__CLAWBOX_ARTIFACT_END__\n"
+    assert len(payload) > 4 * 1024 * 1024
+    assert len(stream) < 4 * 1024 * 1024
+    assert _decode_framed_artifacts(stream) == {"clause.json": payload}
 from clawbox.experiments.worker import (
     enrich_tool_execution_observations,
     summarize_tool_execution_observations,

@@ -1,5 +1,63 @@
 # Tiered oracle execution record
 
+## Standalone continuation, 2026-09-07 (in progress)
+
+Active ClawBox: `/home/weitianc/ClawBox-experiment-8bc19e6`.
+Active standalone CubeSandbox: `/home/weitianc/CubeSandbox-standalone-20260907`;
+API `127.0.0.1:3000`. The Kubernetes recovery observations below are historical,
+not instructions for the active deployment.
+
+The selected full rec-a gate is still incomplete; no formal c40 outcome is
+available. Standalone attempt r13 accepted 20 of 27 model requests before a
+pip-network-output mismatch; artifact collection then failed and obscured that
+cause in its summary. Both failures are retained under
+`/home/weitianc/clawbox-tiered-study-20260907/raw-standalone/`.
+
+The user explicitly approved ignoring the network-dependent pip diagnostic.
+The comparison exception is restricted to the recorded
+`timeout 12 pip install -q pytest 2>&1 | tail -2` probe and its known unavailable
+package/retry diagnostics. It does not remove surrounding import failures,
+change commands, fake tool output, or ignore the command exit code. Raw model
+requests remain unchanged in the evidence. Search result order is normalized
+while retaining filenames, line numbers and contents; generated environment
+metadata is also normalized. Consequently, replay consistency is not a claim
+of byte-identical output.
+
+To audit an attempt's accepted requests against the selected trace:
+
+```bash
+.venv/bin/python scripts/audit-replay-outputs.py \
+  --trace /path/to/rec-a-enriched.jsonl \
+  --gateway /path/to/attempt/model-gateway/SESSION.json \
+  --output /path/to/attempt/tool-output-audit.json
+```
+
+The command exits nonzero for incomplete coverage or mismatches. It separates
+exact, normalized, different and missing tool results. Rejected requests are
+separate gateway artifacts; a complete output audit still does not replace
+final task validation, clause-level eBPF joins, or placement/tier gates.
+
+r13 audit: 20 exact tool messages, 4 normalized, 7 not yet observed in accepted
+requests. r14 accepted 21 model steps with the explicit pip exception, then
+rejected the filesystem wheel search: `find / ... | head` selects ten out of
+eleven available wheels in filesystem traversal order. A fresh VM check found
+the recorded `/usr/share/python-wheels/pip-22.0.2-py3-none-any.whl` present;
+it was eleventh in the new traversal. This is not a missing-package problem,
+but neither is it byte-identical output. The user approved the exception.
+It is scoped to this exact filesystem-probe command and the two competing
+wheel entries; other filenames and error output remain checked. Before r15,
+`scripts/validate-rec-a-listing.py` verified all 17 recorded paths on a fresh
+VM from the frozen Tool template; none were missing. Evidence:
+`gates/rec-a-listing-preflight.json`. Run this preflight again when changing
+the template or moving the experiment to another machine.
+
+r14 also preserved artifact stdout truncated at exactly 4,194,304 bytes.
+The collector now compresses each framed artifact for transport, preserving
+the decompressed bytes and end-marker validation. Its >4 MiB payload regression
+passed on Kunpeng; a full live collection with that fix remains to be verified.
+r15 is running with these two fixes. Gateway/native-artifact regressions passed
+on Kunpeng (24 tests). Full c1/c4 and all 13 c40 runs remain required.
+
 ## Latest authorized scope
 
 The user's later instructions supersede the original matrix sizes and repetitions:

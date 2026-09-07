@@ -592,6 +592,7 @@ _GENERATED_DIRECTORY_MTIME_RE = re.compile(
     r"\d{1,2} \d{2}:\d{2} "
     r"(\.|\.clawbox|openclaw-ssh-shared-[^\s]+)$"
 )
+_CLAWBOX_GIT_STATUS_RE = re.compile(r"(?m)^\?\? \.clawbox/(?:\r?\n|$)")
 _GIT_COMMIT_HEADER_RE = re.compile(r"(?m)^(\[master )[0-9a-f]{7,40}(\] )")
 _GIT_LOG_HEAD_RE = re.compile(
     r"(?m)^[0-9a-f]{7,40}(?= .+\n(?:[0-9a-f]{7,40} |\?\? ))"
@@ -602,6 +603,7 @@ _LS_LONG_ENTRY_RE = re.compile(
     r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
     r"\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(?P<name>[^\n]+)$"
 )
+_SEARCH_RESULT_LINE_RE = re.compile(r"^(?:\./)?[^:\s]+/[^:\n]+:\d+:")
 
 
 def _canonicalize_ls_long_entry(match: re.Match[str]) -> str:
@@ -615,6 +617,27 @@ def _canonicalize_ls_long_entry(match: re.Match[str]) -> str:
     return f"LS-META {match.group('size')} {name}"
 
 
+def _canonicalize_search_result_order(value: str) -> str:
+    """Sort filesystem-order-dependent grep/ripgrep result blocks."""
+    lines = value.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        if not _SEARCH_RESULT_LINE_RE.match(lines[index]):
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and _SEARCH_RESULT_LINE_RE.match(lines[end]):
+            end += 1
+        trailing_newline = lines[end - 1].endswith("\n")
+        block = sorted(line.rstrip("\r\n") for line in lines[index:end])
+        lines[index:end] = [
+            line + ("\n" if offset < len(block) - 1 or trailing_newline else "")
+            for offset, line in enumerate(block)
+        ]
+        index = end
+    return "".join(lines)
+
+
 def _canonical_replay_text(value: str) -> str:
     """Mask only per-session values known to be nondeterministic in this workload."""
     value = _RUNTIME_SESSION_RE.sub(r"\1session-N\2session-N\3", value)
@@ -625,15 +648,80 @@ def _canonical_replay_text(value: str) -> str:
     )
     value = _LS_LONG_ENTRY_RE.sub(_canonicalize_ls_long_entry, value)
     value = re.sub(r"(?m)^LS-IGNORED-WORKSPACE-METADATA(?:\n|$)", "", value)
+    value = _CLAWBOX_GIT_STATUS_RE.sub("", value)
     value = _GENERATED_DIRECTORY_MTIME_RE.sub(r"\1REPLAY-MTIME \2", value)
     value = _PYTEST_TIME_RE.sub(r"\1N.NNs", value)
     value = _GIT_COMMIT_HEADER_RE.sub(r"\1COMMIT\2", value)
-    return _GIT_LOG_HEAD_RE.sub("COMMIT", value)
+    value = _GIT_LOG_HEAD_RE.sub("COMMIT", value)
+    return _canonicalize_search_result_order(value)
+
+
+_REC_A_FILESYSTEM_PROBE = (
+    'find / -name "sly*" -not -path "*/proc/*" 2>/dev/null | head; '
+    'echo "---django---"; find / -maxdepth 6 -name "django" -type d -not -path "*/proc/*" 2>/dev/null | head; '
+    'echo "---pytest---"; find / -name "pytest" -maxdepth 8 -not -path "*/proc/*" 2>/dev/null | head; '
+    'echo "---wheels---"; find / -name "*.whl" -not -path "*/proc/*" 2>/dev/null | head; '
+    'echo "---pipcache---"; ls ~/.cache/pip 2>/dev/null | head'
+)
+
+
+def _canonical_rec_a_listing(content: str) -> str:
+    # The approved head-truncation exception covers only these two competing
+    # wheel entries. Verify all recorded paths on the frozen template separately.
+    alternate_wheels = {
+        "/usr/share/python-wheels/pip-22.0.2-py3-none-any.whl",
+        "/root/.cache/pip/wheels/48/cc/f2/37f85b0cde9f0cc404f270b26e733847c886d0e4b750c0d7c5/sly-0.3-py3-none-any.whl",
+    }
+    blocks = content.split("---")
+    for index in range(0, len(blocks), 2):
+        lines = blocks[index].splitlines()
+        if index == 6:  # ---wheels--- block; leave other listings intact.
+            lines = [line for line in lines if line not in alternate_wheels]
+        if all(not line or line.startswith("/") for line in lines):
+            blocks[index] = "\n".join(sorted(line for line in lines if line))
+    return "---".join(blocks)
 
 
 def _canonical_replay_input(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _canonical_replay_input(item) for key, item in value.items()}
+        result = {key: _canonical_replay_input(item) for key, item in value.items()}
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            pip_probes = set()
+            filesystem_probes = set()
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    try:
+                        args = json.loads(function.get("arguments", "{}"))
+                    except (TypeError, ValueError):
+                        continue
+                    if (function.get("name") == "exec" and isinstance(args, dict)
+                            and "timeout 12 pip install -q pytest 2>&1 | tail -2"
+                            in str(args.get("command", ""))):
+                        pip_probes.add(call.get("id"))
+                    if (function.get("name") == "exec" and isinstance(args, dict)
+                            and args.get("command") == _REC_A_FILESYSTEM_PROBE):
+                        filesystem_probes.add(call.get("id"))
+                if (message.get("role") == "tool"
+                        and message.get("tool_call_id") in filesystem_probes
+                        and isinstance(message.get("content"), str)):
+                    message["content"] = _canonical_rec_a_listing(message["content"])
+                if (message.get("role") == "tool"
+                        and message.get("tool_call_id") in pip_probes
+                        and isinstance(message.get("content"), str)):
+                    # User-approved exception for this network availability
+                    # probe only. Preserve imports, other errors and exit code.
+                    content = re.sub(
+                        r"(?m)^(?:WARNING: Retrying .* /simple/pytest/|"
+                        r"ERROR: Could not find a version that satisfies the requirement pytest \(from versions: none\)|"
+                        r"ERROR: No matching distribution found for pytest)\n?",
+                        "", message["content"],
+                    )
+                    message["content"] = content
+        return result
     if isinstance(value, list):
         return [_canonical_replay_input(item) for item in value]
     if isinstance(value, str):

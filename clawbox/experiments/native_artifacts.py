@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import json
 import math
 import re
@@ -24,6 +25,7 @@ from .openclaw_driver import NativeSSHConfig, split_native_ssh_target
 
 
 _ARTIFACT_MARKER = "__CLAWBOX_ARTIFACT_V1__"
+_ARTIFACT_GZIP_MARKER = "__CLAWBOX_ARTIFACT_GZIP_V1__"
 _ARTIFACT_END = "__CLAWBOX_ARTIFACT_END__"
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
 _SAFE_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -57,8 +59,8 @@ def _collection_command() -> str:
         f"{_TOOL_RESOURCE_ROOT}/*.json; do "
         "[ -f \"$path\" ] || continue; "
         "name=${path##*/}; "
-        f"printf '%s%s\\n' {_ARTIFACT_MARKER} \"$name\"; "
-        "base64 \"$path\" | tr -d '\\n'; printf '\\n'; "
+        f"printf '%s%s\\n' {_ARTIFACT_GZIP_MARKER} \"$name\"; "
+        "gzip -c \"$path\" | base64 | tr -d '\\n'; printf '\\n'; "
         f"done; printf '%s\\n' {_ARTIFACT_END}"
     )
 
@@ -92,9 +94,11 @@ def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
             if any(item.strip() for item in lines[index + 1:]):
                 raise ValueError("Tool artifact stream has data after its end marker")
             break
-        if not line.startswith(_ARTIFACT_MARKER):
+        compressed = line.startswith(_ARTIFACT_GZIP_MARKER)
+        marker = _ARTIFACT_GZIP_MARKER if compressed else _ARTIFACT_MARKER
+        if not line.startswith(marker):
             raise ValueError("Tool artifact stream has an unexpected output line")
-        name = line.removeprefix(_ARTIFACT_MARKER)
+        name = line.removeprefix(marker)
         if not _SAFE_FILENAME.fullmatch(name):
             raise ValueError(f"unsafe Tool artifact filename: {name!r}")
         if name in result:
@@ -105,6 +109,8 @@ def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
         encoded = lines[index].strip()
         try:
             payload = base64.b64decode(encoded, validate=True)
+            if compressed:
+                payload = gzip.decompress(payload)
         except (ValueError, binascii.Error) as exc:
             raise ValueError(f"Tool artifact {name} is not valid base64") from exc
         if len(payload) > _MAX_ARTIFACT_BYTES:
@@ -473,6 +479,10 @@ def collect_and_validate_native_tool_artifacts(
                 f"{candidate.stderr[-2000:]}"
             )
         if "__CLAWBOX_ARTIFACT_END__" not in candidate.stdout:
+            diagnostics = output_dir / "tool-artifacts" / session_id
+            diagnostics.mkdir(parents=True, exist_ok=True)
+            (diagnostics / "collection-incomplete.stdout").write_text(candidate.stdout)
+            (diagnostics / "collection-incomplete.stderr").write_text(candidate.stderr)
             if collection_attempt == max_collection_attempts:
                 raise RuntimeError(
                     "Tool artifact collection produced no complete framed stream "
