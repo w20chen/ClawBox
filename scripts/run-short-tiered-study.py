@@ -27,7 +27,7 @@ from clawbox.experiments.spec import ExperimentSpec
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--spec', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
-parser.add_argument('--steps', type=int, default=16)
+parser.add_argument('--steps', type=int, default=23)
 parser.add_argument('--arm-seconds', type=int, default=1800)
 args = parser.parse_args()
 if args.steps < 1 or args.arm_seconds < 1:
