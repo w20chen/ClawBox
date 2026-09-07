@@ -32,6 +32,10 @@ def main() -> int:
         ),
     )
     parser.add_argument("--exposed-port", type=int, action="append")
+    parser.add_argument(
+        "--command",
+        help="absolute container entrypoint to preserve in the generated template",
+    )
     # Both ClawBox Cube images start envd on 49983. They do not start the
     # code-interpreter/Jupyter service, so 49999 is not the probe endpoint.
     parser.add_argument("--probe-port", type=int, default=49983)
@@ -59,6 +63,7 @@ def main() -> int:
             memory_mb=args.memory_mib,
             writable_layer_size=args.writable_layer_size,
             exposed_ports=args.exposed_port or [49983], probe_port=args.probe_port,
+            command=[args.command] if args.command else None,
         )
     except Exception as exc:
         inventory = read_with_backoff(Template.list, label="Template.list after ambiguous build")
