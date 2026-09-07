@@ -1,5 +1,5 @@
 schema_version: 2
-experiment_id: tiered-oracle-rec-a-c40
+experiment_id: tiered-oracle-rec-a-c4
 workload:
   source: recorded_trace
   input: /home/weitianc/clawbox-tiered-study-20260907/workload/healthy-reference-v1/rec-a-healthy-reference.jsonl
@@ -20,8 +20,6 @@ inference:
     time_scale: 1.0
     repo_fingerprint: 15five/scim2-filter-parser
     openclaw_exec_yield_ms: 120000
-    model_wait_prediction_seconds: 9.054413080215454
-    model_wait_prediction_source: independent-recording2-repo-tool-p90
 runtime:
   template_id: tpl-c947c1efb94446198000eefb
   source_image_reference: 127.0.0.1:5000/clawbox/runtime-cube-arm64@sha256:54a2b7d5d488bb8f862d90d85e16d46fe92692af7c2801baf44dab3653245a0c
@@ -41,8 +39,8 @@ sandbox:
   workspace: /testbed
   allow_internet_access: false
 execution:
-  concurrency_levels: [40]
-  randomized_order: true
+  concurrency_levels: [4]
+  randomized_order: false
   random_seed: 20260907
   arm_timeout_seconds: 1800
   command_timeout_seconds: 300
@@ -54,30 +52,12 @@ resources:
   emergency_free_memory_mib: 8192
   checkpoint_restore_headroom_mib: 8192
   static_tool_memory_mib: 512
-  full_tool_memory_mib: 4096
-  p90_predictions: examples/predictions/rec-a-independent-p90.json
-  oracle_measurements: examples/predictions/rec-a-heldout-oracle.json
-  local_memory_capacity_mib: 65536
-  warm_memory_capacity_mib: 65536
-  warm_snapshot_root: /data/cubelet/clawbox-tiered-20260907/warm
-  cold_snapshot_root: /data/cubelet/clawbox-tiered-20260907/cold
-  local_numa_node: 0
-  local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
-  warm_numa_node: 1
 policies:
-  - {name: lifetime-full-resident, admission: lifetime_full, reclamation: resident, eviction: none, restore: none}
-  - {name: tool-full-resident, admission: tool_full, reclamation: resident, eviction: none, restore: none}
-  - {name: tool-static-resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
-  - {name: tool-p90-resident, admission: tool_p90, reclamation: resident, eviction: none, restore: none}
-  - {name: tool-oracle-resident, admission: tool_oracle, reclamation: resident, eviction: none, restore: none}
-  - {name: tool-static-eager-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: eager, restore: reactive}
-  - {name: tool-p90-eager-reactive, admission: tool_p90, reclamation: snapshot_pause, eviction: eager, restore: reactive}
-  - {name: tool-p90-fixed-reactive, admission: tool_p90, reclamation: snapshot_pause, eviction: fixed_delay, restore: reactive, fixed_delay_seconds: 0.5}
-  - {name: tool-p90-wait-reactive, admission: tool_p90, reclamation: snapshot_pause, eviction: wait_aware_pressure, restore: reactive}
-  - {name: tool-p90-wait-proactive, admission: tool_p90, reclamation: snapshot_pause, eviction: wait_aware_pressure, restore: proactive, prefetch_lead_seconds: 0.5}
-  - {name: tool-static-time-oracle-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: time_oracle, restore: reactive, checkpoint_break_even_seconds: 4.0}
-  - {name: tool-p90-tiered-lru-oracle-reactive, admission: tool_p90, reclamation: snapshot_pause, eviction: tiered_lru_oracle, restore: reactive}
-  - {name: tool-p90-tiered-time-oracle-reactive, admission: tool_p90, reclamation: snapshot_pause, eviction: tiered_time_oracle, restore: reactive}
+  - name: tool-static-resident
+    admission: tool_static
+    reclamation: resident
+    eviction: none
+    restore: none
 validation:
   command: cd /testbed && PYTHONPATH=/testbed/src /opt/miniconda3/envs/testbed/bin/python -m pytest tests/ -q
 output: {directory: /results}

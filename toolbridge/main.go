@@ -295,12 +295,14 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	// The pre-exec gate must stay single-threaded so cgroup.procs can move it
 	// into a new domain cgroup on Kata guests. A Go child starts runtime threads
 	// before user code and is rejected with EOPNOTSUPP by this guest kernel.
-	// Start a login shell before the gate so its profile hooks complete outside
-	// the execution's cgroup and telemetry window. After release, replace it
-	// with a non-login shell that runs only the requested command. This keeps
-	// the historical login environment without attributing /etc/profile helper
-	// commands (for example `id -u`) to the tool execution.
-	gateScript := "dd bs=1 count=1 <&3 >/dev/null 2>&1 || exit 125; exec /bin/sh -c \"$CLAWBOX_GATE_COMMAND\""
+	// Start the login shell before the gate so the image's historical profile
+	// environment is preserved. FD 4 is a readiness handshake emitted only
+	// after profile hooks finish; collection starts after that byte, preventing
+	// helpers such as `mesg n` from racing into exact clause attribution.
+	// Keep the synchronization operation inside the shell. Spawning `dd` here
+	// creates a first-level process inside the measured cgroup that is not part
+	// of the user's command and therefore invalidates exact clause attribution.
+	gateScript := "printf '\\n' >&4 || exit 125; IFS= read -r CLAWBOX_GATE_RELEASE <&3 || exit 125; exec /bin/sh -c \"$CLAWBOX_GATE_COMMAND\""
 	cmd := exec.Command("/bin/sh", "-lc", gateScript)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(),
@@ -328,12 +330,33 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	var collector *resourceCollector
 	gateRead, gateWrite, pipeErr := os.Pipe()
 	var err error
+	var readyRead, readyWrite *os.File
 	if pipeErr != nil {
 		err = pipeErr
 	} else {
-		cmd.ExtraFiles = []*os.File{gateRead}
-		err = cmd.Start()
-		_ = gateRead.Close()
+		readyRead, readyWrite, err = os.Pipe()
+		if err == nil {
+			cmd.ExtraFiles = []*os.File{gateRead, readyWrite}
+			err = cmd.Start()
+			_ = gateRead.Close()
+			_ = readyWrite.Close()
+			if err == nil {
+				readyTimeout := 30 * time.Second
+				if timeout < readyTimeout {
+					readyTimeout = timeout
+				}
+				_ = readyRead.SetReadDeadline(time.Now().Add(readyTimeout))
+				ready := make([]byte, 1)
+				if _, readyErr := io.ReadFull(readyRead, ready); readyErr != nil {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					_ = cmd.Wait()
+					err = fmt.Errorf("login shell gate readiness: %w", readyErr)
+				}
+			}
+			_ = readyRead.Close()
+		} else {
+			_ = gateRead.Close()
+		}
 	}
 	_ = stdinRead.Close()
 	if err == nil {
@@ -378,7 +401,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				record.TelemetryArtifact = response.ArtifactPath
 			}
 		}
-		if _, releaseErr := gateWrite.Write([]byte{1}); releaseErr != nil {
+		if _, releaseErr := gateWrite.Write([]byte{'\n'}); releaseErr != nil {
 			err = releaseErr
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}

@@ -41,6 +41,16 @@ BRIDGE_LOG = "/var/lib/clawtune/artifacts/tool-bridge.jsonl"
 ARTIFACT_ROOT = "/var/lib/clawtune/artifacts/tool-resource/"
 
 
+def stage_guest_telemetry_override(tool) -> None:
+    """Optionally stage a collector source override for kernel compatibility gates."""
+    source = os.environ.get("CLAWBOX_GUEST_TELEMETRY_SOURCE", "").strip()
+    if not source:
+        return
+    payload = Path(source).read_text()
+    target = "/opt/clawtune-guest/services/sidecar/src/tool_resource/telemetry.py"
+    tool.files.write(target, payload)
+
+
 def endpoint_route(endpoint, epoch: int):
     route = native_ssh_route(endpoint, epoch=epoch)
     if route.container_port != 2222:
@@ -249,12 +259,28 @@ def validate_tool_telemetry(tool, policy_session, expected_ids: set[str]) -> dic
         )
     for execution_id in expected_ids:
         record = by_id[execution_id][0]
+        telemetry_path = str(record.get("telemetry_artifact") or "")
+        telemetry_diagnostics: dict[str, object] = {}
+        if telemetry_path.startswith(ARTIFACT_ROOT):
+            try:
+                telemetry_payload = json.loads(tool.files.read(telemetry_path))
+                telemetry_diagnostics = {
+                    "collector": telemetry_payload.get("collector"),
+                    "integrity": telemetry_payload.get("integrity"),
+                    "calls": telemetry_payload.get("calls"),
+                }
+            except Exception as exc:
+                telemetry_diagnostics = {
+                    "artifact_read_error": f"{type(exc).__name__}: {exc}",
+                }
         if record.get("telemetry_state") != "complete" \
                 or record.get("telemetry_collection_validity") != "valid" \
                 or record.get("telemetry_cleanup") != "ok" \
                 or int(record.get("telemetry_loss_total") or 0):
             raise AssertionError(
-                f"invalid telemetry for {execution_id}: {json.dumps(record, sort_keys=True)}"
+                f"invalid telemetry for {execution_id}: "
+                f"record={json.dumps(record, sort_keys=True)} "
+                f"artifact={json.dumps(telemetry_diagnostics, sort_keys=True)}"
             )
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", execution_id)
         cgroup = json.loads(tool.files.read(
@@ -264,7 +290,6 @@ def validate_tool_telemetry(tool, policy_session, expected_ids: set[str]) -> dic
                 or cgroup.get("source") != "cgroup-v2" \
                 or cgroup.get("sampling_quality") != "valid":
             raise AssertionError(f"invalid cgroup artifact for {execution_id}: {cgroup}")
-        telemetry_path = str(record.get("telemetry_artifact") or "")
         if not telemetry_path.startswith(ARTIFACT_ROOT):
             raise AssertionError(f"unsafe telemetry artifact path for {execution_id}")
         telemetry = json.loads(tool.files.read(telemetry_path))
@@ -339,6 +364,7 @@ def main() -> int:
             if endpoint.sandbox_id != tool.sandbox_id or endpoint.container_port != 2222:
                 raise AssertionError(f"endpoint identity mismatch: {endpoint_record(endpoint)}")
             endpoints_before.append(endpoint)
+            stage_guest_telemetry_override(tool)
             setup = tool.commands.run(
                 native_tool_bridge_setup_command()
                 + f"; printf %s {shlex.quote(tool.sandbox_id)} > {MARKER}",
