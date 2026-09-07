@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from enum import Enum
 from threading import RLock
@@ -307,8 +308,22 @@ class CubeSandboxLifecycle:
 
     pause_and_evict = checkpoint_and_evict
 
+    @contextmanager
+    def _snapshot_access(self):
+        # Do not hold this lifecycle's lock while waiting for an in-flight
+        # spill: its callback acquires the same lock to publish COLD state.
+        while True:
+            with self._lock:
+                key, pool = self._snapshot_key, self.snapshot_pool
+            guard = pool.consume_guard(key) if key is not None and pool else nullcontext()
+            with guard, self._lock:
+                if key != self._snapshot_key:
+                    continue
+                yield
+                return
+
     def restore(self) -> float:
-        with self._lock:
+        with self._snapshot_access():
             if self.sandbox_id is None or self._state is not SandboxState.SWAPPED:
                 raise LifecycleError("CubeSandbox is not swapped out")
             before = self._state
@@ -320,7 +335,7 @@ class CubeSandboxLifecycle:
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
                         raise RuntimeError("WARM snapshot accounting disappeared before restore")
-                    self.snapshot_pool.remove(self._snapshot_key)
+                    self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
                 self._snapshot_key = None
                 self._tier = SnapshotTier.LOCAL
                 self._state = SandboxState.RUNNING
@@ -376,7 +391,7 @@ class CubeSandboxLifecycle:
             return True
 
     def close(self) -> float:
-        with self._lock:
+        with self._snapshot_access():
             if self._state is SandboxState.CLOSED:
                 return 0.0
             before = self._state
@@ -389,7 +404,7 @@ class CubeSandboxLifecycle:
                 if (self._snapshot_key is not None and
                         self._tier is SnapshotTier.WARM and
                         self.snapshot_pool is not None):
-                    self.snapshot_pool.remove(self._snapshot_key)
+                    self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
                 self._snapshot_key = None
                 self.sandbox = None
                 self.sandbox_id = None

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -95,3 +96,54 @@ def test_oversized_admission_never_spills_or_pins_existing_snapshots() -> None:
         pool.spill_for_admission(101)
     assert spilled == []
     assert pool.snapshot() == before
+
+
+def test_consumer_pin_excludes_spill_and_can_retire_snapshot() -> None:
+    pool = WarmSnapshotPool(100)
+    commit(pool, 1, 100)
+    with pool.consume_guard(key(1)) as item:
+        assert item is not None and item.pinned == 1
+        with pytest.raises(WarmCapacityError):
+            pool.spill_for_admission(1)
+        pool.remove(key(1), consume_pinned=True)
+    assert pool.committed_bytes == 0
+
+
+def test_consumer_waits_for_inflight_spill() -> None:
+    pool = WarmSnapshotPool(100)
+    entered, release, consumed = Event(), Event(), Event()
+
+    def spill(item):
+        entered.set()
+        assert release.wait(5)
+
+    pool.reserve(key(1), 100)
+    pool.commit(key(1), path="/warm/1", logical_bytes=100,
+                allocated_bytes=100, transferred_bytes=100, spiller=spill)
+
+    def consume():
+        with pool.consume_guard(key(1)) as item:
+            consumed.set()
+            return item
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        spilling = executor.submit(pool.spill_for_admission, 100)
+        assert entered.wait(5)
+        consuming = executor.submit(consume)
+        try:
+            assert not consumed.wait(0.1)
+        finally:
+            release.set()
+        assert len(spilling.result(timeout=5)) == 1
+        assert consuming.result(timeout=5) is None
+    assert pool.committed_bytes == 0
+
+
+def test_consumer_failure_releases_pin_without_retiring_snapshot() -> None:
+    pool = WarmSnapshotPool(100)
+    commit(pool, 1, 100)
+    with pytest.raises(ValueError):
+        with pool.consume_guard(key(1)):
+            raise ValueError("restore failed")
+    assert pool.committed_bytes == 100
+    assert pool.snapshot()["manifests"][0]["pinned"] == 0

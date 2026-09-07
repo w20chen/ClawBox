@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from threading import RLock
+from threading import Condition, RLock
 
 from .spec_types import SnapshotTier
 
@@ -51,6 +52,7 @@ class WarmSnapshotPool:
         self.capacity_bytes = capacity_bytes
         self._clock = clock
         self._lock = RLock()
+        self._changed = Condition(self._lock)
         self._reservations: dict[SnapshotKey, int] = {}
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
@@ -131,12 +133,14 @@ class WarmSnapshotPool:
                     self._spillers.pop(item.key, None)
                     completed.append(item)
                     self._assert_capacity_locked()
+                    self._changed.notify_all()
             return tuple(completed)
         finally:
             with self._lock:
                 for item in victims:
                     if item.key in self._manifests and item.pinned > 0:
                         item.pinned -= 1
+                self._changed.notify_all()
 
     def abort(self, key: SnapshotKey) -> None:
         with self._lock:
@@ -154,18 +158,44 @@ class WarmSnapshotPool:
             if item.pinned <= 0:
                 raise RuntimeError(f"snapshot pin underflow: {key}")
             item.pinned -= 1
+            self._changed.notify_all()
+
+    @contextmanager
+    def consume_guard(self, key: SnapshotKey):
+        """Exclude spill while restoring/deleting a generation.
+
+        Wait without holding a lifecycle lock: an already selected spiller
+        needs that lock to finish relocation. A missing manifest means that
+        spill completed and the lifecycle now owns a COLD snapshot.
+        """
+        with self._changed:
+            self._changed.wait_for(
+                lambda: key not in self._manifests or self._manifests[key].pinned == 0
+            )
+            item = self._manifests.get(key)
+            if item is not None:
+                item.pinned += 1
+        try:
+            yield item
+        finally:
+            with self._changed:
+                if item is not None and self._manifests.get(key) is item:
+                    item.pinned -= 1
+                self._changed.notify_all()
 
     def touch(self, key: SnapshotKey) -> None:
         with self._lock:
             self._manifests[key].last_used_monotonic_s = self._clock()
 
-    def remove(self, key: SnapshotKey) -> SnapshotManifest:
+    def remove(self, key: SnapshotKey, *, consume_pinned: bool = False) -> SnapshotManifest:
         with self._lock:
             item = self._manifests[key]
-            if item.pinned:
+            if item.pinned != (1 if consume_pinned else 0):
                 raise RuntimeError(f"cannot remove pinned snapshot: {key}")
             self._spillers.pop(key, None)
-            return self._manifests.pop(key)
+            removed = self._manifests.pop(key)
+            self._changed.notify_all()
+            return removed
 
     def lru_victims(self, required_bytes: int, *, exclude: set[SnapshotKey] | None = None
                     ) -> tuple[SnapshotManifest, ...]:

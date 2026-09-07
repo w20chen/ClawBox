@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,6 +333,49 @@ def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:
     assert pool.committed_bytes == 1024
     spill = next(item for item in lifecycles[0].timings if item["operation"] == "spill")
     assert spill["tier_from"] == "warm" and spill["tier_to"] == "cold"
+
+
+@pytest.mark.parametrize("operation", ["restore", "close"])
+def test_lifecycle_consumption_waits_for_selected_spill(operation: str) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1024)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    relocate = client.relocate_snapshot
+
+    def delayed_relocate(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return relocate(*args, **kwargs)
+
+    client.relocate_snapshot = delayed_relocate
+
+    def consume():
+        getattr(lifecycle, operation)()
+        finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        spilling = executor.submit(pool.spill_for_admission, 1024)
+        assert entered.wait(5)
+        consuming = executor.submit(consume)
+        try:
+            assert not finished.wait(0.1)
+        finally:
+            release.set()
+        spilling.result(timeout=5)
+        consuming.result(timeout=5)
+    assert pool.committed_bytes == 0
+    if operation == "restore":
+        assert lifecycle.resident and lifecycle.tier is SnapshotTier.LOCAL
+        lifecycle.close()
+    assert not _Sandbox.items
 
 
 def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(

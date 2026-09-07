@@ -1,5 +1,36 @@
 # Tiered oracle execution record
 
+## Latest verified gates, 2026-09-07 13:45 UTC
+
+The approved healthy request reference passed strict c1 and c4 replay on
+standalone CubeSandbox. All five sessions completed all 27 model steps;
+benchmark validation passed, execution-ID joins were 1.0, and telemetry loss
+was zero. Original recorded model responses, tool commands, and timing were
+preserved; only the request-side reference was recaptured in the healthy Tool
+environment, with the user's approval. Evidence under
+`/home/weitianc/clawbox-tiered-study-20260907/raw-standalone/`:
+`gate-healthy-c1-v1` and `gate-healthy-c4-v1`. The reference and provenance are
+under `workload/healthy-reference-v1/`.
+
+Direct WARM/restore and WARM/spill/COLD/restore process-state checks passed,
+but physical placement did not: restored guest RAM retained the deleted
+snapshot's file mapping and NUMA1 pages. Therefore these checks do **not**
+certify WARM-to-LOCAL or release of physical WARM capacity. Evidence:
+`gates/tier-storage-v1.json` and `gates/tier-storage-v2.json`. An opt-in backend
+change using the existing anonymous-copy restore path is being built; it has
+not yet been installed or validated. LOCAL cgroup enforcement and separate
+WARM page charging are also still being established.
+
+The restore/spill race now has an exclusive snapshot-consumer guard, also
+used by cleanup. Consumers wait for an already selected spill without holding
+the lifecycle lock. Deterministic tests cover exclusion, waiting, failed restore
+pin release, and concurrent lifecycle restore/cleanup. The snapshot-pool and
+CubeSandbox suites passed on kunpeng after this change (31 tests).
+
+Formal c40 coverage remains **0/13**. The final backend build must pass affected
+gates before the comparison is frozen. Older status sections below describe
+historical attempts, not the current replay outcome.
+
 ## Standalone continuation, 2026-09-07 (in progress)
 
 Active ClawBox: `/home/weitianc/ClawBox-experiment-8bc19e6`.
