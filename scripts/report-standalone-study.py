@@ -11,6 +11,10 @@ args = parser.parse_args()
 def number(value):
     return 'n/a' if value is None else f'{value:.2f}'
 
+def gib_value(memory, key):
+    value = memory.get(key)
+    return None if value is None else value / 1024 ** 3
+
 print(f'# Standalone study: {args.directory.name}\n')
 print('| Policy | c | Status | Valid sessions | JCT p50/p95 s | Agents/min | LOCAL peak GiB | LOCAL GiB-s | Pauses/restores | ID join | Lost events |')
 print('|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|')
@@ -28,8 +32,8 @@ for path in sorted((args.directory / 'arms').glob('*.json')):
         f"{correctness.get('completed_sessions', 0)}/{arm['concurrency']}",
         f"{number(performance.get('jct_p50_seconds'))}/{number(performance.get('jct_p95_seconds'))}",
         number(performance.get('agents_per_minute')),
-        number(memory.get('peak_used_delta_bytes', 0) / gib),
-        number(memory.get('memory_time_integral_byte_seconds', 0) / gib),
+        number(gib_value(memory, 'peak_used_delta_bytes')),
+        number(gib_value(memory, 'memory_time_integral_byte_seconds')),
         f"{performance.get('pause_count', 0)}/{performance.get('resume_count', 0)}",
         number(correctness.get('native_tool_exact_id_join_rate')),
         str(correctness.get('native_tool_telemetry_loss_total', 'n/a')),
