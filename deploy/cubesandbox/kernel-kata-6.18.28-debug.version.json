@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "variants": {
+    "bm": {
+      "version": "sha256-2d2f2a70df4f",
+      "digest_sha256": "sha256:2d2f2a70df4f04c07b16bfe5fc8a02aa2550700d5a92e0e645e8770bfe8ca9d4",
+      "tag": "6.18.28-194-debug"
+    }
+  }
+}
