@@ -44,7 +44,7 @@ execution:
   concurrency_levels: [40]
   randomized_order: true
   random_seed: 20260907
-  arm_timeout_seconds: 1800
+  arm_timeout_seconds: 7200
   command_timeout_seconds: 300
   memory_sample_interval_seconds: 0.2
   stabilization_seconds: 1
