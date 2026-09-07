@@ -126,7 +126,10 @@ def _prediction(command_sha256: str) -> dict[str, Any] | None:
 
 def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
     base = os.environ["CLAWBOX_POLICY_CONTROL_URL"].rstrip("/")
-    token = os.environ["CLAWBOX_POLICY_CONTROL_TOKEN"]
+    token = (
+        os.environ.get("CLAWBOX_POLICY_CONTROL_AUTH")
+        or os.environ["CLAWBOX_POLICY_CONTROL_TOKEN"]
+    )
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     request = urllib.request.Request(
         base + path, data=encoded, method="POST",

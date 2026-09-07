@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import importlib.util
 import json
 import sys
@@ -18,6 +19,24 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC is not None and _SPEC.loader is not None
 policy_ssh = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(policy_ssh)
+
+
+def test_post_accepts_sanitizer_safe_policy_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_AUTH", "auth-token")
+    monkeypatch.delenv("CLAWBOX_POLICY_CONTROL_TOKEN", raising=False)
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append((request, timeout))
+        return io.BytesIO(b'{"status":"ok"}')
+
+    monkeypatch.setattr(policy_ssh.urllib.request, "urlopen", urlopen)
+
+    assert policy_ssh._post("/v1/tool/admit", {"x": 1}, attempts=1) == {"status": "ok"}
+    assert requests[0][0].get_header("Authorization") == "Bearer auth-token"
 
 
 def _argv(tool_name: str = "exec") -> list[str]:
