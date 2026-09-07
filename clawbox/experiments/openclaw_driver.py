@@ -263,7 +263,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         raise ValueError("native SSH host_key_alias is not safe")
 
     home = f"/state/openclaw/{session_id}"
-    runtime_workspace = f"{home}/runtime-workspace"
+    # Replay must reconstruct the selected recording's request envelope.  Its
+    # OpenClaw workspace was /workspace; live runs retain per-session state.
+    runtime_workspace = "/workspace" if replay_compatibility else f"{home}/runtime-workspace"
     trace_dir = f"/state/clawtune/{session_id}/traces"
     ssh_dir = f"{home}/ssh"
     identity_file = f"{ssh_dir}/id_ed25519"
@@ -436,9 +438,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     if not replay_compatibility:
         patch["agents"]["defaults"]["sandbox"]["ssh"]["command"] = ssh_launcher
     invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
+    openclaw_model = "experiment-model" if replay_compatibility else model
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
-            "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", model])
+            "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", openclaw_model])
     if replay_compatibility:
         # The selected rec-a request was recorded before OpenClaw's vLLM
         # onboarding began materializing ``reasoning: false``. That descriptor
@@ -448,6 +451,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # and all message/tool validation remain unchanged.
         invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
     instruction = (
+        "[REPLAY-TIME] " + prompt
+        if replay_compatibility else
         "Use only sandboxed exec/process/read/write/edit/apply_patch for workspace and "
         "process operations; those execute in the Tool VM. Web search/fetch and agent "
         "memory lookup remain Runtime-local and must not be used to access the mutable "
@@ -455,7 +460,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     )
     agent_args = [
         "agent", "--local", "--agent", "main", "--session-id", session_id,
-        "--model", f"vllm/{model}", "--message", instruction,
+        "--model", f"vllm/{openclaw_model}", "--message", instruction,
         "--timeout", str(timeout_seconds), "--json",
     ]
     if resident_poll is None:
