@@ -21,9 +21,9 @@ inference:
     repo_fingerprint: 15five/scim2-filter-parser
     openclaw_exec_yield_ms: 120000
 runtime:
-  template_id: tpl-8925700183e341e3b8694dca
+  template_id: tpl-f4c0c6a3c80a48be95b271b4
   source_image_reference: 127.0.0.1:5000/clawbox/runtime-arm64@sha256:997bf0a73bf4205d2e41e734c26e8104206442e738246df9e5fe2535119ddaaa
-  image_digest: sha256:f687b22f7ccf39ac81f30ac6bf1e47979837a3a95bb3e20e52c546e26dac8186
+  image_digest: sha256:54a2b7d5d488bb8f862d90d85e16d46fe92692af7c2801baf44dab3653245a0c
   architecture: arm64
   vcpu: 2
   memory_mib: 2048
