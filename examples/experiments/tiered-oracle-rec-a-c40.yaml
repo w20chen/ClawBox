@@ -1,5 +1,5 @@
 schema_version: 2
-experiment_id: tiered-oracle-rec-a-c8-c40
+experiment_id: tiered-oracle-rec-a-c40
 workload:
   source: recorded_trace
   input: /home/weitianc/ClawBox/results/paper_replay_20260901_128g_v4/selected-traces/rec-a-enriched.jsonl
@@ -41,7 +41,7 @@ sandbox:
   workspace: /testbed
   allow_internet_access: false
 execution:
-  concurrency_levels: [8, 40]
+  concurrency_levels: [40]
   randomized_order: true
   random_seed: 20260907
   arm_timeout_seconds: 1800

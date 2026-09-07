@@ -246,8 +246,8 @@ def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
     assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
     assert by_id["openclaw-cube-replay-c60-overcommit"]["concurrency_levels"] == [60]
     assert by_id["tiered-oracle-rec-a-c1"]["concurrency_levels"] == [1]
-    assert by_id["tiered-oracle-rec-a-c8-c40"]["concurrency_levels"] == [8, 40]
-    assert by_id["tiered-oracle-rec-a-c8-c40"]["arm_count"] == 26
+    assert by_id["tiered-oracle-rec-a-c40"]["concurrency_levels"] == [40]
+    assert by_id["tiered-oracle-rec-a-c40"]["arm_count"] == 13
     assert all(item["tool_template"] != "sandbox-code" for item in audits)
     openclaw = by_id["openclaw-cube-replay-c40"]["artifact_provenance"]
     assert openclaw["runtime"]["template_id"] == "tpl-ec97143fa76e409981055c2f"
