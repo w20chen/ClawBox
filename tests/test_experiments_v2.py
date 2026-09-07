@@ -67,6 +67,21 @@ def test_v2_matrix_is_complete_stable_and_randomized() -> None:
     assert {arm.policy.name for arm in first} == {"resident", "proposed"}
 
 
+def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
+    raw = raw_spec()
+    raw["resources"].update(warm_memory_capacity_mib=65536,
+                            local_memory_capacity_mib=65536,
+                            warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+                            local_numa_node=0, warm_numa_node=1)
+    raw["policies"].append({"name": "tiered", "admission": "tool_p90",
+                            "reclamation": "snapshot_pause", "restore": "reactive",
+                            "eviction": "tiered_time_oracle"})
+    arms = expand_matrix(ExperimentSpec.model_validate(raw))
+    for arm in arms:
+        assert arm.resources.warm_memory_capacity_mib == (
+            65536 if arm.policy.name == "tiered" else 0)
+
+
 def test_round_robin_workload_builds_one_arm_and_stable_session_mix() -> None:
     raw = raw_spec()
     raw["workload"]["repetitions"] = 1
@@ -153,7 +168,8 @@ def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
     assert checkpoint["state_after"] == "swapped"
 
 
-def test_worker_provenance_separates_runtime_and_tool_artifacts() -> None:
+def test_worker_provenance_separates_runtime_and_tool_artifacts(monkeypatch) -> None:
+    monkeypatch.delenv("CUBE_SOURCE_DIR", raising=False)
     raw = raw_spec()
     raw["runtime"].update({
         "template_id": "runtime-id", "template_alias": None,
@@ -173,6 +189,9 @@ def test_worker_provenance_separates_runtime_and_tool_artifacts() -> None:
     assert provenance["tool_template_reference"] == "tool-id"
     assert provenance["tool_template_image_digest"] == "sha256:" + "b" * 64
     assert provenance["template_reference"] == "tool-id"  # legacy key
+    assert provenance["cubesandbox_deployment"] == "standalone"
+    assert provenance["cubesandbox_commit"] == "unknown"
+    assert "kubernetes_version" not in provenance
 
 
 def test_arm_provenance_records_clawbox_memory_overcommit() -> None:

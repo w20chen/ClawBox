@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
+from collections.abc import Callable
 
 
 def read_meminfo(path: Path) -> tuple[int, int]:
@@ -54,6 +55,8 @@ class MemorySummary:
 
 
 class NodeMemorySampler:
+    sample_hook: Callable[[int, int], None] | None = None
+
     def __init__(self, *, meminfo: Path = Path("/host/proc/meminfo"),
                  vmstat: Path = Path("/host/proc/vmstat"),
                  storage: Path = Path("/data/cubelet"), interval_s: float = 0.2) -> None:
@@ -93,6 +96,9 @@ class NodeMemorySampler:
         }
 
     def start(self) -> None:
+        delta, available = self.current()
+        with self._lock:
+            self._samples.append((time.monotonic(), delta, available))
         self._thread = Thread(target=self._run, name="node-memory-sampler", daemon=True)
         self._thread.start()
 
@@ -100,7 +106,9 @@ class NodeMemorySampler:
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
+        delta, available = self.current()
         with self._lock:
+            self._samples.append((time.monotonic(), delta, available))
             samples = list(self._samples)
         if not samples:
             delta, available = self.current()
@@ -110,7 +118,8 @@ class NodeMemorySampler:
                        for index in range(1, len(samples)))
         return MemorySummary(
             self.total, self.baseline_used,
-            sum(item[1] for item in samples) / len(samples),
+            integral / (samples[-1][0] - samples[0][0])
+            if samples[-1][0] > samples[0][0] else float(samples[-1][1]),
             max(item[1] for item in samples), integral,
             min(item[2] for item in samples), self._storage_used() - self.storage_used_before,
             max(
@@ -119,11 +128,19 @@ class NodeMemorySampler:
             ),
         )
 
+    def samples(self) -> list[dict[str, int | float]]:
+        with self._lock:
+            return [{"monotonic_s": stamp, "used_bytes": used,
+                     "available_bytes": available}
+                    for stamp, used, available in self._samples]
+
     def _run(self) -> None:
         while not self._stop.wait(self.interval_s):
             delta, available = self.current()
             with self._lock:
                 self._samples.append((time.monotonic(), delta, available))
+            if self.sample_hook is not None:
+                self.sample_hook(delta, available)
 
     def _storage_used(self) -> int:
         try:
@@ -176,6 +193,46 @@ class NumaNodeMemorySampler(NodeMemorySampler):
             "host_available_bytes": free,
             "experiment_used_delta_bytes": max(0, used - self.baseline_used),
         }
+
+
+class CgroupMemorySampler(NodeMemorySampler):
+    """Absolute LOCAL charges, including VM overhead and retained page cache.
+
+    Host available memory remains the independent emergency guard. No arm
+    baseline is subtracted from the enforced cgroup's admission usage.
+    """
+
+    def __init__(self, cgroup: Path, *, capacity_bytes: int,
+                 numa_node: int | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cgroup = cgroup
+        limit = (cgroup / "memory.max").read_text().strip()
+        if limit != str(capacity_bytes):
+            raise ValueError(f"LOCAL memory.max {limit} does not match {capacity_bytes}")
+        if numa_node is not None:
+            nodes = (cgroup / "cpuset.mems.effective").read_text().strip()
+            if nodes != str(numa_node):
+                raise ValueError(f"LOCAL cpuset {nodes} does not match node {numa_node}")
+        self.total = capacity_bytes
+        self.baseline_used = 0
+
+    def current(self) -> tuple[int, int]:
+        _, available = read_meminfo(self.meminfo)
+        return int((self.cgroup / "memory.current").read_text()), available
+
+    def observe(self) -> dict[str, int | str]:
+        observation = super().observe()
+        used, _ = self.current()
+        observation.update({
+            "metric": "cgroup_v2_memory_current",
+            "local_memory_cgroup": str(self.cgroup),
+            "local_capacity_bytes": self.total,
+            "local_used_bytes": used,
+            "local_memory_events": (self.cgroup / "memory.events").read_text().strip()
+            if (self.cgroup / "memory.events").exists() else "unavailable",
+            "experiment_used_delta_bytes": used,
+        })
+        return observation
 
 
 def sandbox_process_rss_bytes(sandbox_id: str, *,

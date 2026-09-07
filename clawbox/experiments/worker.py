@@ -32,7 +32,7 @@ from clawbox.cube import (
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.replay.trace import ReplayAction, load_trace
 
-from .memory import NodeMemorySampler, NumaNodeMemorySampler, SandboxRSSSampler
+from .memory import CgroupMemorySampler, NodeMemorySampler, NumaNodeMemorySampler, SandboxRSSSampler
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
@@ -546,6 +546,14 @@ class ExperimentWorker:
                 )
         events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
         sampler = (
+            CgroupMemorySampler(
+                Path(arm.resources.local_memory_cgroup),
+                capacity_bytes=(arm.resources.local_memory_capacity_mib or
+                                arm.resources.pool_memory_budget_mib) * 1024 * 1024,
+                numa_node=arm.resources.local_numa_node,
+                interval_s=arm.execution.memory_sample_interval_seconds,
+            )
+            if arm.resources.local_memory_cgroup else
             NumaNodeMemorySampler(
                 arm.resources.local_numa_node,
                 interval_s=arm.execution.memory_sample_interval_seconds,
@@ -573,6 +581,21 @@ class ExperimentWorker:
         snapshot_pool = WarmSnapshotPool(
             arm.resources.warm_memory_capacity_mib * 1024 * 1024
         )
+        if arm.resources.local_memory_cgroup:
+            def record_memory_sample(used: int, available: int) -> None:
+                pool = snapshot_pool.snapshot()
+                warm_physical = None
+                if arm.resources.warm_snapshot_root:
+                    stat = os.statvfs(arm.resources.warm_snapshot_root)
+                    warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+                events.write({
+                    "event": "memory_sample", "local_used_bytes": used,
+                    "host_available_bytes": available,
+                    "warm_allocated_bytes": warm_physical,
+                    "warm_reserved_bytes": pool["reserved_bytes"],
+                    "warm_committed_bytes": pool["committed_bytes"],
+                })
+            sampler.sample_hook = record_memory_sample
         prediction_provider = None
         if (arm.agent.driver is AgentDriver.OPENCLAW
                 and arm.policy.admission in {
@@ -642,6 +665,9 @@ class ExperimentWorker:
                 cleanup_error = exc
             time.sleep(arm.execution.stabilization_seconds)
             memory = sampler.stop()
+            events.write({"event": "memory_sampling", "observation": sampler.observe(),
+                          "interval_seconds": sampler.interval_s,
+                          "samples": sampler.samples()})
             if cleanup_error is not None:
                 failure = failure or cleanup_error
             if memory.host_oom_kill_events:
@@ -2315,13 +2341,14 @@ class ExperimentWorker:
             sdk = importlib.metadata.version("cubesandbox")
         except importlib.metadata.PackageNotFoundError:
             sdk = "unavailable"
+        cube_source = os.environ.get("CUBE_SOURCE_DIR", "")
         return {
-            "cubesandbox_tag": "v0.7.0",
-            "cubesandbox_commit": "d0081641c59822e4e5653b7462e914410b81910a",
+            "cubesandbox_deployment": "standalone",
+            "cubesandbox_source_directory": cube_source or None,
+            "cubesandbox_tag": command("git", "-C", cube_source, "describe", "--tags", "--exact-match") if cube_source else "unknown",
+            "cubesandbox_commit": command("git", "-C", cube_source, "rev-parse", "HEAD") if cube_source else "unknown",
             "cubesandbox_sdk": sdk,
             "clawbox_commit": os.environ.get("CLAWBOX_REVISION", command("git", "rev-parse", "HEAD")),
-            "kubernetes_version": os.environ.get("CLAWBOX_KUBERNETES_VERSION", "unknown"),
-            "containerd_version": os.environ.get("CLAWBOX_CONTAINERD_VERSION", "unknown"),
             "os_release": platform.platform(), "kernel": platform.release(),
             "architecture": platform.machine(), "cpu_model": platform.processor(),
             "template_reference": self.spec.sandbox.template,

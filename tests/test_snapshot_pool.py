@@ -147,3 +147,21 @@ def test_consumer_failure_releases_pin_without_retiring_snapshot() -> None:
             raise ValueError("restore failed")
     assert pool.committed_bytes == 100
     assert pool.snapshot()["manifests"][0]["pinned"] == 0
+
+
+def test_atomic_admission_waits_for_uncommitted_writer() -> None:
+    pool = WarmSnapshotPool(100)
+    pool.reserve(key(1), 100)
+    admitted = Event()
+
+    def admit():
+        pool.reserve_for_admission(key(2), 100, timeout_s=5)
+        admitted.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(admit)
+        assert not admitted.wait(0.1)
+        pool.commit(key(1), path="/warm/1", logical_bytes=100,
+                    allocated_bytes=100, transferred_bytes=100, spiller=lambda _: None)
+        future.result(timeout=5)
+    assert pool.reserved_bytes == 100 and pool.committed_bytes == 0

@@ -128,6 +128,7 @@ class ResourcesSpec(StrictFrozenModel):
     warm_snapshot_root: str | None = None
     cold_snapshot_root: str | None = None
     local_numa_node: int | None = Field(default=None, ge=0)
+    local_memory_cgroup: str | None = None
     warm_numa_node: int | None = Field(default=None, ge=0)
 
 
@@ -275,6 +276,12 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
         for repetition in range(spec.workload.repetitions):
             for concurrency in spec.execution.concurrency_levels:
                 for policy in spec.policies:
+                    resources = spec.resources
+                    if policy.eviction not in {
+                        EvictionPolicy.TIERED_LRU_ORACLE,
+                        EvictionPolicy.TIERED_TIME_ORACLE,
+                    }:
+                        resources = resources.model_copy(update={"warm_memory_capacity_mib": 0})
                     identity = {"spec_digest": digest,
                                 "case_ids": [item.case_id for item in session_cases],
                                 "session_assignment": spec.workload.session_assignment,
@@ -288,7 +295,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                         repetition=repetition, concurrency=concurrency, policy=policy,
                         agent=spec.agent, inference=spec.inference, runtime=spec.runtime,
                         sandbox=spec.sandbox,
-                        execution=spec.execution, resources=spec.resources,
+                        execution=spec.execution, resources=resources,
                         validation=spec.validation,
                     ))
     if spec.execution.randomized_order:

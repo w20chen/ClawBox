@@ -127,10 +127,12 @@ class CubeSandboxLifecycle:
             growth = max(0, after_used - before_used)
             net_change = after_used - before_used
             if operation == "checkpoint":
+                scope = ("local_cgroup" if host_memory_before is not None and
+                         "local_used_bytes" in host_memory_before else "whole_host")
                 evidence = (
-                    "observed_whole_host_reclamation"
+                    f"observed_{scope}_reclamation"
                     if reclaimed > 0
-                    else "not_observed_whole_host_reclamation"
+                    else f"not_observed_{scope}_reclamation"
                 )
         self._timings.append(LifecycleTiming(
             operation, started_wall, completed_wall, started_mono,
@@ -151,7 +153,7 @@ class CubeSandboxLifecycle:
     def _host_used(sample: Mapping[str, Any] | None) -> int | None:
         if sample is None:
             return None
-        value = sample.get("host_used_bytes")
+        value = sample.get("local_used_bytes", sample.get("host_used_bytes"))
         return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
     def start(self) -> float:
@@ -223,10 +225,8 @@ class CubeSandboxLifecycle:
                     if tier is SnapshotTier.WARM:
                         if self.snapshot_pool is None or self.snapshot_reservation_bytes is None:
                             raise RuntimeError("WARM snapshot accounting is not configured")
-                        self.snapshot_pool.spill_for_admission(
-                            self.snapshot_reservation_bytes, exclude={key}
-                        )
-                        self.snapshot_pool.reserve(key, self.snapshot_reservation_bytes)
+                        self.snapshot_pool.reserve_for_admission(
+                            key, self.snapshot_reservation_bytes)
                     path = (
                         f"{root.rstrip('/')}/{self.sandbox_id}/"
                         f"{self.role}-g{self._generation}.mem"

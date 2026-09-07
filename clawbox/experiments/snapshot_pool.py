@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from threading import Condition, RLock
+from threading import Condition, Lock, RLock
 
 from .spec_types import SnapshotTier
 
@@ -53,6 +53,7 @@ class WarmSnapshotPool:
         self._clock = clock
         self._lock = RLock()
         self._changed = Condition(self._lock)
+        self._admission_lock = Lock()
         self._reservations: dict[SnapshotKey, int] = {}
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
@@ -110,7 +111,32 @@ class WarmSnapshotPool:
             if spiller is not None:
                 self._spillers[key] = spiller
             self._assert_capacity_locked()
+            self._changed.notify_all()
             return manifest
+
+    def reserve_for_admission(self, key: SnapshotKey, upper_bound_bytes: int,
+                              *, timeout_s: float = 120) -> None:
+        """Keep spill-and-reserve atomic against other admissions.
+
+        Writers commit without the admission lock. If capacity is temporarily
+        reserved or pinned, wait for their completion instead of failing an
+        otherwise valid parallel checkpoint.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                with self._admission_lock:
+                    self.spill_for_admission(upper_bound_bytes, exclude={key})
+                    self.reserve(key, upper_bound_bytes)
+                return
+            except WarmSnapshotTooLarge:
+                raise
+            except WarmCapacityError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                with self._changed:
+                    self._changed.wait(timeout=min(remaining, 0.2))
 
     def spill_for_admission(self, required_bytes: int, *,
                             exclude: set[SnapshotKey] | None = None
@@ -145,6 +171,7 @@ class WarmSnapshotPool:
     def abort(self, key: SnapshotKey) -> None:
         with self._lock:
             self._reservations.pop(key, None)
+            self._changed.notify_all()
 
     def pin(self, key: SnapshotKey) -> SnapshotManifest:
         with self._lock:
