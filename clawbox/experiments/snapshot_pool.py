@@ -172,6 +172,11 @@ class WarmSnapshotPool:
         """Return and pin the deterministic LRU prefix needed for admission."""
         if required_bytes <= 0:
             return ()
+        if required_bytes > self.capacity_bytes:
+            raise WarmSnapshotTooLarge(
+                f"snapshot reservation {required_bytes} exceeds WARM capacity "
+                f"{self.capacity_bytes}"
+            )
         excluded = exclude or set()
         with self._lock:
             deficit = max(0, self._usage_locked() + required_bytes - self.capacity_bytes)

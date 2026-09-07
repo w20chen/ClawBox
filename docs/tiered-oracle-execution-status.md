@@ -95,3 +95,28 @@ The recording archive contains the original recording and resource evidence,
 selected-trace directory, and prediction inputs. The source archive contains
 tracked CubeSandbox `094daaa` source. The host-kernel log is also downloaded.
 These artifacts reside in the local workspace's `.worktrees/` directory.
+
+## Capacity audit after host failure
+
+An oversized WARM request now raises `WarmSnapshotTooLarge` at victim selection,
+before any pin or relocation. Previously the same request raised generic
+`WarmCapacityError` because no victim prefix could satisfy it. The previous code
+did not spill in this case, but incorrectly classified the permanent capacity
+problem as temporary pressure. The regression checks the specific error and
+unchanged manifests, pins, and spill callbacks.
+
+Validated on kunpeng in the isolated directory
+`/home/weitianc/clawbox-capacity-validation-20260907-icc9id`: the new regression
+failed against the prior implementation, then the snapshot-pool and policy
+suites passed with the fix. Raw `evidence/before.log` and `evidence/after.log`
+are retained there. No live deployment was changed during this audit.
+
+Further code review identified unresolved integration requirements. The worker's
+NUMA sampler measures a node-wide baseline-subtracted delta; it does not enforce
+the experiment's LOCAL limit. The lifecycle restore path calls connect before
+removing its WARM manifest and has no restore pin around that call. A concurrent
+spill selection can therefore pin the generation while restore is in progress;
+this needs a deterministic race regression and a lifecycle fix. Backing-file
+release/placement after connect also needs backend evidence before removing its
+WARM charge. Passing the small pure-policy tests does not establish these
+properties. Host recovery is necessary but not sufficient for formal readiness.

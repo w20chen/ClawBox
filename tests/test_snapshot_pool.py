@@ -80,3 +80,18 @@ def test_spill_for_admission_relocates_lru_and_reclaims_accounting() -> None:
     assert [item.key for item in victims] == [key(1)]
     assert spilled == [key(1)]
     assert pool.committed_bytes == 50
+
+
+def test_oversized_admission_never_spills_or_pins_existing_snapshots() -> None:
+    pool = WarmSnapshotPool(100)
+    spilled: list[SnapshotKey] = []
+    pool.reserve(key(1), 100)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=100, allocated_bytes=100,
+        transferred_bytes=100, spiller=lambda item: spilled.append(item.key),
+    )
+    before = pool.snapshot()
+    with pytest.raises(WarmSnapshotTooLarge):
+        pool.spill_for_admission(101)
+    assert spilled == []
+    assert pool.snapshot() == before
