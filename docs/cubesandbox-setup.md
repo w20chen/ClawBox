@@ -19,9 +19,10 @@ A Kubernetes Pod IP is not a valid final Tool address. The old Kunpeng
 Kubernetes deployment remains documented in
 `kunpeng920-reproduction-runbook.md` for historical diagnosis only.
 
-CubeSandbox base version: `v0.7.0`. ClawBox applies four source-controlled
+CubeSandbox base version: `v0.7.0`. ClawBox applies source-controlled
 patches for the semantic TCP endpoint, same-node port forwarding, template
-image provenance, and checkpoint phase timing.
+image provenance, tiered snapshots, checkpoint phase timing, and physical
+memory tier isolation.
 
 ## Install on a new machine
 
@@ -68,6 +69,23 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev,postgres]'
 .venv/bin/python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
+
+## Configure the NUMA memory tiers
+
+After installing the patched bundle, configure LOCAL on NUMA0 and a WARM
+tmpfs on NUMA1. Use a directory on SSD for COLD:
+
+```bash
+sudo bash scripts/setup-tiered-memory.sh /data/clawbox/warm /data/clawbox/cold "$USER"
+sudo systemctl restart cube-sandbox-cubelet.service
+```
+
+Run setup while experiments are stopped. Repeat it after reboot before starting
+experiments. It configures a 64 GiB LOCAL cgroup and 64 GiB WARM tmpfs without
+swap, and enables independent anonymous LOCAL restore and separate WARM page
+charging. The paths must match the experiment YAML. See
+[memory tier simulation](tiered-memory-simulation.md) for the measurement
+interpretation and the limits of this CXL/UB approximation.
 
 ## Required TCP endpoint behavior
 

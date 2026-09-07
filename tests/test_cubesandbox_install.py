@@ -4,17 +4,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_installer_preserves_helm_database_templates() -> None:
-    script = (ROOT / "scripts" / "install-cubesandbox-kunpeng920.sh").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'include "cube.dbHost"' in script
-    assert 'include "cube.redisNodes"' in script
-    assert "target.write_text(source.read_text())" not in script
-    assert "overcommit_ratio" in script
-    assert "rewrite stop name regex (.*)[.]cube[.]local[.]?" in script
-    assert "answer auto" in script
+def test_kubernetes_install_and_launch_commands_are_retired() -> None:
+    assert not (ROOT / "scripts" / "install-cubesandbox-kunpeng920.sh").exists()
+    assert not (ROOT / "scripts" / "recover-cubesandbox-s3lvol-kunpeng920.sh").exists()
+    project = (ROOT / "pyproject.toml").read_text()
+    assert "clawbox-cell-controller =" not in project
+    assert "clawbox-managed-dispatcher =" not in project
 
 
 def test_template_helper_exposes_cube_command_ports() -> None:
@@ -40,7 +35,7 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
         encoding="utf-8"
     )
     lifecycle_timing = (
-        ROOT / "deploy" / "cubesandbox" / "lifecycle-phase-timing.patch"
+        ROOT / "deploy" / "cubesandbox" / "tiered-memory-api.patch"
     ).read_text(encoding="utf-8")
 
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
@@ -53,7 +48,7 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "tcp_hairpin_proxy" in hairpin
     assert "remote_port_mapping" in hairpin
     assert "mvmip_to_ifindex" in hairpin
-    assert "LIFECYCLE_TIMING_PATCH_FILE" in helper
+    assert "TIER_API_PATCH_FILE" in helper
     assert '"phase":       "snapshot_create"' in lifecycle_timing
     assert '"phase":       "swap_out"' in lifecycle_timing
     assert '"duration_ms"' in lifecycle_timing

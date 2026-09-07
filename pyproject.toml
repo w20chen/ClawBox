@@ -33,9 +33,6 @@ images = ["datasets>=3.0"]
 dev = ["pytest>=8", "httpx2"]
 
 [project.scripts]
-clawbox-cell-controller = "clawbox.cell.app:main"
-clawbox-managed-api = "clawbox.api.main:main"
-clawbox-managed-dispatcher = "clawbox.api.dispatcher_main:main"
 clawbox = "clawbox.cli:main"
 clawbox-p90-export = "clawbox.cell.p90:export_main"
 clawbox-experiment-worker = "clawbox.experiments.worker:main"

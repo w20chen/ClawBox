@@ -11,8 +11,9 @@ described in [experiment operations](../docs/experiment-operations.md) and
 - kprobe-capable guest-kernel metadata and configuration;
 - source preparation helpers.
 
-The old values overlay and CubeNode startup patch are historical Kubernetes
-assets and are not used by standalone source preparation or installation.
+The Kubernetes installer/recovery scripts, values overlay, CubeNode startup
+patch, and installed Cell/Dispatcher launch commands have been removed. Use
+Git history to inspect those old deployment attempts; they are not maintained.
 
 Other root-level YAML, service, containerd, and RuntimeClass files are retained
 only to reproduce older Kubernetes/Kata experiments and tests. They are not a

@@ -1559,13 +1559,22 @@ class ExperimentWorker:
                             str(request["command_sha256"]), request.get("prediction")
                         ) if prediction_provider is not None
                         and execution_scope == "agent-tool"
+                        and request.get("operation") != "filesystem"
                         else request.get("prediction")
                     )
                     if (prediction_provider is not None
-                            and execution_scope != "agent-tool"):
+                            and (execution_scope != "agent-tool"
+                                 or request.get("operation") == "filesystem")):
+                        # File bridge operations have no shell-command KB entry.
+                        # Charge their configured static budget explicitly.
+                        filesystem_tool = request.get("operation") == "filesystem"
                         prediction = {
-                            "canonical_prediction_key": "ssh-backend-maintenance",
-                            "prediction_source": "backend_maintenance_static",
+                            "canonical_prediction_key": (
+                                "filesystem" if filesystem_tool else "ssh-backend-maintenance"
+                            ),
+                            "prediction_source": (
+                                "filesystem_static" if filesystem_tool else "backend_maintenance_static"
+                            ),
                             "fallback_level": "not_applicable",
                             "predicted_incremental_memory_mib": int(
                                 arm.resources.static_tool_memory_mib or 1
@@ -2494,8 +2503,8 @@ def main(argv: list[str] | None = None) -> int:
         results = ExperimentWorker(load_experiment(args.spec), run_id=args.run_id,
                                    attempt_id=args.attempt_id, task_uid=args.task_uid).run()
     except Exception as exc:
-        # Kubernetes otherwise records only exit code 1 when a pre-arm gate
-        # fails (for example NodePort readiness). Keep the log useful without
+        # Preserve a useful diagnostic when a pre-arm infrastructure gate
+        # fails. Keep the log useful without
         # printing credentials, prompts, request bodies, or bearer tokens.
         print(
             "experiment worker failed before completion: "

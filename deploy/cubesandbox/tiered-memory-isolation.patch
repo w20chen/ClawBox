@@ -1,0 +1,313 @@
+diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
+index e89f52b..23c6d56 100644
+--- a/CubeShim/shim/src/sandbox/sb.rs
++++ b/CubeShim/shim/src/sandbox/sb.rs
+@@ -470,6 +470,18 @@ impl SandBox {
+     }
+ 
+     pub async fn create_sandbox(&mut self) -> CResult<()> {
++        // Join LOCAL before restoring/allocating guest RAM. Moving the shim
++        // only after Create completes leaves those pages charged to Cubelet.
++        if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1") {
++            let group = self.spec.annotations().as_ref()
++                .and_then(|annotations| annotations.get("cube.sandbox_cgroup_path"))
++                .ok_or_else(|| "missing LOCAL cgroup annotation".to_string())?;
++            let path = PathBuf::from("/sys/fs/cgroup")
++                .join(group.trim_start_matches('/')).join("cgroup.procs");
++            stdfs::write(&path, self.pid.to_string())
++                .map_err(|error| format!("enter LOCAL cgroup {}: {}", path.display(), error))?;
++            infof!(self.log, "entered LOCAL cgroup {} before guest RAM allocation", group);
++        }
+         let snapshot = self.start_vm().await?;
+ 
+         //todo: app snapshot
+diff --git a/Cubelet/services/cubebox/annotation.go b/Cubelet/services/cubebox/annotation.go
+index 02dd57e..e866144 100644
+--- a/Cubelet/services/cubebox/annotation.go
++++ b/Cubelet/services/cubebox/annotation.go
+@@ -214,6 +214,7 @@ func (l *local) genCgroupAnnotationOpt(ctx context.Context, c *cubebox.Container
+ 	tmpSpecs = append(tmpSpecs, oci.WithAnnotations(map[string]string{
+ 
+ 		constants.AnnotationsVMSpecKey: string(resJson),
++		constants.AnnotationsCgroupPath: cgInfo.CgroupID,
+ 	}))
+ 
+ 	return tmpSpecs
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index 70283bf..d323348 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -14,6 +14,8 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"golang.org/x/sys/unix"
++
+ 	containerd "github.com/containerd/containerd/v2/client"
+ 	"github.com/containerd/containerd/v2/pkg/namespaces"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+@@ -215,7 +217,9 @@ func (s *service) updateWithPauseCow(
+ 	directMemoryPath, directMemory, err := directPauseMemoryPath(req)
+ 	var memoryObject *storage.CowSnapshotObject
+ 	if err == nil && directMemory {
+-		err = os.MkdirAll(filepath.Dir(directMemoryPath), 0700)
++		// The standalone experiment client reads allocation metadata with stat.
++		// Snapshot contents remain owner-only, but the directory is traversable.
++		err = os.MkdirAll(filepath.Dir(directMemoryPath), 0755)
+ 		if err == nil {
+ 			var file *os.File
+ 			file, err = os.OpenFile(
+@@ -223,7 +227,17 @@ func (s *service) updateWithPauseCow(
+ 			)
+ 			if err == nil {
+ 				err = file.Truncate(int64(memorySizeBytes))
++				// Allocate tmpfs pages in Cubelet's storage cgroup, not the
++				// bounded LOCAL VMM cgroup that subsequently writes the data.
++				// The WARM mount's NUMA policy determines physical placement.
++				if err == nil && os.Getenv("CLAWBOX_WARM_PREALLOCATE") == "1" &&
++					strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"]) == "warm" {
++					err = unix.Fallocate(int(file.Fd()), 0, 0, int64(memorySizeBytes))
++				}
+ 				_ = file.Close()
++				if err != nil {
++					_ = os.Remove(directMemoryPath)
++				}
+ 			}
+ 		}
+ 		if err == nil {
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+index 8ee8458..69aef99 100644
+--- a/Cubelet/services/cubebox/relocate_snapshot.go
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -5,13 +5,14 @@ package cubebox
+ 
+ import (
+ 	"context"
+-	"crypto/sha256"
+ 	"fmt"
+ 	"io"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+ 
++	"golang.org/x/sys/unix"
++
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+@@ -19,7 +20,7 @@ import (
+ )
+ 
+ // relocatePauseSnapshot performs WARM -> COLD without an SSD staging file:
+-// copy to a temporary file in COLD, hash-verify, atomically publish, persist the
++// copy to a temporary file in COLD, sync, atomically publish, persist the
+ // authoritative catalog, then remove WARM. Any failure before the catalog
+ // update leaves the original snapshot authoritative and restorable.
+ func (s *service) relocatePauseSnapshot(
+@@ -59,7 +60,7 @@ func (s *service) relocatePauseSnapshot(
+ 		rsp.Ret.RetMsg = "authoritative source is not in the configured WARM root"
+ 		return rsp, nil
+ 	}
+-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
++	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 		rsp.Ret.RetMsg = err.Error()
+ 		return rsp, nil
+@@ -71,14 +72,7 @@ func (s *service) relocatePauseSnapshot(
+ 	}
+ 	tmp := destination + ".copying"
+ 	_ = os.Remove(tmp)
+-	sourceHash, copied, err := copyAndHash(source, tmp)
+-	if err == nil {
+-		var destinationHash [sha256.Size]byte
+-		destinationHash, err = hashFile(tmp)
+-		if err == nil && destinationHash != sourceHash {
+-			err = fmt.Errorf("relocation hash mismatch")
+-		}
+-	}
++	copied, err := copySnapshot(source, tmp)
+ 	if err == nil {
+ 		err = os.Rename(tmp, destination)
+ 	}
+@@ -110,46 +104,34 @@ func (s *service) relocatePauseSnapshot(
+ 	return rsp, nil
+ }
+ 
+-func copyAndHash(source, destination string) ([sha256.Size]byte, int64, error) {
+-	var zero [sha256.Size]byte
++func copySnapshot(source, destination string) (int64, error) {
+ 	in, err := os.Open(source)
+ 	if err != nil {
+-		return zero, 0, err
++		return 0, err
+ 	}
+ 	defer in.Close()
++	info, err := in.Stat()
++	if err != nil {
++		return 0, err
++	}
+ 	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+ 	if err != nil {
+-		return zero, 0, err
++		return 0, err
++	}
++	written, copyErr := io.Copy(out, in)
++	if copyErr == nil && written != info.Size() {
++		copyErr = fmt.Errorf("short snapshot copy: %d of %d bytes", written, info.Size())
+ 	}
+-	h := sha256.New()
+-	written, copyErr := io.Copy(io.MultiWriter(out, h), in)
+ 	if copyErr == nil {
+ 		copyErr = out.Sync()
+ 	}
++	if copyErr == nil && os.Getenv("CUBE_RESTORE_PRIVATE_COPY") == "1" {
++		// A COLD snapshot must not retain an unaccounted DRAM cache copy.
++		copyErr = unix.Fadvise(int(out.Fd()), 0, 0, unix.FADV_DONTNEED)
++	}
+ 	closeErr := out.Close()
+ 	if copyErr == nil {
+ 		copyErr = closeErr
+ 	}
+-	if copyErr != nil {
+-		return zero, written, copyErr
+-	}
+-	var sum [sha256.Size]byte
+-	copy(sum[:], h.Sum(nil))
+-	return sum, written, nil
+-}
+-
+-func hashFile(path string) ([sha256.Size]byte, error) {
+-	var zero [sha256.Size]byte
+-	f, err := os.Open(path)
+-	if err != nil {
+-		return zero, err
+-	}
+-	defer f.Close()
+-	h := sha256.New()
+-	if _, err = io.Copy(h, f); err != nil {
+-		return zero, err
+-	}
+-	var sum [sha256.Size]byte
+-	copy(sum[:], h.Sum(nil))
+-	return sum, nil
++	return written, copyErr
+ }
+diff --git a/deploy/one-click/scripts/systemd/cube-egress-prepare.sh b/deploy/one-click/scripts/systemd/cube-egress-prepare.sh
+index c4c3f73..376c08a 100644
+--- a/deploy/one-click/scripts/systemd/cube-egress-prepare.sh
++++ b/deploy/one-click/scripts/systemd/cube-egress-prepare.sh
+@@ -203,12 +203,9 @@ chown "${WORKER_UID}:${WORKER_GID}" "${AUDIT_DIR}"
+ chmod 0755 "${AUDIT_DIR}"
+ log "audit dir ${AUDIT_DIR} ready (owner ${WORKER_UID}:${WORKER_GID})"
+ 
+-# Wait for Cubelet's embedded network runtime policy bootstrap endpoint before
+-# letting cube-egress start. cube-egress's lua/init_worker_phase fires
+-# CUBE_EGRESS_BOOTSTRAP_URL on worker-0 startup; if the Cubelet HTTP listener is
+-# not ready yet, bootstrap_status sticks at "pending" until the next retry tick.
+-# Block here to make the dependency hard.
++# Start the admin listener even while Cubelet is recovering old TAP state.
++# Recovery may need to DELETE egress policies before Cubelet can publish its
++# bootstrap endpoint. Waiting here creates a circular startup dependency.
++# The egress worker already retries bootstrap; postcheck verifies readiness.
+ CUBELET_BOOTSTRAP_URL="${CUBE_EGRESS_BOOTSTRAP_URL:-http://127.0.0.1:9998/v1/policies/dump}"
+-log "waiting for Cubelet network runtime bootstrap endpoint ${CUBELET_BOOTSTRAP_URL}"
+-wait_for_http "${CUBELET_BOOTSTRAP_URL}" 60 1 \
+-  || die "Cubelet network runtime bootstrap endpoint ${CUBELET_BOOTSTRAP_URL} not ready in 60s"
++log "Cubelet policy bootstrap ${CUBELET_BOOTSTRAP_URL} will be checked by the egress worker"
+diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
+index fd9616a..5556aa0 100644
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -71,6 +71,28 @@ struct MemorySnapshotFile {
+     external: bool,
+ }
+ 
++// Common study protocol for SSD snapshots (including block-backed snapshots).
++// WARM regular files on tmpfs must retain their pages. This deliberately does
++// not drop host-wide caches or touch unrelated files.
++fn discard_cold_snapshot_cache(file: &File) -> io::Result<()> {
++    if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() != Ok("1") {
++        return Ok(());
++    }
++    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
++    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } != 0 {
++        return Err(io::Error::last_os_error());
++    }
++    if file.metadata()?.is_file() && stat.f_type == libc::TMPFS_MAGIC {
++        return Ok(());
++    }
++    file.sync_all()?;
++    let result = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
++    if result != 0 {
++        return Err(io::Error::from_raw_os_error(result));
++    }
++    Ok(())
++}
++
+ impl MemorySnapshotFile {
+     fn from_snapshot_url(
+         snapshot_url: &str,
+@@ -454,6 +476,9 @@ pub enum Error {
+     /// Error opening snapshot file
+     SnapshotOpen(io::Error),
+ 
++    /// Snapshot cache preparation or retirement failed.
++    SnapshotCache(io::Error),
++
+     // Error copying snapshot into region
+     SnapshotCopy(GuestMemoryError),
+ 
+@@ -779,6 +804,8 @@ impl MemoryManager {
+             .open(file_path)
+             .map_err(Error::SnapshotOpen)?;
+ 
++        discard_cold_snapshot_cache(&memory_file).map_err(Error::SnapshotCache)?;
++
+         let guest_memory = self.guest_memory.memory();
+         for range in saved_regions.regions() {
+             let mut offset: u64 = 0;
+@@ -803,6 +830,7 @@ impl MemoryManager {
+             }
+         }
+ 
++        discard_cold_snapshot_cache(&memory_file).map_err(Error::SnapshotCache)?;
+         Ok(())
+     }
+ 
+@@ -1337,7 +1365,15 @@ impl MemoryManager {
+                 MemorySnapshotFile::from_snapshot_url(source_url, memory_vol_url)
+                     .map_err(Error::Restore)?;
+ 
+-            let fast_restore = Self::support_fast_restore_check(config);
++            // A tiered-memory study must detach restored RAM from the snapshot
++            // pool before retiring its accounting. MAP_PRIVATE alone retains
++            // the file and its NUMA policy, even after the pathname is unlinked.
++            // Opt in on the isolated study deployment; ordinary restores keep
++            // their existing lazy/COW behavior.
++            let private_copy = std::env::var("CUBE_RESTORE_PRIVATE_COPY")
++                .map(|value| value == "1")
++                .unwrap_or(false);
++            let fast_restore = Self::support_fast_restore_check(config) && !private_copy;
+             let memory_file = if fast_restore {
+                 info!("restore non-shared map, speed up restore by share map memory file");
+                 Some(
+@@ -3107,6 +3143,8 @@ impl Transportable for MemoryManager {
+                 // Move to next range.
+                 offset += range.length;
+             }
++            discard_cold_snapshot_cache(&memory_file)
++                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+             return Ok(());
+         }
+ 
+@@ -3128,6 +3166,10 @@ impl Transportable for MemoryManager {
+                 }
+             }
+         }
++        let memory_file = memory_file_target.open_read()
++            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++        discard_cold_snapshot_cache(&memory_file)
++            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+         Ok(())
+     }
+ }

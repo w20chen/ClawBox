@@ -1,5 +1,27 @@
 # Tiered oracle execution record
 
+## Continuation on 2026-09-08
+
+Physical gate `gates/tier-storage-private-copy-v5.json` passed on kunpeng with
+CubeSandbox `48b3268`. Guest RAM restored as anonymous NUMA0 memory charged to
+the LOCAL cgroup; WARM was separately charged on NUMA1. Both restores preserved
+process state. WARM checkpoint took about 2.07 s, WARM restore 1.30 s, spill
+2.23 s, and COLD restore 1.30 s. COLD cached pages were zero before restore.
+
+The subsequent c1 static-eager arm passed all 27 model steps (371.94 s,
+54 pauses/restores). The P90 tiered-time arm failed because filesystem tool
+admission incorrectly required a shell-command prediction. Its `read` request
+had no prediction and received HTTP 409. This caused the replay mismatch and
+incomplete-execution report; the Git nonzero exit was also present in the
+successful static arm and was not the cause. File tools now receive the
+configured static reservation, explicitly recorded as `filesystem_static`.
+Prediction/control tests passed (10 tests).
+
+The two-policy c4 gate is running at
+`raw-standalone/gate-tiered-policy-c4-v1`, with WARM limited to 5 GiB to exercise
+spill. Formal c40 coverage is still 0/13. The older physical-gate status below
+is superseded by v5.
+
 ## Latest verified gates, 2026-09-07 13:45 UTC
 
 The approved healthy request reference passed strict c1 and c4 replay on

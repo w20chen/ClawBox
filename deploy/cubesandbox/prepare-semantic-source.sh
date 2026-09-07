@@ -12,7 +12,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PATCH_FILE=${CUBE_ENDPOINT_PATCH:-$SCRIPT_DIR/semantic-tcp-endpoint.patch}
 HAIRPIN_PATCH_FILE=${CUBE_HAIRPIN_PATCH:-$SCRIPT_DIR/hostport-hairpin.patch}
 PROVENANCE_PATCH_FILE=${CUBE_PROVENANCE_PATCH:-$SCRIPT_DIR/template-image-provenance.patch}
-LIFECYCLE_TIMING_PATCH_FILE=${CUBE_LIFECYCLE_TIMING_PATCH:-$SCRIPT_DIR/lifecycle-phase-timing.patch}
+TIER_API_PATCH_FILE=$SCRIPT_DIR/tiered-memory-api.patch
+TIER_ISOLATION_PATCH_FILE=$SCRIPT_DIR/tiered-memory-isolation.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 
 require() {
@@ -23,7 +24,7 @@ require git
 [[ -f "$PATCH_FILE" ]] || { echo "missing endpoint patch: $PATCH_FILE" >&2; exit 1; }
 [[ -f "$HAIRPIN_PATCH_FILE" ]] || { echo "missing hairpin patch: $HAIRPIN_PATCH_FILE" >&2; exit 1; }
 [[ -f "$PROVENANCE_PATCH_FILE" ]] || { echo "missing provenance patch: $PROVENANCE_PATCH_FILE" >&2; exit 1; }
-[[ -f "$LIFECYCLE_TIMING_PATCH_FILE" ]] || { echo "missing lifecycle timing patch: $LIFECYCLE_TIMING_PATCH_FILE" >&2; exit 1; }
+[[ -f "$TIER_API_PATCH_FILE" && -f "$TIER_ISOLATION_PATCH_FILE" ]] || { echo "missing tiered memory patches" >&2; exit 1; }
 
 if [[ ! -d "$SOURCE_DIR/.git" ]]; then
   mkdir -p "$(dirname "$SOURCE_DIR")"
@@ -56,7 +57,8 @@ apply_once() {
 apply_once "$PATCH_FILE" "semantic endpoint"
 apply_once "$HAIRPIN_PATCH_FILE" "same-node HostPort hairpin"
 apply_once "$PROVENANCE_PATCH_FILE" "template image provenance"
-apply_once "$LIFECYCLE_TIMING_PATCH_FILE" "lifecycle phase timing"
+apply_once "$TIER_API_PATCH_FILE" "tiered snapshot API and lifecycle timing"
+apply_once "$TIER_ISOLATION_PATCH_FILE" "physical memory tier isolation"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$SOURCE_DIR"
