@@ -254,6 +254,21 @@ class CubeSandboxClient:
         if status not in {"ready", "succeeded", "success", "completed"}:
             raise RuntimeError(f"CubeSandbox template {reference!r} is not ready: {status}")
         image_info = str(getattr(info, "image_info", "") or "").strip()
+        if not image_info:
+            # CubeAPI v0.7.0's detail response can omit imageInfo even though
+            # the official list response carries CubeMaster's persisted
+            # source-image provenance. Require one exact template-ID match;
+            # absence or ambiguity still fails closed below.
+            lister = getattr(template_class, "list", None)
+            if callable(lister):
+                matches = [
+                    item for item in lister()
+                    if str(getattr(item, "template_id", "")).strip() == reference
+                ]
+                if len(matches) == 1:
+                    image_info = str(
+                        getattr(matches[0], "image_info", "") or ""
+                    ).strip()
         actual_digest = image_info.rsplit("@", 1)[-1] if "@" in image_info else ""
         if actual_digest != digest:
             raise RuntimeError(

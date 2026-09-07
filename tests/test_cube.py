@@ -242,6 +242,30 @@ def test_cube_client_accepts_ready_template_with_pinned_image() -> None:
     assert result["image_digest"] == digest
 
 
+def test_cube_client_uses_official_list_when_detail_omits_image_info() -> None:
+    digest = "sha256:" + "a" * 64
+
+    class Item:
+        template_id = "tpl-runtime"
+        image_info = "http://registry.example/clawbox/runtime@" + digest
+
+    class Template:
+        status = "READY"
+        image_info = ""
+
+        @classmethod
+        def get(cls, _reference: str):
+            return cls
+
+        @classmethod
+        def list(cls):
+            return [Item()]
+
+    client = CubeSandboxClient(sandbox_class=_Sandbox, template_class=Template)
+    result = client.validate_template_image("tpl-runtime", digest)
+    assert result["image_digest"] == digest
+
+
 def test_cube_client_bounds_a_stalled_command_stream() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox, command_stream_grace_s=0.01)
