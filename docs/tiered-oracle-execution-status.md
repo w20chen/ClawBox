@@ -70,12 +70,37 @@ configuration and verify the same effective SSH launcher, tool set, envelope
 and ClawTune instrumentation (20 driver tests passed on Kunpeng). This is
 source-level parity evidence, not an end-to-end live-LLM certification.
 
-r16 tests the original frozen trace with the unmodified healthy Tool setup.
-Strict request matching is still enabled; no blanket output exception or
-replacement trace has been introduced. Full c1/c4 and all 13 c40 runs remain
-required.
+r16 confirmed the incompatibility at model step 2: the live `read` operation
+returns the SQL source successfully, but the frozen request reference expects
+`python3: can't open file '/dev/fd/3'`. Strict matching correctly rejected that
+substantive difference. No blanket output exception or replacement trace has
+been introduced. Rebuilding the request-reference metadata on the healthy
+shared execution environment requires an explicit study-input decision; keep
+all original model responses, issued commands and recorded waits unchanged.
+
+r15's completed artifact validation reports exact join 1.0, telemetry loss 0,
+duplicate count 0, 132 native operations and 27 runtime-traced executions.
+Its live tool output includes `156 passed` and `ALL CHECKS PASSED` for the
+NamedTuple checks, but that does not make the incomplete replay a valid arm.
+Full c1/c4 and all 13 c40 runs remain required. Raw standalone attempts and gates
+are archived in `standalone-replay-through-r16.tar.gz` for local preservation.
 
 ## Latest authorized scope
+
+The user explicitly approved rebuilding only the request-reference metadata
+on the healthy Tool environment. The original trace remains unchanged.
+`scripts/rebuild-replay-reference.py prepare` makes a separate diagnostic input
+without request references, using the same recorded model responses and waits.
+The existing gateway records the actual requests but cannot certify strict
+completeness for that capture run. This is intentional: it is not a formal arm.
+`finalize` requires all responses delivered exactly once, verifies them against
+the originals, and replaces only request metadata. A subsequent strict c1 run
+on the resulting reference must pass independently before c4/formal use.
+
+The capture attempt is `raw-standalone/reference-capture-c1-v1`; its input and
+eventual output reference are in `workload/healthy-reference-v1`. The helper's
+regression verifies workload preservation, rejects changed responses, and
+refuses to overwrite an existing reference. It passed on Kunpeng.
 
 The user's later instructions supersede the original matrix sizes and repetitions:
 complete c1 replay and c1/c4 correctness and tier-transition gates, then run all
