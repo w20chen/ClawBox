@@ -107,7 +107,7 @@ digests and guest-kernel version match the experiment YAML. Tool must expose
 ports `49983` for readiness and `2222` for SSH. Template registration is shown
 in the [experiment guide](experiment-operations.md#2-install-clawbox-and-build-templates).
 
-## Validate c1, c4, and c8
+## Validate c1 and c4
 
 Run the same connectivity, identity, checkpoint, telemetry, and cleanup check
 at increasing sizes:
@@ -125,11 +125,6 @@ at increasing sizes:
   --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
   --count 4 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c4.json"
 
-.venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
-  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
-  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 8 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c8.json"
 ```
 
 A passing check must confirm all of the following:
@@ -142,7 +137,9 @@ A passing check must confirm all of the following:
 - cgroup and eBPF records join to the exact execution ID;
 - no owned VM remains after cleanup.
 
-Only continue to c20/c40/c60 after the smaller checks pass.
+For the tiered oracle study, continue to c40 only after these checks and the
+full replay, tier-transition, capacity, and placement gates pass. Run each of
+the 13 policies once; c8/c60 and extra repetitions are outside the agreed scope.
 
 ## Diagnose network failures
 

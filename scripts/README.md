@@ -19,7 +19,8 @@ still uses the single managed experiment Worker.
 | --- | --- |
 | `register-cube-template.py` | Build an immutable Runtime or Tool template, including per-VM writable-disk size. |
 | `audit-cube-sandboxes.py` | Read-only sandbox/template inventory before and after a run. |
-| `validate-cubesandbox-tcp-endpoints.py` | c1/c4/c8 native SSH identity, lifecycle, epoch, telemetry, and leak gate. |
+| `cube-host-doctor.py` | Read-only standalone host inventory with a new JSON evidence file. |
+| `validate-cubesandbox-tcp-endpoints.py` | c1/c4 native SSH identity, lifecycle, epoch, telemetry, and leak gate. |
 | `smoke-cubesandbox-agent-pair.py` | Lower-level Runtime/Tool pair smoke. |
 | `probe-cubesandbox-memory-reclaim.py` | Measure host physical-memory change around Cube pause/restore. |
 | `probe-cubesandbox-network-topology.py` | Diagnose Cube networking without changing the Worker endpoint contract. |

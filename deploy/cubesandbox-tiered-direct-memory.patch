@@ -873,48 +873,6 @@ index fcc8036..eabb5a6 100644
  CONFIG_JUMP_LABEL=y
  # CONFIG_STATIC_KEYS_SELFTEST is not set
  CONFIG_UPROBES=y
-diff --git a/deploy/kubernetes/chart/files/cube-master/conf.yaml b/deploy/kubernetes/chart/files/cube-master/conf.yaml
-index f9e87d0..7ff8758 100644
---- a/deploy/kubernetes/chart/files/cube-master/conf.yaml
-+++ b/deploy/kubernetes/chart/files/cube-master/conf.yaml
-@@ -81,6 +81,9 @@ scheduler:
-   priority_select_num: 1
-   metric_update_timeout: 300s
-   local_metric_update_timeout: 300s
-+  overcommit_ratio:
-+    cpu_ratio: 1.0
-+    mem_ratio: 1.0
-   filter:
-     enable_filters:
-       - "cpu"
-diff --git a/deploy/kubernetes/chart/templates/_helpers.tpl b/deploy/kubernetes/chart/templates/_helpers.tpl
-index a07491f..b9279db 100644
---- a/deploy/kubernetes/chart/templates/_helpers.tpl
-+++ b/deploy/kubernetes/chart/templates/_helpers.tpl
-@@ -920,6 +920,8 @@ Toolbox is mounted whole at the fixed path.
-   mountPath: /run/containerd
- - name: run-vc
-   mountPath: /run/vc
-+- name: s3lvol-socket
-+  mountPath: /var/run/s3lvol.sock
- - name: cube-pid
-   mountPath: /run/cube-node
- {{- end -}}
-diff --git a/deploy/kubernetes/chart/templates/node-daemonset.yaml b/deploy/kubernetes/chart/templates/node-daemonset.yaml
-index 268af16..5ef774f 100644
---- a/deploy/kubernetes/chart/templates/node-daemonset.yaml
-+++ b/deploy/kubernetes/chart/templates/node-daemonset.yaml
-@@ -334,6 +334,10 @@ spec:
-           hostPath:
-             path: {{ .Values.hostPaths.runVc }}
-             type: DirectoryOrCreate
-+        - name: s3lvol-socket
-+          hostPath:
-+            path: /var/run/s3lvol.sock
-+            type: Socket
-       {{- if .Values.volumeCos.enabled }}
-         - name: volume-cos-conf
-           secret:
 diff --git a/docker/Dockerfile.builder b/docker/Dockerfile.builder
 index dd6d0a6..18232d2 100644
 --- a/docker/Dockerfile.builder

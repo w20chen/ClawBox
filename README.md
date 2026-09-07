@@ -98,7 +98,7 @@ VMs. It refuses to overwrite a file unless `--force` is given. `describe`
 shows the number of VMs, configured memory, memory-pool size, overcommit ratio,
 selected policies, and number of experiment variants.
 
-Before a formal high-concurrency run, follow the c1/c4/c8 connectivity and
+Before a formal high-concurrency run, follow the c1/c4 connectivity and
 identity checks in the [CubeSandbox setup guide](docs/cubesandbox-setup.md).
 Resource totals and the c60 overcommit calculation are in the
 [baseline guide](docs/baselines.md#resource-example) and are also printed by
