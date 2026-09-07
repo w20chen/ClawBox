@@ -8,9 +8,11 @@ described in [experiment operations](../docs/experiment-operations.md) and
 
 - pinned semantic TCP endpoint, HostPort hairpin, template-provenance, and
   checkpoint phase-timing patches;
-- the Kunpeng CubeSandbox values overlay;
 - kprobe-capable guest-kernel metadata and configuration;
 - source preparation helpers.
+
+The old values overlay and CubeNode startup patch are historical Kubernetes
+assets and are not used by standalone source preparation or installation.
 
 Other root-level YAML, service, containerd, and RuntimeClass files are retained
 only to reproduce older Kubernetes/Kata experiments and tests. They are not a
