@@ -23,7 +23,7 @@ inference:
     repo_fingerprint: 15five/scim2-filter-parser
     openclaw_exec_yield_ms: 120000
 runtime:
-  template_id: tpl-ec97143fa76e409981055c2f
+  template_id: tpl-939b04959e4b4e0c9a6a55e9
   source_image_reference: 127.0.0.1:5000/clawbox/runtime-arm64@sha256:997bf0a73bf4205d2e41e734c26e8104206442e738246df9e5fe2535119ddaaa
   image_digest: sha256:f687b22f7ccf39ac81f30ac6bf1e47979837a3a95bb3e20e52c546e26dac8186
   architecture: arm64
@@ -32,7 +32,7 @@ runtime:
   workspace: /workspace
   allow_internet_access: false
 sandbox:
-  template_id: tpl-72f8a42d8fe746279d0bb80a
+  template_id: tpl-eba79451a7ea43a088ba1c17
   source_image_reference: 127.0.0.1:5000/clawbox/swe-rebench-arm64@sha256:f74f1cb744c70836966e9162deea8ae237b72547b34b4275855eb50d18cb7423
   image_digest: sha256:f0d65d4474aa97ca471062771bda8b0bdffa831e34b8536a522d56d4e0b7cc10
   architecture: arm64
