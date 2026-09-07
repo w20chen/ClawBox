@@ -372,7 +372,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
-        + "nohup /opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
+        + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
+        + "/opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
         + f"--host 127.0.0.1 --port 8765 >{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
         + f"echo $! >{shlex.quote(home + '/sidecar.pid')}", 30,
     )
@@ -515,6 +516,20 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
+    runtime_logs = {
+        "agent.stderr.log": agent_stderr_file,
+        "sidecar.log": home + "/logs/sidecar.log",
+    }
+    if checkpoint_relay:
+        runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
+    for local_name, remote_path in runtime_logs.items():
+        log_result = runtime_executor.execute(
+            prefix + f"cat {shlex.quote(remote_path)}", 30,
+        )
+        if log_result.exit_code == 0:
+            (host_home / local_name).write_text(
+                log_result.stdout, encoding="utf-8",
+            )
     runtime_executor.execute(
         prefix + f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
         + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi; "

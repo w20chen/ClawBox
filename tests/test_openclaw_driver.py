@@ -60,8 +60,9 @@ def test_native_ssh_route_requires_cube_mapped_port() -> None:
         )
 
 
+@pytest.mark.parametrize("replay_compatibility", [False, True])
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
-    monkeypatch, tmp_path: Path,
+    monkeypatch, tmp_path: Path, replay_compatibility: bool,
 ) -> None:
     commands = []
 
@@ -70,6 +71,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
             commands.append(command)
             if " agent " in command:
                 return CommandResult(0, '{"ok":true}\n', "", 0.1)
+            if "cat /state/openclaw/session-a/logs/sidecar.log" in command:
+                return CommandResult(0, "sidecar evidence\n", "", 0.01)
             return CommandResult(0, "", "", 0.01)
 
     monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
@@ -85,6 +88,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         ),
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=60,
+        replay_compatibility=replay_compatibility,
     )
     patch_command = next(command for command in commands if "config patch" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
@@ -105,10 +109,14 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
+    assert "XDG_CACHE_HOME=/opt/clawtune/cache" in commands[0]
     assert "/bin/ssh" in "\n".join(commands)
-    assert config["agents"]["defaults"]["sandbox"]["ssh"]["command"].endswith(
-        "/bin/ssh"
-    )
+    if replay_compatibility:
+        # Recorded config uses PATH lookup, resolving to the same launcher.
+        assert "command" not in sandbox["ssh"]
+        assert "PATH=/state/openclaw/session-a/bin:$PATH" in patch_command
+    else:
+        assert sandbox["ssh"]["command"] == "/state/openclaw/session-a/bin/ssh"
     assert "exec /usr/local/bin/ssh" in base64.b64decode(
         re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", commands[0])[2]
     ).decode()
@@ -117,6 +125,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "exec " in agent_command
     assert result["tool_calls"] == 1
     assert result["tool_latencies"] == [0.25]
+    assert (tmp_path / "openclaw/session-a/sidecar.log").read_text() == (
+        "sidecar evidence\n"
+    )
 
 
 def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
@@ -233,6 +244,11 @@ def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:
     restart = native_tool_bridge_setup_command(restart=True)
     assert "pkill -x tool-bridge" in restart
     assert "guest-collector.sock" in restart
+
+
+def test_native_tool_bridge_setup_only_removes_dev_fd_for_replay() -> None:
+    assert "rm -f /dev/fd" not in native_tool_bridge_setup_command()
+    assert "rm -f /dev/fd" not in native_tool_bridge_setup_command(restart=True)
 
 
 def test_native_ssh_target_rejects_malformed_explicit_port() -> None:

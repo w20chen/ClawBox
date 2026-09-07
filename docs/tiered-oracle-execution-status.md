@@ -55,8 +55,25 @@ r14 also preserved artifact stdout truncated at exactly 4,194,304 bytes.
 The collector now compresses each framed artifact for transport, preserving
 the decompressed bytes and end-marker validation. Its >4 MiB payload regression
 passed on Kunpeng; a full live collection with that fix remains to be verified.
-r15 is running with these two fixes. Gateway/native-artifact regressions passed
-on Kunpeng (24 tests). Full c1/c4 and all 13 c40 runs remain required.
+r15 accepted 25 of 27 model steps. Its next mismatch was the template-specific
+hostname in Git's missing-author-identity error. Compressed Tool artifact
+collection completed, removing the 4 MiB truncation obstruction.
+
+The user's subsequent priority is equality of the live-inference and replay
+Tool execution environments, not reproducing incidental recording defects.
+An earlier uncommitted replay-only workaround removed `/dev/fd` to recreate
+the recorded read/edit failures. That workaround is now removed from source
+and the remote deployment; r15 and earlier attempts using it are diagnostic,
+not valid final parity gates. `native_tool_bridge_setup_command()` is again
+independent of inference mode. Tests exercise both replay and live driver
+configuration and verify the same effective SSH launcher, tool set, envelope
+and ClawTune instrumentation (20 driver tests passed on Kunpeng). This is
+source-level parity evidence, not an end-to-end live-LLM certification.
+
+r16 tests the original frozen trace with the unmodified healthy Tool setup.
+Strict request matching is still enabled; no blanket output exception or
+replacement trace has been introduced. Full c1/c4 and all 13 c40 runs remain
+required.
 
 ## Latest authorized scope
 
