@@ -23,7 +23,7 @@ of a real CXL/UB fabric or a complete multi-host simulator.
 
 ## Capacity and measurements
 
-The proposed formal configuration is LOCAL 64 GiB and WARM 64 GiB. The 8 GiB
+The current formal configuration is LOCAL 160 GiB and WARM 64 GiB. The 8 GiB
 checkpoint/restore headroom is **inside**, not additional to, LOCAL. The
 standalone VM cgroup enforces LOCAL and includes its charged guest RAM, VM
 overhead, and retained file cache. Admission uses absolute cgroup usage, not
@@ -33,6 +33,23 @@ Cubelet preallocates WARM tmpfs pages outside the LOCAL cgroup before the VM
 writes them. The mount binds those pages to NUMA1; its size limit and the
 snapshot reservation/commit ledger bound WARM. Backend-service overhead must
 be reported separately rather than described as guest RAM or pool payload.
+
+The September 8 full-trace configuration supersedes the 64 GiB prefix pilot.
+Each agent has a 2 GiB Runtime VM and a 4 GiB Tool VM. The successful c4
+resident/no-eviction gate peaked at 26.65 GiB LOCAL for four pairs, or about
+6.66 GiB per pair including charged overhead and cache. Linear extrapolation
+suggests about 267 GiB for 40 pairs; it is a sizing estimate, not a c40 result.
+160 GiB leaves meaningful pressure (240 GiB provisioned guest RAM alone) while
+allowing roughly two resident waves after headroom, targeting approximately
+20–30 minutes based on the 8.8-minute c4 trace time. Contention and transitions
+can make runs longer. A 3600-second safety deadline avoids censoring at the
+30-minute target; incomplete arms remain explicitly invalid comparisons.
+
+All 13 policies use identical LOCAL capacity, CPU/NUMA placement, guest sizes,
+full 27-round trace and original timing. No per-policy capacity tuning is used.
+The two tiered policies retain 64 GiB WARM; the capacity-confounding limitation
+below still applies. Earlier 64 GiB runs are pilot evidence, not mixed into
+the new comparison.
 
 Gate evidence must establish correct guest state, NUMA placement, released
 snapshot backing, separate page charging, capacity conservation, and serialized

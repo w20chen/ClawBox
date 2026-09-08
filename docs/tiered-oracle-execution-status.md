@@ -1,5 +1,42 @@
 # Tiered oracle execution record
 
+## Full-trace resource revision, 2026-09-08
+
+The user requested the full trace and a larger fair LOCAL budget. The active
+64 GiB prefix pilot v4 was stopped intentionally and its owned VMs cleaned;
+its evidence is retained, not considered a completed formal arm. It had
+advanced tools across sessions after the admission and machine repairs.
+
+The new matrix uses 160 GiB LOCAL/NUMA0, unchanged 64 GiB WARM/NUMA1 for the
+two tiered policies, unchanged 2+4 GiB VM pairs, all 27 original trace rows,
+and unchanged replay timing. There is no synthetic stop. Sizing rationale is
+in `tiered-memory-simulation.md`: c4 measured 26.65 GiB, so 160 GiB retains
+pressure at c40 while aiming for roughly two resident waves. The deadline is
+3600 seconds per arm; around 30 minutes is an estimate, not a measured result.
+The planned output is `full-c40-160g-20260908-v1` under the existing study root.
+
+## Post-reboot recovery, 2026-09-08 06:03 UTC
+
+The v2 and v3 attempts were stopped as infrastructure-invalid. The host had
+rebooted after a fatal PCIe hardware error at 05:12 UTC (recorded in the crash
+kernel log). The reboot removed the temporary LOCAL cgroup limit and WARM
+mount. Restoring those settings exposed a second blocker: a new 269 GiB crash
+dump had raised disk usage above CubeMaster's scheduling threshold, causing
+VM creation to return `no more resource` despite abundant RAM.
+
+Only `/var/crash/127.0.0.1-2026-09-08-05:12:52/vmcore` was deleted, under the
+user's crash-dump cleanup authorization; the diagnostic `vmcore-dmesg.txt`
+was preserved. Disk usage fell to 82%, with 559 GiB free. A direct Tool VM
+creation and owned cleanup then passed. This hardware failure is distinct
+from the source admission deadlock documented below.
+
+The corrected matrix restarted as `short-c40-20260908-v4`, using source
+`d978839` plus the runner's LOCAL/WARM preflight checks. Its supervisor log is
+`/home/weitianc/clawbox-tiered-study-20260907/short-c40-v4-supervisor.log`.
+The 23-round, c40, 13-policy workload and 1800-second arm limit are unchanged.
+The earlier v2 launch description below is historical, not an active run.
+No successful c40 comparison is certified by this restart.
+
 ## c40 continuation, 2026-09-08 05:46 UTC
 
 Both c4 arms passed (4/4 sessions each, validation passed, exact telemetry joins

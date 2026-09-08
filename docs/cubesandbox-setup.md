@@ -184,3 +184,50 @@ diagnostic changes after the test.
 
 After a host reboot, repeat service health, template provenance, c1, and
 pause/restore checks before starting a large experiment.
+
+## Detached, bounded tiered study
+
+The current comparison uses the **full trace and 160 GiB LOCAL**. Run setup
+with `sudo env CLAWBOX_LOCAL_MIB=163840 bash scripts/setup-tiered-memory.sh
+WARM_ROOT COLD_ROOT USER`, then use `--full-trace --arm-seconds 3600` in the
+launch command below instead of `--steps 23 --arm-seconds 1800`. The larger
+deadline is a safety limit; approximately 30 minutes is a planning target.
+The prefix command below remains available for explicitly labeled pilots.
+
+On an installed machine, with no experiment VMs running, restore the temporary
+NUMA settings after every reboot:
+
+```bash
+sudo bash scripts/setup-tiered-memory.sh \
+  /data/cubelet/clawbox-tiered-20260907/warm \
+  /data/cubelet/clawbox-tiered-20260907/cold "$USER"
+df -h /data/cubelet
+```
+
+CubeMaster can reject creation with `no more resource` when disk usage crosses
+its scheduling threshold even if RAM is available. Check disk space and node
+health before changing memory or admission settings. Preserve crash diagnostic
+logs; remove a large crash dump only when its loss is acceptable.
+
+After the required gates, load `machine.env` as above and launch from the repo:
+
+```bash
+nohup .venv/bin/python scripts/run-short-tiered-study.py \
+  --spec examples/experiments/tiered-oracle-rec-a-c40.yaml \
+  --steps 23 --arm-seconds 1800 \
+  --output /data/clawbox-study/short-c40-run1 \
+  > short-c40-supervisor.log 2>&1 < /dev/null &
+```
+
+Adapt the example YAML's machine paths, templates, node address, and source
+trace before running on another machine. Use a fresh output directory.
+The runner checks LOCAL and WARM configuration, executes all 13 policies
+sequentially at c40, cleans up between policies, and updates `summary.json`
+and `report.md` after each arm. Raw logs remain under the output directory.
+No agent polling is needed. Inspect `tail short-c40-supervisor.log` for progress.
+
+The 30-minute cap is per baseline, plus cleanup, not the whole matrix; timeout
+results are incomplete evidence, not successful comparisons. Rounds 1–23
+retain exploration, edits, and the successful pytest invocation. A labeled
+synthetic stop follows them. This is a prefix experiment, not full coding-task
+completion, and retaining those rounds does not guarantee completion in 30 minutes.

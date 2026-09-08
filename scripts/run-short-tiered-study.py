@@ -28,6 +28,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--spec', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--steps', type=int, default=23)
+parser.add_argument('--full-trace', action='store_true', help='Replay every original row without a synthetic boundary')
 parser.add_argument('--arm-seconds', type=int, default=1800)
 args = parser.parse_args()
 if args.steps < 1 or args.arm_seconds < 1:
@@ -70,28 +71,41 @@ def recover_partial(run_directory):
             {'pause_count': pauses, 'resume_count': restores}, memory)
 
 spec = yaml.safe_load(args.spec.read_text())
+resources = spec['resources']
+local_group = Path(resources['local_memory_cgroup'])
+expected_limit = resources['local_memory_capacity_mib'] * 1024**2
+if (local_group / 'memory.max').read_text().strip() != str(expected_limit):
+    parser.error('LOCAL limit is not configured; run scripts/setup-tiered-memory.sh first')
+warm_type = subprocess.check_output([
+    'findmnt', '-n', '-o', 'FSTYPE', '--target', resources['warm_snapshot_root']], text=True).strip()
+if warm_type != 'tmpfs':
+    parser.error('WARM tmpfs is not mounted; run scripts/setup-tiered-memory.sh first')
 source = Path(spec['workload']['input'])
 records = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
 if not all(r.get('type') == 'action' and r.get('action_type') == 'llm_call' for r in records):
     parser.error('this helper requires an action-format trace containing only llm_call records')
-if args.steps >= len(records):
+if not args.full_trace and args.steps >= len(records):
     parser.error('steps must leave a next recorded request for the explicit stop boundary')
 
 root = args.output.resolve()
 root.mkdir(parents=True)
 (root / 'arms').mkdir()
 (root / 'plans').mkdir()
-prefix = copy.deepcopy(records[:args.steps + 1])
-stop = prefix[-1]
-stop['data']['raw_response'] = {
-    'content': 'Replay workload prefix finished at the configured experiment boundary.',
-    'tool_calls': [],
-}
-stop['data']['llm_latency_ms'] = 0
-stop['ts_end'] = stop['ts_start']
-stop['data']['clawbox_synthetic_boundary'] = True
-trace = root / 'replay-prefix.jsonl'
-trace.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in prefix))
+if args.full_trace:
+    trace = root / 'replay-full.jsonl'
+    shutil.copyfile(source, trace)
+else:
+    prefix = copy.deepcopy(records[:args.steps + 1])
+    stop = prefix[-1]
+    stop['data']['raw_response'] = {
+        'content': 'Replay workload prefix finished at the configured experiment boundary.',
+        'tool_calls': [],
+    }
+    stop['data']['llm_latency_ms'] = 0
+    stop['ts_end'] = stop['ts_start']
+    stop['data']['clawbox_synthetic_boundary'] = True
+    trace = root / 'replay-prefix.jsonl'
+    trace.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in prefix))
 spec['workload']['input'] = str(trace)
 for case in spec['workload']['cases']:
     case['replay_trace_reference'] = str(trace)
@@ -102,9 +116,11 @@ policies = list(spec['policies'])
 random.Random(spec['execution'].get('random_seed', 20260907)).shuffle(policies)
 provenance = {
     'source_trace': str(source), 'original_model_steps': len(records),
-    'recorded_tool_rounds': args.steps, 'synthetic_stop_responses': 1,
+    'recorded_tool_rounds': len(records) if args.full_trace else args.steps,
+    'synthetic_stop_responses': 0 if args.full_trace else 1,
     'synthetic_stop_latency_seconds': 0,
-    'interpretation': 'prefix execution and regression validation, not original task completion',
+    'interpretation': ('full recorded trace and regression validation' if args.full_trace else
+                       'prefix execution and regression validation, not original task completion'),
     'concurrency': 40, 'per_arm_wall_seconds': args.arm_seconds,
     'policy_order': [p['name'] for p in policies],
 }
@@ -120,7 +136,7 @@ for index, policy in enumerate(policies):
     plan = root / 'plans' / f'{index:02d}.yaml'
     plan.write_text(yaml.safe_dump(arm_spec, sort_keys=False))
     environment = dict(os.environ, CLAWBOX_OUTPUT_ROOT=str(root / 'runs'), PYTHONUNBUFFERED='1')
-    log(f'Starting {index + 1}/{len(policies)}: {policy["name"]}, c40, {args.steps} recorded rounds')
+    log(f'Starting {index + 1}/{len(policies)}: {policy["name"]}, c40, {provenance["recorded_tool_rounds"]} recorded rounds')
     started = stamp()
     timed_out = False
     with (root / f'{index:02d}.log').open('w') as output:
@@ -132,7 +148,7 @@ for index, policy in enumerate(policies):
             code = process.wait(timeout=args.arm_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            log(f'{policy["name"]}: 30-minute limit reached; stopping worker and cleaning its VMs')
+            log(f'{policy["name"]}: {args.arm_seconds}-second limit reached; stopping worker and cleaning its VMs')
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=10)

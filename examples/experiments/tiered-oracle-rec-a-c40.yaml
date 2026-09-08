@@ -50,14 +50,14 @@ execution:
   stabilization_seconds: 1
 resources:
   target_node: 193.124.7.2
-  pool_memory_budget_mib: 65536
+  pool_memory_budget_mib: 163840
   emergency_free_memory_mib: 8192
   checkpoint_restore_headroom_mib: 8192
   static_tool_memory_mib: 512
   full_tool_memory_mib: 4096
   p90_predictions: examples/predictions/rec-a-independent-p90.json
   oracle_measurements: examples/predictions/rec-a-heldout-oracle.json
-  local_memory_capacity_mib: 65536
+  local_memory_capacity_mib: 163840
   warm_memory_capacity_mib: 65536
   warm_snapshot_root: /data/cubelet/clawbox-tiered-20260907/warm
   cold_snapshot_root: /data/cubelet/clawbox-tiered-20260907/cold
