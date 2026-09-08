@@ -88,6 +88,7 @@ def test_replay_request_mismatch_poison_session(tmp_path: Path) -> None:
         })
     verdict = gateway.replay_completeness()
     assert verdict["replay_failure"] == "canonical_request_mismatch"
+    assert verdict["canonical_request_matches"] is False
     assert verdict["complete"] is False
 
 

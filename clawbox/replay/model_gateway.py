@@ -433,7 +433,7 @@ class ModelGateway:
             "replay_entries_consumed_exactly_once": (
                 self.mode != "replay" or consumed == expected_indices
             ),
-            "canonical_request_matches": not failed_matches,
+            "canonical_request_matches": not failed_matches and self._replay_failure is None,
             "replay_failure": self._replay_failure,
             "required_responses_delivered": not incomplete,
             "retry_http_attempts": sum(
