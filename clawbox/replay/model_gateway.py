@@ -10,7 +10,7 @@ import re
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +19,7 @@ from typing import Any, Callable
 import httpx
 
 from .trace import ReplayAction, load_trace
+from .process_sessions import bind_process_sessions, rebind_process_sessions
 
 
 @dataclass(slots=True)
@@ -48,6 +49,7 @@ class GatewayRequest:
     delivery_failures: int = 0
     delivered: bool = False
     production_attempts: int = 0
+    replay_process_sessions: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 class ModelGateway:
@@ -84,6 +86,7 @@ class ModelGateway:
         self._requests: dict[str, GatewayRequest] = {}
         self._replay_failure: str | None = None
         self._checkpoint_retry_messages: set[str] = set()
+        self._process_sessions: dict[str, dict[str, str]] = {}
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
         self._server: ThreadingHTTPServer | None = None
@@ -160,7 +163,9 @@ class ModelGateway:
     ) -> None:
         """Persist fail-closed replay evidence, including trace exhaustion."""
         actual_identity = _canonical_replay_input(actual)
-        expected_identity = _canonical_replay_input(expected)
+        expected_identity = _canonical_replay_input(
+            rebind_process_sessions(expected, self._process_sessions)
+        )
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         rejection = self.store_path.with_name(
             f"{self.store_path.stem}.rejected-request-{index:04d}.json"
@@ -177,6 +182,7 @@ class ModelGateway:
             ),
             "model_step": index,
             "reason": reason,
+            "replay_process_sessions": self._process_sessions,
         }, sort_keys=True))
         temporary.replace(rejection)
 
@@ -238,7 +244,20 @@ class ModelGateway:
                     else:
                         actual_input = None
                     if actual_input is not None:
-                        expected_identity = _canonical_replay_input(expected)
+                        try:
+                            self._process_sessions = bind_process_sessions(
+                                expected, actual_input, self._process_sessions,
+                            )
+                        except ValueError:
+                            self._replay_failure = "process_session_identity_mismatch"
+                            self._persist_replay_rejection(
+                                index=index, actual=actual_input, expected=expected,
+                                reason=self._replay_failure,
+                            )
+                            raise
+                        expected_identity = _canonical_replay_input(
+                            rebind_process_sessions(expected, self._process_sessions)
+                        )
                         actual_identity = _canonical_replay_input(actual_input)
                         if self._checkpoint_retry_messages:
                             actual_identity = _collapse_checkpoint_retry_messages(
@@ -250,6 +269,8 @@ class ModelGateway:
                             if self._checkpoint_retry_messages
                             else "volatile_fields_v1"
                         )
+                        if self._process_sessions:
+                            replay_input_match_mode += "+process_session_bindings"
                         replay_input_expected_sha256 = _canonical_sha256(expected_identity)
                         replay_input_actual_sha256 = _canonical_sha256(actual_identity)
                     if replay_input_match is False:
@@ -272,6 +293,7 @@ class ModelGateway:
                     replay_input_match_mode=replay_input_match_mode,
                     replay_input_expected_sha256=replay_input_expected_sha256,
                     replay_input_actual_sha256=replay_input_actual_sha256,
+                    replay_process_sessions=dict(self._process_sessions),
                 )
                 self._requests[request_id] = request
                 self._persist()
@@ -471,6 +493,9 @@ class ModelGateway:
                 request = self._requests[request_id]
                 assert request.replay_index is not None
                 action = self.actions[request.replay_index]
+                action = replace(action, output=rebind_process_sessions(
+                    action.output, request.replay_process_sessions,
+                ))
                 time.sleep(action.duration_s * self.time_scale)
                 status, content_type, body = _replay_response(action, bool(payload.get("stream")))
             else:

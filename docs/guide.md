@@ -313,6 +313,13 @@ live recording and replay; filesystem transfers keep separate channels. Older
 recordings can contain channel-order differences and are not rewritten to hide
 them. Record a new live run when validating this execution setup.
 
+OpenClaw generates new handles for background processes on each run. Replay
+matches the tool call that created each handle and uses the current handle in
+subsequent recorded model responses, so OpenClaw can poll or cancel the real
+process. The gateway records these bindings in `replay_process_sessions`;
+the source trace is unchanged. This does not substitute tool results or ignore
+changes in their content.
+
 A successful comparison needs all sessions requested by the arm to finish and
 pass task validation. For managed replay, also check complete request matching,
 exact execution-ID joins, telemetry loss, duplicate execution, and leaked VMs.
