@@ -174,6 +174,14 @@ def test_replay_normalizes_python_temporary_names_without_hiding_errors():
     assert _canonical_replay_input("/tmp/project-a") != _canonical_replay_input("/tmp/project-b")
 
 
+def test_replay_normalizes_object_addresses_but_not_values_or_error_types():
+    expected = "<pip._vendor.urllib3.connection.HTTPSConnection object at 0xffffa04ece50>: DNS failed"
+    actual = expected.replace("0xffffa04ece50", "0xffffb37f4b20")
+    assert _canonical_replay_input(expected) == _canonical_replay_input(actual)
+    assert _canonical_replay_input(expected) != _canonical_replay_input(actual.replace("DNS failed", "connection refused"))
+    assert _canonical_replay_input("value=0x1234") != _canonical_replay_input("value=0x5678")
+
+
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(
     tmp_path: Path,
 ) -> None:

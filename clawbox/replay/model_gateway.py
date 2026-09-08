@@ -573,6 +573,7 @@ _LS_LONG_ENTRY_RE = re.compile(
 )
 _SEARCH_RESULT_LINE_RE = re.compile(r"^(?:\./)?[^:\s]+/[^:\n]+:\d+:")
 _PYTHON_TEMP_DIRECTORY_RE = re.compile(r"/tmp/tmp[a-z0-9_]{8}(?=[/'\"\s]|$)")
+_PYTHON_OBJECT_ADDRESS_RE = re.compile(r"(<[\w.]+ object at )0x[0-9a-fA-F]+(>)")
 
 
 def _canonicalize_ls_long_entry(match: re.Match[str]) -> str:
@@ -621,6 +622,7 @@ def _canonical_replay_text(value: str) -> str:
     value = _GENERATED_DIRECTORY_MTIME_RE.sub(r"\1REPLAY-MTIME \2", value)
     value = _PYTEST_TIME_RE.sub(r"\1N.NNs", value)
     value = _PYTHON_TEMP_DIRECTORY_RE.sub("/tmp/PYTHON-TEMP", value)
+    value = _PYTHON_OBJECT_ADDRESS_RE.sub(r"\1ADDRESS\2", value)
     value = _GIT_COMMIT_HEADER_RE.sub(r"\1COMMIT\2", value)
     value = _GIT_LOG_HEAD_RE.sub("COMMIT", value)
     return _canonicalize_search_result_order(value)

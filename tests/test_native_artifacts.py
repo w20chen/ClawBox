@@ -217,6 +217,39 @@ def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
         )
 
 
+def test_native_tool_join_reports_preflight_rejections_without_inventing_telemetry():
+    execution_id = "exec-1"
+    bridge, cgroup, clause = _artifacts(execution_id, "digest")
+    executed = {"session_id": "session-a", "execution": {"execution_id": execution_id}}
+    rejected = {
+        "name": "exec", "session_id": "session-a",
+        "execution": {"execution_id": "exec-rejected"},
+        "output": {"result": {"details": {
+            "status": "error", "error": "exec preflight: complex interpreter invocation",
+        }}},
+    }
+
+    def validate(spans):
+        return validate_native_tool_join(
+            bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause},
+            policy_records=_policy(execution_id, "digest"),
+            runtime_span_records=spans, expected_session_id="session-a",
+        )
+
+    verdict = validate([executed, rejected, {**rejected, "status": {"code": "ok"}}])
+    assert verdict["preflight_rejected_execution_ids"] == ["exec-rejected"]
+    assert verdict["preflight_rejected_execution_count"] == 1
+    assert verdict["runtime_trace_execution_count"] == 1
+    assert verdict["exact_id_join_rate"] == 1
+    for altered in (
+        {**rejected, "output": {"result": {"details": {"status": "error", "error": "SSH failed"}}}},
+        {**rejected, "execution": {"execution_id": "exec-rejected", "payload_pid": 123}},
+    ):
+        with pytest.raises(ValueError, match="Runtime trace identity mismatch"):
+            validate([executed, altered])
+
+
 def test_native_tool_join_allows_explicit_runtime_trace_exemption() -> None:
     execution_id = "exec-fs"
     digest = hashlib.sha256(b"read file").hexdigest()

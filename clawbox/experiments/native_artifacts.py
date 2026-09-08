@@ -312,6 +312,19 @@ def _validate_clause(payload: dict[str, Any], execution_id: str) -> None:
         raise ValueError(f"{execution_id}: clause telemetry is not eligible for KB")
 
 
+def _is_preflight_rejection(span: dict[str, Any]) -> bool:
+    details = ((span.get("output") or {}).get("result") or {}).get("details")
+    execution = span.get("execution") or {}
+    return (
+        span.get("name") == "exec"
+        and isinstance(details, dict)
+        and details.get("status") == "error"
+        and str(details.get("error") or "").startswith("exec preflight:")
+        and not execution.get("payload_pid")
+        and not execution.get("cgroup_path")
+    )
+
+
 def validate_native_tool_join(
     *, bridge_records: list[dict[str, Any]],
     cgroup_artifacts: dict[str, dict[str, Any]],
@@ -347,6 +360,7 @@ def validate_native_tool_join(
         raise ValueError("native Tool join contains no completed policy executions")
 
     runtime_by_id: dict[str, list[dict[str, Any]]] = {}
+    preflight_rejected: list[str] = []
     if runtime_span_records is not None:
         for span in runtime_span_records:
             if (expected_session_id is not None
@@ -360,6 +374,15 @@ def validate_native_tool_join(
                 execution.get("execution_id") if isinstance(execution, dict) else ""
             )
             runtime_by_id.setdefault(execution_id, []).append(span)
+        # OpenClaw assigns an ID before its exec preflight. A rejected call
+        # never reaches SSH admission or the Tool VM, so it has no eBPF span.
+        # Keep the native records and report these attempts separately.
+        for execution_id, spans in list(runtime_by_id.items()):
+            if execution_id in expected:
+                continue
+            if all(_is_preflight_rejection(span) for span in spans):
+                preflight_rejected.append(execution_id)
+                del runtime_by_id[execution_id]
         trace_expected = {
             execution_id for execution_id, request in expected.items()
             if request.get("runtime_trace_expected", True) is not False
@@ -420,6 +443,8 @@ def validate_native_tool_join(
         "valid": True,
         "expected_execution_ids": sorted(expected),
         "policy_execution_count": len(expected),
+        "preflight_rejected_execution_ids": sorted(preflight_rejected),
+        "preflight_rejected_execution_count": len(preflight_rejected),
         "runtime_envelope_execution_count": len(runtime_records),
         "runtime_trace_execution_count": (
             len(runtime_by_id) if runtime_span_records is not None else None
