@@ -19,8 +19,13 @@ def _load_clawtune():
         "/opt/clawtune/services/sidecar/src",
     ]
     for candidate in candidates:
-        if candidate and Path(candidate).is_dir() and candidate not in sys.path:
+        if candidate and Path(candidate).is_dir():
+            # Select one source in declared priority order. Prepending every
+            # candidate reverses priority and silently overrides explicit config.
+            if candidate in sys.path:
+                sys.path.remove(candidate)
             sys.path.insert(0, candidate)
+            break
     from tool_resource.runtime_kb import CompletedCall, RuntimeToolResourceKB, ToolCallQuery
     return CompletedCall, RuntimeToolResourceKB, ToolCallQuery
 

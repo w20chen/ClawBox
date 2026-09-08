@@ -1,0 +1,2 @@
+arm_id,policy,concurrency,repetition,status,duration_seconds
+9963b78483ea913a73e0e6cb,tool-static-resident,1,0,failed,37.76985294399992

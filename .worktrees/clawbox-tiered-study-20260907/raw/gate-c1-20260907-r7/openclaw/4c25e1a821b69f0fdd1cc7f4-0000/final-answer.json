@@ -1,0 +1,283 @@
+{
+  "payloads": [
+    {
+      "text": "LLM request failed.",
+      "mediaUrl": null
+    }
+  ],
+  "meta": {
+    "durationMs": 25140,
+    "agentMeta": {
+      "sessionId": "4c25e1a821b69f0fdd1cc7f4-0000",
+      "sessionFile": "/state/openclaw/4c25e1a821b69f0fdd1cc7f4-0000/.openclaw/.openclaw/agents/main/sessions/4c25e1a821b69f0fdd1cc7f4-0000.jsonl",
+      "provider": "vllm",
+      "model": "experiment-model",
+      "contextTokens": 128000,
+      "agentHarnessId": "openclaw",
+      "contextBudgetStatus": {
+        "schemaVersion": 1,
+        "source": "pre-prompt-estimate",
+        "updatedAt": 1788752628371,
+        "provider": "vllm",
+        "model": "experiment-model",
+        "route": "fits",
+        "shouldCompact": false,
+        "estimatedPromptTokens": 8386,
+        "contextTokenBudget": 128000,
+        "promptBudgetBeforeReserve": 108000,
+        "reserveTokens": 20000,
+        "effectiveReserveTokens": 20000,
+        "remainingPromptBudgetTokens": 99614,
+        "overflowTokens": 0,
+        "toolResultReducibleChars": 0,
+        "messageCount": 0,
+        "unwindowedMessageCount": 0,
+        "sessionId": "4c25e1a821b69f0fdd1cc7f4-0000"
+      }
+    },
+    "aborted": false,
+    "systemPromptReport": {
+      "source": "run",
+      "generatedAt": 1788752628247,
+      "sessionId": "4c25e1a821b69f0fdd1cc7f4-0000",
+      "sessionKey": "agent:main:explicit:4c25e1a821b69f0fdd1cc7f4-0000",
+      "provider": "vllm",
+      "model": "experiment-model",
+      "workspaceDir": "/workspace",
+      "bootstrapMaxChars": 20000,
+      "bootstrapTotalMaxChars": 60000,
+      "bootstrapTruncation": {
+        "warningMode": "always",
+        "warningShown": false,
+        "truncatedFiles": 0,
+        "nearLimitFiles": 0,
+        "totalNearLimit": false
+      },
+      "sandbox": {
+        "mode": "all",
+        "sandboxed": true
+      },
+      "systemPrompt": {
+        "chars": 27489,
+        "hash": "461a9e33434ae33bbc01621227fd7dfe067d83e12339edbff1b4ce27f8a71c5a",
+        "projectContextChars": 13348,
+        "nonProjectContextChars": 14141
+      },
+      "injectedWorkspaceFiles": [
+        {
+          "name": "AGENTS.md",
+          "path": "/workspace/AGENTS.md",
+          "missing": false,
+          "rawChars": 7195,
+          "injectedChars": 7195,
+          "truncated": false
+        },
+        {
+          "name": "SOUL.md",
+          "path": "/workspace/SOUL.md",
+          "missing": false,
+          "rawChars": 1509,
+          "injectedChars": 1509,
+          "truncated": false
+        },
+        {
+          "name": "TOOLS.md",
+          "path": "/workspace/TOOLS.md",
+          "missing": false,
+          "rawChars": 866,
+          "injectedChars": 866,
+          "truncated": false
+        },
+        {
+          "name": "IDENTITY.md",
+          "path": "/workspace/IDENTITY.md",
+          "missing": false,
+          "rawChars": 1275,
+          "injectedChars": 1275,
+          "truncated": false
+        },
+        {
+          "name": "USER.md",
+          "path": "/workspace/USER.md",
+          "missing": false,
+          "rawChars": 534,
+          "injectedChars": 534,
+          "truncated": false
+        },
+        {
+          "name": "HEARTBEAT.md",
+          "path": "/workspace/HEARTBEAT.md",
+          "missing": false,
+          "rawChars": 243,
+          "injectedChars": 243,
+          "truncated": false
+        },
+        {
+          "name": "BOOTSTRAP.md",
+          "path": "/workspace/BOOTSTRAP.md",
+          "missing": false,
+          "rawChars": 1668,
+          "injectedChars": 1668,
+          "truncated": false
+        }
+      ],
+      "skills": {
+        "promptChars": 5281,
+        "hash": "4d88e7ca0f92b3b16ba84fc13ac7d74aacafa76d98f01bede63665ece0275351",
+        "entries": [
+          {
+            "name": "browser-automation",
+            "blockChars": 386
+          },
+          {
+            "name": "canvas",
+            "blockChars": 304
+          },
+          {
+            "name": "clawhub",
+            "blockChars": 334
+          },
+          {
+            "name": "diagram-maker",
+            "blockChars": 307
+          },
+          {
+            "name": "healthcheck",
+            "blockChars": 319
+          },
+          {
+            "name": "meme-maker",
+            "blockChars": 292
+          },
+          {
+            "name": "node-connect",
+            "blockChars": 322
+          },
+          {
+            "name": "node-inspect-debugger",
+            "blockChars": 318
+          },
+          {
+            "name": "notion",
+            "blockChars": 313
+          },
+          {
+            "name": "python-debugpy",
+            "blockChars": 306
+          },
+          {
+            "name": "skill-creator",
+            "blockChars": 300
+          },
+          {
+            "name": "spike",
+            "blockChars": 292
+          },
+          {
+            "name": "taskflow",
+            "blockChars": 322
+          },
+          {
+            "name": "taskflow-inbox-triage",
+            "blockChars": 332
+          },
+          {
+            "name": "weather",
+            "blockChars": 330
+          }
+        ]
+      },
+      "tools": {
+        "listChars": 0,
+        "schemaChars": 3922,
+        "entries": [
+          {
+            "name": "read",
+            "summaryChars": 303,
+            "summaryHash": "b15dd29794ef5562ddee30a6282387ee7b40b9806c10ae2616daf75514ddc1f6",
+            "schemaChars": 304,
+            "schemaHash": "134f19bcabe3e29d63c5cebb38f1d2556759fd08adad6bc90a4b4d3cd1fb8441",
+            "propertiesCount": 3
+          },
+          {
+            "name": "edit",
+            "summaryChars": 326,
+            "summaryHash": "c498a85576e187d069e8e8ea4f70f81bddd57829600d385ef61c4359fd634c9e",
+            "schemaChars": 834,
+            "schemaHash": "457e8bb9f800b21be76c4fd8c0e3078bf07ee9bf93ac82f39944c171bd8f6d84",
+            "propertiesCount": 2
+          },
+          {
+            "name": "write",
+            "summaryChars": 127,
+            "summaryHash": "cdb1c46027b22d1f1b923b47bfe297821d9fe589a9f9d92994961948060a4d89",
+            "schemaChars": 225,
+            "schemaHash": "e98a2484f667cf7c22d76ca103bf2022bf9113dc63fe38b899e71c328cb1e833",
+            "propertiesCount": 2
+          },
+          {
+            "name": "apply_patch",
+            "summaryChars": 132,
+            "summaryHash": "432bf38688a4f011d2b765a441ac07e1fdfa9faf2051679adee04abcd9332d93",
+            "schemaChars": 153,
+            "schemaHash": "05521268363ff4f191472c90d69ef08a503ba9acf1d2febc50b3ee68db32ab65",
+            "propertiesCount": 1
+          },
+          {
+            "name": "exec",
+            "summaryChars": 446,
+            "summaryHash": "369f5e5e195c647ab1e3cfad282e6d25488d4b9fe269f1157e273a546ca80295",
+            "schemaChars": 1332,
+            "schemaHash": "49dcb29ee9f7016cd248f40cfb44508aac4d6a67d4c9acb52cbd08ad3e3ae893",
+            "propertiesCount": 12
+          },
+          {
+            "name": "process",
+            "summaryChars": 362,
+            "summaryHash": "21d78afb643a24f211fe9aa86c748f165ca82f1dc21bbaf6e3e6d6d4d4411d86",
+            "schemaChars": 1074,
+            "schemaHash": "a2d30a25569f409d7e8539844c89a088044535388b24031d014577b96ed27c5c",
+            "propertiesCount": 12
+          }
+        ]
+      },
+      "currentTurn": {
+        "promptChars": 337,
+        "runtimeContextChars": 0
+      }
+    },
+    "finalPromptText": "Return NamedTuple rather than tuple.\nIt would be nice to return a NamedTuple instead of a tuple here: \r\n\r\nhttps://github.com/15five/scim2-filter-parser/blob/7ddc216f8c3dd1cdb2152944187e8f7f5ee07be2/src/scim2_filter_parser/transpilers/sql.py#L148\r\n\r\nThis way parts of each path could be accessed by name rather than by index in the tuple.",
+    "replayInvalid": true,
+    "livenessState": "blocked",
+    "stopReason": "error",
+    "executionTrace": {
+      "winnerProvider": "vllm",
+      "winnerModel": "experiment-model",
+      "attempts": [
+        {
+          "provider": "vllm",
+          "model": "experiment-model",
+          "result": "success",
+          "stage": "assistant"
+        }
+      ],
+      "fallbackUsed": false,
+      "runner": "embedded"
+    },
+    "requestShaping": {
+      "authMode": "auth-profile",
+      "thinking": "off"
+    },
+    "toolSummary": {
+      "calls": 1,
+      "tools": [
+        "exec"
+      ],
+      "failures": 1
+    },
+    "completion": {
+      "stopReason": "error",
+      "finishReason": "error"
+    }
+  }
+}

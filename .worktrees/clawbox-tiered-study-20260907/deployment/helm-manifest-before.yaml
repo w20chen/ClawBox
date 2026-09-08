@@ -1,0 +1,3092 @@
+---
+# Source: cube/templates/cluster-dns.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cube-cluster-dns
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cluster-dns
+---
+# Source: cube/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cube-node
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-node
+  annotations:
+    {}
+---
+# Source: cube/templates/tests/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cube-test
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: test
+---
+# Source: cube/templates/egress-ca.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cube-egress-ca
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-egress
+    app.kubernetes.io/part-of: cube-egress
+type: Opaque
+
+data:
+  "cube-root-ca.crt": "Ci0tLS0tQkVHSU4gQ0VSVElGSUNBVEUtLS0tLQpNSUlETlRDQ0FoMmdBd0lCQWdJUUV5aWQyMis0Z0ZGYTVDQlhza2t0VGpBTkJna3Foa2lHOXcwQkFRc0ZBREFsCk1TTXdJUVlEVlFRREV4cERkV0psVTJGdVpHSnZlQ0JGWjNKbGMzTWdUVWxVVFNCRFFUQWVGdzB5TmpBNU1ETXcKT1RRNU5USmFGdzB6TmpBNE16RXdPVFE1TlRKYU1DVXhJekFoQmdOVkJBTVRHa04xWW1WVFlXNWtZbTk0SUVWbgpjbVZ6Y3lCTlNWUk5JRU5CTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUE0UHJiCkI3a2thS1piNGpBeGcrQjdEZ1JYeng4ZkZST1FxalNSUGxVTHdSWmV6RFFYRVBXN056Sk8wU0lnZ1BGVFRlYkQKeElqTVB5aVBrckY0bm9BK0F2RlZBMHl5RlRNR0laK0hwMVBUQ0twYzZYUFJjWGVWMFkrLzNUcW41STBCSU9Hbwp4azN6RlNveTI1WThFMyttODN3QUVRVVFpcTU2cWZlbStSVS96aGVkSGlvZ3RQQWFCNW1MV28yTGg2NXFMOHhmCk9VMU0xOVFhSk9vd1Z4ekZqelFndS9aMXdDMm1zbTRRR1ZpOC9UYUFNWnpuWDlzNXg1c1JPb2h6S2JpWVp4ZnMKRU1LK0VCZ2pkdUdreGRUdERhS1VrQzJUTDFkZzBCTkI1NEhNT1pHQldCQTAvYUU3UGZMQ0gvUnozZnlpUERDYgpCZk53TFkwVjZab0dvb2I4Q1FJREFRQUJvMkV3WHpBT0JnTlZIUThCQWY4RUJBTUNBcVF3SFFZRFZSMGxCQll3CkZBWUlLd1lCQlFVSEF3RUdDQ3NHQVFVRkJ3TUNNQThHQTFVZEV3RUIvd1FGTUFNQkFmOHdIUVlEVlIwT0JCWUUKRkNqUXJndDNCVnVUS25NNk1KeU92bkJ5WVpyMU1BMEdDU3FHU0liM0RRRUJDd1VBQTRJQkFRRE1TMndLUmJFaAo0d3EyeXFRWStndytGVHFnM2xuMjJDQVE2Snl5UGJHMWV2NXFNSDJqWlRHWGNsQU9OUVBxZU5pYVNFN1ZWL3dpCmJkdnlSUy91U3JUUWRNdGUvN2djaTJvbXFsdTZEWk92MTZqa3dBN2hmbS9OaWFhTXdZRTUzNkl4NVlEN3B3MngKazJjN3ZEak1HaU1WRExtRks3dS8veWFjNlVpVTF1bGVoMVM0UDcxbjE3SEsxOGdoajRBSHdHcUhGbHFmODE3VgozTVRVWTFSUkxub0hBTWE1YUY1M2VqSW50RmU2YUZFQ0Mvd2VLa29UWTF1ZGRONG9YdERWVE1KdGVCajVLb20xCnlteCtLWGdVSVU5U2oybjd6OGpLUGhJMDR5YW1KaTVTQ0ozUTVueTlpQytqTTRxbW5jZGVFbnpLTEFEcG9zQ0YKK1JjSkMzc04xNzU4Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0="
+  "cube-root-ca.key": "Ci0tLS0tQkVHSU4gUlNBIFBSSVZBVEUgS0VZLS0tLS0KTUlJRXBRSUJBQUtDQVFFQTRQcmJCN2trYUtaYjRqQXhnK0I3RGdSWHp4OGZGUk9RcWpTUlBsVUx3UlplekRRWApFUFc3TnpKTzBTSWdnUEZUVGViRHhJak1QeWlQa3JGNG5vQStBdkZWQTB5eUZUTUdJWitIcDFQVENLcGM2WFBSCmNYZVYwWSsvM1RxbjVJMEJJT0dveGszekZTb3kyNVk4RTMrbTgzd0FFUVVRaXE1NnFmZW0rUlUvemhlZEhpb2cKdFBBYUI1bUxXbzJMaDY1cUw4eGZPVTFNMTlRYUpPb3dWeHpGanpRZ3UvWjF3QzJtc200UUdWaTgvVGFBTVp6bgpYOXM1eDVzUk9vaHpLYmlZWnhmc0VNSytFQmdqZHVHa3hkVHREYUtVa0MyVEwxZGcwQk5CNTRITU9aR0JXQkEwCi9hRTdQZkxDSC9SejNmeWlQRENiQmZOd0xZMFY2Wm9Hb29iOENRSURBUUFCQW9JQkFRQ2t3ZERKTlNLZXFNVzkKUFVIbHErMHg5S2hCZkM4TkJrajQvSW9wTmFybituUHQ0Mi9JOGN2cXZpTE9NTW5RNCtuM3NMbEpJazFCSzNrSgpHb0tVd0tHcEVnY0o1WTY4eTZMLzJJNUZVYlBJTXNyY0EvOHJzMEc2T0NWdjQ5YTBIemJtVjV0N3JmWUlWK0RxCnduaTRadEZpbWpxS1BFVkM2a2ZXVlJDb2RKRkhZTkFHb241YUNQd0JZRStkQ1hRVjhmVnRZM0tBWStacUdWR2QKSi9LODJLMzJJVWlFMU1Gbkk2T1JSdHJOVkNqTjVyN09jZjNEbFpZdkVsZnQ4V0dxMWNpOGsxaWNQZG5KR1c4agp3Q2lveG0yWjJaQmlvb1ErQXN5SW9UMVZKYzBzTVFOc2tTNnZsVmcxSkMrTTRqTm5KSXpZMWRSSnhmWVBLU2M2CjFLN2VmTDhoQW9HQkFPbm1GcGV6dldvdndTUlF6dFJIajhhUURYQW5ZZW1nazhWRVBDYnBZVktoT3VMWG9YYnMKLy9jcytDTU8rcFdjTGc3ZUd2K0RKRkN6eWgySUFnZEg0dnV2SlpQbHFtbUpkQ0dzV2JqdzFtQUxZZ0FTZUFiUQpYVkFMQlVNNUFGck9CMVFBOWRsOENnS214Wk5WcVdQbGRMWWhYaUt1RFc4WnRBZDhaSXhUS2lxVkFvR0JBUFk5CkJnTjRjczBsYnBlTWgycm5IY2RFNzJZd2s4R2Q4V0VVVGZ1VHpIcy9EZThwVmlWMFRXaVRBYnJMRWNVdUJXQ1AKZDlBSzgveHFQQ0RFcEowcXk3bW9yaWl0TmM1RG0yc0EySERyeG4vSGJEWCtLeDJjN2xhbDcvUTIyNk9uM2NZTApVeTNnQmhBTXJyTURyWDZYUCt5TG9mVHFiQThuUHhxM1docEZPdUtsQW9HQkFJNklrU0gyL1NsMVdteUg5ZEkwCm5hL3gzczZHb1VzZWVJNVF5NXNtd3hENGdZcjB2a2RibTR3RDBsNkM1VDlBZ215NitwYlVVcy8vRDk2NUlBdFIKeWtkM2J4M1dhZWVRUkwyMGFxU2gxdkdHWGowUEJDZWEyQkpMOVBRSEMybEtmZnE1N3hlT1dBZFBtN3p5Q1p4Lwptb1RXaHFmNWl1UTJOSmdQUExLcWgxcVZBb0dCQU5BaTNNWnFOWCs2T0RUWmtFMklkZDlPSVoyYlNnbksyNUZYCmZHTStsd1ZHVXh6cEwrd1ExcTJpTlVBVERqNUJuRUgyZ3l2VFZsRHg2MGszYm4xN0F5RTN0NTZpYW15ak1PZk4KbXlZMzVWMTB6NzhEektZSFZGN2hmR1pOU0hLWkhoaWMwZjVnOGo3MnVXU1BvMEx4emhMQUpISEZCUG42RHBraQppb0xTS2VnUkFvR0FRc0RReVBtd2NOdGxmR2tVRmIwSjF3UEdId2Q0eXVFc1B3QzBMVTR4bnhZV0JyY0JVV1VECm1oVEtXTDZxTXpKZFZiSUs5cmpuT1ZEaU0rNVduUlc0ZHVLL3BhTmp6SHNWQm5vVmErcER1STAydGw0TTA1dFkKQ1RYY0V2ZjFNcTZiY2x3dFEwamhvMWRmOFM5Y0U0cEZhS3VJMWVSZDFiRDJSK0pKYTVwZmI5VT0KLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0="
+  "placeholder.crt": "Ci0tLS0tQkVHSU4gQ0VSVElGSUNBVEUtLS0tLQpNSUlERFRDQ0FmV2dBd0lCQWdJUVc4eG9HeE5xaEl1NG96VnQ2Z1FCY2pBTkJna3Foa2lHOXcwQkFRc0ZBREFoCk1SOHdIUVlEVlFRREV4WmpkV0psTFhCeWIzaDVMWEJzWVdObGFHOXNaR1Z5TUNBWERUSTJNRGt3TXpBNU5EazEKTWxvWUR6SXhNall3T0RFd01EazBPVFV5V2pBaE1SOHdIUVlEVlFRREV4WmpkV0psTFhCeWIzaDVMWEJzWVdObAphRzlzWkdWeU1JSUJJakFOQmdrcWhraUc5dzBCQVFFRkFBT0NBUThBTUlJQkNnS0NBUUVBdVFBWW9ZdXdhdnQ4CjVrN3VWSWJnQk4rd1RuU29rcXR3NkdCZjAyT1BHSkMvd0ptdXJ4cWRjTm1hRWdpeUJySmw2VGRqQUlhdkVrS1MKQUFUV1NDNUZvdWNkN3grSmxhZ1ZIRGNOalBoVVZvaHF2Q21HUFJpTGd2bUxnMWJVc2lack1keDRnanFoOXd6Wgppa0lkQjNnRmw3a1N2M25WeFRGN3ZqL2R3THZ3eGNsVkVXN1lzdUM5UFppRXJycmtQVHRCNk1DOVF6U0RyUnM3CllnVVltWm8rczJCUThidWYrMnpoVWs3cVlSUUptUGZrUkljUnhyME1sQk9ObDlYWWNybmtYbndRQmN3OGVkUngKNkhCUGk5SUJHMEZLWHd6eVhUYVRLRVJrbzJKRDdJRkdBVUpoeXF5NlRLT3JoSEJSTnFvYmJ4YnNRcnArRWNwRQpnRjZPR2JtY0lRSURBUUFCb3o4d1BUQU9CZ05WSFE4QkFmOEVCQU1DQmFBd0hRWURWUjBsQkJZd0ZBWUlLd1lCCkJRVUhBd0VHQ0NzR0FRVUZCd01DTUF3R0ExVWRFd0VCL3dRQ01BQXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUIKQURPaUZ6N21UcGlGRzllZWFMQ3FlM2NJZ3hBK2hiZE40SEVPOU9obUtCaVdYbXp6a1RUTEhWY3k0Z0E3UmMwcApXcXlRMXFRVjVZVkJCTTY0V1Ywb2l4ODN6SUN4am1FK1p0REw4aUNBUml0bVBsNytwaFAwS1BzVmxUZTZlaGJHCk1NQXhxcE04cmFSNkNwYlA2UTBUVWY4VkxTMTRRVjQ4RkNYWDQ5eFNzbXlvM1IydzF1SnYzb2NHb3F4cmFxNVoKb2VudjBIblBDaDlhbVhkTUxFVkJLWEtBRTJJbXVSSXFsZkFqeXp5QnRkRnc4YWxOVDdpZmZ1MFBnY0VobkJiUQpJbUFhcHJKQTEvaVU5T21DNFJ0K29FU0Mxc2JaZU8wZ01LL0llbXBqMExCZ0RFYkVPcFNqYTV4aTYwd3hJT0VDCkg0emxKMFR5b0hITER2RmRYN25iR0xJPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0t"
+  "placeholder.key": "Ci0tLS0tQkVHSU4gUlNBIFBSSVZBVEUgS0VZLS0tLS0KTUlJRXBBSUJBQUtDQVFFQXVRQVlvWXV3YXZ0ODVrN3VWSWJnQk4rd1RuU29rcXR3NkdCZjAyT1BHSkMvd0ptdQpyeHFkY05tYUVnaXlCckpsNlRkakFJYXZFa0tTQUFUV1NDNUZvdWNkN3grSmxhZ1ZIRGNOalBoVVZvaHF2Q21HClBSaUxndm1MZzFiVXNpWnJNZHg0Z2pxaDl3elppa0lkQjNnRmw3a1N2M25WeFRGN3ZqL2R3THZ3eGNsVkVXN1kKc3VDOVBaaUVycnJrUFR0QjZNQzlRelNEclJzN1lnVVltWm8rczJCUThidWYrMnpoVWs3cVlSUUptUGZrUkljUgp4cjBNbEJPTmw5WFljcm5rWG53UUJjdzhlZFJ4NkhCUGk5SUJHMEZLWHd6eVhUYVRLRVJrbzJKRDdJRkdBVUpoCnlxeTZUS09yaEhCUk5xb2JieGJzUXJwK0VjcEVnRjZPR2JtY0lRSURBUUFCQW9JQkFRQ1h1a0o1UzgzM0VDZVIKNUM2SDJNNm1jS2R5MFM3b2kvOWdOcHFoRHNodngxZmRLSzRpSXR2NWtCNVNxQnNLYndveVNpRENiN1BxYi9xNgpWVDFCbWVHM0I0Si9lZ2duVytGa2NLcUdjYTBLQTN3MnNuL01YL01jQ25xbnozRkdZMGdMYnR6UFFqTlFJWlBSClZ3UGora1hyOS9ndVhrZzdJS2h5a29MVzdjMDlDTXVKNnRDdUNhdXVQb1IwZEFLeFRPK1A3NzdQUjk3NkpxK00Ka0NmNVRvRFlPZVUwc0JaeTA3a2ZkWnc3R0NubWlYdGxWcEpQczlkeEpjUC9GTTBBbFRRN1hEYVhheHBTNFhtawpXUWFvcE4rYUltenVlVlIxeXMrak1vZXFERkJBQ2lHL1ZGSTk2eVBiWndMTno4eUJzSGl4MVVyc252V2VIMHlnCmtFZTZqeUFCQW9HQkFPUEtwYUZPR1IrdmZyMGFSeUU1QTRUc0I5ajVWOUdHZUFvdjkzR0ZDOEpyUnpONUhDQWkKSk5pb1Z1bklNeHlCdlBoZUZtQzlSUUY5aHJpcVREbDBnaC9GVDV4cStLQkM0OFFqZHhSMTlseGJtSnUyMmU0NwpzOHdDZW5iRnpkUE9JakNubjdRUkhBVStTVCs0Wlc2Sm9HZkZOTXlMb2RmUEtzOFRrMDlUNGtDaEFvR0JBTS9vCjVuS1NjWmRkSmRYdUtYS0FBU0lzWE9zd2p4U0tZYVhvRWMyaUJNcmZyTmN0M0REbGVTckNpQ0E0QUdkSUZJMkIKM0JnYU83UHNuMDVSWHhSVkE1TEx3SnBwN0hra09TenRZTDJSZ0pQcjgrYVQwcVF4aEcyMlBsRnhkdStSdVhHdgpKWEtsWkoxSmd6Q0kwNy8zbHdmeHlyNlh3ZmNzeHIrR2JyWmFYQ3VCQW9HQWJSdWdzQjIzWFB6emFPS1FWWEo0CnBBOW1SdUJQMXhWZ3BBaUxyajA2LzduZzFkL1p2KzU2MWFmMFVYQktRd3BGbUhXQXBIK2o4TzNPUE4rZE9SdjgKUS9sL2czMmRieTM2NlBUUDBlWWF4ZXc5c2NBb3JMcStDU2Jhdjg5SkluMm0xTVZGY3J1TFAxdXhQQ3Mzc25XTApkb2o0SEUxNWpPUTNMZzdEVFlqeFkyRUNnWUFUdnJxa0J1Uml5NlhjTzFJVVhiTzkyeGkzL1ZTWlRzc1hSb0xxClZJaS8rNTRla1d4bitHTVpmSUFSRDBCNmpvM2xJb0FVaWVsQm5TZEQrTlpleC9RZTdOck56MkYxMzhyT1NYejIKZytzQ0lWWjRmM0Z4eG9JZEtVR2gyblRCSzhYQTFqRm9RZXpjUXk4Q1hQdy9MdlJZL00yVWJEVXZsRUVMejJpVQpTT0NZQVFLQmdRQ2lsQ0hLbUJzTTRCeUhHZ0xUZm8wNmQveG53eVAwS0RWOHU0OWRCa0RseU16a2NpNS9aNW9hClVxbmdra3NqVlJSY0NkN1Q5dHlzcEkyenBzbWhTdW5YWnZ3bHV1T2tVenJoWFd4NFJOQjFEcEd5K3ViQmZQQ0EKS3NzR2dibUluR25HYjZtaTRuSzRxYkZ1ZU9ObHJkTE5OQXVBTW42TWRVazZScjk4U25vaXlRPT0KLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0="
+---
+# Source: cube/templates/master-config-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cube-master-config
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: master
+type: Opaque
+stringData:
+  conf.yaml: |-
+
+    common:
+      http_port: 8089
+      http_readtimeout: 120
+      http_writetimeout: 360
+      http_idletimeout: 360
+      cube_ops_addr: "http://cube-ops.cube-system.svc.cluster.local:3010"
+      sync_meta_data_interval: 1s
+      sync_metric_data_interval: 1s
+      collect_metric_interval: 1s
+      default_headless_service_nodes_num: 1
+      enable_check_com_net_id_param: false
+    
+    log:
+      module: "cubemaster"
+      path: "/data/log/CubeMaster"
+      file_size: 100
+      file_num: 10
+      level: "info"
+    
+    cubelet_conf:
+      grpc:
+        grpc_port: 9999
+      common_timeout_insec: 30
+      create_image_timeout_insec: 300
+      create_concurrent_limit: 100
+      destroy_concurent_limit: 100
+      enable_exposed_port: true
+      exposed_port_list:
+        - "80"
+      disable_redis_proxy_port: true
+    
+    auth:
+      enable: false
+    
+    # CubeProxy admin cache invalidation on sandbox resume. admin_token must match
+    # the release Secret key cube-admin-token (what CubeProxy validates as
+    # X-Cube-Admin-Token). Rendered from the chart helper; see cube.adminToken.
+    # admin_port/heartbeat_ttl_ms fall back to defaults (8082 / 15000).
+    cube_proxy_conf:
+      admin_token: "M93rVZp4PmyupFqXVENlm3s9vk6pUafY"
+    
+    req_template_conf:
+      whitelist_req_tag:
+        WorkingDir: true
+        RLimit: true
+        DnsConfig: true
+        HostAliases: true
+        Poststop: true
+        Prestop: true
+      cube_box_req_template: >-
+        {"volumes":[{"name":"tmp","volume_source":{"empty_dir":{"medium":0}}}],"containers":[{"name":"cubebox-default","envs":[{"key":"TZ","value":"Asia/Shanghai"},{"key":"TERM","value":"xterm"}],"volume_mounts":[{"name":"tmp","container_path":"/"}],"security_context":{"privileged":true,"readonly_rootfs":false,"no_new_privs":false}}],"network_type":"tap","cube_network_config":{"allowInternetAccess":true,"denyOut":["10.0.0.0/8","100.64.0.0/10","172.16.0.0/12","192.168.0.0/18"]}}
+    
+    instance_db_config:
+      driver: "mysql"
+      addr: "cube-mysql.cube-system.svc.cluster.local:3306"
+      user: "cube"
+      pwd: "12fb567911aa451e89d110add9bb1e2e4c38b187b50173cf"
+      db_name: "cube_mvp"
+      conn_timeout: 5
+      read_timeout: 5
+      write_timeout: 5
+      max_idle_conns: 5
+      max_open_conns: 20
+      max_conn_life_time_seconds: 300
+    
+    redis:
+      nodes: "cube-redis.cube-system.svc.cluster.local:6379"
+      master_name: ""
+      sentinel_nodes: ""
+      sentinel_password: ""
+      password: "981cf73a6556de5557aa94b913e9af377bf6bd627f81de22"
+      db_no: 0
+      max_idle: 8
+      max_active: 32
+      idle_timeout: 30
+      max_retry: 2
+    
+    scheduler:
+      priority_select_num: 1
+      metric_update_timeout: 300s
+      local_metric_update_timeout: 300s
+      overcommit_ratio:
+        cpu_ratio: 1.0
+        mem_ratio: 1.0
+      filter:
+        enable_filters:
+          - "cpu"
+          - "mem"
+          - "template_locality"
+          - "realtime_create_num"
+    
+    # Volume plugin (S3 / COS binary). Credentials: Secret-mounted.
+    # List order sets the default driver when Volume.create() omits `driver`;
+    # S3 is first so the default install (bundled MinIO) works out of the box.
+    volume_plugins:
+      - name: s3
+        type: binary
+        binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-s3
+      - name: cos
+        type: binary
+        binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
+---
+# Source: cube/templates/proxy.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cube-proxy-certs
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-proxy
+type: Opaque
+
+data:
+  "tls.crt": "Ci0tLS0tQkVHSU4gQ0VSVElGSUNBVEUtLS0tLQpNSUlEV0RDQ0FrQ2dBd0lCQWdJUkFQMW42YVd6em1zeENnckNYUDR4ZXdzd0RRWUpLb1pJaHZjTkFRRUxCUUF3CkdERVdNQlFHQTFVRUF4TU5ZM1ZpWlMxd2NtOTRlUzFqWVRBZUZ3MHlOakE1TURNd09UUTVOVEphRncwek5qQTQKTXpFd09UUTVOVEphTUJVeEV6QVJCZ05WQkFNVENtTjFZbVV1Ykc5allXd3dnZ0VpTUEwR0NTcUdTSWIzRFFFQgpBUVVBQTRJQkR3QXdnZ0VLQW9JQkFRREpsclJkQmcrWW5JcVl2V1Y2RTI3dVhqRzIyUUtqTzR1WU90ZXhrUkE5CklORG1OTHVpQTJMRDZaa3hseGlHTFp4NHlwZzd2ZWwzRXZYYnFHeXRJZ1YwelZVMWpobzRndCt6UCtZSDU2QncKblFwV3lDUkhUbVo0WUg0OFFOSjdCUWtzS2FIV2hMK3lwcm1WTXJxWW9mUDM1YXdJZE1Kb3RTZUJXK1Z0NmJVcAoydG80dDR5NmxuUUUvT2lydDkxVlNycERxcnRNUFA0UXBUQUJTTXBwV2NGVEJhMU56ZitLTThMa0VpdWwzaHhkCmFvWmQ4ck1ieE1zTHpFaDduMlVyanNHUjkxckxpZTBNVHZITEg5dFdxOWRzYmdkU1Nwb1B5SE1rSUliMjVWRG4KM29FWXM3akIxeVpSSFkzamdWeEZhWDg0aGE4VGd5VVFqSVZqSjZRcnNkY1JBZ01CQUFHamdaOHdnWnd3RGdZRApWUjBQQVFIL0JBUURBZ1dnTUIwR0ExVWRKUVFXTUJRR0NDc0dBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU1CZ05WCkhSTUJBZjhFQWpBQU1COEdBMVVkSXdRWU1CYUFGSGd6c1NneWZxQ2ZpTDJ6TmZlS1BxNVNydlcxTUR3R0ExVWQKRVFRMU1ET0NDbU4xWW1VdWJHOWpZV3lDQ0dOMVltVXVZWEJ3Z2dvcUxtTjFZbVV1WVhCd2dnbHNiMk5oYkdodgpjM1NIQkg4QUFBRXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBQ2RmMEliNUQ2bzJHVm40azNZZnlxVldxY0ZkClBTcWI4UkpNWmM5dmM1SEJmTjhWVVdmOGdxWnV4aFBUcEs3YjNMVUhJV0ViME9XTUQ0K2ZWMHlremk3aXNOdDgKemtEMlFsNm5GN2FhZVp2Q085cHVvNzBvcXZmSk1lYW84UnJsSkpqeGZ4NlY4STMzcDI2RmUrcndWc3R0L29HRwozQytXbmU1YXNvY3FkeXV6M0N4YW91SjNnU01VZk9TS2JBT3haaDBVMGJFb1U2UTV2YUl1dHdFeUdNZFFwRWF6CjRxM2EzTjE2bjJUN2p5UW54Zlg0U1VqTGZiUE4xV1FRK2JRaE04VVlyZ3ZaaS9HOTg3ekVqdlZNbjFRb2pWYm8KOC9CYy8wcTBzSUpBVWpNY2VieTRiU1BsU28vd1ZaWkJsYXdYWFpKNWNSSnVwNXhrVlBPM3RyRCtJUGs9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0="
+  "tls.key": "Ci0tLS0tQkVHSU4gUlNBIFBSSVZBVEUgS0VZLS0tLS0KTUlJRXBBSUJBQUtDQVFFQXlaYTBYUVlQbUp5S21MMWxlaE51N2w0eHR0a0NvenVMbURyWHNaRVFQU0RRNWpTNwpvZ05pdyttWk1aY1loaTJjZU1xWU83M3BkeEwxMjZoc3JTSUZkTTFWTlk0YU9JTGZzei9tQitlZ2NKMEtWc2drClIwNW1lR0IrUEVEU2V3VUpMQ21oMW9TL3NxYTVsVEs2bUtIejkrV3NDSFRDYUxVbmdWdmxiZW0xS2RyYU9MZU0KdXBaMEJQem9xN2ZkVlVxNlE2cTdURHorRUtVd0FVakthVm5CVXdXdFRjMy9palBDNUJJcnBkNGNYV3FHWGZLegpHOFRMQzh4SWU1OWxLNDdCa2ZkYXk0bnRERTd4eXgvYlZxdlhiRzRIVWtxYUQ4aHpKQ0NHOXVWUTU5NkJHTE80CndkY21VUjJONDRGY1JXbC9PSVd2RTRNbEVJeUZZeWVrSzdIWEVRSURBUUFCQW9JQkFGQjJ2aEZ2Yk9RK2Y3Zk4KeVdaN3dVaVdBb1A0aE93QXhZeUMyRHVCS3BrcnN4WmdNQkRRQnlrcDRjTUFpNEpyVEV5T21Vc25WN3Yycm5uNQo5VDc2R0hGeDBEUXJQMTRWSnhOV1N3d1dzVnloNGxHWFc1dTJ1SUlPQ2ZVazdwNjUrTnBPMTlGWGRXanEwYUt5CjkvWWFsdFg1TDd6RVZpRVRSZXlGY01ONWlKMW1qdURka1hCRkxVejJIZHRINVp1cDdWbElpbm5qdkhoSDdVYTYKbnhTellHN0dTZ1FKekxGY3I3Nmk0ZFN2c21WRzU1c1FGdUpQYWdKTk1Sc3EzbW92b0xSb0hMUkNFbHhjbThTQwp6UFhlNjllbE51N3M5T0VJNFhmK29TZ1RKSGpPa3F5b3NwN3VRWG9nSDRYY0dtbDZpNWxTYjhscWdjazhsQzBVClh4ZEJ5QTBDZ1lFQTB2dVk1NVpqaytxQ2ZoeFNjYVYyenZWTzhFNUpHaU8xYkljSGQ4d1F1anVoUWlweTZ2ODQKbnNHMjRIL3M5MFIzS0hZbURGRUV1UW5SeHdvalNtZFZBV0NvY3BCVnNVUWVkUnZ6RSs2YmgzUG55eEMvZ0cvNQpHYjUzekl4bXEyRllrOHFVNVlkT1RncVEwNytzcGpXTWpKY1p1MUFnMUdUOHVqcVNHemcxV3pzQ2dZRUE5Sm42ClJETW43Y0VFZVRUVGlZb1RxRUlPNmdBbkRMUjB0d05mUXNscXdvSG92Y0E3YWhWYkRrSTI5bE1oUmU1SGg3dUMKYzhnbmE1K3NVWiszTGNWZXczMkJsdC9EVXFYNkRlbHlZbUs3T1NkRFlTT2xzNEVWVTM5SFY5bm9yUVcwbjExZgpwWmxHNlJXd3l3Z0RHSG9uRHdnZWJJd1pLNWVrbXVMU2JIZUJPaU1DZ1lFQXF3d25Mcm9TQ1AxNnhkc1lTK0tsCnE2dmRUNTFvVHJUY2hSd0R4ZSsvTC96Z0E5QitVbDZQL01WNENoSXNmMXNXYjhzNWxZcXBsWXFNZEIyWDl0NUgKWUZLSXZqaWVBSlVGVEZSWWdiUlVpMEJBajdVSVRJeDdHNC83ZCszcjNzMlJEbUNTem5NZjNNMWNGUSswWFJ2VQowclk5dWtxQUV6RzhZdzdSSFJnNHlia0NnWUVBNlljZ3c0QTd2T2l0UnJOQ3kydkNmTUFrMFJBNE9BOEo1N2tXCmVBTXBKRzgzTUFLYU54d1FoVHAra3dxbkY4YjVFQVBiOW9LLzhDYlFORlhTWTZhdVpPSXNtVWtsaUlEaWplbTEKeFcwUjV1MHZqVXlsWlEzMnVITXFRQnZSNDI4eEZYM21WWXBUZ3pHc1N3dHBPVE5XbXlsYk1yTkhUTEZJL0g5VgoreXpWZWhVQ2dZQVhqenNSeWN0dU44aU5QT0cvN1RrTG4raThBOVNBNUJWelBWazJDcWFicjNQQUtObWhzUzVjCjdLbU5uZWRkaUlVYVNSQVBnaUI4MFlwNVBFUTE4WlhaNWI1UndPS05IZEkvcjd5ay8rZ2VnL2JKdGRaazJ1REIKZExkWjRnTTd0NlZBV0QrOERoajhiNW9MT2lOQmhQbUNtT1pGWnRDNWNDanRhOVFtNkZsVXVRPT0KLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0="
+  "ca.crt": "Ci0tLS0tQkVHSU4gQ0VSVElGSUNBVEUtLS0tLQpNSUlESERDQ0FnU2dBd0lCQWdJUkFMOEl0UTAxc3Yyb3ZIMFdyZjFySnZ3d0RRWUpLb1pJaHZjTkFRRUxCUUF3CkdERVdNQlFHQTFVRUF4TU5ZM1ZpWlMxd2NtOTRlUzFqWVRBZUZ3MHlOakE1TURNd09UUTVOVEZhRncwek5qQTQKTXpFd09UUTVOVEZhTUJneEZqQVVCZ05WQkFNVERXTjFZbVV0Y0hKdmVIa3RZMkV3Z2dFaU1BMEdDU3FHU0liMwpEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUUM3QTRyQVc5cjNiR0hsUTFDNmtUMzFUaHE3UFVvY0hmL2dKK0ZYClcrUUtVdUI3M3pRTE8rajdiUDVkR0RQMHp3MlVYajhZcmFkNWptU2hnK3Q0NFc3KzIwWWZGTmtpZWtpVXlBaDEKT3ZJb0ZhZU1INGE0alpidWRkdUIyY3ZrcEpCdkxEc3RRSFhQY0VnRmV4c0pHUDkyKzN3WDErUUJHdTBSa1pjZwpKZHNOd1c0MkNwa25sczdCdXEvTnQ2VU5HeS9qM2RVaDFIZFhmMzFVa1l6SjBYTG02S2xUS2NTcitKU3lQWG9tCjYwN01xOEtZdGxmTW5EaFQwTXBVR21IVy9VckYrZ0RDdXJVZ3BFTTIrbWFVWjNRR3Z4d1RlZDVZQUlvUk16MkkKK25acFhtUDNJSTZLa21RZmxuTkxmRFRjamlSbHZIdzFIdHZtUEd6N0VCdllzYUtsQWdNQkFBR2pZVEJmTUE0RwpBMVVkRHdFQi93UUVBd0lDcERBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEd1lEClZSMFRBUUgvQkFVd0F3RUIvekFkQmdOVkhRNEVGZ1FVZURPeEtESitvSitJdmJNMTk0bytybEt1OWJVd0RRWUoKS29aSWh2Y05BUUVMQlFBRGdnRUJBQUlWaXMxVHBpaFIyRGJRcDdKbk1BVHIyRE9qQTFNbkFZTDQ4SjRzQzVkQgp4OVI0dEZtUW1qTHpFNGp3eUdOMHB3eGNLUmh0Rjl3T2dwTHRBSVp2ZHlUbGM1VkpmdDNzLzdwcWN6d0JoZ1dLCnFrVFl0UDNEREt6OHFhM09HcmJZa1hjUlhIRjRNSXU3WktocGRhcEpDWUN0ZmF6Y2tWS0lUd3ZQTkYwdWdNbVIKTWQ3dDBjUDJzQzlEeUJBMWhPem9QQ1FzekgrRWlYVFBPS3JVRlJobWtlWFMvMm9OUFVrWU0xQXRJRHBtWnhUTwpHdWZrSVhrT3RBZWdSZGZMYmx0bkpIN2NXOFgzYjd6ajF2aXBURlZqM1phSFhhci9ndnRuTlZsYytvNzVtUEovCldwenJvYWlia29TTklsNDQ1Nk16VHVUamtPZ29hempkbnNVNkJFSGZqWFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0="
+---
+# Source: cube/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cube-secret
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+stringData:
+  # Only the chart-managed MySQL StatefulSet consumes the root password.
+  mysql-root-password: "b6498235acaf54b4102ff3abc9578bdb5520b2a4b729ace0"
+  mysql-password: "12fb567911aa451e89d110add9bb1e2e4c38b187b50173cf"
+  redis-password: "981cf73a6556de5557aa94b913e9af377bf6bd627f81de22"
+  redis-sentinel-password: ""
+  # Consumed via include in ConfigMap redis.conf (password must not live in ConfigMap or argv).
+  redis-auth.conf: |
+    requirepass "981cf73a6556de5557aa94b913e9af377bf6bd627f81de22"
+  minio-root-user: "cubeminio"
+  minio-root-password: "1KcoMcHfUDVeh3Lcl6rQbHUy"
+  cube-admin-token: "M93rVZp4PmyupFqXVENlm3s9vk6pUafY"
+---
+# Source: cube/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cube-volume-s3
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: volume-s3
+type: Opaque
+stringData:
+  volume-s3.conf: |
+    ACCESS_KEY_ID='cubeminio'
+    SECRET_ACCESS_KEY='1KcoMcHfUDVeh3Lcl6rQbHUy'
+    BUCKET='cube-volumes'
+    ENDPOINT='http://cube-minio.cube-system.svc.cluster.local:9000'
+    REGION='us-east-1'
+    S3FS_EXTRA_OPTS='-ouse_path_request_style'
+---
+# Source: cube/templates/cluster-dns.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cube-cluster-dns
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cluster-dns
+data:
+  domain: "cube.local"
+  target: "cube-proxy.cube-system.svc.cluster.local"
+  marker.begin: "# BEGIN cube-sandbox-dns cube"
+  marker.end: "# END cube-sandbox-dns cube"
+  Corefile.snippet: |
+    # BEGIN cube-sandbox-dns cube
+    cube.local:53 {
+        errors
+        cache 60
+        rewrite name exact cube.local. cube-proxy.cube-system.svc.cluster.local.
+        rewrite name regex (.*)\.cube\.local\.? cube-proxy.cube-system.svc.cluster.local.
+        kubernetes cluster.local
+        forward . /etc/resolv.conf
+    }
+    # END cube-sandbox-dns cube
+  sync.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    mode="${1:?mode apply|remove}"
+    # alpine/k8s kubectl does not auto-load in-cluster config.
+    if [[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]]; then
+      kubectl() {
+        command kubectl \
+          --server="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" \
+          --token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+          --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+          "$@"
+      }
+    fi
+    kubectl_opts=(--request-timeout=30s)
+    marker_begin="$(cat /snippet/marker.begin)"
+    marker_end="$(cat /snippet/marker.end)"
+    if ! kubectl "${kubectl_opts[@]}" -n "${COREDNS_NS}" get configmap "${COREDNS_CM}" >/dev/null 2>&1; then
+      if [[ "${mode}" == "remove" ]]; then
+        echo "coredns configmap missing; nothing to remove"
+        exit 0
+      fi
+      echo "coredns configmap ${COREDNS_NS}/${COREDNS_CM} not found" >&2
+      exit 1
+    fi
+    tmp="$(mktemp)"
+    kubectl "${kubectl_opts[@]}" -n "${COREDNS_NS}" get configmap "${COREDNS_CM}" -o json > "${tmp}.cm.json"
+    jq -r --arg key "${COREDNS_KEY}" '.data[$key] // empty' "${tmp}.cm.json" > "${tmp}.raw"
+    awk -v begin="${marker_begin}" -v end="${marker_end}" '
+      $0 == begin { skip=1; next }
+      $0 == end { skip=0; next }
+      !skip { print }
+    ' "${tmp}.raw" > "${tmp}.clean"
+    if [[ "${mode}" == "apply" ]]; then
+      {
+        cat "${tmp}.clean"
+        printf '\n%s\n' "$(cat /snippet/Corefile.snippet)"
+      } > "${tmp}.new"
+    else
+      cp "${tmp}.clean" "${tmp}.new"
+    fi
+    jq --arg key "${COREDNS_KEY}" --rawfile cf "${tmp}.new" \
+      '.data[$key] = $cf' "${tmp}.cm.json" | kubectl "${kubectl_opts[@]}" apply -f -
+    echo "${mode} ${marker_begin} on ${COREDNS_NS}/${COREDNS_CM}"
+---
+# Source: cube/templates/diagnostics.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cube-diagnostics
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: diagnostics
+data:
+  cube-diag-k8s.sh: |-
+    #!/bin/sh
+    set -eu
+
+    NS="${1:-cube-system}"
+    RELEASE="${2:-cube}"
+    OUT="${3:-cube-diag-${RELEASE}-$(date +%Y%m%d%H%M%S)}"
+
+    mkdir -p "${OUT}"
+
+    run() {
+      name="$1"
+      shift
+      echo "==> ${name}"
+      {
+        echo "# ${name}"
+        echo "# $*"
+        "$@"
+      } > "${OUT}/${name}.txt" 2>&1 || true
+    }
+
+    run pods kubectl get pods -n "${NS}" -o wide
+    run daemonsets kubectl get daemonsets -n "${NS}" -o wide
+    run deployments kubectl get deployments -n "${NS}" -o wide
+    run statefulsets kubectl get statefulsets -n "${NS}" -o wide
+    run services kubectl get services -n "${NS}" -o wide
+    run endpoints kubectl get endpoints -n "${NS}" -o wide
+    run events kubectl get events -n "${NS}" --sort-by=.lastTimestamp
+    run helm-values helm get values "${RELEASE}" -n "${NS}" -o yaml
+    run helm-manifest helm get manifest "${RELEASE}" -n "${NS}"
+
+    for component in master api ops cube-node cube-proxy webui dns mysql redis; do
+      run "pods-${component}" kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o wide
+      kubectl get pods -n "${NS}" -l "app.kubernetes.io/component=${component}" -o name 2>/dev/null \
+        | while read -r pod; do
+            pod_name="${pod#pod/}"
+            run "describe-${pod_name}" kubectl describe -n "${NS}" "${pod}"
+            for container in $(kubectl get -n "${NS}" "${pod}" -o jsonpath='{range .spec.initContainers[*]}{.name}{"\n"}{end}{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
+              run "logs-${pod_name}-${container}" kubectl logs -n "${NS}" "${pod}" -c "${container}" --tail=300
+            done
+          done
+    done
+
+    for ds in "cube-node" "cube-node-installer" "cube-node-bootstrap"; do
+      run "status-${ds}" kubectl get "daemonset/${ds}" -n "${NS}" -o wide
+    done
+    
+    run status-proxy kubectl get "deploy/cube-proxy" -n "${NS}" -o wide
+    run rollout-mysql kubectl rollout status "statefulset/cube-mysql" -n "${NS}" --timeout=30s
+    run rollout-redis kubectl rollout status "statefulset/cube-redis" -n "${NS}" --timeout=30s
+
+    echo "diagnostics written to ${OUT}"
+---
+# Source: cube/templates/proxy.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cube-proxy-entrypoint
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: proxy
+data:
+  cube-proxy-entrypoint.sh: |
+    #!/bin/sh
+    # Cube Proxy entrypoint script.
+    #
+    # Extracted from the chart-embedded shell in templates/proxy.yaml so
+    # that it can be linted (`shellcheck`), unit-tested, and reviewed as a
+    # proper source file rather than an inline command list.
+    #
+    # Contract:
+    # Reads the following env vars (populated by the Chart in the Pod spec):
+    #   CUBE_PROXY_HTTP_LISTEN_PORT   - digits only, target HTTP listen port
+    #   CUBE_PROXY_HTTPS_LISTEN_PORT  - digits only, target HTTPS listen port
+    #   CUBE_PROXY_GRPC_LISTEN_PORT   - digits only, target plaintext gRPC listen port
+    #   CUBE_PROXY_ADMIN_LISTEN       - admin server listen address (default 0.0.0.0)
+    #   CUBE_PROXY_ADMIN_PORT         - admin server port (default 8082)
+    #   CUBE_PROXY_ADMIN_TOKEN        - optional shared secret for /admin/*
+    #   CUBE_PROXY_RESOLVER_ADDRS     - space-separated nameservers; empty means
+    #                                   read from /etc/resolv.conf
+    #   CUBE_PROXY_RESOLVER_VALID     - nginx `valid=` duration
+    #   CUBE_PROXY_RESOLVER_TIMEOUT   - nginx `resolver_timeout` value
+    #   CUBE_PROXY_RESOLVER_IPV6      - on/off
+    #   REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_DB
+    #   REDIS_MASTER_NAME, REDIS_SENTINEL_NODES, REDIS_SENTINEL_PASSWORD
+    #   TIMEOUT_MIN, TIMEOUT_MAX
+    #   NODE_IP, CUBE_SIDECAR_LISTEN_ADDR (cube-lifecycle-manager host:port)
+    # Rewrites nginx.conf listen ports / admin bind in-place, then generates
+    # /usr/local/openresty/nginx/conf/global/global.conf and execs start.sh.
+    
+    set -eu
+    
+    mkdir -p /usr/local/openresty/nginx/conf/global /data /data/log/cube-proxy /cache
+    
+    CUBE_PROXY_GRPC_LISTEN_PORT="${CUBE_PROXY_GRPC_LISTEN_PORT:-9090}"
+    
+    case "${CUBE_PROXY_HTTP_LISTEN_PORT}:${CUBE_PROXY_HTTPS_LISTEN_PORT}:${CUBE_PROXY_GRPC_LISTEN_PORT}" in
+      *[!0-9:]*|:*|*:|::*|*::*)
+        echo "invalid CubeProxy listen ports: http=${CUBE_PROXY_HTTP_LISTEN_PORT} https=${CUBE_PROXY_HTTPS_LISTEN_PORT} grpc=${CUBE_PROXY_GRPC_LISTEN_PORT}" >&2
+        exit 1
+        ;;
+    esac
+    
+    admin_listen="${CUBE_PROXY_ADMIN_LISTEN:-0.0.0.0}"
+    admin_port="${CUBE_PROXY_ADMIN_PORT:-8082}"
+    case "${admin_port}" in
+      *[!0-9]*|"")
+        echo "invalid CubeProxy admin port: ${admin_port}" >&2
+        exit 1
+        ;;
+    esac
+    case "${admin_listen}" in
+      *[\;\{\}\$\`\"\\]*)
+        echo "invalid CubeProxy admin listen address: ${admin_listen}" >&2
+        exit 1
+        ;;
+    esac
+    
+    sed -i \
+      -e "s/listen 8081 reuseport;/listen ${CUBE_PROXY_HTTP_LISTEN_PORT} reuseport;/g" \
+      -e "s/listen 8080 ssl reuseport;/listen ${CUBE_PROXY_HTTPS_LISTEN_PORT} ssl reuseport;/g" \
+      -e "s/listen 9090 http2 reuseport;/listen ${CUBE_PROXY_GRPC_LISTEN_PORT} http2 reuseport;/g" \
+      -e "s/set \\\$host_proxy_port 8081;/set \\\$host_proxy_port ${CUBE_PROXY_HTTP_LISTEN_PORT};/g" \
+      -e "s/set \\\$host_proxy_port 8080;/set \\\$host_proxy_port ${CUBE_PROXY_HTTPS_LISTEN_PORT};/g" \
+      -e "s/listen 127\\.0\\.0\\.1:8082;/listen ${admin_listen}:${admin_port};/g" \
+      /usr/local/openresty/nginx/conf/nginx.conf
+    
+    escape_nginx_value() {
+      printf '%s' "$1" | sed 's/[\\"]/\\&/g'
+    }
+    
+    if [ -n "${CUBE_PROXY_ADMIN_TOKEN:-}" ]; then
+      token_escaped="$(escape_nginx_value "${CUBE_PROXY_ADMIN_TOKEN}")"
+      # Stock nginx.conf sets an empty token in each server block; rewrite them
+      # so /admin/* and resume paths share the same secret as cube-lifecycle-manager.
+      sed -i \
+        -e "s/set \\\$cube_admin_token \"\";/set \\\$cube_admin_token \"${token_escaped}\";/g" \
+        /usr/local/openresty/nginx/conf/nginx.conf
+    fi
+    
+    resolver_addrs="${CUBE_PROXY_RESOLVER_ADDRS:-}"
+    if [ -z "${resolver_addrs}" ]; then
+      resolver_addrs="$(awk '/^nameserver[[:space:]]+/ { printf "%s ", $2 }' /etc/resolv.conf | sed 's/[[:space:]]*$//')"
+    fi
+    [ -n "${resolver_addrs}" ] || {
+      echo "unable to determine nginx DNS resolver for CubeProxy Redis lookups" >&2
+      exit 1
+    }
+    case "${resolver_addrs}${CUBE_PROXY_RESOLVER_VALID}${CUBE_PROXY_RESOLVER_TIMEOUT}${CUBE_PROXY_RESOLVER_IPV6}" in
+      *[\;\{\}\$\`]*)
+        echo "invalid CubeProxy resolver configuration" >&2
+        exit 1
+        ;;
+    esac
+    
+    sidecar_addr="${CUBE_SIDECAR_LISTEN_ADDR:-}"
+    [ -n "${sidecar_addr}" ] || {
+      echo "CUBE_SIDECAR_LISTEN_ADDR is required (cube-lifecycle-manager host:port)" >&2
+      exit 1
+    }
+    
+    cat > /usr/local/openresty/nginx/conf/global/global.conf <<EOF
+    resolver ${resolver_addrs} valid=${CUBE_PROXY_RESOLVER_VALID} ipv6=${CUBE_PROXY_RESOLVER_IPV6};
+    resolver_timeout ${CUBE_PROXY_RESOLVER_TIMEOUT};
+    set \$redis_ip "$(escape_nginx_value "${REDIS_HOST:-}")";
+    set \$redis_port "$(escape_nginx_value "${REDIS_PORT:-6379}")";
+    set \$redis_pd "$(escape_nginx_value "${REDIS_PASSWORD:-}")";
+    set \$redis_master_name "$(escape_nginx_value "${REDIS_MASTER_NAME:-}")";
+    set \$redis_sentinel_nodes "$(escape_nginx_value "${REDIS_SENTINEL_NODES:-}")";
+    set \$redis_sentinel_pd "$(escape_nginx_value "${REDIS_SENTINEL_PASSWORD:-}")";
+    set \$redis_index "$(escape_nginx_value "${REDIS_DB:-0}")";
+    set \$timeout_min "$(escape_nginx_value "${TIMEOUT_MIN}")";
+    set \$timeout_max "$(escape_nginx_value "${TIMEOUT_MAX}")";
+    set \$cube_proxy_host_ip "$(escape_nginx_value "${NODE_IP}")";
+    set \$cube_sidecar_addr "$(escape_nginx_value "${sidecar_addr}")";
+    set \$cube_admin_token "$(escape_nginx_value "${CUBE_PROXY_ADMIN_TOKEN:-}")";
+    EOF
+    
+    exec /usr/local/openresty/nginx/sbin/start.sh
+---
+# Source: cube/templates/redis.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cube-redis
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: redis
+data:
+  redis.conf: |
+    include /etc/redis/redis-auth.conf
+    bind 0.0.0.0
+    port 6379
+    dir /data
+    protected-mode yes
+---
+# Source: cube/templates/webui.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cube-webui-config
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: webui
+data:
+  nginx.conf: |-
+    worker_processes auto;
+    
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        include /usr/local/openresty/nginx/conf/mime.types;
+        default_type application/octet-stream;
+    
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+    
+        gzip on;
+        gzip_types text/plain text/css application/javascript application/json application/xml;
+    
+        map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      '';
+        }
+    
+        server {
+            listen 80;
+            server_name _;
+    
+            root /usr/share/nginx/html;
+            index index.html;
+    
+            location = /cubeapi {
+                return 308 /cubeapi/;
+            }
+            location ^~ /sandbox/ {
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection $connection_upgrade;
+                proxy_read_timeout 7206s;
+                proxy_send_timeout 7206s;
+    
+                proxy_pass http://cube-proxy.cube-system.svc.cluster.local:80;
+            }
+    
+            location /opsapi/ {
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 300s;
+                proxy_send_timeout 300s;
+    
+                proxy_pass http://cube-ops.cube-system.svc.cluster.local:3010/api/;
+            }
+    
+            location /cubeapi/v1/ {
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 300s;
+                proxy_send_timeout 300s;
+    
+                rewrite ^/cubeapi/v1/(.*)$ /api/v1/sdk/$1 break;
+                proxy_pass http://cube-ops.cube-system.svc.cluster.local:3010;
+            }
+    
+            location = /health {
+                proxy_pass http://cube-ops.cube-system.svc.cluster.local:3010/health;
+            }
+    
+            location ~ ^/(sandboxes|v2/sandboxes|templates|snapshots) {
+                if ($http_authorization = "") {
+                    return 418;
+                }
+                add_header Vary "Authorization" always;
+                add_header Cache-Control "no-store" always;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 300s;
+                proxy_send_timeout 300s;
+    
+                rewrite ^/(.*)$ /api/v1/sdk/$1 break;
+                proxy_pass http://cube-ops.cube-system.svc.cluster.local:3010;
+            }
+    
+            error_page 418 = @spa_fallback;
+            location @spa_fallback {
+                root /usr/share/nginx/html;
+                try_files /index.html =404;
+                add_header Vary "Authorization" always;
+                add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+            }
+    
+            location /assets/ {
+                try_files $uri =404;
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+            }
+    
+            location / {
+                try_files $uri $uri/ /index.html;
+            }
+        }
+    }
+---
+# Source: cube/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cube-node-cube-c651771384
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch", "update"]
+---
+# Source: cube/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cube-node-cube-c651771384
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cube-node-cube-c651771384
+subjects:
+  - kind: ServiceAccount
+    name: cube-node
+    namespace: cube-system
+---
+# Source: cube/templates/cluster-dns.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cube-cluster-dns
+  namespace: "kube-system"
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cluster-dns
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["coredns"]
+    verbs: ["get", "update", "patch"]
+---
+# Source: cube/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cube-node-pod-drain
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+---
+# Source: cube/templates/tests/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cube-test
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: test
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list"]
+---
+# Source: cube/templates/cluster-dns.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cube-cluster-dns
+  namespace: "kube-system"
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cluster-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cube-cluster-dns
+subjects:
+  - kind: ServiceAccount
+    name: cube-cluster-dns
+    namespace: cube-system
+---
+# Source: cube/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cube-node-pod-drain
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cube-node-pod-drain
+subjects:
+  - kind: ServiceAccount
+    name: cube-node
+    namespace: cube-system
+---
+# Source: cube/templates/tests/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cube-test
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cube-test
+subjects:
+  - kind: ServiceAccount
+    name: cube-test
+    namespace: cube-system
+---
+# Source: cube/templates/api.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-api
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: api
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: api
+  ports:
+    - name: http-api
+      port: 3000
+      targetPort: http-api
+      nodePort: 30030
+---
+# Source: cube/templates/lifecycle-manager.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-lifecycle-manager
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: lifecycle-manager
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: lifecycle-manager
+  ports:
+    - name: http
+      port: 8083
+      targetPort: http
+      protocol: TCP
+---
+# Source: cube/templates/master.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-master
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: master
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: master
+  ports:
+    - name: cubemaster
+      port: 8089
+      targetPort: cubemaster
+---
+# Source: cube/templates/minio.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-minio
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: minio
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: minio
+  ports:
+    - name: minio
+      port: 9000
+      targetPort: minio
+---
+# Source: cube/templates/mysql.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-mysql
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: mysql
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+# Source: cube/templates/ops.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-ops
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: ops
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: ops
+  ports:
+    - name: http
+      port: 3010
+      targetPort: http
+---
+# Source: cube/templates/proxy-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-proxy
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-proxy
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: cube-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+      nodePort: 30080
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+      nodePort: 30443
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+      protocol: TCP
+      nodePort: 30090
+    - name: admin
+      port: 8082
+      targetPort: admin
+      protocol: TCP
+---
+# Source: cube/templates/redis.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-redis
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: redis
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+# Source: cube/templates/webui.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-webui
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: webui
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: webui
+  ports:
+    - name: http
+      port: 12088
+      targetPort: 80
+---
+# Source: cube/templates/node-bootstrap-daemonset.yaml
+# Node prep DaemonSet (wait-pvm-host + node-init + write node-prep-ready).
+# PVM host install is on cube-node-pvm. Low-churn: bumping nodeInit recreates
+# THIS pod only, not the Big Pod. Artifact install stays on cube-node-installer.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cube-node-bootstrap
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-node-bootstrap
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: cube-node-bootstrap
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: cube-node-bootstrap
+      annotations:
+    spec:
+      serviceAccountName: cube-node
+      automountServiceAccountToken: true
+      # nsenter --target 1 for node-init (same privilege model as former Big Pod inits).
+      hostPID: true
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: 30
+      
+      nodeSelector:
+        cube.tencent.com/cube-node: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      initContainers:
+        - name: invalidate-stale-node-prep
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-node-init:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              . /scripts/node-prep-lib.sh
+              ready="$(node_prep_ready_path)"
+              [ -f "$ready" ] || exit 0
+              old_generation="$(sed -n 's/^prep_generation=//p' "$ready")"
+              old_node_init="$(sed -n 's/^node_init_enabled=//p' "$ready")"
+              if [ "$old_generation" != "$PREP_GENERATION" ] || [ "$old_node_init" != "$NODE_INIT_ENABLED" ]; then
+                invalidate_node_prep_ready
+              fi
+          env:
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: PREP_GENERATION
+              value: "1"
+            - name: NODE_INIT_ENABLED
+              value: "1"
+          volumeMounts:
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+        - name: wait-pvm-host
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-node-init:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/wait-pvm-host.sh"]
+          securityContext:
+            privileged: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: HOST_ROOT
+              value: /host
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: PVM_FEATURE_ENABLED
+              value: "0"
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: ALLOW_PVM_LABEL
+              value: cube.tencent.com/allow-pvm-bootstrap
+            - name: DESIRED_KERNEL_PATTERN
+              value: "pvm.host"
+            - name: KERNEL_BOOT_ARGS
+              value: "nopti pti=off"
+            - name: WAIT_TIMEOUT_SECONDS
+              value: "900"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+        - name: cube-node-init
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-node-init:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: HOST_ROOT
+              value: /host
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: NODE_INIT_ENABLED
+              value: "1"
+            - name: PVM_ENABLED
+              value: "0"
+            - name: SKIP_IF_NODE_PREP_READY
+              value: "true"
+            - name: DATA_CUBELET
+              value: "/data/cubelet"
+            - name: REQUIRE_KVM
+              value: "true"
+            - name: REQUIRE_XFS
+              value: "true"
+            - name: CHMOD_KVM
+              value: "true"
+            - name: LOAD_KVM_MODULE
+              value: "true"
+            - name: WRITE_UDEV_RULE
+              value: "true"
+            - name: CREATE_HOST_DIRS
+              value: "true"
+            - name: CHECK_MASTER_CONNECTIVITY
+              value: "true"
+            - name: CUBE_MASTER_ENDPOINT
+              value: "cube-master.cube-system.svc.cluster.local:8089"
+            - name: LOOPBACK_ENABLED
+              value: "true"
+            - name: LOOPBACK_IMAGE_PATH
+              value: "/data/cubelet-xfs.img"
+            - name: LOOPBACK_SIZE
+              value: "200G"
+            - name: CHECK_MEMORY
+              value: "true"
+            - name: MIN_MEMORY_KB
+              value: "7500000"
+            - name: CHECK_CGROUP_CPU
+              value: "true"
+            - name: CHECK_BPF_FS
+              value: "true"
+            - name: CHECK_GLIBC
+              value: "true"
+            - name: CHECK_CIDR
+              value: "true"
+            - name: CHECK_CUBECOW_DEPS
+              value: "true"
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: "172.16.0.0/18"
+            - name: CUBE_SANDBOX_NETWORK_CIDR_SKIP_CONFLICT_CHECK
+              value: "0"
+            - name: PREP_GENERATION
+              value: "1"
+            - name: DESIRED_KERNEL_PATTERN
+              value: "pvm.host"
+            - name: KERNEL_BOOT_ARGS
+              value: "nopti pti=off"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+            - name: data-cubelet
+              mountPath: /data/cubelet
+              mountPropagation: Bidirectional
+            - name: data-log
+              mountPath: /data/log
+            - name: data-cube-shim
+              mountPath: /data/cube-shim
+              mountPropagation: Bidirectional
+            - name: data-snapshot-pack
+              mountPath: /data/cubelet/snapshot_pack
+            - name: data-cube-shared
+              mountPath: /data/cube-shared
+              mountPropagation: Bidirectional
+            - name: data-shared
+              mountPath: /data/shared
+              mountPropagation: Bidirectional
+            - name: tmp-cube
+              mountPath: /tmp/cube
+              mountPropagation: Bidirectional
+      containers:
+        - name: write-node-prep-ready
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-wait-node-prep:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/bin/tini", "-s", "--", "/scripts/write-node-prep-ready.sh"]
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: PREP_GENERATION
+              value: "1"
+            - name: PVM_ENABLED
+              value: "0"
+            - name: NODE_INIT_ENABLED
+              value: "1"
+            - name: DESIRED_KERNEL_PATTERN
+              value: "pvm.host"
+            - name: KERNEL_BOOT_ARGS
+              value: "nopti pti=off"
+          volumeMounts:
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+        - name: bootstrap-state
+          hostPath:
+            path: /var/lib/cube-node-bootstrap
+            type: DirectoryOrCreate
+        - name: data-cubelet
+          hostPath:
+            path: /data/cubelet
+            type: DirectoryOrCreate
+        - name: data-log
+          hostPath:
+            path: /data/log
+            type: DirectoryOrCreate
+        - name: data-cube-shim
+          hostPath:
+            path: /data/cube-shim
+            type: DirectoryOrCreate
+        - name: data-snapshot-pack
+          hostPath:
+            path: /data/cubelet/snapshot_pack
+            type: DirectoryOrCreate
+        - name: data-cube-shared
+          hostPath:
+            path: /data/cube-shared
+            type: DirectoryOrCreate
+        - name: data-shared
+          hostPath:
+            path: /data/shared
+            type: DirectoryOrCreate
+        - name: tmp-cube
+          hostPath:
+            path: /tmp/cube
+            type: DirectoryOrCreate
+---
+# Source: cube/templates/node-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cube-node
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-node
+spec:
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: cube-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: cube-node
+      annotations:
+        kubectl.kubernetes.io/default-container: cubelet
+    spec:
+      serviceAccountName: cube-node
+      automountServiceAccountToken: true
+      hostPID: true
+      hostNetwork: false
+      terminationGracePeriodSeconds: 30
+      # With hostNetwork the Pod shares the host netns; ClusterFirstWithHostNet
+      # keeps in-cluster DNS working from the host network namespace.
+      dnsPolicy: ClusterFirst
+      
+      nodeSelector:
+        cube.tencent.com/cube-node: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      initContainers:
+        # wait-node-prep: block until bootstrap wrote a matching node-prep-ready
+        # fingerprint, then exit 0 so run containers can start.
+        - name: wait-node-prep
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-wait-node-prep:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+          volumeMounts:
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 20m
+              memory: 32Mi
+      containers:
+        # Artifact install (shim/kernel/guest) lives in cube-node-installer.
+        - name: cubelet
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubelet:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_MODULE
+                - SYS_RESOURCE
+                - IPC_LOCK
+                - SYS_PTRACE
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
+            - name: IMAGE_ROOT
+              value: /opt/cube-image
+            - name: CUBE_PID_DIR
+              value: /run/cube-node
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: CUBE_OPS_ENDPOINT
+              value: "cube-ops.cube-system.svc.cluster.local:3010"
+            - name: CUBE_MASTER_HTTP_ADDR
+              value: "cube-master.cube-system.svc.cluster.local:8089"
+            - name: CUBE_SANDBOX_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CUBE_SANDBOX_ENDPOINT_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: CUBE_SANDBOX_AUTO_DETECT_ETH
+              value: "true"
+            - name: CUBE_SANDBOX_ETH_NAME
+              value: ""
+            - name: CUBE_SANDBOX_NETWORK_CIDR
+              value: "172.16.0.0/18"
+            - name: CUBE_EGRESS_ADMIN_PORT
+              value: "9091"
+            - name: CUBE_SANDBOX_DNS_SERVERS
+              value: ""
+            - name: CUBE_SANDBOX_DNS_FOLLOW_NODE
+              value: "true"
+            - name: CUBE_COMPONENT
+              value: cubelet
+            - name: CUBE_ROLE
+              value: run
+          ports:
+            - name: cubelet-grpc
+              containerPort: 9999
+            - name: cubelet-http
+              containerPort: 9998
+            - name: cubelet-debug
+              containerPort: 9966
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - |
+                    # Kill only this container's pidfile. Never pkill -f —
+                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
+                    pidfile=/run/cube-node/cubelet.pid
+                    if [[ -f "${pidfile}" ]]; then
+                      kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true
+                    fi
+          startupProbe:
+            tcpSocket:
+              port: 9999
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - |
+                  ss -lntp 2>/dev/null | grep -q ':9999' || exit 1
+                  test -S /data/cubelet/cubelet.sock
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 9999
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+            - name: data-cubelet
+              mountPath: /data/cubelet
+              mountPropagation: Bidirectional
+            - name: data-log
+              mountPath: /data/log
+            - name: data-cube-shim
+              mountPath: /data/cube-shim
+              mountPropagation: Bidirectional
+            - name: data-snapshot-pack
+              mountPath: /data/cubelet/snapshot_pack
+            - name: data-cube-shared
+              mountPath: /data/cube-shared
+              mountPropagation: Bidirectional
+            - name: data-shared
+              mountPath: /data/shared
+              mountPropagation: Bidirectional
+            - name: tmp-cube
+              mountPath: /tmp/cube
+              mountPropagation: Bidirectional
+            - name: run-containerd
+              mountPath: /run/containerd
+            - name: run-vc
+              mountPath: /run/vc
+            - name: s3lvol-socket
+              mountPath: /var/run/s3lvol.sock
+            - name: cube-pid
+              mountPath: /run/cube-node
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            # File bind on the hostPath toolbox. cubelet staging overlays Cubelet/
+            # in place so this mount is not renamed aside with the directory.
+            - name: volume-s3-conf
+              mountPath: /usr/local/services/cubetoolbox/Cubelet/plugin/volume-s3.conf
+              subPath: volume-s3.conf
+              readOnly: true
+          resources:
+            limits:
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+        - name: cube-egress
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - NET_BIND_SERVICE
+                - CHOWN
+                - SETUID
+                - SETGID
+                - DAC_READ_SEARCH
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_EGRESS_BOOTSTRAP_URL
+              value: "http://127.0.0.1:9998/v1/policies/dump"
+            - name: CUBE_EGRESS_DEBUG_DUMP
+              value: "0"
+            - name: CUBE_EGRESS_ADMIN_PORT
+              value: "9091"
+          ports:
+            - name: egress-admin
+              containerPort: 9091
+            - name: egress-http
+              containerPort: 8080
+            - name: egress-https
+              containerPort: 8443
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - "curl -fsS http://127.0.0.1:9091/admin/v1/health >/dev/null"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - "curl -fsS http://127.0.0.1:9091/admin/v1/health >/dev/null"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+            - name: data-log
+              mountPath: /data/log
+            - name: cube-egress-run
+              mountPath: /var/run/openresty
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+        - name: cube-egress-net
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-net:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - SYS_MODULE
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_INGRESS_IFACE
+              value: "cube-dev"
+            - name: CUBE_TPROXY_ON_IP
+              value: "172.16.0.1"
+            - name: CUBE_EGRESS_NET_INITIAL_WAIT_SECONDS
+              value: "300"
+            - name: CUBE_EGRESS_NET_REAPPLY_INTERVAL_SECONDS
+              value: "30"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - "set -e\niface=\"${CUBE_INGRESS_IFACE:-cube-dev}\"\ntable=\"${CUBE_EGRESS_NET_ROUTE_TABLE:-100}\"\nchain=\"${CUBE_EGRESS_NET_CHAIN:-TRANSPROXY}\"\nip link show \"${iface}\" >/dev/null\nhttp_mark=0xce010000\nhttps_mark=0xce020000\nmark_mask=0xffff0000\nip rule show | grep -q \"fwmark ${http_mark}/${mark_mask} lookup ${table}\"\nip rule show | grep -q \"fwmark ${https_mark}/${mark_mask} lookup ${table}\"\nip route show table \"${table}\" | grep -Eq \"local (default|0\\\\.0\\\\.0\\\\.0/0) dev lo\"\niptables -t mangle -S \"${chain}\" | grep -q \"${http_mark}\"\niptables -t mangle -S \"${chain}\" | grep -q \"${https_mark}\""
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - "set -e\niface=\"${CUBE_INGRESS_IFACE:-cube-dev}\"\ntable=\"${CUBE_EGRESS_NET_ROUTE_TABLE:-100}\"\nchain=\"${CUBE_EGRESS_NET_CHAIN:-TRANSPROXY}\"\nip link show \"${iface}\" >/dev/null\nhttp_mark=0xce010000\nhttps_mark=0xce020000\nmark_mask=0xffff0000\nip rule show | grep -q \"fwmark ${http_mark}/${mark_mask} lookup ${table}\"\nip rule show | grep -q \"fwmark ${https_mark}/${mark_mask} lookup ${table}\"\nip route show table \"${table}\" | grep -Eq \"local (default|0\\\\.0\\\\.0\\\\.0/0) dev lo\"\niptables -t mangle -S \"${chain}\" | grep -q \"${http_mark}\"\niptables -t mangle -S \"${chain}\" | grep -q \"${https_mark}\""
+            initialDelaySeconds: 330
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+          resources:
+            limits:
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: toolbox
+          hostPath:
+            path: /usr/local/services/cubetoolbox
+            type: DirectoryOrCreate
+        - name: bootstrap-state
+          hostPath:
+            path: /var/lib/cube-node-bootstrap
+            type: DirectoryOrCreate
+        - name: cube-pid
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: data-cubelet
+          hostPath:
+            path: /data/cubelet
+            type: DirectoryOrCreate
+        - name: data-log
+          hostPath:
+            path: /data/log
+            type: DirectoryOrCreate
+        - name: data-cube-shim
+          hostPath:
+            path: /data/cube-shim
+            type: DirectoryOrCreate
+        - name: data-snapshot-pack
+          hostPath:
+            path: /data/cubelet/snapshot_pack
+            type: DirectoryOrCreate
+        - name: data-cube-shared
+          hostPath:
+            path: /data/cube-shared
+            type: DirectoryOrCreate
+        - name: data-shared
+          hostPath:
+            path: /data/shared
+            type: DirectoryOrCreate
+        - name: tmp-cube
+          hostPath:
+            path: /tmp/cube
+            type: DirectoryOrCreate
+        - name: run-containerd
+          hostPath:
+            path: /data/cubelet/run/containerd
+            type: DirectoryOrCreate
+        - name: run-vc
+          hostPath:
+            path: /data/cubelet/run/vc
+            type: DirectoryOrCreate
+        - name: s3lvol-socket
+          hostPath:
+            path: /var/run/s3lvol.sock
+            type: Socket
+        - name: volume-s3-conf
+          secret:
+            secretName: cube-volume-s3
+            defaultMode: 0400
+        - name: cube-egress-ca
+          secret:
+            secretName: cube-egress-ca
+        - name: cube-egress-run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+# Source: cube/templates/node-installer-daemonset.yaml
+# Artifact installer DaemonSet. Shares placement + toolbox hostPath with
+# cube-node, but uses a disjoint selector and may RollingUpdate / grow containers
+# without recreating the Big Pod. Always deployed with cube-node (no separate enable switch).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cube-node-installer
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-node-installer
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: cube-node-installer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: cube-node-installer
+      annotations:
+    spec:
+      serviceAccountName: cube-node
+      automountServiceAccountToken: true
+      # Installer only stages files; no host PID / dataplane netns needed.
+      hostPID: false
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: 15
+      
+      nodeSelector:
+        cube.tencent.com/cube-node: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cube-shim-install
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-shim:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
+            - name: IMAGE_ROOT
+              value: /opt/cube-image
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: COMPONENT_VERSIONS_ROOT
+              value: "/data/cubelet/root/component_versions"
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: CUBE_COMPONENT
+              value: cube-shim
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+            - name: data-cubelet
+              mountPath: /data/cubelet
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        - name: cube-kernel-install
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-kernel:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
+            - name: IMAGE_ROOT
+              value: /opt/cube-image
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: COMPONENT_VERSIONS_ROOT
+              value: "/data/cubelet/root/component_versions"
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: CUBE_COMPONENT
+              value: cube-kernel
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+            - name: data-cubelet
+              mountPath: /data/cubelet
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+        - name: cube-guest-install
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-guest:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
+            - name: IMAGE_ROOT
+              value: /opt/cube-image
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: COMPONENT_VERSIONS_ROOT
+              value: "/data/cubelet/root/component_versions"
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: CUBE_COMPONENT
+              value: cube-guest
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+            - name: data-cubelet
+              mountPath: /data/cubelet
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        - name: cube-agent-install
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-agent:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: TOOLBOX_ROOT
+              value: /usr/local/services/cubetoolbox
+            - name: IMAGE_ROOT
+              value: /opt/cube-image
+            - name: STATE_DIR
+              value: "/var/lib/cube-node-bootstrap"
+            - name: COMPONENT_VERSIONS_ROOT
+              value: "/data/cubelet/root/component_versions"
+            - name: CUBE_PVM_ENABLE
+              value: "0"
+            - name: CUBE_COMPONENT
+              value: cube-agent
+            - name: CUBE_ROLE
+              value: install
+          volumeMounts:
+            - name: toolbox
+              mountPath: /usr/local/services/cubetoolbox
+            - name: bootstrap-state
+              mountPath: /var/lib/cube-node-bootstrap
+            - name: data-cubelet
+              mountPath: /data/cubelet
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: toolbox
+          hostPath:
+            path: /usr/local/services/cubetoolbox
+            type: DirectoryOrCreate
+        - name: bootstrap-state
+          hostPath:
+            path: /var/lib/cube-node-bootstrap
+            type: DirectoryOrCreate
+        - name: data-cubelet
+          hostPath:
+            path: /data/cubelet
+            type: DirectoryOrCreate
+---
+# Source: cube/templates/api.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-api
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: api
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cube-api
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-api:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_MASTER_ENDPOINT
+              value: "cube-master.cube-system.svc.cluster.local:8089"
+            - name: CUBE_MASTER_ADDR
+              value: "http://cube-master.cube-system.svc.cluster.local:8089"
+            - name: CUBE_API_BIND
+              value: "0.0.0.0:3000"
+            - name: CUBE_SANDBOX_MYSQL_HOST
+              value: "cube-mysql.cube-system.svc.cluster.local"
+            - name: CUBE_SANDBOX_MYSQL_PORT
+              value: "3306"
+            - name: CUBE_SANDBOX_MYSQL_USER
+              value: "cube"
+            - name: CUBE_SANDBOX_MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: mysql-password
+            - name: CUBE_SANDBOX_MYSQL_DB
+              value: "cube_mvp"
+            - name: CUBE_API_SANDBOX_DOMAIN
+              value: "cube.local"
+          ports:
+            - name: http-api
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: "/health"
+              port: http-api
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: "/health"
+              port: http-api
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+      volumes:
+        - name: cube-egress-ca
+          secret:
+            secretName: cube-egress-ca
+---
+# Source: cube/templates/cubemastercli.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-cubemastercli
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cubemastercli
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: cubemastercli
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: cubemastercli
+    spec:
+      terminationGracePeriodSeconds: 5
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cubemastercli
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cubemastercli:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_RELEASE
+              value: "cube"
+            - name: CUBE_NAMESPACE
+              value: "cube-system"
+            - name: CUBE_MASTER_ENDPOINT
+              value: "cube-master.cube-system.svc.cluster.local:8089"
+            - name: CUBEMASTERCLI_ADDRESS
+              value: "cube-master.cube-system.svc.cluster.local"
+            - name: CUBEMASTERCLI_PORT
+              value: "8089"
+            - name: CUBEOPSCLI_ADDRESS
+              value: "cube-ops.cube-system.svc.cluster.local"
+            - name: CUBEOPSCLI_PORT
+              value: "3010"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - cubemastercli --address "${CUBEMASTERCLI_ADDRESS}" --port "${CUBEMASTERCLI_PORT}" cubebox list >/dev/null
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cubemastercli
+                - --help
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+---
+# Source: cube/templates/lifecycle-manager.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-lifecycle-manager
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: lifecycle-manager
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: lifecycle-manager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: lifecycle-manager
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cube-lifecycle-manager
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_LCM_REDIS_ADDR
+              value: "cube-redis.cube-system.svc.cluster.local:6379"
+            - name: CUBE_LCM_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-password
+            - name: CUBE_LCM_REDIS_DB
+              value: "0"
+            - name: CUBE_LCM_REDIS_MASTER_NAME
+              value: ""
+            - name: CUBE_LCM_REDIS_SENTINEL_NODES
+              value: ""
+            - name: CUBE_LCM_REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-sentinel-password
+            - name: CUBE_LCM_CUBEMASTER_URL
+              value: "http://cube-master.cube-system.svc.cluster.local:8089"
+            - name: CUBE_LCM_LISTEN_ADDR
+              value: "0.0.0.0:8083"
+            - name: CUBE_LCM_DEFAULT_IDLE_TIMEOUT
+              value: "5m"
+            - name: CUBE_LCM_HEARTBEAT_TTL
+              value: "15s"
+            - name: CUBE_LCM_DISCOVERY_REFRESH
+              value: "3s"
+            - name: CUBE_LCM_LAST_ACTIVE_POLL
+              value: "5s"
+            - name: CUBE_LCM_IDLE_SWEEP_INTERVAL
+              value: "5s"
+            - name: CUBE_LCM_BOOTSTRAP_WARMUP
+              value: "30s"
+            - name: CUBE_LCM_STATE_LOCK_TTL
+              value: "60s"
+            - name: CUBE_LCM_EVENTBUS_ENABLED
+              value: "true"
+            - name: CUBE_LCM_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: cube-admin-token
+          ports:
+            - name: http
+              containerPort: 8083
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: "/readyz"
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: "/healthz"
+              port: 8083
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+---
+# Source: cube/templates/master.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-master
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: master
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: master
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: master
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cube-master
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-master:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_MASTER_CONFIG_PATH
+              value: /usr/local/services/cubetoolbox/CubeMaster/conf.yaml
+            - name: CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR
+              value: /data/CubeMaster/storage
+            - name: CUBE_NODE_IPS
+              value: ""
+          ports:
+            - name: cubemaster
+              containerPort: 8089
+          readinessProbe:
+            httpGet:
+              path: "/notify/health"
+              port: cubemaster
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: "/notify/health"
+              port: cubemaster
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: cube-master-config
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/conf.yaml
+              subPath: conf.yaml
+              readOnly: true
+            - name: volume-s3-conf
+              mountPath: /usr/local/services/cubetoolbox/CubeMaster/plugin/volume-s3.conf
+              subPath: volume-s3.conf
+              readOnly: true
+            - name: cube-egress-ca
+              mountPath: /etc/cube/ca
+              readOnly: true
+            - name: cube-master-log
+              mountPath: /data/log/CubeMaster
+            - name: cube-master-storage
+              mountPath: /data/CubeMaster/storage
+      volumes:
+        - name: cube-master-config
+          secret:
+            secretName: cube-master-config
+        - name: volume-s3-conf
+          secret:
+            secretName: cube-volume-s3
+            defaultMode: 0400
+        - name: cube-egress-ca
+          secret:
+            secretName: cube-egress-ca
+        - name: cube-master-log
+          emptyDir: {}
+        - name: cube-master-storage
+          hostPath:
+            path: "/data/cubesandbox/master"
+            type: DirectoryOrCreate
+---
+# Source: cube/templates/ops.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-ops
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: ops
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: ops
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: ops
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cube-ops
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-ops:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: CUBE_OPS_BIND
+              value: "0.0.0.0:3010"
+            - name: CUBE_MASTER_ADDR
+              value: "http://cube-master.cube-system.svc.cluster.local:8089"
+            - name: CUBE_SANDBOX_MYSQL_HOST
+              value: "cube-mysql.cube-system.svc.cluster.local"
+            - name: CUBE_SANDBOX_MYSQL_PORT
+              value: "3306"
+            - name: CUBE_SANDBOX_MYSQL_USER
+              value: "cube"
+            - name: CUBE_SANDBOX_MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: mysql-password
+            - name: CUBE_SANDBOX_MYSQL_DB
+              value: "cube_mvp"
+            - name: CUBE_API_SANDBOX_DOMAIN
+              value: "cube.local"
+            # Shared CubeDB with CubeMaster; skip fingerprint so chart upgrades
+            # do not fail when Master already applied the same migrations.
+            - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
+              value: "true"
+            - name: REDIS_HOST
+              value: "cube-redis.cube-system.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-password
+            - name: REDIS_MASTER_NAME
+              value: ""
+            - name: REDIS_SENTINEL_NODES
+              value: ""
+            - name: REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-sentinel-password
+          ports:
+            - name: http
+              containerPort: 3010
+          readinessProbe:
+            httpGet:
+              path: "/health"
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: "/health"
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+---
+# Source: cube/templates/proxy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-proxy
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cube-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: cube-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: cube-proxy
+      annotations:
+        checksum/entrypoint: "f6fe446ed6b0042a4cb53d12f4c41ca61c5ba84c9dadc0b7923b9a0f2ae3527a"
+    spec:
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: cube-proxy
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              exec /etc/cube-proxy/cube-proxy-entrypoint.sh
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_IP
+              value: "$(POD_IP)"
+            - name: REDIS_HOST
+              value: "cube-redis.cube-system.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-password
+            - name: REDIS_DB
+              value: "0"
+            - name: REDIS_MASTER_NAME
+              value: ""
+            - name: REDIS_SENTINEL_NODES
+              value: ""
+            - name: REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-sentinel-password
+            - name: TIMEOUT_MIN
+              value: "500"
+            - name: TIMEOUT_MAX
+              value: "700"
+            # nginx $cube_sidecar_addr → cube-lifecycle-manager Service (resume callback).
+            - name: CUBE_SIDECAR_LISTEN_ADDR
+              value: "cube-lifecycle-manager.cube-system.svc.cluster.local:8083"
+            - name: CUBE_PROXY_HTTP_LISTEN_PORT
+              value: "80"
+            - name: CUBE_PROXY_HTTPS_LISTEN_PORT
+              value: "443"
+            - name: CUBE_PROXY_GRPC_LISTEN_PORT
+              value: "9090"
+            - name: CUBE_PROXY_ADMIN_LISTEN
+              value: "0.0.0.0"
+            - name: CUBE_PROXY_ADMIN_PORT
+              value: "8082"
+            - name: CUBE_PROXY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: cube-admin-token
+            - name: CUBE_PROXY_RESOLVER_ADDRS
+              value: ""
+            - name: CUBE_PROXY_RESOLVER_VALID
+              value: "5s"
+            - name: CUBE_PROXY_RESOLVER_TIMEOUT
+              value: "5s"
+            - name: CUBE_PROXY_RESOLVER_IPV6
+              value: "off"
+            - name: CUBE_PROXY_REGISTRY_ENABLE
+              value: "1"
+            - name: CUBE_PROXY_ID
+              value: "$(POD_NAME)"
+            - name: CUBE_PROXY_ADMIN_URL
+              value: "http://$(POD_IP):8082"
+            - name: CUBE_PROXY_RESUME_URL
+              value: "http://$(POD_IP):8082"
+            - name: CUBE_PROXY_NODE_IP
+              value: "$(POD_IP)"
+            - name: CUBE_PROXY_VERSION
+              value: "v0.7.0"
+            - name: CUBE_PROXY_HEARTBEAT_INTERVAL_MS
+              value: "5000"
+            - name: CUBE_PROXY_REGISTRY_REDIS_HOST
+              value: "cube-redis.cube-system.svc.cluster.local"
+            - name: CUBE_PROXY_REGISTRY_REDIS_PORT
+              value: "6379"
+            - name: CUBE_PROXY_REGISTRY_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-password
+            - name: CUBE_PROXY_REGISTRY_REDIS_DB
+              value: "0"
+            - name: CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME
+              value: ""
+            - name: CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES
+              value: ""
+            - name: CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-sentinel-password
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
+            - name: grpc
+              containerPort: 9090
+              protocol: TCP
+            - name: admin
+              containerPort: 8082
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - "curl -fsS -H \"X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}\" http://127.0.0.1:8082/admin/healthz >/dev/null"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - "curl -fsS -H \"X-Cube-Admin-Token: ${CUBE_PROXY_ADMIN_TOKEN}\" http://127.0.0.1:8082/admin/healthz >/dev/null"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: proxy-certs
+              mountPath: /usr/local/openresty/nginx/certs
+              readOnly: true
+            - name: proxy-logs
+              mountPath: /data/log/cube-proxy
+            - name: entrypoint
+              mountPath: /etc/cube-proxy
+              readOnly: true
+      volumes:
+        - name: proxy-certs
+          secret:
+            secretName: cube-proxy-certs
+            items:
+              - key: "tls.crt"
+                path: cube.app+3.pem
+              - key: "tls.key"
+                path: cube.app+3-key.pem
+        - name: proxy-logs
+          hostPath:
+            path: "/data/log/cube-proxy"
+            type: DirectoryOrCreate
+        - name: entrypoint
+          configMap:
+            name: cube-proxy-entrypoint
+            defaultMode: 0755
+---
+# Source: cube/templates/webui.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-webui
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: webui
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: webui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: webui
+      annotations:
+        checksum/nginx-conf: "674edadcf566ac3b3cbecd1787686b52bb884a3b7fdf08947ac52713508cfc3a"
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: webui
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui:v0.7.0"
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT embeds "-g daemon off;"; override so we can load the
+          # chart ConfigMap without a subPath file mount (which does not refresh).
+          command:
+            - /usr/local/openresty/bin/openresty
+          args:
+            - -c
+            - /etc/cube-webui/nginx.conf
+            - -g
+            - daemon off;
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: webui-config
+              mountPath: /etc/cube-webui
+              readOnly: true
+      volumes:
+        - name: webui-config
+          configMap:
+            name: cube-webui-config
+---
+# Source: cube/templates/minio.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cube-minio
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: cube-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: minio
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: minio
+          image: "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/minio:RELEASE.2025-09-07T16-13-09Z"
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: minio-root-password
+          ports:
+            - name: minio
+              containerPort: 9000
+          startupProbe:
+            httpGet:
+              path: /minio/health/live
+              port: minio
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: minio
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: minio
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      volumes:
+        - name: minio-data
+          hostPath:
+            path: "/data/cubesandbox/minio"
+            type: DirectoryOrCreate
+---
+# Source: cube/templates/mysql.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cube-mysql
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: mysql
+spec:
+  serviceName: cube-mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: mysql
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: mysql
+          image: "mysql:8.0"
+          imagePullPolicy: IfNotPresent
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: mysql-root-password
+            - name: MYSQL_DATABASE
+              value: "cube_mvp"
+            - name: MYSQL_USER
+              value: "cube"
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: mysql-password
+          args:
+            - --skip-name-resolve
+          ports:
+            - name: mysql
+              containerPort: 3306
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent
+            initialDelaySeconds: 10
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: mysql-data
+          hostPath:
+            path: "/data/cubesandbox/mysql"
+            type: DirectoryOrCreate
+---
+# Source: cube/templates/redis.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cube-redis
+  labels:
+    helm.sh/chart: "cube-0.7.0"
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/version: "0.7.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: cube-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube
+      app.kubernetes.io/instance: cube
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube
+        app.kubernetes.io/instance: cube
+        app.kubernetes.io/component: redis
+    spec:
+      
+      nodeSelector:
+        cube.tencent.com/cube-control: "true"
+      tolerations:
+        - effect: NoSchedule
+          key: cube.tencent.com/control
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: cube.tencent.com/compute
+          operator: Equal
+          value: "true"
+      containers:
+        - name: redis
+          image: "redis:7-alpine"
+          imagePullPolicy: IfNotPresent
+          args:
+            - /etc/redis/redis.conf
+          env:
+            
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-secret
+                  key: redis-password
+          ports:
+            - name: redis
+              containerPort: 6379
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ping | grep -x PONG
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ping | grep -x PONG
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ping | grep -x PONG
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-config
+          projected:
+            sources:
+              - configMap:
+                  name: cube-redis
+              - secret:
+                  name: cube-secret
+                  items:
+                    - key: redis-auth.conf
+                      path: redis-auth.conf
+        - name: redis-data
+          hostPath:
+            path: "/data/cubesandbox/redis"
+            type: DirectoryOrCreate
+

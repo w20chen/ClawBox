@@ -1,0 +1,94 @@
+bootstrap:
+  nodeInit:
+    dataCubelet:
+      loopback:
+        enabled: true
+        imagePath: /data/cubelet-xfs.img
+        size: 200G
+      path: /data/cubelet
+  pvmHostKernel:
+    enabled: false
+    startupGate:
+      enabled: false
+      requirePreflight: false
+controlPlane:
+  api:
+    sandboxDomain: cube.local
+    service:
+      nodePort: 30030
+      type: NodePort
+  master:
+    persistence:
+      hostPath: /data/cubesandbox/master
+cubeNode:
+  network:
+    cidr: 172.16.0.0/18
+    cidrSkipConflictCheck: false
+  pvmGuestKernel:
+    enabled: false
+cubeProxy:
+  advertiseIP: 193.124.7.2
+  domain: cube.local
+  ingress:
+    enabled: false
+  service:
+    nodePorts:
+      grpc: 30090
+      http: 30080
+      https: 30443
+    type: NodePort
+hostPaths:
+  dataCubelet: /data/cubelet
+  dataSnapshotPack: /data/cubelet/snapshot_pack
+minio:
+  persistence:
+    hostPath: /data/cubesandbox/minio
+mysql:
+  host: ""
+  password: 12fb567911aa451e89d110add9bb1e2e4c38b187b50173cf
+  persistence:
+    hostPath: /data/cubesandbox/mysql
+  rootPassword: b6498235acaf54b4102ff3abc9578bdb5520b2a4b729ace0
+placement:
+  compute:
+    nodeSelector:
+      cube.tencent.com/cube-node: "true"
+    tolerations:
+    - effect: NoSchedule
+      key: cube.tencent.com/control
+      operator: Equal
+      value: "true"
+    - effect: NoSchedule
+      key: cube.tencent.com/compute
+      operator: Equal
+      value: "true"
+  controlPlane:
+    nodeSelector:
+      cube.tencent.com/cube-control: "true"
+    tolerations:
+    - effect: NoSchedule
+      key: cube.tencent.com/control
+      operator: Equal
+      value: "true"
+    - effect: NoSchedule
+      key: cube.tencent.com/compute
+      operator: Equal
+      value: "true"
+  pvm:
+    nodeSelector:
+      cube.tencent.com/allow-pvm-bootstrap: "true"
+      cube.tencent.com/cube-node: "true"
+    tolerations:
+    - effect: NoSchedule
+      key: cube.tencent.com/control
+      operator: Equal
+      value: "true"
+    - effect: NoSchedule
+      key: cube.tencent.com/compute
+      operator: Equal
+      value: "true"
+redis:
+  host: ""
+  password: 981cf73a6556de5557aa94b913e9af377bf6bd627f81de22
+  persistence:
+    hostPath: /data/cubesandbox/redis

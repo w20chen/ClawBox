@@ -1,0 +1,2 @@
+{"ownership":{"attempt_id":"attempt-1","experiment_id":"tiered-oracle-rec-a-c1","policy_name":"tool-static-resident","run_id":"gate-c1-20260907-r4","session_id":"9963b78483ea913a73e0e6cb-0000-tool","task_uid":"gate-c1-20260907-r4"},"sandbox_id":"a61afa9af68b4bba903e36d97d2c9515"}
+{"ownership":{"attempt_id":"attempt-1","experiment_id":"tiered-oracle-rec-a-c1","policy_name":"tool-static-resident","run_id":"gate-c1-20260907-r4","session_id":"9963b78483ea913a73e0e6cb-0000-runtime","task_uid":"gate-c1-20260907-r4"},"sandbox_id":"1a5a758de1914a94b9bbd78ab8f8a890"}

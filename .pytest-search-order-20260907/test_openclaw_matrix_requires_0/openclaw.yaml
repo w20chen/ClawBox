@@ -1,0 +1,46 @@
+agent:
+  driver: openclaw
+execution:
+  concurrency_levels:
+  - 1
+  - 4
+  random_seed: 17
+experiment_id: unit
+inference:
+  backend: replay
+  configuration:
+    model: recorded-model
+policies:
+- admission: lifetime_full
+  eviction: none
+  name: resident
+  reclamation: resident
+  restore: none
+- admission: tool_p90
+  eviction: wait_aware_pressure
+  name: proposed
+  prefetch_lead_seconds: 0.5
+  reclamation: snapshot_pause
+  restore: proactive
+resources:
+  emergency_free_memory_mib: 10000
+  p90_predictions: p90.json
+  pool_memory_budget_mib: 100000
+  target_node: node-a
+runtime:
+  image_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  source_image_reference: registry/runtime
+  template_id: runtime-id
+sandbox:
+  source_image_reference: registry/tool
+  template_id: tool-id
+schema_version: 2
+workload:
+  cases:
+  - case_id: case-a
+    replay_trace_reference: trace.jsonl
+    source: recorded_trace
+    source_reference: trace.jsonl
+  input: trace.jsonl
+  repetitions: 2
+  source: recorded_trace

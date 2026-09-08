@@ -1,0 +1,138 @@
+diff --git a/CubeMaster/conf.yaml b/CubeMaster/conf.yaml
+index d580a8a..38b4490 100644
+--- a/CubeMaster/conf.yaml
++++ b/CubeMaster/conf.yaml
+@@ -85,8 +85,8 @@ scheduler:
+   # Global CPU/Mem overcommit ratio applied to the node-reported quota capacity.
+   # Defaults to CPU=3, Mem=2.
+   overcommit_ratio:
+-    cpu_ratio: 3.0
+-    mem_ratio: 2.0
++    cpu_ratio: 1.0
++    mem_ratio: 1.0
+   # Per-instance-type overcommit ratio (takes precedence over the global
+   # overcommit_ratio).
+   # overcommit_ratio_conf:
+diff --git a/Cubelet/dynamicconf/conf.yaml b/Cubelet/dynamicconf/conf.yaml
+index 74cc3a5..60b1390 100644
+--- a/Cubelet/dynamicconf/conf.yaml
++++ b/Cubelet/dynamicconf/conf.yaml
+@@ -40,7 +40,7 @@ host:
+     #                 still shows up in QuotaCpuUsage/QuotaMemUsage, so
+     #                 pause-heavy nodes are deprioritised by the cpu/mem scoring
+     #                 factors.
+-    paused_resource_release_ratio: 0.0
++    paused_resource_release_ratio: 1.0
+   gc:
+     code_expiration_time: "72h"
+     image_expiration_time: "24h"
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index 285289e..9c83332 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -107,6 +107,18 @@ func (s *service) updateWithPauseCow(
+ 		"step":      "pauseCow",
+ 		"sandboxID": req.SandboxID,
+ 	})
++	snapshotPhaseStarted := time.Now()
++	snapshotPhaseLogged := false
++	defer func() {
++		if !snapshotPhaseLogged {
++			stepLog.WithFields(CubeLog.Fields{
++				"operation":   "checkpoint",
++				"phase":       "snapshot_create",
++				"status":      "error",
++				"duration_ms": time.Since(snapshotPhaseStarted).Milliseconds(),
++			}).Info("sandbox lifecycle phase completed")
++		}
++	}()
+ 
+ 	snapID, err := resolvePauseSnapshotID(req)
+ 	if err != nil {
+@@ -370,8 +382,30 @@ func (s *service) updateWithPauseCow(
+ 
+ 	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
+ 
++	snapshotPhaseLogged = true
++	stepLog.WithFields(CubeLog.Fields{
++		"operation":    "checkpoint",
++		"phase":        "snapshot_create",
++		"status":       "ok",
++		"duration_ms":  time.Since(snapshotPhaseStarted).Milliseconds(),
++		"snapshotID":   snapID,
++		"snapshotPath": snapshotPath,
++	}).Info("sandbox lifecycle phase completed")
++
+ 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
++	swapOutPhaseStarted := time.Now()
+ 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
++	swapOutStatus := "ok"
++	if err != nil {
++		swapOutStatus = "error"
++	}
++	stepLog.WithFields(CubeLog.Fields{
++		"operation":   "checkpoint",
++		"phase":       "swap_out",
++		"status":      swapOutStatus,
++		"duration_ms": time.Since(swapOutPhaseStarted).Milliseconds(),
++		"snapshotID":  snapID,
++	}).Info("sandbox lifecycle phase completed")
+ 	// Always attach whatever volume ref events were observed — Detach may have
+ 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
+ 	// to apply those deltas on an explicit Pause failure.
+diff --git a/configs/kernel-oc9.aarch64.config b/configs/kernel-oc9.aarch64.config
+index fcc8036..eabb5a6 100644
+--- a/configs/kernel-oc9.aarch64.config
++++ b/configs/kernel-oc9.aarch64.config
+@@ -778,7 +778,8 @@ CONFIG_ARCH_HAS_SUBPAGE_FAULTS=y
+ CONFIG_HOTPLUG_SMT=y
+ CONFIG_HOTPLUG_CORE_SYNC=y
+ CONFIG_HOTPLUG_CORE_SYNC_DEAD=y
+-# CONFIG_KPROBES is not set
++CONFIG_KPROBES=y
++CONFIG_KPROBES_ON_FTRACE=y
+ CONFIG_JUMP_LABEL=y
+ # CONFIG_STATIC_KEYS_SELFTEST is not set
+ CONFIG_UPROBES=y
+diff --git a/deploy/kubernetes/chart/files/cube-master/conf.yaml b/deploy/kubernetes/chart/files/cube-master/conf.yaml
+index f9e87d0..7ff8758 100644
+--- a/deploy/kubernetes/chart/files/cube-master/conf.yaml
++++ b/deploy/kubernetes/chart/files/cube-master/conf.yaml
+@@ -81,6 +81,9 @@ scheduler:
+   priority_select_num: 1
+   metric_update_timeout: 300s
+   local_metric_update_timeout: 300s
++  overcommit_ratio:
++    cpu_ratio: 1.0
++    mem_ratio: 1.0
+   filter:
+     enable_filters:
+       - "cpu"
+diff --git a/deploy/kubernetes/chart/templates/_helpers.tpl b/deploy/kubernetes/chart/templates/_helpers.tpl
+index a07491f..b9279db 100644
+--- a/deploy/kubernetes/chart/templates/_helpers.tpl
++++ b/deploy/kubernetes/chart/templates/_helpers.tpl
+@@ -920,6 +920,8 @@ Toolbox is mounted whole at the fixed path.
+   mountPath: /run/containerd
+ - name: run-vc
+   mountPath: /run/vc
++- name: s3lvol-socket
++  mountPath: /var/run/s3lvol.sock
+ - name: cube-pid
+   mountPath: /run/cube-node
+ {{- end -}}
+diff --git a/deploy/kubernetes/chart/templates/node-daemonset.yaml b/deploy/kubernetes/chart/templates/node-daemonset.yaml
+index 268af16..5ef774f 100644
+--- a/deploy/kubernetes/chart/templates/node-daemonset.yaml
++++ b/deploy/kubernetes/chart/templates/node-daemonset.yaml
+@@ -334,6 +334,10 @@ spec:
+           hostPath:
+             path: {{ .Values.hostPaths.runVc }}
+             type: DirectoryOrCreate
++        - name: s3lvol-socket
++          hostPath:
++            path: /var/run/s3lvol.sock
++            type: Socket
+       {{- if .Values.volumeCos.enabled }}
+         - name: volume-cos-conf
+           secret:
