@@ -22,6 +22,9 @@ def main():
     parser.add_argument("--output", required=True, type=Path, help="New result directory")
     parser.add_argument("--estimate", choices=("fixed", "capacity"), action="append",
                         help="Limit the verification matrix to these reservation estimates")
+    parser.add_argument("--idle", choices=("resident", "immediate"), action="append")
+    parser.add_argument("--recordings-root", type=Path,
+                        help="Replay successful live runs from an earlier verification directory")
     args = parser.parse_args()
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -50,7 +53,8 @@ def main():
         return passed
 
     baselines = [name for name in ("tool-static-resident", "tool-static-eager-reactive", "tool-full-resident")
-                 if not args.estimate or ("capacity" if name == "tool-full-resident" else "fixed") in args.estimate]
+                 if (not args.estimate or ("capacity" if name == "tool-full-resident" else "fixed") in args.estimate)
+                 and (not args.idle or ("immediate" if "eager" in name else "resident") in args.idle)]
     for baseline in baselines:
         for concurrency in (1, 4):
             live = copy.deepcopy(base)
@@ -60,10 +64,16 @@ def main():
             live["workload"]["session_assignment"] = "single_case"
             live["inference"]["backend"] = "api"
             live_name = f"{baseline}-c{concurrency}-live"
-            if not run(live, live_name):
+            live_root = args.recordings_root.resolve() if args.recordings_root else root
+            if args.recordings_root:
+                live = yaml.safe_load((live_root / (live_name + ".yaml")).read_text())
+                arms = [json.loads(p.read_text()) for p in (live_root / live_name / "arms").glob("*.json")]
+                if len(arms) != 1 or arms[0]["status"] != "succeeded":
+                    raise RuntimeError(f"No successful live run found for {live_name}")
+            elif not run(live, live_name):
                 continue
             traces = []
-            for directory in sorted((root / live_name / "runtime-traces").iterdir()):
+            for directory in sorted((live_root / live_name / "runtime-traces").iterdir()):
                 candidates = find_recordings(directory.rglob("*.jsonl"), directory.name)
                 if len(candidates) != 1:
                     raise RuntimeError(f"Expected one native agent recording in {directory}")
@@ -81,7 +91,8 @@ def main():
                 source="recorded_trace", source_reference=str(trace), replay_trace_reference=str(trace))
                 for index, trace in enumerate(traces)]
             run(replay, f"{baseline}-c{concurrency}-replay")
-    if len(outcomes) != len(baselines) * 4 or not all(item["passed"] for item in outcomes):
+    expected_runs = len(baselines) * (2 if args.recordings_root else 4)
+    if not baselines or len(outcomes) != expected_runs or not all(item["passed"] for item in outcomes):
         raise SystemExit(1)
 
 

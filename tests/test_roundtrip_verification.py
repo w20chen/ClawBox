@@ -60,3 +60,12 @@ def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path,
     assert len(results) == baseline_count * 4
     assert all(row["passed"] for row in results)
     assert len(originals) == baseline_count * 5
+    recorded_root = output
+    output = tmp_path / "replay-only"
+    arguments[arguments.index("--output") + 1] = str(output)
+    arguments.extend(["--recordings-root", str(recorded_root)])
+    module.main()
+    results = json.loads((output / "verification.json").read_text())
+    assert len(results) == baseline_count * 2
+    assert all(row["passed"] for row in results)
+    assert len(originals) == baseline_count * 5

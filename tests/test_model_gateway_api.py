@@ -165,6 +165,14 @@ def test_replay_preserves_network_errors_and_installed_file_differences():
         _canonical_replay_input(request("/root/.cache/pip/wheels/sly.whl")))
 
 
+def test_replay_normalizes_python_temporary_names_without_hiding_errors():
+    expected = "wheel -w '/tmp/tmpd7qz0166' returned non-zero exit status 1"
+    actual = "wheel -w '/tmp/tmpl__ihy9p' returned non-zero exit status 1"
+    assert _canonical_replay_input(expected) == _canonical_replay_input(actual)
+    assert _canonical_replay_input(expected) != _canonical_replay_input(actual.replace("status 1", "status 2"))
+    assert _canonical_replay_input("/tmp/project-a") != _canonical_replay_input("/tmp/project-b")
+
+
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(
     tmp_path: Path,
 ) -> None:
