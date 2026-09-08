@@ -10,10 +10,47 @@ import pytest
 
 from clawbox.experiments.native_artifacts import (
     _decode_framed_artifacts,
+    _collect_large_artifact_stream,
     _runtime_spans,
     collect_and_validate_native_tool_artifacts,
     validate_native_tool_join,
 )
+
+
+def test_large_export_is_frozen_once_and_read_below_stdout_limit():
+    from clawbox.experiments.native_artifacts import _ARTIFACT_CHUNK_BYTES
+    payload = "x" * (5 * _ARTIFACT_CHUNK_BYTES + 123)
+    commands = []
+
+    class Executor:
+        def execute(self, command, timeout):
+            commands.append(command)
+            if "wc -c" in command:
+                return CommandResult(0, str(len(payload)), "", 0)
+            index = len(commands) - 2
+            chunk = payload[index * _ARTIFACT_CHUNK_BYTES:(index + 1) * _ARTIFACT_CHUNK_BYTES]
+            assert f"skip={index}" in command
+            return CommandResult(0, chunk, "", 0)
+
+    result = _collect_large_artifact_stream(
+        Executor(), NativeSSHConfig("executor@tool:2222", "private", "public"),
+        "/identity", "/known-hosts",
+    )
+    assert result.stdout == payload
+    assert len(commands) == 7
+    assert sum("gzip -c" in command for command in commands) == 1
+
+
+def test_large_export_rejects_a_truncated_chunk():
+    class Executor:
+        def execute(self, command, timeout):
+            return CommandResult(0, "100" if "wc -c" in command else "short", "", 0)
+
+    with pytest.raises(RuntimeError, match="chunk at 0 is incomplete"):
+        _collect_large_artifact_stream(
+            Executor(), NativeSSHConfig("executor@tool:2222", "private", "public"),
+            "/identity", "/known-hosts",
+        )
 
 
 def test_compressed_artifact_transfer_preserves_large_payload():

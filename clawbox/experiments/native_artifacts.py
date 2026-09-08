@@ -32,6 +32,8 @@ _SAFE_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _EXECUTION_ENVELOPE_PREFIX = "__CBX_EXEC_1__"
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _TOOL_RESOURCE_ROOT = "/var/lib/clawtune/artifacts/tool-resource"
+_ARTIFACT_EXPORT = "/run/clawbox-ssh/artifact-export"
+_ARTIFACT_CHUNK_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,37 @@ def _direct_ssh_command(ssh: NativeSSHConfig, identity_file: str,
         "-p", str(port), f"{user}@{host_argument}", remote_command,
     ]
     return shlex.join(args)
+
+
+def _collect_large_artifact_stream(runtime_executor: Any, ssh: NativeSSHConfig,
+                                   identity_file: str, known_hosts_file: str) -> CommandResult:
+    """Read a fixed export in chunks below the Tool bridge's stdout limit."""
+    def execute(remote: str) -> CommandResult:
+        result = runtime_executor.execute(
+            _direct_ssh_command(ssh, identity_file, known_hosts_file, remote), 60,
+        )
+        if result.exit_code:
+            raise RuntimeError(f"Tool artifact export failed: {result.stderr[-2000:]}")
+        return result
+
+    # Capture once. Reading chunks itself creates maintenance telemetry, which
+    # must not change the file being transferred between successive reads.
+    size_result = execute(
+        f"( {_collection_command()} ) > {_ARTIFACT_EXPORT} && "
+        f"wc -c < {_ARTIFACT_EXPORT}"
+    )
+    size = int(size_result.stdout.strip())
+    chunks = []
+    for offset in range(0, size, _ARTIFACT_CHUNK_BYTES):
+        result = execute(
+            f"dd if={_ARTIFACT_EXPORT} bs={_ARTIFACT_CHUNK_BYTES} "
+            f"skip={offset // _ARTIFACT_CHUNK_BYTES} count=1 2>/dev/null"
+        )
+        expected_size = min(_ARTIFACT_CHUNK_BYTES, size - offset)
+        if len(result.stdout.encode("ascii")) != expected_size:
+            raise RuntimeError(f"Tool artifact export chunk at {offset} is incomplete")
+        chunks.append(result.stdout)
+    return CommandResult(0, "".join(chunks), "", 0.0)
 
 
 def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
@@ -505,6 +538,11 @@ def collect_and_validate_native_tool_artifacts(
     for collection_attempt in range(1, max_collection_attempts + 1):
         try:
             candidate: CommandResult = runtime_executor.execute(command, 60)
+            if (candidate.exit_code == 0 and _ARTIFACT_END not in candidate.stdout
+                    and len(candidate.stdout) >= _ARTIFACT_CHUNK_BYTES):
+                candidate = _collect_large_artifact_stream(
+                    runtime_executor, ssh, identity_file, known_hosts_file,
+                )
         except Exception as exc:
             if collection_attempt == max_collection_attempts:
                 raise RuntimeError(
