@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from clawbox.replay.model_gateway import ModelGateway
+from clawbox.replay.model_gateway import ModelGateway, _response_message
 from clawbox.replay.process_sessions import bind_process_sessions, rebind_process_sessions
 from trace_fixtures import llm_spans, write_spans
 
@@ -12,9 +12,10 @@ def report(session, pid):
             f"Command still running (session {session}, pid {pid}). Use process for follow-up."}
 
 
-def test_recorded_poll_is_bound_to_real_openclaw_session_without_editing_trace(tmp_path):
+@pytest.mark.parametrize("stream", [False, True])
+def test_recorded_poll_is_bound_to_real_openclaw_session_without_editing_trace(tmp_path, stream):
     before, actual = [report("warm-crustacean", 2727)], [report("warm-daisy", 2720)]
-    poll = {"role": "assistant", "content": None, "tool_calls": [{
+    poll = {"role": "assistant", "content": "" if stream else None, "tool_calls": [{
         "id": "poll-call", "type": "function", "function": {"name": "process",
         "arguments": json.dumps({"action": "poll", "sessionId": "warm-crustacean"})}}]}
     result = {"role": "tool", "tool_call_id": "poll-call", "content": "done"}
@@ -23,13 +24,13 @@ def test_recorded_poll_is_bound_to_real_openclaw_session_without_editing_trace(t
                       *llm_spans([*before, poll, result], {"content": "finished"}, index=1)])
     original = path.read_bytes()
     gateway = ModelGateway(tmp_path / "gateway.json", mode="replay", trace=path, time_scale=0)
-    status, _, body, request_id = gateway.complete_http({"messages": actual})
+    status, content_type, body, request_id = gateway.complete_http({"messages": actual, "stream": stream})
     assert status == 200
-    observed_poll = json.loads(body)["choices"][0]["message"]
+    observed_poll = {"role": "assistant", **_response_message(content_type, body)}
     arguments = json.loads(observed_poll["tool_calls"][0]["function"]["arguments"])
     assert arguments == {"action": "poll", "sessionId": "warm-daisy"}
     gateway.mark_delivery(request_id, delivered=True)
-    status, _, body, request_id = gateway.complete_http({"messages": [*actual, observed_poll, result]})
+    status, _, body, request_id = gateway.complete_http({"messages": [*actual, observed_poll, result], "stream": stream})
     assert status == 200
     gateway.mark_delivery(request_id, delivered=True)
     assert gateway.replay_completeness()["complete"] is True
