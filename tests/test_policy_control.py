@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -142,9 +143,11 @@ def test_policy_control_c60_has_no_cross_session_head_of_line_blocking() -> None
                                  bind_host="127.0.0.1", bind_port=0)
     server.advertised_port = server.actual_port
     finished: dict[str, float] = {}
+    release_long = Event()
 
     def admit(request: dict) -> dict:
-        time.sleep(0.35 if request["execution_id"] == "long" else 0.005)
+        if request["execution_id"] == "long":
+            release_long.wait(10)
         finished[request["execution_id"]] = time.monotonic()
         return {"decision": "ADMIT"}
 
@@ -156,12 +159,15 @@ def test_policy_control_c60_has_no_cross_session_head_of_line_blocking() -> None
             time.sleep(0.02)
             short = [pool.submit(_post, sessions[index], "/v1/tool/admit", f"short-{index}")
                      for index in range(1, 60)]
-            for future in short:
-                assert future.result()["decision"] == "ADMIT"
+            try:
+                for future in short:
+                    assert future.result()["decision"] == "ADMIT"
+            finally:
+                release_long.set()
             assert long.result()["decision"] == "ADMIT"
-        assert max(finished[f"short-{index}"] for index in range(1, 60)) < finished["long"]
         for index, session in enumerate(sessions):
             execution_id = "long" if index == 0 else f"short-{index}"
             _post(session, "/v1/tool/complete", execution_id)
             assert session.close(timeout=1)
         assert server.session_count == 0
+        assert list(finished)[-1] == "long"
