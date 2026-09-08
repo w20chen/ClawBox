@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases
@@ -30,7 +29,6 @@ def inspect_trace(path: Path) -> dict:
 
 def validate_inputs(spec: ExperimentSpec) -> dict:
     traces = []
-    tool_ids = set()
     cases = load_workload_cases(spec.workload)
     if not cases:
         raise ValueError("workload contains no cases")
@@ -40,11 +38,6 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
         if spec.inference.backend is InferenceBackend.REPLAY:
             path = Path(case.replay_trace_reference or case.source_reference)
             info = inspect_trace(path)
-            if spec.agent.driver is AgentDriver.REPLAY_ENGINE:
-                for action in load_trace(path):
-                    if action.kind == "tool":
-                        action.shell_command()
-                        tool_ids.add(action.action_id)
             if spec.agent.driver is AgentDriver.OPENCLAW:
                 if (not info["model_calls"] or not info["model_requests_present"]
                         or not info["model_responses_present"]):
@@ -61,15 +54,8 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError(f"{path}: prediction data must be a JSON object")
-            if spec.agent.driver is AgentDriver.OPENCLAW:
-                provider = CommandPredictionProvider(path)
-                if not provider.manifest:
-                    raise ValueError(f"{path}: managed prediction data contains no command records")
-            else:
-                for action_id in sorted(tool_ids):
-                    value = payload.get(action_id)
-                    if (isinstance(value, bool) or not isinstance(value, (int, float))
-                            or not math.isfinite(value) or value <= 0):
-                        raise ValueError(f"{path}: {action_id} requires a positive finite MiB prediction")
+            provider = CommandPredictionProvider(path)
+            if not provider.manifest:
+                raise ValueError(f"{path}: managed prediction data contains no command records")
             files.append(str(path))
     return {"traces": traces, "prediction_files": files}

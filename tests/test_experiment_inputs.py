@@ -16,7 +16,7 @@ EXAMPLE = Path("examples/experiments/getting-started.yaml")
 def test_documented_example_validates_without_host(capsys):
     assert cli.main(["experiment", "validate", str(EXAMPLE), "--inputs"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["inputs"]["traces"][0]["tool_calls"] == 1
+    assert result["inputs"]["traces"][0]["model_calls"] == 1
     assert result["armCount"] == 1
 
 
@@ -51,7 +51,7 @@ def test_duplicate_action_ids_are_rejected(tmp_path):
     path = tmp_path / "duplicate.jsonl"
     row = Path("examples/traces/smoke.jsonl").read_text().splitlines()[0]
     path.write_text(row + "\n" + row + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="unique"):
+    with pytest.raises(ValueError, match="duplicate"):
         inspect_trace(path)
 
 
@@ -74,11 +74,11 @@ def test_validation_override_replaces_case_command(tmp_path):
 
 
 @pytest.mark.parametrize('payload', [{}, {'tool-1': -1}, {'tool-1': float('nan')}, {'tool-1': True}])
-def test_direct_predictions_require_positive_values_for_every_tool(tmp_path, payload):
+def test_managed_predictions_reject_non_command_records(tmp_path, payload):
     source = tmp_path / 'predictions.json'
     source.write_text(json.dumps(payload))
     spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'], p90_kb=str(source))
-    with pytest.raises(ValueError, match='positive finite'):
+    with pytest.raises(ValueError, match='no command records'):
         validate_inputs(spec)
 
 

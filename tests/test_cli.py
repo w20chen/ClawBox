@@ -20,7 +20,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
 
 
 def test_validate_and_plan_v2(capsys) -> None:
-    path = "examples/experiments/vertical-slice.yaml"
+    path = "examples/experiments/getting-started.yaml"
     assert cli.main(["experiment", "validate", path]) == 0
     assert '"valid": true' in capsys.readouterr().out
     assert cli.main(["experiment", "plan", path]) == 0

@@ -34,7 +34,7 @@ def test_api_outbox_attempt_projects_exactly_one_v2_sandboxtask(tmp_path) -> Non
     ManagedBase.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     app = create_app(session_factory=factory, service_token="token")
-    spec = yaml.safe_load(open("examples/experiments/vertical-slice.yaml", encoding="utf-8"))
+    spec = yaml.safe_load(open("examples/experiments/getting-started.yaml", encoding="utf-8"))
     headers = {"X-Clawbox-Token": "token", "X-Tenant-Id": "tenant-a"}
     with TestClient(app) as client:
         response = client.post("/v1/runs", headers=headers, json={

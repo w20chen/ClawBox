@@ -29,8 +29,9 @@ from clawbox.cube import (
     CubeCommandExecutor, CubeSandboxClient, CubeSandboxLifecycle,
     OwnedSandboxJournal, Ownership,
 )
+from .llm_config import resolve_llm_configuration
+from clawbox.replay.trace import find_recordings, load_trace
 from clawbox.replay.lifecycle import CommandResult
-from clawbox.replay.trace import ReplayAction, load_trace
 
 from .memory import CgroupMemorySampler, NodeMemorySampler, NumaNodeMemorySampler, SandboxRSSSampler
 from .clawtune_trace import ClawTuneTraceWriter
@@ -839,26 +840,25 @@ class ExperimentWorker:
             self.run_id, self.attempt_id, self.task_uid, self.spec.experiment_id,
             f"{session_id}-tool", arm.policy.name,
         )
+        inference_configuration, credential = resolve_llm_configuration(
+            arm.inference.configuration, live=arm.inference.backend.value == "api",
+        )
         runtime_env: dict[str, str] = {}
         runtime_allow_out: list[str] = []
         route_epoch = 0
         ssh_config: NativeSSHConfig | None = None
         if arm.agent.driver is AgentDriver.OPENCLAW:
-            credential_name = str(arm.inference.configuration.get("api_key_env", "OPENCLAW_API_KEY"))
-            credential = os.environ.get(credential_name, "")
-            if arm.inference.backend.value == "api" and not credential:
-                raise ValueError(f"OpenClaw credential environment is missing: {credential_name}")
             runtime_env.update({
                 # Runtime talks only to the Worker-owned node-routed gateway;
                 # the upstream API key stays in the Worker process.
                 "OPENAI_BASE_URL": "",
-                "OPENCLAW_MODEL": str(arm.inference.configuration.get("model") or ""),
+                "OPENCLAW_MODEL": str(inference_configuration.get("model") or ""),
                 "CLAWBOX_RUN_ID": self.run_id,
                 "CLAWBOX_ATTEMPT_ID": self.attempt_id,
                 "CLAWBOX_TENANT_ID": os.environ.get("CLAWBOX_TENANT_ID", "default"),
                 "CLAWBOX_REPO_KEY": (
                     arm.case.repository
-                    or str(arm.inference.configuration.get("repo_fingerprint") or arm.case.case_id)
+                    or str(inference_configuration.get("repo_fingerprint") or arm.case.case_id)
                 ),
             })
             for optional in ("CLAWBOX_KB_ENDPOINT", "CLAWBOX_KB_TOKEN"):
@@ -967,13 +967,12 @@ class ExperimentWorker:
             # snapshot.  During a model wait, snapshot both VMs for a
             # snapshot_pause policy; Runtime is restored before the gateway
             # response is released, while Tool may stay swapped until the
-            # next SSH admission.  Replay-engine baselines retain their
-            # existing Tool-only lifecycle below.
+            # next SSH admission.
             runtime_snapshot_enabled = (
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
             )
-            prediction_wait = arm.inference.configuration.get("model_wait_prediction_seconds")
-            prediction_source = arm.inference.configuration.get(
+            prediction_wait = inference_configuration.get("model_wait_prediction_seconds")
+            prediction_source = inference_configuration.get(
                 "model_wait_prediction_source"
             )
             if prediction_wait is not None:
@@ -1334,10 +1333,10 @@ class ExperimentWorker:
                 store_path=self.output_root / "model-gateway" / f"{session_id}.json",
                 mode=arm.inference.backend.value,
                 trace=trace_path,
-                time_scale=float(arm.inference.configuration.get("time_scale", 1.0)),
-                upstream_base_url=str(arm.inference.configuration.get("base_url") or "") or None,
+                time_scale=float(inference_configuration.get("time_scale", 1.0)),
+                upstream_base_url=str(inference_configuration.get("base_url") or "") or None,
                 upstream_api_key=credential or None,
-                upstream_model=str(arm.inference.configuration.get("model") or "") or None,
+                upstream_model=str(inference_configuration.get("model") or "") or None,
                 on_request_started=on_model_request_started,
                 before_response_ready=before_model_response_ready,
             )
@@ -1510,7 +1509,7 @@ class ExperimentWorker:
             trace_writer = ClawTuneTraceWriter(
                 self.output_root, run_id=self.run_id, session_id=session_id,
                 repo_fingerprint=(arm.case.repository or str(
-                    arm.inference.configuration.get("repo_fingerprint") or ""
+                    inference_configuration.get("repo_fingerprint") or ""
                 ) or None),
             )
 
@@ -1924,7 +1923,7 @@ class ExperimentWorker:
 
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
-                    configuration=arm.inference.configuration,
+                    configuration=inference_configuration,
                     ssh=ssh_config,
                     policy_control=policy_session, runtime_executor=runtime_executor,
                     output_dir=self.output_root,
@@ -2004,13 +2003,16 @@ class ExperimentWorker:
                         "OpenClaw completed without using a required native Tool operation"
                     )
                 if arm.inference.backend.value == "api":
-                    model_trace_path = self.output_root / "model-traces" / f"{session_id}.jsonl"
-                    gateway_session.write_replay_trace(model_trace_path)
+                    recordings = find_recordings(outcome["runtime_traces"], session_id)
+                    if len(recordings) != 1:
+                        raise RuntimeError("live agent must produce one complete native model recording")
+                    if len(load_trace(recordings[0])) != len(gateway_session.records()):
+                        raise RuntimeError("native recording does not cover every model call")
                     events.write({
                         "event": "model_trace_recorded",
                         "session_id": session_id,
-                        "path": str(model_trace_path),
-                        "sha256": hashlib.sha256(model_trace_path.read_bytes()).hexdigest(),
+                        "paths": [str(path) for path in recordings],
+                        "format": "clawtune-schema-6",
                     })
                 for gateway_record in gateway_session.records():
                     request_id = str(gateway_record.get("request_id") or "")
@@ -2035,38 +2037,6 @@ class ExperimentWorker:
                         role="runtime", operation="response_delivery",
                         execution_id=request_id,
                     )
-                timeline["final_agent_completion"] = time.time()
-            else:
-                actions = self._actions(arm)
-                for action_index, action in enumerate(actions):
-                    if action.kind == "llm":
-                        model_steps += 1
-                        self._model_wait(
-                            arm, action, session_id, lifecycle, coordinator, events,
-                            timeline=timeline,
-                        )
-                        continue
-                    amount = self._tool_reservation_mib(arm, action)
-                    coordinator.begin_tool_admission(
-                        session_id, amount, arm.execution.arm_timeout_seconds,
-                    )
-                    try:
-                        if not lifecycle.resident:
-                            self._restore_with_one_victim(
-                                arm, session_id, lifecycle, coordinator, events,
-                            )
-                        result = execute_observed(
-                            action.shell_command(), arm.execution.command_timeout_seconds,
-                            f"{session_id}:replay:{action_index}:"
-                            f"{hashlib.sha256(action.action_id.encode()).hexdigest()[:16]}",
-                            tool_name=action.name.rsplit(".", 1)[-1].rsplit("/", 1)[-1],
-                        )
-                        tool_latencies.append(result.duration_s)
-                        if action.expected_exit_code is not None and result.exit_code != action.expected_exit_code:
-                            exit_mismatches += 1
-                    finally:
-                        coordinator.set_tool_active(session_id, False)
-                        coordinator.release(session_id, amount)
                 timeline["final_agent_completion"] = time.time()
             validation = arm.validation.command or (
                 arm.case.validation if isinstance(arm.case.validation, str) else None)
@@ -2234,81 +2204,6 @@ class ExperimentWorker:
                     if not policy_drained:
                         raise RuntimeError(f"policy session did not drain: {session_id}")
 
-    def _actions(self, arm: ExperimentArm) -> list[ReplayAction]:
-        if arm.agent.driver is not AgentDriver.REPLAY_ENGINE:
-            raise RuntimeError(f"unsupported agent driver: {arm.agent.driver}")
-        trace = arm.case.replay_trace_reference or arm.case.source_reference
-        return load_trace(Path(trace))
-
-    def _model_wait(self, arm: ExperimentArm, action: ReplayAction, session_id: str,
-                    lifecycle: CubeSandboxLifecycle, coordinator: PolicyCoordinator,
-                    events: EventWriter, *, timeline: dict[str, Any]) -> None:
-        scale = float(arm.inference.configuration.get("time_scale", 1.0))
-        duration = max(0.0, action.duration_s * scale)
-        if arm.policy.eviction in {
-            EvictionPolicy.TIERED_LRU_ORACLE,
-            EvictionPolicy.TIERED_TIME_ORACLE,
-        }:
-            coordinator.begin_model_wait(session_id, action.action_id, duration)
-        coordinator.set_eviction_eligible(session_id, True)
-        raw_prediction = arm.inference.configuration.get("model_wait_prediction_seconds")
-        predicted_wait = float(raw_prediction) if raw_prediction is not None else None
-        prediction_source = arm.inference.configuration.get("model_wait_prediction_source")
-        delay, prefetch_lead = coordinator.model_wait_plan(
-            predicted_wait, oracle_duration_s=duration,
-        )
-        should_pause = delay is not None
-        wait_started = time.monotonic()
-        wait_started_wall = time.time()
-        try:
-            if should_pause:
-                time.sleep(min(delay, duration))
-                # This is the model-completion race, not advance knowledge: if
-                # the recorded response becomes ready before the delay timer,
-                # the pending pause is cancelled just as it is in ModelGateway.
-                if time.monotonic() - wait_started < duration:
-                    target_tier = (
-                        coordinator.oracle_tier(duration)
-                        if arm.policy.eviction is EvictionPolicy.TIERED_TIME_ORACLE
-                        else None
-                    )
-                    pause_s = lifecycle.checkpoint_and_evict(tier=target_tier)
-                    if pause_s is not None:
-                        coordinator.pause_count += 1
-                        coordinator.pause_service_seconds += pause_s
-                        events.write({"event": "sandbox_paused", "session_id": session_id,
-                                      "role": "tool", "service_seconds": pause_s,
-                                      "lifecycle_timing": lifecycle.timings[-1]})
-                    remaining = max(0.0, duration - (time.monotonic() - wait_started))
-                    if prefetch_lead is not None:
-                        restore_at = max(
-                            0.0, float(predicted_wait or 0.0) - prefetch_lead,
-                        )
-                        until_restore = max(
-                            0.0, restore_at - (time.monotonic() - wait_started),
-                        )
-                        time.sleep(min(remaining, until_restore))
-                        if time.monotonic() - wait_started < duration:
-                            self._restore_with_one_victim(
-                                arm, session_id, lifecycle, coordinator, events,
-                            )
-                    time.sleep(max(0.0, duration - (time.monotonic() - wait_started)))
-            else:
-                time.sleep(duration)
-        finally:
-            if arm.policy.eviction in {
-                EvictionPolicy.TIERED_LRU_ORACLE,
-                EvictionPolicy.TIERED_TIME_ORACLE,
-            }:
-                coordinator.complete_model_wait(session_id, action.action_id)
-            _record_time_span(
-                timeline, "model.wait", wait_started_wall, time.time(),
-                role="runtime", operation="model_wait", execution_id=action.action_id,
-                start_monotonic=wait_started, end_monotonic=time.monotonic(),
-                predicted_wait_seconds=predicted_wait,
-                prediction_source=prediction_source,
-            )
-        coordinator.set_eviction_eligible(session_id, not lifecycle.resident)
 
     def _restore_with_one_victim(self, arm: ExperimentArm, session_id: str,
                                  lifecycle: CubeSandboxLifecycle,
@@ -2328,8 +2223,7 @@ class ExperimentWorker:
                       "lifecycle_timing": lifecycle.timings[-1]})
         return elapsed
 
-    def _tool_reservation_mib(self, arm: ExperimentArm,
-                              action: ReplayAction | None = None, *,
+    def _tool_reservation_mib(self, arm: ExperimentArm, *,
                               prediction: dict[str, Any] | None = None) -> int:
         policy = arm.policy.admission
         if policy is AdmissionPolicy.LIFETIME_FULL:
@@ -2344,20 +2238,12 @@ class ExperimentWorker:
             raise PredictionUnavailable(
                 f"managed {policy.value} cannot admit without Runtime command metadata"
             )
-        source = arm.resources.p90_predictions if policy is AdmissionPolicy.TOOL_P90 else arm.resources.oracle_measurements
         if prediction is not None:
             value = prediction.get("predicted_incremental_memory_mib")
             if value is None:
                 raise PredictionUnavailable("prediction metadata has no memory reservation")
             return max(1, int(math.ceil(float(value))))
-        if action is None:
-            raise ValueError("replay admission requires an action")
-        payload = json.loads(Path(str(source)).read_text(encoding="utf-8"))
-        if action.action_id not in payload:
-            raise PredictionUnavailable(
-                f"prediction artifact has no entry for replay action {action.action_id}"
-            )
-        return max(1, int(payload[action.action_id]))
+        raise PredictionUnavailable("command prediction metadata is required")
 
     def _provenance(self) -> dict[str, Any]:
         def command(*args: str) -> str:

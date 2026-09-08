@@ -35,7 +35,7 @@ def raw_spec() -> dict:
             "cases": [{"case_id": "case-a", "source": "recorded_trace",
                        "source_reference": "trace.jsonl", "replay_trace_reference": "trace.jsonl"}],
         },
-        "agent": {"driver": "replay_engine"},
+        "agent": {"driver": "openclaw"},
         "inference": {"backend": "replay", "configuration": {
             "model_wait_prediction_seconds": 1.0,
             "model_wait_prediction_source": "separate-recording-fixed",
@@ -256,17 +256,12 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
 
 
 def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
-    paths = list(Path("examples/experiments").glob("*.yaml"))
+    paths = list(Path("examples/experiments").glob("openclaw*.yaml"))
     audits = audit_experiments(paths)
     assert len(audits) == len(paths)
     by_id = {str(item["experiment_id"]): item for item in audits}
-    for experiment_id in ("decision", "full-system", "reclamation", "spatial"):
-        assert by_id[experiment_id]["concurrency_levels"] == [20, 40, 60]
     assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
     assert by_id["openclaw-cube-replay-c60-overcommit"]["concurrency_levels"] == [60]
-    assert by_id["tiered-oracle-rec-a-c1"]["concurrency_levels"] == [1]
-    assert by_id["tiered-oracle-rec-a-c40"]["concurrency_levels"] == [40]
-    assert by_id["tiered-oracle-rec-a-c40"]["arm_count"] == 13
     assert all(item["tool_template"] != "sandbox-code" for item in audits)
     openclaw = by_id["openclaw-cube-replay-c40"]["artifact_provenance"]
     assert openclaw["runtime"]["template_id"] == "tpl-ec97143fa76e409981055c2f"

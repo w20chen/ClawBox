@@ -110,9 +110,6 @@ class SessionGatewayState:
     def replay_completeness(self) -> dict[str, Any]:
         return self.gateway.replay_completeness(require_delivery=True)
 
-    def write_replay_trace(self, path: Path) -> None:
-        self.gateway.write_replay_trace(path)
-
 
 class ManagedModelGateway:
     """One fixed node-routed HTTP listener dispatching session tokens."""

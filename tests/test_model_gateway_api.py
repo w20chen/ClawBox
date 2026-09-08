@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from trace_fixtures import llm_spans, write_spans
 
 from clawbox.replay.model_gateway import ModelGateway, _canonical_replay_input
 
@@ -14,14 +15,7 @@ def test_replay_divergence_is_persisted_before_store_directory_exists(
     tmp_path: Path,
 ) -> None:
     trace = tmp_path / "trace.jsonl"
-    trace.write_text(json.dumps({
-        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
-        "iteration": 0, "ts_start": 0, "ts_end": 0.1,
-        "data": {
-            "raw_request": {"messages": [{"role": "user", "content": "expected"}]},
-            "raw_response": {"content": "ok"},
-        },
-    }) + "\n", encoding="utf-8")
+    write_spans(trace, llm_spans([{"role": "user", "content": "expected"}], {"content": "ok"}, duration_ms=100))
     gateway = ModelGateway(
         tmp_path / "not-created" / "session.json", mode="replay", trace=trace,
     )
@@ -44,14 +38,7 @@ def test_replay_trace_exhaustion_persists_the_unexpected_request(
     tmp_path: Path,
 ) -> None:
     trace = tmp_path / "trace.jsonl"
-    trace.write_text(json.dumps({
-        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
-        "iteration": 0, "ts_start": 0, "ts_end": 0.1,
-        "data": {
-            "raw_request": {"messages": [{"role": "user", "content": "first"}]},
-            "raw_response": {"content": "first response"},
-        },
-    }) + "\n", encoding="utf-8")
+    write_spans(trace, llm_spans([{"role": "user", "content": "first"}], {"content": "first response"}, duration_ms=100))
     gateway = ModelGateway(
         tmp_path / "not-created" / "session.json", mode="replay", trace=trace,
     )
@@ -86,14 +73,7 @@ def test_replay_trace_exhaustion_persists_the_unexpected_request(
 
 def test_replay_request_mismatch_poison_session(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
-    trace.write_text(json.dumps({
-        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
-        "iteration": 0, "ts_start": 0, "ts_end": 0,
-        "data": {
-            "raw_request": {"messages": [{"role": "user", "content": "expected"}]},
-            "raw_response": {"content": "ok"},
-        },
-    }) + "\n", encoding="utf-8")
+    write_spans(trace, llm_spans([{"role": "user", "content": "expected"}], {"content": "ok"}, duration_ms=100))
     gateway = ModelGateway(tmp_path / "session.json", mode="replay", trace=trace)
 
     with pytest.raises(ValueError, match="diverged at model step 0"):
@@ -123,14 +103,7 @@ def test_replay_canonicalization_masks_openclaw_session_workspace(
         "host=runtime", "host=tpl-new",
     )
     trace = tmp_path / "trace.jsonl"
-    trace.write_text(json.dumps({
-        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
-        "iteration": 0, "ts_start": 0, "ts_end": 0,
-        "data": {
-            "raw_request": {"messages": [{"role": "system", "content": expected}]},
-            "raw_response": {"content": "ok"},
-        },
-    }) + "\n", encoding="utf-8")
+    write_spans(trace, llm_spans([{"role": "system", "content": expected}], {"content": "ok"}, duration_ms=100))
     gateway = ModelGateway(tmp_path / "session.json", mode="replay", trace=trace)
 
     status, _content_type, _body = gateway.complete({

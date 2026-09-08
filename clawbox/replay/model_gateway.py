@@ -532,38 +532,6 @@ class ModelGateway:
             self._persist()
             self._changed.notify_all()
 
-    def write_replay_trace(self, path: Path) -> None:
-        """Export successful API responses as an ordered replayable v4 trace."""
-        records = []
-        for index, item in enumerate(self.records()):
-            if not item["ready"] or item["error"] or item["status_code"] != 200:
-                raise ValueError("cannot export an incomplete or failed model response")
-            message = _response_message(
-                item["content_type"], base64.b64decode(item["response_b64"])
-            )
-            start = float(item["started_unix_s"])
-            # Preserve the pure model/replay duration.  ``completed_unix_s``
-            # is the legacy response-release timestamp and may include
-            # policy-induced checkpoint/restore hold time.
-            end = float(item.get("model_generated_unix_s") or item["completed_unix_s"])
-            if start <= 0 or end < start:
-                raise ValueError("model response has no valid timing metadata")
-            records.append({
-                "type": "action", "action_type": "llm_call",
-                "action_id": f"model-{index + 1}", "iteration": index,
-                "ts_start": start, "ts_end": end,
-                "data": {"model": self.upstream_model or "recorded-model",
-                         "raw_request": item["request_payload"],
-                         "raw_response": message,
-                         "llm_latency_ms": (end - start) * 1000.0},
-            })
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".next")
-        temporary.write_text(
-            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
 
     def _persist(self) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)

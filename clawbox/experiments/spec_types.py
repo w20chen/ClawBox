@@ -19,7 +19,6 @@ class ArrivalSchedule(StrEnum):
 
 class AgentDriver(StrEnum):
     OPENCLAW = "openclaw"
-    REPLAY_ENGINE = "replay_engine"
 
 
 class InferenceBackend(StrEnum):

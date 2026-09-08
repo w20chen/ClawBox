@@ -112,6 +112,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert config["tools"]["exec"]["backgroundMs"] == 120000
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
+    assert clawtune["trace"]["redact_sensitive_data"] is False
+    assert clawtune["trace"]["max_messages_bytes"] == 67108864
     assert clawtune["sandboxExecEnvelope"] is True
     assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
     assert clawtune["instrumentHosts"] == ["sandbox", "gateway"]
@@ -121,7 +123,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "XDG_CACHE_HOME=/opt/clawtune/cache" in commands[0]
-    assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=experiment-model" in commands[0]
+    assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in commands[0]
     assert "CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL=test-model" in commands[0]
     assert "/bin/ssh" in "\n".join(commands)
     assert "command" not in sandbox["ssh"]
@@ -133,7 +135,10 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", commands[0])[2]
     ).decode()
     agent_command = next(command for command in commands if " agent " in command)
-    assert "--model vllm/experiment-model" in agent_command
+    assert "--model vllm/test-model" in agent_command
+    assert "CLAWTUNE_RUNTIME_ID=session-a" in agent_command
+    assert "CLAWTUNE_GATEWAY_ID=session-a" in agent_command
+    assert any("--custom-api-key clawtune-runtime.session-a" in command for command in commands)
     assert "--message 'Create /workspace/result.txt'" in agent_command
     assert "Use only sandboxed" not in agent_command
     assert "agent.pid" in agent_command

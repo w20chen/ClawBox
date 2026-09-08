@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from trace_fixtures import llm_spans, write_spans
 
 from clawbox.experiments.model_gateway import ManagedModelGateway
 
@@ -19,19 +20,11 @@ def write_trace(path: Path, *, prefix: str = "") -> dict:
     for index in range(2):
         payload = {"messages": [{"role": "user", "content": f"{prefix}step-{index}"}]}
         payloads.append(payload)
-    path.write_text(
-        "".join(json.dumps({
-            "type": "action", "action_type": "llm_call",
-            "action_id": f"model-{index}", "ts_start": index,
-            "ts_end": index + 0.01,
-            "data": {
-                "model": "test-model", "raw_request": payload,
-                "raw_response": {"content": f"reply-{prefix}{index}"},
-                "llm_latency_ms": 1,
-            },
-        }) + "\n" for index, payload in enumerate(payloads)),
-        encoding="utf-8",
-    )
+    write_spans(path, [
+        row for index, payload in enumerate(payloads)
+        for row in llm_spans(payload["messages"], {"content": f"reply-{prefix}{index}"},
+                             index=index, start=index)
+    ])
     return {"messages": [{"role": "user", "content": f"{prefix}step-0"}]}
 
 
@@ -137,22 +130,6 @@ def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(
             assert session.token != "upstream-secret"
             assert session.records()[0]["delivered"] is True
             assert session.replay_completeness()["complete"] is True
-            replay_trace = tmp_path / "model-traces" / "api-export.jsonl"
-            session.write_replay_trace(replay_trace)
-            exported = json.loads(replay_trace.read_text(encoding="utf-8").splitlines()[0])
-            assert exported["action_type"] == "llm_call"
-            assert exported["data"]["model"] == "server-model"
-            assert exported["data"]["raw_response"]["content"] == "managed-api-ok"
-            replay = gateway.register(
-                session_id="replay-export", store_path=tmp_path / "replayed-store.json",
-                mode="replay", trace=replay_trace, time_scale=0,
-            )
-            replayed = post(gateway.url, replay.token, {
-                "model": "guest-model",
-                "messages": [{"role": "user", "content": "hello"}],
-            })
-            assert replayed['choices'][0]['message'] == response['choices'][0]['message']
-            assert replay.replay_completeness()['complete'] is True
     finally:
         upstream.shutdown()
         upstream.server_close()
@@ -271,13 +248,11 @@ def test_checkpoint_retry_artifact_is_removed_from_later_replay_steps(
         }]},
         {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
     ]}
-    trace.write_text("".join(json.dumps({
-        "type": "action", "action_type": "llm_call",
-        "action_id": f"model-{index}", "ts_start": index, "ts_end": index,
-        "data": {"model": "test-model", "raw_request": payload,
-                 "raw_response": {"content": f"reply-{index}"},
-                 "llm_latency_ms": 0},
-    }) + "\n" for index, payload in enumerate((initial, continued))), encoding="utf-8")
+    write_spans(trace, [
+        row for index, payload in enumerate((initial, continued))
+        for row in llm_spans(payload["messages"], {"content": f"reply-{index}"},
+                             index=index, start=index, duration_ms=0)
+    ])
 
     gateway = ManagedModelGateway(
         advertise_host="127.0.0.1", advertised_port=0,

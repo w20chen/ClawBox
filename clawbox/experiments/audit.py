@@ -46,10 +46,7 @@ def _catalog_keys() -> set[tuple[object, ...]]:
 def _artifact_provenance(spec: ExperimentSpec, path: Path) -> dict[str, dict[str, str]]:
     """Return immutable Runtime/Tool provenance required by OpenClaw runs.
 
-    Replay-engine capacity matrices intentionally retain aliases because they
-    are historical systems fixtures.  OpenClaw runs, however, are formal
-    agent evidence and must identify the exact template record and image that
-    the Worker will validate before creating either VM.
+    Formal agent results identify the template and image used for each VM.
     """
     if spec.agent.driver is not AgentDriver.OPENCLAW:
         return {}

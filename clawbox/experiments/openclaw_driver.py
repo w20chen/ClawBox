@@ -264,7 +264,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     home = f"/state/openclaw/{session_id}"
     # Record and replay use the same runtime setup and task instruction.
     runtime_workspace = "/workspace"
-    openclaw_model = "experiment-model"
+    openclaw_model = model
     trace_dir = f"/state/clawtune/{session_id}/traces"
     ssh_dir = f"{home}/ssh"
     identity_file = f"{ssh_dir}/id_ed25519"
@@ -286,6 +286,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # spawning its SSH backend. This per-session capability is not an LLM
         # provider credential; use a name that survives the installed
         # backend's environment sanitizer.
+        f"CLAWTUNE_RUNTIME_ID={shlex.quote(session_id)} "
+        f"CLAWTUNE_GATEWAY_ID={shlex.quote(session_id)} "
         f"CLAWBOX_POLICY_CONTROL_AUTH={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
@@ -366,6 +368,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
+        + "CLAWTUNE_TRACE_MAX_MESSAGES_BYTES=67108864 "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
@@ -430,14 +433,17 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "autoStartSidecar": False, "securityBoundaryAccepted": True,
             "trace": {"schema_version": 6, "include_raw_events": True,
                       "include_llm_messages": True, "include_tool_outputs": True,
-                      "redact_sensitive_data": True, "flush_span_start": True,
+                      "redact_sensitive_data": False, "flush_span_start": True,
+                      "max_messages_bytes": 67108864,
+                      "max_string_bytes": 67108864,
+                      "max_tool_output_bytes": 67108864,
                       "trace_dir": trace_dir},
         }}}},
     }
     invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
-            "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", openclaw_model])
+            "--custom-api-key", f"clawtune-runtime.{session_id}", "--custom-model-id", openclaw_model])
     # Preserve the request envelope used by the validated recording. Apply this
     # to live recording too, rather than keeping a replay-only configuration.
     invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])

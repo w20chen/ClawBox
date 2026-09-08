@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from trace_fixtures import llm_spans, write_spans
 
 from clawbox.cube import (
     CubeCommandExecutor,
@@ -432,22 +433,12 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     SnapshotSandbox.sequence = 0
     SnapshotSandbox.created = []
     trace = tmp_path / "openclaw-snapshot.jsonl"
-    trace.write_text(json.dumps({
-        "type": "action", "action_type": "llm_call", "action_id": "llm-1",
-        "iteration": 0, "ts_start": 0, "ts_end": 0.5,
-        "data": {
-            "model": "recorded-model",
-            "raw_request": {"messages": [{"role": "user", "content": "hello"}]},
-            "raw_response": {
-                "content": None,
-                "tool_calls": [{
-                    "id": "call-1", "type": "function",
-                    "function": {"name": "exec", "arguments": '{"command":"true"}'},
-                }],
-            },
-            "llm_latency_ms": 500,
-        },
-    }) + "\n", encoding="utf-8")
+    write_spans(trace, llm_spans(
+        [{"role": "user", "content": "hello"}],
+        {"content": "", "tool_calls": [{"id": "call-1", "type": "function",
+         "function": {"name": "exec", "arguments": '{"command":"true"}'}}]},
+        duration_ms=500,
+    ))
 
     def post_policy(policy_control, path: str, body: dict) -> dict:
         request = urllib.request.Request(
@@ -464,11 +455,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
-                          resident_poll=None, checkpoint_relay=False,
-                          replay_compatibility=False):
+                          resident_poll=None, checkpoint_relay=False):
         assert resident_poll is not None
         assert checkpoint_relay is True
-        assert replay_compatibility is False
         assert (
             SnapshotSandbox.created[1].create_kwargs["env_vars"]
             ["CLAWBOX_MODEL_GATEWAY_TOKEN"]
@@ -558,7 +547,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         client=CubeSandboxClient(sandbox_class=SnapshotSandbox),
     ).run()[0]
 
-    assert result.status.value == "succeeded"
+    assert result.status.value == "succeeded", result.model_dump()
     assert result.provenance["evidence_class"] == "deterministic-managed-replay"
     assert result.provenance["configured_trace_sha256"] == hashlib.sha256(
         trace.read_bytes()
@@ -741,162 +730,3 @@ def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> Non
     assert second.sandbox_id not in PartiallyFailingSandbox.items
     assert first.sandbox_id not in PartiallyFailingSandbox.items
     assert PartiallyFailingSandbox.items == {}
-
-
-def test_failed_lifetime_admission_does_not_underflow_cleanup_reservation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    trace = tmp_path / "trace.jsonl"
-    trace.write_text(
-        '{"type":"action","action_type":"tool_exec","action_id":"t",'
-        '"ts_start":0,"ts_end":0,"data":{"tool_name":"exec",'
-        '"args":{"command":"true"},"exit_code":0}}\n',
-        encoding="utf-8",
-    )
-    spec = ExperimentSpec.model_validate({
-        "schema_version": 2, "experiment_id": "failed-admission-cleanup",
-        "workload": {"source": "recorded_trace", "input": str(trace)},
-        "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
-        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
-        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
-        "execution": {"concurrency_levels": [1], "randomized_order": False,
-                       "arm_timeout_seconds": 1, "stabilization_seconds": 0},
-        "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
-                       "emergency_free_memory_mib": 1},
-        "policies": [{"name": "naive", "admission": "lifetime_full",
-                      "reclamation": "resident", "eviction": "none", "restore": "none"}],
-    })
-    unregistered: list[str] = []
-    original_unregister = PolicyCoordinator.unregister
-
-    def fail_acquire(self, session_id: str, amount_mib: int, timeout_s: float) -> float:
-        raise RuntimeError("admission deliberately failed")
-
-    def record_unregister(self, session_id: str) -> None:
-        unregistered.append(session_id)
-        original_unregister(self, session_id)
-
-    monkeypatch.setattr(PolicyCoordinator, "acquire", fail_acquire)
-    monkeypatch.setattr(PolicyCoordinator, "unregister", record_unregister)
-    result = ExperimentWorker(
-        spec, run_id="run", attempt_id="attempt", task_uid="task",
-        output_root=tmp_path / "results", client=CubeSandboxClient(sandbox_class=_Sandbox),
-    ).run()[0]
-    assert result.status.value == "failed"
-    assert "reservation underflow" not in str(result.correctness["failure"])
-    assert len(unregistered) == 1
-    assert unregistered[0].endswith("-0000")
-
-
-def test_worker_runs_atomic_arm_and_skips_matching_completion(tmp_path: Path) -> None:
-    _Sandbox.items = {}
-    trace = tmp_path / "trace.jsonl"
-    trace.write_text(
-        '{"type":"action","action_type":"llm_call","action_id":"l","ts_start":0,"ts_end":0,'
-        '"data":{"llm_latency_ms":0}}\n'
-        '{"type":"action","action_type":"tool_exec","action_id":"t","ts_start":0,"ts_end":0,'
-        '"data":{"tool_name":"exec","args":{"command":"true"},"exit_code":0}}\n',
-        encoding="utf-8",
-    )
-    spec = ExperimentSpec.model_validate({
-        "schema_version": 2, "experiment_id": "worker-test",
-        "workload": {"source": "recorded_trace", "input": str(trace)},
-        "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
-        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
-        "sandbox": {"template_alias": "tpl"},
-        "execution": {"concurrency_levels": [1], "randomized_order": False,
-                      "stabilization_seconds": 0},
-        "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
-                      "emergency_free_memory_mib": 1},
-        "policies": [{"name": "naive", "admission": "lifetime_full",
-                      "reclamation": "resident", "eviction": "none", "restore": "none"}],
-    })
-    output = tmp_path / "results"
-    first_client = CubeSandboxClient(sandbox_class=_Sandbox)
-    first = ExperimentWorker(spec, run_id="run", attempt_id="attempt", task_uid="task",
-                             output_root=output, client=first_client).run()
-    assert first[0].status == "succeeded"
-    marker = next((output / "arms").glob("*.complete"))
-    assert marker.read_text().strip() == first[0].arm.spec_digest
-    _Sandbox.create_kwargs = {}
-    second = ExperimentWorker(spec, run_id="run", attempt_id="attempt", task_uid="task",
-                              output_root=output,
-                              client=CubeSandboxClient(sandbox_class=_Sandbox)).run()
-    assert second[0].arm.arm_id == first[0].arm.arm_id
-    assert _Sandbox.create_kwargs == {}
-
-
-def test_worker_runs_every_current_baseline_at_c40_with_complete_spans(
-    tmp_path: Path,
-) -> None:
-    class ConcurrentSandbox(_Sandbox):
-        create_lock = threading.Lock()
-        create_sequence = 0
-
-        @classmethod
-        def create(cls, **kwargs):
-            with cls.create_lock:
-                cls.create_sequence += 1
-                sandbox_id = f"c40-{cls.create_sequence}"
-            item = cls({
-                "sandboxID": sandbox_id,
-                "templateID": kwargs["template"],
-                "metadata": kwargs["metadata"],
-            })
-            cls.items[sandbox_id] = item
-            return item
-
-    ConcurrentSandbox.items = {}
-    trace = tmp_path / "c40-trace.jsonl"
-    trace.write_text(
-        '{"type":"action","action_type":"llm_call","action_id":"llm-1",'
-        '"ts_start":0,"ts_end":0.01,"data":{"llm_latency_ms":10}}\n'
-        '{"type":"action","action_type":"tool_exec","action_id":"tool-1",'
-        '"ts_start":0.01,"ts_end":0.02,"data":{"tool_name":"exec",'
-        '"args":{"command":"true"},"exit_code":0}}\n',
-        encoding="utf-8",
-    )
-    # Exercise every catalog entry at c40. Compatibility aliases are not a
-    # second backend; they materialize the same supported schema-v2 policies
-    # under their retained historical names.
-    policy_data = [baseline.as_policy().model_dump(mode="json")
-                   for baseline in BASELINES.values()]
-    assert [item["name"] for item in policy_data] == list(BASELINES)
-    spec = ExperimentSpec.model_validate({
-        "schema_version": 2, "experiment_id": "baseline-c40-test",
-        "workload": {"source": "recorded_trace", "input": str(trace)},
-        "agent": {"driver": "replay_engine"}, "inference": {"backend": "replay"},
-        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
-        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
-        "execution": {"concurrency_levels": [40], "randomized_order": False,
-                       "stabilization_seconds": 0},
-        "resources": {
-            "target_node": "node-a", "pool_memory_budget_mib": 1000000,
-            "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 8192,
-            "static_tool_memory_mib": 256, "full_tool_memory_mib": 4096,
-            "p90_predictions": "examples/predictions/smoke-p90.json",
-                "oracle_measurements": "examples/predictions/smoke-oracle.json",
-                "local_memory_capacity_mib": 65536,
-                "warm_memory_capacity_mib": 65536,
-                "warm_snapshot_root": "/warm", "cold_snapshot_root": "/cold",
-                "local_numa_node": 0, "warm_numa_node": 1,
-        },
-        "policies": policy_data,
-        "output": {"directory": str(tmp_path / "output")},
-    })
-    results = ExperimentWorker(
-        spec, run_id="c40-run", attempt_id="c40-attempt", task_uid="c40-task",
-        output_root=tmp_path / "results",
-        client=CubeSandboxClient(sandbox_class=ConcurrentSandbox),
-    ).run()
-    assert len(results) == len(policy_data)
-    assert all(result.status.value == "succeeded" for result in results)
-    assert all(result.arm.concurrency == 40 for result in results)
-    assert ConcurrentSandbox.items == {}
-    for result in results:
-        spans = {
-            span["name"]
-            for session in result.performance["session_time_spans"]
-            for span in session
-        }
-        assert {"session", "sandbox.create", "agent", "sandbox.cleanup"} <= spans

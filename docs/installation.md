@@ -268,6 +268,17 @@ systemctl is-active cube-sandbox-cube-api.service cube-sandbox-cubemaster.servic
 For an S3lvol-backed installation, also check `cube-sandbox-s3lvol.service` and
 `test -S /var/run/s3lvol.sock`. Restore its configured backend before restarting
 Cubelet if the socket is missing. Reapply the memory setup above on an idle pool.
+
+When using the bundled MinIO backend, start it before S3lvol:
+
+```bash
+sudo systemctl start cube-sandbox-minio.service
+sudo systemctl start cube-sandbox-s3lvol.service
+test -S /var/run/s3lvol.sock
+```
+
+An active S3lvol supervisor alone is not sufficient: it may be retrying while
+MinIO is unavailable. Check the socket and service log before creating VMs.
 Keep interrupted results and start with a new run ID; reboot does not resume a run.
 Disable the old kubelet on a dedicated host migrated from Kubernetes, after
 confirming it has no unrelated workloads.

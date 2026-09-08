@@ -1,11 +1,8 @@
-"""Trace-driven agent workload replay and sandbox lifecycle experiments."""
+"""Model-response replay for the OpenClaw agent and VM lifecycle measurements."""
 
-from .latency import LatencyObservation, LinearLatencyPredictor
 from .trace import ReplayAction, load_trace
 
 __all__ = [
-    "LatencyObservation",
-    "LinearLatencyPredictor",
     "ReplayAction",
     "load_trace",
 ]
