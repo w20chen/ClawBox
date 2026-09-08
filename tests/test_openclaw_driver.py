@@ -60,10 +60,22 @@ def test_native_ssh_route_requires_cube_mapped_port() -> None:
         )
 
 
+@pytest.mark.parametrize("gateway_mode", [None, "api", "replay"])
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
-    monkeypatch, tmp_path: Path,
+    monkeypatch, tmp_path: Path, gateway_mode,
 ) -> None:
     commands = []
+
+    class Gateway:
+        url = "http://model.test/v1"
+
+        @staticmethod
+        def records():
+            return []
+
+        @staticmethod
+        def replay_completeness():
+            return {"complete": True} if gateway_mode == "replay" else None
 
     class RuntimeExecutor:
         def execute(self, command, _timeout):
@@ -87,6 +99,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         ),
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=60,
+        model_gateway=Gateway() if gateway_mode else None,
     )
     patch_command = next(command for command in commands if "config patch" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
@@ -108,12 +121,21 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "XDG_CACHE_HOME=/opt/clawtune/cache" in commands[0]
+    assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=experiment-model" in commands[0]
+    assert "CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL=test-model" in commands[0]
     assert "/bin/ssh" in "\n".join(commands)
-    assert sandbox["ssh"]["command"] == "/state/openclaw/session-a/bin/ssh"
+    assert "command" not in sandbox["ssh"]
+    assert config["agents"]["defaults"]["workspace"] == "/workspace"
+    assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
+    assert any("config unset models.providers.vllm.models.0.reasoning" in command
+               for command in commands)
     assert "exec /usr/local/bin/ssh" in base64.b64decode(
         re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", commands[0])[2]
     ).decode()
     agent_command = next(command for command in commands if " agent " in command)
+    assert "--model vllm/experiment-model" in agent_command
+    assert "--message 'Create /workspace/result.txt'" in agent_command
+    assert "Use only sandboxed" not in agent_command
     assert "agent.pid" in agent_command
     assert "exec " in agent_command
     assert result["tool_calls"] == 1

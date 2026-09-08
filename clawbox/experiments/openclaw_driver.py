@@ -263,7 +263,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
 
     home = f"/state/openclaw/{session_id}"
     # Record and replay use the same runtime setup and task instruction.
-    runtime_workspace = f"{home}/runtime-workspace"
+    runtime_workspace = "/workspace"
+    openclaw_model = "experiment-model"
     trace_dir = f"/state/clawtune/{session_id}/traces"
     ssh_dir = f"{home}/ssh"
     identity_file = f"{ssh_dir}/id_ed25519"
@@ -286,6 +287,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # provider credential; use a name that survives the installed
         # backend's environment sanitizer.
         f"CLAWBOX_POLICY_CONTROL_AUTH={shlex.quote(policy_control.token)} "
+        f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
@@ -366,7 +368,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
-        + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(model)} "
+        + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
         + "/opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
@@ -432,18 +434,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                       "trace_dir": trace_dir},
         }}}},
     }
-    patch["agents"]["defaults"]["sandbox"]["ssh"]["command"] = ssh_launcher
     invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
-    openclaw_model = model
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
             "--custom-api-key", f"$ENV:{upstream_key_env}", "--custom-model-id", openclaw_model])
-    instruction = (
-        "Use only sandboxed exec/process/read/write/edit/apply_patch for workspace and "
-        "process operations; those execute in the Tool VM. Web search/fetch and agent "
-        "memory lookup remain Runtime-local and must not be used to access the mutable "
-        "workspace.\n\nTask:\n" + prompt
-    )
+    # Preserve the request envelope used by the validated recording. Apply this
+    # to live recording too, rather than keeping a replay-only configuration.
+    invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
+    instruction = prompt
     agent_args = [
         "agent", "--local", "--agent", "main", "--session-id", session_id,
         "--model", f"vllm/{openclaw_model}", "--message", instruction,

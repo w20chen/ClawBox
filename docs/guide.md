@@ -205,17 +205,20 @@ After a successful run, each session's model recording is exported to
 `clawbox experiment trace`, then select it with `configure --trace` and
 `--inference-backend replay --time-scale 1`. Keep the agent version, runtime
 configuration, original task prompt, tool image, repository, and initial workspace
-the same. Record and replay now use the same agent setup.
+the same. Recording and replay share the validated Runtime settings: `/workspace`,
+the original task prompt without an added prefix, and the same SSH and model
+capability settings. The agent sees the stable model name `experiment-model`;
+ClawTune maps it to the upstream model configured for the experiment.
 
 Replay matches incoming requests after normalizing known runtime metadata such
 as session identifiers and timestamps. A valid JSONL file alone cannot establish
 that the request contents match. Missing, extra, or different requests fail the
 run. Workload-specific exceptions for package errors and installed files are not
-applied. Historical recordings captured with the retired special runtime setup
-must be checked again in the selected environment. In particular, the earlier
-rec-a results used a different Runtime workspace and prompt setup. They do not
-validate this interface's agent replay; record a new reference before comparing
-its policies. Do not rewrite an old trace's expected requests to make it pass.
+applied. The earlier rec-a Runtime settings are preserved, but historical results
+alone do not validate replay with the current code and images. Check the recording
+in the selected environment before comparing policies. A CLI change alone does
+not require a new recording. Do not rewrite an old trace's expected requests to
+make it pass.
 
 For direct replay, a prediction file maps action IDs to positive MiB reservations,
 for example `{"tool-1":256}`. Managed agent prediction files instead contain
