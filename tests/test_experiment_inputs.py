@@ -61,3 +61,70 @@ def test_report_uses_same_result_root(tmp_path, capsys):
     (root / "summary.md").write_text("# Result\n", encoding="utf-8")
     assert cli.main(["--output-root", str(tmp_path), "experiment", "report", "run-a"]) == 0
     assert capsys.readouterr().out == "# Result\n"
+
+
+def test_validation_override_replaces_case_command(tmp_path):
+    raw = yaml.safe_load(EXAMPLE.read_text())
+    raw['workload']['cases'][0]['validation'] = 'old-command'
+    base = tmp_path / 'base.yaml'
+    base.write_text(yaml.safe_dump(raw))
+    spec = configure_experiment(base, validation_command='new-command')
+    assert spec.validation.command == 'new-command'
+    assert spec.workload.cases[0].validation == 'new-command'
+
+
+@pytest.mark.parametrize('payload', [{}, {'tool-1': -1}, {'tool-1': float('nan')}, {'tool-1': True}])
+def test_direct_predictions_require_positive_values_for_every_tool(tmp_path, payload):
+    source = tmp_path / 'predictions.json'
+    source.write_text(json.dumps(payload))
+    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'], p90_kb=str(source))
+    with pytest.raises(ValueError, match='positive finite'):
+        validate_inputs(spec)
+
+
+def test_managed_predictions_reject_action_id_dictionary(tmp_path):
+    source = tmp_path / 'predictions.json'
+    source.write_text('{"tool-1": 256}')
+    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'], p90_kb=str(source))
+    from clawbox.experiments.spec_types import AgentDriver
+    spec = spec.model_copy(update={'agent': spec.agent.model_copy(update={'driver': AgentDriver.OPENCLAW})})
+    # Revalidate so enums match the worker's actual model.
+    from clawbox.experiments.spec import ExperimentSpec
+    spec = ExperimentSpec.model_validate(spec.model_dump(mode='json'))
+    with pytest.raises(ValueError, match='no command records'):
+        validate_inputs(spec)
+
+
+def test_status_reads_finished_arms_before_summary(tmp_path, capsys):
+    root = tmp_path / 'running' / 'arms'
+    root.mkdir(parents=True)
+    (root / 'one.json').write_text(json.dumps({'arm': {'arm_id': 'one'}, 'status': 'succeeded'}))
+    (root / 'writing.json').write_text('{')
+    assert cli.main(['--output-root', str(tmp_path), 'experiment', 'status', 'running']) == 0
+    value = json.loads(capsys.readouterr().out)
+    assert value['summaryComplete'] is False
+    assert value['arms'] == [{'armId': 'one', 'status': 'succeeded'}]
+
+
+def test_run_refuses_existing_results_before_worker_creation(tmp_path, monkeypatch, capsys):
+    import clawbox.experiments.worker as worker
+    monkeypatch.setattr(worker, 'ExperimentWorker', lambda *a, **kw: pytest.fail('worker constructed'))
+    (tmp_path / 'old-run').mkdir()
+    assert cli.main(['--output-root', str(tmp_path), 'experiment', 'run', str(EXAMPLE), '--run-id', 'old-run']) == 1
+    assert 'fresh --run-id' in capsys.readouterr().err
+
+
+def test_malformed_yaml_has_a_cli_error_not_a_traceback(tmp_path, capsys):
+    path = tmp_path / 'broken.yaml'
+    path.write_text('workload: [')
+    assert cli.main(['experiment', 'validate', str(path)]) == 1
+    assert 'cannot read experiment' in capsys.readouterr().err
+
+
+def test_dimension_filters_select_only_catalog_combinations():
+    from clawbox.experiments.preset_view import select_presets
+    assert set(select_presets(estimate=['fixed', 'predicted'], idle=['resident', 'immediate'])) == {
+        'tool-static-resident', 'tool-p90-resident', 'tool-static-eager-reactive', 'tool-p90-eager-reactive'}
+    assert select_presets(['tool-static-resident', 'tool-p90-resident'], estimate=['fixed']) == ['tool-static-resident']
+    with pytest.raises(ValueError, match='No implemented preset'):
+        select_presets(reserve_during=['session'], estimate=['predicted'])

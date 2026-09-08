@@ -313,6 +313,8 @@ def main(argv: list[str] | None = None) -> int:
             attempt_id = args.attempt_id or f"attempt-{uuid.uuid4().hex[:16]}"
             owner_id = args.owner_id or attempt_id
             output = args.output_root / run_id
+            if output.exists():
+                raise ValueError(f"result directory already exists: {output}; use a fresh --run-id")
             results = ExperimentWorker(
                 spec, run_id=run_id, attempt_id=attempt_id, task_uid=owner_id,
                 output_root=output,
@@ -326,6 +328,21 @@ def main(argv: list[str] | None = None) -> int:
             print((run_root / "summary.md").read_text(encoding="utf-8"), end="")
             return 0
         summary = run_root / "summary.json"
+        if args.command == "status" and not summary.exists():
+            if not run_root.is_dir():
+                raise ValueError(f"result directory does not exist: {run_root}")
+            partial = []
+            for path in sorted((run_root / "arms").glob("*.json")):
+                try:
+                    item = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    continue  # The worker may still be writing this result.
+                partial.append({"armId": item.get("arm", {}).get("arm_id"),
+                                "status": item.get("status")})
+            emit({"runId": args.run_id, "output": str(run_root),
+                  "summaryComplete": False, "arms": partial,
+                  "note": "No final summary yet; this does not prove the worker is still running."})
+            return 0
         if not summary.exists():
             raise ValueError(f"run summary does not exist: {summary}")
         value = json.loads(summary.read_text(encoding="utf-8"))

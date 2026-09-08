@@ -121,7 +121,7 @@ def configure_experiment(
     """Apply friendly overrides to a checked-in, already complete base spec."""
     try:
         raw = yaml.safe_load(base_path.read_text(encoding="utf-8"))
-    except OSError as exc:
+    except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot read base experiment {base_path}: {exc}") from exc
     root = _mapping(raw, name="experiment")
     runtime = _mapping(root.get("runtime"), name="runtime")
@@ -134,7 +134,7 @@ def configure_experiment(
 
     if experiment_id is not None:
         root["experiment_id"] = experiment_id
-    if any(value is not None for value in (trace, case_id, prompt, repository, base_commit)):
+    if any(value is not None for value in (trace, case_id, prompt, repository, base_commit, validation_command)):
         workload = _mapping(root.get("workload"), name="workload")
         cases = workload.get("cases")
         if not cases and workload.get("source") == "recorded_trace":

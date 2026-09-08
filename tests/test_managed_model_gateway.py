@@ -143,6 +143,16 @@ def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(
             assert exported["action_type"] == "llm_call"
             assert exported["data"]["model"] == "server-model"
             assert exported["data"]["raw_response"]["content"] == "managed-api-ok"
+            replay = gateway.register(
+                session_id="replay-export", store_path=tmp_path / "replayed-store.json",
+                mode="replay", trace=replay_trace, time_scale=0,
+            )
+            replayed = post(gateway.url, replay.token, {
+                "model": "guest-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+            assert replayed['choices'][0]['message'] == response['choices'][0]['message']
+            assert replay.replay_completeness()['complete'] is True
     finally:
         upstream.shutdown()
         upstream.server_close()

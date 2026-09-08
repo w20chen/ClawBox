@@ -102,6 +102,10 @@ systemctl list-units 'cube-sandbox-*' --no-pager
 
 Before running `install.sh`, review `.env` for storage devices and conflicting
 ports on this host. The commands follow the pinned [standalone installer](https://github.com/TencentCloud/CubeSandbox/blob/v0.7.0/deploy/one-click/README.md#target-machine-installation).
+If your Cubelet storage uses S3lvol, set `ONE_CLICK_ENABLE_S3LVOL=1` before
+installation and configure its S3/MinIO backend using the supplied environment
+file. The upstream default is disabled; an active Cubelet alone does not prove
+that storage is ready.
 Expected: the smoke command succeeds and services are active. A failed smoke
 check must be resolved before template registration.
 
@@ -251,6 +255,22 @@ python scripts/validate-tiered-storage.py \
 
 This helper uses privileged Docker inspection. Memory setup, endpoint checks,
 and storage checks do not establish a completed agent benchmark.
+
+## After a reboot
+
+On an installed host, check the API and compute services before starting work:
+
+```bash
+systemctl is-active cube-sandbox-cube-api.service cube-sandbox-cubemaster.service \
+  cube-sandbox-cubelet.service cube-sandbox-cube-egress.service
+```
+
+For an S3lvol-backed installation, also check `cube-sandbox-s3lvol.service` and
+`test -S /var/run/s3lvol.sock`. Restore its configured backend before restarting
+Cubelet if the socket is missing. Reapply the memory setup above on an idle pool.
+Keep interrupted results and start with a new run ID; reboot does not resume a run.
+Disable the old kubelet on a dedicated host migrated from Kubernetes, after
+confirming it has no unrelated workloads.
 
 ## Verification boundary
 

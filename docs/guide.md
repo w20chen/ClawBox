@@ -26,8 +26,9 @@ the compute-node name are placeholders, so the example cannot start VMs until
 they are replaced with registrations from your host.
 
 `trace` reports the file hash, action counts, and recorded model-wait duration.
-`validate --inputs` additionally parses every selected replay trace and required
-prediction file. It does not contact CubeSandbox, check image contents, or prove
+`validate --inputs` additionally checks replayable tool actions and prediction
+data: action-ID coverage for direct replay, command records for agent runs.
+It does not contact CubeSandbox, check image contents, or prove
 that an agent's future requests will match a recording. `plan` prints the exact
 expanded execution configurations as JSON.
 
@@ -211,7 +212,10 @@ as session identifiers and timestamps. A valid JSONL file alone cannot establish
 that the request contents match. Missing, extra, or different requests fail the
 run. Workload-specific exceptions for package errors and installed files are not
 applied. Historical recordings captured with the retired special runtime setup
-may need to be recorded again in the selected environment.
+must be checked again in the selected environment. In particular, the earlier
+rec-a results used a different Runtime workspace and prompt setup. They do not
+validate this interface's agent replay; record a new reference before comparing
+its policies. Do not rewrite an old trace's expected requests to make it pass.
 
 For direct replay, a prediction file maps action IDs to positive MiB reservations,
 for example `{"tool-1":256}`. Managed agent prediction files instead contain
@@ -244,7 +248,14 @@ clawbox --output-root /data/clawbox-results experiment run local.yaml --run-id m
 ```
 
 Use a fresh run identifier and an idle VM pool. `run` is a foreground command:
-keep the shell connected or use your host's process supervisor. It checks inputs
+keep the shell connected or use `nohup`:
+
+```bash
+nohup clawbox --output-root /data/clawbox-results experiment run local.yaml \
+  --run-id marker-02 > /data/clawbox-results/marker-02.log 2>&1 < /dev/null &
+```
+
+It checks inputs
 before creating VMs, uses the selected concurrency and workload, and replays the
 full input. There is no implicit truncation or injected stop response. Use a
 complete shorter recording if you need a shorter task.
@@ -261,7 +272,9 @@ clawbox --output-root /data/clawbox-results experiment report marker-01
 clawbox --output-root /data/clawbox-results experiment collect marker-01
 ```
 
-`status` gives arm status, `report` prints the generated Markdown summary, and
+`status` lists available arm results, including before the final summary exists.
+An incomplete summary does not prove the worker is still running.
+`report` prints the generated Markdown summary, and
 `collect` returns the complete summary as JSON. The result directory contains:
 
 | Path | Contents |

@@ -312,8 +312,10 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
                              source_reference=str(path), replay_trace_reference=str(path)),)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read workload input {path}: {exc}") from exc
+    if not isinstance(raw, (dict, list)):
+        raise ValueError(f"{path}: workload input must be an object or a list")
     records = raw if isinstance(raw, list) else raw.get(
         "tasks" if workload.source is WorkloadSource.SWE_REBENCH else "cases", [])
     if not isinstance(records, list):
@@ -342,7 +344,7 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
 def load_experiment(path: Path) -> ExperimentSpec:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError as exc:
+    except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot read experiment {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError("experiment document must be an object")
