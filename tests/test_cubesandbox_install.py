@@ -55,12 +55,12 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
 
 
 def test_setup_docs_reject_pod_ip_native_ssh_and_link_from_readme() -> None:
-    guide = (ROOT / "docs" / "cubesandbox-setup.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "installation.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "semantic TCP endpoint" in guide
     assert "--count 1" in guide
     assert "--count 4" in guide
     assert "--count 8" not in guide
-    assert "docs/cubesandbox-setup.md" in readme
+    assert "docs/installation.md" in readme
     assert "standalone CubeSandbox" in guide

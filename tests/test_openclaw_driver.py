@@ -60,9 +60,8 @@ def test_native_ssh_route_requires_cube_mapped_port() -> None:
         )
 
 
-@pytest.mark.parametrize("replay_compatibility", [False, True])
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
-    monkeypatch, tmp_path: Path, replay_compatibility: bool,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     commands = []
 
@@ -88,7 +87,6 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         ),
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=60,
-        replay_compatibility=replay_compatibility,
     )
     patch_command = next(command for command in commands if "config patch" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
@@ -111,12 +109,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "XDG_CACHE_HOME=/opt/clawtune/cache" in commands[0]
     assert "/bin/ssh" in "\n".join(commands)
-    if replay_compatibility:
-        # Recorded config uses PATH lookup, resolving to the same launcher.
-        assert "command" not in sandbox["ssh"]
-        assert "PATH=/state/openclaw/session-a/bin:$PATH" in patch_command
-    else:
-        assert sandbox["ssh"]["command"] == "/state/openclaw/session-a/bin/ssh"
+    assert sandbox["ssh"]["command"] == "/state/openclaw/session-a/bin/ssh"
     assert "exec /usr/local/bin/ssh" in base64.b64decode(
         re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", commands[0])[2]
     ).decode()

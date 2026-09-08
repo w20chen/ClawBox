@@ -11,68 +11,10 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('study_wrapper', ROOT / 'scripts/study.py')
-study = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(study)
-
-
-def invoke(monkeypatch, *arguments):
-    monkeypatch.setattr(sys, 'argv', ['study', *map(str, arguments)])
-    study.main()
-
-
-def test_init_uses_machine_settings_and_does_not_overwrite(tmp_path, monkeypatch):
-    trace = tmp_path / 'trace.jsonl'
-    trace.write_text('{}\n')
-    output = tmp_path / 'study.yaml'
-    settings = dict(CUBE_NODE='node', CLAWBOX_RUNTIME_TEMPLATE='runtime',
-                    CLAWBOX_TOOL_TEMPLATE='tool', CLAWBOX_RUNTIME_IMAGE='registry/runtime@sha256:' + 'a' * 64,
-                    CLAWBOX_TOOL_IMAGE='registry/tool@sha256:' + 'b' * 64,
-                    CLAWBOX_WARM_ROOT='/data/warm', CLAWBOX_COLD_ROOT='/data/cold')
-    for key, value in settings.items():
-        monkeypatch.setenv(key, value)
-    invoke(monkeypatch, 'init', '--trace', trace, '--output', output)
-    value = yaml.safe_load(output.read_text())
-    assert value['workload']['input'] == str(trace.resolve())
-    assert value['runtime']['template_id'] == 'runtime'
-    assert value['resources']['target_node'] == 'node'
-    with pytest.raises(FileExistsError):
-        invoke(monkeypatch, 'init', '--trace', trace, '--output', output)
-
-
-@pytest.mark.parametrize('command', ['start', 'setup-memory'])
-def test_busy_pool_cannot_be_reconfigured_or_started(tmp_path, monkeypatch, command):
-    (tmp_path / 'cgroup.events').write_text('populated 1\n')
-    monkeypatch.setattr(study, 'check', lambda path: None)
-    monkeypatch.setattr(study, 'read_spec', lambda path: {'resources': {'local_memory_cgroup': str(tmp_path)}})
-    with pytest.raises(SystemExit) as error:
-        invoke(monkeypatch, command, '--spec', tmp_path / 'study.yaml')
-    assert error.value.code == 2
-
-
-def test_start_detaches_and_keeps_a_log(tmp_path, monkeypatch):
-    (tmp_path / 'cgroup.events').write_text('populated 0\n')
-    monkeypatch.setattr(study, 'check', lambda path: None)
-    monkeypatch.setattr(study, 'read_spec', lambda path: {'resources': {'local_memory_cgroup': str(tmp_path)}})
-    launched = []
-    def launch(command, **kwargs):
-        launched.append((command, kwargs))
-        return SimpleNamespace(pid=123)
-    monkeypatch.setattr(study.subprocess, 'Popen', launch)
-    invoke(monkeypatch, 'start', '--spec', tmp_path / 'study.yaml', '--name', 'check-01', '--output-root', tmp_path)
-    command, options = launched[0]
-    assert command[-2:] == ['--steps', '5']
-    assert options['start_new_session'] is True
-    assert options['stdin'] == study.subprocess.DEVNULL
-    assert (tmp_path / 'check-01.log').exists()
-    with pytest.raises(FileExistsError):
-        invoke(monkeypatch, 'start', '--spec', tmp_path / 'study.yaml', '--name', 'check-01', '--output-root', tmp_path)
-
-
 def test_public_wrapper_has_no_cluster_fallback():
     source = (ROOT / 'scripts/clawbox').read_text()
-    assert 'study.py' in source
-    assert 'cube-host-doctor.py' in source
+    assert 'study.py' not in source
+    assert '-m clawbox.cli' in source
     assert 'kubectl' not in source
     assert 'clawbox-host.sh' not in source
 

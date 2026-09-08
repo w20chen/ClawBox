@@ -1934,9 +1934,6 @@ class ExperimentWorker:
                                          if prediction_provider is not None else None),
                     resident_poll=poll_resident_runtime,
                     checkpoint_relay=runtime_snapshot_enabled,
-                    replay_compatibility=(
-                        arm.inference.backend is InferenceBackend.REPLAY
-                    ),
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")

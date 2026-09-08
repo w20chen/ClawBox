@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from clawbox.experiments import BASELINES, expand_matrix, load_experiment, spec_digest
+from clawbox.experiments.preset_view import DIMENSIONS, dimensions, select_presets
+from clawbox.experiments.spec import PolicySpec
 
 
 def emit(value: Any) -> None:
@@ -51,10 +53,15 @@ def emit_overview(value: dict[str, Any]) -> None:
     )
     print(f"Policies ({len(value['policies'])}), arms ({value['arm_count']}):")
     for policy in value["policies"]:
+        labels = dimensions(PolicySpec.model_validate(policy))
         print(
-            f"  {policy['name']}: {policy['admission']} + "
-            f"{policy['reclamation']}/{policy['eviction']}/{policy['restore']}"
+            f"  {policy['name']}: " + ", ".join(f"{key}={item}" for key, item in labels.items())
         )
+    for name, resources in value["effective_policy_resources"].items():
+        print(f"  {name}: execution pool={resources['pool_memory_gib']:g} GiB, "
+              f"snapshot memory={resources['snapshot_memory_gib']:g} GiB")
+    if len({row['snapshot_memory_gib'] for row in value['effective_policy_resources'].values()}) > 1:
+        print("Comparison: snapshot-memory capacities differ between policies.")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -67,13 +74,17 @@ def parser() -> argparse.ArgumentParser:
     for name in ("validate", "plan", "run"):
         command = sub.add_parser(name)
         command.add_argument("spec", type=Path)
+        if name == "validate":
+            command.add_argument("--inputs", action="store_true", help="also parse workload traces and prediction files")
         if name == "run":
             command.add_argument("--run-id")
             command.add_argument("--attempt-id")
             command.add_argument("--owner-id")
-    for name in ("status", "collect"):
+    for name in ("status", "collect", "report"):
         command = sub.add_parser(name)
         command.add_argument("run_id")
+    trace = sub.add_parser("trace", help="inspect a JSONL recording without starting VMs")
+    trace.add_argument("path", type=Path)
     describe = sub.add_parser(
         "describe", help="show VM totals, memory overcommit, policies, and arm count",
     )
@@ -91,9 +102,14 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("output", type=Path, help="new experiment YAML")
     configure.add_argument("--force", action="store_true", help="replace the output file")
     configure.add_argument("--experiment-id")
+    for name, choices in DIMENSIONS.items():
+        configure.add_argument("--" + name.replace("_", "-"), choices=choices, action="append",
+                               help="filter existing presets; repeat for alternatives in this dimension")
     configure.add_argument("--trace")
     configure.add_argument("--case-id")
     configure.add_argument("--prompt")
+    configure.add_argument("--repository", help="repository identity stored with the selected case")
+    configure.add_argument("--base-commit", help="repository revision expected in the Tool image")
     configure.add_argument("--validation-command")
     configure.add_argument("--repetitions", type=int)
     configure.add_argument(
@@ -151,6 +167,10 @@ def main(argv: list[str] | None = None) -> int:
     root = parser()
     args = root.parse_args(argv)
     try:
+        if args.command == "trace":
+            from clawbox.experiments.inputs import inspect_trace
+            emit(inspect_trace(args.path))
+            return 0
         if args.command == "baselines":
             admission_required = {
                 "tool_full": ["resources.full_tool_memory_mib"],
@@ -186,14 +206,14 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("Available baselines:")
                 for row in rows:
+                    labels = dimensions(BASELINES[row['name']].as_policy())
                     requirement = (
                         f", requires {', '.join(row['required_settings'])}"
                         if row["required_settings"] else ""
                     )
                     print(
-                        f"  {row['name']}: {row['admission']} + "
-                        f"{row['reclamation']}/{row['eviction']}/{row['restore']}"
-                        f"{requirement}"
+                        f"  {row['name']}: " + ", ".join(f"{key}={item}" for key, item in labels.items())
+                        + requirement
                     )
             return 0
         if args.command == "configure":
@@ -211,11 +231,14 @@ def main(argv: list[str] | None = None) -> int:
                 trace=args.trace,
                 case_id=args.case_id,
                 prompt=args.prompt,
+                repository=args.repository,
+                base_commit=args.base_commit,
                 validation_command=args.validation_command,
                 repetitions=args.repetitions,
                 session_assignment=args.session_assignment,
                 concurrency=args.concurrency,
-                baseline_names=args.baselines or (),
+                baseline_names=select_presets(args.baselines or (), **{
+                    name: getattr(args, name) for name in DIMENSIONS}),
                 runtime_template_id=args.runtime_template_id,
                 tool_template_id=args.tool_template_id,
                 runtime_image_reference=args.runtime_image_reference,
@@ -273,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
             result: dict[str, Any] = {
                 "valid": True, "specDigest": spec_digest(spec), "armCount": len(arms),
             }
+            if args.command == "validate" and args.inputs:
+                from clawbox.experiments.inputs import validate_inputs
+                result["inputs"] = validate_inputs(spec)
             if args.command == "plan":
                 result["arms"] = [arm.model_dump(mode="json") for arm in arms]
             emit(result)
@@ -281,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
             from clawbox.experiments.worker import ExperimentWorker
 
             spec = load_experiment(args.spec)
+            from clawbox.experiments.inputs import validate_inputs
+            validate_inputs(spec)
             run_id = args.run_id or f"run-{uuid.uuid4().hex[:16]}"
             attempt_id = args.attempt_id or f"attempt-{uuid.uuid4().hex[:16]}"
             owner_id = args.owner_id or attempt_id
@@ -294,6 +322,9 @@ def main(argv: list[str] | None = None) -> int:
                   "succeeded": all(item.status.value == "succeeded" for item in results)})
             return 0 if all(item.status.value == "succeeded" for item in results) else 1
         run_root = args.output_root / args.run_id
+        if args.command == "report":
+            print((run_root / "summary.md").read_text(encoding="utf-8"), end="")
+            return 0
         summary = run_root / "summary.json"
         if not summary.exists():
             raise ValueError(f"run summary does not exist: {summary}")

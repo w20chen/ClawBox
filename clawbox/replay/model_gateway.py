@@ -656,72 +656,9 @@ def _canonical_replay_text(value: str) -> str:
     return _canonicalize_search_result_order(value)
 
 
-_REC_A_FILESYSTEM_PROBE = (
-    'find / -name "sly*" -not -path "*/proc/*" 2>/dev/null | head; '
-    'echo "---django---"; find / -maxdepth 6 -name "django" -type d -not -path "*/proc/*" 2>/dev/null | head; '
-    'echo "---pytest---"; find / -name "pytest" -maxdepth 8 -not -path "*/proc/*" 2>/dev/null | head; '
-    'echo "---wheels---"; find / -name "*.whl" -not -path "*/proc/*" 2>/dev/null | head; '
-    'echo "---pipcache---"; ls ~/.cache/pip 2>/dev/null | head'
-)
-
-
-def _canonical_rec_a_listing(content: str) -> str:
-    # The approved head-truncation exception covers only these two competing
-    # wheel entries. Verify all recorded paths on the frozen template separately.
-    alternate_wheels = {
-        "/usr/share/python-wheels/pip-22.0.2-py3-none-any.whl",
-        "/root/.cache/pip/wheels/48/cc/f2/37f85b0cde9f0cc404f270b26e733847c886d0e4b750c0d7c5/sly-0.3-py3-none-any.whl",
-    }
-    blocks = content.split("---")
-    for index in range(0, len(blocks), 2):
-        lines = blocks[index].splitlines()
-        if index == 6:  # ---wheels--- block; leave other listings intact.
-            lines = [line for line in lines if line not in alternate_wheels]
-        if all(not line or line.startswith("/") for line in lines):
-            blocks[index] = "\n".join(sorted(line for line in lines if line))
-    return "---".join(blocks)
-
-
 def _canonical_replay_input(value: Any) -> Any:
     if isinstance(value, dict):
-        result = {key: _canonical_replay_input(item) for key, item in value.items()}
-        messages = result.get("messages")
-        if isinstance(messages, list):
-            pip_probes = set()
-            filesystem_probes = set()
-            for message in messages:
-                if not isinstance(message, dict):
-                    continue
-                for call in message.get("tool_calls") or []:
-                    function = call.get("function") or {}
-                    try:
-                        args = json.loads(function.get("arguments", "{}"))
-                    except (TypeError, ValueError):
-                        continue
-                    if (function.get("name") == "exec" and isinstance(args, dict)
-                            and "timeout 12 pip install -q pytest 2>&1 | tail -2"
-                            in str(args.get("command", ""))):
-                        pip_probes.add(call.get("id"))
-                    if (function.get("name") == "exec" and isinstance(args, dict)
-                            and args.get("command") == _REC_A_FILESYSTEM_PROBE):
-                        filesystem_probes.add(call.get("id"))
-                if (message.get("role") == "tool"
-                        and message.get("tool_call_id") in filesystem_probes
-                        and isinstance(message.get("content"), str)):
-                    message["content"] = _canonical_rec_a_listing(message["content"])
-                if (message.get("role") == "tool"
-                        and message.get("tool_call_id") in pip_probes
-                        and isinstance(message.get("content"), str)):
-                    # User-approved exception for this network availability
-                    # probe only. Preserve imports, other errors and exit code.
-                    content = re.sub(
-                        r"(?m)^(?:WARNING: Retrying .* /simple/pytest/|"
-                        r"ERROR: Could not find a version that satisfies the requirement pytest \(from versions: none\)|"
-                        r"ERROR: No matching distribution found for pytest)\n?",
-                        "", message["content"],
-                    )
-                    message["content"] = content
-        return result
+        return {key: _canonical_replay_input(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_canonical_replay_input(item) for item in value]
     if isinstance(value, str):

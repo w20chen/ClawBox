@@ -183,41 +183,13 @@ def test_replay_canonicalization_sorts_search_results_but_keeps_content() -> Non
     )
 
 
-def test_replay_pip_network_exception_is_scoped_to_probe() -> None:
-    def request(output: str, command: str = "timeout 12 pip install -q pytest 2>&1 | tail -2") -> dict:
-        return {"messages": [
-            {"role": "assistant", "tool_calls": [{"id": "pip-probe", "function": {
-                "name": "exec", "arguments": json.dumps({"command": command}),
-            }}]},
-            {"role": "tool", "tool_call_id": "pip-probe", "content": output},
-        ]}
-    suffix = "ModuleNotFoundError: No module named 'pytest'\n(Command exited with code 1)"
-    expected = "ERROR: No matching distribution found for pytest\n" + suffix
-    actual = "WARNING: Retrying (Retry(total=4)) after connection broken: /simple/pytest/\n" + suffix
-    assert _canonical_replay_input(request(expected)) == _canonical_replay_input(request(actual))
-    assert _canonical_replay_input(request(expected, "pip install pytest")) != _canonical_replay_input(request(actual, "pip install pytest"))
-    assert _canonical_replay_input(request(expected)) != _canonical_replay_input(request(actual.replace("code 1", "code 0")))
-    assert _canonical_replay_input(request(expected)) != _canonical_replay_input(request(actual.replace("'pytest'", "'sly'")))
-
-
-def test_replay_filesystem_probe_exception_keeps_other_paths_and_errors():
-    from clawbox.replay.model_gateway import _REC_A_FILESYSTEM_PROBE
-
-    def request(content, command=_REC_A_FILESYSTEM_PROBE):
-        return {"messages": [
-            {"role": "assistant", "tool_calls": [{"id": "listing", "function": {
-                "name": "exec", "arguments": json.dumps({"command": command}),
-            }}]},
-            {"role": "tool", "tool_call_id": "listing", "content": content},
-        ]}
-
-    prefix = "/opt/sly\n---django---\n---pytest---\n/opt/pytest\n---wheels---\n"
-    expected = prefix + "/opt/pip.whl\n/usr/share/python-wheels/pip-22.0.2-py3-none-any.whl\n---pipcache---"
-    actual = prefix + "/root/.cache/pip/wheels/48/cc/f2/37f85b0cde9f0cc404f270b26e733847c886d0e4b750c0d7c5/sly-0.3-py3-none-any.whl\n/opt/pip.whl\n---pipcache---"
-    assert _canonical_replay_input(request(expected)) == _canonical_replay_input(request(actual))
-    assert _canonical_replay_input(request(expected)) != _canonical_replay_input(request(actual.replace("/opt/pip.whl", "/opt/other.whl")))
-    assert _canonical_replay_input(request(expected)) != _canonical_replay_input(request(actual + "\n(Command exited with code 1)"))
-    assert _canonical_replay_input(request(expected, "find /")) != _canonical_replay_input(request(actual, "find /"))
+def test_replay_preserves_network_errors_and_installed_file_differences():
+    def request(content):
+        return {"messages": [{"role": "tool", "tool_call_id": "probe", "content": content}]}
+    assert _canonical_replay_input(request("ERROR: No matching distribution found for pytest")) != (
+        _canonical_replay_input(request("WARNING: Retrying /simple/pytest/")))
+    assert _canonical_replay_input(request("/usr/share/python-wheels/pip.whl")) != (
+        _canonical_replay_input(request("/root/.cache/pip/wheels/sly.whl")))
 
 
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(

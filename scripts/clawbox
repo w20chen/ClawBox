@@ -4,15 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ "${1:-}" == study ]]; then
-  machine_env="${CLAWBOX_MACHINE_ENV:-${HOME}/.config/clawbox/machine.env}"
-  if [[ -f "$machine_env" ]]; then
-    set -a
-    source "$machine_env"
-    set +a
-  fi
-fi
-
 # Daily commands should keep working in a new shell after the documented
 # editable install.  An explicit override still wins for remote/client use.
 if [[ -n "${CLAWBOX_PYTHON:-}" ]]; then
@@ -23,17 +14,6 @@ else
   PYTHON=python3
 fi
 export CLAWBOX_PYTHON="${PYTHON}"
-
-case "${1:-}" in
-  study)
-    shift
-    exec "${PYTHON}" "${SCRIPT_DIR}/study.py" "$@"
-    ;;
-  doctor)
-    shift
-    exec "${PYTHON}" "${SCRIPT_DIR}/cube-host-doctor.py" "$@"
-    ;;
-esac
 
 # The shell entry point follows exactly the standalone Python CLI. It must
 # never auto-detect a cluster or start a historical deployment helper.

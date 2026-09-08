@@ -1,41 +1,42 @@
 # ClawBox
 
-ClawBox runs coding agents in standalone CubeSandbox virtual machines and compares 13 memory-management policies. Each agent has an OpenClaw Runtime VM and a separate Tool VM. ClawTune supplies tool predictions and clause-level resource measurements.
+ClawBox compares memory reservation, idle-VM reclamation, and restoration policies
+for coding-agent workloads on standalone CubeSandbox. Each session has a Runtime
+VM and a separate Tool VM. ClawTune supplies command predictions and measurements.
 
-Kubernetes, Kata, and direct-Firecracker deployment are not supported.
+The public interface is `clawbox experiment`. Workloads, concurrency, resources,
+and policy dimensions are configuration inputs; no particular benchmark is required.
 
-## Start here
+## Start
 
-- [Use an installed machine](docs/experiment-operations.md)
-- [Install on a new machine](docs/cubesandbox-setup.md)
-- [Current kunpeng environment](docs/current-environment.md)
-- [Baselines](docs/baselines.md) and [results](docs/results-guide.md)
-- [Research design](docs/research-system-contract.md) and [memory tiers](docs/tiered-memory-simulation.md)
-
-## Everyday commands
-
-Run these from an installed ClawBox checkout on Linux:
-
-```bash
-bash scripts/clawbox study --help
-bash scripts/clawbox study check --spec /data/clawbox-specs/rec-a.yaml
-bash scripts/clawbox study start --spec /data/clawbox-specs/rec-a.yaml --name check-01 --steps 5
-bash scripts/clawbox study status /data/clawbox-results/check-01
-bash scripts/clawbox study report /data/clawbox-results/check-01
-```
-
-The wrapper loads `~/.config/clawbox/machine.env`. Set `CLAWBOX_MACHINE_ENV` to use another file. A study continues after SSH disconnects. Baselines run sequentially, with 40 agent sessions offered per baseline.
-
-Five recorded rounds are a short correctness check, not a complete coding task. Use `--full-trace` for the full recording. A running process or a timed-out run is not a successful experiment.
-
-## Development
-
-Keep ClawBox and ClawTune in sibling directories. With Python 3.12 or newer:
+With Python 3.12 or newer, from this checkout:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest tests
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+clawbox experiment trace examples/traces/smoke.jsonl
+clawbox experiment validate examples/experiments/getting-started.yaml --inputs
+clawbox experiment describe examples/experiments/getting-started.yaml
 ```
 
-Real experiments also need the patched CubeSandbox server and matching SDK. Unit tests do not replace VM, replay, and eBPF checks. Keep generated logs, results, virtual environments, and temporary checkouts outside Git.
+These commands need no VM host. Running the example requires registered ARM64
+CubeSandbox templates; the included template aliases are placeholders.
+
+| Document | Contents |
+| --- | --- |
+| [User guide](docs/guide.md) | Configuration, policy dimensions, trace format, recording, execution, results |
+| [Installation](docs/installation.md) | Host dependencies, guest artifacts, server/SDK setup, templates, memory checks |
+| [Design contracts](docs/design.md) | Admission ordering, memory accounting, checkpoint semantics, evidence requirements |
+
+The included [experiment](examples/experiments/getting-started.yaml) and
+[trace](examples/traces/smoke.jsonl) form a small direct-command replay check.
+Real agent runs use the same CLI with `agent.driver: openclaw` and live or recorded
+model responses. Other checked-in experiment files are research fixtures with
+machine-specific references, not installation defaults.
+
+## Development
+
+Keep ClawTune in a sibling checkout. Run relevant checks with `python -m pytest`.
+Guest integration requires the patched server, matching SDK, images and kernel
+listed in the installation guide. Store generated outputs outside Git.

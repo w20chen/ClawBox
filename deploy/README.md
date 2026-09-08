@@ -1,7 +1,7 @@
-# Deployment
+# CubeSandbox deployment components
 
-ClawBox uses standalone CubeSandbox. Follow [the installation guide](../docs/cubesandbox-setup.md).
-
-The maintained source patches and memory-isolation service settings are in `cubesandbox/`. Apply the complete patch set with `prepare-semantic-source.sh`.
-
-Old Kubernetes manifests, containerd/Kata deployment files, and experimental source bundles are no longer distributed here.
+Use the [installation guide](../docs/installation.md) for the complete host setup.
+`cubesandbox/prepare-semantic-source.sh` applies the pinned server patch set:
+semantic TCP endpoints, same-node routing, image provenance, snapshot storage,
+and memory isolation. `cubesandbox/tiered-memory.conf` contains the service flags
+used by optional memory-tier setup. The matching server and Python SDK are required.

@@ -74,6 +74,8 @@ def configure_experiment(
     trace: str | None = None,
     case_id: str | None = None,
     prompt: str | None = None,
+    repository: str | None = None,
+    base_commit: str | None = None,
     validation_command: str | None = None,
     repetitions: int | None = None,
     session_assignment: str | None = None,
@@ -132,12 +134,17 @@ def configure_experiment(
 
     if experiment_id is not None:
         root["experiment_id"] = experiment_id
-    if any(value is not None for value in (trace, case_id, prompt)):
+    if any(value is not None for value in (trace, case_id, prompt, repository, base_commit)):
         workload = _mapping(root.get("workload"), name="workload")
         cases = workload.get("cases")
+        if not cases and workload.get("source") == "recorded_trace":
+            source = trace or workload["input"]
+            cases = [{"case_id": case_id or Path(source).stem, "source": "recorded_trace",
+                      "source_reference": source, "replay_trace_reference": source}]
+            workload["cases"] = cases
         if not isinstance(cases, list) or len(cases) != 1:
             raise ValueError(
-                "trace/case/prompt overrides require a base spec with exactly one case"
+                "workload overrides require one case; edit workload.cases for a multi-case experiment"
             )
         case = _mapping(cases[0], name="workload.cases[0]")
         if trace is not None:
@@ -150,6 +157,12 @@ def configure_experiment(
             case["case_id"] = case_id
         if prompt is not None:
             case["prompt"] = prompt
+        if repository is not None:
+            case["repository"] = repository
+        if base_commit is not None:
+            case["base_commit"] = base_commit
+        if validation_command is not None:
+            case["validation"] = validation_command
     else:
         workload = _mapping(root.get("workload"), name="workload")
     if repetitions is not None:
@@ -359,7 +372,14 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             "offered_to_pool_ratio": offered_mib / pool_mib,
             "memory_overcommit": offered_mib > pool_mib,
         })
+    effective_resources = {
+        arm.policy.name: {
+            "pool_memory_gib": arm.resources.pool_memory_budget_mib / 1024,
+            "snapshot_memory_gib": arm.resources.warm_memory_capacity_mib / 1024,
+        } for arm in expand_matrix(spec)
+    }
     return {
+        "effective_policy_resources": effective_resources,
         "experiment_id": spec.experiment_id,
         "agent_driver": spec.agent.driver.value,
         "inference_backend": spec.inference.backend.value,

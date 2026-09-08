@@ -15,7 +15,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
                     if action.dest == "command")
     assert set(commands.choices) == {
         "baselines", "configure", "describe", "validate", "plan", "run", "status",
-        "collect",
+        "collect", "trace", "report",
     }
 
 
