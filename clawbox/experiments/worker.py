@@ -1795,7 +1795,10 @@ class ExperimentWorker:
                         raise RuntimeError(
                             "completion timestamps do not prove SSH reaped before complete"
                         )
-                    with wait_lock, reservation_lock:
+                    # A concurrent admission holds wait_lock while waiting for
+                    # memory. Completion must release its finished command's
+                    # reservation without that lock, or both requests deadlock.
+                    with reservation_lock:
                         amount = active_reservations.get(execution_id)
                         admitted_route = admitted_routes.get(execution_id)
                         host_sampler = host_rss_samplers.get(execution_id)
@@ -1832,7 +1835,6 @@ class ExperimentWorker:
                                 )
                                 break
                         coordinator.release(session_id, amount)
-                        coordinator.set_tool_active(session_id, bool(active_reservations))
                         _record_time_span(
                             timeline, "tool.operation",
                             timestamps["execution_started_at"],
@@ -1849,6 +1851,10 @@ class ExperimentWorker:
                             ),
                         )
 
+                    # Keep lifecycle/idle transitions serialized with admission.
+                    # Never hold reservation_lock while waiting for wait_lock.
+                    with wait_lock, reservation_lock:
+                        coordinator.set_tool_active(session_id, bool(active_reservations))
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
                                   "exit_code": request.get("exit_code"),
