@@ -4,6 +4,10 @@ import base64
 import hashlib
 import gzip
 import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +19,33 @@ from clawbox.experiments.native_artifacts import (
     collect_and_validate_native_tool_artifacts,
     validate_native_tool_join,
 )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="guest export uses POSIX shell tools")
+def test_real_compressed_export_exceeds_4mib_and_roundtrips_in_chunks(tmp_path, monkeypatch):
+    from clawbox.experiments import native_artifacts as native
+    resources = tmp_path / "tool-resource"
+    resources.mkdir()
+    payload = os.urandom(5 * 1024 * 1024)
+    (resources / "large.json").write_bytes(payload)
+    (tmp_path / "tool-bridge.jsonl").write_bytes(b"{}\n")
+    monkeypatch.setattr(native, "_TOOL_RESOURCE_ROOT", str(resources))
+    monkeypatch.setattr(native, "_ARTIFACT_EXPORT", str(tmp_path / "export"))
+
+    class Executor:
+        def execute(self, command, timeout):
+            completed = subprocess.run(shlex.split(command)[-1], shell=True,
+                                       capture_output=True, text=True, timeout=timeout)
+            return CommandResult(completed.returncode, completed.stdout[:4*1024*1024],
+                                 completed.stderr, 0)
+
+    ssh = NativeSSHConfig("executor@tool:2222", "private", "public")
+    first = Executor().execute(native._direct_ssh_command(
+        ssh, "/identity", "/known-hosts", native._collection_command()), 60)
+    assert len(first.stdout) == 4 * 1024 * 1024
+    assert native._ARTIFACT_END not in first.stdout
+    result = _collect_large_artifact_stream(Executor(), ssh, "/identity", "/known-hosts")
+    assert _decode_framed_artifacts(result.stdout)["large.json"] == payload
 
 
 def test_large_export_is_frozen_once_and_read_below_stdout_limit():
