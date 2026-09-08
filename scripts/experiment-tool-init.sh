@@ -16,6 +16,7 @@ chmod 1777 /tmp
 hostname tool-vm
 printf '127.0.0.1 localhost tool-vm\n::1 localhost\n' >/etc/hosts
 export TOOL_BRIDGE_LISTEN=0.0.0.0:2222
+export PYTHONHASHSEED=0
 export TOOL_BRIDGE_WORKDIR=/testbed
 export TOOL_BRIDGE_HOST_KEY=/etc/clawbox/ssh/ssh_host_ed25519_key
 export TOOL_BRIDGE_AUTHORIZED_KEY=/etc/clawbox/ssh/id_ed25519.pub

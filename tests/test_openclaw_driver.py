@@ -30,6 +30,13 @@ def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
     )
 
 
+def test_tool_bootstrap_uses_the_same_python_hash_seed_for_record_and_replay():
+    command = native_tool_bridge_setup_command()
+    assert "export PYTHONHASHSEED=0" in command
+    assert "/etc/profile.d/clawbox-experiment.sh" in command
+    assert "PYTHONHASHSEED=0 " in command
+
+
 class PolicySession:
     url = "http://192.0.2.10:18080"
     token = "policy-token"

@@ -196,6 +196,11 @@ run. Workload-specific exceptions for package errors and installed files are not
 applied. Use the original file from a live run. Do not rewrite recorded inputs or
 outputs to make a different execution pass.
 
+Tool sessions use `PYTHONHASHSEED=0` in both live and replay runs. This keeps
+Python string hashes and hash-dependent iteration repeatable. It does not make
+network responses or explicitly randomized programs deterministic; their outputs
+must still match for the recording to pass replay.
+
 Agent prediction files contain command records with `command`, `predicted_command_memory_p90_mib`, and
 `predicted_host_execution_increment_mib`; the latter is calibrated host demand.
 The Runtime must supply matching command metadata. An action-ID dictionary is

@@ -189,6 +189,8 @@ def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
         )
     return (
         "set -eu; "
+        "mkdir -p /etc/profile.d; "
+        "printf 'export PYTHONHASHSEED=0\\n' > /etc/profile.d/clawbox-experiment.sh; "
         "mkdir -p /run/clawbox-ssh; "
         "printf '%s' \"$CLAWBOX_TOOL_HOST_KEY_B64\" | base64 -d > /run/clawbox-ssh/host_key; "
         "printf '%s' \"$CLAWBOX_TOOL_AUTHORIZED_KEY_B64\" | base64 -d > /run/clawbox-ssh/authorized_key; "
@@ -199,6 +201,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
         "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
+        "PYTHONHASHSEED=0 "
         "CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py "
         "CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python "
         "PYTHONPATH=/opt/clawtune-guest/services/sidecar/src "
