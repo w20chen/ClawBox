@@ -201,6 +201,15 @@ Python string hashes and hash-dependent iteration repeatable. It does not make
 network responses or explicitly randomized programs deterministic; their outputs
 must still match for the recording to pass replay.
 
+Python before 3.12 can also include process addresses in `hash(None)` and hashes
+of tuples containing `None`. For a Python `-c` command that explicitly prints
+`print('label', hash(value))`, replay compares the labelled hash results by their
+equality relationships, not their numeric values. Other numbers, equality tests,
+dictionary lookups, and command contents must still match. This is semantic
+matching, not byte-for-byte output equality. Raw outputs are retained. A trace
+that later uses a process-dependent hash as an actual input is not made portable
+by this comparison rule.
+
 Agent prediction files contain command records with `command`, `predicted_command_memory_p90_mib`, and
 `predicted_host_execution_increment_mib`; the latter is calibrated host demand.
 The Runtime must supply matching command metadata. An action-ID dictionary is

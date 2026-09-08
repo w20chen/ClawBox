@@ -191,6 +191,33 @@ def test_replay_normalizes_single_git_log_entry_but_keeps_commit_message():
         _canonical_replay_input("8a90f4e Return AttrPath NamedTuple"))
     assert _canonical_replay_input("81267aa Return AttrPath NamedTuple") != (
         _canonical_replay_input("8a90f4e Delete AttrPath"))
+    tail = "\n---status---\n?? .gitconfig"
+    assert _canonical_replay_input("81267aa Return AttrPath NamedTuple" + tail) == (
+        _canonical_replay_input("8a90f4e Return AttrPath NamedTuple" + tail))
+
+
+def test_python_hash_reports_require_matching_source_and_preserve_equalities():
+    import shlex
+    script = "print('hash nt:', hash(nt)); print('hash t:', hash(t))"
+
+    def history(content, source=script):
+        return [{"role": "assistant", "tool_calls": [{"id": "probe", "function": {
+            "name": "exec", "arguments": json.dumps({"command": "cd /testbed && python3 -c "
+                                                      + shlex.quote(source)})}}]},
+                {"role": "tool", "tool_call_id": "probe", "content": content}]
+
+    expected = history("hash nt: 3741550240359950407\nhash t: 3741550240359950407\neq: True")
+    actual = history("hash nt: 6655479721732998349\nhash t: 6655479721732998349\neq: True")
+    assert _canonical_replay_input(expected) == _canonical_replay_input(actual)
+    assert "3741550240359950407" in expected[1]["content"]
+    assert _canonical_replay_input(expected) != _canonical_replay_input(
+        history("hash nt: 6655479721732998349\nhash t: 123\neq: True"))
+    assert _canonical_replay_input(expected) != _canonical_replay_input(
+        history("hash nt: 6655479721732998349\nhash t: 6655479721732998349\neq: False"))
+    actual[1]["tool_call_id"] = "unrelated"
+    assert _canonical_replay_input(expected) != _canonical_replay_input(actual)
+    assert _canonical_replay_input(history("hash nt: 123", "print('hash nt:', 123)")) != (
+        _canonical_replay_input(history("hash nt: 456", "print('hash nt:', 123)")))
 
 
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import ast
 import hashlib
 import inspect
 import json
 import re
+import shlex
 import sys
 import threading
 import time
@@ -588,7 +590,7 @@ _GENERATED_DIRECTORY_MTIME_RE = re.compile(
 _CLAWBOX_GIT_STATUS_RE = re.compile(r"(?m)^\?\? \.clawbox/(?:\r?\n|$)")
 _GIT_COMMIT_HEADER_RE = re.compile(r"(?m)^(\[master )[0-9a-f]{7,40}(\] )")
 _GIT_LOG_HEAD_RE = re.compile(
-    r"(?m)^[0-9a-f]{7,40}(?= [^\n]+(?:\n(?:[0-9a-f]{7,40} |\?\? )|\Z))"
+    r"(?m)^[0-9a-f]{7,40}(?= [^\n]+(?:\n(?:[0-9a-f]{7,40} |\?\? |---[^\n]*---)|\Z))"
 )
 _LS_LONG_ENTRY_RE = re.compile(
     r"(?m)^[bcdlps-][rwxStTs-]{9}\.?(?:\s+\d+)(?:\s+\S+){2}"
@@ -659,10 +661,65 @@ def _canonical_replay_input(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _canonical_replay_input(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_canonical_replay_input(item) for item in value]
+        return [_canonical_replay_input(item) for item in _canonical_python_hash_reports(value)]
     if isinstance(value, str):
         return _canonical_replay_text(value)
     return value
+
+
+def _canonical_python_hash_reports(messages: list[Any]) -> list[Any]:
+    """Compare explicitly printed Python hashes by equality, not process address.
+
+    Python versions before 3.12 hash None by its address, even with a fixed
+    PYTHONHASHSEED. Only literal labels in print(label, hash(...)) in a matching
+    python -c tool call qualify. Numbers elsewhere and the recorded commands
+    are unchanged. No model response or tool execution is rewritten here.
+    """
+    labels_by_call: dict[str, list[str]] = {}
+    result = []
+    for message in messages:
+        if not isinstance(message, dict):
+            result.append(message)
+            continue
+        for call in message.get("tool_calls", []):
+            function = call.get("function", {})
+            if function.get("name") != "exec":
+                continue
+            try:
+                command = json.loads(function["arguments"])["command"]
+                words = shlex.split(command)
+                scripts = [words[i + 2] for i in range(len(words) - 2)
+                           if words[i].rsplit("/", 1)[-1] in {"python", "python3"}
+                           and words[i + 1] == "-c"]
+                labels = []
+                for script in scripts:
+                    for node in ast.walk(ast.parse(script)):
+                        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                                and node.func.id == "print" and len(node.args) == 2
+                                and not node.keywords and isinstance(node.args[0], ast.Constant)
+                                and isinstance(node.args[0].value, str)
+                                and isinstance(node.args[1], ast.Call)
+                                and isinstance(node.args[1].func, ast.Name)
+                                and node.args[1].func.id == "hash"):
+                            labels.append(node.args[0].value)
+                labels_by_call[call["id"]] = labels
+            except (KeyError, TypeError, ValueError, SyntaxError):
+                continue
+        labels = labels_by_call.get(message.get("tool_call_id"), [])
+        content = message.get("content")
+        if message.get("role") == "tool" and labels and isinstance(content, str):
+            pattern = re.compile(r"(?m)^(" + "|".join(re.escape(label) for label in labels)
+                                 + r") (-?[0-9]+)$")
+            identities: dict[str, int] = {}
+
+            def report(match):
+                number = match[2]
+                identity = identities.setdefault(number, len(identities))
+                return f"{match[1]} PYTHON-HASH-{identity}"
+
+            message = dict(message, content=pattern.sub(report, content))
+        result.append(message)
+    return result
 
 
 def _canonical_sha256(value: Any) -> str:
