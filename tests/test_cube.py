@@ -526,6 +526,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     )
     monkeypatch.setenv("CLAWBOX_CONTROL_HOST", "127.0.0.1")
     monkeypatch.setenv("CLAWBOX_MODEL_GATEWAY_HOST", "127.0.0.1")
+    monkeypatch.setenv("CLAWBOX_POLICY_PORT", "0")
+    monkeypatch.setenv("CLAWBOX_MODEL_GATEWAY_PORT", "0")
     spec = ExperimentSpec.model_validate({
         "schema_version": 2, "experiment_id": "openclaw-snapshot-test",
         "workload": {"source": "recorded_trace", "input": str(trace), "cases": [{

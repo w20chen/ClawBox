@@ -78,7 +78,7 @@ esac
 
 
 @requires_bash
-def test_cli_automatically_uses_cluster_token_and_local_api(tmp_path):
+def test_cli_does_not_discover_a_cluster_or_inject_cluster_credentials(tmp_path):
     mock_bin = tmp_path / "bin"
     mock_bin.mkdir()
     _command(mock_bin / "curl", "exit 0\n")
@@ -99,7 +99,7 @@ esac
     )
     _command(
         mock_bin / "python3",
-        'printf "token=%s api=%s args=%s\\n" "$CLAWBOX_TOKEN" "$CLAWBOX_API_URL" "$*"\n',
+        'printf "token=%s api=%s args=%s\\n" "${CLAWBOX_TOKEN:-unset}" "${CLAWBOX_API_URL:-unset}" "$*"\n',
     )
 
     result = subprocess.run(
@@ -112,7 +112,7 @@ esac
     )
 
     assert result.returncode == 0, result.stderr
-    assert "token=token api=http://127.0.0.1:49152" in result.stdout
+    assert "token=unset api=unset" in result.stdout
     assert "args=-m clawbox.cli submit --input-ref task-a" in result.stdout
 
 
@@ -121,9 +121,10 @@ def test_up_script_cannot_invoke_destructive_bootstrap():
     assert "bootstrap-openeuler-arm64" not in source
 
 
-def test_public_cli_routes_configure_to_host_workflow():
+def test_public_cli_routes_doctor_to_standalone_workflow():
     source = (ROOT / "scripts/clawbox").read_text(encoding="utf-8")
-    assert "up|doctor|configure|install|traces" in source
+    assert '"${SCRIPT_DIR}/cube-host-doctor.py"' in source
+    assert "clawbox-host.sh" not in source
 
 
 def test_trace_export_is_a_single_host_command():

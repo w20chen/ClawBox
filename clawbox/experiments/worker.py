@@ -504,8 +504,9 @@ class ExperimentWorker:
             if control_host else nullcontext(None)
         )
         gateway_context = (
-            ManagedModelGateway(advertise_host=gateway_host, advertised_port=gateway_port)
-            if gateway_host and gateway_port else nullcontext(None)
+            ManagedModelGateway(advertise_host=gateway_host, advertised_port=gateway_port,
+                                bind_port=gateway_port)
+            if gateway_host else nullcontext(None)
         )
         with policy_context as policy_control, gateway_context as model_gateway:
             self.policy_control = policy_control

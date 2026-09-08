@@ -187,12 +187,14 @@ pause/restore checks before starting a large experiment.
 
 ## Detached, bounded tiered study
 
-The current comparison uses the **full trace and 160 GiB LOCAL**. Run setup
+The current correctness sweep uses **five recorded rounds and 160 GiB LOCAL**.
+Use `--steps 5 --arm-seconds 1200` in the launch command below. Five rounds
+do not cover the later recorded edits/pytest phase; separate post-run regression
+validation still runs. Full-trace runs remain available with `--full-trace`.
+Run setup
 with `sudo env CLAWBOX_LOCAL_MIB=163840 bash scripts/setup-tiered-memory.sh
-WARM_ROOT COLD_ROOT USER`, then use `--full-trace --arm-seconds 3600` in the
-launch command below instead of `--steps 23 --arm-seconds 1800`. The larger
-deadline is a safety limit; approximately 30 minutes is a planning target.
-The prefix command below remains available for explicitly labeled pilots.
+WARM_ROOT COLD_ROOT USER`. Deadlines are safety limits, not expected durations.
+Do not compare prefix pilot timings with full-trace performance results.
 
 On an installed machine, with no experiment VMs running, restore the temporary
 NUMA settings after every reboot:

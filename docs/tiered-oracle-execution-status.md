@@ -26,6 +26,15 @@ use this same mechanism; WARM is separate and LOCAL swap is disabled. Setup
 delegates the LOCAL reclaim control to the experiment user. The affected
 policy, memory and CubeSandbox suites passed 43 tests on kunpeng.
 
+The five-round sweep is detached under `five-c40-20260908-v1`; supervisor log
+is `five-c40-supervisor.log`. The complete Python suite subsequently passed
+330 tests (`five-c40-unit-tests-v4.log`). Two obsolete Kubernetes CLI
+expectations were corrected, and the mocked OpenClaw worker test now uses
+ephemeral policy/gateway ports so it can coexist with a real experiment.
+The worker now binds the configured gateway port explicitly; the live study
+uses the unchanged standard ports. A passing unit suite does not certify the
+13 live baseline arms, whose outcomes are still pending.
+
 ## Full-trace resource revision, 2026-09-08
 
 The user requested the full trace and a larger fair LOCAL budget. The active

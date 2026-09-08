@@ -281,6 +281,8 @@ class PolicyControlServer:
 
         self.server = Server((bind_host, bind_port), Handler)
         self.actual_port = int(self.server.server_port)
+        if self.advertised_port == 0:
+            self.advertised_port = self.actual_port
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        name="policy-control", daemon=True)
 
