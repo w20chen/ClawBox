@@ -573,7 +573,9 @@ _LS_LONG_ENTRY_RE = re.compile(
 )
 _SEARCH_RESULT_LINE_RE = re.compile(r"^(?:\./)?[^:\s]+/[^:\n]+:\d+:")
 _PYTHON_TEMP_DIRECTORY_RE = re.compile(r"/tmp/tmp[a-z0-9_]{8}(?=[/'\"\s]|$)")
-_PYTHON_OBJECT_ADDRESS_RE = re.compile(r"(<[\w.]+ object at )0x[0-9a-fA-F]+(>)")
+_PYTHON_OBJECT_ADDRESS_RE = re.compile(
+    r"(<(?:[\w.]+ object|function [\w.<>]+) at )0x[0-9a-fA-F]+(>)"
+)
 
 
 def _canonicalize_ls_long_entry(match: re.Match[str]) -> str:

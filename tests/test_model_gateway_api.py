@@ -180,6 +180,10 @@ def test_replay_normalizes_object_addresses_but_not_values_or_error_types():
     assert _canonical_replay_input(expected) == _canonical_replay_input(actual)
     assert _canonical_replay_input(expected) != _canonical_replay_input(actual.replace("DNS failed", "connection refused"))
     assert _canonical_replay_input("value=0x1234") != _canonical_replay_input("value=0x5678")
+    assert _canonical_replay_input("<function NamedTuple at 0xffff7fac6560>") == (
+        _canonical_replay_input("<function NamedTuple at 0xffff9d446560>"))
+    assert _canonical_replay_input("<function NamedTuple at 0xffff7fac6560>") != (
+        _canonical_replay_input("<function different at 0xffff9d446560>"))
 
 
 def test_replay_normalizes_single_git_log_entry_but_keeps_commit_message():
