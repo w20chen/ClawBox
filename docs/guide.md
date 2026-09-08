@@ -307,6 +307,12 @@ preflight rejections remain in the native trace and are counted separately from
 executed commands; they cannot have Tool VM resource measurements. A cancelled
 command that did execute must still finish its telemetry and admission record.
 
+For `exec`, stdout and stderr are combined in the Tool VM before SSH transport,
+so separate SSH channels do not reorder sequential output. This applies to both
+live recording and replay; filesystem transfers keep separate channels. Older
+recordings can contain channel-order differences and are not rewritten to hide
+them. Record a new live run when validating this execution setup.
+
 A successful comparison needs all sessions requested by the arm to finish and
 pass task validation. For managed replay, also check complete request matching,
 exact execution-ID joins, telemetry loss, duplicate execution, and leaked VMs.

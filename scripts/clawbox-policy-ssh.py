@@ -83,6 +83,13 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
         argv[index] = (
             argument[:marker] + PREFIX + "b64:" + encoded + "\n" + payload
         )
+        # OpenClaw's exec result is a combined stream. Merge at the remote
+        # shell, before SSH's independent stdout/stderr channels can reorder
+        # sequential writes. Filesystem and maintenance calls retain separate
+        # channels; the logical command used for clause profiling is unchanged.
+        if metadata.get("tool_name", "exec") == "exec":
+            command = "{\n" + command + "\n} 2>&1"
+            argv[index] = "{\n" + argv[index] + "\n} 2>&1"
         return metadata, command, profile_command
     return None
 

@@ -5,6 +5,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -89,7 +90,7 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert "Port=20020" in command
     assert "HostKeyAlias=clawbox-tool-tool-a" in command
     assert command[-2] == "openclaw-sandbox"
-    assert command[-1].endswith("\nprintf /run/identity")
+    assert command[-1].endswith("\nprintf /run/identity\n} 2>&1")
     assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
     completion = posted[-1][1]
     assert completion["endpoint_sandbox_id"] == "tool-a"
@@ -291,18 +292,18 @@ def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
 
     assert policy_ssh.main() == 0
     request = posted[0][1]
-    effective = wrapper + logical + "'"
+    effective = "{\n" + wrapper + logical + "'\n} 2>&1"
     assert request["command_sha256"] == hashlib.sha256(logical.encode()).hexdigest()
     assert request["effective_command_sha256"] == hashlib.sha256(effective.encode()).hexdigest()
     launched_remote = launched[0][-1]
-    assert launched_remote.startswith(wrapper + policy_ssh.PREFIX + "b64:")
-    header = launched_remote.split("\n", 1)[0].split(policy_ssh.PREFIX + "b64:", 1)[1]
+    assert launched_remote.startswith("{\n" + wrapper + policy_ssh.PREFIX + "b64:")
+    header = launched_remote.split(policy_ssh.PREFIX + "b64:", 1)[1].split("\n", 1)[0]
     bridge_metadata = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
     encoded_profile = bridge_metadata["profile_command_b64"]
     assert base64.urlsafe_b64decode(
         encoded_profile + "=" * (-len(encoded_profile) % 4)
     ).decode() == logical
-    assert launched_remote.endswith("\n" + logical + "'")
+    assert launched_remote.endswith("\n" + logical + "'\n} 2>&1")
 
 
 def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(
@@ -392,6 +393,26 @@ def test_policy_rejects_non_ssh_container_port_before_spawning_ssh(
 
     assert policy_ssh.main() == 125
     assert posted == ["/v1/tool/admit"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="native commands use a POSIX shell")
+@pytest.mark.parametrize("tool_name", ["exec", "filesystem"])
+def test_output_order_is_merged_only_for_exec(tool_name):
+    logical = "printf 'first\\n' >&2; printf 'second\\n'; cat <<'EOF'\nthird\nEOF"
+    args = [policy_ssh.PREFIX + json.dumps({
+        "v": 1, "execution_id": "exec-order", "tool_name": tool_name,
+    }) + "\n" + logical]
+    _, effective, profile = policy_ssh._envelope(args)
+    assert profile == logical
+    for _ in range(10):
+        result = subprocess.run(["/bin/sh", "-c", effective], capture_output=True, text=True)
+        assert result.returncode == 0
+        if tool_name == "exec":
+            assert result.stdout == "first\nsecond\nthird\n"
+            assert result.stderr == ""
+        else:
+            assert result.stdout == "second\nthird\n"
+            assert result.stderr == "first\n"
 
 
 def test_cancellation_keeps_ssh_alive_until_remote_cleanup(monkeypatch):
