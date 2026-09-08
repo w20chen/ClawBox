@@ -1,5 +1,36 @@
 # Tiered oracle execution record
 
+## c40 continuation, 2026-09-08 05:46 UTC
+
+Both c4 arms passed (4/4 sessions each, validation passed, exact telemetry joins
+1.0, zero telemetry loss). The user subsequently requested approximately
+30 minutes per baseline while retaining exploration and pytest. The selected
+workload preserves original rounds 1–23 (including the successful pytest in
+round 23), then supplies a labeled zero-latency stop response to round 24's
+request. It is a workload-prefix study, not full task-completion evaluation.
+
+`short-c40-20260908-v1` attempted all 13 policies but all hit their external
+1800-second deadline. Twelve arms stalled around the first model step.
+Creation and tool admissions shared one FIFO, allowing a capacity-blocked
+creation to prevent existing sessions from running tools and releasing memory.
+Separately reserving Runtime and Tool creation allowed partial pairs to consume
+capacity. The lifetime-resident arm made progress and completed nine sessions;
+the original top-level timeout report's 0/40 was a missing-data placeholder,
+not an accurate count of partial completions. Raw events retain those results.
+
+Commit `d978839` prioritizes progress of existing sessions ahead of new
+creation, reserves complete VM pairs, and leaves tool-operation room when
+admitting a new pair. The policy and worker suites passed (36 tests).
+Timeout summaries now recover observed completions, memory samples and
+pause/restore counts. No timed-out arm is considered a successful comparison.
+
+The corrected detached run is `short-c40-20260908-v2`; supervisor log:
+`/home/weitianc/clawbox-tiered-study-20260907/short-c40-v2-supervisor.log`.
+It uses `/home/weitianc/ClawBox-experiment-short-c40-v2`, 23 recorded rounds,
+c40, the same randomized order of 13 policies, and 1800 seconds per arm plus
+cleanup. Source trace and failed-run evidence are preserved. Completion of
+the corrected c40 study has not yet been established.
+
 ## Continuation on 2026-09-08
 
 Physical gate `gates/tier-storage-private-copy-v5.json` passed on kunpeng with
