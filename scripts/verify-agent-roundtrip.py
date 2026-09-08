@@ -29,6 +29,7 @@ def main():
     base["agent"] = {"driver": "openclaw"}
     base["inference"]["configuration"]["clawtune_config"] = str(args.clawtune_config.resolve())
     base["workload"]["repetitions"] = 1
+    base["resources"]["full_tool_memory_mib"] = base["sandbox"].get("memory_mib", 4096)
     outcomes = []
 
     def run(spec, name):

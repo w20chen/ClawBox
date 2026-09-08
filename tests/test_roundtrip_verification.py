@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import yaml
 
 from trace_fixtures import llm_spans, write_spans
+from clawbox.experiments.spec import ExperimentSpec
 
 
 def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path, monkeypatch):
@@ -22,6 +23,8 @@ def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path,
     def run(command, **kwargs):
         name = command[-1]
         spec = yaml.safe_load(Path(command[-3]).read_text())
+        ExperimentSpec.model_validate(spec)
+        assert spec["resources"]["full_tool_memory_mib"] == spec["sandbox"]["memory_mib"]
         concurrency, = spec["execution"]["concurrency_levels"]
         directory = output / name
         (directory / "arms").mkdir(parents=True)
