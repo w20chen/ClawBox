@@ -218,7 +218,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
 
 def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  ssh: NativeSSHConfig, policy_control: Any,
-                 runtime_executor: Any, output_dir: Path, timeout_seconds: int,
+                 runtime_executor: Any, output_dir: Path, timeout_seconds: int | None,
                  model_gateway: Any | None = None,
                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
@@ -317,7 +317,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             command = prefix + f"printf '%s\\n' $$ > {shlex.quote(pid_file)}; exec {argv}"
         else:
             command = prefix + argv
-        result = runtime_executor.execute(command, timeout_seconds)
+        result = runtime_executor.execute(command, timeout_seconds or 300)
         if result.exit_code:
             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
         return result
@@ -454,9 +454,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     agent_args = [
         "agent", "--local", "--agent", "main", "--session-id", session_id,
         "--model", f"vllm/{openclaw_model}", "--message", instruction,
-        "--timeout", str(timeout_seconds), "--json",
+        "--timeout", str(timeout_seconds if timeout_seconds is not None else 0), "--json",
     ]
     if resident_poll is None:
+        if timeout_seconds is None:
+            raise ValueError("unbounded agent execution requires detached Runtime polling")
         result = invoke(agent_args, pid_file=agent_pid_file)
     else:
         argv = " ".join(shlex.quote(item) for item in [executable, *agent_args])
@@ -477,14 +479,15 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             raise RuntimeError(
                 f"OpenClaw Runtime VM launch failed: {launched.stderr[-2000:]}"
             )
-        deadline = time.monotonic() + timeout_seconds
+        agent_started = time.monotonic()
+        deadline = None if timeout_seconds is None else agent_started + timeout_seconds
         while True:
             status = resident_poll(
                 f"test -s {shlex.quote(agent_exit_file)}", 10,
             )
             if status is not None and status.exit_code == 0:
                 break
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 resident_poll(
                     f"kill -TERM $(cat {shlex.quote(agent_pid_file)}) 2>/dev/null || true",
                     10,
@@ -502,7 +505,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             raise RuntimeError("OpenClaw detached Agent wrote an invalid exit status") from exc
         result = CommandResult(
             exit_code, stdout_result.stdout, stderr_result.stdout,
-            max(0.0, timeout_seconds - max(0.0, deadline - time.monotonic())),
+            max(0.0, time.monotonic() - agent_started),
         )
         if result.exit_code:
             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")

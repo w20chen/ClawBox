@@ -83,7 +83,7 @@ class ExecutionSpec(StrictFrozenModel):
     concurrency_levels: tuple[int, ...] = (1,)
     randomized_order: bool = True
     random_seed: int = 0
-    arm_timeout_seconds: int = Field(default=1800, ge=1)
+    arm_timeout_seconds: int | None = Field(default=1800, ge=1)
     command_timeout_seconds: int = Field(default=300, ge=1)
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)

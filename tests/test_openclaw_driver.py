@@ -157,8 +157,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     )
 
 
+@pytest.mark.parametrize("timeout_seconds", [60, None])
 def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
-    monkeypatch, tmp_path: Path,
+    monkeypatch, tmp_path: Path, timeout_seconds,
 ) -> None:
     commands: list[str] = []
 
@@ -188,13 +189,14 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
             sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
         ),
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
-        output_dir=tmp_path, timeout_seconds=60,
+        output_dir=tmp_path, timeout_seconds=timeout_seconds,
         resident_poll=resident_poll,
     )
 
     launch = next(command for command in commands if "nohup /bin/sh" in command)
     assert "agent.exit" in launch
     assert "agent.pid" in launch
+    assert f"--timeout {timeout_seconds if timeout_seconds is not None else 0}" in launch
     assert result["stdout"] == '{"ok":true}\n'
 
 

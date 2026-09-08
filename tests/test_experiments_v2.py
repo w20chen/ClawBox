@@ -18,6 +18,12 @@ from clawbox.experiments.worker import (
 from clawbox.replay.lifecycle import CommandResult
 
 
+def test_explicit_null_disables_arm_deadline() -> None:
+    from clawbox.experiments.spec import ExecutionSpec
+    assert ExecutionSpec(arm_timeout_seconds=None).arm_timeout_seconds is None
+    assert ExecutionSpec().arm_timeout_seconds == 1800
+
+
 def test_runtime_network_policy_honors_explicit_internet_access() -> None:
     allowlist = ["192.0.2.10/32"]
 

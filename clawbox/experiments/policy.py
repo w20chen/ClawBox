@@ -217,7 +217,7 @@ class PolicyCoordinator:
             reasons.append("emergency_free_memory")
         return tuple(reasons)
 
-    def acquire(self, session_id: str, amount_mib: int, timeout_s: float, *,
+    def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
                 capacity_claim: bool = False) -> float:
         started = time.monotonic()
@@ -227,7 +227,7 @@ class PolicyCoordinator:
             with self._condition:
                 self._record_wait_locked(wait_class, elapsed)
             return elapsed
-        deadline = started + timeout_s
+        deadline = None if timeout_s is None else started + timeout_s
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
@@ -305,7 +305,7 @@ class PolicyCoordinator:
                                     victim, elapsed, "memory_admission",
                                 )
                         continue
-                    remaining = deadline - time.monotonic()
+                    remaining = 0.2 if deadline is None else deadline - time.monotonic()
                     if remaining <= 0:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
                     self._condition.wait(min(0.2, remaining))

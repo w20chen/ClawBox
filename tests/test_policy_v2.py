@@ -42,6 +42,22 @@ def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
     coordinator.release("restore", 4)
 
 
+def test_unbounded_admission_waits_until_capacity_is_available() -> None:
+    used = [9 * 1024**2]
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                                    operation_headroom_mib=1,
+                                    physical_sample=lambda: (used[0], 100 * 1024**2))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(coordinator.acquire, "restore", 4, None)
+        time.sleep(0.05)
+        assert not future.done()
+        used[0] = 0
+        assert future.result(timeout=2) >= 0.05
+    coordinator.release("restore", 4)
+
+
 def test_unsuccessful_cache_reclaim_does_not_invent_capacity() -> None:
     policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
                         eviction="none", restore="none")

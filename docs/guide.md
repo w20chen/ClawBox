@@ -195,6 +195,12 @@ ClawBox does not compare tool output text with the recording or apply task-speci
 log normalization. Missing or extra model steps, failed delivery, failed task
 validation, and incomplete telemetry still fail verification.
 
+Set `execution.arm_timeout_seconds: null` to remove ClawBox's arm and agent
+deadlines. OpenClaw receives its native `--timeout 0` option. Single-command and
+transport timeouts remain enabled; exceeding 30 minutes alone does not stop a
+run. The bundled OpenClaw implements its no-timeout option using the JavaScript
+timer maximum (about 24.8 days), not a 30-minute or hourly limit.
+
 Tool sessions use `PYTHONHASHSEED=0` in both live and replay runs. This keeps
 Python string hashes and hash-dependent iteration repeatable. Identical initial
 environments do not guarantee identical timestamps, process addresses, random
