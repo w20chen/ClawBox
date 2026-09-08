@@ -571,12 +571,17 @@ class ExperimentWorker:
                 "reason": reason,
                 "lifecycle_timing": timings[-1] if timings else None,
             })
+        def reclaim_local_cache() -> None:
+            observation = sampler.reclaim_file_cache()
+            events.write({"event": "local_cache_reclaim", **observation})
+
         coordinator = PolicyCoordinator(
             arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
             emergency_free_mib=arm.resources.emergency_free_memory_mib,
             operation_headroom_mib=arm.resources.checkpoint_restore_headroom_mib,
             startup_headroom_mib=arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib,
             physical_sample=sampler.current,
+            reclaim_cache=reclaim_local_cache if isinstance(sampler, CgroupMemorySampler) else None,
             on_pressure_pause=record_pressure_pause,
         )
         snapshot_pool = WarmSnapshotPool(

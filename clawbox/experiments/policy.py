@@ -62,6 +62,7 @@ class PolicyCoordinator:
     def __init__(self, policy: PolicySpec, *, budget_mib: int,
                  emergency_free_mib: int, operation_headroom_mib: int,
                  startup_headroom_mib: int = 0,
+                 reclaim_cache: Callable[[], None] | None = None,
                  physical_sample: Callable[[], tuple[int, int]] | None = None,
                  on_pressure_pause: Callable[[SessionState, float, str], None] | None = None,
                  ) -> None:
@@ -71,6 +72,9 @@ class PolicyCoordinator:
         self.operation_headroom_bytes = operation_headroom_mib * MIB
         self.operation_headroom_mib = operation_headroom_mib
         self.startup_headroom_bytes = startup_headroom_mib * MIB
+        self.reclaim_cache = reclaim_cache
+        self._last_cache_reclaim = float("-inf")
+        self._cache_reclaim_running = False
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self.on_pressure_pause = on_pressure_pause
         self._condition = Condition()
@@ -247,6 +251,23 @@ class PolicyCoordinator:
                     ) if at_head else ()
                     if at_head and not safety_reasons:
                         break
+                    # Admission stops below memory.max, so the kernel may never
+                    # experience pressure that would reclaim clean file cache.
+                    # Request real, cgroup-scoped reclamation before evicting VMs.
+                    if (at_head and "configured_memory_budget" in safety_reasons
+                            and self.reclaim_cache is not None
+                            and not self._cache_reclaim_running
+                            and time.monotonic() - self._last_cache_reclaim >= 2.0):
+                        self._cache_reclaim_running = True
+                        self._condition.release()
+                        try:
+                            self.reclaim_cache()
+                        finally:
+                            self._condition.acquire()
+                            self._cache_reclaim_running = False
+                            self._last_cache_reclaim = time.monotonic()
+                            self._condition.notify_all()
+                        continue  # Re-sample actual charges; do not assume success.
                     for reason in safety_reasons:
                         if reason not in recorded_safety_reasons:
                             recorded_safety_reasons.add(reason)

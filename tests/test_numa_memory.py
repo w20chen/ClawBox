@@ -44,3 +44,17 @@ def test_local_cgroup_uses_absolute_usage_and_host_emergency_guard(tmp_path: Pat
         CgroupMemorySampler(group, capacity_bytes=1, storage=tmp_path)
     with pytest.raises(ValueError, match="cpuset"):
         CgroupMemorySampler(group, capacity_bytes=1024000, numa_node=1, storage=tmp_path)
+
+
+def test_local_cache_reclaim_excludes_shmem_and_keeps_actual_accounting(tmp_path: Path) -> None:
+    for name, value in {"memory.max": "1024000", "memory.current": "200000",
+                        "memory.stat": "file 100000\nshmem 30000\n"}.items():
+        (tmp_path / name).write_text(value)
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 10000 kB\nMemAvailable: 7000 kB\n")
+    sampler = CgroupMemorySampler(tmp_path, capacity_bytes=1024000,
+                                  meminfo=meminfo, storage=tmp_path)
+    result = sampler.reclaim_file_cache(maximum_bytes=80000)
+    assert (tmp_path / "memory.reclaim").read_text() == "70000"
+    assert result["observed_net_reclaimed_bytes"] == 0
+    assert sampler.current()[0] == 200000

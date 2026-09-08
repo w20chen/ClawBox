@@ -27,7 +27,7 @@ from clawbox.experiments.spec import ExperimentSpec
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--spec', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
-parser.add_argument('--steps', type=int, default=23)
+parser.add_argument('--steps', type=int, default=5)
 parser.add_argument('--full-trace', action='store_true', help='Replay every original row without a synthetic boundary')
 parser.add_argument('--arm-seconds', type=int, default=1800)
 args = parser.parse_args()
@@ -76,6 +76,8 @@ local_group = Path(resources['local_memory_cgroup'])
 expected_limit = resources['local_memory_capacity_mib'] * 1024**2
 if (local_group / 'memory.max').read_text().strip() != str(expected_limit):
     parser.error('LOCAL limit is not configured; run scripts/setup-tiered-memory.sh first')
+if not os.access(local_group / 'memory.reclaim', os.W_OK):
+    parser.error('LOCAL memory.reclaim is not writable; run scripts/setup-tiered-memory.sh first')
 warm_type = subprocess.check_output([
     'findmnt', '-n', '-o', 'FSTYPE', '--target', resources['warm_snapshot_root']], text=True).strip()
 if warm_type != 'tmpfs':

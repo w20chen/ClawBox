@@ -36,6 +36,8 @@ install -D -m 644 "$script_dir/../deploy/cubesandbox/tiered-memory.conf" \
   /etc/systemd/system/cube-sandbox-cubelet.service.d/tiered-memory.conf
 systemctl daemon-reload
 python3 "$script_dir/configure-tiered-local.py" --capacity-mib "$local_mib" --numa-node "$local_node"
+chown "$owner:$(id -gn "$owner")" /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim
+chmod u+w /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim
 findmnt -n -o TARGET,FSTYPE,OPTIONS --target "$warm"
 echo 'Settings prepared. Restart Cubelet and its egress dependent if the environment flags are new.'
 echo 'After a reboot, run this setup again before any experiment; the tmpfs and cgroup settings are not persistent.'

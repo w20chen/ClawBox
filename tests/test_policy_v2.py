@@ -26,6 +26,32 @@ class Lifecycle:
         return 0.01
 
 
+def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
+    used = [9 * 1024**2]
+    calls = []
+    def reclaim() -> None:
+        calls.append(True)
+        used[0] = 5 * 1024**2
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                                    operation_headroom_mib=1, reclaim_cache=reclaim,
+                                    physical_sample=lambda: (used[0], 100 * 1024**2))
+    coordinator.acquire("restore", 4, 1, wait_class="restore")
+    assert calls == [True]
+    coordinator.release("restore", 4)
+
+
+def test_unsuccessful_cache_reclaim_does_not_invent_capacity() -> None:
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                                    operation_headroom_mib=1, reclaim_cache=lambda: None,
+                                    physical_sample=lambda: (9 * 1024**2, 100 * 1024**2))
+    with pytest.raises(AdmissionTimeout):
+        coordinator.acquire("restore", 4, 0, wait_class="restore")
+
+
 def test_running_tool_can_pass_a_capacity_blocked_new_pair() -> None:
     policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
                         eviction="none", restore="none")

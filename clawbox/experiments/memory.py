@@ -220,6 +220,30 @@ class CgroupMemorySampler(NodeMemorySampler):
         _, available = read_meminfo(self.meminfo)
         return int((self.cgroup / "memory.current").read_text()), available
 
+    def reclaim_file_cache(self, maximum_bytes: int = 8 * 1024**3) -> dict[str, int | str]:
+        """Ask the kernel to reclaim charged cache; never discount it on paper.
+
+        LOCAL has swap disabled. WARM is in a separate cgroup; shmem is excluded
+        from the request. EAGAIN means partial reclamation, not a failed run.
+        """
+        import errno
+        stats = dict(line.split() for line in (self.cgroup / "memory.stat").read_text().splitlines())
+        requested = min(maximum_bytes, max(0, int(stats.get("file", 0)) - int(stats.get("shmem", 0))))
+        before, _ = self.current()
+        status = "no_file_cache"
+        if requested:
+            try:
+                (self.cgroup / "memory.reclaim").write_text(str(requested))
+                status = "requested"
+            except OSError as exc:
+                if exc.errno != errno.EAGAIN:
+                    raise
+                status = "partial_EAGAIN"
+        after, _ = self.current()
+        return {"requested_bytes": requested, "before_bytes": before,
+                "after_bytes": after, "observed_net_reclaimed_bytes": max(0, before - after),
+                "status": status}
+
     def observe(self) -> dict[str, int | str]:
         observation = super().observe()
         used, _ = self.current()

@@ -1,5 +1,31 @@
 # Tiered oracle execution record
 
+## Five-round correctness sweep and cache fix, 2026-09-08
+
+The latest user instruction replaces the full-trace performance run with a
+five-round correctness sweep across all 13 baselines at c40. LOCAL remains
+160 GiB, with 64 GiB WARM for the two tiered policies. The trace preserves
+the first five responses and timings, followed by a labeled synthetic stop.
+The later recorded pytest and coding edits are not covered; the separate
+post-run regression validation remains enabled. This is not paper performance
+evidence or proof that every possible policy path is bug-free.
+
+The first full-trace arm stalled at a 4096 MiB restore admission. Live stacks
+showed `configured_memory_budget` and no eligible victim. LOCAL charged
+146 GiB including 35.94 GiB file cache. Admission's reserved headroom stopped
+growth below `memory.max`, so kernel hard-limit reclamation was not triggered.
+A cgroup-only 16 GiB reclaim request resumed restores and increased completed
+operations from 42 to 63. This manually intervened run was stopped and cleaned;
+its logs and `full-c40-160g-stall-stacks.txt` remain diagnostic evidence.
+
+The fix requests up to 8 GiB of LOCAL file-cache reclamation under admission
+pressure, no more often than two seconds after the prior request completes.
+It re-samples real usage rather than deducting cache from accounting. Each
+request records before/after charges as `local_cache_reclaim`. All 13 policies
+use this same mechanism; WARM is separate and LOCAL swap is disabled. Setup
+delegates the LOCAL reclaim control to the experiment user. The affected
+policy, memory and CubeSandbox suites passed 43 tests on kunpeng.
+
 ## Full-trace resource revision, 2026-09-08
 
 The user requested the full trace and a larger fair LOCAL budget. The active
