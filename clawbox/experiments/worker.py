@@ -573,6 +573,7 @@ class ExperimentWorker:
                 "lifecycle_timing": timings[-1] if timings else None,
             })
         def reclaim_local_cache() -> None:
+            events.write({"event": "local_cache_reclaim_started"})
             observation = sampler.reclaim_file_cache()
             events.write({"event": "local_cache_reclaim", **observation})
 

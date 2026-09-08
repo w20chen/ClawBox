@@ -1,5 +1,21 @@
 # Tiered oracle execution record
 
+## Asynchronous reclaim correction
+
+Five-round v2 reached round 5 for all 23 initially admitted sessions, and four
+sessions completed with validation true. It then exposed a second reclamation
+issue: the head admission thread was still inside a 4.42 GiB `memory.reclaim`
+write after LOCAL had fallen from about 143 GiB to 114 GiB. The kernel can
+continue reclaim work even after there is enough memory for admission.
+The run was stopped with its partial successes retained.
+
+Only one reclaim request may now run at a time, on a separate daemon thread.
+Admission continues sampling real charges rather than waiting for that syscall
+to finish. Start and completion are logged; failed requests are surfaced to
+admission. A regression test keeps the reclaim callback blocked after it frees
+memory and verifies that admission nevertheless completes. This correction
+does not increase LOCAL, relax accounting, or change policy definitions.
+
 ## Five-round v1 diagnostic follow-up
 
 The cache fix allowed sessions to reach round 2, but host-RSS instrumentation

@@ -52,6 +52,25 @@ def test_unsuccessful_cache_reclaim_does_not_invent_capacity() -> None:
         coordinator.acquire("restore", 4, 0, wait_class="restore")
 
 
+def test_slow_kernel_reclaim_does_not_hold_the_admission_head() -> None:
+    used = [9 * 1024**2]
+    finish = threading.Event()
+    def reclaim() -> None:
+        used[0] = 5 * 1024**2
+        assert finish.wait(3)
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                                    operation_headroom_mib=1, reclaim_cache=reclaim,
+                                    physical_sample=lambda: (used[0], 100 * 1024**2))
+    try:
+        coordinator.acquire("restore", 4, 1, wait_class="restore")
+        assert coordinator._cache_reclaim_running
+        coordinator.release("restore", 4)
+    finally:
+        finish.set()
+
+
 def test_running_tool_can_pass_a_capacity_blocked_new_pair() -> None:
     policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
                         eviction="none", restore="none")

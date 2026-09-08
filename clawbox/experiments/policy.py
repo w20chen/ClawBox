@@ -5,7 +5,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
-from threading import Condition
+from threading import Condition, Thread
 from typing import Protocol
 
 from .spec import EvictionPolicy, PolicySpec, ReclamationPolicy, RestorePolicy
@@ -75,6 +75,7 @@ class PolicyCoordinator:
         self.reclaim_cache = reclaim_cache
         self._last_cache_reclaim = float("-inf")
         self._cache_reclaim_running = False
+        self._cache_reclaim_error: Exception | None = None
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self.on_pressure_pause = on_pressure_pause
         self._condition = Condition()
@@ -239,6 +240,8 @@ class PolicyCoordinator:
                 )
             try:
                 while True:
+                    if self._cache_reclaim_error is not None:
+                        raise RuntimeError("LOCAL cache reclamation failed") from self._cache_reclaim_error
                     # Existing sessions must be able to finish and free memory
                     # while a new VM pair is waiting for capacity.
                     head = next((item for item in self._waiters
@@ -259,15 +262,11 @@ class PolicyCoordinator:
                             and not self._cache_reclaim_running
                             and time.monotonic() - self._last_cache_reclaim >= 2.0):
                         self._cache_reclaim_running = True
-                        self._condition.release()
-                        try:
-                            self.reclaim_cache()
-                        finally:
-                            self._condition.acquire()
-                            self._cache_reclaim_running = False
-                            self._last_cache_reclaim = time.monotonic()
-                            self._condition.notify_all()
-                        continue  # Re-sample actual charges; do not assume success.
+                        # memory.reclaim can remain in the kernel long after
+                        # enough pages were freed. Never pin the admission head
+                        # to syscall completion; actual usage is sampled below.
+                        Thread(target=self._reclaim_cache, name="local-cache-reclaim",
+                               daemon=True).start()
                     for reason in safety_reasons:
                         if reason not in recorded_safety_reasons:
                             recorded_safety_reasons.add(reason)
@@ -331,6 +330,18 @@ class PolicyCoordinator:
         with self._condition:
             self._record_wait_locked(wait_class, waited)
         return waited
+
+    def _reclaim_cache(self) -> None:
+        try:
+            self.reclaim_cache()
+        except Exception as exc:
+            with self._condition:
+                self._cache_reclaim_error = exc
+        finally:
+            with self._condition:
+                self._cache_reclaim_running = False
+                self._last_cache_reclaim = time.monotonic()
+                self._condition.notify_all()
 
     def _record_wait_locked(self, wait_class: str, waited: float) -> None:
         if wait_class == "tool_admission":
