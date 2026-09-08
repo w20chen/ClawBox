@@ -43,16 +43,18 @@ def status(root: Path) -> str:
                 if event not in ("memory_sample", "local_cache_reclaim", "local_cache_reclaim_started"):
                     last_progress = row.get("wall_time", last_progress)
     steps = Counter()
-    mismatches = 0
+    rejected = 0
     for path in (latest / "model-gateway").glob("*.json"):
         try:
             rows = json.loads(path.read_text())
         except ValueError:
             continue
+        if not isinstance(rows, list):
+            rejected += 1
+            continue
         steps[len(rows)] += 1
-        mismatches += sum(row.get("replay_input_match") is False for row in rows)
     lines += [f"Latest arm: {latest.name}",
-              f"Validated sessions: {len(valid_sessions)}; replay mismatches: {mismatches}",
+              f"Validated sessions: {len(valid_sessions)}; rejected model requests: {rejected}",
               f"Sessions by model-request count: {dict(sorted(steps.items()))}",
               "(A prefix run includes one final synthetic-stop request.)",
               f"Tool completions: {events['tool_completed']}; pauses/restores: "

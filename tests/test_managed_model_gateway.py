@@ -278,12 +278,10 @@ def test_checkpoint_retry_artifact_is_removed_from_later_replay_steps(
         session.mark_delivery(second_id, delivered=True)
         assert session.gateway.logical_model_steps() == 2
         assert session.replay_completeness()["complete"] is True
-        assert session.records()[1]["replay_input_match_mode"] == (
-            "volatile_fields_v1+checkpoint_reconnect_v1"
-        )
+        assert session.records()[1]["request_payload"] == continued_with_retry_artifact
 
 
-def test_duplicate_user_turn_without_checkpoint_retry_still_fails_closed(
+def test_replay_does_not_compare_conversation_text(
     tmp_path: Path,
 ) -> None:
     trace = tmp_path / "trace.jsonl"
@@ -298,8 +296,11 @@ def test_duplicate_user_turn_without_checkpoint_retry_still_fails_closed(
             mode="replay", trace=trace, time_scale=0,
         )
         duplicate = {"messages": [payload["messages"][0], payload["messages"][0]]}
-        with pytest.raises(ValueError, match="replay request diverged"):
-            session.gateway.complete_http(duplicate)
+        status, _, _, request_id = session.gateway.complete_http(duplicate)
+        session.mark_delivery(request_id, delivered=True)
+        assert status == 200
+        assert session.gateway.logical_model_steps() == 1
+        assert session.replay_completeness()["complete"] is False  # second response not consumed
 
 
 def test_request_started_callback_does_not_create_gateway_hol(tmp_path: Path) -> None:

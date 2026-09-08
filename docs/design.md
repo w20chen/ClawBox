@@ -83,14 +83,15 @@ speedups from these measurements.
 
 ## Replay and evidence
 
-Record and replay use the same agent configuration. The gateway checks recorded
-requests, supplies model responses in order, and preserves recorded model wait
-separately from policy-induced response-release delay. It normalizes known
-runtime metadata; benchmark-specific output substitutions are not permitted.
+Record and replay use the same agent configuration and initial guest environment.
+The gateway supplies model responses in order and preserves recorded model wait
+separately from policy-induced response-release delay. OpenClaw executes tools
+normally. Actual tool outputs are retained, not compared with recorded text or
+rewritten using task-specific rules.
 
 Keep workload, clean workspace, templates, task assignment, arrival schedule,
 seed, and resource scope fixed when comparing policies. Report actual completed
-sessions, task validation, request matching, execution-ID joins, telemetry loss,
+sessions, task validation, model-step delivery, execution-ID joins, telemetry loss,
 duplicate commands, OOMs, and VM leaks before performance metrics. Include
 throughput, completion time, admission wait, host mean/peak memory and memory
 integral, prediction error/fallback rate, reclaimed bytes, and transition costs.

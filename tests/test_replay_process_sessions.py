@@ -49,11 +49,12 @@ def test_bindings_require_matching_tool_identity_and_preserve_other_content():
         bind_process_sessions(before, [report("another-name", 30)], bindings)
 
 
-def test_binding_does_not_hide_a_different_tool_result(tmp_path):
+def test_binding_preserves_actual_tool_result_without_comparison(tmp_path):
     path = tmp_path / "native.jsonl"
     write_spans(path, llm_spans([report("old-name", 10)], {"content": "ok"}))
     gateway = ModelGateway(tmp_path / "gateway.json", mode="replay", trace=path, time_scale=0)
     actual = report("new-name", 20)
     actual["content"] += " ERROR: different execution outcome"
-    with pytest.raises(ValueError, match="diverged"):
-        gateway.complete({"messages": [actual]})
+    status, _, _ = gateway.complete({"messages": [actual]})
+    assert status == 200
+    assert gateway.records()[0]["request_payload"]["messages"] == [actual]

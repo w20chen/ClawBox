@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import base64
-import ast
 import hashlib
 import inspect
 import json
-import re
-import shlex
 import sys
 import threading
 import time
@@ -41,10 +38,6 @@ class GatewayRequest:
     completed_unix_s: float = 0.0
     delivered_unix_s: float = 0.0
     request_payload: dict[str, Any] = field(default_factory=dict)
-    replay_input_match: bool | None = None
-    replay_input_match_mode: str | None = None
-    replay_input_expected_sha256: str | None = None
-    replay_input_actual_sha256: str | None = None
     admission: dict[str, Any] = field(default_factory=dict)
     http_attempts: int = 0
     reconnect_attempts: int = 0
@@ -87,7 +80,6 @@ class ModelGateway:
         self.before_response_ready = before_response_ready
         self._requests: dict[str, GatewayRequest] = {}
         self._replay_failure: str | None = None
-        self._checkpoint_retry_messages: set[str] = set()
         self._process_sessions: dict[str, dict[str, str]] = {}
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
@@ -164,10 +156,6 @@ class ModelGateway:
         self, *, index: int, actual: Any, expected: Any, reason: str,
     ) -> None:
         """Persist fail-closed replay evidence, including trace exhaustion."""
-        actual_identity = _canonical_replay_input(actual)
-        expected_identity = _canonical_replay_input(
-            rebind_process_sessions(expected, self._process_sessions)
-        )
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         rejection = self.store_path.with_name(
             f"{self.store_path.stem}.rejected-request-{index:04d}.json"
@@ -175,13 +163,7 @@ class ModelGateway:
         temporary = rejection.with_name(rejection.name + ".next")
         temporary.write_text(json.dumps({
             "actual": actual,
-            "actual_canonical": actual_identity,
-            "actual_sha256": _canonical_sha256(actual_identity),
             "expected": expected,
-            "expected_canonical": expected_identity,
-            "expected_sha256": (
-                _canonical_sha256(expected_identity) if expected is not None else None
-            ),
             "model_step": index,
             "reason": reason,
             "replay_process_sessions": self._process_sessions,
@@ -219,11 +201,6 @@ class ModelGateway:
                     undelivered[-1].request_payload, canonical,
                 ):
                     request = undelivered[-1]
-                    duplicate = _checkpoint_retry_duplicate_message(
-                        undelivered[-1].request_payload, canonical,
-                    )
-                    if duplicate is not None:
-                        self._checkpoint_retry_messages.add(_canonical_json(duplicate))
             if request is None:
                 index = len(self._requests) if self.mode == "replay" else None
                 if index is not None and index >= len(self.actions):
@@ -233,55 +210,22 @@ class ModelGateway:
                         reason="trace_exhausted",
                     )
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
-                replay_input_match = None
-                replay_input_match_mode = None
-                replay_input_expected_sha256 = None
-                replay_input_actual_sha256 = None
                 if index is not None:
-                    expected = self.actions[index].input
-                    if isinstance(expected, list):
-                        actual_input = canonical.get("messages")
-                    elif isinstance(expected, dict) and expected:
-                        actual_input = canonical
-                    else:
-                        actual_input = None
-                    if actual_input is not None:
-                        try:
-                            self._process_sessions = bind_process_sessions(
-                                expected, actual_input, self._process_sessions,
-                            )
-                        except ValueError:
-                            self._replay_failure = "process_session_identity_mismatch"
-                            self._persist_replay_rejection(
-                                index=index, actual=actual_input, expected=expected,
-                                reason=self._replay_failure,
-                            )
-                            raise
-                        expected_identity = _canonical_replay_input(
-                            rebind_process_sessions(expected, self._process_sessions)
+                    # Recorded model responses drive OpenClaw in order. Tool
+                    # outputs remain actual guest outputs, not replay assertions.
+                    try:
+                        self._process_sessions = bind_process_sessions(
+                            self.actions[index].input, canonical["messages"],
+                            self._process_sessions,
                         )
-                        actual_identity = _canonical_replay_input(actual_input)
-                        if self._checkpoint_retry_messages:
-                            actual_identity = _collapse_checkpoint_retry_messages(
-                                actual_identity, self._checkpoint_retry_messages,
-                            )
-                        replay_input_match = expected_identity == actual_identity
-                        replay_input_match_mode = (
-                            "volatile_fields_v1+checkpoint_reconnect_v1"
-                            if self._checkpoint_retry_messages
-                            else "volatile_fields_v1"
-                        )
-                        if self._process_sessions:
-                            replay_input_match_mode += "+process_session_bindings"
-                        replay_input_expected_sha256 = _canonical_sha256(expected_identity)
-                        replay_input_actual_sha256 = _canonical_sha256(actual_identity)
-                    if replay_input_match is False:
-                        self._replay_failure = "canonical_request_mismatch"
+                    except ValueError:
+                        self._replay_failure = "process_session_identity_mismatch"
                         self._persist_replay_rejection(
-                            index=index, actual=actual_input, expected=expected,
-                            reason="canonical_request_mismatch",
+                            index=index, actual=canonical["messages"],
+                            expected=self.actions[index].input,
+                            reason=self._replay_failure,
                         )
-                        raise ValueError(f"replay request diverged at model step {index}")
+                        raise
                 occurrence = len(matching)
                 request_id = hashlib.sha256(
                     f"{self.request_namespace}\0{fingerprint}\0{occurrence}".encode()
@@ -291,10 +235,6 @@ class ModelGateway:
                     request_namespace=self.request_namespace,
                     request_fingerprint=fingerprint,
                     request_payload=canonical,
-                    replay_input_match=replay_input_match,
-                    replay_input_match_mode=replay_input_match_mode,
-                    replay_input_expected_sha256=replay_input_expected_sha256,
-                    replay_input_actual_sha256=replay_input_actual_sha256,
                     replay_process_sessions=dict(self._process_sessions),
                 )
                 self._requests[request_id] = request
@@ -426,10 +366,6 @@ class ModelGateway:
         """Return a strict, auditable completion verdict for this session."""
         records = self.records()
         expected = len(self.actions) if self.mode == "replay" else None
-        failed_matches = [
-            item for item in records
-            if self.mode == "replay" and item.get("replay_input_match") is not True
-        ]
         incomplete = [
             item["request_id"] for item in records
             if not item.get("ready") or item.get("error") or item.get("status_code") != 200
@@ -445,7 +381,6 @@ class ModelGateway:
             self.mode != "replay" or (
                 len(records) == expected
                 and consumed == expected_indices
-                and not failed_matches
                 and self._replay_failure is None
             )
         ) and not incomplete
@@ -457,7 +392,7 @@ class ModelGateway:
             "replay_entries_consumed_exactly_once": (
                 self.mode != "replay" or consumed == expected_indices
             ),
-            "canonical_request_matches": not failed_matches and self._replay_failure is None,
+            "tool_output_comparison": "not_performed",
             "replay_failure": self._replay_failure,
             "required_responses_delivered": not incomplete,
             "retry_http_attempts": sum(
@@ -567,177 +502,11 @@ class ModelGateway:
         temporary.replace(self.store_path)
 
 
-_RUNTIME_SESSION_RE = re.compile(
-    r"(?m)^(Runtime: .*?\| session=agent:main:explicit:)[A-Za-z0-9_.-]+"
-    r"( \| sessionId=)[A-Za-z0-9_.-]+( \|.*)$"
-)
-_RUNTIME_HOST_RE = re.compile(
-    r"(?m)^(Runtime: .*?\| host=)[^ |\n]+(?= \||$)"
-)
-_PYTEST_TIME_RE = re.compile(r"(?m)^(\d+ passed in )\d+(?:\.\d+)?s$")
-_OPENCLAW_PROMPT_TIME_RE = re.compile(
-    r"(?m)^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} "
-    r"\d{2}:\d{2} UTC\](?= )"
-)
-_OPENCLAW_WORKSPACE_RE = re.compile(
-    r"/state/openclaw/[A-Za-z0-9_.-]+/runtime-workspace"
-)
-_GENERATED_DIRECTORY_MTIME_RE = re.compile(
-    r"(?m)^(.+\s)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
-    r"\d{1,2} \d{2}:\d{2} "
-    r"(\.|\.clawbox|openclaw-ssh-shared-[^\s]+)$"
-)
-_CLAWBOX_GIT_STATUS_RE = re.compile(r"(?m)^\?\? \.clawbox/(?:\r?\n|$)")
-_GIT_COMMIT_HEADER_RE = re.compile(r"(?m)^(\[master )[0-9a-f]{7,40}(\] )")
-_GIT_LOG_HEAD_RE = re.compile(
-    r"(?m)^[0-9a-f]{7,40}(?= [^\n]+(?:\n(?:[0-9a-f]{7,40} |\?\? |---[^\n]*---)|\Z))"
-)
-_LS_LONG_ENTRY_RE = re.compile(
-    r"(?m)^[bcdlps-][rwxStTs-]{9}\.?(?:\s+\d+)(?:\s+\S+){2}"
-    r"\s+(?P<size>\d+)\s+"
-    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
-    r"\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(?P<name>[^\n]+)$"
-)
-_SEARCH_RESULT_LINE_RE = re.compile(r"^(?:\./)?[^:\s]+/[^:\n]+:\d+:")
-_PYTHON_TEMP_DIRECTORY_RE = re.compile(r"/tmp/tmp[a-z0-9_]{8}(?=[/'\"\s]|$)")
-_PYTHON_OBJECT_ADDRESS_RE = re.compile(
-    r"(<(?:[\w.]+ object|function [\w.<>]+) at )0x[0-9a-fA-F]+(>)"
-)
-
-
-def _canonicalize_ls_long_entry(match: re.Match[str]) -> str:
-    """Retain listing content while dropping image/build-time stat metadata."""
-    name = match.group("name")
-    # Older recorder images created this telemetry scratch directory in the
-    # Tool workspace. Current native telemetry is stored outside the mutable
-    # repository, so its presence is not part of Agent-visible semantics.
-    if name == ".clawbox":
-        return "LS-IGNORED-WORKSPACE-METADATA"
-    return f"LS-META {match.group('size')} {name}"
-
-
-def _canonicalize_search_result_order(value: str) -> str:
-    """Sort filesystem-order-dependent grep/ripgrep result blocks."""
-    lines = value.splitlines(keepends=True)
-    index = 0
-    while index < len(lines):
-        if not _SEARCH_RESULT_LINE_RE.match(lines[index]):
-            index += 1
-            continue
-        end = index + 1
-        while end < len(lines) and _SEARCH_RESULT_LINE_RE.match(lines[end]):
-            end += 1
-        trailing_newline = lines[end - 1].endswith("\n")
-        block = sorted(line.rstrip("\r\n") for line in lines[index:end])
-        lines[index:end] = [
-            line + ("\n" if offset < len(block) - 1 or trailing_newline else "")
-            for offset, line in enumerate(block)
-        ]
-        index = end
-    return "".join(lines)
-
-
-def _canonical_replay_text(value: str) -> str:
-    """Mask only per-session values known to be nondeterministic in this workload."""
-    value = _RUNTIME_SESSION_RE.sub(r"\1session-N\2session-N\3", value)
-    value = _RUNTIME_HOST_RE.sub(r"\1runtime-N", value)
-    value = _OPENCLAW_PROMPT_TIME_RE.sub("[REPLAY-TIME]", value)
-    value = _OPENCLAW_WORKSPACE_RE.sub(
-        "/state/openclaw/session-N/runtime-workspace", value,
-    )
-    value = _LS_LONG_ENTRY_RE.sub(_canonicalize_ls_long_entry, value)
-    value = re.sub(r"(?m)^LS-IGNORED-WORKSPACE-METADATA(?:\n|$)", "", value)
-    value = _CLAWBOX_GIT_STATUS_RE.sub("", value)
-    value = _GENERATED_DIRECTORY_MTIME_RE.sub(r"\1REPLAY-MTIME \2", value)
-    value = _PYTEST_TIME_RE.sub(r"\1N.NNs", value)
-    value = _PYTHON_TEMP_DIRECTORY_RE.sub("/tmp/PYTHON-TEMP", value)
-    value = _PYTHON_OBJECT_ADDRESS_RE.sub(r"\1ADDRESS\2", value)
-    value = _GIT_COMMIT_HEADER_RE.sub(r"\1COMMIT\2", value)
-    value = _GIT_LOG_HEAD_RE.sub("COMMIT", value)
-    return _canonicalize_search_result_order(value)
-
-
-def _canonical_replay_input(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _canonical_replay_input(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_canonical_replay_input(item) for item in _canonical_python_hash_reports(value)]
-    if isinstance(value, str):
-        return _canonical_replay_text(value)
-    return value
-
-
-def _canonical_python_hash_reports(messages: list[Any]) -> list[Any]:
-    """Compare explicitly printed Python hashes by equality, not process address.
-
-    Python versions before 3.12 hash None by its address, even with a fixed
-    PYTHONHASHSEED. Only literal labels in print(label, hash(...)) in a matching
-    python -c tool call qualify. Numbers elsewhere and the recorded commands
-    are unchanged. No model response or tool execution is rewritten here.
-    """
-    labels_by_call: dict[str, list[str]] = {}
-    result = []
-    for message in messages:
-        if not isinstance(message, dict):
-            result.append(message)
-            continue
-        for call in message.get("tool_calls", []):
-            function = call.get("function", {})
-            if function.get("name") != "exec":
-                continue
-            try:
-                command = json.loads(function["arguments"])["command"]
-                words = shlex.split(command)
-                scripts = [words[i + 2] for i in range(len(words) - 2)
-                           if words[i].rsplit("/", 1)[-1] in {"python", "python3"}
-                           and words[i + 1] == "-c"]
-                labels = []
-                for script in scripts:
-                    for node in ast.walk(ast.parse(script)):
-                        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                                and node.func.id == "print" and len(node.args) == 2
-                                and not node.keywords and isinstance(node.args[0], ast.Constant)
-                                and isinstance(node.args[0].value, str)
-                                and isinstance(node.args[1], ast.Call)
-                                and isinstance(node.args[1].func, ast.Name)
-                                and node.args[1].func.id == "hash"):
-                            labels.append(node.args[0].value)
-                labels_by_call[call["id"]] = labels
-            except (KeyError, TypeError, ValueError, SyntaxError):
-                continue
-        labels = labels_by_call.get(message.get("tool_call_id"), [])
-        content = message.get("content")
-        if message.get("role") == "tool" and labels and isinstance(content, str):
-            pattern = re.compile(r"(?m)^(" + "|".join(re.escape(label) for label in labels)
-                                 + r") (-?[0-9]+)$")
-            identities: dict[str, int] = {}
-
-            def report(match):
-                number = match[2]
-                identity = identities.setdefault(number, len(identities))
-                return f"{match[1]} PYTHON-HASH-{identity}"
-
-            message = dict(message, content=pattern.sub(report, content))
-        result.append(message)
-    return result
-
-
-def _canonical_sha256(value: Any) -> str:
-    return hashlib.sha256(json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-    ).encode()).hexdigest()
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
 def _checkpoint_retry_duplicate_message(
     previous: dict[str, Any], current: dict[str, Any],
 ) -> Any | None:
     """Return the sole adjacent user-message insertion in a reconnect request."""
-    left = _canonical_replay_input(previous)
-    right = _canonical_replay_input(current)
+    left, right = previous, current
     if not isinstance(left, dict) or not isinstance(right, dict):
         return None
     left_messages = left.get("messages")
@@ -760,36 +529,12 @@ def _checkpoint_retry_duplicate_message(
     return None
 
 
-def _collapse_checkpoint_retry_messages(value: Any, duplicates: set[str]) -> Any:
-    """Remove only duplicate user turns previously proven to be reconnect artifacts."""
-    if isinstance(value, dict):
-        return {
-            key: (_collapse_checkpoint_retry_messages(item, duplicates)
-                  if key == "messages" else item)
-            for key, item in value.items()
-        }
-    if not isinstance(value, list):
-        return value
-    collapsed: list[Any] = []
-    for item in value:
-        if (
-            collapsed
-            and item == collapsed[-1]
-            and isinstance(item, dict)
-            and item.get("role") == "user"
-            and _canonical_json(item) in duplicates
-        ):
-            continue
-        collapsed.append(item)
-    return collapsed
-
-
 def _checkpoint_retry_matches(previous: dict[str, Any], current: dict[str, Any]) -> bool:
     """Recognize OpenClaw's narrow retry shape after a Runtime checkpoint.
 
     When an in-flight TCP connection disappears, OpenClaw retries the same
     turn by inserting one duplicate adjacent user message. Only an undelivered
-    request is eligible for this equivalence, and every other canonical field
+    request is eligible for this equivalence, and every other request field
     must remain identical. The insertion can precede already-recorded assistant
     and Tool messages on later turns.
     """

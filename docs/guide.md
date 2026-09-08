@@ -189,26 +189,21 @@ capability settings. OpenClaw and ClawTune use the configured model name and
 the same per-session runtime identity, allowing the sidecar to join proxy
 requests to model events and record their messages.
 
-Replay matches incoming requests after normalizing known runtime metadata such
-as session identifiers and timestamps. A valid JSONL file alone cannot establish
-that the request contents match. Missing, extra, or different requests fail the
-run. Workload-specific exceptions for package errors and installed files are not
-applied. Use the original file from a live run. Do not rewrite recorded inputs or
-outputs to make a different execution pass.
+Replay supplies recorded model responses in order through the normal OpenClaw
+agent loop. Tools execute again and their actual outputs remain in the new trace.
+ClawBox does not compare tool output text with the recording or apply task-specific
+log normalization. Missing or extra model steps, failed delivery, failed task
+validation, and incomplete telemetry still fail verification.
 
 Tool sessions use `PYTHONHASHSEED=0` in both live and replay runs. This keeps
-Python string hashes and hash-dependent iteration repeatable. It does not make
-network responses or explicitly randomized programs deterministic; their outputs
-must still match for the recording to pass replay.
-
-Python before 3.12 can also include process addresses in `hash(None)` and hashes
-of tuples containing `None`. For a Python `-c` command that explicitly prints
-`print('label', hash(value))`, replay compares the labelled hash results by their
-equality relationships, not their numeric values. Other numbers, equality tests,
-dictionary lookups, and command contents must still match. This is semantic
-matching, not byte-for-byte output equality. Raw outputs are retained. A trace
-that later uses a process-dependent hash as an actual input is not made portable
-by this comparison rule.
+Python string hashes and hash-dependent iteration repeatable. Identical initial
+environments do not guarantee identical timestamps, process addresses, random
+values, or network responses. Keep Runtime and Tool images, repository revision,
+working directories, environment variables, and tool settings identical between
+recording and replay. The verification wrapper reuses the live configuration for
+replay, changing only the model backend and recording assignment. Both YAML files
+are retained with the results. A recorded response that depends on a transient
+value can still fail in a later run; task validation must detect task failure.
 
 Agent prediction files contain command records with `command`, `predicted_command_memory_p90_mib`, and
 `predicted_host_execution_increment_mib`; the latter is calibrated host demand.
@@ -295,7 +290,7 @@ An incomplete summary does not prove the worker is still running.
 | `summary.json`, `summary.csv`, `summary.md` | Combined arm results, configuration/provenance, and summaries |
 | `arms/` | Individual results and completion markers |
 | `events/` | Memory samples, admission, lifecycle, and session events |
-| `model-gateway/` | HTTP request, response, and replay matching evidence |
+| `model-gateway/` | Actual HTTP requests, responses, and replay step/delivery evidence |
 | `runtime-traces/` | Unmodified ClawTune recordings collected from each Runtime |
 | `policy-control/`, `tool-artifacts/` | Tool admission, measurements, and validation evidence |
 | `owned-sandboxes.jsonl` | VM ownership for cleanup and failure investigation |
@@ -326,11 +321,11 @@ OpenClaw generates new handles for background processes on each run. Replay
 matches the tool call that created each handle and uses the current handle in
 subsequent recorded model responses, so OpenClaw can poll or cancel the real
 process. The gateway records these bindings in `replay_process_sessions`;
-the source trace is unchanged. This does not substitute tool results or ignore
-changes in their content.
+the source trace and actual tool results are unchanged. This is handle translation
+for the OpenClaw process API, not a task-specific output comparison.
 
 A successful comparison needs all sessions requested by the arm to finish and
-pass task validation. For managed replay, also check complete request matching,
+pass task validation. For managed replay, also check complete model-step delivery,
 exact execution-ID joins, telemetry loss, duplicate execution, and leaked VMs.
 Missing metrics are not zero. Compare completion time, throughput, admission wait,
 host memory over time, and checkpoint/restore cost under the same workload and
