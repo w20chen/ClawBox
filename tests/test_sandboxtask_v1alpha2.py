@@ -110,15 +110,3 @@ def test_cancel_patch_is_one_way_running_to_cancelled():
 
 def test_cancel_patch_shape():
     assert cancel_patch() == {"spec": {"desiredState": DESIRED_CANCELLED}}
-
-
-def test_served_crd_idempotency_limit_matches_builder():
-    crd = yaml.safe_load(
-        (ROOT / "deploy" / "sandboxtask-crd.yaml").read_text(encoding="utf-8")
-    )
-    schema = crd["spec"]["versions"][0]
-    assert schema["name"] == "v1alpha2"
-    assert (
-        schema["schema"]["openAPIV3Schema"]["properties"]["spec"]
-        ["properties"]["idempotencyKey"]["maxLength"]
-    ) == 512

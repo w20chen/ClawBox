@@ -58,9 +58,9 @@ def test_setup_docs_reject_pod_ip_native_ssh_and_link_from_readme() -> None:
     guide = (ROOT / "docs" / "cubesandbox-setup.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "Pod IP" in guide
+    assert "semantic TCP endpoint" in guide
     assert "--count 1" in guide
     assert "--count 4" in guide
     assert "--count 8" not in guide
     assert "docs/cubesandbox-setup.md" in readme
-    assert "get_host(2222)" in guide
+    assert "standalone CubeSandbox" in guide

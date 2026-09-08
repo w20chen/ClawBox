@@ -16,7 +16,7 @@ clawbox experiment baselines
 
 ## Resource example
 
-The checked-in c60 YAML uses the following CPU and memory sizes. The disk row
+The checked-in c40 YAML uses the following CPU and memory sizes. The disk row
 shows the template-registration recipe documented in the experiment guide;
 disk size is not stored in the experiment YAML and must also be verified from
 the selected CubeSandbox templates.
@@ -37,10 +37,10 @@ The totals are configured capacity, not measured host usage:
 | 40 | 80 | 80 GiB | 160 GiB | 240 GiB |
 | 60 | 120 | 120 GiB | 240 GiB | 360 GiB |
 
-At c60, a 64 GiB policy memory pool gives an offered-memory ratio of:
+At c40, the 160 GiB LOCAL budget gives a configured-memory ratio of:
 
 ```text
-60 * (2048 MiB + 4096 MiB) / 65536 MiB = 5.625x
+40 * (2048 MiB + 4096 MiB) / 163840 MiB = 1.5x
 ```
 
 This is overcommit against the configured ClawBox pool. The Kunpeng host may
@@ -48,8 +48,8 @@ have more physical memory. Host memory samples in the result show how much was
 actually resident.
 
 Writable-disk size belongs to the immutable CubeSandbox template. If the
-documented 20 GiB Runtime and 40 GiB Tool templates are used, c60 nominally
-offers 3.6 TiB (`60 * (20 + 40) GiB`), not necessarily fully allocated
+documented 20 GiB Runtime and 40 GiB Tool templates are used, c40 nominally
+offers 2400 GiB (`40 * (20 + 40) GiB`), not necessarily fully allocated
 storage. Changing disk size requires a new template.
 
 ## Memory checks shared by all baselines
@@ -108,7 +108,7 @@ estimate to compare with command-specific prediction.
 
 `tool_p90` uses the frozen ClawTune prediction selected by the command's
 normalized key. A managed OpenClaw command must provide matching prediction
-metadata before it can be admitted. Record the KB file hash and use the same
+metadata before it can be admitted. Keep the prediction file and use the same
 file for every compared variant.
 
 Native file tools (`read`, `write`, `edit`, and `apply_patch`, routed as
@@ -153,10 +153,10 @@ Repeat `--baseline` to place several baselines in one experiment file:
 
 ```bash
 clawbox experiment configure \
-  examples/experiments/openclaw-cube-replay-c60-overcommit.yaml \
+  examples/experiments/tiered-oracle-rec-a-c40.yaml \
   /data/clawbox-specs/comparison.yaml \
-  --concurrency 1,5,60 \
-  --pool-memory-gib 64 \
+  --concurrency 40 \
+  --pool-memory-gib 160 \
   --baseline lifetime-full-resident \
   --baseline tool-static-resident \
   --baseline tool-static-eager-reactive

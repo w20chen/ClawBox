@@ -1,22 +1,7 @@
-# Deployment files
+# Deployment
 
-The supported ClawBox experiment path is the standalone CubeSandbox Worker
-described in [experiment operations](../docs/experiment-operations.md) and
-[CubeSandbox setup](../docs/cubesandbox-setup.md).
+ClawBox uses standalone CubeSandbox. Follow [the installation guide](../docs/cubesandbox-setup.md).
 
-`deploy/cubesandbox/` contains the active CubeSandbox integration assets:
+The maintained source patches and memory-isolation service settings are in `cubesandbox/`. Apply the complete patch set with `prepare-semantic-source.sh`.
 
-- pinned semantic TCP endpoint, HostPort hairpin, template-provenance, and
-  checkpoint phase-timing patches;
-- kprobe-capable guest-kernel metadata and configuration;
-- source preparation helpers.
-
-The Kubernetes installer/recovery scripts, values overlay, CubeNode startup
-patch, and installed Cell/Dispatcher launch commands have been removed. Use
-Git history to inspect those old deployment attempts; they are not maintained.
-
-Other root-level YAML, service, containerd, and RuntimeClass files are retained
-only to reproduce older Kubernetes/Kata experiments and tests. They are not a
-second supported sandbox backend. New ClawBox runs must not launch Pods, Jobs,
-SandboxTasks, or direct Firecracker VMs, and must not use NodePort, Redis, or
-guest-IP endpoint fallbacks.
+Old Kubernetes manifests, containerd/Kata deployment files, and experimental source bundles are no longer distributed here.

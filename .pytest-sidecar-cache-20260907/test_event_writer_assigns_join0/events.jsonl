@@ -1,2 +1,0 @@
-{"event":"agent_started","monotonic_time_ns":"362169203000000","schema_version":1,"sequence_no":0,"session_id":"session-a","wall_time":"2026-09-07T11:53:10.644009+00:00","wall_time_ns":"1788781990644009300"}
-{"event":"agent_finished","monotonic_time_ns":"362169203000000","schema_version":1,"sequence_no":1,"session_id":"session-a","wall_time":"2026-09-07T11:53:10.644682+00:00","wall_time_ns":"1788781990644682000"}

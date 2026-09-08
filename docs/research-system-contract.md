@@ -55,7 +55,7 @@ physical-memory control and VM checkpoint decisions. It should not contain a
 second implementation of ClawTune's parser or percentile estimator.
 
 For a normal comparison, create the prediction file from a separate recording
-set, make it read-only, record its SHA-256, and reuse the exact file in every
+set, retain it with the experiment inputs, and reuse the exact file in every
 variant. The test workload must not train its own predictor unless the variant
 is explicitly studying online learning.
 
@@ -102,7 +102,7 @@ own raw host-memory samples.
 
 ## Evaluation rules
 
-Large c20/c40/c60 comparisons use recorded model responses and their original
+The c40 comparisons use recorded model responses and their original
 timing. Everything else remains real: Runtime and Tool VMs, OpenClaw, SSH,
 workspace changes, memory checks, checkpoint/restore, cgroup data, and eBPF
 data. Any mismatch between replay input and the recorded request stops the run.

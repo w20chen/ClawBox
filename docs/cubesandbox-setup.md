@@ -1,245 +1,203 @@
-# CubeSandbox setup
+# Install on a new machine
 
-This guide covers CubeSandbox installation, networking, and the checks required
-before a ClawBox experiment. Experiment configuration and model settings are in
-the [experiment guide](experiment-operations.md).
+This guide is for a dedicated ARM64 Linux host. It installs standalone CubeSandbox, not Kubernetes. Do not run the installer on a machine that is currently running experiments.
 
-ClawBox uses CubeSandbox for both the Runtime VM and Tool VM. It asks
-CubeSandbox for the current TCP address of Tool port `2222`; it does not read
-CubeProxy databases, allocate ports, create a NodePort, or connect directly to
-an assumed guest address.
+The most repeatable route is to transfer the working guest images and guest kernel from kunpeng, then build and install the patched CubeSandbox server. The images contain the benchmark repository, Python environment, OpenClaw, ClawTune, and telemetry tools. Recreating only the VM size is not enough to reproduce that environment.
 
-## Supported deployment
+## 1. Check the host
 
-Use CubeSandbox's standalone deployment on a Linux KVM host, or its documented
-multi-node control/compute layout. The returned Tool address must use a
-physical or private deployment address that the Runtime VM can reach.
+You need:
 
-A Kubernetes Pod IP is not a valid final Tool address. The old Kunpeng
-Kubernetes deployment remains documented in
-`kunpeng920-reproduction-runbook.md` for historical diagnosis only.
+- ARM64 Linux, Python 3.12 or newer, Git, Docker, tar, and standard build tools.
+- Working KVM: `test -c /dev/kvm`.
+- cgroup v2: `stat -fc %T /sys/fs/cgroup` should print `cgroup2fs`.
+- At least two NUMA nodes for this experiment. Check `lscpu` and `numactl --hardware`.
+- Enough free memory on NUMA0 for 160 GiB LOCAL and on NUMA1 for 64 GiB WARM, plus host services.
+- SSD storage with room for images, writable VM layers, snapshots, and logs. Keep well below CubeMaster's disk scheduling threshold.
+- A host address reachable from the guest VMs. Do not use localhost as the guest-facing control address.
+- Permission to run Docker and sudo for installation and memory setup.
 
-CubeSandbox base version: `v0.7.0`. ClawBox applies source-controlled
-patches for the semantic TCP endpoint, same-node port forwarding, template
-image provenance, tiered snapshots, checkpoint phase timing, and physical
-memory tier isolation.
+CubeSandbox's installer prepares its service dependencies. Review its storage checks before choosing a data directory. Do not reformat an existing disk as a troubleshooting shortcut.
 
-## Install on a new machine
+## 2. Transfer the working guest environment
 
-Use CubeSandbox's upstream instructions for packages, firewall settings,
-storage, and service layout:
-
-- [bare-metal deployment](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/bare-metal-deploy.md)
-- [multi-node deployment](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/guide/multi-node-deploy.md)
-- [one-click deployment files](https://github.com/TencentCloud/CubeSandbox/tree/master/deploy/one-click)
-
-The host needs `/dev/kvm`, cgroup v2, an ARM64 CubeSandbox build, and enough
-reflink-capable XFS storage for VM layers and checkpoints.
-
-Prepare a clean CubeSandbox `v0.7.0` checkout and apply the required patches:
+On kunpeng, use a current ClawBox checkout and add the registered Runtime and Tool image references to `machine.env` as `CLAWBOX_RUNTIME_IMAGE` and `CLAWBOX_TOOL_IMAGE`. The references are in the active experiment YAML under `runtime.source_image_reference` and `sandbox.source_image_reference`.
 
 ```bash
+bash scripts/export-machine-assets.sh /data/clawbox-transfer
+```
+
+Expected files:
+
+```text
+guest-images.tar
+kernel/vmlinux-bm
+kernel/version
+kernel/version.json
+```
+
+This is a read-only copy of the working images and kernel, apart from two local Docker export tags. It does not copy live VMs, databases, or credentials. It can require substantial disk space.
+
+Copy the directory to the new host. Also copy the approved rec-a trace and its original recording/provenance to your research-data directory. On kunpeng the approved trace is:
+
+```text
+/home/weitianc/clawbox-tiered-study-20260907/workload/healthy-reference-v1/rec-a-healthy-reference.jsonl
+```
+
+Do not assume that benchmark data or images are downloadable from GitHub. The local registry addresses in the Dockerfiles refer to assets on the original machine.
+
+## 3. Install ClawBox and prepare CubeSandbox
+
+Use sibling checkouts:
+
+```bash
+mkdir -p ~/src
+cd ~/src
+git clone https://github.com/w20chen/ClawBox.git
+git clone https://github.com/w20chen/ClawTune.git
 cd ClawBox
-export CUBE_SOURCE_DIR="$PWD/.cubesandbox"
-bash deploy/cubesandbox/prepare-semantic-source.sh
-```
-
-The helper refuses to overwrite a dirty checkout. Build and install the
-one-click bundle using CubeSandbox's normal release process:
-
-```bash
-cd "$CUBE_SOURCE_DIR"
-test -e deploy/one-click/build.env || \
-  cp deploy/one-click/build.env.example deploy/one-click/build.env
-ONE_CLICK_BUILD_JOBS=1 ./deploy/one-click/build-release-bundle-builder.sh
-
-tar -xzf deploy/one-click/dist/cube-sandbox-one-click-*.tar.gz
-cd cube-sandbox-one-click-*
-cp env.example .env
-# Set CUBE_SANDBOX_NODE_IP to a routable physical or private address.
-sudo ./install.sh
-sudo ./smoke.sh
-```
-
-Install the Python SDK from the same prepared source used by the server:
-
-```bash
-cd <ClawBox-checkout>
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev,postgres]'
+.venv/bin/python -m pip install -e '.[dev]'
+export CUBE_SOURCE_DIR="$HOME/src/CubeSandbox"
+bash deploy/cubesandbox/prepare-semantic-source.sh
 .venv/bin/python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
-## Configure the NUMA memory tiers
+The preparation command applies the maintained patches to CubeSandbox v0.7.0. It refuses unrelated local changes. Use the matching SDK from this source, not an unpatched SDK with the same version number.
 
-After installing the patched bundle, configure LOCAL on NUMA0 and a WARM
-tmpfs on NUMA1. Use a directory on SSD for COLD:
+Build the standalone release with the transferred guest kernel:
 
 ```bash
-sudo bash scripts/setup-tiered-memory.sh /data/clawbox/warm /data/clawbox/cold "$USER"
-sudo systemctl restart cube-sandbox-cubelet.service
+cd "$CUBE_SOURCE_DIR"
+cp deploy/one-click/build.env.example deploy/one-click/build.env
+ONE_CLICK_BUILD_JOBS=1 \
+ONE_CLICK_CUBE_KERNEL_VMLINUX=/data/clawbox-transfer/kernel/vmlinux-bm \
+bash deploy/one-click/build-release-bundle-builder.sh
 ```
 
-Run setup while experiments are stopped. Repeat it after reboot before starting
-experiments. It configures a 64 GiB LOCAL cgroup and 64 GiB WARM tmpfs without
-swap, and enables independent anonymous LOCAL restore and separate WARM page
-charging. The paths must match the experiment YAML. See
-[memory tier simulation](tiered-memory-simulation.md) for the measurement
-interpretation and the limits of this CXL/UB approximation.
+The output is a release archive under `deploy/one-click/dist`. The build may take considerable time; it is installation work, not required before every experiment. Using the supplied kernel preserves the guest's eBPF/kprobe support.
 
-## Required TCP endpoint behavior
+Extract the newly produced archive into a new directory. Use its exact filename rather than extracting every old archive in `dist`. Enter the extracted directory:
 
-CubeSandbox must provide:
-
-```text
-GET /sandboxes/<sandbox-id>/ports/2222
-  -> {"sandboxID":"...", "containerPort":2222, "address":"host:port"}
+```bash
+cp env.example .env
+# Edit .env and set CUBE_SANDBOX_NODE_IP to the new host's reachable address.
+sudo bash install.sh
+sudo bash smoke.sh
 ```
 
-ClawBox calls the matching SDK method `get_tcp_endpoint(2222)`. Do not replace
-it with `get_host(2222)`: that method returns an HTTP service address, not the
-raw SSH address.
+Expected result: the smoke check succeeds and `systemctl list-units 'cube-sandbox-*'` shows the installed services. Keep the release archive for later installation; do not copy kunpeng's service configuration wholesale to another IP address.
 
-After a Tool VM is restored, ClawBox asks CubeSandbox for the address again,
-increments the endpoint generation, and verifies the Tool's SSH identity before
-allowing the command. A restored VM may receive the same address; it is still
-treated as a new endpoint generation.
+## 4. Load images into a registry the new host can use
 
-## Check an installed machine
+```bash
+docker load -i /data/clawbox-transfer/guest-images.tar
+export REGISTRY='YOUR_REGISTRY/clawbox'
+docker tag clawbox-transfer/runtime:research "$REGISTRY/runtime:research"
+docker tag clawbox-transfer/tool:research "$REGISTRY/tool:research"
+docker push "$REGISTRY/runtime:research"
+docker push "$REGISTRY/tool:research"
+docker image inspect --format '{{json .RepoDigests}}' "$REGISTRY/runtime:research"
+docker image inspect --format '{{json .RepoDigests}}' "$REGISTRY/tool:research"
+```
 
-Load the machine-specific settings and verify the services:
+Replace `YOUR_REGISTRY` with a real reachable registry and log in if it requires authentication. A registry listening only on the old machine's localhost is not transferable. Save the pushed image references printed by Docker; use them below.
+
+## 5. Configure this machine and register templates
+
+```bash
+cd ~/src/ClawBox
+mkdir -p ~/.config/clawbox
+cp examples/clawbox-machine.env.example ~/.config/clawbox/machine.env
+```
+
+Edit every placeholder. For an all-in-one host, CubeAPI can use `http://127.0.0.1:3000`; the guest-facing control and model-gateway addresses must use the reachable host IP. The current kunpeng proxy uses port 80; verify the new install's proxy listener rather than assuming it.
+
+Set ClawTune paths, WARM/COLD paths, and an output directory outside the repository. Set the pushed image references. Leave the quoted template-ID placeholders until registration finishes. For this guide's example directories, make them writable by the experiment user:
+
+```bash
+sudo install -d -o "$USER" -g "$(id -gn)" \
+  /data/clawbox-results /data/clawbox-specs /data/clawbox-traces
+```
+
+Load the settings:
 
 ```bash
 set -a
-. "$HOME/.config/clawbox/machine.env"
+source ~/.config/clawbox/machine.env
 set +a
-
-test -c /dev/kvm
-test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
 curl -fsS "$CUBE_API_URL/health"
 .venv/bin/python scripts/audit-cube-sandboxes.py --json
 ```
 
-Runtime and Tool templates must be newly built immutable templates whose image
-digests and guest-kernel version match the experiment YAML. Tool must expose
-ports `49983` for readiness and `2222` for SSH. Template registration is shown
-in the [experiment guide](experiment-operations.md#2-install-clawbox-and-build-templates).
+Read the installed kernel component ID from `/usr/local/services/cubetoolbox/cube-kernel-scf/version.json`, at `variants.bm.version`. Then:
 
-## Validate c1 and c4
+```bash
+export GUEST_KERNEL_COMPONENT='REPLACE_WITH_INSTALLED_COMPONENT_ID'
+.venv/bin/python scripts/register-cube-template.py "$CLAWBOX_RUNTIME_IMAGE" \
+  --alias runtime-research-01 --node "$CUBE_NODE" \
+  --cpu-millicores 2000 --memory-mib 2048 --writable-layer-size 20G \
+  --exposed-port 49983 --probe-port 49983 \
+  --command /usr/local/bin/cube-runtime-entrypoint.sh \
+  --expected-kernel-version "$GUEST_KERNEL_COMPONENT"
 
-Run the same connectivity, identity, checkpoint, telemetry, and cleanup check
-at increasing sizes:
+.venv/bin/python scripts/register-cube-template.py "$CLAWBOX_TOOL_IMAGE" \
+  --alias tool-research-01 --node "$CUBE_NODE" \
+  --cpu-millicores 2000 --memory-mib 4096 --writable-layer-size 40G \
+  --exposed-port 49983 --exposed-port 2222 --probe-port 49983 \
+  --command /usr/local/bin/cube-tool-entrypoint.sh \
+  --expected-kernel-version "$GUEST_KERNEL_COMPONENT"
+```
+
+Save the returned IDs as `CLAWBOX_RUNTIME_TEMPLATE` and `CLAWBOX_TOOL_TEMPLATE`. Reload the environment file. A successful registration must reach READY and match the expected guest kernel. Do not reuse an old template after changing its image or kernel.
+
+## 6. Configure memory and validate
+
+Create the local YAML using `study init` as shown in the [experiment guide](experiment-operations.md), then:
+
+```bash
+bash scripts/clawbox study setup-memory --spec /data/clawbox-specs/rec-a.yaml
+sudo systemctl restart cube-sandbox-cubelet.service
+sudo systemctl restart cube-sandbox-cube-egress.service
+bash scripts/clawbox study setup-memory --spec /data/clawbox-specs/rec-a.yaml
+bash scripts/clawbox study check --spec /data/clawbox-specs/rec-a.yaml
+```
+
+The first setup installs the memory-isolation service settings. Restart only on this idle, newly installed host. Reapply temporary cgroup settings after restart. For normal later runs, do not restart services.
+
+Check native SSH, identity, pause/restore, and telemetry first at c1, then c4:
 
 ```bash
 .venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
-  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
+  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
   --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
   --count 1 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c1.json"
-
-.venv/bin/python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
-  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
-  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 4 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-c4.json"
-
 ```
 
-A passing check must confirm all of the following:
-
-- Runtime reaches the correct Tool VM over native SSH;
-- SSH host-key checking and the Tool identity marker match;
-- an old endpoint is rejected while the Tool is paused;
-- the endpoint generation advances after restore;
-- one Tool's identity cannot be used with another Tool's endpoint;
-- cgroup and eBPF records join to the exact execution ID;
-- no owned VM remains after cleanup.
-
-For the tiered oracle study, continue to c40 only after these checks and the
-full replay, tier-transition, capacity, and placement gates pass. Run each of
-the 13 policies once; c8/c60 and extra repetitions are outside the agreed scope.
-
-## Diagnose network failures
-
-If CubeSandbox returns an address but Runtime cannot connect, test the route
-from the Runtime VM rather than only from the host. A populated BPF map or a
-successful host TCP connection does not prove Runtime reachability.
-
-Use the bounded topology probe:
+Repeat with `--count 4` and a new output filename. On the idle host, validate snapshot placement. The helper uses privileged Docker access to inspect the VM's host memory mappings:
 
 ```bash
-python scripts/probe-cubesandbox-network-topology.py \
-  --runtime-template <runtime-template-id> \
-  --tool-template <tool-template-id> \
-  --node <compute-node> \
-  --cube-master-url <CubeMaster-URL> \
-  --physical-host <routable-host-address> \
-  --output /data/clawbox-topology.json
+.venv/bin/python scripts/validate-tiered-storage.py \
+  --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
+  --warm "$CLAWBOX_WARM_ROOT" --cold "$CLAWBOX_COLD_ROOT" \
+  --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa 0 \
+  --expected-memory-mib 4096 --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
 
-Inspect the identity result for each tested route. Do not work around a failed
-CubeSandbox route by adding an SSH proxy, Redis lookup, NodePort, port
-allocator, or guest-IP fallback in ClawBox. Restore any temporary host-network
-diagnostic changes after the test.
-
-After a host reboot, repeat service health, template provenance, c1, and
-pause/restore checks before starting a large experiment.
-
-## Detached, bounded tiered study
-
-The current correctness sweep uses **five recorded rounds and 160 GiB LOCAL**.
-Use `--steps 5 --arm-seconds 1200` in the launch command below. Five rounds
-do not cover the later recorded edits/pytest phase; separate post-run regression
-validation still runs. Full-trace runs remain available with `--full-trace`.
-Run setup
-with `sudo env CLAWBOX_LOCAL_MIB=163840 bash scripts/setup-tiered-memory.sh
-WARM_ROOT COLD_ROOT USER`. Deadlines are safety limits, not expected durations.
-Do not compare prefix pilot timings with full-trace performance results.
-
-On an installed machine, with no experiment VMs running, restore the temporary
-NUMA settings after every reboot:
+After a replay run, inspect the standalone report:
 
 ```bash
-sudo bash scripts/setup-tiered-memory.sh \
-  /data/cubelet/clawbox-tiered-20260907/warm \
-  /data/cubelet/clawbox-tiered-20260907/cold "$USER"
-df -h /data/cubelet
+bash scripts/clawbox study report /path/to/study-directory
 ```
 
-CubeMaster can reject creation with `no more resource` when disk usage crosses
-its scheduling threshold even if RAM is available. Check disk space and node
-health before changing memory or admission settings. Preserve crash diagnostic
-logs; remove a large crash dump only when its loss is acceptable.
+Check that Tool eBPF data is present, execution IDs join exactly, and loss is zero. A failed check is not a valid performance result.
 
-After the required gates, load `machine.env` as above and launch from the repo:
+Only after those checks should you start the c40 sweep. This repository's deployment components and patch preparation have been tested on kunpeng; this rewritten guide has not been certified by reinstalling a second empty physical host during the ongoing study. Report any failed check rather than treating an incomplete installation as ready.
 
-```bash
-nohup .venv/bin/python scripts/run-short-tiered-study.py \
-  --spec examples/experiments/tiered-oracle-rec-a-c40.yaml \
-  --steps 23 --arm-seconds 1800 \
-  --output /data/clawbox-study/short-c40-run1 \
-  > short-c40-supervisor.log 2>&1 < /dev/null &
-```
+## Common failures
 
-Adapt the example YAML's machine paths, templates, node address, and source
-trace before running on another machine. Use a fresh output directory.
-The runner checks LOCAL and WARM configuration, executes all 13 policies
-sequentially at c40, cleans up between policies, and updates `summary.json`
-and `report.md` after each arm. Raw logs remain under the output directory.
-No agent polling is needed. Inspect `tail short-c40-supervisor.log` for progress.
-
-For a concise result/progress check, run:
-
-```bash
-.venv/bin/python scripts/study-status.py /data/clawbox-study/short-c40-run1
-```
-
-It distinguishes completed baseline results from partial session progress and
-shows replay mismatches, telemetry joins/loss for finished arms, and the age
-of the latest non-memory event. Memory sampling alone is not evidence of progress.
-
-The 30-minute cap is per baseline, plus cleanup, not the whole matrix; timeout
-results are incomplete evidence, not successful comparisons. Rounds 1–23
-retain exploration, edits, and the successful pytest invocation. A labeled
-synthetic stop follows them. This is a prefix experiment, not full coding-task
-completion, and retaining those rounds does not guarantee completion in 30 minutes.
+- **No more resource:** inspect disk space, node readiness, and template replicas; free RAM alone is insufficient.
+- **LOCAL limit or WARM mount mismatch:** run memory setup on an idle pool, particularly after reboot.
+- **VM cannot reach Tool:** inspect the semantic TCP endpoint and guest-to-host routing. Do not substitute a guessed guest IP.
+- **Missing eBPF data:** check the guest kernel, collector readiness, execution IDs, and image versions.
+- **Replay mismatch:** check the repository, Python environment, workspace path, and actual tool output. Do not weaken matching to hide an environment error.

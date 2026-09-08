@@ -1,1 +1,0 @@
-{"actual": {"messages": [{"content": "second", "role": "user"}]}, "actual_canonical": {"messages": [{"content": "second", "role": "user"}]}, "actual_sha256": "18d738231b86808245bdb610afc65f9ae802ce923249b6c562b4da9947703326", "expected": null, "expected_canonical": null, "expected_sha256": null, "model_step": 1, "reason": "trace_exhausted"}

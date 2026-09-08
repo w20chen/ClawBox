@@ -87,7 +87,7 @@ def main() -> None:
         project_root / "docker" / "Dockerfile.runtime",
         project_root / "scripts" / "runtime-entrypoint.sh",
         project_root / "scripts" / "clawtune-sidecar-entrypoint.sh",
-        project_root / "scripts" / "build-kubernetes-images.sh",
+        project_root / "docker" / "Dockerfile.runtime-cube",
     )
     for path in integration_files:
         text = path.read_text(encoding="utf-8")

@@ -34,7 +34,7 @@ writes them. The mount binds those pages to NUMA1; its size limit and the
 snapshot reservation/commit ledger bound WARM. Backend-service overhead must
 be reported separately rather than described as guest RAM or pool payload.
 
-The September 8 full-trace configuration supersedes the 64 GiB prefix pilot.
+The September 8 memory configuration supersedes the 64 GiB prefix pilot.
 Each agent has a 2 GiB Runtime VM and a 4 GiB Tool VM. The successful c4
 resident/no-eviction gate peaked at 26.65 GiB LOCAL for four pairs, or about
 6.66 GiB per pair including charged overhead and cache. Linear extrapolation
@@ -46,7 +46,9 @@ can make runs longer. A 3600-second safety deadline avoids censoring at the
 30-minute target; incomplete arms remain explicitly invalid comparisons.
 
 All 13 policies use identical LOCAL capacity, CPU/NUMA placement, guest sizes,
-full 27-round trace and original timing. No per-policy capacity tuning is used.
+trace selection and original timing. The current correctness sweep uses five
+recorded rounds; full-trace runs use all 27 rounds and are reported separately.
+No per-policy capacity tuning is used.
 The two tiered policies retain 64 GiB WARM; the capacity-confounding limitation
 below still applies. Earlier 64 GiB runs are pilot evidence, not mixed into
 the new comparison.
@@ -54,7 +56,7 @@ the new comparison.
 Gate evidence must establish correct guest state, NUMA placement, released
 snapshot backing, separate page charging, capacity conservation, and serialized
 restore/spill of each generation. Performance runs follow these gates, not
-the reverse. See [current execution evidence](tiered-oracle-execution-status.md).
+the reverse. See [current execution evidence](current-environment.md).
 
 ## Limits on paper claims
 

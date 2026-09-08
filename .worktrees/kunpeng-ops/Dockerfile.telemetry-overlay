@@ -1,6 +1,0 @@
-FROM 127.0.0.1:5000/clawbox/tool-cube-arm64@sha256:91eebc360c9bbf11c8e71f6954f8b527c0864dceab27cc8e79d6dc616e50420c
-COPY telemetry-from-tool-image.py /opt/clawtune-guest/services/sidecar/src/tool_resource/telemetry.py
-COPY clause_bridge.py /opt/clawtune-guest/services/sidecar/src/tool_resource/clause_bridge.py
-RUN /opt/clawtune/venv/bin/python -m py_compile \
-      /opt/clawtune-guest/services/sidecar/src/tool_resource/telemetry.py \
-      /opt/clawtune-guest/services/sidecar/src/tool_resource/clause_bridge.py

@@ -1,187 +1,45 @@
-# Results guide
+# Read the results
 
-Each run writes one result directory. Treat the whole directory as the result;
-`summary.md` is only a quick index.
+The complete result directory is the evidence. A summary alone cannot establish correctness.
 
-## Find or copy a run
-
-```bash
-clawbox --output-root /data/clawbox-results experiment status <run-id>
-clawbox --output-root /data/clawbox-results experiment collect <run-id>
-```
-
-To copy a Kunpeng run:
-
-```bash
-scp -r kunpeng:/home/weitianc/clawbox-results-current/<run-id> ./results/
-```
-
-For a large run, archive the complete directory first and store its SHA-256.
-
-## Directory contents
+## Files
 
 ```text
-summary.json       complete machine-readable summary
-summary.csv        small table for spreadsheets
-summary.md         small table for people
-arms/              one complete JSON result per experiment variant
-events/            ordered lifecycle and policy events
-model-gateway/     model request and response timing
-policy-control/    Tool admission and completion records
-runtime-traces/    Runtime and ClawTune records
-tool-artifacts/    SSH, cgroup, eBPF, and validation data
-model-traces/      model responses recorded during API runs
-owned-sandboxes.jsonl  VM ownership and cleanup journal
+prefix-provenance.json   source, selected rounds, policy order, deadline
+replay-prefix.jsonl      selected rounds and labeled stop
+replay-full.jsonl        unchanged source copy for --full-trace
+plans/                  exact YAML for each baseline
+00.log, 01.log, ...      worker output
+arms/                   finished baseline attempt records
+summary.json            combined results
+report.md               readable table
+runs/<run-id>/          detailed worker evidence
 ```
 
-A missing directory in a failed run is evidence of where the run stopped. Do
-not copy replacement data from another run.
+Only one replay file is used. Within a worker directory, `events/` contains lifecycle, admission, and memory events; `model-gateway/` contains replay checks; `policy-control/` contains tool control records; and `tool-artifacts/` contains cgroup, eBPF, and validation evidence. `owned-sandboxes.jsonl` records VM ownership.
 
-## 1. Check correctness first
+## Correctness comes first
+
+A passing baseline needs 40/40 completed sessions and successful validation. Check replay matching, exact execution-ID joins, and lost telemetry events. Missing measurements are not zero.
+
+In the report, JCT is the time from an agent's arrival to its completion. P50 is the median and P95 is the 95th percentile. LOCAL GiB-s is memory use integrated over time; ID join is the fraction of tool records linked by their exact execution IDs.
+
+A timeout is incomplete evidence. A live memory-sampling loop does not prove tool progress. The status command shows the age of the latest non-memory event.
+
+Five rounds cover only early exploration. Separate post-run pytest checks the resulting workspace, but does not turn the prefix into a complete coding-task evaluation. Do not compare five-round, 23-round, and full-trace timings as if they were the same workload.
+
+## Memory and timing
+
+VM RAM sizes are fixed capacities. Per-tool reservations are host scheduling decisions, not VM resizing. LOCAL includes charged memory, overhead, and cache. Requested reclamation bytes are not assumed to have been freed.
+
+The two tiered policies have extra WARM capacity. Without capacity-matched controls, improvements cannot be attributed solely to policy quality. The NUMA setup is not a measurement of a real multi-host CXL fabric. A single repetition does not estimate run-to-run uncertainty.
+
+## Keep evidence outside Git
+
+After a study finishes:
 
 ```bash
-jq '.arms[] | {
-  policy: .arm.policy.name,
-  concurrency: .arm.concurrency,
-  status,
-  completed: .correctness.completed_sessions,
-  failed: .correctness.failed_sessions,
-  validation: .correctness.validation_passed,
-  telemetry_join: .correctness.native_tool_exact_id_join_rate,
-  telemetry_loss: .correctness.native_tool_telemetry_loss_total,
-  host_oom: .memory.host_oom_kill_events,
-  safety_events: .performance.admission_control.safety_intervention_count
-}' summary.json
+tar -czf check-01-results.tar.gz -C /data/clawbox-results check-01
 ```
 
-A usable result normally has all sessions completed, validation passing,
-telemetry join rate `1.0`, telemetry loss `0`, no host OOM, and no unexplained
-safety event. Also confirm that the post-run CubeSandbox inventory contains no
-VM owned by the run. Keep failed runs, but do not include them as successful
-samples.
-
-## 2. Read performance
-
-| Field | Meaning |
-| --- | --- |
-| `agents_per_minute` | Correctly completed agents per minute |
-| `steps_per_minute` | Completed model and Tool steps per minute |
-| `jct_mean/p50/p90/p95_seconds` | Agent completion-time distribution |
-| `tool_latency_*_seconds` | Native SSH Tool-command latency |
-| `blocked_admission_seconds` | Sum of memory-wait time across commands; waits may overlap |
-| `admission_control.wait_*` | Distribution of individual memory waits |
-| `duration_seconds` | Complete experiment-variant wall time |
-| `sandbox_create_mean_seconds` | Mean Runtime+Tool creation service time per agent |
-
-Compare only variants using the same workload, templates, replay timing,
-arrival schedule, random seed, memory pool, and host scope.
-
-## 3. Read memory
-
-| Field | Measurement |
-| --- | --- |
-| `memory.mean_used_delta_bytes` | Mean increase in host physical-memory use from the pre-variant baseline |
-| `memory.peak_used_delta_bytes` | Peak increase in host physical-memory use |
-| `memory.memory_time_integral_byte_seconds` | Host memory use integrated over time |
-| `tool_execution_observations[].actual_measured_memory_mib` | Tool process memory measured inside the Tool VM |
-| `actual_host_execution_increment_mib` | Host VM-memory increase around one Tool command |
-
-Guest Tool memory is used to profile commands. Host memory is used to evaluate
-VM density and checkpoint reclamation. These values are not interchangeable.
-
-## 4. Read checkpoint and restore time
-
-Arm-level totals are available in `summary.json`:
-
-```bash
-jq '.arms[] | {
-  policy: .arm.policy.name,
-  checkpoint_count: .performance.pause_count,
-  checkpoint_total_s: .performance.pause_service_seconds,
-  restore_count: .performance.resume_count,
-  restore_total_s: .performance.resume_service_seconds,
-  mean_host_bytes: .memory.mean_used_delta_bytes,
-  peak_host_bytes: .memory.peak_used_delta_bytes
-}' summary.json
-```
-
-For each Runtime or Tool VM operation:
-
-```bash
-jq '.arms[] | .performance.session_timelines[]
-  | .lifecycle_timings[]
-  | {role, operation, service_seconds, status, state_before, state_after,
-     host_observed_reclaimed_bytes, host_reclamation_evidence}' summary.json
-```
-
-The operations are:
-
-| Name | Timed work |
-| --- | --- |
-| `create` | Create and prepare one Runtime or Tool VM |
-| `checkpoint` | Synchronous `sandbox.pause(wait=True)` call, including work CubeSandbox completes before returning |
-| `restore` | Restore the VM and wait for CubeSandbox readiness |
-| `destroy` | End-of-session VM cleanup |
-
-Runtime and Tool records are separate. For one paired checkpoint, add the two
-matching service times. `pause_count` and `resume_count` count these role-level
-operations, not model requests.
-
-`checkpoint.service_seconds` includes snapshot serialization and live-VM
-eviction completed before the CubeSandbox call returns. It does not by itself
-prove that host memory was reclaimed. Use
-`host_observed_reclaimed_bytes`, `host_reclamation_evidence`, and the host
-memory samples for that conclusion. Any asynchronous reclamation after the API
-returns is outside the recorded service time.
-
-Because CubeSandbox exposes checkpoint-and-evict as one synchronous Pause API,
-ClawBox's `checkpoint.service_seconds` remains the end-to-end value. The patched
-Cubelet additionally emits two structured `sandbox lifecycle phase completed`
-log records for every successful pause:
-
-| `operation` | `phase` | Meaning |
-| --- | --- | --- |
-| `checkpoint` | `snapshot_create` | Build and persist the resumable memory, rootfs, metadata, catalog, and remote package |
-| `checkpoint` | `swap_out` | Remove the live runtime while retaining the paused tombstone |
-
-Each record contains `sandboxID`, `status`, and `duration_ms`; successful phase
-records also carry `snapshotID`. Snapshot failures emit an error phase record,
-while swap-out records report either `ok` or `error`. This separates phase
-costs without misrepresenting the public Pause API as two independently callable
-operations.
-
-Creation is reported separately from Agent completion time. Checkpoint and
-restore delays that occur during workload execution affect completion time;
-final destroy time is cleanup overhead.
-
-## 5. Read P90 prediction results
-
-```bash
-jq '.arms[] | {
-  policy: .arm.policy.name,
-  predictions: .performance.prediction_observation_count,
-  fallback_rate: .performance.prediction_fallback_rate,
-  sources: .performance.prediction_source_distribution,
-  fallback_levels: .performance.prediction_fallback_level_distribution,
-  absolute_error_p90_mib: .performance.prediction_absolute_error_p90_mib,
-  underestimate_p90_mib: .performance.prediction_underestimate_p90_mib,
-  coverage: .performance.prediction_coverage_fraction,
-  kb: .provenance.prediction_artifact
-}' summary.json
-```
-
-A command-specific result should use the same frozen KB hash in every compared
-variant and report its fallback rate. If most commands use a global fallback,
-the result does not demonstrate command-specific P90 admission.
-
-## Recommended reading order
-
-1. Reject failed or incomplete variants using the correctness fields.
-2. Compare throughput and Agent completion time.
-3. Compare mean, peak, and time-integrated host memory.
-4. Account for memory-wait, checkpoint, restore, and response-hold time.
-5. For P90 policies, check prediction source, fallback rate, and error.
-6. Confirm identical workload and environment provenance.
-
-Keep the original YAML, source commits, template and guest-kernel identifiers,
-trace hashes, KB hash, raw events, and validation output with the final report.
+Copy the archive to research storage. Do not delete active output, replace failed data with another run's data, or commit large logs and temporary bundles to GitHub.

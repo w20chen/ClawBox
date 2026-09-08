@@ -1,5 +1,0 @@
-FROM 127.0.0.1:5000/clawbox/tool-cube-arm64@sha256:f0d65d4474aa97ca471062771bda8b0bdffa831e34b8536a522d56d4e0b7cc10
-
-USER root
-COPY telemetry-from-tool-image.py /opt/clawtune-guest/services/sidecar/src/tool_resource/telemetry.py
-RUN /opt/clawtune/venv/bin/python -m py_compile /opt/clawtune-guest/services/sidecar/src/tool_resource/telemetry.py

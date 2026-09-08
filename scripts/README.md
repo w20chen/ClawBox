@@ -1,42 +1,20 @@
-# Script index
+# Supported commands and scripts
 
-The supported user entry point is `.venv/bin/python -m clawbox.cli`. Most users
-need only the following helpers:
+Start with `bash scripts/clawbox study --help`.
 
-Before using a helper script, prefer the built-in configuration workflow:
-
-```bash
-clawbox experiment configure <base.yaml> <new.yaml> [options]
-clawbox experiment describe <new.yaml>
-clawbox experiment validate <new.yaml>
-clawbox --output-root <results> experiment run <new.yaml>
-```
-
-`configure` and `describe` are thin schema-v2 front ends; all VM and Tool work
-still uses the single managed experiment Worker.
-
-| Script | Purpose |
+| Command | Purpose |
 | --- | --- |
-| `register-cube-template.py` | Build an immutable Runtime or Tool template, including per-VM writable-disk size. |
-| `audit-cube-sandboxes.py` | Read-only sandbox/template inventory before and after a run. |
-| `cube-host-doctor.py` | Read-only standalone host inventory with a new JSON evidence file. |
-| `validate-cubesandbox-tcp-endpoints.py` | c1/c4 native SSH identity, lifecycle, epoch, telemetry, and leak gate. |
-| `smoke-cubesandbox-agent-pair.py` | Lower-level Runtime/Tool pair smoke. |
-| `probe-cubesandbox-memory-reclaim.py` | Measure host physical-memory change around Cube pause/restore. |
-| `probe-cubesandbox-network-topology.py` | Diagnose Cube networking without changing the Worker endpoint contract. |
-| `diagnose-cube-kprobes.py` | Verify Tool guest kprobe support. |
-| `train-p90-from-runs.py` | Build the immutable ClawTune P90 artifact from separate recording data. |
-| `audit-experiment-matrices.py` | Validate checked-in experiment matrices. |
-| `evidence-manifest.py` | Produce artifact provenance/evidence manifests. |
+| `study init` | Create a machine-specific YAML |
+| `study setup-memory` | Configure memory on an idle host |
+| `study check` | Check files and memory prerequisites |
+| `study start` | Start the baseline sequence in the background |
+| `study status` | Show completed results and live progress |
+| `study report` | Print the comparison table |
 
-Image, kernel, and CubeSandbox preparation helpers are documented by
-`docs/cubesandbox-setup.md` and `docs/experiment-operations.md`. In particular,
-`prepare-semantic-source.sh`, `install-kprobe-kernel-kunpeng920.sh`, and
-`rebuild-swe-rebench-tool-overlay.sh` are provisioning tools, not experiment
-launchers.
+The wrapper loads `~/.config/clawbox/machine.env`. See the [experiment guide](../docs/experiment-operations.md).
 
-Other scripts remain only where tests, artifact compatibility, or historical
-Kunpeng recovery still reference them. They are not alternative ClawBox
-sandbox backends and must not be used to claim native managed results. Do not
-choose old Kubernetes, direct-Firecracker, Pod, or `SandboxTask` launchers for
-new experiments.
+Provisioning helpers include `export-machine-assets.sh`, `register-cube-template.py`, `setup-tiered-memory.sh`, and `deploy/cubesandbox/prepare-semantic-source.sh`.
+
+The endpoint, replay-output audit, tier-storage, guest-artifact, and kprobe validation scripts remain supported. Lower-level probes diagnose the same CubeSandbox backend; they are not alternative deployment paths.
+
+Image entrypoints, benchmark image builders, and prediction/trace preparation tools remain where the supported research workflow needs them. Historical Kubernetes, Kata, and direct-Firecracker installation scripts have been removed.

@@ -2,8 +2,15 @@
 clawtune/
 clawtune-*/
 
-# Rendered / generated k8s artifacts
-*.rendered.yaml
+# Generated experiment data and temporary source checkouts
+.worktrees/
+.cubesandbox/
+results/
+.pytest-*/
+.tmp-*/
+*.bundle
+*.log
+deploy/rec-a-*.inspect.jsonl
 
 # Python test/runtime caches
 __pycache__/
