@@ -1,5 +1,21 @@
 # Tiered oracle execution record
 
+## Five-round v1 diagnostic follow-up
+
+The cache fix allowed sessions to reach round 2, but host-RSS instrumentation
+then dominated tool admission/completion. Live stacks showed many threads
+scanning all of `/proc` every 50 ms, and completion callbacks waiting for
+those scans to finish. At c40 this generated repeated slow backend-maintenance
+operations and delayed real tool completion. The attempt was stopped, not
+reported as a correctness pass. Its stack dump is `five-c40-stacks.txt`.
+
+The RSS sampler now discovers matching VM processes once per execution window
+and reads only those processes thereafter, while rechecking their command
+lines. A fresh sampler discovers new PIDs after restore. This preserves the
+host-RSS measurement and leaves clause-level guest eBPF collection untouched.
+Regression coverage checks that periodic samples do not enumerate all host
+processes and that unrelated reused PIDs are excluded.
+
 ## Five-round correctness sweep and cache fix, 2026-09-08
 
 The latest user instruction replaces the full-trace performance run with a

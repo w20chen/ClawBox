@@ -260,12 +260,13 @@ class CgroupMemorySampler(NodeMemorySampler):
 
 
 def sandbox_process_rss_bytes(sandbox_id: str, *,
-                              proc_root: Path = Path("/proc")) -> int | None:
+                              proc_root: Path = Path("/proc"),
+                              process_paths: tuple[Path, ...] | None = None) -> int | None:
     """Sum host RSS for Cube processes whose argv contains ``sandbox_id``."""
     total = 0
     matched = False
     try:
-        entries = tuple(proc_root.iterdir())
+        entries = process_paths if process_paths is not None else tuple(proc_root.iterdir())
     except OSError:
         return None
     for entry in entries:
@@ -297,8 +298,20 @@ class SandboxRSSSampler:
         self._lock = Lock()
         self._samples: list[int] = []
         self._thread: Thread | None = None
+        # A Tool is pinned resident for the execution window. Discover its
+        # processes once, not with a host-wide /proc scan every 50 ms per tool.
+        # The RSS reader still checks argv on each sample (including PID reuse).
+        paths = []
+        for entry in proc_root.iterdir():
+            if entry.name.isdigit():
+                try:
+                    if sandbox_id.encode() in (entry / "cmdline").read_bytes():
+                        paths.append(entry)
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    continue
+        self._process_paths = tuple(paths)
         self.baseline_bytes = sandbox_process_rss_bytes(
-            sandbox_id, proc_root=proc_root,
+            sandbox_id, proc_root=proc_root, process_paths=self._process_paths,
         )
 
     def start(self) -> None:
@@ -335,7 +348,7 @@ class SandboxRSSSampler:
 
     def _sample(self) -> None:
         value = sandbox_process_rss_bytes(
-            self.sandbox_id, proc_root=self.proc_root,
+            self.sandbox_id, proc_root=self.proc_root, process_paths=self._process_paths,
         )
         if value is not None:
             with self._lock:
