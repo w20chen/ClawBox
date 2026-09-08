@@ -63,6 +63,11 @@ memory-backed copy. COLD restoration must distinguish actual device I/O from
 page-cache hits. Logical snapshot bytes and physical device I/O are different
 measurements.
 
+If WARM is disabled or a VM snapshot cannot fit its total capacity, that snapshot
+goes directly to COLD. This supports the SSD-only ablation without changing the
+wait-based placement policy. Model transport invalidation occurs at Runtime
+checkpointing, not before a Tool checkpoint that may fail.
+
 LOCAL cgroup usage includes charged guest RAM, VM overhead, and retained cache.
 Checkpoint/restore headroom is inside the configured LOCAL capacity. WARM
 preallocation occurs outside that cgroup, with separate capacity accounting.
