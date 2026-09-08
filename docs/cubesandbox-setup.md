@@ -228,6 +228,16 @@ sequentially at c40, cleans up between policies, and updates `summary.json`
 and `report.md` after each arm. Raw logs remain under the output directory.
 No agent polling is needed. Inspect `tail short-c40-supervisor.log` for progress.
 
+For a concise result/progress check, run:
+
+```bash
+.venv/bin/python scripts/study-status.py /data/clawbox-study/short-c40-run1
+```
+
+It distinguishes completed baseline results from partial session progress and
+shows replay mismatches, telemetry joins/loss for finished arms, and the age
+of the latest non-memory event. Memory sampling alone is not evidence of progress.
+
 The 30-minute cap is per baseline, plus cleanup, not the whole matrix; timeout
 results are incomplete evidence, not successful comparisons. Rounds 1–23
 retain exploration, edits, and the successful pytest invocation. A labeled
