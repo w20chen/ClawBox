@@ -1,5 +1,30 @@
 # Tiered oracle execution record
 
+## First verified five-round c40 arm, 2026-09-08 07:08 UTC
+
+`five-c40-20260908-v3` uses execution source `3ac8fdd` in
+`/home/weitianc/ClawBox-experiment-five-c40-v3`. The first baseline,
+`tool-static-time-oracle-reactive`, succeeded with 40/40 validated sessions,
+exact execution-ID join 1.0 and zero lost telemetry events. The detached
+supervisor proceeded to `tool-p90-wait-reactive` after cleanup. The remaining
+12 baseline outcomes are pending; this is not a completed 13-policy report.
+
+The complete execution-source unit suite passed 332 tests. The subsequent
+read-only status-command test also passed. Inspect current state with:
+
+```bash
+cd /home/weitianc/ClawBox-experiment-five-c40-v3
+.venv/bin/python scripts/study-status.py \
+  /home/weitianc/clawbox-tiered-study-20260907/five-c40-20260908-v3
+```
+
+Supervisor log: `five-c40-v3-supervisor.log` under the study root. Each arm
+retains five recorded rounds plus the explicit stop, c40, 160 GiB LOCAL and
+the configured policy's WARM budget. A 1200-second deadline marks incomplete
+arms as such; it does not certify them. The runner proceeds through all 13
+policies without an agent polling it, and updates `report.md` and `summary.json`
+after each arm. Final paper/full-trace results remain outside this prefix check.
+
 ## Asynchronous reclaim correction
 
 Five-round v2 reached round 5 for all 23 initially admitted sessions, and four
