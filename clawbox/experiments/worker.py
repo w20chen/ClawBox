@@ -575,6 +575,7 @@ class ExperimentWorker:
             arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
             emergency_free_mib=arm.resources.emergency_free_memory_mib,
             operation_headroom_mib=arm.resources.checkpoint_restore_headroom_mib,
+            startup_headroom_mib=arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib,
             physical_sample=sampler.current,
             on_pressure_pause=record_pressure_pause,
         )
@@ -1366,16 +1367,23 @@ class ExperimentWorker:
                         - timeline["sandbox_create_gate_wait_start"],
                     ),
                 })
+            pair_reservation = 0
             try:
+                if not lifetime:
+                    pair_amount = arm.sandbox.memory_mib + arm.runtime.memory_mib
+                    pair_wait = coordinator.acquire(
+                        session_id, pair_amount, arm.execution.arm_timeout_seconds,
+                        wait_class="create",
+                    )
+                    pair_reservation = pair_amount
                 timeline["sandbox_create_start"] = time.time()
                 timeline["tool_create_start"] = time.time()
                 if lifetime:
                     tool_create_s, tool_create_reservation_wait = lifecycle.start(), 0.0
                 else:
-                    tool_create_s, tool_create_reservation_wait = coordinator.materialize(
-                        session_id, arm.sandbox.memory_mib, lifecycle.start,
-                        arm.execution.arm_timeout_seconds,
-                    )
+                    tool_create_s, tool_create_reservation_wait = lifecycle.start(), pair_wait
+                    coordinator.release(session_id, arm.sandbox.memory_mib)
+                    pair_reservation -= arm.sandbox.memory_mib
                 timeline["tool_ready"] = time.time()
                 events.write({"event": "sandbox_created", "session_id": session_id,
                               "role": "tool", "service_seconds": tool_create_s,
@@ -1401,10 +1409,9 @@ class ExperimentWorker:
                 if lifetime:
                     runtime_create_s, runtime_create_reservation_wait = runtime_lifecycle.start(), 0.0
                 else:
-                    runtime_create_s, runtime_create_reservation_wait = coordinator.materialize(
-                        session_id, arm.runtime.memory_mib, runtime_lifecycle.start,
-                        arm.execution.arm_timeout_seconds,
-                    )
+                    runtime_create_s, runtime_create_reservation_wait = runtime_lifecycle.start(), 0.0
+                    coordinator.release(session_id, arm.runtime.memory_mib)
+                    pair_reservation -= arm.runtime.memory_mib
                 timeline["runtime_ready"] = time.time()
                 timeline["sandbox_ready"] = timeline["runtime_ready"]
                 events.write({"event": "sandbox_created", "session_id": session_id,
@@ -1414,6 +1421,8 @@ class ExperimentWorker:
                               "lifecycle_timing": runtime_lifecycle.timings[-1],
                               "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
             finally:
+                if pair_reservation:
+                    coordinator.release(session_id, pair_reservation)
                 if sandbox_create_gate is not None:
                     sandbox_create_gate.release()
             create_s = runtime_create_s + tool_create_s

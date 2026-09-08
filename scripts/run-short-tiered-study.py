@@ -41,6 +41,34 @@ def stamp():
 def log(message):
     print(stamp(), message, flush=True)
 
+def recover_partial(run_directory):
+    """Keep observed progress and memory even when the worker was interrupted."""
+    completed = set()
+    pauses = restores = 0
+    samples = []
+    for path in (run_directory / 'events').glob('*.jsonl'):
+        for line in path.open():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue  # the final write may have been interrupted
+            event = row.get('event')
+            if event == 'session_complete' and row.get('valid'):
+                completed.add(row['session_id'])
+            pauses += event == 'sandbox_paused'
+            restores += event == 'sandbox_restored'
+            if event == 'memory_sample' and row.get('local_used_bytes') is not None:
+                samples.append((int(row['monotonic_time_ns']) / 1e9, row['local_used_bytes']))
+    samples.sort()
+    memory = {}
+    if samples:
+        memory['peak_used_delta_bytes'] = max(value for _, value in samples)
+        memory['memory_time_integral_byte_seconds'] = sum(
+            (b[0] - a[0]) * (a[1] + b[1]) / 2 for a, b in zip(samples, samples[1:]))
+    return ({'completed_sessions': len(completed), 'validation_passed': False,
+             'partial_observations': True},
+            {'pause_count': pauses, 'resume_count': restores}, memory)
+
 spec = yaml.safe_load(args.spec.read_text())
 source = Path(spec['workload']['input'])
 records = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
@@ -118,13 +146,14 @@ for index, policy in enumerate(policies):
     if completed:
         result = json.loads(completed[0].read_text())
     else:
+        partial_correctness, partial_performance, partial_memory = recover_partial(root / 'runs' / run_id)
         result = {
             'arm': {'policy': policy, 'concurrency': 40},
             'status': 'timed_out' if timed_out else 'failed',
             'started_at': started, 'completed_at': stamp(),
-            'correctness': {'completed_sessions': 0, 'validation_passed': False,
+            'correctness': {**partial_correctness,
                             'failure': f'Worker exit {code}; external timeout={timed_out}; inspect raw session logs'},
-            'performance': {}, 'memory': {},
+            'performance': partial_performance, 'memory': partial_memory,
         }
     if timed_out:
         result['status'] = 'timed_out'

@@ -61,6 +61,7 @@ class PolicyCoordinator:
 
     def __init__(self, policy: PolicySpec, *, budget_mib: int,
                  emergency_free_mib: int, operation_headroom_mib: int,
+                 startup_headroom_mib: int = 0,
                  physical_sample: Callable[[], tuple[int, int]] | None = None,
                  on_pressure_pause: Callable[[SessionState, float, str], None] | None = None,
                  ) -> None:
@@ -69,6 +70,7 @@ class PolicyCoordinator:
         self.emergency_free_bytes = emergency_free_mib * MIB
         self.operation_headroom_bytes = operation_headroom_mib * MIB
         self.operation_headroom_mib = operation_headroom_mib
+        self.startup_headroom_bytes = startup_headroom_mib * MIB
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self.on_pressure_pause = on_pressure_pause
         self._condition = Condition()
@@ -79,6 +81,7 @@ class PolicyCoordinator:
         self._reservations: dict[str, int] = {}
         self._capacity_claims: dict[str, int] = {}
         self._waiters: deque[object] = deque()
+        self._progress_waiters: set[object] = set()
         self._sessions: dict[str, SessionState] = {}
         self.blocked_seconds = 0.0
         self.peak_commitment_bytes = 0
@@ -223,6 +226,8 @@ class PolicyCoordinator:
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
+            if wait_class != "create" and not capacity_claim:
+                self._progress_waiters.add(ticket)
             recorded_safety_reasons: set[str] = set()
             if wait_class == "tool_admission":
                 self.max_admission_queue_depth = max(
@@ -230,9 +235,15 @@ class PolicyCoordinator:
                 )
             try:
                 while True:
-                    at_head = self._waiters[0] is ticket
+                    # Existing sessions must be able to finish and free memory
+                    # while a new VM pair is waiting for capacity.
+                    head = next((item for item in self._waiters
+                                 if item in self._progress_waiters), self._waiters[0])
+                    at_head = head is ticket
                     safety_reasons = self._pressure_reasons(
-                        amount, capacity_claim=capacity_claim,
+                        amount + (self.startup_headroom_bytes
+                                  if wait_class == "create" else 0),
+                        capacity_claim=capacity_claim,
                     ) if at_head else ()
                     if at_head and not safety_reasons:
                         break
@@ -278,7 +289,8 @@ class PolicyCoordinator:
                     if remaining <= 0:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
                     self._condition.wait(min(0.2, remaining))
-                self._waiters.popleft()
+                self._waiters.remove(ticket)
+                self._progress_waiters.discard(ticket)
                 ledger = self._capacity_claims if capacity_claim else self._reservations
                 ledger[session_id] = ledger.get(session_id, 0) + amount
                 self.peak_commitment_bytes = max(
@@ -289,7 +301,8 @@ class PolicyCoordinator:
             except Exception:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
-                    self._condition.notify_all()
+                self._progress_waiters.discard(ticket)
+                self._condition.notify_all()
                 waited = time.monotonic() - started
                 self._record_wait_locked(wait_class, waited)
                 raise
@@ -330,7 +343,7 @@ class PolicyCoordinator:
         count = len(samples)
         total = sum(samples)
         return {
-            "discipline": "fifo",
+            "discipline": "progress_before_create_fifo",
             "admission_count": count,
             "max_queue_depth": max_queue_depth,
             "wait_total_seconds": total,

@@ -26,6 +26,42 @@ class Lifecycle:
         return 0.01
 
 
+def test_running_tool_can_pass_a_capacity_blocked_new_pair() -> None:
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    used = [8 * 1024**2]
+    coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                                    operation_headroom_mib=0,
+                                    physical_sample=lambda: (used[0], 100 * 1024**2))
+    created = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(coordinator.materialize, "new-pair", 6,
+                              lambda: created.set() or 0.01, 2)
+        deadline = time.monotonic() + 1
+        while not coordinator._waiters and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert coordinator._waiters
+        # The old single FIFO times out here despite enough room for this tool.
+        coordinator.acquire("running", 1, 0.5)
+        assert not created.is_set()
+        coordinator.release("running", 1)
+        used[0] = 0
+        pending.result(timeout=2)
+    assert created.is_set()
+
+
+def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                                    operation_headroom_mib=1, startup_headroom_mib=2,
+                                    physical_sample=lambda: (2 * 1024**2, 100 * 1024**2))
+    with pytest.raises(AdmissionTimeout):
+        coordinator.materialize("new-pair", 6, lambda: pytest.fail("must not start"), 0)
+    coordinator.acquire("running", 6, 0)
+    coordinator.release("running", 6)
+
+
 def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
     policy = PolicySpec(name="resident", admission="lifetime_full", reclamation="resident",
                         eviction="none", restore="none")
@@ -152,7 +188,7 @@ def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
 
     assert order == ["second", "third"]
     metrics = coordinator.admission_metrics()
-    assert metrics["discipline"] == "fifo"
+    assert metrics["discipline"] == "progress_before_create_fifo"
     assert metrics["admission_count"] == 3
     assert metrics["max_queue_depth"] == 2
     assert metrics["wait_p95_seconds"] is not None
