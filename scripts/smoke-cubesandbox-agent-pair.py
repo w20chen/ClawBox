@@ -31,6 +31,7 @@ from clawbox.experiments.openclaw_driver import (
     split_native_ssh_target,
 )
 from clawbox.experiments.policy_control import PolicyControlServer
+from clawbox.experiments.native_artifacts import _validate_clause
 from clawbox.experiments.ssh_credentials import generate_ssh_credentials
 
 
@@ -178,7 +179,7 @@ def ssh_config_dump(runtime, ssh: NativeSSHConfig, identity: str,
 
 
 def policy_ssh_call(runtime, ssh: NativeSSHConfig, identity: str, known_hosts: str,
-                    session, execution_id: str, remote_command: str):
+                    session, execution_id: str, remote_command: str, *, cancel: bool = False):
     envelope = ENVELOPE + json.dumps(
         {"v": 1, "execution_id": execution_id, "tool_name": "exec"},
         separators=(",", ":"),
@@ -193,6 +194,12 @@ def policy_ssh_call(runtime, ssh: NativeSSHConfig, identity: str, known_hosts: s
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1; "
         + shlex.join([*ssh_args(ssh, identity, known_hosts, "/usr/local/bin/ssh"), envelope])
     )
+    if cancel:
+        # Match OpenClaw's process-group termination of a background exec.
+        command = (
+            f"setsid /bin/sh -c {shlex.quote(command)} & child=$!; "
+            "sleep 3; kill -TERM -- -$child; wait $child"
+        )
     return runtime.commands.run(command, timeout=45, cwd="/workspace")
 
 
@@ -273,6 +280,7 @@ def validate_tool_artifacts(tool, policy_session, expected_ids: set[str]) -> dic
         if not artifact_path.startswith(ARTIFACT_ROOT):
             raise AssertionError(f"{execution_id}: unsafe telemetry path")
         telemetry = json.loads(tool.files.read(artifact_path))
+        _validate_clause(telemetry, execution_id)
         calls = telemetry.get("calls") or []
         if len(calls) != 1 or calls[0].get("tool_call_id") != execution_id:
             raise AssertionError(f"{execution_id}: invalid telemetry call identity")
@@ -302,6 +310,8 @@ def main() -> int:
     parser.add_argument("--policy-port", type=int,
                         default=int(os.environ.get("CLAWBOX_POLICY_PORT", "18080")))
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--cancel-probe", action="store_true",
+                        help="Also verify cancellation and telemetry after process-group termination")
     args = parser.parse_args()
     if not args.control_host:
         parser.error("--control-host or CLAWBOX_CONTROL_HOST is required")
@@ -380,6 +390,11 @@ def main() -> int:
             network={"allow_out": runtime_allow_out, "deny_out": ["0.0.0.0/0"]},
         )
         timings["runtime_create_seconds"] = time.monotonic() - started
+        # Use the current launcher, just as the experiment driver does.
+        launcher = (Path(__file__).parent / "clawbox-policy-ssh.py").read_bytes()
+        encoded_launcher = base64.b64encode(launcher).decode()
+        run(runtime, f"printf %s {encoded_launcher} | base64 -d > /usr/local/bin/ssh; "
+                     "chmod +x /usr/local/bin/ssh")
         ssh = endpoint_ssh(endpoint_before, credentials)
         initial_ssh = ssh
         identity, known_hosts = setup_runtime_ssh(runtime, ssh, credentials, session_id)
@@ -525,6 +540,47 @@ def main() -> int:
             require_state(runtime.sandbox_id, "running", "Runtime after Tool restore")
 
             tool = tool_holder["sandbox"]
+            resource_id = "exec-resource-" + uuid.uuid4().hex
+            expected_ids.add(resource_id)
+            program = (
+                "import time; data=bytearray(64*1024*1024); "
+                "data[::4096]=b'x'*(len(data)//4096); end=time.monotonic()+2\n"
+                "while time.monotonic()<end: pass"
+            )
+            result = policy_ssh_call(
+                runtime, initial_ssh, identity, known_hosts, policy_session,
+                resource_id, "python3 -c " + shlex.quote(program),
+            )
+            if result.exit_code:
+                raise AssertionError(f"resource probe failed: {result.stderr}")
+            resource_artifact = json.loads(tool.files.read(
+                ARTIFACT_ROOT + "clause-telemetry-" + resource_id + ".json"))
+            resource_clauses = resource_artifact["calls"][0]["clauses"]
+            if len(resource_clauses) != 1:
+                raise AssertionError("resource probe must produce one observed Python clause")
+            resource = resource_clauses[0]
+            cpu_ns = resource.get("cpu_ns_cumulative")
+            if not isinstance(cpu_ns, (int, float)) or not 0.5e9 < cpu_ns < 5e9:
+                raise AssertionError(f"invalid two-second busy-loop CPU measurement: {cpu_ns}")
+            peak_cpu = resource.get("peak_cpu_cores")
+            peak_rss = resource.get("sampled_peak_rss_mb")
+            if not isinstance(peak_cpu, (int, float)) or not 0.25 < peak_cpu < 2.5:
+                raise AssertionError(f"invalid busy-loop eBPF CPU peak: {peak_cpu}")
+            if not isinstance(peak_rss, (int, float)) or not 50 < peak_rss < 200:
+                raise AssertionError(f"invalid 64 MiB allocation eBPF RSS peak: {peak_rss}")
+            if args.cancel_probe:
+                cancelled_id = "exec-cancel-" + uuid.uuid4().hex
+                expected_ids.add(cancelled_id)
+                result = policy_ssh_call(
+                    runtime, initial_ssh, identity, known_hosts, policy_session,
+                    cancelled_id, "sleep 30", cancel=True,
+                )
+                if not policy_session.close(timeout=15):
+                    raise AssertionError("cancelled SSH did not report completion")
+                completed = next(item for item in policy_session.records()
+                                 if item["request"]["execution_id"] == cancelled_id)
+                if completed["completion"]["exit_code"] != 130:
+                    raise AssertionError(f"wrong cancellation completion: {completed}")
             validation = validate_tool_artifacts(tool, policy_session, expected_ids)
             policy_json = json.dumps(server.requests, sort_keys=True)
             if any(secret in policy_json for secret in (tool_id, "should-not-run")):
@@ -552,6 +608,8 @@ def main() -> int:
                 "telemetry": validation,
                 "pre_pause_telemetry": pre_pause_validation,
                 "exact_id_validation": True,
+                "cancellation_verified": args.cancel_probe,
+                "ebpf_resource_probe": resource,
             }
             if args.output is not None:
                 args.output.parent.mkdir(parents=True, exist_ok=True)

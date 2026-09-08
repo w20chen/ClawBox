@@ -262,6 +262,7 @@ by replay of its own unmodified recordings. For c4, each agent gets its own
 recording. The output directory must be new. `verification.json` records each
 completed run; the individual run directories retain all experimental evidence.
 Use `--estimate fixed|capacity` and `--idle resident|immediate` to select a subset.
+Use `--concurrency 1` or `--concurrency 4` to repeat just one concurrency level.
 To repeat only replay after a fix, add `--recordings-root` pointing to an earlier
 verification directory and choose a new `--output`. The script reads the original
 live configurations and recordings; it does not make new API calls or edit traces.
@@ -300,6 +301,11 @@ NUMA placement, snapshot tiers, reservation waits, and policy decisions are save
 in events and results. Tool-level eBPF and cgroup evidence and execution-ID joins
 remain in tool artifacts. Changing the replay input format does not remove these
 measurements or insert them into the native ClawTune recording.
+
+OpenClaw can reject an `exec` call before sending it to the Tool VM. These
+preflight rejections remain in the native trace and are counted separately from
+executed commands; they cannot have Tool VM resource measurements. A cancelled
+command that did execute must still finish its telemetry and admission record.
 
 A successful comparison needs all sessions requested by the arm to finish and
 pass task validation. For managed replay, also check complete request matching,

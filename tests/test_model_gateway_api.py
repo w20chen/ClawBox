@@ -182,6 +182,13 @@ def test_replay_normalizes_object_addresses_but_not_values_or_error_types():
     assert _canonical_replay_input("value=0x1234") != _canonical_replay_input("value=0x5678")
 
 
+def test_replay_normalizes_single_git_log_entry_but_keeps_commit_message():
+    assert _canonical_replay_input("81267aa Return AttrPath NamedTuple") == (
+        _canonical_replay_input("8a90f4e Return AttrPath NamedTuple"))
+    assert _canonical_replay_input("81267aa Return AttrPath NamedTuple") != (
+        _canonical_replay_input("8a90f4e Delete AttrPath"))
+
+
 def test_api_gateway_forwards_model_and_keeps_upstream_credential_server_side(
     tmp_path: Path,
 ) -> None:

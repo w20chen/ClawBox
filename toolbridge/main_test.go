@@ -9,6 +9,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestParseExecEnvelope_PlainCommand(t *testing.T) {
@@ -256,6 +258,56 @@ func (c *stdinTestChannel) Close() error                                   { ret
 func (c *stdinTestChannel) CloseWrite() error                              { return nil }
 func (c *stdinTestChannel) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
 func (c *stdinTestChannel) Stderr() io.ReadWriter                          { return &c.stderr }
+
+func TestCancellationBypassesOccupiedCommandSlot(t *testing.T) {
+	cancelled := make(chan struct{}, 1)
+	activeExecutions.Store("exec-active", cancelled)
+	defer activeExecutions.Delete("exec-active")
+	semaphore := make(chan struct{}, 1)
+	semaphore <- struct{}{}
+	requests := make(chan *ssh.Request, 1)
+	requests <- &ssh.Request{Type: "exec", Payload: ssh.Marshal(struct{ Command string }{cancelCommandPrefix + "exec-active"})}
+	close(requests)
+	done := make(chan struct{})
+	go func() {
+		handleSession(&execTestChannel{}, requests, t.TempDir(), time.Minute, 1024, semaphore)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation waited for the command it must stop")
+	}
+	if len(cancelled) != 1 || len(semaphore) != 1 {
+		t.Fatal("cancellation did not preserve command slot ownership")
+	}
+}
+
+func TestRunCommandCancellationReapsBeforeReturning(t *testing.T) {
+	channel := &stdinTestChannel{reader: bytes.NewReader(nil)}
+	done := make(chan executionLog, 1)
+	go func() {
+		done <- runCommand(channel, "__CBX_EXEC_1__exec-cancel-test\nsleep 30", t.TempDir(), time.Minute, 1024)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cancelExecution("exec-cancel-test") {
+		if time.Now().After(deadline) {
+			t.Fatal("execution was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case record := <-done:
+		if !record.Cancelled || record.TimedOut || record.ExitCode != 130 {
+			t.Fatalf("wrong cancellation result: %+v", record)
+		}
+		if cancelExecution("exec-cancel-test") {
+			t.Fatal("completed execution remains active")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled process was not reaped")
+	}
+}
 
 func TestRunCommandStreamsSSHStdin(t *testing.T) {
 	channel := &stdinTestChannel{reader: bytes.NewReader([]byte("archive-payload"))}

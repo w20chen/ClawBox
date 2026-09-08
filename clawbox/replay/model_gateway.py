@@ -563,7 +563,7 @@ _GENERATED_DIRECTORY_MTIME_RE = re.compile(
 _CLAWBOX_GIT_STATUS_RE = re.compile(r"(?m)^\?\? \.clawbox/(?:\r?\n|$)")
 _GIT_COMMIT_HEADER_RE = re.compile(r"(?m)^(\[master )[0-9a-f]{7,40}(\] )")
 _GIT_LOG_HEAD_RE = re.compile(
-    r"(?m)^[0-9a-f]{7,40}(?= .+\n(?:[0-9a-f]{7,40} |\?\? ))"
+    r"(?m)^[0-9a-f]{7,40}(?= [^\n]+(?:\n(?:[0-9a-f]{7,40} |\?\? )|\Z))"
 )
 _LS_LONG_ENTRY_RE = re.compile(
     r"(?m)^[bcdlps-][rwxStTs-]{9}\.?(?:\s+\d+)(?:\s+\S+){2}"

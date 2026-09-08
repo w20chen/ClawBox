@@ -65,6 +65,7 @@ def _artifacts(execution_id: str, digest: str) -> tuple[list[dict], dict, dict]:
     }
     clause = {
         "version": 2, "collection_validity": "valid", "cleanup": "ok",
+        "provenance": {"collector": "ebpf_ebpf"},
         "telemetry_loss_total": {"total": 0},
         "calls": [{"tool_call_id": execution_id, "eligible_for_kb": True}],
     }
@@ -215,6 +216,31 @@ def test_native_tool_join_requires_exact_bridge_and_artifact_identity() -> None:
             policy_records=_policy(execution_id, digest),
             expected_session_id="session-a",
         )
+
+
+def test_native_tool_join_rejects_non_ebpf_and_impossible_cpu_counters():
+    execution_id = "exec-1"
+    bridge, cgroup, clause = _artifacts(execution_id, "digest")
+
+    def validate():
+        return validate_native_tool_join(
+            bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause},
+            policy_records=_policy(execution_id, "digest"),
+        )
+
+    clause["provenance"]["collector"] = "cgroup"
+    with pytest.raises(ValueError, match="not from eBPF"):
+        validate()
+    clause["provenance"]["collector"] = "ebpf_ebpf"
+    clause["calls"][0].update({
+        "provenance": {"call_ended_monotonic_ns": 10_000_000_000, "quota_cores": 2},
+        "clauses": [{"cpu_ns_cumulative": 2**64 - 1}],
+    })
+    with pytest.raises(ValueError, match="impossible eBPF CPU counter"):
+        validate()
+    clause["calls"][0]["clauses"][0]["cpu_ns_cumulative"] = 1_000_000_000
+    assert validate()["valid"] is True
 
 
 def test_native_tool_join_reports_preflight_rejections_without_inventing_telemetry():

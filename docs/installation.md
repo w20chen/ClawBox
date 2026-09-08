@@ -157,6 +157,27 @@ python scripts/audit-cube-sandboxes.py --json
 
 ## 4. Register templates and verify SSH
 
+BCC needs headers prepared for the **running guest kernel configuration**, not
+just the same kernel version. A mismatch can produce eBPF events with invalid
+CPU or memory counters. If your Tool image has the matching kernel source but
+was prepared with a different configuration, build a corrected image from an
+existing template on this host:
+
+```bash
+python scripts/prepare-guest-kernel-headers.py \
+  --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
+  --image "$CLAWBOX_TOOL_IMAGE" --tag "$REGISTRY/tool:matching-headers" \
+  --output /data/clawbox-specs/header-build-01
+docker push "$REGISTRY/tool:matching-headers"
+export CLAWBOX_TOOL_IMAGE=$(docker image inspect "$REGISTRY/tool:matching-headers" \
+  --format '{{index .RepoDigests 0}}')
+```
+
+This reads `/proc/config.gz` from a temporary guest, prepares the headers in a
+new image, and preserves the configuration and build log. Register the new image
+below. On a fresh installation, register an initial template first to perform
+this check; do not start experiments until the resource probe passes.
+
 Read the installed guest-kernel component and register new aliases. The commands
 match the starting example's VM sizes; disk capacity belongs to the template:
 
@@ -193,6 +214,15 @@ python scripts/validate-cubesandbox-tcp-endpoints.py \
 
 Expected: endpoint reachability and identity checks succeed. Repeat with
 `--count 4` and a new output filename before testing higher concurrency.
+Check command cancellation and telemetry across a snapshot/restore cycle too:
+
+```bash
+python scripts/smoke-cubesandbox-agent-pair.py \
+  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
+  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" --cancel-probe \
+  --output "$CLAWBOX_OUTPUT_ROOT/agent-pair.json"
+```
+
 Then follow [configure and run](guide.md#5-run-on-an-installed-host).
 
 ## Optional: isolated memory and tiered snapshots

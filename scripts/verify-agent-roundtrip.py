@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--estimate", choices=("fixed", "capacity"), action="append",
                         help="Limit the verification matrix to these reservation estimates")
     parser.add_argument("--idle", choices=("resident", "immediate"), action="append")
+    parser.add_argument("--concurrency", type=int, choices=(1, 4), action="append",
+                        help="Limit verification to c1 or c4; default: both")
     parser.add_argument("--recordings-root", type=Path,
                         help="Replay successful live runs from an earlier verification directory")
     args = parser.parse_args()
@@ -56,7 +58,7 @@ def main():
                  if (not args.estimate or ("capacity" if name == "tool-full-resident" else "fixed") in args.estimate)
                  and (not args.idle or ("immediate" if "eager" in name else "resident") in args.idle)]
     for baseline in baselines:
-        for concurrency in (1, 4):
+        for concurrency in dict.fromkeys(args.concurrency or (1, 4)):
             live = copy.deepcopy(base)
             live["policies"] = [BASELINES[baseline].as_policy().model_dump(mode="json")]
             live["execution"]["concurrency_levels"] = [concurrency]
@@ -91,7 +93,8 @@ def main():
                 source="recorded_trace", source_reference=str(trace), replay_trace_reference=str(trace))
                 for index, trace in enumerate(traces)]
             run(replay, f"{baseline}-c{concurrency}-replay")
-    expected_runs = len(baselines) * (2 if args.recordings_root else 4)
+    expected_runs = (len(baselines) * len(set(args.concurrency or (1, 4)))
+                     * (1 if args.recordings_root else 2))
     if not baselines or len(outcomes) != expected_runs or not all(item["passed"] for item in outcomes):
         raise SystemExit(1)
 

@@ -11,7 +11,8 @@ from clawbox.experiments.spec import ExperimentSpec
 
 
 @pytest.mark.parametrize("estimate,baseline_count", [(None, 3), ("capacity", 1)])
-def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path, monkeypatch, estimate, baseline_count):
+@pytest.mark.parametrize("selected_concurrency", [None, 4])
+def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path, monkeypatch, estimate, baseline_count, selected_concurrency):
     module_spec = importlib.util.spec_from_file_location(
         "verification", Path(__file__).parents[1] / "scripts/verify-agent-roundtrip.py")
     module = importlib.util.module_from_spec(module_spec)
@@ -54,18 +55,22 @@ def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path,
                  str(tmp_path / "clawtune.yaml"), "--output", str(output)]
     if estimate:
         arguments.extend(["--estimate", estimate])
+    if selected_concurrency:
+        arguments.extend(["--concurrency", str(selected_concurrency)])
     monkeypatch.setattr(module.sys, "argv", arguments)
     module.main()
     results = json.loads((output / "verification.json").read_text())
-    assert len(results) == baseline_count * 4
+    concurrency_count = 1 if selected_concurrency else 2
+    trace_count = selected_concurrency or 5
+    assert len(results) == baseline_count * concurrency_count * 2
     assert all(row["passed"] for row in results)
-    assert len(originals) == baseline_count * 5
+    assert len(originals) == baseline_count * trace_count
     recorded_root = output
     output = tmp_path / "replay-only"
     arguments[arguments.index("--output") + 1] = str(output)
     arguments.extend(["--recordings-root", str(recorded_root)])
     module.main()
     results = json.loads((output / "verification.json").read_text())
-    assert len(results) == baseline_count * 2
+    assert len(results) == baseline_count * concurrency_count
     assert all(row["passed"] for row in results)
-    assert len(originals) == baseline_count * 5
+    assert len(originals) == baseline_count * trace_count

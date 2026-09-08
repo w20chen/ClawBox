@@ -295,6 +295,8 @@ def _validate_cgroup(payload: dict[str, Any], execution_id: str) -> None:
 def _validate_clause(payload: dict[str, Any], execution_id: str) -> None:
     if payload.get("version") != 2:
         raise ValueError(f"{execution_id}: unsupported clause telemetry version")
+    if (payload.get("provenance") or {}).get("collector") != "ebpf_ebpf":
+        raise ValueError(f"{execution_id}: clause telemetry is not from eBPF")
     if payload.get("collection_validity") != "valid":
         raise ValueError(f"{execution_id}: clause collection is not valid")
     if payload.get("cleanup") != "ok":
@@ -310,6 +312,19 @@ def _validate_clause(payload: dict[str, Any], execution_id: str) -> None:
         raise ValueError(f"{execution_id}: clause telemetry identity mismatch")
     if call.get("eligible_for_kb") is not True:
         raise ValueError(f"{execution_id}: clause telemetry is not eligible for KB")
+    # A task cannot accumulate more CPU than all guest CPUs since boot.
+    # This catches incompatible BCC kernel layouts that otherwise look like
+    # healthy, loss-free collections while reading pointers as CPU counters.
+    provenance = call.get("provenance") or {}
+    uptime_ns = provenance.get("call_ended_monotonic_ns")
+    cores = provenance.get("quota_cores")
+    if isinstance(uptime_ns, (int, float)) and isinstance(cores, (int, float)):
+        for clause in call.get("clauses") or []:
+            cpu_ns = clause.get("cpu_ns_cumulative")
+            if isinstance(cpu_ns, (int, float)) and not 0 <= cpu_ns <= uptime_ns * cores:
+                raise ValueError(
+                    f"{execution_id}: impossible eBPF CPU counter; check guest kernel headers"
+                )
 
 
 def _is_preflight_rejection(span: dict[str, Any]) -> bool:

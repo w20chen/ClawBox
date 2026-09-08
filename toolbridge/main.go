@@ -40,6 +40,7 @@ type executionLog struct {
 	DurationMS         int64  `json:"duration_ms"`
 	ExitCode           int    `json:"exit_code"`
 	TimedOut           bool   `json:"timed_out"`
+	Cancelled          bool   `json:"cancelled"`
 	StdoutBytes        int64  `json:"stdout_bytes"`
 	StderrBytes        int64  `json:"stderr_bytes"`
 	OutputTruncated    bool   `json:"output_truncated"`
@@ -59,6 +60,22 @@ type executionLog struct {
 var executionLogMu sync.Mutex
 var guestCollector guestCollectorAPI
 var guestCollectorError string
+
+const cancelCommandPrefix = "__CLAWBOX_CANCEL__ "
+
+var activeExecutions sync.Map // execution ID -> cancellation channel
+
+func cancelExecution(executionID string) bool {
+	value, ok := activeExecutions.Load(executionID)
+	if !ok {
+		return false
+	}
+	select {
+	case value.(chan struct{}) <- struct{}{}:
+	default:
+	}
+	return true
+}
 
 func persistExecutionLog(record executionLog) {
 	encoded, _ := json.Marshal(record)
@@ -272,6 +289,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	if !enveloped || executionID == "" {
 		executionID = randomID()
 	}
+	cancelled := make(chan struct{}, 1)
+	activeExecutions.Store(executionID, cancelled)
+	defer activeExecutions.Delete(executionID)
 	executionSource := "bridge-local"
 	if enveloped {
 		executionSource = "runtime-envelope"
@@ -414,6 +434,11 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			timer.Stop()
 		case <-timer.C:
 			record.TimedOut = true
+		case <-cancelled:
+			timer.Stop()
+			record.Cancelled = true
+		}
+		if record.TimedOut || record.Cancelled {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			select {
 			case err = <-done:
@@ -424,6 +449,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		}
 		_ = stdinWrite.Close()
 		record.ExitCode = commandExitCode(err, record.TimedOut)
+		if record.Cancelled {
+			record.ExitCode = 130
+		}
 		if telemetryBegun {
 			// The guest collector consumes kernel events asynchronously.  In
 			// particular, a short command can exit before the collector's poll
@@ -560,7 +588,6 @@ func runOneShot(encoded string) int {
 
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, workdir string, timeout time.Duration, outputLimit int64, semaphore chan struct{}) {
 	defer channel.Close()
-	defer func() { <-semaphore }()
 	for request := range requests {
 		if request.Type != "exec" {
 			_ = request.Reply(false, nil)
@@ -572,6 +599,17 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, workdir st
 			return
 		}
 		_ = request.Reply(true, nil)
+		if strings.HasPrefix(command, cancelCommandPrefix) {
+			status := uint32(1)
+			if cancelExecution(strings.TrimPrefix(command, cancelCommandPrefix)) {
+				status = 0
+			}
+			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
+			return
+		}
+		// Cancellation is control traffic, not a queued workspace command.
+		semaphore <- struct{}{}
+		defer func() { <-semaphore }()
 		record := runCommand(channel, command, workdir, timeout, outputLimit)
 		persistExecutionLog(record)
 		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(record.ExitCode)}))
@@ -603,7 +641,6 @@ func handleConnection(raw net.Conn, config *ssh.ServerConfig, workdir string, ti
 		// its own bridge/semaphore, so a long command never serializes unrelated
 		// Agents.
 		go func() {
-			semaphore <- struct{}{}
 			handleSession(channel, channelRequests, workdir, timeout, outputLimit, semaphore)
 		}()
 	}

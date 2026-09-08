@@ -12,8 +12,10 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +25,7 @@ from typing import Any
 
 
 PREFIX = "__CBX_EXEC_1__"
+CANCEL_PREFIX = "__CLAWBOX_CANCEL__ "
 _HOST_KEY_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
@@ -181,6 +184,50 @@ def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _wait_for_ssh(argv: list[str], execution_id: str) -> int:
+    """Forward OpenClaw cancellation, but reap SSH before reporting completion."""
+    child = None
+    cancellation_requested = False
+    cancelling = False
+
+    def cancel(_signum, _frame):
+        nonlocal cancellation_requested, cancelling
+        cancellation_requested = True
+        if child is None or cancelling:
+            return
+        cancelling = True
+        try:
+            # Keep the original connection alive until the bridge has stopped
+            # the process group and saved its cgroup and clause artifacts.
+            cancel_argv = [*argv[:-1], CANCEL_PREFIX + execution_id]
+            for _ in range(3):
+                result = subprocess.run(cancel_argv, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, timeout=10,
+                                        start_new_session=True)
+                if result.returncode == 0 or child.poll() is not None:
+                    break
+                time.sleep(0.2)
+        finally:
+            cancelling = False
+
+    handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                handlers[sig] = signal.signal(sig, cancel)
+    try:
+        # A process-group kill from OpenClaw must not bypass our completion
+        # callback by killing the original OpenSSH child at the same time.
+        child = subprocess.Popen(argv, start_new_session=True)
+        if cancellation_requested:
+            cancel(None, None)
+        return child.wait()
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
 def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
     """Override only destination routing for the current OpenSSH invocation.
 
@@ -295,8 +342,9 @@ def main() -> int:
 
     execution_started_at = time.time()
     try:
-        child = subprocess.Popen([real_ssh, *_ssh_args_for_route(ssh_argv, route)])
-        return_code = child.wait()
+        return_code = _wait_for_ssh(
+            [real_ssh, *_ssh_args_for_route(ssh_argv, route)], execution_id,
+        )
     except OSError as exc:
         print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)
         return_code = 127

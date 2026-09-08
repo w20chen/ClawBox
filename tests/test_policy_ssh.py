@@ -76,7 +76,7 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
 
     launched: list[list[str]] = []
     monkeypatch.setattr(policy_ssh, "_post", post)
-    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda argv: (launched.append(argv) or Child()))
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda argv, **_kwargs: (launched.append(argv) or Child()))
     monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
 
     assert policy_ssh.main() == 0
@@ -154,7 +154,7 @@ def test_each_tool_vm_operation_keeps_its_native_policy_operation(
             return 0
 
     monkeypatch.setattr(policy_ssh, "_post", post)
-    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda _argv: Child())
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda _argv, **_kwargs: Child())
     monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv(tool_name)])
 
     assert policy_ssh.main() == 0
@@ -204,7 +204,7 @@ def test_openclaw_filesystem_ssh_gets_admission_and_bridge_envelope(
 
     monkeypatch.setattr(policy_ssh, "_post", post)
     monkeypatch.setattr(
-        policy_ssh.subprocess, "Popen", lambda argv: (launched.append(argv) or Child()),
+        policy_ssh.subprocess, "Popen", lambda argv, **_kwargs: (launched.append(argv) or Child()),
     )
     remote = "/bin/sh -c 'printf data' openclaw-sandbox-fs /workspace/a"
     monkeypatch.setattr(sys, "argv", [
@@ -283,7 +283,7 @@ def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
     remote = wrapper + policy_ssh.PREFIX + "b64:" + metadata + "\n" + logical + "'"
     monkeypatch.setattr(policy_ssh, "_post", post)
     monkeypatch.setattr(
-        policy_ssh.subprocess, "Popen", lambda argv: (launched.append(argv) or Child()),
+        policy_ssh.subprocess, "Popen", lambda argv, **_kwargs: (launched.append(argv) or Child()),
     )
     monkeypatch.setattr(sys, "argv", [
         "clawbox-policy-ssh.py", "-F", "/tmp/config", "openclaw-sandbox", remote,
@@ -394,6 +394,38 @@ def test_policy_rejects_non_ssh_container_port_before_spawning_ssh(
     assert posted == ["/v1/tool/admit"]
 
 
+def test_cancellation_keeps_ssh_alive_until_remote_cleanup(monkeypatch):
+    handlers = {}
+    events = []
+
+    def install(sig, handler):
+        previous = handlers.get(sig)
+        handlers[sig] = handler
+        return previous
+
+    class Child:
+        def wait(self):
+            handlers[policy_ssh.signal.SIGTERM](None, None)
+            events.append("reaped")
+            return 130
+
+    def spawn(argv, **kwargs):
+        assert kwargs["start_new_session"] is True
+        return Child()
+
+    def cancel(argv, **kwargs):
+        assert argv[-1] == "__CLAWBOX_CANCEL__ exec-a"
+        events.append("cancel sent")
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(policy_ssh.signal, "signal", install)
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", spawn)
+    monkeypatch.setattr(policy_ssh.subprocess, "run", cancel)
+    assert policy_ssh._wait_for_ssh(["ssh", "target", "command"], "exec-a") == 130
+    assert events == ["cancel sent", "reaped"]
+    assert all(value is None for value in handlers.values())
+
+
 def test_policy_does_not_complete_while_ssh_child_is_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -424,7 +456,7 @@ def test_policy_does_not_complete_while_ssh_child_is_active(
             return 0
 
     monkeypatch.setattr(policy_ssh, "_post", post)
-    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda _argv: Child())
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda _argv, **_kwargs: Child())
     monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
 
     result: list[int] = []
