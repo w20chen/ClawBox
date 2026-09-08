@@ -1000,7 +1000,6 @@ class ExperimentWorker:
                             return
                         if gateway_session is None:
                             raise RuntimeError("model wait has no gateway session")
-                        gateway_session.invalidate_pending_delivery()
                         agent_pid_before = observe_openclaw_agent_pid("before_tool_pause")
                         started = time.time()
                         target_tier = (
@@ -1028,6 +1027,7 @@ class ExperimentWorker:
                                 "before_runtime_pause"
                             )
                             runtime_started = time.time()
+                            gateway_session.invalidate_pending_delivery()
                             runtime_elapsed = runtime_lifecycle.checkpoint_and_evict(
                                 tier=target_tier
                             )
@@ -1063,6 +1063,9 @@ class ExperimentWorker:
                         })
                 except Exception as exc:
                     policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
+                    events.write({"event": "policy_event_failed", "session_id": session_id,
+                                  "operation": "pause", "error": str(exc),
+                                  "error_type": type(exc).__name__})
 
             def restore_runtime_for_model_wait_locked(
                 event: dict[str, Any], *, phase: str,

@@ -310,6 +310,25 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert sandbox_id not in _Sandbox.items
 
 
+@pytest.mark.parametrize("capacity", [0, 512])
+def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(capacity)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.tier is SnapshotTier.COLD
+    assert pool.committed_bytes == pool.reserved_bytes == 0
+    lifecycle.restore()
+    assert lifecycle.resident
+    lifecycle.close()
+
+
 def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)

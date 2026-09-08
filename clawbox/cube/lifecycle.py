@@ -211,6 +211,13 @@ class CubeSandboxLifecycle:
             key = None
             try:
                 manifest = None
+                # A disabled or undersized WARM pool is the SSD-only ablation,
+                # not a failed checkpoint. Keep the same placement policy but
+                # materialize this generation in COLD when it cannot fit WARM.
+                if (tier is SnapshotTier.WARM and self.snapshot_pool is not None
+                        and self.snapshot_reservation_bytes is not None
+                        and self.snapshot_reservation_bytes > self.snapshot_pool.capacity_bytes):
+                    tier = SnapshotTier.COLD
                 if tier is None:
                     self.client.pause_sandbox(self.sandbox)
                 else:
