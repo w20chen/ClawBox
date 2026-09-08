@@ -20,6 +20,8 @@ def main():
     parser.add_argument("spec", type=Path, help="Task and installed CubeSandbox templates")
     parser.add_argument("--clawtune-config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path, help="New result directory")
+    parser.add_argument("--estimate", choices=("fixed", "capacity"), action="append",
+                        help="Limit the verification matrix to these reservation estimates")
     args = parser.parse_args()
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -47,7 +49,9 @@ def main():
         print(f"{name}: {'PASS' if passed else 'FAIL'}", flush=True)
         return passed
 
-    for baseline in ("tool-static-resident", "tool-static-eager-reactive", "tool-full-resident"):
+    baselines = [name for name in ("tool-static-resident", "tool-static-eager-reactive", "tool-full-resident")
+                 if not args.estimate or ("capacity" if name == "tool-full-resident" else "fixed") in args.estimate]
+    for baseline in baselines:
         for concurrency in (1, 4):
             live = copy.deepcopy(base)
             live["policies"] = [BASELINES[baseline].as_policy().model_dump(mode="json")]
@@ -77,7 +81,7 @@ def main():
                 source="recorded_trace", source_reference=str(trace), replay_trace_reference=str(trace))
                 for index, trace in enumerate(traces)]
             run(replay, f"{baseline}-c{concurrency}-replay")
-    if len(outcomes) != 12 or not all(item["passed"] for item in outcomes):
+    if len(outcomes) != len(baselines) * 4 or not all(item["passed"] for item in outcomes):
         raise SystemExit(1)
 
 

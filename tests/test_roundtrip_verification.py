@@ -4,12 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yaml
+import pytest
 
 from trace_fixtures import llm_spans, write_spans
 from clawbox.experiments.spec import ExperimentSpec
 
 
-def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path, monkeypatch):
+@pytest.mark.parametrize("estimate,baseline_count", [(None, 3), ("capacity", 1)])
+def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path, monkeypatch, estimate, baseline_count):
     module_spec = importlib.util.spec_from_file_location(
         "verification", Path(__file__).parents[1] / "scripts/verify-agent-roundtrip.py")
     module = importlib.util.module_from_spec(module_spec)
@@ -48,10 +50,13 @@ def test_verification_pairs_every_live_session_with_its_original_trace(tmp_path,
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(module.subprocess, "run", run)
-    monkeypatch.setattr(module.sys, "argv", ["verify", str(config), "--clawtune-config",
-                                            str(tmp_path / "clawtune.yaml"), "--output", str(output)])
+    arguments = ["verify", str(config), "--clawtune-config",
+                 str(tmp_path / "clawtune.yaml"), "--output", str(output)]
+    if estimate:
+        arguments.extend(["--estimate", estimate])
+    monkeypatch.setattr(module.sys, "argv", arguments)
     module.main()
     results = json.loads((output / "verification.json").read_text())
-    assert len(results) == 12
+    assert len(results) == baseline_count * 4
     assert all(row["passed"] for row in results)
-    assert len(originals) == 15
+    assert len(originals) == baseline_count * 5
