@@ -11,6 +11,46 @@ from trace_fixtures import llm_spans, write_spans
 from clawbox.replay.model_gateway import ModelGateway
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_prefix_stop_is_separate_from_recorded_model_steps(tmp_path, stream):
+    trace = tmp_path / "trace.jsonl"
+    write_spans(trace, sum((llm_spans([], {"content": f"round {i}"}, index=i,
+                                    duration_ms=0) for i in range(3)), []))
+    original = trace.read_bytes()
+    gateway = ModelGateway(tmp_path / "session.json", mode="replay", trace=trace,
+                           max_model_steps=2)
+    for i in range(2):
+        payload = {"messages": [{"role": "user", "content": str(i)}]}
+        _, _, body, request_id = gateway.complete_http(payload)
+        assert json.loads(body)["choices"][0]["message"]["content"] == f"round {i}"
+        # An undelivered response retry must not consume the next round.
+        assert gateway.complete_http(payload)[3] == request_id
+        gateway.mark_delivery(request_id, delivered=True)
+    assert not gateway.replay_completeness()["complete"]
+    request = {"messages": [{"role": "user", "content": "tools finished"}], "stream": stream}
+    status, _, body, request_id = gateway.complete_http(request)
+    assert status == 200 and b"configured replay round limit" in body
+    gateway.mark_delivery(request_id, delivered=False)
+    assert not gateway.replay_completeness()["complete"]
+    assert gateway.complete_http(request)[2] == body
+    gateway.mark_delivery(request_id, delivered=True)
+    verdict = gateway.replay_completeness()
+    assert verdict["complete"] and verdict["scope"] == "prefix"
+    assert verdict["source_model_steps"] == 3
+    assert verdict["expected_replay_model_steps"] == 2
+    assert len(gateway.records()) == gateway.logical_model_steps() == 2
+    assert json.loads((tmp_path / "session.prefix-stop.json").read_text())["synthetic"]
+    assert trace.read_bytes() == original
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, "10", 1.5])
+def test_prefix_limit_rejects_invalid_values(tmp_path, limit):
+    trace = tmp_path / "trace.jsonl"
+    write_spans(trace, llm_spans([], {"content": "done"}))
+    with pytest.raises(ValueError, match="positive integer"):
+        ModelGateway(tmp_path / "s.json", mode="replay", trace=trace, max_model_steps=limit)
+
+
 def test_replay_trace_exhaustion_persists_the_unexpected_request(
     tmp_path: Path,
 ) -> None:

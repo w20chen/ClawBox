@@ -30,6 +30,7 @@ class SessionGatewayState:
                  mode: str, trace: Path | None, time_scale: float,
                  upstream_base_url: str | None, upstream_api_key: str | None,
                  upstream_model: str | None,
+                 max_model_steps: int | None = None,
                  on_request_started: Callable[..., None] | None = None,
                  before_response_ready: Callable[..., dict[str, Any]] | None = None) -> None:
         self.session_id = session_id
@@ -40,6 +41,7 @@ class SessionGatewayState:
             upstream_base_url=upstream_base_url,
             upstream_api_key=upstream_api_key,
             upstream_model=upstream_model,
+            max_model_steps=max_model_steps,
             request_namespace=session_id,
             on_request_started=on_request_started,
             before_response_ready=before_response_ready,
@@ -265,6 +267,7 @@ class ManagedModelGateway:
 
     def register(self, *, session_id: str, store_path: Path, mode: str,
                  trace: Path | None = None, time_scale: float = 1.0,
+                 max_model_steps: int | None = None,
                  upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None,
                  upstream_model: str | None = None,
@@ -279,6 +282,7 @@ class ManagedModelGateway:
         state = SessionGatewayState(
             session_id=session_id, token=token, store_path=store_path,
             mode=mode, trace=trace, time_scale=time_scale,
+            max_model_steps=max_model_steps,
             upstream_base_url=upstream_base_url,
             upstream_api_key=upstream_api_key,
             upstream_model=upstream_model,

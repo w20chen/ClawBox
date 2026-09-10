@@ -28,6 +28,12 @@ def inspect_trace(path: Path) -> dict:
 
 
 def validate_inputs(spec: ExperimentSpec) -> dict:
+    limit = spec.inference.configuration.get("max_model_steps")
+    if limit is not None and (
+        spec.inference.backend is not InferenceBackend.REPLAY
+        or type(limit) is not int or limit < 1
+    ):
+        raise ValueError("inference.configuration.max_model_steps requires replay and a positive integer")
     traces = []
     cases = load_workload_cases(spec.workload)
     if not cases:

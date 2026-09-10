@@ -37,6 +37,23 @@ def post(url: str, token: str, payload: dict) -> dict:
         return json.load(response)
 
 
+def test_managed_http_prefix_stop_is_delivered_without_an_extra_model_step(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    payload = write_trace(trace)
+    with ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0, bind_host="127.0.0.1", bind_port=0,
+    ) as gateway:
+        state = gateway.register(session_id="prefix", store_path=tmp_path / "store.json",
+                                 mode="replay", trace=trace, time_scale=0, max_model_steps=1)
+        assert post(gateway.url, state.token, payload)["choices"][0]["message"]["content"] == "reply-0"
+        response = post(gateway.url, state.token, {"messages": [{"role": "user", "content": "step-1"}]})
+        assert "configured replay round limit" in response["choices"][0]["message"]["content"]
+        assert state.drain(1)
+        assert state.replay_completeness()["complete"]
+        assert state.replay_completeness()["scope"] == "prefix"
+        assert len(state.records()) == 1
+
+
 def test_managed_gateway_keeps_replay_cursors_and_delivery_state_session_local(tmp_path: Path) -> None:
     trace_a = tmp_path / "a.jsonl"
     trace_b = tmp_path / "b.jsonl"

@@ -54,6 +54,7 @@ class ModelGateway:
                  time_scale: float = 1.0, upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None, upstream_model: str | None = None,
                  timeout_s: float = 600.0,
+                 max_model_steps: int | None = None,
                  request_namespace: str = "default",
                  on_request_started: Callable[[], None] | None = None,
                  before_response_ready: Callable[[int | None, dict[str, Any]], dict[str, Any]] | None = None) -> None:
@@ -68,6 +69,12 @@ class ModelGateway:
         self.store_path = store_path
         self.mode = mode
         self.actions = [] if trace is None else [a for a in load_trace(trace) if a.kind == "llm"]
+        if max_model_steps is not None and (
+            mode != "replay" or type(max_model_steps) is not int or max_model_steps < 1
+        ):
+            raise ValueError("max_model_steps requires replay and a positive integer")
+        self.max_model_steps = max_model_steps
+        self._prefix_stop: dict[str, Any] | None = None
         self.time_scale = time_scale
         self.upstream_base_url = (upstream_base_url or "").rstrip("/")
         self.upstream_api_key = upstream_api_key or ""
@@ -203,6 +210,25 @@ class ModelGateway:
                     request = undelivered[-1]
             if request is None:
                 index = len(self._requests) if self.mode == "replay" else None
+                if (index is not None and self.max_model_steps is not None
+                        and self.max_model_steps < len(self.actions)
+                        and index >= self.max_model_steps):
+                    # A harness control response ends OpenClaw only after it
+                    # has executed the final selected round's tools. It is not
+                    # a recorded model response or a measured model step.
+                    if self._prefix_stop is None:
+                        self._prefix_stop = {
+                            "kind": "experiment_prefix_stop", "synthetic": True,
+                            "selected_model_steps": self.max_model_steps,
+                            "source_model_steps": len(self.actions),
+                            "request_payload": canonical, "delivered": False,
+                        }
+                    self._persist_prefix_stop()
+                    stop = ReplayAction("control", "experiment-prefix-stop", 0, 0, 0,
+                        "clawbox-experiment-control",
+                        output={"content": "ClawBox experiment stopped at the configured replay round limit. This is not a task-completion result."})
+                    return (*_replay_response(stop, bool(payload.get("stream"))),
+                            "experiment-prefix-stop")
                 if index is not None and index >= len(self.actions):
                     self._replay_failure = "trace_exhausted"
                     self._persist_replay_rejection(
@@ -305,6 +331,10 @@ class ModelGateway:
     def mark_delivery(self, request_id: str, *, delivered: bool) -> None:
         """Record whether a host response write survived a guest disconnect."""
         with self._changed:
+            if request_id == "experiment-prefix-stop" and self._prefix_stop is not None:
+                self._prefix_stop["delivered"] = self._prefix_stop["delivered"] or delivered
+                self._persist_prefix_stop()
+                return
             request = self._requests.get(request_id)
             if request is None:
                 raise KeyError(f"unknown gateway request {request_id}")
@@ -315,6 +345,13 @@ class ModelGateway:
             else:
                 request.delivery_failures += 1
             self._persist()
+
+    def _persist_prefix_stop(self) -> None:
+        path = self.store_path.with_suffix(".prefix-stop.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".next")
+        temporary.write_text(json.dumps(self._prefix_stop, indent=2), encoding="utf-8")
+        temporary.replace(path)
 
     def records(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -366,6 +403,9 @@ class ModelGateway:
         """Return a strict, auditable completion verdict for this session."""
         records = self.records()
         expected = len(self.actions) if self.mode == "replay" else None
+        prefix = expected is not None and self.max_model_steps is not None and self.max_model_steps < expected
+        if prefix:
+            expected = self.max_model_steps
         incomplete = [
             item["request_id"] for item in records
             if not item.get("ready") or item.get("error") or item.get("status_code") != 200
@@ -383,9 +423,12 @@ class ModelGateway:
                 and consumed == expected_indices
                 and self._replay_failure is None
             )
-        ) and not incomplete
+        ) and not incomplete and (not prefix or bool(self._prefix_stop and self._prefix_stop["delivered"]))
         return {
             "mode": self.mode,
+            "scope": "prefix" if prefix else "full",
+            "source_model_steps": len(self.actions) if self.mode == "replay" else None,
+            "prefix_stop_delivered": bool(self._prefix_stop and self._prefix_stop["delivered"]),
             "observed_logical_model_steps": len(records),
             "expected_replay_model_steps": expected,
             "replay_indices": consumed,

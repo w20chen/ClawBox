@@ -1343,6 +1343,7 @@ class ExperimentWorker:
                 mode=arm.inference.backend.value,
                 trace=trace_path,
                 time_scale=float(inference_configuration.get("time_scale", 1.0)),
+                max_model_steps=inference_configuration.get("max_model_steps"),
                 upstream_base_url=str(inference_configuration.get("base_url") or "") or None,
                 upstream_api_key=credential or None,
                 upstream_model=str(inference_configuration.get("model") or "") or None,

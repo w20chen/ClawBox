@@ -216,6 +216,20 @@ Agent prediction files contain command records with `command`, `predicted_comman
 The Runtime must supply matching command metadata. An action-ID dictionary is
 not a substitute for that data. File operations use the configured static budget.
 
+### Short replay experiments
+
+Set `inference.configuration.max_model_steps: 10` to replay only the first ten
+model calls per agent. Omit it for the full recording. Source trace files are
+never shortened or rewritten; OpenClaw executes each selected response and its
+tools normally. On the next model request, a separate, synthetic experiment
+control reply ends the agent loop. This reply is saved in
+`model-gateway/*.prefix-stop.json`, not counted as a recorded model step or model
+latency. The collected native Runtime recording also includes this control exchange.
+
+Completion evidence reports `scope: prefix`; it does not establish full task
+completion. Task validation still runs, and ten rounds need not reach the task's
+later test phase. Compare runs using the same round limit.
+
 ## 5. Run on an installed host
 
 Real runs require the patched CubeSandbox server, matching SDK, registered images,
