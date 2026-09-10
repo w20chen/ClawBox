@@ -451,6 +451,13 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     SnapshotSandbox.items = {}
     SnapshotSandbox.sequence = 0
     SnapshotSandbox.created = []
+    # This simulated lifecycle has no host microVM processes. Keep the real
+    # sampler, but isolate its procfs discovery from the test host OS.
+    from clawbox.experiments.memory import SandboxRSSSampler
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    monkeypatch.setattr(worker_module, "SandboxRSSSampler",
+                        lambda sandbox_id: SandboxRSSSampler(sandbox_id, proc_root=proc_root))
     trace = tmp_path / "openclaw-snapshot.jsonl"
     write_spans(trace, llm_spans(
         [{"role": "user", "content": "hello"}],
@@ -468,8 +475,11 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                 "Content-Type": "application/json",
             },
         )
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            pytest.fail(f"policy {path} returned {exc.code}: {exc.read().decode()}")
 
     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
                           policy_control, runtime_executor, output_dir,
