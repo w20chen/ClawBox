@@ -309,6 +309,18 @@ test -S /var/run/s3lvol.sock
 
 An active S3lvol supervisor alone is not sufficient: it may be retrying while
 MinIO is unavailable. Check the socket and service log before creating VMs.
+If the host address changed, check that `/data/cubelet/s3.cfg` points to the
+actual MinIO listener and uses credentials accepted by that server. Preserve a
+copy before editing; do not print credentials into experiment logs.
+
+Also check free disk space with `df -h /data/cubelet`. The pinned CubeSandbox
+snapshot backend rejects new writes at 85% filesystem usage. This can surface
+as `no more resource` even when CPU and RAM are idle; the CubeMaster log then
+reports `snapshot storage unavailable`. Remove confirmed obsolete crash dumps
+or unused build cache, keeping templates, recordings and experiment results.
+Allow additional space for snapshots during the run, not just enough to pass
+the initial check. Run the storage validation above again before experiments.
+
 Keep interrupted results and start with a new run ID; reboot does not resume a run.
 Disable the old kubelet on a dedicated host migrated from Kubernetes, after
 confirming it has no unrelated workloads.
