@@ -93,6 +93,85 @@ class BridgeRecord(StrictModel):
     telemetry_collection_validity: str | None = None
     telemetry_cleanup: str | None = None
     telemetry_loss_total: int | None = None
+    pmu_state: str | None = None
+    pmu_quality: str | None = None
+    pmu_error: str | None = None
+    pmu_artifact: str | None = None
+
+
+class PmuEvent(StrictModel):
+    supported: bool
+    semantics: str
+    raw_count: int | None = Field(default=None, ge=0)
+    scaled_count: float | None = Field(default=None, ge=0)
+    time_enabled_ns: int | None = Field(default=None, ge=0)
+    time_running_ns: int | None = Field(default=None, ge=0)
+    running_ratio: float | None = Field(default=None, ge=0, le=1)
+    error: str | None = None
+
+
+class PmuCoverage(StrictModel):
+    status: Literal["reliable", "multiplexed", "partial", "unavailable"]
+    reason: str
+    running_ratio: float | None = Field(default=None, ge=0, le=1)
+    multiplexed: bool
+    kernel_included: bool
+    root_and_future_descendants: bool
+    eligible_for_kb: bool
+
+
+class PmuProfile(StrictModel):
+    model_config = ConfigDict(
+        extra="forbid", populate_by_name=True, serialize_by_alias=True
+    )
+    schema_name: Literal["pmu_profile_v1"] = Field(
+        validation_alias="schema", serialization_alias="schema"
+    )
+    execution_id: str = Field(min_length=1, max_length=128)
+    source: Literal["perf_event_open"]
+    mode: Literal["counting"]
+    scope: Literal["task-inherit-enable-on-exec"]
+    root_pid: int | None = Field(default=None, ge=1)
+    started_at: float | None = Field(default=None, ge=0)
+    ended_at: float | None = Field(default=None, ge=0)
+    architecture: str
+    pmu_devices: list[str]
+    llc_semantics: str
+    llc_semantics_confirmed: bool
+    events: dict[Literal[
+        "cycles", "instructions", "llc_read_misses", "llc_read_accesses"
+    ], PmuEvent]
+    derived: dict[Literal["ipc", "llc_mpki", "llc_miss_rate"], float | None]
+    coverage: PmuCoverage
+    collector_errors: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _complete_event_set(self) -> "PmuProfile":
+        required = {"cycles", "instructions", "llc_read_misses", "llc_read_accesses"}
+        if set(self.events) != required:
+            raise ValueError("PMU profile requires the complete named event set")
+        semantics = {
+            "cycles": "PERF_COUNT_HW_CPU_CYCLES",
+            "instructions": "PERF_COUNT_HW_INSTRUCTIONS",
+            "llc_read_misses": "PERF_COUNT_HW_CACHE_LL:READ:MISS",
+            "llc_read_accesses": "PERF_COUNT_HW_CACHE_LL:READ:ACCESS",
+        }
+        if any(self.events[name].semantics != value for name, value in semantics.items()):
+            raise ValueError("PMU event semantics do not match the public contract")
+        if set(self.derived) != {"ipc", "llc_mpki", "llc_miss_rate"}:
+            raise ValueError("PMU profile requires all derived metrics")
+        reliable = self.coverage.status == "reliable"
+        if self.coverage.eligible_for_kb != reliable:
+            raise ValueError("PMU KB eligibility must exactly match reliable coverage")
+        if reliable and not self.llc_semantics_confirmed:
+            raise ValueError("reliable PMU coverage requires confirmed LLC semantics")
+        if reliable and not self.coverage.root_and_future_descendants:
+            raise ValueError("reliable PMU coverage requires inherited root scope")
+        if reliable and self.coverage.multiplexed:
+            raise ValueError("reliable PMU coverage cannot be multiplexed")
+        if self.coverage.status == "multiplexed" and not self.coverage.multiplexed:
+            raise ValueError("multiplexed PMU coverage requires multiplexed=true")
+        return self
 
 
 class CgroupResource(StrictModel):
@@ -149,6 +228,7 @@ class CgroupResource(StrictModel):
     cgroup_read_error: str | None = None
     collector_errors: list[str] = Field(default_factory=list)
     independence: str | None = None
+    pmu: PmuProfile | None = None
 
 
 def cgroup_artifact_to_resource(
@@ -168,7 +248,16 @@ def cgroup_artifact_to_resource(
     try:
         return CgroupResource.model_validate(data)
     except (ValueError, TypeError):
-        return None
+        # PMU is optional and fail-open. A malformed/partially written PMU
+        # member must not discard otherwise authoritative cgroup accounting.
+        if "pmu" not in data:
+            return None
+        without_pmu = dict(data)
+        without_pmu.pop("pmu", None)
+        try:
+            return CgroupResource.model_validate(without_pmu)
+        except (ValueError, TypeError):
+            return None
 
 
 class ToolObservation(StrictModel):
@@ -207,6 +296,11 @@ class ToolObservation(StrictModel):
     # Independent cgroup v2/procfs resource artifact, when the Tool-VM
     # collector produced one for this execution (ClawTune cgroup_resource_v1).
     cgroup: CgroupResource | None = None
+    pmu: PmuProfile | None = None
+    ipc: float | None = Field(default=None, ge=0)
+    llc_mpki: float | None = Field(default=None, ge=0)
+    llc_miss_rate: float | None = Field(default=None, ge=0)
+    pmu_eligible_for_kb: bool = False
     trusted: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -309,6 +403,17 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
     cpu_cores = _as_float(resources.get("cpu_utilization_avg_cores"))
     rss_peak = _as_int(resources.get("rss_peak_bytes"))
     rss_after = _as_int(resources.get("memory_rss_bytes_after"))
+    pmu = None
+    try:
+        if isinstance(resources.get("pmu"), dict):
+            pmu = PmuProfile.model_validate(resources["pmu"])
+    except (ValueError, TypeError):
+        pmu = None
+    pmu_eligible = bool(
+        pmu is not None
+        and pmu.coverage.status == "reliable"
+        and pmu.coverage.eligible_for_kb
+    )
     try:
         return ToolObservation(
             execution_id=execution_id,
@@ -332,6 +437,11 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
             cpu_utilization_avg_cores=cpu_cores,
             rss_peak_bytes=rss_peak,
             memory_rss_bytes_after=rss_after,
+            pmu=pmu,
+            ipc=(pmu.derived.get("ipc") if pmu_eligible else None),
+            llc_mpki=(pmu.derived.get("llc_mpki") if pmu_eligible else None),
+            llc_miss_rate=(pmu.derived.get("llc_miss_rate") if pmu_eligible else None),
+            pmu_eligible_for_kb=pmu_eligible,
             source=ObservationSource.CLAWTUNE_SPAN,
         )
     except (ValueError, TypeError):

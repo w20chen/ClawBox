@@ -57,6 +57,9 @@ class ClawTuneTraceWriter:
             "timeout" if result.exit_code == 124 else "error"
         )
         cgroup = self._artifact(artifacts, "cgroup_resource_v1", execution_id)
+        pmu = self._artifact(artifacts, "pmu_profile_v1", execution_id)
+        if pmu is None and isinstance(cgroup, dict) and isinstance(cgroup.get("pmu"), dict):
+            pmu = cgroup["pmu"]
         attribution_status = "measured" if cgroup else "latency_only"
         with self._lock:
             sequence = self._sequence
@@ -107,6 +110,7 @@ class ClawTuneTraceWriter:
                     "memory_rss_bytes_after": (
                         cgroup.get("memory_rss_after_bytes") if cgroup else None
                     ),
+                    "pmu": pmu,
                 },
             }
             if prediction is not None:
@@ -154,6 +158,7 @@ class ClawTuneTraceWriter:
         names = {
             "cgroup_resource_v1": "cgroup-resource",
             "clause_telemetry_v2": "clause-telemetry",
+            "pmu_profile_v1": "pmu-profile",
         }
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", execution_id)
         for kind, prefix in names.items():

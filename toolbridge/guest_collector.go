@@ -20,6 +20,7 @@ import (
 )
 
 const guestCollectorProtocolVersion = 1
+const pmuCollectorRequestTimeout = 100 * time.Millisecond
 
 type guestCollectorResponse struct {
 	OK                 bool           `json:"ok"`
@@ -33,12 +34,17 @@ type guestCollectorResponse struct {
 	Cleanup            string         `json:"cleanup"`
 	LossTotal          int64          `json:"loss_total"`
 	BPFRuntime         map[string]any `json:"bpf_runtime"`
+	PMUProfile         map[string]any `json:"pmu_profile"`
+	PMUQuality         string         `json:"pmu_quality"`
 }
 
 type guestCollectorAPI interface {
 	Begin(executionID, command, executionCommand, cgroupPath string, trustedRootPID int, repo string) (guestCollectorResponse, error)
 	Finish(executionID string, returnCode int) (guestCollectorResponse, error)
 	Abort(executionID string) error
+	PMUBegin(executionID string, trustedRootPID int) (guestCollectorResponse, error)
+	PMUFinish(executionID string) (guestCollectorResponse, error)
+	PMUAbort(executionID string) error
 }
 
 type guestCollectorClient struct {
@@ -48,14 +54,18 @@ type guestCollectorClient struct {
 }
 
 func (c *guestCollectorClient) request(values map[string]any) (guestCollectorResponse, error) {
+	return c.requestWithTimeout(values, c.timeout)
+}
+
+func (c *guestCollectorClient) requestWithTimeout(values map[string]any, timeout time.Duration) (guestCollectorResponse, error) {
 	values["v"] = guestCollectorProtocolVersion
 	values["token"] = c.token
-	connection, err := net.DialTimeout("unix", c.socket, c.timeout)
+	connection, err := net.DialTimeout("unix", c.socket, timeout)
 	if err != nil {
 		return guestCollectorResponse{}, err
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(c.timeout))
+	_ = connection.SetDeadline(time.Now().Add(timeout))
 	if err := json.NewEncoder(connection).Encode(values); err != nil {
 		return guestCollectorResponse{}, err
 	}
@@ -104,6 +114,28 @@ func (c *guestCollectorClient) Finish(executionID string, returnCode int) (guest
 
 func (c *guestCollectorClient) Abort(executionID string) error {
 	_, err := c.request(map[string]any{"op": "abort", "execution_id": executionID})
+	return err
+}
+
+func (c *guestCollectorClient) PMUBegin(executionID string, trustedRootPID int) (guestCollectorResponse, error) {
+	return c.requestWithTimeout(map[string]any{
+		"op": "pmu_begin", "execution_id": executionID,
+		"trusted_root_pid": trustedRootPID,
+	}, pmuCollectorRequestTimeout)
+}
+
+func (c *guestCollectorClient) PMUFinish(executionID string) (guestCollectorResponse, error) {
+	return c.requestWithTimeout(
+		map[string]any{"op": "pmu_finish", "execution_id": executionID},
+		pmuCollectorRequestTimeout,
+	)
+}
+
+func (c *guestCollectorClient) PMUAbort(executionID string) error {
+	_, err := c.requestWithTimeout(
+		map[string]any{"op": "pmu_abort", "execution_id": executionID},
+		pmuCollectorRequestTimeout,
+	)
 	return err
 }
 

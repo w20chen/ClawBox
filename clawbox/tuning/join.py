@@ -137,6 +137,16 @@ def join_trace_and_bridge(
                     merged.collection_quality = CollectionQuality(
                         resource.sampling_quality
                     )
+                if resource.pmu is not None:
+                    merged.pmu = resource.pmu
+                    merged.pmu_eligible_for_kb = bool(
+                        resource.pmu.coverage.status == "reliable"
+                        and resource.pmu.coverage.eligible_for_kb
+                    )
+                    if merged.pmu_eligible_for_kb:
+                        merged.ipc = resource.pmu.derived.get("ipc")
+                        merged.llc_mpki = resource.pmu.derived.get("llc_mpki")
+                        merged.llc_miss_rate = resource.pmu.derived.get("llc_miss_rate")
         merged.trusted = merged.collection_quality == "valid" and merged.complete and merged.exit_code == 0
         joined.append(merged)
         used_bridge_ids.add(bridge.execution_id)

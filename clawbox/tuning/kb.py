@@ -191,6 +191,9 @@ class KnowledgeBaseBuilder:
                 "observations": len(trusted),
                 "valid": sum(1 for obs in trusted if obs.collection_quality.value == "valid"),
                 "commands": len({obs.command_digest or obs.command for obs in trusted}),
+                "pmu_reliable": sum(
+                    1 for obs in trusted if obs.pmu_eligible_for_kb
+                ),
                 "input_range": [min_created.isoformat(), max_created.isoformat()],
             },
         )

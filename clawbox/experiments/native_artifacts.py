@@ -15,11 +15,12 @@ import math
 import re
 import shlex
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from clawbox.replay.lifecycle import CommandResult
+from clawbox.tuning.schema import PmuProfile
 
 from .openclaw_driver import NativeSSHConfig, split_native_ssh_target
 
@@ -45,6 +46,7 @@ class NativeToolArtifactCollection:
     cgroup_artifacts: dict[str, dict[str, Any]]
     clause_artifacts: dict[str, dict[str, Any]]
     validation: dict[str, Any]
+    pmu_artifacts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _collection_command() -> str:
@@ -586,6 +588,8 @@ def collect_and_validate_native_tool_artifacts(
     bridge_records = _jsonl(bridge_raw, "tool-bridge.jsonl")
     cgroup_artifacts: dict[str, dict[str, Any]] = {}
     clause_artifacts: dict[str, dict[str, Any]] = {}
+    pmu_artifacts: dict[str, dict[str, Any]] = {}
+    pmu_artifact_errors: list[str] = []
     for name, raw in raw_files.items():
         if name.startswith("cgroup-resource-") and name.endswith(".json"):
             payload = _json_object(raw, name)
@@ -603,11 +607,28 @@ def collect_and_validate_native_tool_artifacts(
             if execution_id in clause_artifacts:
                 raise ValueError(f"duplicate clause artifact identity: {execution_id}")
             clause_artifacts[execution_id] = payload
+        elif name.startswith("pmu-profile-") and name.endswith(".json"):
+            payload = _json_object(raw, name)
+            execution_id = str(payload.get("execution_id") or "")
+            try:
+                PmuProfile.model_validate(payload)
+            except (TypeError, ValueError):
+                pmu_artifact_errors.append(name)
+                continue
+            if execution_id in pmu_artifacts:
+                raise ValueError(f"duplicate PMU artifact identity: {execution_id}")
+            pmu_artifacts[execution_id] = payload
 
     runtime_span_records = (
         _runtime_spans(runtime_trace_paths)
         if runtime_trace_paths is not None else None
     )
+    # The bridge embeds PMU in new cgroup artifacts; accept the standalone
+    # artifact as an exact-ID compatibility path for partially rolled images.
+    for execution_id, pmu in pmu_artifacts.items():
+        cgroup = cgroup_artifacts.get(execution_id)
+        if cgroup is not None and not isinstance(cgroup.get("pmu"), dict):
+            cgroup["pmu"] = pmu
     try:
         validation = validate_native_tool_join(
             bridge_records=bridge_records, cgroup_artifacts=cgroup_artifacts,
@@ -624,6 +645,10 @@ def collect_and_validate_native_tool_artifacts(
         }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         raise
     validation["artifact_collection_attempts"] = collection_attempt
+    validation["pmu"] = {
+        "valid_artifacts": len(pmu_artifacts),
+        "invalid_artifacts": pmu_artifact_errors,
+    }
     validation_path = root / "validation.json"
     validation_path.write_text(
         json.dumps(validation, sort_keys=True, separators=(",", ":")) + "\n",
@@ -633,4 +658,5 @@ def collect_and_validate_native_tool_artifacts(
         root=root, bridge_records=tuple(bridge_records),
         cgroup_artifacts=cgroup_artifacts, clause_artifacts=clause_artifacts,
         validation=validation,
+        pmu_artifacts=pmu_artifacts,
     )

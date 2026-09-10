@@ -1,4 +1,5 @@
-# Tool CubeSandbox: repository/workspace plus ClawTune eBPF/cgroup collectors.
+# syntax=docker/dockerfile:1
+# Tool CubeSandbox: repository/workspace plus ClawTune eBPF/cgroup/PMU collectors.
 FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d AS cube-base
 
 FROM golang:1.25-bookworm AS toolbridge-build
@@ -18,6 +19,11 @@ COPY --from=cube-base /usr/bin/envd /usr/bin/envd
 COPY --from=toolbridge-build /out/tool-bridge /usr/local/bin/tool-bridge
 COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-tool-entrypoint.sh
 COPY docker/patch-clawtune-guest-arm64.py /tmp/patch-clawtune-guest-arm64.py
+# Keep the PMU implementation and guest protocol sourced directly from the
+# sibling ClawTune checkout (docker buildx --build-context clawtune=../ClawTune).
+# There is no ClawBox fork of the collector core.
+COPY --from=clawtune services/sidecar/src/clawtune_sidecar/monitoring/pmu.py /opt/clawtune-guest/services/sidecar/src/clawtune_sidecar/monitoring/pmu.py
+COPY --from=clawtune tools/guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-tool-entrypoint.sh \
  && test -f /opt/clawtune-guest/tools/guest_collector_server.py \
  && /opt/clawtune/venv/bin/python /tmp/patch-clawtune-guest-arm64.py \

@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import sys
 import urllib.request
@@ -67,6 +68,11 @@ SIGNED_FIELDS = (
     "output_truncated",
     "source",
     "cgroup",
+    "pmu",
+    "ipc",
+    "llc_mpki",
+    "llc_miss_rate",
+    "pmu_eligible_for_kb",
 )
 
 
@@ -86,6 +92,54 @@ def as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def reliable_pmu(value: Any) -> tuple[dict[str, Any] | None, dict[str, float | None]]:
+    """Accept only the exact quality/semantic subset eligible for online KB use."""
+    empty = {"ipc": None, "llc_mpki": None, "llc_miss_rate": None}
+    if not isinstance(value, dict) or value.get("schema") != "pmu_profile_v1":
+        return None, empty
+    coverage = value.get("coverage")
+    events = value.get("events")
+    derived = value.get("derived")
+    expected = {
+        "cycles": "PERF_COUNT_HW_CPU_CYCLES",
+        "instructions": "PERF_COUNT_HW_INSTRUCTIONS",
+        "llc_read_misses": "PERF_COUNT_HW_CACHE_LL:READ:MISS",
+        "llc_read_accesses": "PERF_COUNT_HW_CACHE_LL:READ:ACCESS",
+    }
+    if (
+        not isinstance(coverage, dict)
+        or coverage.get("status") != "reliable"
+        or coverage.get("eligible_for_kb") is not True
+        or coverage.get("root_and_future_descendants") is not True
+        or value.get("llc_semantics_confirmed") is not True
+        or not isinstance(events, dict)
+        or not isinstance(derived, dict)
+        or any(
+            not isinstance(events.get(name), dict)
+            or events[name].get("supported") is not True
+            or events[name].get("semantics") != semantics
+            for name, semantics in expected.items()
+        )
+    ):
+        return None, empty
+    metrics: dict[str, float | None] = {}
+    for name in empty:
+        raw = derived.get(name)
+        if raw is None:
+            metrics[name] = None
+            continue
+        if isinstance(raw, bool):
+            return None, empty
+        try:
+            metric = float(raw)
+        except (TypeError, ValueError):
+            return None, empty
+        if not math.isfinite(metric) or metric < 0:
+            return None, empty
+        metrics[name] = metric
+    return value, metrics
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -143,6 +197,7 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
         quality = "invalid"
     complete = status_code in ("ok", "error", "timeout", "cancelled")
     requested_command = execution.get("requested_command") or execution.get("payload_command")
+    pmu, pmu_metrics = reliable_pmu(resources.get("pmu"))
     try:
         return {
             "schema_version": OBSERVATION_SCHEMA_VERSION,
@@ -168,6 +223,11 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
             "rss_peak_bytes": as_int(resources.get("rss_peak_bytes")),
             "memory_rss_bytes_after": as_int(resources.get("memory_rss_bytes_after")),
             "source": "clawtune_span",
+            "pmu": pmu,
+            "ipc": pmu_metrics["ipc"],
+            "llc_mpki": pmu_metrics["llc_mpki"],
+            "llc_miss_rate": pmu_metrics["llc_miss_rate"],
+            "pmu_eligible_for_kb": pmu is not None,
         }
     except (TypeError, ValueError):
         return None
@@ -352,6 +412,8 @@ def read_cgroup_artifacts(trace_dir: Path) -> dict[str, dict[str, Any]]:
             continue
         if not isinstance(raw, dict):
             continue
+        if raw.get("schema") not in (None, "cgroup_resource_v1"):
+            continue
         execution_id = raw.get("execution_id")
         if not execution_id:
             continue
@@ -442,6 +504,13 @@ def join_observations(
             if source in ("cgroup-v2", "process-tree"):
                 out["source"] = source
                 out["resource_source"] = source
+            pmu, pmu_metrics = reliable_pmu(artifact.get("pmu"))
+            if pmu is not None:
+                out["pmu"] = pmu
+                out["ipc"] = pmu_metrics["ipc"]
+                out["llc_mpki"] = pmu_metrics["llc_mpki"]
+                out["llc_miss_rate"] = pmu_metrics["llc_miss_rate"]
+                out["pmu_eligible_for_kb"] = True
         out["trusted"] = (
             out.get("collection_quality") == "valid"
             and out.get("complete") is True

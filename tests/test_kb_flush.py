@@ -91,6 +91,39 @@ def bridge(execution_id, *, duration_ms=5000, exit_code=0, stdout_bytes=128,
     }
 
 
+def reliable_pmu(execution_id: str) -> dict:
+    values = {
+        "cycles": ("PERF_COUNT_HW_CPU_CYCLES", 2_000_000),
+        "instructions": ("PERF_COUNT_HW_INSTRUCTIONS", 1_000_000),
+        "llc_read_misses": ("PERF_COUNT_HW_CACHE_LL:READ:MISS", 1_000),
+        "llc_read_accesses": ("PERF_COUNT_HW_CACHE_LL:READ:ACCESS", 10_000),
+    }
+    events = {
+        name: {
+            "supported": True, "semantics": semantics, "raw_count": raw,
+            "scaled_count": float(raw), "time_enabled_ns": 1_000_000,
+            "time_running_ns": 1_000_000, "running_ratio": 1.0, "error": None,
+        }
+        for name, (semantics, raw) in values.items()
+    }
+    return {
+        "schema": "pmu_profile_v1", "execution_id": execution_id,
+        "source": "perf_event_open", "mode": "counting",
+        "scope": "task-inherit-enable-on-exec", "root_pid": 42,
+        "started_at": 1.0, "ended_at": 2.0, "architecture": "aarch64",
+        "pmu_devices": ["armv8_pmuv3_0"], "llc_semantics": "LL read",
+        "llc_semantics_confirmed": True, "events": events,
+        "derived": {"ipc": 0.5, "llc_mpki": 1.0, "llc_miss_rate": 0.1},
+        "coverage": {
+            "status": "reliable", "reason": "execution_exited",
+            "running_ratio": 1.0, "multiplexed": False,
+            "kernel_included": True, "root_and_future_descendants": True,
+            "eligible_for_kb": True,
+        },
+        "collector_errors": [],
+    }
+
+
 def test_join_matches_canonical_pipeline(tmp_path):
     kb_flush = load_kb_flush()
     span_records = [span_end("exec-0001"), span_end("exec-0002", exit_code=1)]
@@ -200,6 +233,10 @@ def test_read_cgroup_artifacts_both_layouts(tmp_path):
         encoding="utf-8",
     )
     (trace_dir / "cgroup-resource-bad.json").write_text("{not json\n", encoding="utf-8")
+    (resource_dir / "pmu-profile-exec-a.json").write_text(
+        '{"schema":"pmu_profile_v1","execution_id":"exec-a"}\n',
+        encoding="utf-8",
+    )
     artifacts = kb_flush.read_cgroup_artifacts(trace_dir)
     assert set(artifacts) == {"exec-a", "exec-b"}
     assert artifacts["exec-a"]["cpu_time_s"] == 1.5
@@ -245,6 +282,24 @@ def test_signature_matches_canonical(tmp_path):
     runtime_sig = kb_flush.sign_observation(obs_dict, secret)
     canonical_sig = sign_observation(canonical_obs, secret)
     assert runtime_sig == canonical_sig
+
+
+def test_reliable_pmu_signature_matches_canonical_online_path() -> None:
+    kb_flush = load_kb_flush()
+    record = span_end("exec-pmu")
+    record["resources"]["pmu"] = reliable_pmu("exec-pmu")
+
+    runtime = kb_flush.span_end_to_obs(record)
+    canonical = span_end_to_observation(record)
+
+    assert runtime is not None and canonical is not None
+    assert runtime["pmu_eligible_for_kb"] is True
+    assert (runtime["ipc"], runtime["llc_mpki"], runtime["llc_miss_rate"]) == (
+        0.5, 1.0, 0.1,
+    )
+    assert kb_flush.sign_observation(runtime, "secret") == sign_observation(
+        canonical, "secret"
+    )
 
 
 def test_post_batch_binds_signature_to_tenant_and_repo(monkeypatch):

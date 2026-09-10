@@ -22,6 +22,29 @@ Use one execution ID across admission, SSH, completion, and measurements. Retrie
 must not duplicate execution. After restoration, obtain a new endpoint from
 CubeSandbox; cached host/port values are not authoritative.
 
+### Tool-level PMU scope
+
+The Tool bridge arms ClawTune's shared `perf_event_open` collector against the
+guest-local gated root PID before releasing the payload. It records cycles,
+instructions, LLC read accesses, and LLC read misses in counting mode and then
+embeds `pmu_profile_v1` in the execution's cgroup resource artifact. There is no
+ClawBox fork of the collector: Cube images copy the implementation directly
+from the sibling ClawTune build context.
+
+Each active Tool uses one four-FD inherited event group, independent of guest
+vCPU count. `TOOL_MAX_CONCURRENCY` is also the per-VM PMU active-group ceiling;
+the experiment worker uses one. Multiple Runtime/Tool VM pairs are bounded by
+the host's existing session/VM admission. Guest running ratios expose
+multiplexing visible to the guest, but do not prove absence of host-side vPMU
+contention. Unsupported events, absent vPMU/capabilities, budget exhaustion,
+and low running ratios produce explicit unavailable/partial/multiplexed
+coverage and never alter Tool exit status.
+
+ARM64 uses Linux's `PERF_TYPE_HW_CACHE` last-level read mappings. Generic cache
+misses and HiSilicon `hisi_l3c` uncore counts are never relabeled as task-level
+LLC misses. Full field and validation details live in the sibling ClawTune
+`docs/pmu-profiling.md` and `contracts/pmu-profile.schema.json`.
+
 ## Reservations and physical memory
 
 Reservations determine whether work may start; they do not resize guest RAM.

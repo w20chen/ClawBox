@@ -57,6 +57,53 @@ def cgroup_artifact(execution_id: str, **overrides) -> dict:
     return data
 
 
+def pmu_profile(execution_id: str, *, status: str = "reliable") -> dict:
+    supported = status != "unavailable"
+    events = {}
+    for name, semantics, raw in (
+        ("cycles", "PERF_COUNT_HW_CPU_CYCLES", 2_000_000),
+        ("instructions", "PERF_COUNT_HW_INSTRUCTIONS", 1_000_000),
+        ("llc_read_misses", "PERF_COUNT_HW_CACHE_LL:READ:MISS", 1_000),
+        ("llc_read_accesses", "PERF_COUNT_HW_CACHE_LL:READ:ACCESS", 10_000),
+    ):
+        events[name] = {
+            "supported": supported, "semantics": semantics,
+            "raw_count": raw if supported else None,
+            "scaled_count": float(raw) if supported else None,
+            "time_enabled_ns": 1_000_000 if supported else None,
+            "time_running_ns": (500_000 if status == "multiplexed" else 1_000_000)
+            if supported else None,
+            "running_ratio": (0.5 if status == "multiplexed" else 1.0)
+            if supported else None,
+            "error": None if supported else "unsupported",
+        }
+    return {
+        "schema": "pmu_profile_v1", "execution_id": execution_id,
+        "source": "perf_event_open", "mode": "counting",
+        "scope": "task-inherit-enable-on-exec", "root_pid": 42,
+        "started_at": 1.0, "ended_at": 2.0, "architecture": "aarch64",
+        "pmu_devices": ["armv8_pmuv3_0"],
+        "llc_semantics": "PERF_TYPE_HW_CACHE last-level read",
+        "llc_semantics_confirmed": supported,
+        "events": events,
+        "derived": {
+            "ipc": 0.5 if supported else None,
+            "llc_mpki": 1.0 if supported else None,
+            "llc_miss_rate": 0.1 if supported else None,
+        },
+        "coverage": {
+            "status": status,
+            "reason": "execution_exited" if status == "reliable" else "quality",
+            "running_ratio": (0.5 if status == "multiplexed" else 1.0)
+            if supported else None,
+            "multiplexed": status == "multiplexed", "kernel_included": True,
+            "root_and_future_descendants": True,
+            "eligible_for_kb": status == "reliable",
+        },
+        "collector_errors": [],
+    }
+
+
 def bridge_record(execution_id: str, exit_code: int = 0) -> BridgeRecord:
     return BridgeRecord(
         timestamp="2026-08-19T00:00:00Z",
@@ -121,12 +168,15 @@ def test_bridge_record_accepts_current_clawtune_telemetry_metadata() -> None:
         "telemetry_eligible_for_kb": True, "telemetry_quality": "ok",
         "telemetry_collection_validity": "valid", "telemetry_cleanup": "ok",
         "telemetry_loss_total": 0,
+        "pmu_state": "reliable", "pmu_quality": "reliable",
+        "pmu_artifact": "/tmp/pmu.json", "pmu_error": "",
     })
     assert value.telemetry_eligible_for_kb is True
     assert value.telemetry_loss_total == 0
     assert value.telemetry_error == "guest collector helper is not configured"
     assert value.effective_command_sha256 == "a" * 64
     assert value.effective_command_bytes == 123
+    assert value.pmu_quality == "reliable"
 
 
 def test_cgroup_artifact_parser_rejects_invalid():
@@ -134,6 +184,16 @@ def test_cgroup_artifact_parser_rejects_invalid():
     assert cgroup_artifact_to_resource({"schema": "other"}) is None
     assert cgroup_artifact_to_resource(cgroup_artifact("")) is None
     assert cgroup_artifact_to_resource(cgroup_artifact("exec-1", cpu_time_s="not-a-number")) is None
+
+
+def test_invalid_optional_pmu_does_not_discard_cgroup_accounting() -> None:
+    resource = cgroup_artifact_to_resource(cgroup_artifact(
+        "exec-1", pmu={"schema": "pmu_profile_v1", "broken": True},
+    ))
+
+    assert resource is not None
+    assert resource.cpu_time_s == 4.2
+    assert resource.pmu is None
 
 
 def test_read_cgroup_artifacts_from_trace_dir(tmp_path):
@@ -168,6 +228,31 @@ def test_three_source_join_attaches_cgroup():
     assert isinstance(merged.collection_quality, CollectionQuality)
     assert merged.exit_code == 0
     assert merged.trusted is True
+
+
+def test_cgroup_join_carries_only_reliable_pmu_metrics() -> None:
+    reliable = cgroup_artifact("exec-1", pmu=pmu_profile("exec-1"))
+    result = join_trace_and_bridge(
+        [span_end("exec-1")], [bridge_record("exec-1")],
+        {"exec-1": CgroupResource.model_validate(reliable)},
+    )
+
+    merged = result.joined[0]
+    assert merged.pmu is not None
+    assert merged.pmu_eligible_for_kb is True
+    assert (merged.ipc, merged.llc_mpki, merged.llc_miss_rate) == (0.5, 1.0, 0.1)
+
+    multiplexed = cgroup_artifact(
+        "exec-2", pmu=pmu_profile("exec-2", status="multiplexed"),
+    )
+    result = join_trace_and_bridge(
+        [span_end("exec-2")], [bridge_record("exec-2")],
+        {"exec-2": CgroupResource.model_validate(multiplexed)},
+    )
+    merged = result.joined[0]
+    assert merged.pmu is not None
+    assert merged.pmu_eligible_for_kb is False
+    assert (merged.ipc, merged.llc_mpki, merged.llc_miss_rate) == (None, None, None)
 
 
 def test_unmatched_cgroup_artifacts_reported():

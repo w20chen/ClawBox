@@ -671,6 +671,9 @@ def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> 
     sandbox.files.content[
         "/var/lib/clawtune/artifacts/tool-resource/cgroup-resource-call_123.json"
     ] = json.dumps(cgroup)
+    pmu = {"schema": "pmu_profile_v1", "execution_id": execution_id}
+    pmu_path = "/var/lib/clawtune/artifacts/tool-resource/pmu-profile-call_123.json"
+    sandbox.files.content[pmu_path] = json.dumps(pmu)
 
     def run(command: str, **_kwargs):
         encoded = command.rsplit(" ", 1)[-1]
@@ -679,6 +682,7 @@ def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> 
         record = {
             "execution_id": execution_id, "exit_code": 0,
             "telemetry_state": "complete", "telemetry_artifact": "",
+            "pmu_state": "reliable", "pmu_artifact": pmu_path,
         }
         return SimpleNamespace(
             exit_code=0, stdout="observed", stderr=(
@@ -696,6 +700,7 @@ def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> 
     assert json.loads(observed.artifacts["cgroup_resource_v1"])[
         "memory_rss_peak_bytes"
     ] == 4096
+    assert json.loads(observed.artifacts["pmu_profile_v1"])["execution_id"] == execution_id
     assert observed.telemetry_unavailable_reason is None
     lifecycle.close()
 

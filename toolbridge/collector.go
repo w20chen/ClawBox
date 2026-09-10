@@ -73,6 +73,7 @@ type resourceStats struct {
 	CgroupSetupError   string   `json:"cgroup_setup_error,omitempty"`
 	CgroupReadError    string   `json:"cgroup_read_error,omitempty"`
 	CollectorErrors    []string `json:"collector_errors"`
+	PMUProfile         map[string]any `json:"pmu"`
 }
 
 type resourceCollector struct {
@@ -575,6 +576,7 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string, 
 		"cgroup_setup_error":        nilIfEmpty(stats.CgroupSetupError),
 		"cgroup_read_error":         nilIfEmpty(stats.CgroupReadError),
 		"collector_errors":          stats.CollectorErrors,
+		"pmu":                       stats.PMUProfile,
 		"independence":              "independent cgroup/procfs resource accounting; not eBPF clause telemetry",
 	}
 	payload, err := json.Marshal(artifact)
