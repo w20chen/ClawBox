@@ -3,4 +3,4 @@
 *.py text eol=lf
 *.go text eol=lf
 Dockerfile* text eol=lf
-deploy/cubesandbox/*.patch whitespace=-blank-at-eol
+deploy/cubesandbox/*.patch whitespace=-blank-at-eol,-space-before-tab
