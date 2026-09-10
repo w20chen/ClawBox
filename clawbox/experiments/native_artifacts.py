@@ -608,9 +608,9 @@ def collect_and_validate_native_tool_artifacts(
                 raise ValueError(f"duplicate clause artifact identity: {execution_id}")
             clause_artifacts[execution_id] = payload
         elif name.startswith("pmu-profile-") and name.endswith(".json"):
-            payload = _json_object(raw, name)
-            execution_id = str(payload.get("execution_id") or "")
             try:
+                payload = _json_object(raw, name)
+                execution_id = str(payload.get("execution_id") or "")
                 PmuProfile.model_validate(payload)
             except (TypeError, ValueError):
                 pmu_artifact_errors.append(name)

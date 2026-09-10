@@ -78,6 +78,12 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         end_epoch = to_epoch(end)
     cpu_cores = observation.cpu_utilization_avg_cores
     rss_bytes = observation.rss_peak_bytes
+    pmu = observation.pmu
+    pmu_eligible = bool(
+        observation.pmu_eligible_for_kb and pmu is not None
+        and pmu.execution_id == observation.execution_id
+        and pmu.coverage.status == "reliable" and pmu.coverage.eligible_for_kb
+    )
     return CompletedCall(
         repo=repo,
         tool_name=observation.tool_name,
@@ -92,6 +98,10 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         ),
         peak_memory_mb_eligible=rss_bytes is not None,
         ambient_before_mb=0.0 if rss_bytes is not None else None,
+        pmu_ipc=pmu.derived["ipc"] if pmu_eligible else None,
+        pmu_llc_mpki=pmu.derived["llc_mpki"] if pmu_eligible else None,
+        pmu_llc_miss_rate=pmu.derived["llc_miss_rate"] if pmu_eligible else None,
+        pmu_eligible=pmu_eligible,
     )
 
 

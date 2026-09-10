@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import pytest
 
 from clawbox.tuning.join import join_trace_and_bridge
 from clawbox.tuning.schema import BridgeRecord, span_end_to_observation
@@ -300,6 +301,40 @@ def test_reliable_pmu_signature_matches_canonical_online_path() -> None:
     assert kb_flush.sign_observation(runtime, "secret") == sign_observation(
         canonical, "secret"
     )
+
+
+@pytest.mark.parametrize("mutation", ["multiplexed", "kernel", "counter", "identity"])
+def test_runtime_and_online_reject_invalid_pmu_consistently(mutation):
+    record = span_end("exec-pmu")
+    pmu = reliable_pmu("exec-pmu")
+    if mutation == "multiplexed":
+        pmu["coverage"]["multiplexed"] = True
+    elif mutation == "kernel":
+        pmu["coverage"]["kernel_included"] = False
+    elif mutation == "counter":
+        pmu["events"]["cycles"]["time_running_ns"] = 500_000
+    else:
+        pmu["execution_id"] = "another-execution"
+    record["resources"]["pmu"] = pmu
+    runtime = load_kb_flush().span_end_to_obs(record)
+    canonical = span_end_to_observation(record)
+    assert runtime["pmu_eligible_for_kb"] is canonical.pmu_eligible_for_kb is False
+    assert runtime["ipc"] is canonical.ipc is None
+
+
+def test_reliable_pmu_reaches_native_clawtune_snapshot():
+    from clawbox.tuning.clawtune import build_clawtune_kb_snapshot
+    record = span_end("exec-pmu")
+    record["resources"]["pmu"] = reliable_pmu("exec-pmu")
+    observation = span_end_to_observation(record)
+    snapshot = build_clawtune_kb_snapshot([observation], "github.com/acme/foo")
+    assert snapshot["schema"] == "runtime_tool_resource_kb_v2"
+    for target, expected in {"pmu_ipc": 0.5, "pmu_llc_mpki": 1.0, "pmu_llc_miss_rate": 0.1}.items():
+        nodes = snapshot["public"][target]
+        assert nodes and all(values == [expected] for _, _, values in nodes)
+    observation.pmu_eligible_for_kb = False
+    excluded = build_clawtune_kb_snapshot([observation], "github.com/acme/foo")
+    assert not excluded["public"]["pmu_ipc"]
 
 
 def test_post_batch_binds_signature_to_tenant_and_repo(monkeypatch):

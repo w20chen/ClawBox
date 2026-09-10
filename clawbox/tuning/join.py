@@ -137,7 +137,10 @@ def join_trace_and_bridge(
                     merged.collection_quality = CollectionQuality(
                         resource.sampling_quality
                     )
-                if resource.pmu is not None:
+                merged.pmu = None
+                merged.pmu_eligible_for_kb = False
+                merged.ipc = merged.llc_mpki = merged.llc_miss_rate = None
+                if resource.pmu is not None and resource.pmu.execution_id == span.execution_id:
                     merged.pmu = resource.pmu
                     merged.pmu_eligible_for_kb = bool(
                         resource.pmu.coverage.status == "reliable"

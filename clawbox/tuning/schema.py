@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -169,6 +170,23 @@ class PmuProfile(StrictModel):
             raise ValueError("reliable PMU coverage requires inherited root scope")
         if reliable and self.coverage.multiplexed:
             raise ValueError("reliable PMU coverage cannot be multiplexed")
+        if reliable and (
+            not self.coverage.kernel_included
+            or self.coverage.running_ratio != 1.0
+            or any(
+                not event.supported or event.error
+                or event.raw_count is None or event.scaled_count is None
+                or not math.isfinite(event.scaled_count)
+                or not event.time_enabled_ns
+                or event.time_running_ns != event.time_enabled_ns
+                or event.running_ratio != 1.0
+                for event in self.events.values()
+            )
+        ):
+            raise ValueError("reliable PMU coverage requires complete, unmultiplexed counters including kernel")
+        if any(value is not None and (not math.isfinite(value) or value < 0)
+               for value in self.derived.values()):
+            raise ValueError("PMU derived metrics must be finite and nonnegative")
         if self.coverage.status == "multiplexed" and not self.coverage.multiplexed:
             raise ValueError("multiplexed PMU coverage requires multiplexed=true")
         return self
@@ -245,6 +263,8 @@ def cgroup_artifact_to_resource(
         return None
     if not data.get("execution_id"):
         return None
+    if isinstance(data.get("pmu"), dict) and data["pmu"].get("execution_id") != data["execution_id"]:
+        data = {key: value for key, value in data.items() if key != "pmu"}
     try:
         return CgroupResource.model_validate(data)
     except (ValueError, TypeError):
@@ -407,6 +427,8 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
     try:
         if isinstance(resources.get("pmu"), dict):
             pmu = PmuProfile.model_validate(resources["pmu"])
+            if pmu.execution_id != execution_id:
+                pmu = None
     except (ValueError, TypeError):
         pmu = None
     pmu_eligible = bool(

@@ -384,7 +384,8 @@ class _TransientRuntimeExecutor(_RuntimeExecutor):
         return super().execute(command, _timeout)
 
 
-def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("broken_pmu", [None, b'{"schema":', b'{"schema":"pmu_profile_v1"}'])
+def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path: Path, broken_pmu) -> None:
     execution_id = "exec-1"
     digest = hashlib.sha256(b"printf ok").hexdigest()
     bridge, cgroup, clause = _artifacts(execution_id, digest)
@@ -393,6 +394,8 @@ def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path
         "cgroup-resource-exec-1.json": (json.dumps(cgroup) + "\n").encode(),
         "clause-telemetry-exec-1.json": (json.dumps(clause) + "\n").encode(),
     }
+    if broken_pmu is not None:
+        files["pmu-profile-exec-1.json"] = broken_pmu
     stdout = "".join(
         "__CLAWBOX_ARTIFACT_V1__" + name + "\n"
         + base64.b64encode(raw).decode() + "\n"
@@ -413,6 +416,9 @@ def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path
     )
     assert collection.validation["exact_id_join_rate"] == 1.0
     assert collection.validation["artifact_collection_attempts"] == 1
+    assert collection.validation["pmu"]["invalid_artifacts"] == (
+        ["pmu-profile-exec-1.json"] if broken_pmu is not None else []
+    )
     assert collection.validation["runtime_trace_execution_count"] == 1
     assert (collection.root / "tool-bridge.jsonl").read_bytes() == files["tool-bridge.jsonl"]
     assert (collection.root / "validation.json").is_file()

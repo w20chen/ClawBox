@@ -9,6 +9,7 @@ observation dataset and KB.
 from __future__ import annotations
 
 import json
+import pytest
 
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts
 from clawbox.tuning.join import join_trace_and_bridge
@@ -194,6 +195,35 @@ def test_invalid_optional_pmu_does_not_discard_cgroup_accounting() -> None:
     assert resource is not None
     assert resource.cpu_time_s == 4.2
     assert resource.pmu is None
+
+
+@pytest.mark.parametrize("mutation", ["unsupported", "multiplexed", "kernel", "nan", "identity"])
+def test_invalid_pmu_is_excluded_without_losing_cpu_memory(mutation):
+    pmu = pmu_profile("exec-1")
+    if mutation == "unsupported":
+        pmu["events"]["cycles"]["supported"] = False
+    elif mutation == "multiplexed":
+        pmu["events"]["cycles"]["time_running_ns"] = 500_000
+    elif mutation == "kernel":
+        pmu["coverage"]["kernel_included"] = False
+    elif mutation == "nan":
+        pmu["derived"]["ipc"] = float("nan")
+    else:
+        pmu["execution_id"] = "another-execution"
+    resource = cgroup_artifact_to_resource(cgroup_artifact("exec-1", pmu=pmu))
+    assert resource is not None and resource.cpu_time_s == 4.2
+    assert resource.pmu is None
+
+
+def test_degraded_pmu_clears_stale_span_metrics():
+    span = span_end("exec-1")
+    span["resources"]["pmu"] = pmu_profile("exec-1")
+    resource = cgroup_artifact_to_resource(cgroup_artifact(
+        "exec-1", pmu=pmu_profile("exec-1", status="multiplexed"),
+    ))
+    merged = join_trace_and_bridge([span], [bridge_record("exec-1")], {"exec-1": resource}).joined[0]
+    assert not merged.pmu_eligible_for_kb
+    assert (merged.ipc, merged.llc_mpki, merged.llc_miss_rate) == (None, None, None)
 
 
 def test_read_cgroup_artifacts_from_trace_dir(tmp_path):

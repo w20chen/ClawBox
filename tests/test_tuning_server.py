@@ -86,7 +86,7 @@ def test_native_api_publishes_atomic_pair_and_replays_idempotently(client):
     snapshot = response.json()
     assert snapshot["generation"] == 1
     assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v4"
-    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v1"
+    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v2"
 
     prediction = client.get(
         "/v1/kb/admission-prediction",
@@ -173,7 +173,7 @@ def test_post_observations_then_read_snapshot(client):
     )
     assert claw.status_code == 200
     claw_data = claw.json()["snapshot"]
-    assert claw_data["schema"] == "runtime_tool_resource_kb_v1"
+    assert claw_data["schema"] == "runtime_tool_resource_kb_v2"
 
 
 def test_post_rejects_bad_signature(client):

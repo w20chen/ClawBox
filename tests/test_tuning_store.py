@@ -270,9 +270,13 @@ def test_clawtune_snapshot_loadable_shape(db):
     import json
 
     clawtune = json.loads(row.clawtune_snapshot)
-    assert clawtune["schema"] == "runtime_tool_resource_kb_v1"
+    assert clawtune["schema"] == "runtime_tool_resource_kb_v2"
     assert clawtune["quantile"] == 0.9
-    assert set(clawtune["public"]) == {"latency_ms", "peak_cpu_cores", "peak_memory_mb"}
+    assert set(clawtune["public"]) == {
+        "latency_ms", "peak_cpu_cores", "peak_memory_mb", "cpu_time_seconds",
+        "cpu_avg_cores", "cpu_peak_cores", "memory_peak_rss_bytes",
+        "pmu_ipc", "pmu_llc_mpki", "pmu_llc_miss_rate",
+    }
     assert "github.com/acme/foo" in clawtune["repo"]
     # Node rows are [kind, key, [values...]].
     for target, nodes in clawtune["repo"]["github.com/acme/foo"].items():

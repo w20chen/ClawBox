@@ -112,6 +112,9 @@ def reliable_pmu(value: Any) -> tuple[dict[str, Any] | None, dict[str, float | N
         not isinstance(coverage, dict)
         or coverage.get("status") != "reliable"
         or coverage.get("eligible_for_kb") is not True
+        or coverage.get("multiplexed") is not False
+        or coverage.get("kernel_included") is not True
+        or coverage.get("running_ratio") != 1.0
         or coverage.get("root_and_future_descendants") is not True
         or value.get("llc_semantics_confirmed") is not True
         or not isinstance(events, dict)
@@ -120,6 +123,14 @@ def reliable_pmu(value: Any) -> tuple[dict[str, Any] | None, dict[str, float | N
             not isinstance(events.get(name), dict)
             or events[name].get("supported") is not True
             or events[name].get("semantics") != semantics
+            or events[name].get("error")
+            or events[name].get("raw_count") is None
+            or as_float(events[name].get("scaled_count")) is None
+            or not math.isfinite(as_float(events[name].get("scaled_count")))
+            or as_float(events[name].get("scaled_count")) < 0
+            or not events[name].get("time_enabled_ns")
+            or events[name].get("time_running_ns") != events[name].get("time_enabled_ns")
+            or events[name].get("running_ratio") != 1.0
             for name, semantics in expected.items()
         )
     ):
@@ -197,7 +208,10 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
         quality = "invalid"
     complete = status_code in ("ok", "error", "timeout", "cancelled")
     requested_command = execution.get("requested_command") or execution.get("payload_command")
-    pmu, pmu_metrics = reliable_pmu(resources.get("pmu"))
+    pmu_value = resources.get("pmu")
+    pmu, pmu_metrics = reliable_pmu(
+        pmu_value if isinstance(pmu_value, dict) and pmu_value.get("execution_id") == execution_id else None
+    )
     try:
         return {
             "schema_version": OBSERVATION_SCHEMA_VERSION,
@@ -504,13 +518,13 @@ def join_observations(
             if source in ("cgroup-v2", "process-tree"):
                 out["source"] = source
                 out["resource_source"] = source
-            pmu, pmu_metrics = reliable_pmu(artifact.get("pmu"))
-            if pmu is not None:
-                out["pmu"] = pmu
-                out["ipc"] = pmu_metrics["ipc"]
-                out["llc_mpki"] = pmu_metrics["llc_mpki"]
-                out["llc_miss_rate"] = pmu_metrics["llc_miss_rate"]
-                out["pmu_eligible_for_kb"] = True
+            pmu_value = artifact.get("pmu")
+            pmu, pmu_metrics = reliable_pmu(
+                pmu_value if isinstance(pmu_value, dict) and pmu_value.get("execution_id") == span["execution_id"] else None
+            )
+            out["pmu"] = pmu
+            out.update(pmu_metrics)
+            out["pmu_eligible_for_kb"] = pmu is not None
         out["trusted"] = (
             out.get("collection_quality") == "valid"
             and out.get("complete") is True
