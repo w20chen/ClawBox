@@ -1,0 +1,211 @@
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index d323348..4dc418e 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -138,6 +138,9 @@ func (s *service) updateWithPauseCow(
+ 		"sandboxID": req.SandboxID,
+ 	})
+ 	snapshotPhaseStarted := time.Now()
++	defer func() {
++		writeCheckpointPhase(snapshotPhaseStarted, "cubelet.total", req.SandboxID, req.RequestID, "", rsp.Ret.RetCode == errorcode.ErrorCode_Success)
++	}()
+ 	snapshotPhaseLogged := false
+ 	defer func() {
+ 		if !snapshotPhaseLogged {
+@@ -363,6 +366,8 @@ func (s *service) updateWithPauseCow(
+ 	}
+ 
+ 	stepLog.Infof("PauseToSnapshot destination=%s memory_vol=%s snapID=%s", layout.MetaWork, memURL, snapID)
++	writeCheckpointPhase(snapshotPhaseStarted, "cubelet.prepare", req.SandboxID, req.RequestID, snapID, true)
++	vmPhaseStarted := time.Now()
+ 	// Shim returns Update OK and stays alive (Paused). Any error is Pause
+ 	// failure — do not treat ttrpc closed as success (shim no longer self-exits
+ 	// on PauseToSnapshot). Cubelet reaps the shim via keep_tombstone Delete below.
+@@ -378,6 +383,8 @@ func (s *service) updateWithPauseCow(
+ 		return rsp, nil
+ 	}
+ 
++	writeCheckpointPhase(vmPhaseStarted, "cubelet.vm_snapshot_call", req.SandboxID, req.RequestID, snapID, true)
++	metadataPhaseStarted := time.Now()
+ 	// Disk after memory freeze: live rootfs volume is still present until
+ 	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
+ 	// Pause fails and the sandbox is not Resume-able (delete only).
+@@ -462,6 +469,7 @@ func (s *service) updateWithPauseCow(
+ 	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
+ 
+ 	snapshotPhaseLogged = true
++	writeCheckpointPhase(metadataPhaseStarted, "cubelet.rootfs_and_metadata", req.SandboxID, req.RequestID, snapID, true)
+ 	stepLog.WithFields(CubeLog.Fields{
+ 		"operation":    "checkpoint",
+ 		"phase":        "snapshot_create",
+@@ -474,6 +482,8 @@ func (s *service) updateWithPauseCow(
+ 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
+ 	swapOutPhaseStarted := time.Now()
+ 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
++	writeCheckpointPhase(swapOutPhaseStarted, "cubelet.destroy_runtime", req.SandboxID, req.RequestID, snapID, err == nil)
++	cleanupPhaseStarted := time.Now()
+ 	swapOutStatus := "ok"
+ 	if err != nil {
+ 		swapOutStatus = "error"
+@@ -508,9 +518,36 @@ func (s *service) updateWithPauseCow(
+ 		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
+ 		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
+ 	}
++	writeCheckpointPhase(cleanupPhaseStarted, "cubelet.cleanup_previous", req.SandboxID, req.RequestID, snapID, true)
+ 	return rsp, nil
+ }
+ 
++// Keep research timing independent of the deployment's WARN/ERROR log filter.
++func writeCheckpointPhase(start time.Time, phase, sandboxID, requestID, snapshotID string, ok bool) {
++	duration := time.Since(start).Seconds()
++	status := "ok"
++	if !ok {
++		status = "error"
++	}
++	row := map[string]interface{}{"schema_version": 1, "component": "cubelet", "pid": os.Getpid(),
++		"phase": phase, "sandbox_id": sandboxID, "request_id": requestID, "snapshot_id": snapshotID,
++		"started_unix_s": float64(start.UnixNano()) / 1e9, "duration_seconds": duration, "status": status}
++	data, err := json.Marshal(row)
++	if err != nil {
++		return
++	}
++	path := os.Getenv("CLAWBOX_CHECKPOINT_LOG")
++	if path == "" {
++		path = "/data/log/clawbox-checkpoint-phases.jsonl"
++	}
++	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
++	if err != nil {
++		return
++	}
++	defer f.Close()
++	_, _ = f.Write(append(data, '\n'))
++}
++
+ // destroyLiveAfterPause runs engine.Destroy(keep_tombstone) in-process while
+ // Update already holds sandboxLifecycleLocks (do not call service.Destroy).
+ // The paused Destroy path uses localTask.Delete ("binary delete") to reap the
+diff --git a/hypervisor/vmm/src/lib.rs b/hypervisor/vmm/src/lib.rs
+index 93ba37f..0db4aa5 100644
+--- a/hypervisor/vmm/src/lib.rs
++++ b/hypervisor/vmm/src/lib.rs
+@@ -68,6 +68,7 @@ use vmm_sys_util::terminal::Terminal;
+ 
+ mod acpi;
+ pub mod api;
++pub mod checkpoint_metrics;
+ mod clone3;
+ pub mod config;
+ #[cfg(feature = "guest_debug")]
+@@ -690,9 +691,11 @@ impl Vmm {
+         &mut self,
+         snapshot_config: &SnapshotConfig,
+     ) -> result::Result<(), VmError> {
+-        self.vm_pause()?;
+-        self.vm_snapshot(snapshot_config)?;
+-        self.vm_delete()
++        let target = snapshot_config.destination_url.as_str();
++        checkpoint_metrics::measure("vm.freeze", target, None, || self.vm_pause())?;
++        checkpoint_metrics::measure("vm.snapshot_total", target, None,
++            || self.vm_snapshot(snapshot_config))?;
++        checkpoint_metrics::measure("vm.delete", target, None, || self.vm_delete())
+     }
+ 
+     fn vm_resume(&mut self) -> result::Result<(), VmError> {
+@@ -712,7 +715,8 @@ impl Vmm {
+ 
+     fn vm_snapshot(&mut self, snapshot_config: &SnapshotConfig) -> result::Result<(), VmError> {
+         if let Some(ref mut vm) = self.vm {
+-            vm.snapshot()
++            checkpoint_metrics::measure("vm.capture_state", &snapshot_config.destination_url,
++                None, || vm.snapshot())
+                 .map_err(VmError::Snapshot)
+                 .and_then(|snapshot| {
+                     vm.send(&snapshot, snapshot_config)
+diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
+index 5556aa0..645d6d0 100644
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -85,8 +85,12 @@ fn discard_cold_snapshot_cache(file: &File) -> io::Result<()> {
+     if file.metadata()?.is_file() && stat.f_type == libc::TMPFS_MAGIC {
+         return Ok(());
+     }
+-    file.sync_all()?;
+-    let result = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
++    let target = crate::checkpoint_metrics::file_target(file);
++    crate::checkpoint_metrics::measure("memory.sync_all", &target, None, || file.sync_all())?;
++    let result = crate::checkpoint_metrics::measure("memory.drop_cache", &target, None, || {
++        let value = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
++        if value == 0 { Ok(value) } else { Err(io::Error::from_raw_os_error(value)) }
++    })?;
+     if result != 0 {
+         return Err(io::Error::from_raw_os_error(result));
+     }
+@@ -2369,6 +2373,17 @@ impl MemoryManager {
+     }
+ 
+     pub fn save_range_to_file(
++        &self,
++        memory_file: &File,
++        range: &MemoryRange,
++        file_offset: u64,
++    ) -> result::Result<(), MigratableError> {
++        let target = crate::checkpoint_metrics::file_target(memory_file);
++        crate::checkpoint_metrics::measure("memory.write_range", &target, Some(range.length),
++            || self.save_range_to_file_inner(memory_file, range, file_offset))
++    }
++
++    fn save_range_to_file_inner(
+         &self,
+         mut memory_file: &File,
+         range: &MemoryRange,
+diff --git a/hypervisor/vmm/src/vm.rs b/hypervisor/vmm/src/vm.rs
+index c4c4342..a47c699 100644
+--- a/hypervisor/vmm/src/vm.rs
++++ b/hypervisor/vmm/src/vm.rs
+@@ -2878,10 +2878,10 @@ impl Transportable for Vm {
+                 snapshot_type: config.snapshot_type,
+                 memory_vol_url: config.memory_vol_url.clone(),
+             };
+-            self.memory_manager
++            crate::checkpoint_metrics::measure("memory.send_total", destination_url, None, || self.memory_manager
+                 .lock()
+                 .unwrap()
+-                .send(&memory_manager_snapshot.clone(), &mm_config)?;
++                .send(&memory_manager_snapshot.clone(), &mm_config))?;
+         } else {
+             return Err(MigratableError::Restore(anyhow!(
+                 "Missing memory manager snapshot"
+
+diff --git a/hypervisor/vmm/src/checkpoint_metrics.rs b/hypervisor/vmm/src/checkpoint_metrics.rs
+new file mode 100644
+index 0000000..4609b35
+--- /dev/null
++++ b/hypervisor/vmm/src/checkpoint_metrics.rs
+@@ -0,0 +1,27 @@
++//! Research-only checkpoint phase accounting, independent of log verbosity.
++use std::io::Write;
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
++
++pub fn measure<T, E>(phase: &str, target: &str, bytes: Option<u64>,
++                     operation: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
++    let started = Instant::now();
++    let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
++    let result = operation();
++    let duration = started.elapsed().as_secs_f64();
++    let row = serde_json::json!({"schema_version":1,"component":"vmm",
++        "pid":std::process::id(),"phase":phase,"target":target,
++        "started_unix_s":wall,"duration_seconds":duration,
++        "bytes_requested":bytes,"status":if result.is_ok(){"ok"}else{"error"}});
++    let path = std::env::var("CLAWBOX_CHECKPOINT_LOG")
++        .unwrap_or_else(|_| "/data/log/clawbox-checkpoint-phases.jsonl".into());
++    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
++        let _ = file.write_all(format!("{}\n", row).as_bytes());
++    }
++    result
++}
++
++pub fn file_target(file: &std::fs::File) -> String {
++    use std::os::unix::io::AsRawFd;
++    std::fs::read_link(format!("/proc/self/fd/{}",file.as_raw_fd()))
++        .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default()
++}

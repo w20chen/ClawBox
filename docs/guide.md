@@ -326,6 +326,46 @@ in events and results. Tool-level eBPF and cgroup evidence and execution-ID join
 remain in tool artifacts. Changing the replay input format does not remove these
 measurements or insert them into the native ClawTune recording.
 
+### Checkpoint time breakdown
+
+The patched Cubelet and VMM append checkpoint phases to
+`/data/log/clawbox-checkpoint-phases.jsonl` on each sandbox host, even when normal
+service logging is restricted to warnings. Rebuild and install both components
+after applying the backend patches. Keep this file with the experiment results;
+it is separate from the native ClawTune trace.
+
+Existing templates can select a versioned shim under
+`/data/cubelet/root/component_versions/cube-shim/<version>/bin/` rather than the
+default installation binary. When updating an existing host, update the component
+actually selected by the template while its VMs are stopped. Check for both
+`cubelet` and `vmm` records after a test pause; Cubelet records alone cannot
+separate guest-memory writes from the rest of the snapshot call.
+
+For a single-host run, summarize it with the run's ownership file:
+
+```bash
+python scripts/report-checkpoint-phases.py /data/log/clawbox-checkpoint-phases.jsonl \
+  --ownership /data/clawbox-results/my-run/owned-sandboxes.jsonl \
+  --output /data/clawbox-results/my-run/checkpoint-breakdown.json
+```
+
+The report separates VM freezing, state capture, guest-memory writes, storage
+synchronization, cache release, VM deletion, and Cubelet metadata and cleanup.
+It subtracts nested spans before adding them; incomplete checkpoints are listed
+separately. Memory-write bytes are logical bytes passed to the snapshot writer,
+not measured physical SSD traffic. A write to tmpfs or the page cache is not a
+durable SSD write. Synchronization and cache-release phases appear only where
+the cold-snapshot path actually executes them.
+An unmatched synchronization/cache-release pair is reported as incomplete.
+Logging is best effort: if both records are lost, the report cannot distinguish
+that loss from a path that omitted both operations. Retain the original logs
+and verify collection on the intended storage path before interpreting totals.
+
+`cubelet.total` measures the backend pause operation. The ClawBox lifecycle
+pause also includes client and transport overhead. Neither is a standalone
+memory-transfer measurement. `memory.send_total` includes memory writes and
+their storage handling; it must not be added again to those child phases.
+
 OpenClaw can reject an `exec` call before sending it to the Tool VM. These
 preflight rejections remain in the native trace and are counted separately from
 executed commands; they cannot have Tool VM resource measurements. A cancelled
