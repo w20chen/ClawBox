@@ -905,6 +905,12 @@ class ExperimentWorker:
             "TOOL_BRIDGE_LOG_PATH": "/var/lib/clawtune/artifacts/tool-bridge.jsonl",
             "TOOL_BRIDGE_WORKDIR": arm.sandbox.workspace,
             "TOOL_MAX_CONCURRENCY": "1",
+            # Each experiment Tool VM runs one OpenClaw execution at a time.
+            # The guest reports time_running/time_enabled instead of hiding
+            # visible PMU multiplexing. Host VM admission remains the separate
+            # system-wide concurrency bound.
+            "CLAWTUNE_PMU_ENABLED": "true",
+            "CLAWTUNE_PMU_MAX_ACTIVE": "1",
             "CLAWBOX_TOOL_HOST_KEY_B64": base64.b64encode(
                 ssh_credentials.host_private.encode()
             ).decode(),

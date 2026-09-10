@@ -180,6 +180,9 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
                 {"name": "TOOL_BRIDGE_LOG_PATH", "value": "/testbed/.clawbox/tool-bridge.jsonl"},
                 {"name": "TOOL_EXEC_TIMEOUT_SECONDS", "value": str(spec.get("commandTimeoutSeconds", 300))},
                 {"name": "TOOL_OUTPUT_LIMIT_BYTES", "value": str(spec.get("outputLimitBytes", 4 * 1024**2))},
+                {"name": "TOOL_MAX_CONCURRENCY", "value": str(spec.get("toolMaxConcurrency", 4))},
+                {"name": "CLAWTUNE_PMU_ENABLED", "value": "true"},
+                {"name": "CLAWTUNE_PMU_MAX_ACTIVE", "value": str(spec.get("toolMaxConcurrency", 4))},
                 {"name": "CLAWTUNE_GUEST_COLLECTOR_HELPER", "value": "/opt/clawtune-guest/tools/guest_collector_server.py"},
                 {"name": "CLAWTUNE_GUEST_COLLECTOR_PYTHON", "value": "/opt/clawtune/venv/bin/python"},
                 {"name": "CLAWTUNE_GUEST_ARTIFACT_ROOT", "value": "/testbed/.clawbox/tool-resource"},
@@ -200,7 +203,7 @@ def tool_pod(task: dict[str, Any], size: CellSize, *, node_name: str | None = No
             # microVM is the isolation boundary; process-tree collection still
             # works without this cap (best-effort fallback in the bridge).
             "securityContext": {"readOnlyRootFilesystem": False,
-                                "capabilities": {"add": ["SYS_ADMIN", "NET_ADMIN", "NET_RAW", "SYS_PTRACE"]}},
+                                "capabilities": {"add": ["SYS_ADMIN", "PERFMON", "NET_ADMIN", "NET_RAW", "SYS_PTRACE"]}},
             "volumeMounts": [
                 {"name": "tool-auth", "mountPath": "/var/run/secrets/tool-ssh", "readOnly": True},
             ],

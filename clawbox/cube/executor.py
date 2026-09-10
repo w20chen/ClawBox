@@ -103,6 +103,11 @@ class CubeCommandExecutor:
                 f"/var/lib/clawtune/artifacts/tool-resource/cgroup-resource-{leaf}.json"
             ),
         }
+        pmu_path = record.get("pmu_artifact")
+        if isinstance(pmu_path, str) and pmu_path.startswith(
+            "/var/lib/clawtune/artifacts/tool-resource/"
+        ):
+            candidates["pmu_profile_v1"] = pmu_path
         telemetry_path = record.get("telemetry_artifact")
         if isinstance(telemetry_path, str) and telemetry_path.startswith(
             "/var/lib/clawtune/artifacts/tool-resource/"

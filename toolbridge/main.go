@@ -55,6 +55,10 @@ type executionLog struct {
 	TelemetryValidity  string `json:"telemetry_collection_validity,omitempty"`
 	TelemetryCleanup   string `json:"telemetry_cleanup,omitempty"`
 	TelemetryLossTotal int64  `json:"telemetry_loss_total"`
+	PMUState           string `json:"pmu_state,omitempty"`
+	PMUQuality         string `json:"pmu_quality,omitempty"`
+	PMUError           string `json:"pmu_error,omitempty"`
+	PMUArtifact        string `json:"pmu_artifact,omitempty"`
 }
 
 var executionLogMu sync.Mutex
@@ -348,6 +352,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	cmd.Stderr = stderr
 
 	var collector *resourceCollector
+	var pmuProfile map[string]any
 	gateRead, gateWrite, pipeErr := os.Pipe()
 	var err error
 	var readyRead, readyWrite *os.File
@@ -396,6 +401,22 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			cmd.Process.Pid, executionID, resourceTraceDir(),
 			envInt("CLAWBOX_COLLECT_INTERVAL_MS", 20), cgroupPath, cgroupError,
 		)
+		pmuBegun := false
+		if guestCollector == nil {
+			record.PMUState = "unavailable"
+			record.PMUError = guestCollectorError
+		} else {
+			response, pmuErr := guestCollector.PMUBegin(executionID, cmd.Process.Pid)
+			if pmuErr != nil {
+				record.PMUState = "unavailable"
+				record.PMUError = pmuErr.Error()
+				go func() { _ = guestCollector.PMUAbort(executionID) }()
+			} else {
+				pmuBegun = true
+				record.PMUState = response.State
+				pmuProfile = response.PMUProfile
+			}
+		}
 		telemetryBegun := false
 		if guestCollector == nil {
 			record.TelemetryError = guestCollectorError
@@ -452,6 +473,22 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		if record.Cancelled {
 			record.ExitCode = 130
 		}
+		// Read counting FDs immediately at the authoritative process exit. This
+		// is independent of the eBPF drain below; its local RPC is bounded and
+		// failure never changes the tool result.
+		if pmuBegun {
+			response, pmuErr := guestCollector.PMUFinish(executionID)
+			if pmuErr != nil {
+				record.PMUState = "unavailable"
+				record.PMUError = pmuErr.Error()
+				go func() { _ = guestCollector.PMUAbort(executionID) }()
+			} else {
+				record.PMUState = response.State
+				record.PMUQuality = response.PMUQuality
+				record.PMUArtifact = response.ArtifactPath
+				pmuProfile = response.PMUProfile
+			}
+		}
 		if telemetryBegun {
 			// The guest collector consumes kernel events asynchronously.  In
 			// particular, a short command can exit before the collector's poll
@@ -497,6 +534,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	// collector over the direct-child (shell) rusage that the old code read.
 	if collector != nil {
 		stats := collector.Finish(ended)
+		stats.PMUProfile = pmuProfile
 		stats.DurationMS = record.DurationMS
 		record.UserCPUMS = int64(stats.CPUUserSeconds * 1000)
 		record.SystemCPUMS = int64(stats.CPUSystemSeconds * 1000)

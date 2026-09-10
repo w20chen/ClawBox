@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Runtime CubeSandbox: OpenClaw + ClawTune + ClawBox tool plugin.
 FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d AS cube-base
 
@@ -8,9 +9,14 @@ USER root
 COPY --from=cube-base /usr/bin/envd /usr/bin/envd
 COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-runtime-entrypoint.sh
 COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
+# Refresh the same ClawTune sidecar package used by Docker deployments; the
+# Cube runtime changes only execution-scope/capability discovery.
+COPY --from=clawtune services/sidecar /opt/clawtune/services/sidecar
+RUN /opt/clawtune/venv/bin/pip install --no-deps --force-reinstall /opt/clawtune/services/sidecar
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-runtime-entrypoint.sh \
  && chmod 0755 /usr/local/bin/ssh
 ENV PATH=/usr/local/bin:/opt/clawtune/venv/bin:$PATH
 ENV CLAWBOX_VM_ROLE=runtime
+ENV CLAWTUNE_PMU_ENABLED=true
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/cube-runtime-entrypoint.sh"]
