@@ -17,6 +17,7 @@ from clawbox.replay.trace import load_trace
 from clawbox.tuning.__main__ import find_run_datasets
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts
 from clawbox.tuning.native import _clawtune_api
+from clawbox.tuning.clawtune import predict_native_call_load
 
 
 def _sha256(path: Path) -> str:
@@ -405,7 +406,7 @@ def main() -> None:
             eligible_count = 0
             for item in trusted:
                 if (item.start_time is None or item.end_time is None
-                        or item.cpu_utilization_avg_cores is None
+                        or item.cpu_time_sec is None
                         or item.rss_peak_bytes is None):
                     continue
                 eligible_count += 1
@@ -414,8 +415,8 @@ def main() -> None:
                     command=item.command,
                     ts_start=item.start_time.timestamp(), ts_end=item.end_time.timestamp(),
                     censored=item.exit_code not in (None, 0),
-                    peak_cpu_cores=float(item.cpu_utilization_avg_cores),
-                    peak_cpu_cores_eligible=True,
+                    cpu_time_seconds=item.cpu_time_sec,
+                    cpu_time_eligible=True,
                     peak_memory_mb=float(item.rss_peak_bytes) / (1024.0 * 1024.0),
                     peak_memory_mb_eligible=True, ambient_before_mb=0.0,
                 ))
@@ -443,20 +444,22 @@ def main() -> None:
     for call in calls:
         kb.observe_completed_call(call)
     runtime = kb.to_json_obj()
-    predictions = kb.query(ToolCallQuery(
+    query = ToolCallQuery(
         repo=args.repository, tool_name="exec", command=None,
         # Query immediately after the newest training completion.  Using wall
         # clock time makes an otherwise frozen artifact needlessly dependent
         # on when the export command happens to run.
         ts_start=max(call.ts_end for call in calls) + 1e-6,
         ambient_before_mb=0.0,
-    ))
-    latency, cpu, memory = (predictions[name] for name in
-                            ("latency_ms", "peak_cpu_cores", "peak_memory_mb"))
-    revision = subprocess.run(
-        ["git", "-C", str(args.clawtune_root.resolve()), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    )
+    predictions = kb.query(query)
+    call_load = predict_native_call_load(kb, query)
+    latency, memory = predictions["latency_ms"], predictions["peak_memory_mb"]
+    cpu = call_load.targets["cpu_avg_cores"]
+    if cpu.status != "available":
+        raise ValueError("training corpus has no eligible native CPU-time evidence")
+    from clawbox.clawtune_integration import source_revision
+    revision = source_revision(args.clawtune_root.resolve())
     source_digest = source.hexdigest()
     pair_digest = hashlib.sha256(
         source_digest.encode() + json.dumps(runtime, sort_keys=True).encode()
@@ -505,16 +508,19 @@ def main() -> None:
         "generation": args.generation, "pair_digest": pair_digest,
         "source_digest": source_digest, "artifact_count": len(calls),
         "clawtune_revision": revision,
+        "call_prediction": call_load.model_dump(mode="json"),
         "prediction": {
+            "cpu_metric": "cpu_avg_cores",
+            "memory_metric": "cgroup_peak_bytes",
             "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
-            "cpu_p90_cores": float(cpu.conditional_p90),
+            "cpu_p90_cores": float(cpu.p90),
             "memory_p90_bytes": float(memory.conditional_p90) * 1024.0 * 1024.0,
-            "evidence_count": min(latency.evidence_count, cpu.evidence_count,
+            "evidence_count": min(latency.evidence_count, cpu.sample_count,
                                   memory.evidence_count),
-            "scopes": {"latency": latency.scope, "cpu": cpu.scope,
+            "scopes": {"latency": latency.scope, "cpu": cpu.context[0] if cpu.context else None,
                        "memory": memory.scope},
             "fallback_paths": {"latency": list(latency.fallback_path),
-                               "cpu": list(cpu.fallback_path),
+                               "cpu": list(cpu.context),
                                "memory": list(memory.fallback_path)},
         },
         "training": training,

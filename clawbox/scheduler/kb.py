@@ -1,31 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import shlex
-import sys
 from datetime import datetime
-from pathlib import Path
 
 from clawbox.common.models import ExecutionIntent, Observation, ResourcePrediction
 
 
 def _load_clawtune():
-    candidates = [
-        os.getenv("CLAWTUNE_SIDECAR_SRC"),
-        # Backward-compatible only for an operator upgrading an older install.
-        os.getenv("CLAWTUNE_SCHEDULER_SRC"),
-        str(Path(__file__).resolve().parents[3] / "ClawTune" / "services" / "sidecar" / "src"),
-        "/opt/clawtune/services/sidecar/src",
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_dir():
-            # Select one source in declared priority order. Prepending every
-            # candidate reverses priority and silently overrides explicit config.
-            if candidate in sys.path:
-                sys.path.remove(candidate)
-            sys.path.insert(0, candidate)
-            break
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
     from tool_resource.runtime_kb import CompletedCall, RuntimeToolResourceKB, ToolCallQuery
     return CompletedCall, RuntimeToolResourceKB, ToolCallQuery
 

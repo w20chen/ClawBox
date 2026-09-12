@@ -54,25 +54,40 @@ for role, name in (("local", "sandbox"), ("storage", "cubelet")):
         if (group / item).exists()
     }
 if args.snapshot and args.snapshot.exists():
-    stat = args.snapshot.stat()
-    report["snapshot"] = {"path": str(args.snapshot), "logical_bytes": stat.st_size,
-                          "allocated_bytes": stat.st_blocks * 512}
-    if stat.st_size:
-        with args.snapshot.open("rb") as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_COPY) as mapping:
+    sidecar = Path(str(args.snapshot) + ".lineage.json")
+    manifest = json.loads(sidecar.read_text()) if sidecar.exists() else None
+    layers = ([Path(str(args.snapshot) + ".layers") / layer["name"]
+               for layer in manifest["layers"]] if manifest else [args.snapshot])
+    unique = {}
+    for layer in layers:
+        stat = layer.stat()
+        unique[(stat.st_dev, stat.st_ino)] = (layer, stat)
+    report["snapshot"] = {
+        "path": str(args.snapshot),
+        "logical_bytes": manifest["logical_bytes"] if manifest else args.snapshot.stat().st_size,
+        "allocated_bytes": sum(stat.st_blocks * 512 for _, stat in unique.values()),
+        "dirty_bytes": manifest.get("dirty_bytes") if manifest else None,
+        "transferred_bytes": manifest.get("transferred_bytes") if manifest else None,
+        "lineage_layers": len(layers),
+        "resident_pages_before_probe": 0,
+        "page_size": mmap.PAGESIZE,
+        "numa_maps": [],
+    }
+    libc = ctypes.CDLL(None, use_errno=True)
+    for layer, stat in unique.values():
+        if not stat.st_size:
+            continue
+        with layer.open("rb") as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_COPY) as mapping:
             address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
             pages = (stat.st_size + mmap.PAGESIZE - 1) // mmap.PAGESIZE
             vector = (ctypes.c_ubyte * pages)()
-            libc = ctypes.CDLL(None, use_errno=True)
             if libc.mincore(ctypes.c_void_p(address), ctypes.c_size_t(stat.st_size), vector):
                 raise OSError(ctypes.get_errno(), "mincore failed")
-            resident = 0
             for index in range(pages):
                 if vector[index] & 1:
                     _ = mapping[index * mmap.PAGESIZE]
-                    resident += 1
-            report["snapshot"]["resident_pages_before_probe"] = resident
-            report["snapshot"]["page_size"] = mmap.PAGESIZE
-            report["snapshot"]["numa_maps"] = [
+                    report["snapshot"]["resident_pages_before_probe"] += 1
+            report["snapshot"]["numa_maps"].extend(
                 line for line in Path("/proc/self/numa_maps").read_text().splitlines()
-                if line.split()[0] == f"{address:x}"]
+                if line.split()[0] == f"{address:x}")
 print(json.dumps(report))

@@ -196,12 +196,24 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
             continue
         if not path.is_file():
             raise ValueError(f"Runtime ClawTune trace is missing: {path}")
+        starts: dict[tuple, dict[str, Any]] = {}
         for record in _jsonl(path.read_bytes(), str(path)):
+            key = tuple(record.get(field) for field in (
+                "gateway_id", "runtime_id", "trace_id", "span_id", "session_id",
+            ))
+            if record.get("record_type") == "span_start" and record.get("kind") == "tool":
+                starts[key] = record
+                continue
             if record.get("record_type") != "span_end" or record.get("kind") != "tool":
                 continue
             execution = record.get("execution")
             if not isinstance(execution, dict):
                 continue
+            start = starts.get(key, {})
+            args = (start.get("input") or {}).get("requested_args")
+            if isinstance(args, dict) and isinstance(args.get("command"), str):
+                execution = {"requested_command": args["command"], **execution}
+                record = {**record, "execution": execution}
             explicit_id = str(execution.get("execution_id") or "")
             envelope_id = _runtime_envelope_execution_id(
                 execution.get("effective_command")

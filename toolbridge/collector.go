@@ -46,6 +46,7 @@ import (
 // ClawTune cgroup_resource_v1 fields (CgroupResourceResult) so the existing
 // ClawBox pipeline (schema.py / dataset.py / join.py) parses it verbatim.
 type resourceStats struct {
+	CgroupPath         string   `json:"cgroup_path,omitempty"`
 	Source             string   `json:"source"`             // cgroup-v2 | process-tree
 	MonitorSource      string   `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
 	AttributionSource  string   `json:"attribution_source"` // tool-bridge-pgid
@@ -462,6 +463,7 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 	defer c.mu.Unlock()
 
 	stats := resourceStats{
+		CgroupPath:         c.cgroupPath,
 		Source:             "process-tree",
 		MonitorSource:      "psutil-process-tree",
 		AttributionSource:  "tool-bridge-pgid",
@@ -556,6 +558,7 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string, 
 		"ts_end":                    stats.TsEnd,
 		"duration_ms":               stats.DurationMS,
 		"cpu_time_s":                stats.CPUTimeSeconds,
+		"cgroup_path":               stats.CgroupPath,
 		"cpu_utilization_avg_cores": cpuUtilization(stats.CPUTimeSeconds, stats.DurationMS),
 		"memory_rss_before_bytes":   stats.RSSBeforeBytes,
 		"memory_rss_after_bytes":    stats.RSSAfterBytes,

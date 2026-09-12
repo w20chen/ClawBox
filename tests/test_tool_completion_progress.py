@@ -22,6 +22,7 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
         active_reservations={'exec': 512}, admitted_routes={'exec': route},
         host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})}, prediction_records=[],
+        lifecycle=SimpleNamespace(complete_first_tool_after_restore=lambda *args, **kwargs: None),
         coordinator=SimpleNamespace(release=lambda *args: released.set(),
                                     set_tool_active=lambda *args: idle_updates.append(args)),
         session_id='session', timeline={}, _record_time_span=lambda *args, **kwargs: None,

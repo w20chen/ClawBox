@@ -15,6 +15,7 @@ PROVENANCE_PATCH_FILE=${CUBE_PROVENANCE_PATCH:-$SCRIPT_DIR/template-image-proven
 TIER_API_PATCH_FILE=$SCRIPT_DIR/tiered-memory-api.patch
 TIER_ISOLATION_PATCH_FILE=$SCRIPT_DIR/tiered-memory-isolation.patch
 TIMING_PATCH_FILE=$SCRIPT_DIR/checkpoint-phase-timing.patch
+INCREMENTAL_PATCH_FILE=$SCRIPT_DIR/incremental-cow-snapshot.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 
 require() {
@@ -27,6 +28,7 @@ require git
 [[ -f "$PROVENANCE_PATCH_FILE" ]] || { echo "missing provenance patch: $PROVENANCE_PATCH_FILE" >&2; exit 1; }
 [[ -f "$TIER_API_PATCH_FILE" && -f "$TIER_ISOLATION_PATCH_FILE" ]] || { echo "missing tiered memory patches" >&2; exit 1; }
 [[ -f "$TIMING_PATCH_FILE" ]] || { echo "missing checkpoint timing patch" >&2; exit 1; }
+[[ -f "$INCREMENTAL_PATCH_FILE" ]] || { echo "missing incremental CoW patch" >&2; exit 1; }
 
 # Later patches change some endpoint hunks, so the first patch alone cannot
 # recognize a fully prepared checkout. The final patch is applied last.
@@ -34,6 +36,10 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$TIMING_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$TIMING_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$TIMING_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$INCREMENTAL_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$INCREMENTAL_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$INCREMENTAL_PATCH_FILE"
   fi
   git -C "$SOURCE_DIR" diff --check
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -74,6 +80,7 @@ apply_once "$PROVENANCE_PATCH_FILE" "template image provenance"
 apply_once "$TIER_API_PATCH_FILE" "tiered snapshot API and lifecycle timing"
 apply_once "$TIER_ISOLATION_PATCH_FILE" "physical memory tier isolation"
 apply_once "$TIMING_PATCH_FILE" "checkpoint phase timing"
+apply_once "$INCREMENTAL_PATCH_FILE" "incremental CoW RAM snapshots"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$SOURCE_DIR"

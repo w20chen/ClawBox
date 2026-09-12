@@ -896,6 +896,8 @@ class ExperimentWorker:
             physical_observation=physical_observation,
             role="runtime",
             warm_snapshot_root=arm.resources.warm_snapshot_root,
+            snapshot_mechanism=arm.resources.snapshot_mechanism,
+            lazy_restore=True,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             snapshot_reservation_bytes=(arm.runtime.memory_mib + 256) * 1024 * 1024,
@@ -929,6 +931,8 @@ class ExperimentWorker:
             physical_observation=physical_observation,
             role="tool",
             warm_snapshot_root=arm.resources.warm_snapshot_root,
+            snapshot_mechanism=arm.resources.snapshot_mechanism,
+            lazy_restore=True,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             snapshot_reservation_bytes=(arm.sandbox.memory_mib + 256) * 1024 * 1024,
@@ -1527,6 +1531,7 @@ class ExperimentWorker:
                                  execution_id: str, *, tool_name: str = "exec",
                                  prediction: dict[str, Any] | None = None,
                                  phase: str = "agent"):
+                lifecycle.claim_first_tool_after_restore(execution_id)
                 started_wall, started_mono = time.time(), time.monotonic()
                 try:
                     observed = executor.execute_observed(
@@ -1534,6 +1539,10 @@ class ExperimentWorker:
                         execution_id=execution_id,
                     )
                 except Exception:
+                    report = lifecycle.complete_first_tool_after_restore(
+                        execution_id, tool_seconds=time.monotonic() - started_mono, status="error")
+                    if report is not None:
+                        events.write({"event": "first_tool_after_restore", "session_id": session_id, **report})
                     _record_time_span(
                         timeline, "tool.operation", started_wall, time.time(),
                         role="tool", operation=tool_name, execution_id=execution_id,
@@ -1547,6 +1556,11 @@ class ExperimentWorker:
                     start_monotonic=started_mono, end_monotonic=time.monotonic(),
                     status="ok" if observed.result.exit_code == 0 else "error",
                 )
+                report = lifecycle.complete_first_tool_after_restore(
+                    execution_id, tool_seconds=time.monotonic() - started_mono,
+                    status="ok" if observed.result.exit_code == 0 else "error")
+                if report is not None:
+                    events.write({"event": "first_tool_after_restore", "session_id": session_id, **report})
                 observed_by_execution[execution_id] = observed
                 trace_writer.record(
                     command, observed.result, execution_id=execution_id,
@@ -1721,6 +1735,8 @@ class ExperimentWorker:
                                 active_reservations[execution_id] = amount
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
+                                if execution_scope == "agent-tool":
+                                    lifecycle.claim_first_tool_after_restore(execution_id)
                         except Exception as exc:
                             events.write({
                                 "event": "tool_admission_failed",
@@ -1832,6 +1848,10 @@ class ExperimentWorker:
                         admitted_routes.pop(execution_id)
                         host_rss_samplers.pop(execution_id)
                         host_observation = host_sampler.stop()
+                        report = lifecycle.complete_first_tool_after_restore(
+                            execution_id,
+                            tool_seconds=timestamps["execution_completed_at"] - timestamps["execution_started_at"],
+                            status="ok" if int(request.get("exit_code", 1)) == 0 else "error")
                         for prediction_record in prediction_records:
                             if prediction_record.get("execution_id") == execution_id:
                                 prediction_record.update(host_observation)
@@ -1864,6 +1884,8 @@ class ExperimentWorker:
                     # Never hold reservation_lock while waiting for wait_lock.
                     with wait_lock, reservation_lock:
                         coordinator.set_tool_active(session_id, bool(active_reservations))
+                    if report is not None:
+                        events.write({"event": "first_tool_after_restore", "session_id": session_id, **report})
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
                                   "exit_code": request.get("exit_code"),
@@ -2161,6 +2183,8 @@ class ExperimentWorker:
                      ),
                      "timeline": timeline}
         finally:
+            if locals().get("trace_writer") is not None:
+                trace_writer.close()
             if finalization_active:
                 coordinator.set_tool_active(session_id, False)
                 finalization_active = False

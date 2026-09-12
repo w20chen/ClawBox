@@ -18,16 +18,16 @@ USER root
 COPY --from=cube-base /usr/bin/envd /usr/bin/envd
 COPY --from=toolbridge-build /out/tool-bridge /usr/local/bin/tool-bridge
 COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-tool-entrypoint.sh
-COPY docker/patch-clawtune-guest-arm64.py /tmp/patch-clawtune-guest-arm64.py
-# Keep the PMU implementation and guest protocol sourced directly from the
-# sibling ClawTune checkout (docker buildx --build-context clawtune=../ClawTune).
-# There is no ClawBox fork of the collector core.
-COPY --from=clawtune services/sidecar/src/clawtune_sidecar/monitoring/pmu.py /opt/clawtune-guest/services/sidecar/src/clawtune_sidecar/monitoring/pmu.py
+# Install the complete collector package from the same main export as Runtime.
+ARG CLAWTUNE_REVISION=unknown
+LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
+COPY --from=clawtune services/sidecar /opt/clawtune-guest/services/sidecar
+COPY --from=clawtune contracts /opt/clawtune-guest/contracts
+COPY --from=clawtune seeds /opt/clawtune-guest/seeds
+RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune-guest/services/sidecar
 COPY --from=clawtune tools/guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-tool-entrypoint.sh \
  && test -f /opt/clawtune-guest/tools/guest_collector_server.py \
- && /opt/clawtune/venv/bin/python /tmp/patch-clawtune-guest-arm64.py \
- && rm /tmp/patch-clawtune-guest-arm64.py \
  && mkdir -p /workspace /var/lib/clawtune/artifacts/tool-resource
 ENV CLAWBOX_VM_ROLE=tool
 WORKDIR /workspace

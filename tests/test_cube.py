@@ -329,6 +329,30 @@ def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
     lifecycle.close()
 
 
+@pytest.mark.parametrize("capacity, expected_tier", [(1024, SnapshotTier.COLD), (2048, SnapshotTier.WARM)])
+def test_lazy_restore_retains_warm_until_next_commit_or_close(capacity, expected_tier):
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(capacity)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+        snapshot_pool=pool, snapshot_reservation_bytes=1024, lazy_restore=True,
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    lifecycle.restore()
+    assert lifecycle.tier is SnapshotTier.LOCAL
+    assert pool.committed_bytes == 1024
+    assert pool.snapshot()["manifests"][0]["retained_by_vm"]
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.tier is expected_tier
+    assert pool.committed_bytes == (1024 if expected_tier is SnapshotTier.WARM else 0)
+    lifecycle.restore()
+    lifecycle.close()
+    assert pool.committed_bytes == pool.reserved_bytes == 0
+
+
 def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)

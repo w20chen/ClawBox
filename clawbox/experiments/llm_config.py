@@ -12,12 +12,16 @@ def resolve_llm_configuration(configuration: dict, *, live: bool) -> tuple[dict,
     if source := configuration.get("clawtune_config"):
         path = Path(source).expanduser().resolve()
         root = path.parent.parent
+        source_root = Path(configuration.get("clawtune_root") or os.getenv("CLAWTUNE_ROOT")
+                           or Path(__file__).resolve().parents[3] / "ClawTune")
+        sys.path.insert(0, str(source_root))
         sys.path.insert(0, str(root))
         try:
             from swe_rebench.config import RunnerConfig
             llm = RunnerConfig.from_yaml(path, repo_root=root).llm
         finally:
             sys.path.remove(str(root))
+            sys.path.remove(str(source_root))
         resolved["base_url"] = llm.upstream_base_url
         resolved["model"] = llm.model
         credential = llm.api_key

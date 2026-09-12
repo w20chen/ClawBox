@@ -27,6 +27,36 @@ def test_reservation_and_commit_never_double_count() -> None:
     assert (pool.reserved_bytes, pool.committed_bytes) == (0, 50)
 
 
+def test_retained_lineage_is_not_spillable_and_commit_counts_only_new_pages():
+    pool = WarmSnapshotPool(100)
+    commit(pool, 1, 60)
+    pool.retain_for_vm(key(1))
+    with pytest.raises(WarmCapacityError):
+        pool.lru_victims(50)
+    successor = SnapshotKey(key(1).session_id, "tool", 2)
+    pool.reserve(successor, 30)
+    pool.commit(successor, path="/warm/delta", logical_bytes=60,
+                allocated_bytes=80, transferred_bytes=20, replaces=key(1))
+    assert pool.reserved_bytes == 0
+    assert pool.committed_bytes == 80
+    assert len(pool.snapshot()["manifests"]) == 1
+    assert not pool.manifest(successor).retained_by_vm
+
+
+def test_failed_successor_commit_preserves_retained_baseline():
+    pool = WarmSnapshotPool(100)
+    commit(pool, 1, 60)
+    pool.retain_for_vm(key(1))
+    successor = SnapshotKey(key(1).session_id, "tool", 2)
+    pool.reserve(successor, 30)
+    with pytest.raises(RuntimeError, match="exceed reservation"):
+        pool.commit(successor, path="/warm/delta", logical_bytes=60,
+                    allocated_bytes=95, transferred_bytes=35, replaces=key(1))
+    pool.abort(successor)
+    assert pool.committed_bytes == 60
+    assert pool.manifest(key(1)).retained_by_vm
+
+
 def test_oversize_and_capacity_pressure_fail_closed() -> None:
     pool = WarmSnapshotPool(100)
     with pytest.raises(WarmSnapshotTooLarge):

@@ -11,7 +11,7 @@ from typing import Any, Mapping
 from clawbox.replay.lifecycle import LifecycleError
 
 from .client import CubeSandboxClient, Ownership
-from clawbox.experiments.snapshot_pool import SnapshotKey, SnapshotManifest, WarmSnapshotPool
+from clawbox.experiments.snapshot_pool import SnapshotKey, SnapshotManifest, WarmSnapshotPool, WarmCapacityError
 from clawbox.experiments.spec_types import SnapshotTier
 
 
@@ -49,6 +49,7 @@ class LifecycleTiming:
     tier_to: str | None = None
     snapshot_generation: int | None = None
     snapshot_path: str | None = None
+    snapshot_metrics: dict[str, Any] | None = None
 
 
 class CubeSandboxLifecycle:
@@ -64,7 +65,15 @@ class CubeSandboxLifecycle:
                  role: str = "tool", warm_snapshot_root: str | None = None,
                  cold_snapshot_root: str | None = None,
                  snapshot_pool: WarmSnapshotPool | None = None,
-                 snapshot_reservation_bytes: int | None = None) -> None:
+                 snapshot_reservation_bytes: int | None = None,
+                 snapshot_mechanism: str = "full-copy", lazy_restore: bool = False) -> None:
+        if snapshot_mechanism not in {"full-copy", "incremental-cow"}:
+            raise ValueError("invalid snapshot mechanism")
+        if snapshot_mechanism == "incremental-cow" and not lazy_restore:
+            raise ValueError("incremental-cow requires lazy restore")
+        self.snapshot_mechanism = snapshot_mechanism
+        self.lazy_restore = lazy_restore
+        self._snapshot_tier: SnapshotTier | None = None
         self.client = client
         self.template = template
         self.node_name = node_name
@@ -87,6 +96,37 @@ class CubeSandboxLifecycle:
         self._tier = SnapshotTier.LOCAL
         self._generation = 0
         self._snapshot_key: SnapshotKey | None = None
+        self._first_tool_restore: dict[str, Any] | None = None
+        self._restore_fault_sampler = None
+
+    def claim_first_tool_after_restore(self, execution_id: str) -> None:
+        """Claim at admission, so concurrent completion order cannot relabel it."""
+        with self._lock:
+            marker = self._first_tool_restore
+            if marker is not None and marker.get("execution_id") is None:
+                marker["execution_id"] = execution_id
+
+    def complete_first_tool_after_restore(self, execution_id: str, *,
+                                         tool_seconds: float, status: str) -> dict[str, Any] | None:
+        with self._lock:
+            marker = self._first_tool_restore
+            if marker is None or marker.get("execution_id") != execution_id:
+                return None
+            completed = time.monotonic()
+            faults = self._restore_fault_sampler.stop() if self._restore_fault_sampler else {}
+            self._restore_fault_sampler = None
+            self._first_tool_restore = None
+            return {
+                **marker,
+                "first_tool_after_restore_seconds": max(0.0, tool_seconds),
+                "restore_ready_to_first_tool_complete_seconds": max(
+                    0.0, completed - marker["restore_ready_monotonic_s"]),
+                "status": status,
+                **{key: value for key, value in faults.items()
+                   if key in {"host_vm_minor_faults_delta", "host_vm_major_faults_delta",
+                              "host_vm_disk_read_bytes_delta"}},
+                "fault_counter_scope": "host_vm_processes_restore_ready_to_first_tool_complete",
+            }
 
     @property
     def state(self) -> SandboxState:
@@ -113,7 +153,8 @@ class CubeSandboxLifecycle:
                 host_memory_before: Mapping[str, Any] | None = None,
                 tier_from: str | None = None, tier_to: str | None = None,
                 snapshot_generation: int | None = None,
-                snapshot_path: str | None = None) -> float:
+                snapshot_path: str | None = None,
+                snapshot_metrics: Mapping[str, Any] | None = None) -> float:
         completed_wall = time.time()
         completed_mono = time.monotonic()
         duration = max(0.0, completed_mono - started_mono)
@@ -143,6 +184,7 @@ class CubeSandboxLifecycle:
             reclaimed, growth, net_change, evidence,
             "cubesandbox_pause_snapshot_destroy" if operation == "checkpoint" else None,
             tier_from, tier_to, snapshot_generation, snapshot_path,
+            dict(snapshot_metrics) if snapshot_metrics is not None else None,
         ))
         return duration
 
@@ -209,6 +251,8 @@ class CubeSandboxLifecycle:
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
             key = None
+            predecessor = (self._snapshot_key if self._snapshot_tier is SnapshotTier.WARM
+                           and self._tier is SnapshotTier.LOCAL else None)
             try:
                 manifest = None
                 # A disabled or undersized WARM pool is the SSD-only ablation,
@@ -223,17 +267,24 @@ class CubeSandboxLifecycle:
                 else:
                     if tier is SnapshotTier.LOCAL:
                         raise ValueError("cannot checkpoint a sandbox to LOCAL")
-                    root = (self.warm_snapshot_root if tier is SnapshotTier.WARM
-                            else self.cold_snapshot_root)
-                    if not root or self.sandbox_id is None:
-                        raise RuntimeError(f"{tier.value.upper()} snapshot root is not configured")
                     self._generation += 1
                     key = SnapshotKey(self.ownership.session_id, self.role, self._generation)
                     if tier is SnapshotTier.WARM:
                         if self.snapshot_pool is None or self.snapshot_reservation_bytes is None:
                             raise RuntimeError("WARM snapshot accounting is not configured")
-                        self.snapshot_pool.reserve_for_admission(
-                            key, self.snapshot_reservation_bytes)
+                        try:
+                            self.snapshot_pool.reserve_for_admission(
+                                key, self.snapshot_reservation_bytes,
+                                timeout_s=0 if predecessor is not None else 120,
+                            )
+                        except WarmCapacityError:
+                            if predecessor is None:
+                                raise
+                            tier = SnapshotTier.COLD
+                    root = (self.warm_snapshot_root if tier is SnapshotTier.WARM
+                            else self.cold_snapshot_root)
+                    if not root or self.sandbox_id is None:
+                        raise RuntimeError(f"{tier.value.upper()} snapshot root is not configured")
                     path = (
                         f"{root.rstrip('/')}/{self.sandbox_id}/"
                         f"{self.role}-g{self._generation}.mem"
@@ -241,6 +292,8 @@ class CubeSandboxLifecycle:
                     manifest = self.client.pause_sandbox(
                         self.sandbox, tier=tier.value,
                         memory_snapshot_path=path, generation=self._generation,
+                        **({"snapshot_mechanism": self.snapshot_mechanism}
+                           if self.snapshot_mechanism != "full-copy" else {}),
                     )
                     if tier is SnapshotTier.WARM:
                         self.snapshot_pool.commit(
@@ -251,14 +304,22 @@ class CubeSandboxLifecycle:
                                 int(manifest["transferred_bytes"])
                                 if manifest["transferred_bytes"] is not None else None
                             ),
-                            spiller=self._spill_to_cold,
+                            spiller=self._spill_to_cold, replaces=predecessor,
                         )
+                    elif predecessor is not None and self.snapshot_pool is not None:
+                        self.snapshot_pool.remove(predecessor)
                     self._snapshot_key = key
+                    self._snapshot_tier = tier
                     self._tier = tier
                 self._state = SandboxState.SWAPPED
                 return self._record("checkpoint", before, self._state,
                                     started_wall, started_mono,
-                                    host_memory_before=host_memory_before)
+                                    host_memory_before=host_memory_before,
+                                    tier_from=SnapshotTier.LOCAL.value,
+                                    tier_to=tier.value if tier is not None else None,
+                                    snapshot_generation=key.generation if key is not None else None,
+                                    snapshot_path=manifest.get("memory_snapshot_path") if manifest else None,
+                                    snapshot_metrics=manifest)
             except Exception as exc:
                 if key is not None and self.snapshot_pool is not None:
                     self.snapshot_pool.abort(key)
@@ -293,6 +354,7 @@ class CubeSandboxLifecycle:
                     generation=manifest.key.generation,
                 )
                 self._tier = SnapshotTier.COLD
+                self._snapshot_tier = SnapshotTier.COLD
                 self._record(
                     "spill", before, before, started_wall, started_mono,
                     host_memory_before=host_memory_before,
@@ -338,17 +400,44 @@ class CubeSandboxLifecycle:
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
             try:
-                self.sandbox = self.client.connect_sandbox(self.sandbox_id)
+                self.sandbox = self.client.connect_sandbox(
+                    self.sandbox_id,
+                    **({"snapshot_mechanism": self.snapshot_mechanism}
+                       if self.snapshot_mechanism != "full-copy" else {}),
+                )
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
                         raise RuntimeError("WARM snapshot accounting disappeared before restore")
-                    self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
-                self._snapshot_key = None
+                    if self.lazy_restore:
+                        self.snapshot_pool.retain_for_vm(self._snapshot_key)
+                    else:
+                        self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
+                if not self.lazy_restore:
+                    self._snapshot_key = None
+                    self._snapshot_tier = None
                 self._tier = SnapshotTier.LOCAL
                 self._state = SandboxState.RUNNING
-                return self._record("restore", before, self._state,
+                elapsed = self._record("restore", before, self._state,
                                     started_wall, started_mono,
-                                    host_memory_before=host_memory_before)
+                                    host_memory_before=host_memory_before,
+                                    tier_from=self._snapshot_tier.value if self._snapshot_tier else None,
+                                    tier_to=SnapshotTier.LOCAL.value,
+                                    snapshot_generation=self._generation)
+                self._first_tool_restore = {
+                    "restore_ready_monotonic_s": self._timings[-1].completed_monotonic_s,
+                    "restore_ready_service_seconds": elapsed,
+                    "snapshot_generation": self._generation,
+                    "snapshot_tier": self._snapshot_tier.value if self._snapshot_tier else None,
+                }
+                from pathlib import Path
+                from clawbox.experiments.memory import SandboxRSSSampler
+                try:
+                    self._restore_fault_sampler = (
+                        SandboxRSSSampler(self.sandbox_id) if Path("/proc").is_dir() else None
+                    )
+                except OSError:
+                    self._restore_fault_sampler = None
+                return elapsed
             except Exception as exc:
                 self._state = before
                 self._record(
@@ -409,7 +498,7 @@ class CubeSandboxLifecycle:
                 if self.sandbox_id is not None:
                     self.client.kill_sandbox(self.sandbox_id)
                 if (self._snapshot_key is not None and
-                        self._tier is SnapshotTier.WARM and
+                        self._snapshot_tier is SnapshotTier.WARM and
                         self.snapshot_pool is not None):
                     self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
                 self._snapshot_key = None

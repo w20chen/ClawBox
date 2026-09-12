@@ -23,11 +23,13 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
         artifacts={"cgroup_resource_v1": json.dumps({
             "schema": "cgroup_resource_v1", "execution_id": "call-123",
             "source": "cgroup-v2", "cpu_time_s": 0.5,
+            "cgroup_path": "/sys/fs/cgroup/clawbox/call-123", "sampling_quality": "valid",
             "cpu_utilization_avg_cores": 0.4,
             "memory_rss_peak_bytes": 4096, "memory_rss_after_bytes": 2048,
         })},
     )
 
+    writer.close()
     joined, trusted = build_joined_dataset(
         tmp_path / "traces", tmp_path / "tool-bridge.jsonl",
     )
@@ -35,6 +37,7 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
     assert len(trusted) == 1
     assert trusted[0].execution_id == execution_id
     assert trusted[0].tool_name == "exec"
+    assert trusted[0].command == "pytest -q"
     assert trusted[0].duration_sec == 1.25
     assert trusted[0].rss_peak_bytes == 4096
     assert trusted[0].cgroup is not None
@@ -43,3 +46,14 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
 
     bridge = json.loads((tmp_path / "tool-bridge.jsonl").read_text().strip())
     assert bridge["execution_id"] == trusted[0].execution_id
+
+
+def test_worker_preserves_original_clause_artifact(tmp_path):
+    raw = '{ "schema_version": 2, "calls": [{"tool_call_id": "exec-a"}] }\n'
+    writer = ClawTuneTraceWriter(tmp_path, run_id="run", session_id="session")
+    try:
+        writer.record("true", CommandResult(0, "", "", 0.1), execution_id="exec-a",
+                      artifacts={"clause_telemetry_v2": raw})
+    finally:
+        writer.close()
+    assert (tmp_path / "traces/tool-resource/clause-telemetry-exec-a.json").read_bytes() == raw.encode()

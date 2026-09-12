@@ -43,12 +43,15 @@ RUN test -n "${KERNEL_VERSION}" \
  && ln -s "/usr/src/linux-${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/build"
 
 COPY --from=clawtune services/sidecar /opt/clawtune-guest/services/sidecar
+COPY --from=clawtune contracts /opt/clawtune-guest/contracts
+COPY --from=clawtune seeds /opt/clawtune-guest/seeds
 RUN sed -i 's/\r$//' \
       /opt/clawtune-guest/services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
  && XDG_CACHE_HOME=/opt/clawtune/cache /bin/sh \
       /opt/clawtune-guest/services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
  && chmod -R a+rX /opt/clawtune/cache \
  && /usr/bin/python3 -m venv --system-site-packages /opt/clawtune/venv \
+ && /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune-guest/services/sidecar \
  && /opt/clawtune/venv/bin/python -c \
       "import sys; sys.path.insert(0, '/opt/clawtune-guest/services/sidecar/src'); from tool_resource.telemetry import _ensure_bcc_importable; print(_ensure_bcc_importable().__file__)"
 

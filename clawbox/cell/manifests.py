@@ -280,12 +280,13 @@ def runtime_job(task: dict[str, Any], size: CellSize, *, node_name: str | None =
         {"name": "CELL_ID", "value": name},
         {"name": "CLAWBOX_RUN_ID", "value": str(run_ref.get("runID") or name)},
         {"name": "CLAWBOX_ATTEMPT_ID", "value": str(run_ref.get("attemptID") or name)},
-        {"name": "CLAWTUNE_REVISION", "value": settings.clawtune_revision},
         {"name": "TRACE_INGESTER_URL", "value": settings.trace_ingester_url},
         _secret_env(f"{name}-auth", "TRACE_UPLOAD_TOKEN", "trace-upload-token"),
         {"name": "CLAWBOX_STATE_DIR", "value": f"/state/{name}"},
         {"name": "CLAWTUNE_TRACE_DIR", "value": f"/state/{name}/traces"},
     ]
+    if settings.clawtune_revision not in ("", "main"):
+        upload_env.append({"name": "CLAWTUNE_REVISION", "value": settings.clawtune_revision})
     # P2: control-plane KB pull/flush wiring (only when kb_endpoint is set).
     if settings.kb_endpoint:
         upload_env += [

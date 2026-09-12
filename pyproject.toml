@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "CubeSandbox experiment platform with ClawTune measurement and prediction"
 requires-python = ">=3.12"
 dependencies = [
+  "clawtune-sidecar @ git+https://github.com/w20chen/ClawTune.git@main#subdirectory=services/sidecar",
   "fastapi>=0.110",
   "httpx>=0.27",
   "pydantic>=2.7",

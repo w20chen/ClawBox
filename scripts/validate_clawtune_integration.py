@@ -16,22 +16,17 @@ LEGACY_MARKERS = (
 
 
 def fail(message: str) -> None:
-    raise SystemExit(f"ClawTune v2 integration check failed: {message}")
+    raise SystemExit(f"ClawTune main integration check failed: {message}")
 
 
 def revision(root: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else "unknown"
+    from clawbox.clawtune_integration import source_revision
+    return source_revision(root)
 
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="Validate the direct ClawTune v2 integration")
+    parser = argparse.ArgumentParser(description="Validate the direct ClawTune main integration")
     parser.add_argument("--clawtune-root", type=Path, default=project_root.parent / "ClawTune")
     parser.add_argument("--require-assets", action="store_true")
     args = parser.parse_args()
@@ -48,11 +43,14 @@ def main() -> None:
         sidecar_dir / "pyproject.toml",
         sidecar_dir / "src" / "clawtune_sidecar" / "main.py",
         sidecar_dir / "src" / "tool_resource" / "runtime_kb.py",
-        root / "swe_rebench" / "prepare.py",
+        root / "tools" / "guest_collector_server.py",
+        sidecar_dir / "src" / "clawtune_sidecar" / "trace.py",
+        sidecar_dir / "src" / "tool_resource" / "sdk.py",
+        sidecar_dir / "src" / "clawtune_kb" / "store.py",
     )
     missing = [str(path) for path in required if not path.is_file()]
-    if not (root / "traces" / "tool-resource").is_dir():
-        missing.append(str(root / "traces" / "tool-resource"))
+    if not (root / "seeds" / "bootstrap-v1").is_dir():
+        missing.append(str(root / "seeds" / "bootstrap-v1"))
     if missing:
         fail("missing current source files: " + ", ".join(missing))
 
@@ -65,6 +63,7 @@ def main() -> None:
         "mode",
         "failOpen",
         "executionBackend",
+        "sandboxExecEnvelope",
         "enableCgroup",
         "enableAffinity",
         "enableNuma",
@@ -94,6 +93,17 @@ def main() -> None:
         for marker in LEGACY_MARKERS:
             if marker in text:
                 fail(f"legacy marker {marker!r} remains in {path.relative_to(project_root)}")
+
+    import sys
+    sys.path.insert(0, str(sidecar_dir / "src"))
+    from clawtune_kb import validate_seed
+    from clawtune_sidecar.trace import AgentTestBenchTraceWriter
+    from tool_resource.sdk import DockerCommandObserver, DockerExecutionContext
+    from clawtune_sidecar.predictors.call_load import predict_call_load
+    validate_seed(root / "seeds" / "bootstrap-v1")
+    for method in ("record_model", "record_tool", "flush", "close"):
+        if not callable(getattr(AgentTestBenchTraceWriter, method, None)):
+            fail(f"trace recorder method missing: {method}")
 
     if args.require_assets:
         asset_required = (

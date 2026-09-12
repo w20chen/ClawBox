@@ -208,7 +208,7 @@ def ingest_native_batch(
         )
     db.flush()  # raw immutable storage exists before native validation/projecting
 
-    if manifest.clawtune_revision != expected_clawtune_revision:
+    if expected_clawtune_revision not in ("", "main") and manifest.clawtune_revision != expected_clawtune_revision:
         reason = (
             f"incompatible ClawTune revision {manifest.clawtune_revision}; "
             f"expected {expected_clawtune_revision}"

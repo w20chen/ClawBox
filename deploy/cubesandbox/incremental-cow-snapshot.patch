@@ -1,0 +1,1544 @@
+diff --git a/CubeAPI/src/cubemaster/mod.rs b/CubeAPI/src/cubemaster/mod.rs
+index f042f6f..c040f0f 100644
+--- a/CubeAPI/src/cubemaster/mod.rs
++++ b/CubeAPI/src/cubemaster/mod.rs
+@@ -113,12 +113,25 @@ impl CubeMasterClient {
+         &self,
+         sandbox_id: &str,
+         instance_type: &str,
++    ) -> Result<GetSandboxResponse, CubeMasterError> {
++        self.get_sandbox_with_port(sandbox_id, instance_type, None).await
++    }
++
++    pub async fn get_sandbox_with_port(
++        &self,
++        sandbox_id: &str,
++        instance_type: &str,
++        container_port: Option<i32>,
+     ) -> Result<GetSandboxResponse, CubeMasterError> {
+         let url = format!("{}/cube/sandbox/info", self.base_url);
+-        let resp = self
++        let mut request = self
+             .inner
+             .get(&url)
+-            .query(&[("sandbox_id", sandbox_id), ("instance_type", instance_type)])
++            .query(&[("sandbox_id", sandbox_id), ("instance_type", instance_type)]);
++        if let Some(port) = container_port {
++            request = request.query(&[("container_port", port)]);
++        }
++        let resp = request
+             .send()
+             .await
+             .map_err(CubeMasterError::Http)?;
+@@ -1147,6 +1160,14 @@ pub struct GetSandboxDataItem {
+     #[serde(default)]
+     pub host_id: String,
+     #[serde(default)]
++    pub host_ip: String,
++    #[serde(default)]
++    pub exposed_port_endpoint: String,
++    #[serde(default)]
++    pub exposed_port_mode: String,
++    #[serde(default)]
++    pub requested_container_port: i32,
++    #[serde(default)]
+     pub template_id: String,
+     #[serde(default)]
+     pub annotations: HashMap<String, String>,
+@@ -1475,6 +1496,7 @@ pub struct SandboxUpdateRequest {
+     pub memory_snapshot_path: Option<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub snapshot_generation: Option<u64>,
++    pub snapshot_mechanism: Option<String>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.rs
+index d7970fd..ff13119 100644
+--- a/CubeAPI/src/handlers/sandboxes.rs
++++ b/CubeAPI/src/handlers/sandboxes.rs
+@@ -391,7 +391,7 @@ pub async fn resume_sandbox(
+     let sandbox = state
+         .services
+         .sandboxes
+-        .resume_sandbox(&sandbox_id, body.timeout)
++        .resume_sandbox(&sandbox_id, body.timeout, body.snapshot_mechanism.as_deref())
+         .await?;
+ 
+     tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
+@@ -436,7 +436,7 @@ pub async fn connect_sandbox(
+     let sandbox = state
+         .services
+         .sandboxes
+-        .connect_sandbox(&sandbox_id, body.timeout)
++        .connect_sandbox(&sandbox_id, body.timeout, body.snapshot_mechanism.as_deref())
+         .await?;
+     Ok((StatusCode::OK, Json(sandbox)))
+ }
+diff --git a/CubeAPI/src/models/mod.rs b/CubeAPI/src/models/mod.rs
+index d425847..15e90f4 100644
+--- a/CubeAPI/src/models/mod.rs
++++ b/CubeAPI/src/models/mod.rs
+@@ -614,6 +614,8 @@ pub struct ResumedSandbox {
+     pub timeout: Option<i32>,
+     #[serde(rename = "autoPause", default)]
+     pub auto_pause: bool,
++    #[serde(default)]
++    pub snapshot_mechanism: Option<String>,
+ }
+ 
+ /// Request body for POST /sandboxes/{id}/connect.
+@@ -622,6 +624,8 @@ pub struct ConnectSandbox {
+     /// Idle timeout in seconds; None when the client did not send one.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub timeout: Option<i32>,
++    #[serde(default)]
++    pub snapshot_mechanism: Option<String>,
+ }
+ 
+ /// Request body for POST /sandboxes/{id}/snapshots.
+@@ -811,6 +815,7 @@ pub struct PauseSandboxRequest {
+     pub snapshot_tier: Option<String>,
+     pub memory_snapshot_path: Option<String>,
+     pub snapshot_generation: Option<u64>,
++    pub snapshot_mechanism: Option<String>,
+ }
+ 
+ #[derive(Debug, Deserialize, ToSchema)]
+diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
+index 9c71025..eef8e45 100644
+--- a/CubeAPI/src/services/sandboxes.rs
++++ b/CubeAPI/src/services/sandboxes.rs
+@@ -413,6 +413,7 @@ impl SandboxService {
+             snapshot_tier: Some(placement.snapshot_tier.clone()),
+             memory_snapshot_path: Some(placement.memory_snapshot_path.clone()),
+             snapshot_generation: Some(placement.snapshot_generation),
++            snapshot_mechanism: None,
+         };
+         let response = self
+             .cubemaster
+@@ -436,10 +437,13 @@ impl SandboxService {
+         &self,
+         sandbox_id: &str,
+         timeout: Option<i32>,
++        snapshot_mechanism: Option<&str>,
+     ) -> AppResult<Sandbox> {
++        let mut update = self.build_update_request(sandbox_id, "resume", timeout, None);
++        update.snapshot_mechanism = snapshot_mechanism.map(str::to_owned);
+         let resp = self
+             .cubemaster
+-            .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout, None))
++            .update_sandbox(&update)
+             .await
+             .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+ 
+@@ -469,13 +473,16 @@ impl SandboxService {
+         &self,
+         sandbox_id: &str,
+         timeout: Option<i32>,
++        snapshot_mechanism: Option<&str>,
+     ) -> AppResult<Sandbox> {
+         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
+ 
+         if d.status == SandboxStatus::Paused {
++            let mut update = self.build_update_request(sandbox_id, "resume", timeout, None);
++            update.snapshot_mechanism = snapshot_mechanism.map(str::to_owned);
+             let resp = self
+                 .cubemaster
+-                .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout, None))
++                .update_sandbox(&update)
+                 .await
+                 .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+ 
+@@ -750,6 +757,7 @@ impl SandboxService {
+             snapshot_tier: placement.and_then(|value| value.snapshot_tier.clone()),
+             memory_snapshot_path: placement.and_then(|value| value.memory_snapshot_path.clone()),
+             snapshot_generation: placement.and_then(|value| value.snapshot_generation),
++            snapshot_mechanism: placement.and_then(|value| value.snapshot_mechanism.clone()),
+         }
+     }
+ 
+@@ -2125,6 +2133,7 @@ mod tests {
+             snapshot_tier: None,
+             memory_snapshot_path: None,
+             snapshot_generation: None,
++            snapshot_mechanism: None,
+         };
+         let json = serde_json::to_value(&req).unwrap();
+         assert!(
+@@ -2142,6 +2151,7 @@ mod tests {
+                 snapshot_tier: None,
+                 memory_snapshot_path: None,
+                 snapshot_generation: None,
++                snapshot_mechanism: None,
+             };
+             let json = serde_json::to_value(&req).unwrap();
+             assert_eq!(
+diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+index fafe4d5..eb01543 100644
+--- a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
++++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+@@ -97,6 +97,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+ 			rsp.Ret.RetMsg = "invalid tiered pause placement"
+ 			return rsp
+ 		}
++		cubeletReq.Annotations["clawbox.snapshot.mechanism"] = req.SnapshotMechanism
+ 		cubeletReq.Annotations["clawbox.snapshot.tier"] = tier
+ 		cubeletReq.Annotations["clawbox.snapshot.memory.path"] = req.MemorySnapshotPath
+ 		cubeletReq.Annotations["clawbox.snapshot.generation"] = strconv.FormatUint(
+@@ -513,6 +514,11 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
+ 			log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still has pause leftovers: %v",
+ 				req.SandboxID, targetIP, origin, err)
+ 		}
++	} else if req.SnapshotMechanism == "incremental-cow" {
++		// The restored VMM keeps a lazy mmap of the immutable RAM layers.
++		// Cubelet removes this package after the next Pause commits its
++		// independently hardlinked lineage, or when the live VM is destroyed.
++		log.G(ctx).Infof("resume: retaining incremental RAM base %s until next pause", rec.SnapshotID)
+ 	} else if err := pausesnap.CleanupPauseSnapshot(ctx, req.RequestID, targetIP, rec.SnapshotID, rec.Backend); err != nil {
+ 		log.G(ctx).Errorf("resume: sandbox %s is running but pause package %s on %s was not deleted: %v",
+ 			req.SandboxID, rec.SnapshotID, targetIP, err)
+diff --git a/CubeMaster/pkg/service/sandbox/types/types.go b/CubeMaster/pkg/service/sandbox/types/types.go
+index 29a09f9..bc940a9 100644
+--- a/CubeMaster/pkg/service/sandbox/types/types.go
++++ b/CubeMaster/pkg/service/sandbox/types/types.go
+@@ -832,6 +832,7 @@ type UpdateRequest struct {
+ 	SnapshotTier       string `json:"snapshot_tier,omitempty"`
+ 	MemorySnapshotPath string `json:"memory_snapshot_path,omitempty"`
+ 	SnapshotGeneration uint64 `json:"snapshot_generation,omitempty"`
++	SnapshotMechanism string `json:"snapshot_mechanism,omitempty"`
+ }
+ 
+ // UpdateNetworkRequest is the wire shape for POST /cube/sandbox/network. The
+diff --git a/CubeShim/shim/src/hypervisor/cube_hypervisor.rs b/CubeShim/shim/src/hypervisor/cube_hypervisor.rs
+index d95d962..a15ed1c 100644
+--- a/CubeShim/shim/src/hypervisor/cube_hypervisor.rs
++++ b/CubeShim/shim/src/hypervisor/cube_hypervisor.rs
+@@ -287,7 +287,7 @@ impl CubeHypervisor {
+     }
+ 
+     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
+-        self.pause_vm_cube_with_config(path, None).await
++        self.pause_vm_cube_with_config(path, None, SnapshotType::Full).await
+     }
+ 
+     /// Pause the VM and write a snapshot. When `memory_vol_url` is set, memory
+@@ -298,10 +298,12 @@ impl CubeHypervisor {
+         &self,
+         destination_url: &str,
+         memory_vol_url: Option<String>,
++        snapshot_type: SnapshotType,
+     ) -> CResult<()> {
+         let snap_config = Arc::new(SnapshotConfig {
+             destination_url: destination_url.to_string(),
+             memory_vol_url,
++            snapshot_type,
+             ..Default::default()
+         });
+         let ch = self.ch.as_ref().unwrap().lock().await;
+diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
+index 23c6d56..4021983 100644
+--- a/CubeShim/shim/src/sandbox/sb.rs
++++ b/CubeShim/shim/src/sandbox/sb.rs
+@@ -472,7 +472,8 @@ impl SandBox {
+     pub async fn create_sandbox(&mut self) -> CResult<()> {
+         // Join LOCAL before restoring/allocating guest RAM. Moving the shim
+         // only after Create completes leaves those pages charged to Cubelet.
+-        if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1") {
++        if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1")
++            || std::env::var("CLAWBOX_KVM_DIRTY_TRACKING").as_deref() == Ok("1") {
+             let group = self.spec.annotations().as_ref()
+                 .and_then(|annotations| annotations.get("cube.sandbox_cgroup_path"))
+                 .ok_or_else(|| "missing LOCAL cgroup annotation".to_string())?;
+@@ -1360,6 +1361,7 @@ impl SandBox {
+         &mut self,
+         destination_path: &str,
+         memory_vol_url: Option<String>,
++        snapshot_type: cube_hypervisor::SnapshotType,
+     ) -> CResult<()> {
+         {
+             let mut state = self.state.lock().await;
+@@ -1374,7 +1376,7 @@ impl SandBox {
+         }
+ 
+         if let Err(e) = self
+-            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url)
++            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
+             .await
+         {
+             let mut state = self.state.lock().await;
+@@ -1388,6 +1390,7 @@ impl SandBox {
+         &mut self,
+         destination_path: &str,
+         memory_vol_url: Option<String>,
++        snapshot_type: cube_hypervisor::SnapshotType,
+     ) -> CResult<()> {
+         self.disconnect_agent(false).await?;
+ 
+@@ -1409,7 +1412,7 @@ impl SandBox {
+         })?;
+ 
+         let destination_url = format!("file://{}", snapshot_dir.display());
+-        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url)
++        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
+             .await?;
+ 
+         // vmshutdown event after pause2snapshot deletes the MicroVM
+diff --git a/CubeShim/shim/src/service/update_ext.rs b/CubeShim/shim/src/service/update_ext.rs
+index c677bab..60dc10d 100644
+--- a/CubeShim/shim/src/service/update_ext.rs
++++ b/CubeShim/shim/src/service/update_ext.rs
+@@ -104,6 +104,8 @@ struct PauseSnapshotConfig {
+     /// CommitSandbox layout (`--memory-vol`).
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub memory_vol_url: Option<String>,
++    #[serde(default)]
++    pub snapshot_type: cube_hypervisor::SnapshotType,
+ }
+ 
+ /// Outcome of an extended update action.
+@@ -211,7 +213,7 @@ async fn do_pause_to_snapshot(
+         pause_cfg.memory_vol_url
+     );
+ 
+-    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url)
++    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url, pause_cfg.snapshot_type)
+         .await
+         .map_err(|e| {
+             errf!(log, "pause to snapshot failed: {}", e);
+diff --git a/Cubelet/services/cubebox/incremental_memory.go b/Cubelet/services/cubebox/incremental_memory.go
+new file mode 100644
+index 0000000..baa77e1
+--- /dev/null
++++ b/Cubelet/services/cubebox/incremental_memory.go
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: Apache-2.0
++package cubebox
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++type memoryLayerRange struct {
++	GPA uint64 `json:"gpa"`
++	Offset uint64 `json:"offset"`
++	Length uint64 `json:"length"`
++}
++
++// Allocation executes in Cubelet's storage cgroup. The frozen VMM supplies
++// KVM/VMM dirty ranges and waits for the ACK before writing the sparse delta.
++// Allocating in the VMM would charge NUMA1 pool pages to bounded LOCAL memory.
++func serveWarmAllocation(path string, size uint64) (func(), error) {
++	socketPath := path + ".allocate.sock"
++	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
++	if err != nil { return nil, err }
++	if err := os.Chmod(socketPath, 0600); err != nil {
++		listener.Close()
++		return nil, err
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		conn, err := listener.AcceptUnix()
++		if err != nil { return }
++		defer conn.Close()
++		conn.SetDeadline(time.Now().Add(120 * time.Second))
++		var ranges []memoryLayerRange
++		err = json.NewDecoder(io.LimitReader(conn, 64*1024*1024)).Decode(&ranges)
++		var file *os.File
++		if err == nil { file, err = os.OpenFile(path, os.O_RDWR, 0) }
++		if file != nil { defer file.Close() }
++		var previousEnd uint64
++		pageSize := uint64(os.Getpagesize())
++		for _, r := range ranges {
++			if err != nil { break }
++			if r.Length == 0 || r.Offset < previousEnd || r.Offset > size ||
++				r.Length > size-r.Offset || r.Offset%pageSize != 0 || r.Length%pageSize != 0 {
++				err = fmt.Errorf("invalid dirty allocation range")
++				break
++			}
++			err = unix.Fallocate(int(file.Fd()), 0, int64(r.Offset), int64(r.Length))
++			previousEnd = r.Offset + r.Length
++		}
++		response := map[string]interface{}{"ok": err == nil}
++		if err != nil { response["error"] = err.Error() }
++		_ = json.NewEncoder(conn).Encode(response)
++	}()
++	return func() { listener.Close(); <-done }, nil
++}
++
++// Each committed generation owns hardlink names for its entire dependency
++// closure. Removing these names cannot remove another generation's layers.
++func cleanupDirectMemorySnapshot(path string) {
++	_ = os.Remove(path)
++	_ = os.Remove(path + ".metrics.json")
++	_ = os.Remove(path + ".lineage.json")
++	_ = os.Remove(path + ".lineage.json.pending")
++	_ = os.RemoveAll(path + ".layers")
++}
+diff --git a/Cubelet/services/cubebox/incremental_memory_test.go b/Cubelet/services/cubebox/incremental_memory_test.go
+new file mode 100644
+index 0000000..e839464
+--- /dev/null
++++ b/Cubelet/services/cubebox/incremental_memory_test.go
+@@ -0,0 +1,101 @@
++package cubebox
++
++import (
++    "encoding/json"
++    "net"
++    "os"
++    "path/filepath"
++    "testing"
++
++    cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++    "golang.org/x/sys/unix"
++)
++
++func TestDirectPauseMemoryPathAcceptsConfiguredWarmRoot(t *testing.T) {
++    t.Setenv("CLAWBOX_WARM_SNAPSHOT_ROOT", "/mnt/clawbox-warm")
++    t.Setenv("CLAWBOX_COLD_SNAPSHOT_ROOT", "/data/clawbox-incremental-cold-20260913")
++    req := &cubebox.UpdateCubeSandboxRequest{Annotations: map[string]string{
++        "clawbox.snapshot.tier": "warm",
++        "clawbox.snapshot.memory.path": "/mnt/clawbox-warm/test/g1.mem",
++    }}
++    path, direct, err := directPauseMemoryPath(req)
++    if err != nil || !direct || path != "/mnt/clawbox-warm/test/g1.mem" {
++        t.Fatalf("configured warm path rejected: %q %v %v", path, direct, err)
++    }
++}
++
++func TestWarmAllocationOnlyChargesDirtyRanges(t *testing.T) {
++    path := filepath.Join(t.TempDir(), "ram.mem")
++    page := int64(os.Getpagesize())
++    file, err := os.Create(path)
++    if err != nil { t.Fatal(err) }
++    if err := file.Truncate(16 * page); err != nil { t.Fatal(err) }
++    file.Close()
++    stop, err := serveWarmAllocation(path, uint64(16 * page))
++    if err != nil { t.Fatal(err) }
++    defer stop()
++    conn, err := net.Dial("unix", path + ".allocate.sock")
++    if err != nil { t.Fatal(err) }
++    ranges := []memoryLayerRange{{GPA: 0, Offset: uint64(page), Length: uint64(page)}}
++    if err := json.NewEncoder(conn).Encode(ranges); err != nil { t.Fatal(err) }
++    conn.(*net.UnixConn).CloseWrite()
++    var response struct { OK bool `json:"ok"` }
++    if err := json.NewDecoder(conn).Decode(&response); err != nil { t.Fatal(err) }
++    conn.Close()
++    if !response.OK { t.Fatal("valid dirty allocation rejected") }
++    var stat unix.Stat_t
++    if err := unix.Stat(path, &stat); err != nil { t.Fatal(err) }
++    if stat.Blocks * 512 < page || stat.Blocks * 512 >= 16 * page {
++        t.Fatalf("expected only dirty pages allocated: %d", stat.Blocks * 512)
++    }
++}
++
++func TestMissingRequiredLineageCannotSpillOnlyLatestDelta(t *testing.T) {
++    root := t.TempDir()
++    source := filepath.Join(root, "source.mem")
++    dest := filepath.Join(root, "destination.mem")
++    if err := os.WriteFile(source, []byte("delta"), 0600); err != nil { t.Fatal(err) }
++    transferred, err := copyLogicalSnapshot(source, dest, true)
++    if err == nil || transferred != 0 { t.Fatalf("missing lineage accepted: %d %v", transferred, err) }
++    if _, err := os.Stat(dest); !os.IsNotExist(err) { t.Fatalf("partial COLD file: %v", err) }
++}
++
++func TestSpillCopiesEntireSparseRamLineage(t *testing.T) {
++    root := t.TempDir()
++    source := filepath.Join(root, "source.mem")
++    dest := filepath.Join(root, "destination.mem")
++    layers := source + ".layers"
++    if err := os.Mkdir(layers, 0755); err != nil { t.Fatal(err) }
++    page := int64(os.Getpagesize())
++    base := filepath.Join(layers, "000000.mem")
++    delta := filepath.Join(layers, "000001.mem")
++    if err := os.WriteFile(base, make([]byte, 8 * page), 0600); err != nil { t.Fatal(err) }
++    f, err := os.Create(delta)
++    if err != nil { t.Fatal(err) }
++    if err := f.Truncate(8 * page); err != nil { t.Fatal(err) }
++    if _, err := f.WriteAt(make([]byte, page), 3 * page); err != nil { t.Fatal(err) }
++    f.Close()
++    if err := os.Link(delta, source); err != nil { t.Fatal(err) }
++    metadata := map[string]interface{}{
++        "schema_version": 1, "logical_bytes": 8 * page,
++        "layers": []map[string]interface{}{{"name": "000000.mem"}, {"name": "000001.mem"}},
++    }
++    data, _ := json.Marshal(metadata)
++    if err := os.WriteFile(source + ".lineage.json", data, 0600); err != nil { t.Fatal(err) }
++    transferred, err := copyLogicalSnapshot(source, dest, true)
++    if err != nil { t.Fatal(err) }
++    if transferred < 9 * page || transferred >= 16 * page {
++        t.Fatalf("expected base plus sparse delta: %d", transferred)
++    }
++    for _, name := range []string{"000000.mem", "000001.mem"} {
++        info, err := os.Stat(filepath.Join(dest + ".layers", name))
++        if err != nil || info.Size() != 8 * page { t.Fatalf("missing complete layer %s: %v", name, err) }
++    }
++    copied, err := os.ReadFile(dest + ".lineage.json")
++    if err != nil { t.Fatal(err) }
++    var manifest map[string]interface{}
++    if err := json.Unmarshal(copied, &manifest); err != nil { t.Fatal(err) }
++    if int64(manifest["transferred_bytes"].(float64)) != transferred {
++        t.Fatal("COLD manifest transfer count does not include closure")
++    }
++}
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index 4dc418e..64064ce 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -32,6 +32,7 @@ import (
+ )
+ 
+ type pauseSnapshotConfig struct {
++	SnapshotType string `json:"snapshot_type,omitempty"`
+ 	DestinationURL string  `json:"destination_url"`
+ 	MemoryVolURL   *string `json:"memory_vol_url,omitempty"`
+ }
+@@ -58,7 +59,7 @@ func directPauseMemoryPath(req *cubebox.UpdateCubeSandboxRequest) (string, bool,
+ 	rel, err := filepath.Rel(root, target)
+ 	if err != nil || rel == "." || rel == ".." ||
+ 		strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+-		return "", false, fmt.Errorf("memory path %q escapes %s", target, rootName)
++		return "", false, fmt.Errorf("memory path %q escapes %s=%q (relative=%q)", target, rootName, root, rel)
+ 	}
+ 	return target, true, nil
+ }
+@@ -217,7 +218,17 @@ func (s *service) updateWithPauseCow(
+ 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
+ 		return rsp, nil
+ 	}
++	snapshotMechanism := strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.mechanism"])
++	if snapshotMechanism == "" { snapshotMechanism = "full-copy" }
++	if snapshotMechanism != "full-copy" && snapshotMechanism != "incremental-cow" {
++		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
++		rsp.Ret.RetMsg = "invalid snapshot mechanism"
++		return rsp, nil
++	}
+ 	directMemoryPath, directMemory, err := directPauseMemoryPath(req)
++	if snapshotMechanism == "incremental-cow" && !directMemory && err == nil {
++		err = fmt.Errorf("incremental-cow requires a tiered memory snapshot path")
++	}
+ 	var memoryObject *storage.CowSnapshotObject
+ 	if err == nil && directMemory {
+ 		// The standalone experiment client reads allocation metadata with stat.
+@@ -233,13 +244,13 @@ func (s *service) updateWithPauseCow(
+ 				// Allocate tmpfs pages in Cubelet's storage cgroup, not the
+ 				// bounded LOCAL VMM cgroup that subsequently writes the data.
+ 				// The WARM mount's NUMA policy determines physical placement.
+-				if err == nil && os.Getenv("CLAWBOX_WARM_PREALLOCATE") == "1" &&
++				if err == nil && snapshotMechanism == "full-copy" && os.Getenv("CLAWBOX_WARM_PREALLOCATE") == "1" &&
+ 					strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"]) == "warm" {
+ 					err = unix.Fallocate(int(file.Fd()), 0, 0, int64(memorySizeBytes))
+ 				}
+ 				_ = file.Close()
+ 				if err != nil {
+-					_ = os.Remove(directMemoryPath)
++					cleanupDirectMemorySnapshot(directMemoryPath)
+ 				}
+ 			}
+ 		}
+@@ -268,7 +279,7 @@ func (s *service) updateWithPauseCow(
+ 	}
+ 	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
+ 		if directMemory {
+-			_ = os.Remove(directMemoryPath)
++			cleanupDirectMemorySnapshot(directMemoryPath)
+ 		} else {
+ 			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, nil)
+ 		}
+@@ -282,7 +293,7 @@ func (s *service) updateWithPauseCow(
+ 	cleanupArtifacts := func() {
+ 		layout.releaseMetadata(ctx)
+ 		if directMemory {
+-			_ = os.Remove(directMemoryPath)
++			cleanupDirectMemorySnapshot(directMemoryPath)
+ 			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, nil, rootfsObject)
+ 		} else {
+ 			cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+@@ -356,10 +367,21 @@ func (s *service) updateWithPauseCow(
+ 	}
+ 
+ 	memURL := snapshotMemoryVolURL(memoryObject.DevPath)
++	if snapshotMechanism == "incremental-cow" && strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"]) == "warm" {
++		stopAllocator, allocationErr := serveWarmAllocation(directMemoryPath, memorySizeBytes)
++		if allocationErr != nil {
++			cleanupArtifacts()
++			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++			rsp.Ret.RetMsg = allocationErr.Error()
++			return rsp, nil
++		}
++		defer stopAllocator()
++	}
+ 	pauseCfg := pauseSnapshotConfig{
+ 		DestinationURL: layout.MetaWork,
+ 		MemoryVolURL:   &memURL,
+ 	}
++	if snapshotMechanism == "incremental-cow" { pauseCfg.SnapshotType = "kvm-cow" }
+ 	cfgJSON, err := json.Marshal(pauseCfg)
+ 	if err != nil {
+ 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("marshal pause snapshot config: %v", err))
+@@ -429,6 +451,7 @@ func (s *service) updateWithPauseCow(
+ 		RootfsKind:      rootfsObject.Kind,
+ 		MemoryVol:       memoryObject.Name,
+ 		MemoryKind:      memoryObject.Kind,
++		MemorySnapshotMechanism: snapshotMechanism,
+ 		MetadataVol:     storage.S3MetadataCatalogVol(backend, snapID),
+ 		MetadataKind:    storage.S3MetadataCatalogKind(backend),
+ 		RootfsSizeBytes: rootfsObject.SizeBytes,
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+index 69aef99..c14b19a 100644
+--- a/Cubelet/services/cubebox/relocate_snapshot.go
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -5,6 +5,8 @@ package cubebox
+ 
+ import (
+ 	"context"
++	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"os"
+@@ -65,19 +67,27 @@ func (s *service) relocatePauseSnapshot(
+ 		rsp.Ret.RetMsg = err.Error()
+ 		return rsp, nil
+ 	}
+-	if _, statErr := os.Stat(destination); statErr == nil || !os.IsNotExist(statErr) {
+-		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+-		rsp.Ret.RetMsg = "COLD relocation destination already exists or cannot be inspected"
+-		return rsp, nil
+-	}
+ 	tmp := destination + ".copying"
+-	_ = os.Remove(tmp)
+-	copied, err := copySnapshot(source, tmp)
++	for _, name := range []string{destination, destination + ".layers", destination + ".lineage.json",
++		destination + ".metrics.json", tmp, tmp + ".layers", tmp + ".lineage.json"} {
++		if _, statErr := os.Lstat(name); statErr == nil || !os.IsNotExist(statErr) {
++			rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
++			rsp.Ret.RetMsg = "COLD relocation destination or staging artifact already exists"
++			return rsp, nil
++		}
++	}
++	copied, err := copyLogicalSnapshot(source, tmp, entry.MemorySnapshotMechanism == "incremental-cow")
+ 	if err == nil {
+-		err = os.Rename(tmp, destination)
++		if _, statErr := os.Stat(tmp + ".lineage.json"); statErr == nil {
++			err = os.Rename(tmp + ".layers", destination + ".layers")
++			if err == nil { err = os.Rename(tmp + ".lineage.json", destination + ".lineage.json") }
++		}
++		if err == nil { err = os.Rename(tmp, destination) }
++		if err == nil { err = syncSnapshotDirectory(filepath.Dir(destination)) }
+ 	}
+ 	if err != nil {
+-		_ = os.Remove(tmp)
++		cleanupDirectMemorySnapshot(tmp)
++		cleanupDirectMemorySnapshot(destination)
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 		rsp.Ret.RetMsg = err.Error()
+ 		return rsp, nil
+@@ -86,7 +96,7 @@ func (s *service) relocatePauseSnapshot(
+ 	entry.MemoryVol = destination
+ 	if err = storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry); err != nil {
+ 		entry.MemoryVol = previous
+-		_ = os.Remove(destination)
++		cleanupDirectMemorySnapshot(destination)
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 		rsp.Ret.RetMsg = fmt.Sprintf("persist relocated catalog: %v", err)
+ 		return rsp, nil
+@@ -95,12 +105,13 @@ func (s *service) relocatePauseSnapshot(
+ 		entry.MemoryVol = previous
+ 		revertErr := storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry)
+ 		if revertErr == nil {
+-			_ = os.Remove(destination)
++			cleanupDirectMemorySnapshot(destination)
+ 		}
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 		rsp.Ret.RetMsg = fmt.Sprintf("relocation copied %d bytes but could not remove WARM source: %v (catalog revert: %v)", copied, err, revertErr)
+ 		return rsp, nil
+ 	}
++	cleanupDirectMemorySnapshot(source)
+ 	return rsp, nil
+ }
+ 
+@@ -118,14 +129,29 @@ func copySnapshot(source, destination string) (int64, error) {
+ 	if err != nil {
+ 		return 0, err
+ 	}
+-	written, copyErr := io.Copy(out, in)
+-	if copyErr == nil && written != info.Size() {
+-		copyErr = fmt.Errorf("short snapshot copy: %d of %d bytes", written, info.Size())
++	copyErr := out.Truncate(info.Size())
++	var written int64
++	for offset := int64(0); copyErr == nil && offset < info.Size(); {
++		data, seekErr := unix.Seek(int(in.Fd()), offset, unix.SEEK_DATA)
++		if errors.Is(seekErr, unix.ENXIO) { break }
++		if seekErr != nil { copyErr = seekErr; break }
++		hole, seekErr := unix.Seek(int(in.Fd()), data, unix.SEEK_HOLE)
++		if seekErr != nil { copyErr = seekErr; break }
++		if hole > info.Size() { hole = info.Size() }
++		if hole <= data { copyErr = fmt.Errorf("invalid sparse snapshot extent"); break }
++		_, copyErr = in.Seek(data, io.SeekStart)
++		if copyErr == nil { _, copyErr = out.Seek(data, io.SeekStart) }
++		if copyErr == nil {
++			var count int64
++			count, copyErr = io.CopyN(out, in, hole-data)
++			written += count
++		}
++		offset = hole
+ 	}
+ 	if copyErr == nil {
+ 		copyErr = out.Sync()
+ 	}
+-	if copyErr == nil && os.Getenv("CUBE_RESTORE_PRIVATE_COPY") == "1" {
++	if copyErr == nil {
+ 		// A COLD snapshot must not retain an unaccounted DRAM cache copy.
+ 		copyErr = unix.Fadvise(int(out.Fd()), 0, 0, unix.FADV_DONTNEED)
+ 	}
+@@ -135,3 +161,92 @@ func copySnapshot(source, destination string) (int64, error) {
+ 	}
+ 	return written, copyErr
+ }
++
++func syncSnapshotDirectory(path string) error {
++	file, err := os.Open(path)
++	if err != nil { return err }
++	defer file.Close()
++	return file.Sync()
++}
++
++// Preserve the complete immutable RAM dependency closure, not only the delta
++// named by MemoryVol. Layer names are relative, so relocation needs no parent
++// path rewrites and never leaves hidden references back into volatile WARM.
++func copyLogicalSnapshot(source, destination string, requireLineage bool) (int64, error) {
++	data, err := os.ReadFile(source + ".lineage.json")
++	if os.IsNotExist(err) {
++		if requireLineage { return 0, fmt.Errorf("missing committed RAM lineage") }
++		return copySnapshot(source, destination)
++	}
++	if err != nil { return 0, err }
++	var manifest map[string]json.RawMessage
++	if err := json.Unmarshal(data, &manifest); err != nil { return 0, err }
++	var layers []struct {
++		Name string `json:"name"`
++		Ranges []memoryLayerRange `json:"ranges"`
++	}
++	if err := json.Unmarshal(manifest["layers"], &layers); err != nil { return 0, err }
++	if len(layers) == 0 { return 0, fmt.Errorf("empty RAM lineage") }
++	var logical uint64
++	if err := json.Unmarshal(manifest["logical_bytes"], &logical); err != nil || logical == 0 {
++		return 0, fmt.Errorf("invalid RAM logical size")
++	}
++	if err := validateSnapshotLayer(source, layers[len(layers)-1].Name, logical, true); err != nil {
++		return 0, err
++	}
++	for i, layer := range layers {
++		if layer.Name != fmt.Sprintf("%06d.mem", i) {
++			return 0, fmt.Errorf("invalid RAM layer name")
++		}
++		if err := validateSnapshotLayer(source, layer.Name, logical, false); err != nil {
++			return 0, err
++		}
++		var previousEnd uint64
++		for _, r := range layer.Ranges {
++			if r.Length == 0 || r.Offset < previousEnd || r.Offset >= logical || r.Length > logical-r.Offset {
++				return 0, fmt.Errorf("invalid RAM layer range")
++			}
++			previousEnd = r.Offset + r.Length
++		}
++	}
++	if err := os.Mkdir(destination + ".layers", 0755); err != nil { return 0, err }
++	var transferred, allocated int64
++	for i, layer := range layers {
++		if layer.Name != fmt.Sprintf("%06d.mem", i) { return transferred, fmt.Errorf("invalid RAM layer name") }
++		target := filepath.Join(destination + ".layers", layer.Name)
++		count, err := copySnapshot(filepath.Join(source + ".layers", layer.Name), target)
++		transferred += count
++		if err != nil { return transferred, err }
++		var stat unix.Stat_t
++		if err := unix.Stat(target, &stat); err != nil { return transferred, err }
++		allocated += stat.Blocks * 512
++	}
++	if err := os.Link(filepath.Join(destination + ".layers", layers[len(layers)-1].Name), destination); err != nil {
++		return transferred, err
++	}
++	manifest["transferred_bytes"], _ = json.Marshal(transferred)
++	manifest["allocated_bytes"], _ = json.Marshal(allocated)
++	out, err := os.OpenFile(destination + ".lineage.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
++	if err != nil { return transferred, err }
++	err = json.NewEncoder(out).Encode(manifest)
++	if err == nil { err = out.Sync() }
++	closeErr := out.Close()
++	if err == nil { err = closeErr }
++	if err == nil { err = syncSnapshotDirectory(destination + ".layers") }
++	return transferred, err
++}
++
++func validateSnapshotLayer(source, name string, logical uint64, checkHead bool) error {
++	path := filepath.Join(source + ".layers", name)
++	info, err := os.Lstat(path)
++	if err != nil { return err }
++	if !info.Mode().IsRegular() || uint64(info.Size()) != logical {
++		return fmt.Errorf("missing or truncated RAM layer %s", name)
++	}
++	if checkHead {
++		head, err := os.Lstat(source)
++		if err != nil { return err }
++		if !os.SameFile(head, info) { return fmt.Errorf("RAM head is not the latest layer") }
++	}
++	return nil
++}
+diff --git a/Cubelet/services/cubebox/template_ops.go b/Cubelet/services/cubebox/template_ops.go
+index f6f5db1..3668e1a 100644
+--- a/Cubelet/services/cubebox/template_ops.go
++++ b/Cubelet/services/cubebox/template_ops.go
+@@ -636,7 +636,7 @@ func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatal
+ 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.RootfsKind, Role: "rootfs"})
+ 	}
+ 	if name := strings.TrimSpace(entry.MemoryVol); name != "" && entry.MemoryKind == directMemoryKind {
+-		_ = os.Remove(name)
++		cleanupDirectMemorySnapshot(name)
+ 	} else if name != "" {
+ 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.MemoryKind, Role: "memory"})
+ 	}
+diff --git a/Cubelet/storage/snapshot_catalog.go b/Cubelet/storage/snapshot_catalog.go
+index 06c591d..84c6d5e 100644
+--- a/Cubelet/storage/snapshot_catalog.go
++++ b/Cubelet/storage/snapshot_catalog.go
+@@ -50,6 +50,7 @@ type SnapshotCatalogEntry struct {
+ 	RootfsKind   string `json:"rootfs_kind"`
+ 	MemoryVol    string `json:"memory_vol"`
+ 	MemoryKind   string `json:"memory_kind"`
++	MemorySnapshotMechanism string `json:"memory_snapshot_mechanism,omitempty"`
+ 	// MetadataVol/Kind is the S3 package metadata volume (cloned from the
+ 	// node-local base snapshot or a parent package metadata volume).
+ 	// Empty on XFS (plain directory). The node-local base volume/snapshot
+diff --git a/hypervisor/vm-migration/src/lib.rs b/hypervisor/vm-migration/src/lib.rs
+index 215e5ee..8d2d332 100644
+--- a/hypervisor/vm-migration/src/lib.rs
++++ b/hypervisor/vm-migration/src/lib.rs
+@@ -120,11 +120,15 @@ pub enum SnapshotType {
+     /// `Incremental` (pagemap_anon) path.
+     #[serde(rename = "soft-dirty")]
+     SoftDirty,
++    /// Immutable full logical snapshots using KVM and VMM dirty-page tracking.
++    #[serde(rename = "kvm-cow")]
++    KvmCow,
+ }
+ 
+ impl std::fmt::Display for SnapshotType {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
++            SnapshotType::KvmCow => write!(f, "kvm-cow"),
+             SnapshotType::Full => write!(f, "full"),
+             SnapshotType::Incremental => write!(f, "incremental"),
+             SnapshotType::SoftDirty => write!(f, "soft-dirty"),
+@@ -137,6 +141,7 @@ impl std::str::FromStr for SnapshotType {
+ 
+     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+         match s.to_lowercase().as_str() {
++            "kvm-cow" => Ok(SnapshotType::KvmCow),
+             "full" => Ok(SnapshotType::Full),
+             "incremental" => Ok(SnapshotType::Incremental),
+             "soft-dirty" => Ok(SnapshotType::SoftDirty),
+diff --git a/hypervisor/vmm/src/lib.rs b/hypervisor/vmm/src/lib.rs
+index 0db4aa5..56e20b8 100644
+--- a/hypervisor/vmm/src/lib.rs
++++ b/hypervisor/vmm/src/lib.rs
+@@ -69,6 +69,7 @@ use vmm_sys_util::terminal::Terminal;
+ mod acpi;
+ pub mod api;
+ pub mod checkpoint_metrics;
++mod snapshot_lineage;
+ mod clone3;
+ pub mod config;
+ #[cfg(feature = "guest_debug")]
+diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
+index 645d6d0..1253799 100644
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -75,9 +75,6 @@ struct MemorySnapshotFile {
+ // WARM regular files on tmpfs must retain their pages. This deliberately does
+ // not drop host-wide caches or touch unrelated files.
+ fn discard_cold_snapshot_cache(file: &File) -> io::Result<()> {
+-    if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() != Ok("1") {
+-        return Ok(());
+-    }
+     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+     if unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } != 0 {
+         return Err(io::Error::last_os_error());
+@@ -344,6 +341,8 @@ pub struct MemoryManager {
+     ram_allocator: AddressAllocator,
+     dynamic: bool,
+     dirty_log: bool,
++    snapshot_parent: Option<(PathBuf, crate::snapshot_lineage::Lineage)>,
++    snapshot_parent_valid: AtomicBool,
+ 
+     // Keep track of calls to create_userspace_mapping() for guest RAM.
+     // This is useful for getting the dirty pages as we need to know the
+@@ -1334,7 +1333,9 @@ impl MemoryManager {
+             arch_mem_regions,
+             ram_allocator,
+             dynamic,
+-            dirty_log: config.dirty_log,
++            dirty_log: config.dirty_log || std::env::var("CLAWBOX_KVM_DIRTY_TRACKING").as_deref() == Ok("1"),
++            snapshot_parent: None,
++            snapshot_parent_valid: AtomicBool::new(true),
+             #[cfg(target_arch = "aarch64")]
+             uefi_flash: None,
+             thp: config.thp,
+@@ -1363,40 +1364,38 @@ impl MemoryManager {
+         prefault: bool,
+         phys_bits: u8,
+         memory_vol_url: Option<&str>,
++        require_lineage: bool,
+     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
+         if let Some(source_url) = source_url {
+             let memory_file_target =
+                 MemorySnapshotFile::from_snapshot_url(source_url, memory_vol_url)
+                     .map_err(Error::Restore)?;
+ 
+-            // A tiered-memory study must detach restored RAM from the snapshot
+-            // pool before retiring its accounting. MAP_PRIVATE alone retains
+-            // the file and its NUMA policy, even after the pathname is unlinked.
+-            // Opt in on the isolated study deployment; ordinary restores keep
+-            // their existing lazy/COW behavior.
+-            let private_copy = std::env::var("CUBE_RESTORE_PRIVATE_COPY")
+-                .map(|value| value == "1")
+-                .unwrap_or(false);
++            let mem_snapshot: MemoryManagerSnapshotData = snapshot
++                .to_state(MEMORY_MANAGER_SNAPSHOT_ID).map_err(Error::Restore)?;
++            let layout = Self::snapshot_layout(&mem_snapshot.memory_ranges);
++            let lineage = crate::snapshot_lineage::Lineage::load(
++                &memory_file_target.path, &layout, host_page_size()).map_err(Error::SnapshotOpen)?;
++            if require_lineage && lineage.is_none() {
++                return Err(Error::Restore(MigratableError::Restore(anyhow!("missing committed RAM lineage"))));
++            }
++            let private_copy = std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1");
+             let fast_restore = Self::support_fast_restore_check(config) && !private_copy;
++            if lineage.is_some() && (!fast_restore || config.hugepages) {
++                return Err(Error::Restore(MigratableError::Restore(anyhow!(
++                    "kvm-cow restore requires lazy private mappings without hugepages"))));
++            }
+             let memory_file = if fast_restore {
+-                info!("restore non-shared map, speed up restore by share map memory file");
+-                Some(
+-                    memory_file_target
+-                        .open_read()
+-                        .map_err(Error::SnapshotOpen)?,
+-                )
+-            } else {
+-                None
+-            };
+-
+-            let mem_snapshot: MemoryManagerSnapshotData = snapshot
+-                .to_state(MEMORY_MANAGER_SNAPSHOT_ID)
+-                .map_err(Error::Restore)?;
++                Some(if let Some(lineage) = &lineage {
++                    File::open(crate::snapshot_lineage::layer_dir(&memory_file_target.path)
++                        .join(&lineage.layers[0].name))
++                } else { memory_file_target.open_read() }.map_err(Error::SnapshotOpen)?)
++            } else { None };
+ 
+             let mm = MemoryManager::new(
+                 vm,
+                 config,
+-                Some(prefault),
++                Some(prefault && lineage.is_none()),
+                 phys_bits,
+                 #[cfg(feature = "tdx")]
+                 false,
+@@ -1411,9 +1410,32 @@ impl MemoryManager {
+                 info!("restore shared map, fall back to slow restore");
+                 mm.lock()
+                     .unwrap()
+-                    .fill_saved_regions(memory_file_target.path, mem_snapshot.memory_ranges)?;
++                    .fill_saved_regions(memory_file_target.path.clone(), mem_snapshot.memory_ranges)?;
+             }
+ 
++            if let Some(lineage) = lineage {
++                let mut manager = mm.lock().unwrap();
++                for layer in lineage.layers.iter().skip(1) {
++                    let file = File::open(crate::snapshot_lineage::layer_dir(&memory_file_target.path)
++                        .join(&layer.name)).map_err(Error::SnapshotOpen)?;
++                    for range in &layer.ranges {
++                        let memory = manager.guest_memory.memory();
++                        let region = memory.find_region(GuestAddress(range.gpa))
++                            .ok_or_else(|| Error::Restore(MigratableError::Restore(anyhow!("missing layer RAM region"))))?;
++                        let address = unsafe { region.as_ptr().add((range.gpa - region.start_addr().raw_value()) as usize) };
++                        // Validated aligned ranges lie wholly within the mmap we
++                        // own. No vCPU/device has resumed; MMU notifier invalidates
++                        // any KVM stage-two entries, which rebuild on demand.
++                        let mapped = unsafe { libc::mmap(address as _, range.length as usize,
++                            libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_FIXED,
++                            file.as_raw_fd(), range.offset as libc::off_t) };
++                        if mapped == libc::MAP_FAILED {
++                            return Err(Error::SnapshotOpen(io::Error::last_os_error()));
++                        }
++                    }
++                }
++                manager.snapshot_parent = Some((memory_file_target.path.clone(), lineage));
++            }
+             Ok(mm)
+         } else {
+             Err(Error::RestoreMissingSourceUrl)
+@@ -3072,33 +3094,55 @@ impl Snapshottable for MemoryManager {
+     }
+ }
+ 
+-impl Transportable for MemoryManager {
+-    fn send(
+-        &self,
+-        _snapshot: &Snapshot,
+-        config: &SnapshotConfig,
+-    ) -> result::Result<(), MigratableError> {
+-        if self.snapshot_memory_ranges.is_empty() {
+-            return Ok(());
+-        }
+-
+-        let destination_url = &config.destination_url;
+-        let memory_file_target = MemorySnapshotFile::from_snapshot_url(
+-            destination_url,
+-            config.memory_vol_url.as_deref(),
+-        )?;
+-
+-        if self.dirty_log {
+-            let guest_memory = self.guest_memory.memory();
+-            let memory_file = memory_file_target.open_for_fresh_write()?;
+-            info!("Saving dirty guest memory to snapshot image file.");
+-            let total_size = guest_memory.iter().map(|region| region.len()).sum::<u64>();
+-            if !memory_file_target.is_external() {
+-                memory_file
+-                    .set_len(total_size)
+-                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+-            }
++impl MemoryManager {
++    fn snapshot_layout(table: &MemoryRangeTable) -> Vec<crate::snapshot_lineage::Range> {
++        let mut offset = 0;
++        table.regions().iter().map(|r| {
++            let range = crate::snapshot_lineage::Range { gpa: r.gpa, offset, length: r.length };
++            offset += r.length;
++            range
++        }).collect()
++    }
++
++    fn send_kvm_cow(&self, target: &MemorySnapshotFile) -> result::Result<(), MigratableError> {
++        use crate::snapshot_lineage::{self, Lineage};
++        let io_error = |e: io::Error| MigratableError::MigrateSend(e.into());
++        if !self.dirty_log || self.shared || self.hugepages {
++            return Err(MigratableError::MigrateSend(anyhow!(
++                "kvm-cow requires KVM dirty tracking and non-shared, non-hugepage RAM")));
++        }
++        let layout = Self::snapshot_layout(&self.snapshot_memory_ranges);
++        let file = target.open_for_fresh_write()?;
++        let logical_bytes = layout.iter().map(|r| r.length).sum();
++        file.set_len(logical_bytes).map_err(io_error)?;
++        // Reading KVM dirty logs clears bits. Any failed attempt must force a
++        // full base on retry, never reuse a baseline with lost dirty history.
++        let valid = self.snapshot_parent_valid.swap(false, Ordering::SeqCst);
++        let parent = self.snapshot_parent.as_ref().filter(|(path, _lineage)| {
++            valid && std::fs::metadata(path).ok().zip(file.metadata().ok())
++                    .map(|(a, b)| {
++                        use std::os::unix::fs::MetadataExt;
++                        a.dev() == b.dev()
++                    }).unwrap_or(false)
++        });
++        let ranges = if parent.is_some() { self.snapshot_dirty_ranges()? } else { layout };
++        let volatile = snapshot_lineage::volatile(&file).map_err(io_error)?;
++        if volatile {
++            // Cubelet allocates just these pages in its storage cgroup under
++            // the tmpfs NUMA1 policy before the LOCAL VMM writes them.
++            snapshot_lineage::allocate_warm(&target.path, &ranges).map_err(io_error)?;
++        }
++        let lineage = Lineage::inherit(&target.path,
++            parent.map(|(path, lineage)| (path.as_path(), lineage)), logical_bytes).map_err(io_error)?;
++        for r in &ranges {
++            self.save_range_to_file(&file, &MemoryRange { gpa: r.gpa, length: r.length }, r.offset)?;
++        }
++        lineage.publish(&target.path, ranges, !volatile).map_err(io_error)?;
++        Ok(())
++    }
+ 
++    fn snapshot_dirty_ranges(&self) -> result::Result<Vec<crate::snapshot_lineage::Range>, MigratableError> {
++        let mut ranges = Vec::new();
+             let mut offset = 0_u64;
+             for range in self.snapshot_memory_ranges.regions() {
+                 let vmm_dirty_bitmap = match self
+@@ -3140,6 +3184,9 @@ impl Transportable for MemoryManager {
+                         MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
+                     })?;
+ 
++                if vm_dirty_bitmap.len() != vmm_dirty_bitmap.len() {
++                    return Err(MigratableError::MigrateSend(anyhow!("KVM/VMM bitmap sizes differ")));
++                }
+                 let dirty_bitmap: Vec<u64> = vm_dirty_bitmap
+                     .iter()
+                     .zip(vmm_dirty_bitmap.iter())
+@@ -3151,19 +3198,61 @@ impl Transportable for MemoryManager {
+ 
+                 if !sub_table.regions().is_empty() {
+                     for r in sub_table.regions() {
+-                        self.save_range_to_file(&memory_file, r, r.gpa - range.gpa + offset)?;
++                        ranges.push(crate::snapshot_lineage::Range {
++                            gpa: r.gpa, offset: r.gpa - range.gpa + offset, length: r.length,
++                        });
+                     }
+                 }
+ 
+                 // Move to next range.
+                 offset += range.length;
+             }
++        Ok(ranges)
++    }
++}
++
++impl Transportable for MemoryManager {
++    fn send(
++        &self,
++        _snapshot: &Snapshot,
++        config: &SnapshotConfig,
++    ) -> result::Result<(), MigratableError> {
++        if self.snapshot_memory_ranges.is_empty() {
++            return Ok(());
++        }
++
++        let destination_url = &config.destination_url;
++        let memory_file_target = MemorySnapshotFile::from_snapshot_url(
++            destination_url,
++            config.memory_vol_url.as_deref(),
++        )?;
++
++        if config.snapshot_type == SnapshotType::KvmCow {
++            return self.send_kvm_cow(&memory_file_target);
++        }
++
++        if self.dirty_log && config.snapshot_type != SnapshotType::Full {
++            let guest_memory = self.guest_memory.memory();
++            let memory_file = memory_file_target.open_for_fresh_write()?;
++            info!("Saving dirty guest memory to snapshot image file.");
++            let total_size = guest_memory.iter().map(|region| region.len()).sum::<u64>();
++            if !memory_file_target.is_external() {
++                memory_file
++                    .set_len(total_size)
++                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++            }
++
++            for range in self.snapshot_dirty_ranges()? {
++                self.save_range_to_file(&memory_file,
++                    &MemoryRange { gpa: range.gpa, length: range.length }, range.offset)?;
++            }
+             discard_cold_snapshot_cache(&memory_file)
+                 .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+             return Ok(());
+         }
+ 
+         match config.snapshot_type {
++            SnapshotType::KvmCow => unreachable!(),
+             SnapshotType::Incremental => {
+                 self.send_pagemap_anon_memory(destination_url, &config.memory_vol_url)?;
+             }
+@@ -3174,11 +3263,33 @@ impl Transportable for MemoryManager {
+                 let memory_file = memory_file_target.open_for_fresh_write()?;
+ 
+                 info!("Saving full guest memory to snapshot image file.");
++                let dirty_bytes = if self.dirty_log {
++                    Some(self.snapshot_dirty_ranges()?.iter().map(|r| r.length).sum::<u64>())
++                } else { None };
+                 let mut file_offset = 0u64;
+                 for range in self.snapshot_memory_ranges.regions() {
+                     self.save_range_to_file(&memory_file, range, file_offset)?;
+                     file_offset += range.length;
+                 }
++                let tiered = ["CLAWBOX_WARM_SNAPSHOT_ROOT", "CLAWBOX_COLD_SNAPSHOT_ROOT"].iter()
++                    .filter_map(|key| std::env::var(key).ok())
++                    .any(|root| !root.is_empty() && memory_file_target.path.starts_with(root));
++                if tiered {
++                    use std::io::Write;
++                    let mut path = memory_file_target.path.as_os_str().to_os_string();
++                    path.push(".metrics.json");
++                    let mut metrics = OpenOptions::new().write(true).create_new(true).open(PathBuf::from(path))
++                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++                    let data = serde_json::json!({"snapshot_mechanism": "full-copy",
++                        "logical_bytes": file_offset, "transferred_bytes": file_offset,
++                        "dirty_bytes": dirty_bytes, "dirty_tracking_scope": "since_restore_or_boot",
++                        "full_base": true, "lineage_layers": 1});
++                    metrics.write_all(&serde_json::to_vec(&data).map_err(|e| MigratableError::MigrateSend(e.into()))?)
++                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++                    if !crate::snapshot_lineage::volatile(&memory_file).map_err(|e| MigratableError::MigrateSend(e.into()))? {
++                        metrics.sync_all().map_err(|e| MigratableError::MigrateSend(e.into()))?;
++                    }
++                }
+             }
+         }
+         let memory_file = memory_file_target.open_read()
+diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapshot_lineage.rs
+new file mode 100644
+index 0000000..c687029
+--- /dev/null
++++ b/hypervisor/vmm/src/snapshot_lineage.rs
+@@ -0,0 +1,244 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Immutable RAM layers for filesystems without reflink (notably NUMA tmpfs).
++//! Dirty ranges are supplied by the existing KVM/VMM bitmap implementation.
++//! This module never compares RAM contents or uses process soft-dirty bits.
++
++use serde::{Deserialize, Serialize};
++use std::fs::{self, File, OpenOptions};
++use std::io::{self, Write};
++use std::os::unix::fs::MetadataExt;
++use std::os::unix::io::AsRawFd;
++use std::path::{Path, PathBuf};
++
++#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
++pub struct Range {
++    pub gpa: u64,
++    pub offset: u64,
++    pub length: u64,
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++pub struct Layer {
++    pub name: String,
++    pub ranges: Vec<Range>,
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++pub struct Lineage {
++    pub schema_version: u32,
++    pub logical_bytes: u64,
++    pub allocated_bytes: u64,
++    pub dirty_bytes: Option<u64>,
++    pub transferred_bytes: u64,
++    pub full_base: bool,
++    pub layers: Vec<Layer>,
++}
++
++pub fn sidecar(path: &Path) -> PathBuf {
++    let mut name = path.as_os_str().to_os_string();
++    name.push(".lineage.json");
++    name.into()
++}
++
++pub fn layer_dir(path: &Path) -> PathBuf {
++    let mut name = path.as_os_str().to_os_string();
++    name.push(".layers");
++    name.into()
++}
++
++fn invalid(message: &str) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, message)
++}
++
++pub fn volatile(file: &File) -> io::Result<bool> {
++    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
++    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } != 0 {
++        return Err(io::Error::last_os_error());
++    }
++    Ok(stat.f_type == libc::TMPFS_MAGIC)
++}
++
++pub fn allocate_warm(path: &Path, ranges: &[Range]) -> io::Result<()> {
++    use std::net::Shutdown;
++    use std::os::unix::net::UnixStream;
++    use std::time::Duration;
++    let mut socket = path.as_os_str().to_os_string();
++    socket.push(".allocate.sock");
++    let mut stream = UnixStream::connect(PathBuf::from(socket))?;
++    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
++    stream.set_write_timeout(Some(Duration::from_secs(120)))?;
++    serde_json::to_writer(&mut stream, ranges)?;
++    stream.shutdown(Shutdown::Write)?;
++    let response: serde_json::Value = serde_json::from_reader(stream)?;
++    if response.get("ok").and_then(|v| v.as_bool()) != Some(true) {
++        return Err(io::Error::new(io::ErrorKind::Other, format!("WARM allocation failed: {response}")));
++    }
++    Ok(())
++}
++
++impl Lineage {
++    pub fn load(path: &Path, layout: &[Range], page_size: u64) -> io::Result<Option<Self>> {
++        let file = match File::open(sidecar(path)) {
++            Ok(file) => file,
++            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
++            Err(e) => return Err(e),
++        };
++        let lineage: Self = serde_json::from_reader(file)?;
++        if lineage.schema_version != 1 || lineage.layers.is_empty()
++            || lineage.layers[0].ranges != layout
++            || lineage.logical_bytes != layout.iter().map(|r| r.length).sum::<u64>()
++            || page_size == 0
++        {
++            return Err(invalid("incomplete RAM lineage or incompatible guest layout"));
++        }
++        for (index, layer) in lineage.layers.iter().enumerate() {
++            if layer.name != format!("{:06}.mem", index) {
++                return Err(invalid("invalid RAM layer name"));
++            }
++            let metadata = fs::symlink_metadata(layer_dir(path).join(&layer.name))?;
++            if !metadata.is_file() || metadata.len() != lineage.logical_bytes {
++                return Err(invalid("missing or truncated RAM layer"));
++            }
++            let mut previous_end = 0;
++            for range in &layer.ranges {
++                let end = range.offset.checked_add(range.length)
++                    .ok_or_else(|| invalid("RAM range overflow"))?;
++                if range.length == 0 || range.offset < previous_end
++                    || range.offset % page_size != 0 || range.length % page_size != 0
++                    || !layout.iter().any(|region| {
++                        range.offset >= region.offset
++                            && end <= region.offset + region.length
++                            && range.gpa == region.gpa + range.offset - region.offset
++                    })
++                {
++                    return Err(invalid("RAM layer range outside guest mapping"));
++                }
++                previous_end = end;
++            }
++        }
++        Ok(Some(lineage))
++    }
++
++    /// Give the new snapshot its own names for every immutable dependency.
++    /// Unlinking the predecessor then cannot break this snapshot or a live mmap.
++    /// Cross-filesystem inheritance is deliberately rejected: the lifecycle
++    /// must relocate the complete snapshot first, or explicitly create a base.
++    pub fn inherit(path: &Path, parent: Option<(&Path, &Self)>, logical_bytes: u64)
++        -> io::Result<Self>
++    {
++        fs::create_dir(layer_dir(path))?;
++        let mut layers = Vec::new();
++        if let Some((parent_path, parent)) = parent {
++            for layer in &parent.layers {
++                fs::hard_link(layer_dir(parent_path).join(&layer.name),
++                              layer_dir(path).join(&layer.name))?;
++                layers.push(layer.clone());
++            }
++        }
++        Ok(Self {
++            schema_version: 1, logical_bytes, allocated_bytes: 0,
++            dirty_bytes: None, transferred_bytes: 0, full_base: parent.is_none(), layers,
++        })
++    }
++
++    /// Publish only after RAM writes finish. Cubelet still owns the overall
++    /// commit transaction including frozen vCPU/device state and rootfs.
++    pub fn publish(mut self, path: &Path, ranges: Vec<Range>, durable: bool)
++        -> io::Result<()>
++    {
++        self.transferred_bytes = ranges.iter().map(|r| r.length).sum();
++        self.dirty_bytes = if self.full_base { None } else { Some(self.transferred_bytes) };
++        let name = format!("{:06}.mem", self.layers.len());
++        fs::hard_link(path, layer_dir(path).join(&name))?;
++        self.layers.push(Layer { name, ranges });
++        for layer in &self.layers {
++            let file = File::open(layer_dir(path).join(&layer.name))?;
++            self.allocated_bytes += file.metadata()?.blocks() * 512;
++            if durable { file.sync_all()?; }
++        }
++        let target = sidecar(path);
++        let temporary = target.with_extension("json.pending");
++        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
++        file.write_all(&serde_json::to_vec(&self)?)?;
++        if durable {
++            file.sync_all()?;
++            File::open(layer_dir(path))?.sync_all()?;
++        }
++        fs::rename(temporary, target)?;
++        if durable { File::open(path.parent().ok_or_else(|| invalid("no parent"))?)?.sync_all()?; }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::os::unix::fs::FileExt;
++    use std::sync::atomic::{AtomicU64, Ordering};
++
++    struct Directory(PathBuf);
++    impl Directory {
++        fn new() -> Self {
++            static NEXT: AtomicU64 = AtomicU64::new(0);
++            let path = std::env::temp_dir().join(format!("cube-lineage-test-{}-{}",
++                std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
++            fs::create_dir(&path).unwrap();
++            Self(path)
++        }
++    }
++    impl Drop for Directory {
++        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
++    }
++
++    #[test]
++    fn zero_dirty_pages_override_base_and_survive_parent_deletion() {
++        let directory = Directory::new();
++        let base = directory.0.join("base.mem");
++        let delta = directory.0.join("delta.mem");
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
++        let layout = vec![Range { gpa: 0x40000000, offset: 0, length: 3 * page }];
++        fs::write(&base, vec![0x5a; (3 * page) as usize]).unwrap();
++        Lineage::inherit(&base, None, 3 * page).unwrap()
++            .publish(&base, layout.clone(), false).unwrap();
++        let parent = Lineage::load(&base, &layout, page).unwrap().unwrap();
++        let file = File::create(&delta).unwrap();
++        file.set_len(3 * page).unwrap();
++        file.write_all_at(&vec![0; page as usize], page).unwrap();
++        let range = Range { gpa: 0x40000000 + page, offset: page, length: page };
++        Lineage::inherit(&delta, Some((&base, &parent)), 3 * page).unwrap()
++            .publish(&delta, vec![range], false).unwrap();
++        fs::remove_file(&base).unwrap();
++        fs::remove_file(sidecar(&base)).unwrap();
++        fs::remove_dir_all(layer_dir(&base)).unwrap();
++        let child = Lineage::load(&delta, &layout, page).unwrap().unwrap();
++        assert_eq!(child.dirty_bytes, Some(page));
++        assert_eq!(child.transferred_bytes, page);
++        assert!(!child.full_base);
++        assert_eq!(child.logical_bytes, 3 * page);
++        let mut restored = fs::read(layer_dir(&delta).join(&child.layers[0].name)).unwrap();
++        for layer in child.layers.iter().skip(1) {
++            let file = File::open(layer_dir(&delta).join(&layer.name)).unwrap();
++            for r in &layer.ranges {
++                file.read_exact_at(&mut restored[r.offset as usize..(r.offset + r.length) as usize], r.offset).unwrap();
++            }
++        }
++        assert!(restored[..page as usize].iter().all(|v| *v == 0x5a));
++        assert!(restored[page as usize..2 * page as usize].iter().all(|v| *v == 0));
++        assert!(restored[2 * page as usize..].iter().all(|v| *v == 0x5a));
++        // Missing dependencies fail before a VM can resume with zero-filled holes.
++        fs::remove_file(layer_dir(&delta).join(&child.layers[0].name)).unwrap();
++        assert!(Lineage::load(&delta, &layout, page).is_err());
++    }
++
++    #[test]
++    fn changed_guest_layout_cannot_reuse_a_baseline() {
++        let directory = Directory::new();
++        let path = directory.0.join("base.mem");
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
++        let layout = vec![Range { gpa: 0x40000000, offset: 0, length: page }];
++        fs::write(&path, vec![0; page as usize]).unwrap();
++        Lineage::inherit(&path, None, page).unwrap().publish(&path, layout.clone(), false).unwrap();
++        let changed = vec![Range { gpa: 0x80000000, offset: 0, length: page }];
++        assert!(Lineage::load(&path, &changed, page).is_err());
++    }
++}
+diff --git a/hypervisor/vmm/src/vm.rs b/hypervisor/vmm/src/vm.rs
+index a47c699..3d7def1 100644
+--- a/hypervisor/vmm/src/vm.rs
++++ b/hypervisor/vmm/src/vm.rs
+@@ -857,6 +857,7 @@ impl Vm {
+                 prefault,
+                 phys_bits,
+                 memory_vol_url,
++                snapshot.metadata.as_ref().map(|m| m.snapshot_type == vm_migration::SnapshotType::KvmCow).unwrap_or(false),
+             )
+             .map_err(Error::MemoryManager)?
+         } else {
+@@ -2818,6 +2819,17 @@ impl Transportable for Vm {
+         config: &SnapshotConfig,
+     ) -> std::result::Result<(), MigratableError> {
+         let destination_url = &config.destination_url;
++        let durable = match config.memory_vol_url.as_deref() {
++            Some(url) => {
++                let path = crate::migration::memory_blob_to_path(url)?;
++                let file = std::fs::File::open(path)
++                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++                !crate::snapshot_lineage::volatile(&file)
++                    .map_err(|e| MigratableError::MigrateSend(e.into()))?
++            }
++            None => true,
++        };
++
+         let mut snapshot_config_path = url_to_path(destination_url)?;
+         snapshot_config_path.push(SNAPSHOT_CONFIG_FILE);
+ 
+@@ -2834,13 +2846,15 @@ impl Transportable for Vm {
+             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+ 
+         snapshot_config_file
+-            .write(vm_config.as_bytes())
++            .write_all(vm_config.as_bytes())
+             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+ 
+         // Ensure config data is flushed to disk for cross-machine pause-snapshot.
++        if durable {
+         snapshot_config_file
+             .sync_all()
+             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++        }
+ 
+         let mut snapshot_state_path = url_to_path(destination_url)?;
+         snapshot_state_path.push(SNAPSHOT_STATE_FILE);
+@@ -2863,13 +2877,15 @@ impl Transportable for Vm {
+             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+ 
+         snapshot_state_file
+-            .write(&vm_state)
++            .write_all(&vm_state)
+             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+         // Ensure state data is flushed to disk for cross-machine pause-snapshot.
+ 
++        if durable {
+         snapshot_state_file
+             .sync_all()
+             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++        }
+ 
+         // Tell the memory manager to also send/write its own snapshot.
+         if let Some(memory_manager_snapshot) = snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID) {
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+index fca1fe4..bafdbc1 100644
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -335,7 +335,8 @@ class Sandbox:
+         return cls(resp.json(), config=cfg)
+ 
+     @classmethod
+-    def connect(cls, sandbox_id: str, *, config: Config | None = None) -> "Sandbox":
++    def connect(cls, sandbox_id: str, *, config: Config | None = None,
++                snapshot_mechanism: str | None = None) -> "Sandbox":
+         """POST /sandboxes/:sandboxID/connect - Connect to an existing sandbox.
+ 
+         Resumes the sandbox if it is currently paused.
+@@ -354,8 +355,11 @@ class Sandbox:
+         cfg = config or Config()
+         s = requests.Session()
+         # Connect omits timeout; see docs/guide/lifecycle.md.
++        if snapshot_mechanism not in (None, "full-copy", "incremental-cow"):
++            raise ValueError("invalid snapshot mechanism")
+         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
+-                      json={},
++                      json=({"snapshot_mechanism": snapshot_mechanism}
++                            if snapshot_mechanism else {}),
+                       headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+         _check_response(resp)
+         return cls(resp.json(), config=cfg)
+@@ -484,7 +488,8 @@ class Sandbox:
+     def pause(self, *, wait: bool = True, timeout: float = 30, interval: float = 1.0,
+               snapshot_tier: str | None = None,
+               memory_snapshot_path: str | None = None,
+-              snapshot_generation: int | None = None) -> dict | None:
++              snapshot_generation: int | None = None,
++              snapshot_mechanism: str | None = None) -> dict | None:
+         """POST /sandboxes/:sandboxID/pause - Pause a sandbox.
+ 
+         Preserves the sandbox memory snapshot. The sandbox can be resumed
+@@ -510,10 +515,13 @@ class Sandbox:
+                 raise ValueError("snapshot_tier must be warm or cold")
+             if not memory_snapshot_path or snapshot_generation is None or snapshot_generation < 1:
+                 raise ValueError("tiered pause requires a path and positive generation")
++            if snapshot_mechanism not in (None, "full-copy", "incremental-cow"):
++                raise ValueError("invalid snapshot mechanism")
+             body = {
+                 "snapshot_tier": snapshot_tier,
+                 "memory_snapshot_path": memory_snapshot_path,
+                 "snapshot_generation": snapshot_generation,
++                "snapshot_mechanism": snapshot_mechanism,
+             }
+         resp = self._session.post(
+             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause", json=body,

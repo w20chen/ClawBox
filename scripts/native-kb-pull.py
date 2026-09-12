@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import argparse
 import hashlib
 import json
@@ -43,13 +44,19 @@ def publish_response(response: dict[str, Any], artifact_dir: Path) -> dict[str, 
         # Metadata is the commit marker and is published last.
         (artifact_dir / "native-kb-load.json", canonical(metadata)),
     )
-    temporary: list[tuple[Path, Path]] = []
-    for target, content in targets:
-        pending = target.with_name(f".{target.name}.tmp")
-        pending.write_text(content, encoding="utf-8")
-        temporary.append((pending, target))
-    for pending, target in temporary:
-        os.replace(pending, target)
+    from clawtune_kb import StateStore
+    # Commit through the native three-KB store when loading a working state.
+    store = StateStore(artifact_dir) if (artifact_dir / "state.json").is_file() else None
+    with store if store is not None else nullcontext():
+        temporary: list[tuple[Path, Path]] = []
+        for target, content in targets:
+            pending = target.with_name(f".{target.name}.tmp")
+            pending.write_text(content, encoding="utf-8")
+            temporary.append((pending, target))
+        for pending, target in temporary:
+            os.replace(pending, target)
+        if store is not None:
+            store.checkpoint()
     return metadata
 
 

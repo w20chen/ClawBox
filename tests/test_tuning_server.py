@@ -85,7 +85,7 @@ def test_native_api_publishes_atomic_pair_and_replays_idempotently(client):
     assert response.status_code == 200
     snapshot = response.json()
     assert snapshot["generation"] == 1
-    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v4"
+    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v5"
     assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v2"
 
     prediction = client.get(

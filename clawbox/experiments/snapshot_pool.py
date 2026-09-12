@@ -36,6 +36,7 @@ class SnapshotManifest:
     last_used_monotonic_s: float
     committed_monotonic_s: float
     pinned: int = 0
+    retained_by_vm: bool = False
 
 
 class WarmSnapshotPool:
@@ -86,16 +87,25 @@ class WarmSnapshotPool:
 
     def commit(self, key: SnapshotKey, *, path: str, logical_bytes: int,
                allocated_bytes: int, transferred_bytes: int | None,
-               spiller: Callable[[SnapshotManifest], None] | None = None) -> SnapshotManifest:
+               spiller: Callable[[SnapshotManifest], None] | None = None,
+               replaces: SnapshotKey | None = None) -> SnapshotManifest:
         if logical_bytes < 0 or allocated_bytes < 0 or (
             transferred_bytes is not None and transferred_bytes < 0
         ):
             raise ValueError("snapshot byte counts must be non-negative")
         with self._lock:
+            predecessor = self._manifests.get(replaces) if replaces is not None else None
+            if replaces is not None and (
+                predecessor is None or not predecessor.retained_by_vm or predecessor.pinned
+                or (replaces.session_id, replaces.role) != (key.session_id, key.role)
+                or replaces.generation >= key.generation
+            ):
+                raise RuntimeError("invalid retained snapshot predecessor")
             reserved = self._reservations.pop(key, None)
             if reserved is None:
                 raise RuntimeError(f"snapshot generation is not reserved: {key}")
-            if allocated_bytes > reserved:
+            inherited_bytes = predecessor.allocated_bytes if predecessor is not None else 0
+            if allocated_bytes > reserved + inherited_bytes:
                 self._reservations[key] = reserved
                 raise RuntimeError(
                     f"allocated WARM bytes {allocated_bytes} exceed reservation {reserved}"
@@ -108,6 +118,9 @@ class WarmSnapshotPool:
                 last_used_monotonic_s=now, committed_monotonic_s=now,
             )
             self._manifests[key] = manifest
+            if predecessor is not None:
+                self._manifests.pop(replaces)
+                self._spillers.pop(replaces, None)
             if spiller is not None:
                 self._spillers[key] = spiller
             self._assert_capacity_locked()
@@ -214,6 +227,15 @@ class WarmSnapshotPool:
         with self._lock:
             self._manifests[key].last_used_monotonic_s = self._clock()
 
+    def retain_for_vm(self, key: SnapshotKey) -> None:
+        """A running lazy restore still references these physical WARM pages."""
+        with self._lock:
+            self._manifests[key].retained_by_vm = True
+
+    def manifest(self, key: SnapshotKey) -> SnapshotManifest:
+        with self._lock:
+            return self._manifests[key]
+
     def remove(self, key: SnapshotKey, *, consume_pinned: bool = False) -> SnapshotManifest:
         with self._lock:
             item = self._manifests[key]
@@ -241,7 +263,7 @@ class WarmSnapshotPool:
                 return ()
             candidates = sorted(
                 (item for key, item in self._manifests.items()
-                 if key not in excluded and item.pinned == 0),
+                 if key not in excluded and item.pinned == 0 and not item.retained_by_vm),
                 key=lambda item: (
                     item.last_used_monotonic_s,
                     item.key.session_id, item.key.role, item.key.generation,

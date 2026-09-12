@@ -70,8 +70,7 @@ def _check_source_selection(tmp_path, adapter, selection, already_on_path=False)
         env["CLAWTUNE_SCHEDULER_SRC"] = str(sources["legacy"])
     elif selection == "legacy":
         env["CLAWTUNE_SCHEDULER_SRC"] = str(sources["legacy"])
-    else:
-        env["CLAWTUNE_SIDECAR_SRC"] = str(tmp_path / "missing-source")
+    env["CLAWTUNE_ROOT"] = str(tmp_path / "ClawTune")
     # Redirect both built-in locations to fixtures; no local ClawTune checkout
     # or /opt installation is needed. Each case starts with a fresh module cache.
     script = textwrap.dedent(f"""
@@ -95,8 +94,8 @@ def _check_source_selection(tmp_path, adapter, selection, already_on_path=False)
             sys.path.append({str(sources['explicit'])!r})
         for name, loader in {modules[adapter]!r}:
             module = importlib.import_module(name)
-            fake_file = Path({str(tmp_path)!r}) / "ClawBox" / "clawbox" / "adapter" / "loader.py"
-            with patch.object(module, "__file__", str(fake_file)), patch.object(module, "Path", source_path):
+            import clawbox.clawtune_integration as integration
+            with patch.object(integration, "Path", source_path):
                 getattr(module, loader)()
             import tool_resource.runtime_kb as kb
             assert Path(kb.__file__).resolve() == Path({str(sources[selection] / 'tool_resource' / 'runtime_kb.py')!r}).resolve(), kb.__file__

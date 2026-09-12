@@ -37,6 +37,9 @@ machine-specific references, not installation defaults.
 
 ## Development
 
-Keep ClawTune in a sibling checkout. Run relevant checks with `python -m pytest`.
+ClawTune is installed from `main`; a sibling checkout or `CLAWTUNE_SIDECAR_SRC`
+can supply its source. Use the [update instructions](docs/installation.md#update-clawtune-from-main)
+to build Runtime and Tool images from the same latest-main export.
+Run relevant checks with `python -m pytest`.
 Guest integration requires the patched server, matching SDK, images and kernel
 listed in the installation guide. Store generated outputs outside Git.

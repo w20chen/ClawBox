@@ -2,7 +2,21 @@
 # Runtime CubeSandbox: OpenClaw + ClawTune + ClawBox tool plugin.
 FROM cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code@sha256:e1cb43e12ba70b8453b45f0c063306faab8a6974aa3fd76982dc4d019d07c60d AS cube-base
 
+FROM node:22-bookworm-slim AS plugin-build
+ARG NPM_REGISTRY=https://registry.npmjs.org
+WORKDIR /src/plugin
+COPY --from=clawtune packages/clawtune-plugin/package.json ./
+COPY --from=clawtune packages/clawtune-plugin/package-lock.json ./
+RUN npm ci --registry="${NPM_REGISTRY}"
+COPY --from=clawtune packages/clawtune-plugin/tsconfig.json ./
+COPY --from=clawtune packages/clawtune-plugin/src ./src
+RUN npm run build
+
+
 FROM 127.0.0.1:5000/clawbox/runtime-arm64@sha256:997bf0a73bf4205d2e41e734c26e8104206442e738246df9e5fe2535119ddaaa
+ARG CLAWTUNE_REVISION=unknown
+ENV CLAWTUNE_REVISION=${CLAWTUNE_REVISION}
+LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
 ARG CUBE_GUEST_KERNEL_DIGEST=unspecified
 LABEL io.clawbox.cube-guest-kernel-digest="${CUBE_GUEST_KERNEL_DIGEST}"
 USER root
@@ -12,7 +26,12 @@ COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
 # Refresh the same ClawTune sidecar package used by Docker deployments; the
 # Cube runtime changes only execution-scope/capability discovery.
 COPY --from=clawtune services/sidecar /opt/clawtune/services/sidecar
-RUN /opt/clawtune/venv/bin/pip install --no-deps --force-reinstall /opt/clawtune/services/sidecar
+COPY --from=clawtune contracts /opt/clawtune/contracts
+COPY --from=clawtune seeds /opt/clawtune/seeds
+COPY --from=clawtune seeds/bootstrap-v1 /opt/clawtune/cold-start/tool-resource
+COPY --from=plugin-build /src/plugin/dist /opt/clawtune/packages/clawtune-plugin/dist
+COPY --from=clawtune packages/clawtune-plugin/openclaw.plugin.json packages/clawtune-plugin/package.json /opt/clawtune/packages/clawtune-plugin/
+RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune/services/sidecar
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-runtime-entrypoint.sh \
  && chmod 0755 /usr/local/bin/ssh
 ENV PATH=/usr/local/bin:/opt/clawtune/venv/bin:$PATH
@@ -20,3 +39,5 @@ ENV CLAWBOX_VM_ROLE=runtime
 ENV CLAWTUNE_PMU_ENABLED=true
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/cube-runtime-entrypoint.sh"]
+
+COPY scripts/initialize-clawtune-state.py /usr/local/bin/initialize-clawtune-state.py

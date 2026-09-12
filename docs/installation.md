@@ -56,6 +56,38 @@ clawbox experiment --help
 Expected: ARM64, accessible KVM, `cgroup2fs`, a working Docker daemon, and the
 experiment command list. Use fresh checkout directories for the clone commands.
 
+### Update ClawTune from main
+
+ClawBox follows ClawTune's `main` branch. Before rebuilding guest images, export
+the current remote main into a new directory. This leaves the sibling checkout's
+branch and local edits untouched:
+
+```bash
+python scripts/prepare-clawtune.py --output /data/clawtune-build-source
+export CLAWTUNE_ROOT=/data/clawtune-build-source
+export CLAWTUNE_SIDECAR_SRC="$CLAWTUNE_ROOT/services/sidecar/src"
+python -m pip install --upgrade "$CLAWTUNE_ROOT/services/sidecar"
+python scripts/validate_clawtune_integration.py --clawtune-root "$CLAWTUNE_ROOT"
+export CLAWTUNE_REVISION="$(cat "$CLAWTUNE_ROOT/CLAWTUNE_REVISION")"
+docker buildx build --load --platform linux/arm64 \
+  --build-context "clawtune=$CLAWTUNE_ROOT" --build-arg "CLAWTUNE_REVISION=$CLAWTUNE_REVISION" \
+  -f docker/Dockerfile.runtime-cube -t clawbox/runtime-cube:main .
+docker buildx build --load --platform linux/arm64 \
+  --build-context "clawtune=$CLAWTUNE_ROOT" --build-arg "CLAWTUNE_REVISION=$CLAWTUNE_REVISION" \
+  -f docker/Dockerfile.tool-cube -t clawbox/tool-cube:main .
+```
+
+Use the same export for both images, then push and register their new immutable
+digests as described below. The commit records what was built; it is not a
+release-specific compatibility requirement. Use a new export directory for each
+update. The SWE-ReBench overlay rebuild script fetches and exports main itself.
+
+Each Runtime initializes an independent working KB through ClawTune's native
+seed/state API. Use new run directories after upgrading from an older KB layout.
+`CLAWTUNE_COLD_START_DIR` can select a complete native seed bundle, including its
+manifest and all three snapshots. Guest eBPF uses ClawTune's unmodified collector;
+the running guest kernel and its BCC build headers must match.
+
 ## 2. Build and install patched CubeSandbox
 
 Copy the supplied bundle to the destination, then prepare the server from
@@ -249,6 +281,7 @@ local_numa_node: 0
 warm_numa_node: 1
 warm_snapshot_root: /data/clawbox/warm
 cold_snapshot_root: /data/clawbox/cold
+snapshot_mechanism: incremental-cow  # use full-copy for the baseline
 ```
 
 On the idle host, install the storage settings and activate the service flags:
@@ -282,6 +315,27 @@ python scripts/validate-tiered-storage.py \
   --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa 0 \
   --expected-memory-mib 4096 --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
+
+After installing the CubeAPI, CubeMaster, Cubelet, and template-selected shim
+from the patched CubeSandbox source, compare repeated checkpoints under both
+mechanisms. Use separate output files and the same template, node, and RAM size:
+
+```bash
+for mode in full-copy incremental-cow; do
+  python scripts/validate-tiered-storage.py \
+    --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
+    --warm /data/clawbox/warm --cold /data/clawbox/cold \
+    --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa 0 \
+    --expected-memory-mib 4096 --snapshot-mechanism "$mode" --rounds 8 \
+    --output "$CLAWBOX_OUTPUT_ROOT/storage-$mode.json"
+done
+```
+
+The last generation spills to COLD. The JSON contains checkpoint P50/P95
+both with and without the initial base, restore-ready P50/P95, first-tool
+latency, host VM faults/read bytes, and each
+generation's logical, allocated, dirty, and transferred bytes. The process
+state token and changed Guest RAM byte must survive every restore.
 
 This helper uses privileged Docker inspection. Memory setup, endpoint checks,
 and storage checks do not establish a completed agent benchmark.

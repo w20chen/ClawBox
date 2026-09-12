@@ -98,6 +98,7 @@ def make_manifest(
         "ts_start": start,
         "ts_end": start + 2.0,
         "cpu_utilization_avg_cores": cpu,
+        "cpu_time_s": cpu * 2.0,
         "memory_rss_peak_bytes": rss,
         "collector_errors": [],
         "cgroup_setup_error": None,
@@ -244,9 +245,10 @@ def test_run_b_native_prediction_loads_exact_run_a_generation(db):
     assert clause.prediction.scope == "repo"
     assert clause.prediction.key_kind == "exact_clause"
     assert clause.prediction.evidence_count == 1
-    assert runtime["peak_cpu_cores"].scope == "repo"
-    assert runtime["peak_cpu_cores"].key_kind == "exact_command"
-    assert runtime["peak_cpu_cores"].evidence_count == 1
+    assert runtime["peak_cpu_cores"].conditional_p90 is None
+    assert runtime["latency_ms"].scope == "repo"
+    assert runtime["latency_ms"].key_kind == "exact_command"
+    assert runtime["latency_ms"].evidence_count == 1
 
 
 def test_each_identity_domain_refines_the_same_cold_start_independently(db):
@@ -287,7 +289,14 @@ def test_runtime_loader_publishes_the_exact_atomic_pair(db, tmp_path):
     spec = importlib.util.spec_from_file_location("native_kb_pull", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    from clawbox.clawtune_integration import seed_directory
+    from clawtune_kb import initialize_state, StateStore
+    state = tmp_path / "state"
+    initialize_state(state, seed_directory(), owner="runtime")
+    tmp_path = state
     metadata = module.publish_response(snapshot, tmp_path)
+    with StateStore(tmp_path):
+        pass  # Restore the committed generation, as the sidecar does at startup.
     assert metadata["generation"] == 1
     assert metadata["evidence"]["runs"] == ["run-a"]
     assert json.loads((tmp_path / "clause-resource-kb.json").read_text()) == snapshot["clause_snapshot"]

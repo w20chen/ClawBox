@@ -43,15 +43,17 @@ RUN test -n "${KERNEL_VERSION}" \
  && mkdir -p "/lib/modules/${KERNEL_VERSION}" \
  && ln -s "/usr/src/linux-${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/build"
 
-COPY sidecar /opt/clawtune-guest/services/sidecar
-RUN /opt/clawtune/venv/bin/pip install --no-deps --force-reinstall \
+COPY --from=clawtune services/sidecar /opt/clawtune-guest/services/sidecar
+COPY --from=clawtune contracts /opt/clawtune-guest/contracts
+COPY --from=clawtune seeds /opt/clawtune-guest/seeds
+RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall \
       /opt/clawtune-guest/services/sidecar \
  && /opt/clawtune/venv/bin/python -c \
       "from tool_resource.telemetry import _ensure_bcc_importable; print(_ensure_bcc_importable().__file__)" \
  && /opt/clawtune/venv/bin/python -c \
       "from tool_resource.features import parse_command_clauses; result=parse_command_clauses('true'); assert not result['parse_failed'], result"
-COPY check_guest_ebpf.py /opt/clawtune-guest/tools/check_guest_ebpf.py
-COPY guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
+COPY --from=clawtune tools/check_guest_ebpf.py /opt/clawtune-guest/tools/check_guest_ebpf.py
+COPY --from=clawtune tools/guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
 COPY validate-toolbridge-guest-artifacts.py /opt/clawbox/validate-toolbridge-guest-artifacts.py
 COPY --from=toolbridge-build /out/tool-bridge /usr/local/bin/tool-bridge
 

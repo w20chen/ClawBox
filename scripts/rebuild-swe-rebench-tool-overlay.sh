@@ -56,22 +56,11 @@ esac
   echo "reviewed KERNEL_SOURCE_SHA256 required for guest ${kernel_version}" >&2
   exit 65
 }
-clawtune_revision="${CLAWTUNE_REVISION:-$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD)}"
-[[ "${clawtune_revision}" =~ ^[a-f0-9]{40}$ ]] || {
-  echo "CLAWTUNE_REVISION must be an exact 40-character commit id" >&2
-  exit 65
-}
-actual_clawtune_revision="$(git -C "${CLAWTUNE_ROOT}" rev-parse HEAD)"
-expected_clawtune_revision="${EXPECTED_CLAWTUNE_REVISION:-e1c6f0ba24d20d91fb4c89106ca2d94d3554c400}"
-[[ "${clawtune_revision}" == "${actual_clawtune_revision}" ]] || {
-  echo "CLAWTUNE_REVISION ${clawtune_revision} does not match checkout ${actual_clawtune_revision}" >&2
-  exit 65
-}
-[[ "${clawtune_revision}" == "${expected_clawtune_revision}" ]] || {
-  echo "ClawTune revision ${clawtune_revision} is incompatible with this release" >&2
-  echo "expected ${expected_clawtune_revision}; check out that exact revision" >&2
-  exit 65
-}
+# Resolve main once and build every ClawTune component from that clean export.
+clawtune_export="$(mktemp -d "${ROOT}/.artifacts/clawtune-main.XXXXXX")/source"
+python3 "${SCRIPT_DIR}/prepare-clawtune.py" --clawtune-root "${CLAWTUNE_ROOT}" --output "${clawtune_export}"
+CLAWTUNE_ROOT="${clawtune_export}"
+clawtune_revision="$(cat "${CLAWTUNE_ROOT}/CLAWTUNE_REVISION")"
 
 docker build --platform linux/arm64 --network host \
   --build-context "clawtune=${CLAWTUNE_ROOT}" \

@@ -5,7 +5,7 @@ import hashlib
 import json
 import random
 from pathlib import Path
-from typing import Any
+from typing import Literal, Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -125,6 +125,7 @@ class ResourcesSpec(StrictFrozenModel):
     oracle_measurements: str | None = None
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
+    snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "full-copy"
     warm_snapshot_root: str | None = None
     cold_snapshot_root: str | None = None
     local_numa_node: int | None = Field(default=None, ge=0)

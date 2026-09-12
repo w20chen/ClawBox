@@ -204,7 +204,7 @@ def create_app(db_url: str | None = None) -> FastAPI:
         _, _, RuntimeToolResourceKB, ToolCallQuery, _, _ = _clawtune_api()
         runtime_snapshot = json.loads(row.runtime_snapshot)
         kb = RuntimeToolResourceKB.from_json_obj(runtime_snapshot)
-        predictions = kb.query(ToolCallQuery(
+        query = ToolCallQuery(
             repo=repo,
             tool_name="exec",
             command=None,
@@ -212,11 +212,14 @@ def create_app(db_url: str | None = None) -> FastAPI:
                 time.time(), float(runtime_snapshot.get("last_query_ts") or 0.0),
             ),
             ambient_before_mb=0.0,
-        ))
+        )
+        predictions = kb.query(query)
+        from .clawtune import predict_native_call_load
+        call_load = predict_native_call_load(kb, query)
         latency = predictions["latency_ms"]
-        cpu = predictions["peak_cpu_cores"]
+        cpu = call_load.targets["cpu_avg_cores"]
         memory = predictions["peak_memory_mb"]
-        values = (latency.conditional_p90, cpu.conditional_p90, memory.conditional_p90)
+        values = (latency.conditional_p90, cpu.p90, memory.conditional_p90)
         if any(value is None or not math.isfinite(float(value)) or float(value) <= 0 for value in values):
             raise HTTPException(status_code=409, detail="native snapshot has no safe positive p90")
         return {
@@ -227,21 +230,24 @@ def create_app(db_url: str | None = None) -> FastAPI:
             "source_digest": row.source_digest,
             "artifact_count": row.artifact_count,
             "clawtune_revision": row.clawtune_revision,
+            "call_prediction": call_load.model_dump(mode="json"),
             "prediction": {
+                "cpu_metric": "cpu_avg_cores",
+                "memory_metric": "cgroup_peak_bytes",
                 "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
-                "cpu_p90_cores": float(cpu.conditional_p90),
+                "cpu_p90_cores": float(cpu.p90),
                 "memory_p90_bytes": float(memory.conditional_p90) * 1024.0 * 1024.0,
                 "evidence_count": min(
-                    latency.evidence_count, cpu.evidence_count, memory.evidence_count,
+                    latency.evidence_count, cpu.sample_count, memory.evidence_count,
                 ),
                 "scopes": {
                     "latency": latency.scope,
-                    "cpu": cpu.scope,
+                    "cpu": cpu.context[0] if cpu.context else None,
                     "memory": memory.scope,
                 },
                 "fallback_paths": {
                     "latency": list(latency.fallback_path),
-                    "cpu": list(cpu.fallback_path),
+                    "cpu": list(cpu.context),
                     "memory": list(memory.fallback_path),
                 },
             },

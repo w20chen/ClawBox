@@ -1,4 +1,4 @@
-"""Thin adapters over the pinned sibling ClawTune implementation.
+"""Thin adapters over the main-branch sibling ClawTune implementation.
 
 ClawBox owns artifact validation, freezing, and managed VM policy. Command
 normalization, fallback-node construction, target semantics, and conditional
@@ -7,29 +7,15 @@ P90 remain ClawTune code and must not drift into a second implementation here.
 
 from __future__ import annotations
 
-import os
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .schema import ToolObservation
 
 
 def _load_clawtune() -> tuple[Any, Any, Any, Any, Any]:
-    candidates = [
-        os.getenv("CLAWTUNE_SIDECAR_SRC"),
-        str(Path(__file__).resolve().parents[3] / "ClawTune" / "services" / "sidecar" / "src"),
-        "/opt/clawtune/services/sidecar/src",
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_dir():
-            # Select one source in declared priority order. Prepending every
-            # candidate reverses priority and silently overrides explicit config.
-            if candidate in sys.path:
-                sys.path.remove(candidate)
-            sys.path.insert(0, candidate)
-            break
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
     try:
         from tool_resource.runtime_kb import (  # type: ignore[import-not-found]
             CompletedCall,
@@ -41,7 +27,7 @@ def _load_clawtune() -> tuple[Any, Any, Any, Any, Any]:
             shell_command_prefix_tokens as native_prefix_tokens,
         )
     except ImportError as exc:  # pragma: no cover - production image gate
-        raise RuntimeError("pinned ClawTune package is unavailable") from exc
+        raise RuntimeError("ClawTune main package is unavailable") from exc
     return CompletedCall, RuntimeToolResourceKB, ToolCallQuery, native_heads, native_prefix_tokens
 
 
@@ -91,8 +77,11 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         ts_start=round(start_epoch, 6),
         ts_end=round(end_epoch, 6),
         censored=not observation.complete or observation.exit_code != 0,
-        peak_cpu_cores=float(cpu_cores) if cpu_cores is not None else None,
-        peak_cpu_cores_eligible=cpu_cores is not None,
+        cpu_time_seconds=observation.cpu_time_sec,
+        cpu_time_eligible=observation.cpu_time_sec is not None and observation.complete,
+        # Average cgroup CPU must never train the fixed-window peak target.
+        peak_cpu_cores=None,
+        peak_cpu_cores_eligible=False,
         peak_memory_mb=(
             float(rss_bytes) / (1024.0 * 1024.0) if rss_bytes is not None else None
         ),
@@ -130,3 +119,18 @@ def build_clawtune_kb_snapshot(
     snapshot = kb.to_json_obj()
     RuntimeToolResourceKB.from_json_obj(snapshot)
     return snapshot
+
+
+def predict_native_call_load(runtime, query, *, clause=None, lattice=None):
+    """Use ClawTune's canonical five-target adapter and its evidence semantics."""
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
+    from clawtune_sidecar.predictors.call_load import predict_call_load
+    from clawtune_sidecar.prediction_config import load_bucket_edges
+    from tool_resource.runtime_kb import ClauseResourceKB
+    from tool_time.lattice_kb import LatticeTimeKB
+    return predict_call_load(
+        runtime=runtime, trie=clause if clause is not None else ClauseResourceKB(),
+        lattice=lattice if lattice is not None else LatticeTimeKB(), query=query,
+        edges=load_bucket_edges((100.0, 500.0, 2000.0, 10000.0)),
+    )[0]

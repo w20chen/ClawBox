@@ -286,6 +286,52 @@ def sandbox_process_rss_bytes(sandbox_id: str, *,
     return total if matched else None
 
 
+def sandbox_process_fault_counters(
+    sandbox_id: str, process_paths: tuple[Path, ...],
+) -> dict[tuple[str, int], dict[str, int | None]] | None:
+    """Read VMM host faults and I/O, retaining PID start time against reuse.
+
+    These are host process counters, not Guest page faults or a direct count
+    of deferred snapshot loads. Ordinary VM activity also contributes.
+    """
+    if not process_paths:
+        return None
+    result = {}
+    for entry in process_paths:
+        try:
+            if sandbox_id.encode() not in (entry / "cmdline").read_bytes():
+                return None
+            fields = (entry / "stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+            counters = {
+                "minor_faults": int(fields[7]),
+                "major_faults": int(fields[9]),
+                "disk_read_bytes": None,
+            }
+            try:
+                io = dict(line.split(":", 1) for line in
+                          (entry / "io").read_text(encoding="ascii").splitlines())
+                counters["disk_read_bytes"] = int(io["read_bytes"])
+            except (OSError, ValueError, KeyError):
+                pass
+            result[(entry.name, int(fields[19]))] = counters
+        except (OSError, ValueError, IndexError):
+            return None
+    return result
+
+
+def sandbox_process_counter_deltas(before, after) -> dict[str, int | None]:
+    """Missing/restarted processes make a delta unavailable, never zero."""
+    result = {}
+    for name in ("minor_faults", "major_faults", "disk_read_bytes"):
+        delta = None
+        if before and after and before.keys() == after.keys():
+            pairs = [(before[key][name], after[key][name]) for key in before]
+            if all(a is not None and b is not None and b >= a for a, b in pairs):
+                delta = sum(b - a for a, b in pairs)
+        result[f"host_vm_{name}_delta"] = delta
+    return result
+
+
 class SandboxRSSSampler:
     """Execution-window host RSS sampler for one CubeSandbox microVM."""
 
@@ -310,6 +356,9 @@ class SandboxRSSSampler:
                 except (FileNotFoundError, PermissionError, ProcessLookupError):
                     continue
         self._process_paths = tuple(paths)
+        self._counter_baseline = sandbox_process_fault_counters(
+            sandbox_id, self._process_paths,
+        )
         self.baseline_bytes = sandbox_process_rss_bytes(
             sandbox_id, proc_root=proc_root, process_paths=self._process_paths,
         )
@@ -340,6 +389,11 @@ class SandboxRSSSampler:
             "actual_host_execution_increment_bytes": increment,
             "sample_count": len(samples),
             "validity": "valid" if increment is not None else "unavailable",
+            **sandbox_process_counter_deltas(
+                self._counter_baseline,
+                sandbox_process_fault_counters(self.sandbox_id, self._process_paths),
+            ),
+            "fault_counter_scope": "host_vm_processes_execution_window",
         }
 
     def _run(self) -> None:

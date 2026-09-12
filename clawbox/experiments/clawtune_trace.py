@@ -33,7 +33,7 @@ class ClawTuneTraceWriter:
         self.run_id = run_id
         self.session_id = session_id
         self.repo_fingerprint = repo_fingerprint
-        self._sequence = 0
+        self._native = None
         self._lock = Lock()
 
     def record(self, command: str, result: CommandResult, *,
@@ -51,70 +51,12 @@ class ClawTuneTraceWriter:
         if not tool_name or len(tool_name) > 128:
             raise ValueError("tool_name must be between 1 and 128 characters")
         digest = hashlib.sha256(command.encode()).hexdigest()
-        now_ns = time.time_ns()
-        duration_ns = max(0, int(result.duration_s * 1_000_000_000))
-        status = "ok" if result.exit_code == 0 else (
-            "timeout" if result.exit_code == 124 else "error"
-        )
         cgroup = self._artifact(artifacts, "cgroup_resource_v1", execution_id)
         pmu = self._artifact(artifacts, "pmu_profile_v1", execution_id)
         if pmu is None and isinstance(cgroup, dict) and isinstance(cgroup.get("pmu"), dict):
             pmu = cgroup["pmu"]
-        attribution_status = "measured" if cgroup else "latency_only"
         with self._lock:
-            sequence = self._sequence
-            self._sequence += 1
-            span = {
-                "schema_version": 6,
-                "record_type": "span_end",
-                "trace_id": f"trace-{self.session_id}",
-                "span_id": f"span-{execution_id}",
-                "parent_span_id": None,
-                "session_id": self.session_id,
-                "run_id": self.run_id,
-                "agent_id": self.session_id,
-                "sequence_no": sequence,
-                "kind": "tool",
-                "name": tool_name,
-                "phase": phase,
-                "wall_time_ns": str(now_ns),
-                "monotonic_time_ns": str(time.monotonic_ns()),
-                "duration_ns": str(duration_ns),
-                "duration_sec": str(result.duration_s),
-                "repo": self.repo_fingerprint,
-                "status": {"code": status, "message": None},
-                "output": {"exit_code": result.exit_code, "result": None},
-                "execution": {
-                    "mode": "clawbox_cube_worker",
-                    "execution_id": execution_id,
-                    "requested_command": command,
-                    "payload_command": command,
-                    "command_digest": digest,
-                },
-                # The Worker observes the entire Cube RPC wall-time window and
-                # only attaches CPU/RSS values produced by the Tool VM.
-                "resources": {
-                    "attribution_status": attribution_status,
-                    "scope": "tool_vm_cgroup" if cgroup else "cube_rpc",
-                    "quality": cgroup.get("sampling_quality", "unknown") if cgroup else "complete",
-                    "monitor_start_wall_time_ns": str(now_ns - duration_ns),
-                    "monitor_end_wall_time_ns": str(now_ns),
-                    "coverage_ratio": 1.0,
-                    "coverage_reason": "cube_rpc_full_window",
-                    "action_duration_ns": str(duration_ns),
-                    "cpu_time_s": cgroup.get("cpu_time_s") if cgroup else None,
-                    "cpu_utilization_avg_cores": (
-                        cgroup.get("cpu_utilization_avg_cores") if cgroup else None
-                    ),
-                    "rss_peak_bytes": cgroup.get("memory_rss_peak_bytes") if cgroup else None,
-                    "memory_rss_bytes_after": (
-                        cgroup.get("memory_rss_after_bytes") if cgroup else None
-                    ),
-                    "pmu": pmu,
-                },
-            }
-            if prediction is not None:
-                span["prediction"] = prediction
+            self._record_native(command, result, execution_id, cgroup, pmu, prediction, tool_name)
             bridge = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "cell_id": None,
@@ -136,10 +78,70 @@ class ClawTuneTraceWriter:
             if prediction is not None:
                 bridge["prediction"] = prediction
             bridge["execution_id"] = execution_id
-            self._append(self.trace_path, span)
             self._append(self.bridge_path, bridge)
             self._persist_artifacts(execution_id, artifacts or {})
         return execution_id
+
+    def close(self) -> None:
+        if self._native is not None:
+            self._native.close()
+            self._native = None
+
+    def _record_native(self, command, result, execution_id, cgroup, pmu, prediction, tool_name):
+        from clawbox.clawtune_integration import use_clawtune
+        use_clawtune()
+        from clawtune_sidecar.trace import AgentTestBenchTraceWriter
+        from clawtune_sidecar.contracts.models import ToolBeforeRequest, ToolCompletedEvent, ToolPrediction, ResourceScope
+        from clawtune_sidecar.monitoring.tool_runtime import ToolRuntimeSample
+
+        if self._native is None:
+            self._native = AgentTestBenchTraceWriter(
+                self.trace_path.parent, scaffold="clawbox", default_repo=self.repo_fingerprint or "unknown",
+            )
+        end = time.time()
+        start = end - max(0, result.duration_s)
+        duration_ms = max(0, round(result.duration_s * 1000))
+        common = dict(schema_version="clawtune.v1", event_id=execution_id,
+                      occurred_at=datetime.now(timezone.utc).isoformat(), plugin_version="clawbox",
+                      run_id=self.run_id, session_id=self.session_id, session_key=None,
+                      agent_id=self.session_id, runtime_id=self.session_id, gateway_id=self.session_id,
+                      repo=self.repo_fingerprint, tool_call_id=execution_id, tool_name=tool_name)
+        scope = ResourceScope(kind="cgroup-v2", execution_id=execution_id,
+                              cgroup_path=cgroup["cgroup_path"], source="clawbox_tool_vm") if cgroup and cgroup.get("cgroup_path") else None
+        before = ToolBeforeRequest(**common, tool_kind="shell", tool_input_kind="command",
+            derived_paths=[], params_digest=hashlib.sha256(command.encode()).hexdigest(),
+            param_features=dict(serialized_size_bytes=len(command.encode()), string_length=len(command),
+                                list_item_count=0, path_count=0, has_command_like_field=True),
+            raw_params={"command": command}, resource_scope=scope)
+        after = ToolCompletedEvent(**common, decision_id=None, lease_id=None, execution_id=execution_id,
+            duration_ms=duration_ms, succeeded=result.exit_code == 0, resource_scope=scope,
+            error_type="timeout" if result.exit_code == 124 else None, error_digest=None,
+            raw_result={"exit_code": result.exit_code, "stdout": result.stdout, "stderr": result.stderr})
+        c = cgroup or {}
+        # Only guest measurements populate resource fields; RPC time is latency.
+        sample = ToolRuntimeSample(
+            event_id=execution_id, tool_call_id=execution_id, tool_name=tool_name, operation=None,
+            started_at=start, ended_at=end, duration_ms=duration_ms, monitor_duration_ms=duration_ms,
+            monitor_start_wall_s=start, monitor_end_wall_s=end,
+            monitor_start_monotonic_s=None, monitor_end_monotonic_s=None,
+            cpu_time_delta_s=c.get("cpu_time_s"), rss_bytes_before=c.get("memory_rss_before_bytes"),
+            rss_bytes_after=c.get("memory_rss_after_bytes"), rss_bytes_peak=c.get("memory_rss_peak_bytes"),
+            cpu_utilization_avg_cores=c.get("cpu_utilization_avg_cores"), cpu_utilization_avg_pct=None,
+            read_bytes_delta=None, write_bytes_delta=None, net_rx_bytes_delta=None, net_tx_bytes_delta=None,
+            ctx_switches_delta=None, disk_read_bytes_per_s=None, disk_write_bytes_per_s=None,
+            net_rx_bytes_per_s=None, net_tx_bytes_per_s=None, sampling_interval_ms=0, sampling_point_count=0,
+            sampling_quality=c.get("sampling_quality", "unknown"), resource_timeline=[],
+            resource_timeline_truncated=False, resource_class="unknown", target_pid=None,
+            process_count_before=None, process_count_after=None,
+            attribution_status="cgroup-v2" if cgroup else "unattributed",
+            monitor_source="cgroup-v2" if cgroup else "cube_rpc", pmu_profile=pmu,
+        )
+        self._native.record_tool_started(before)
+        if prediction is not None and set(prediction).issubset(ToolPrediction.model_fields):
+            self._native.record_tool_prediction(before, ToolPrediction.model_validate(prediction))
+        self._native.record_tool(after, sample)
+        if not self._native.flush():
+            raise RuntimeError("ClawTune trace recorder did not flush")
 
     @staticmethod
     def _artifact(artifacts: dict[str, str] | None, kind: str,
@@ -148,7 +150,15 @@ class ClawTuneTraceWriter:
             value = json.loads((artifacts or {})[kind])
         except (KeyError, TypeError, ValueError):
             return None
-        if value.get("execution_id") != execution_id:
+        if not isinstance(value, dict):
+            return None
+        if kind == "clause_telemetry_v2":
+            calls = value.get("calls")
+            if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+                return None
+            if calls[0].get("tool_call_id") != execution_id:
+                return None
+        elif value.get("execution_id") != execution_id:
             return None
         return value
 
@@ -167,10 +177,7 @@ class ClawTuneTraceWriter:
                 continue
             target = target_dir / f"{prefix}-{safe_id}.json"
             temporary = target.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
-                encoding="utf-8",
-            )
+            temporary.write_text(artifacts[kind], encoding="utf-8", newline="")
             temporary.replace(target)
 
     @staticmethod

@@ -19,11 +19,9 @@ LOG_DIR="${STATE_DIR}/logs"
 KNOWN_HOSTS="${STATE_DIR}/ssh/known_hosts"
 
 mkdir -p "${ARTIFACT_DIR}" "${LOG_DIR}" "$(dirname "${KNOWN_HOSTS}")" /workspace
-for snapshot in "${CLAWTUNE_HOME}"/cold-start/tool-resource/*-kb.json; do
-  [[ -f "${snapshot}" ]] || continue
-  destination="${ARTIFACT_DIR}/$(basename "${snapshot}")"
-  [[ -e "${destination}" ]] || cp "${snapshot}" "${destination}"
-done
+"${CLAWTUNE_HOME}/venv/bin/python" /usr/local/bin/initialize-clawtune-state.py \
+  --state "${ARTIFACT_DIR}" --owner "${RUNTIME_ID}"
+
 rm -f "${STATE_DIR}/ready"
 
 echo "[runtime] tenant_id=${TENANT_ID} runtime_id=${RUNTIME_ID} sandbox=runtime" >&2

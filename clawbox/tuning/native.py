@@ -1,4 +1,4 @@
-"""Signed native Tool-VM telemetry ingestion using pinned ClawTune code."""
+"""Signed native Tool-VM telemetry ingestion using ClawTune main code."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ import hashlib
 import hmac
 import json
 import math
-import os
 import re
-import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -139,19 +137,8 @@ class NativeProjection:
 
 
 def _clawtune_api():
-    candidates = [
-        os.getenv("CLAWTUNE_SIDECAR_SRC"),
-        str(Path(__file__).resolve().parents[3] / "ClawTune" / "services" / "sidecar" / "src"),
-        "/opt/clawtune/services/sidecar/src",
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_dir():
-            # Select one source in declared priority order. Prepending every
-            # candidate reverses priority and silently overrides explicit config.
-            if candidate in sys.path:
-                sys.path.remove(candidate)
-            sys.path.insert(0, candidate)
-            break
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
     try:
         from tool_resource.runtime_kb import (  # type: ignore[import-not-found]
             ClauseResourceKB,
@@ -164,7 +151,7 @@ def _clawtune_api():
             _validate_artifact,
         )
     except ImportError as exc:  # pragma: no cover - production image gate
-        raise RuntimeError("pinned ClawTune package is unavailable") from exc
+        raise RuntimeError("ClawTune main package is unavailable") from exc
     return (
         ClauseResourceKB,
         CompletedCall,
@@ -176,23 +163,10 @@ def _clawtune_api():
 
 
 def _cold_start_directory() -> Path:
-    """Resolve the pinned ClawTune public-prior directory."""
+    """Resolve the ClawTune main public-prior directory."""
 
-    candidates = [
-        os.getenv("CLAWTUNE_COLD_START_DIR"),
-        str(Path(__file__).resolve().parents[3] / "ClawTune" / "traces" / "tool-resource"),
-        "/opt/clawtune/cold-start/tool-resource",
-        "/opt/clawtune/traces/tool-resource",
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        directory = Path(candidate)
-        if all((directory / name).is_file() for name in _COLD_START_FILES.values()):
-            return directory
-    raise RuntimeError(
-        "pinned ClawTune cold-start KB is unavailable; set CLAWTUNE_COLD_START_DIR"
-    )
+    from clawbox.clawtune_integration import seed_directory
+    return seed_directory()
 
 
 def _load_cold_start_pair(
@@ -274,7 +248,7 @@ def project_native_manifests(
     if not manifests:
         raise ValueError("native projection requires at least one manifest")
     identity = {
-        (item.tenant_id, item.repo_fingerprint, item.clawtune_revision)
+        (item.tenant_id, item.repo_fingerprint)
         for item in manifests
     }
     if len(identity) != 1:
@@ -357,10 +331,11 @@ def project_native_manifests(
                 ts_start=ts_start,
                 ts_end=ts_end,
                 censored=exit_code not in (None, 0),
-                peak_cpu_cores=_positive_number(
-                    cgroup.get("cpu_utilization_avg_cores"), "cpu utilization"
+                cpu_time_seconds=(
+                    _finite_number(cgroup["cpu_time_s"], "CPU time")
+                    if cgroup.get("cpu_time_s") is not None else None
                 ),
-                peak_cpu_cores_eligible=True,
+                cpu_time_eligible=cgroup.get("cpu_time_s") is not None,
                 peak_memory_mb=_positive_number(
                     cgroup.get("memory_rss_peak_bytes"), "peak RSS"
                 )
@@ -378,7 +353,7 @@ def project_native_manifests(
             }
         )
 
-    # The public layer is the pinned ClawTune cold-start corpus.  Observations
+    # The public layer is the ClawTune main cold-start corpus.  Observations
     # belonging to this (tenant, repo) identity refine only its repo layer.
     # Rebuilding from all accepted manifests makes each published generation
     # cumulative while preserving the same immutable public prior.
@@ -410,7 +385,7 @@ def project_native_manifests(
 
     runtime_snapshot = runtime_kb.to_json_obj()
     clause_snapshot = clause_kb.to_json_obj()
-    # The pinned native readers are the compatibility gate, not shape checks.
+    # The native readers are the compatibility gate, not shape checks.
     RuntimeToolResourceKB.from_json_obj(runtime_snapshot)
     ClauseResourceKB.from_json_obj(clause_snapshot)
     source_inputs = [
@@ -426,9 +401,10 @@ def project_native_manifests(
         execution_ids=tuple(sorted(clause_payloads)),
         evidence={
             "runs": sorted({item.run_id for item in manifests}),
+            "clawtune_revisions": sorted({item.clawtune_revision for item in manifests}),
             "executions": evidence_rows,
             "cold_start": {
-                "source": "pinned_clawtune",
+                "source": "clawtune_seed",
                 "clause_sha256": cold_start_digests["clause"],
                 "runtime_sha256": cold_start_digests["runtime"],
             },

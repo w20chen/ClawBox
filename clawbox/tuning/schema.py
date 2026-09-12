@@ -219,6 +219,7 @@ class CgroupResource(StrictModel):
     tool_call_id: str | None = None
     tool_name: str = ""
     source: str = "cgroup-v2"
+    cgroup_path: str | None = None
     monitor_source: str | None = None
     attribution_source: str | None = None
     ts_start: float | None = None

@@ -365,7 +365,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"chmod 700 {shlex.quote(ssh_launcher)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
-        + f"cp -n /opt/clawtune/cold-start/tool-resource/*-kb.json {shlex.quote(trace_dir + '/tool-resource')}/ 2>/dev/null || true; "
+        + f"/opt/clawtune/venv/bin/python /usr/local/bin/initialize-clawtune-state.py --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
         + "export CLAWTUNE_POLICY=observe-only "
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "

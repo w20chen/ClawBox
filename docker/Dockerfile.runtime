@@ -134,7 +134,9 @@ COPY --from=plugin-build /src/plugin/dist ./packages/clawtune-plugin/dist
 COPY --from=clawtune packages/clawtune-plugin/openclaw.plugin.json ./packages/clawtune-plugin/
 COPY --from=clawtune packages/clawtune-plugin/package.json ./packages/clawtune-plugin/
 COPY --from=clawtune packages/clawtune-plugin/README.md ./packages/clawtune-plugin/
-COPY --from=clawtune traces/tool-resource ./cold-start/tool-resource
+COPY --from=clawtune contracts ./contracts
+COPY --from=clawtune seeds ./seeds
+COPY --from=clawtune seeds/bootstrap-v1 ./cold-start/tool-resource
 RUN python3 -m venv /opt/clawtune/venv \
  && /opt/clawtune/venv/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" ./services/sidecar \
  && sed -i 's/\r$//' services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
@@ -160,3 +162,5 @@ RUN groupadd --gid 10001 openclaw \
 USER 10001:10001
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/runtime-entrypoint"]
+
+COPY scripts/initialize-clawtune-state.py /usr/local/bin/initialize-clawtune-state.py

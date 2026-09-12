@@ -29,6 +29,9 @@ openclaw() {
   /usr/local/bin/node /usr/local/lib/node_modules/openclaw/openclaw.mjs "$@"
 }
 
+export CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR=/state/traces/tool-resource
+/opt/clawtune/venv/bin/python /usr/local/bin/initialize-clawtune-state.py \
+  --state "$CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR" --owner "$EXPERIMENT_ID"
 echo "[experiment] starting ClawTune" >&2
 /opt/clawtune/venv/bin/python --version >&2
 if ! timeout 30 /opt/clawtune/venv/bin/python -c \

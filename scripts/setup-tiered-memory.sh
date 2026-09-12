@@ -17,6 +17,13 @@ warm_node=${CLAWBOX_WARM_NODE:-1}
 [[ $warm != / && $cold != / && $warm != "$cold" && $local_node != "$warm_node" ]] || {
   echo 'use distinct storage paths and distinct LOCAL/WARM nodes' >&2; exit 1;
 }
+[[ $warm =~ ^/[A-Za-z0-9_./-]+$ && $cold =~ ^/[A-Za-z0-9_./-]+$ ]] || {
+  echo 'snapshot roots must use letters, digits, slash, dot, underscore or hyphen' >&2; exit 1;
+}
+# Check the idle prerequisite before mounting storage or changing the service.
+grep -qx 'populated 0' /sys/fs/cgroup/cube_sandbox/sandbox/cgroup.events || {
+  echo 'refusing setup while standalone VMs are running' >&2; exit 1;
+}
 install -d -o "$owner" -g "$(id -gn "$owner")" -m 755 "$warm" "$cold"
 if ! mountpoint -q "$warm"; then
   [[ -z $(find "$warm" -mindepth 1 -maxdepth 1 -print -quit) ]] || {
@@ -34,6 +41,8 @@ options=$(findmnt -n -o OPTIONS --target "$warm")
 chown "$owner:$(id -gn "$owner")" "$warm" "$cold"
 install -D -m 644 "$script_dir/../deploy/cubesandbox/tiered-memory.conf" \
   /etc/systemd/system/cube-sandbox-cubelet.service.d/tiered-memory.conf
+printf 'Environment=CLAWBOX_WARM_SNAPSHOT_ROOT=%s\nEnvironment=CLAWBOX_COLD_SNAPSHOT_ROOT=%s\n' \
+  "$warm" "$cold" >> /etc/systemd/system/cube-sandbox-cubelet.service.d/tiered-memory.conf
 systemctl daemon-reload
 python3 "$script_dir/configure-tiered-local.py" --capacity-mib "$local_mib" --numa-node "$local_node"
 chown "$owner:$(id -gn "$owner")" /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim

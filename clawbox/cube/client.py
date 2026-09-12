@@ -134,13 +134,16 @@ class CubeSandboxClient:
             self.journal.record(sandbox_id, ownership)
         return sandbox
 
-    def connect_sandbox(self, sandbox_id: str) -> Any:
+    def connect_sandbox(self, sandbox_id: str, *,
+                        snapshot_mechanism: str = "full-copy") -> Any:
         # Resuming the same immutable sandbox ID is idempotent. CubeMaster can
         # transiently reject or drop HTTP requests during a large restore
         # wave, so retry the control-plane transport without creating a new VM.
         sandbox = retry_with_backoff(
             lambda: self._sandbox_class.connect(
-                sandbox_id, **self._sdk_kwargs()
+                sandbox_id, **self._sdk_kwargs(),
+                **({"snapshot_mechanism": snapshot_mechanism}
+                   if snapshot_mechanism != "full-copy" else {}),
             ),
             label=f"resume sandbox {sandbox_id}",
             attempts=10,
@@ -327,7 +330,8 @@ class CubeSandboxClient:
     @staticmethod
     def pause_sandbox(sandbox: Any, *, tier: str | None = None,
                       memory_snapshot_path: str | None = None,
-                      generation: int | None = None) -> Mapping[str, Any] | None:
+                      generation: int | None = None,
+                      snapshot_mechanism: str = "full-copy") -> Mapping[str, Any] | None:
         if tier is None:
             sandbox.pause(wait=True)
             return None
@@ -338,6 +342,8 @@ class CubeSandboxClient:
                 wait=True, snapshot_tier=tier,
                 memory_snapshot_path=memory_snapshot_path,
                 snapshot_generation=generation,
+                **({"snapshot_mechanism": snapshot_mechanism}
+                   if snapshot_mechanism != "full-copy" else {}),
             )
         except TypeError as exc:
             raise RuntimeError(
@@ -352,27 +358,23 @@ class CubeSandboxClient:
             raise RuntimeError("tiered pause manifest identity mismatch")
         if str(result["memory_snapshot_path"]) != memory_snapshot_path:
             raise RuntimeError("tiered pause used an unexpected memory snapshot path")
-        if "logical_bytes" in result and "allocated_bytes" in result:
-            logical_bytes = int(result["logical_bytes"])
-            allocated_bytes = int(result["allocated_bytes"])
-        else:
+        from .snapshot import read_snapshot_metadata
+        if snapshot_mechanism == "incremental-cow" or "logical_bytes" not in result or "allocated_bytes" not in result:
             try:
-                stat = os.stat(memory_snapshot_path)
+                metadata = read_snapshot_metadata(
+                    memory_snapshot_path, require_lineage=snapshot_mechanism == "incremental-cow",
+                )
             except OSError as exc:
-                raise RuntimeError(
-                    "tiered pause completed without an accessible direct memory snapshot"
-                ) from exc
-            logical_bytes = stat.st_size
-            allocated_bytes = stat.st_blocks * 512
-        return {
-            **result,
-            "logical_bytes": logical_bytes,
-            "allocated_bytes": allocated_bytes,
-            "transferred_bytes": result.get("transferred_bytes"),
-            "transferred_bytes_unavailable_reason": (
-                "CubeSandbox pause API does not expose shim bytes written"
-            ),
-        }
+                raise RuntimeError("tiered pause completed without an accessible direct memory snapshot") from exc
+        else:
+            metadata = {}
+        enriched = {**result, **metadata}
+        enriched.setdefault("transferred_bytes", None)
+        enriched["transferred_bytes_unavailable_reason"] = (
+            "CubeSandbox pause API does not expose shim bytes written"
+            if enriched["transferred_bytes"] is None else None
+        )
+        return enriched
 
     @staticmethod
     def relocate_snapshot(sandbox: Any, *, tier: str,
