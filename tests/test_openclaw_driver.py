@@ -129,18 +129,18 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
-    assert "XDG_CACHE_HOME=/opt/clawtune/cache" in commands[0]
-    assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in commands[0]
-    assert "CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL=test-model" in commands[0]
+    assert "XDG_CACHE_HOME=/opt/clawtune/cache" in "\n".join(commands)
+    assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)
+    assert "CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL=test-model" in "\n".join(commands)
     assert "/bin/ssh" in "\n".join(commands)
     assert "command" not in sandbox["ssh"]
     assert config["agents"]["defaults"]["workspace"] == "/workspace"
     assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
     assert any("config unset models.providers.vllm.models.0.reasoning" in command
                for command in commands)
-    assert "exec /usr/local/bin/ssh" in base64.b64decode(
-        re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", commands[0])[2]
-    ).decode()
+    assert any(b"exec /usr/local/bin/ssh" in base64.b64decode(encoded)
+               for command in commands
+               for encoded in re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", command))
     agent_command = next(command for command in commands if " agent " in command)
     assert "--model vllm/test-model" in agent_command
     assert "CLAWTUNE_RUNTIME_ID=session-a" in agent_command
@@ -235,7 +235,7 @@ def test_checkpoint_relay_keeps_clawtune_in_model_path(tmp_path: Path) -> None:
         output_dir=tmp_path, timeout_seconds=60,
         model_gateway=Gateway(), checkpoint_relay=True,
     )
-    setup = commands[0]
+    setup = "\n".join(commands)
     assert "model-relay.py" in setup
     assert "CLAWBOX_RELAY_UPSTREAM=http://192.0.2.30:18081/v1" in setup
     assert "CLAWTUNE_LLM_UPSTREAM_BASE_URL=http://127.0.0.1:8766/v1" in setup

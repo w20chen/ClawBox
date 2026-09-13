@@ -310,6 +310,53 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
     assert sandbox_id not in _Sandbox.items
 
 
+def test_checkpoint_manifest_failure_does_not_mark_paused_vm_running() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+    )
+    lifecycle.start()
+    sandbox_id = lifecycle.sandbox_id
+
+    def fail_after_pause(sandbox, **kwargs):
+        sandbox.state = "paused"
+        raise RuntimeError("lineage unreadable after remote pause")
+
+    client.pause_sandbox = fail_after_pause
+    with pytest.raises(RuntimeError, match="lineage unreadable"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
+    assert lifecycle.state.value == "unknown"
+    assert not lifecycle.resident
+    with pytest.raises(Exception, match="not resident"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
+    lifecycle.close()
+    assert sandbox_id not in _Sandbox.items
+
+
+def test_restore_failure_after_remote_resume_does_not_mark_vm_swapped() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict()
+
+    def fail_after_resume(sandbox_id, **kwargs):
+        _Sandbox.items[sandbox_id].state = "running"
+        raise RuntimeError("response lost after resume")
+
+    client.connect_sandbox = fail_after_resume
+    with pytest.raises(RuntimeError, match="response lost"):
+        lifecycle.restore()
+    assert lifecycle.state.value == "unknown"
+    assert not lifecycle.resident
+    lifecycle.close()
+    assert not _Sandbox.items
+
+
 @pytest.mark.parametrize("capacity", [0, 512])
 def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
     _Sandbox.items = {}

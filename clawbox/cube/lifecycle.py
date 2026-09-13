@@ -20,6 +20,7 @@ class SandboxState(str, Enum):
     CREATING = "creating"
     RUNNING = "running"
     CHECKPOINTING = "checkpointing"
+    UNKNOWN = "unknown"
     SWAPPED = "swapped"
     RESTORING = "restoring"
     DESTROYING = "destroying"
@@ -251,6 +252,7 @@ class CubeSandboxLifecycle:
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
             key = None
+            pause_attempted = False
             predecessor = (self._snapshot_key if self._snapshot_tier is SnapshotTier.WARM
                            and self._tier is SnapshotTier.LOCAL else None)
             try:
@@ -263,6 +265,7 @@ class CubeSandboxLifecycle:
                         and self.snapshot_reservation_bytes > self.snapshot_pool.capacity_bytes):
                     tier = SnapshotTier.COLD
                 if tier is None:
+                    pause_attempted = True
                     self.client.pause_sandbox(self.sandbox)
                 else:
                     if tier is SnapshotTier.LOCAL:
@@ -289,6 +292,7 @@ class CubeSandboxLifecycle:
                         f"{root.rstrip('/')}/{self.sandbox_id}/"
                         f"{self.role}-g{self._generation}.mem"
                     )
+                    pause_attempted = True
                     manifest = self.client.pause_sandbox(
                         self.sandbox, tier=tier.value,
                         memory_snapshot_path=path, generation=self._generation,
@@ -323,9 +327,19 @@ class CubeSandboxLifecycle:
             except Exception as exc:
                 if key is not None and self.snapshot_pool is not None:
                     self.snapshot_pool.abort(key)
-                self._state = before
+                # A pause can commit remotely and then fail while returning or
+                # validating its manifest. Do not admit commands to a VM whose
+                # actual state is paused or cannot be determined.
+                remote_state = None
+                if pause_attempted and self.sandbox_id is not None:
+                    try:
+                        remote_state = self.client.get_sandbox_state(self.sandbox_id)
+                    except Exception:
+                        pass
+                self._state = (before if not pause_attempted or remote_state == "running"
+                               else SandboxState.UNKNOWN)
                 self._record(
-                    "checkpoint", before, before, started_wall, started_mono,
+                    "checkpoint", before, self._state, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
                 )
@@ -399,7 +413,9 @@ class CubeSandboxLifecycle:
             self._state = SandboxState.RESTORING
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
+            resume_attempted = False
             try:
+                resume_attempted = True
                 self.sandbox = self.client.connect_sandbox(
                     self.sandbox_id,
                     **({"snapshot_mechanism": self.snapshot_mechanism}
@@ -439,9 +455,16 @@ class CubeSandboxLifecycle:
                     self._restore_fault_sampler = None
                 return elapsed
             except Exception as exc:
-                self._state = before
+                remote_state = None
+                if resume_attempted:
+                    try:
+                        remote_state = self.client.get_sandbox_state(self.sandbox_id)
+                    except Exception:
+                        pass
+                self._state = (before if not resume_attempted or remote_state == "paused"
+                               else SandboxState.UNKNOWN)
                 self._record(
-                    "restore", before, before, started_wall, started_mono,
+                    "restore", before, self._state, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
                 )

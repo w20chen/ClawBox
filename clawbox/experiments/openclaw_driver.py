@@ -337,8 +337,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     # the main-branch clawtune_kb package.  Inject that small native package
     # from the selected ClawTune source so the initializer and sidecar share
     # the current StateStore contract.
-    sidecar_src = Path(os.getenv("CLAWTUNE_SIDECAR_SRC", ""))
-    if not sidecar_src.is_dir():
+    sidecar_src_value = os.getenv("CLAWTUNE_SIDECAR_SRC", "")
+    sidecar_src = Path(sidecar_src_value) if sidecar_src_value else None
+    if sidecar_src is None or not sidecar_src.is_dir():
         sidecar_src = Path(os.getenv("CLAWTUNE_ROOT", "")) / "services" / "sidecar" / "src"
     kb_source = sidecar_src / "clawtune_kb"
     if not kb_source.is_dir():

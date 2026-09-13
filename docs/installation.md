@@ -284,35 +284,35 @@ cold_snapshot_root: /data/clawbox/cold
 snapshot_mechanism: incremental-cow  # use full-copy for the baseline
 ```
 
-On the idle host, install the storage settings and activate the service flags:
+Keep the host-specific, non-secret values in one file and run the repeatable
+setup on an idle host:
 
 ```bash
-sudo env CLAWBOX_LOCAL_MIB=16384 CLAWBOX_WARM_MIB=8192 \
-  CLAWBOX_LOCAL_NODE=0 CLAWBOX_WARM_NODE=1 \
-  bash scripts/setup-tiered-memory.sh /data/clawbox/warm /data/clawbox/cold "$USER"
+cp examples/clawbox-snapshot-host.env.example "$HOME/.config/clawbox/snapshot-host.env"
+# Edit paths, capacities, NUMA nodes, and CUBE_SOURCE_DIR for this machine.
+source "$HOME/.config/clawbox/snapshot-host.env"
+bash scripts/snapshot-host.sh "$HOME/.config/clawbox/snapshot-host.env" apply
 sudo systemctl restart cube-sandbox-cubelet.service
 sudo systemctl restart cube-sandbox-cube-egress.service
-sudo env CLAWBOX_LOCAL_MIB=16384 CLAWBOX_WARM_MIB=8192 \
-  CLAWBOX_LOCAL_NODE=0 CLAWBOX_WARM_NODE=1 \
-  bash scripts/setup-tiered-memory.sh /data/clawbox/warm /data/clawbox/cold "$USER"
-cat /sys/fs/cgroup/cube_sandbox/sandbox/memory.max
-cat /sys/fs/cgroup/cube_sandbox/sandbox/memory.swap.max
-findmnt -n -o TARGET,FSTYPE,OPTIONS --target /data/clawbox/warm
-test -w /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim
+bash scripts/snapshot-host.sh "$HOME/.config/clawbox/snapshot-host.env" apply
+bash scripts/snapshot-host.sh "$HOME/.config/clawbox/snapshot-host.env" check \
+  > "$CLAWBOX_OUTPUT_ROOT/snapshot-host-check.json"
 ```
 
-Expected: `memory.max` is `17179869184`, swap is `0`, and the snapshot mount is
-tmpfs with `mpol=bind:1`, `noswap`, and the requested size. Repeat the setup command
-after reboot or service recreation; restart services only to activate changed
-service flags. Never restart them during an experiment.
+Expected: every `checks[].ok` is true. The check reports the configured LOCAL
+limit, WARM tmpfs size and NUMA policy, COLD disk space, service flags, and source
+files without printing credentials. A failed check exits 2. Repeat `apply` after
+reboot or service recreation; restart services only to activate changed flags.
+Never restart them during an experiment. Use the same WARM/COLD roots in the
+experiment YAML and `machine.env`; otherwise Cubelet rejects the snapshot path.
 
 Validate physical snapshot placement:
 
 ```bash
 python scripts/validate-tiered-storage.py \
   --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
-  --warm /data/clawbox/warm --cold /data/clawbox/cold \
-  --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa 0 \
+  --warm "$CLAWBOX_WARM_ROOT" --cold "$CLAWBOX_COLD_ROOT" \
+  --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa "$CLAWBOX_LOCAL_NODE" \
   --expected-memory-mib 4096 --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
 
@@ -324,8 +324,8 @@ mechanisms. Use separate output files and the same template, node, and RAM size:
 for mode in full-copy incremental-cow; do
   python scripts/validate-tiered-storage.py \
     --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
-    --warm /data/clawbox/warm --cold /data/clawbox/cold \
-    --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa 0 \
+    --warm "$CLAWBOX_WARM_ROOT" --cold "$CLAWBOX_COLD_ROOT" \
+    --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa "$CLAWBOX_LOCAL_NODE" \
     --expected-memory-mib 4096 --snapshot-mechanism "$mode" --rounds 8 \
     --output "$CLAWBOX_OUTPUT_ROOT/storage-$mode.json"
 done
@@ -348,6 +348,12 @@ On an installed host, check the API and compute services before starting work:
 systemctl is-active cube-sandbox-cube-api.service cube-sandbox-cubemaster.service \
   cube-sandbox-cubelet.service cube-sandbox-cube-egress.service
 ```
+
+For tiered experiments, reapply the snapshot settings on an idle pool, then
+run `snapshot-host.sh HOST_ENV check` before the live storage validation. The
+[kunpeng example](../deploy/hosts/kunpeng.snapshot.env.example) records its
+observed non-secret paths and can be copied as `HOST_ENV`; review its capacities
+before applying it.
 
 For an S3lvol-backed installation, also check `cube-sandbox-s3lvol.service` and
 `test -S /var/run/s3lvol.sock`. Restore its configured backend before restarting

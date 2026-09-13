@@ -394,7 +394,7 @@ index 0000000..baa77e1
 +		if err != nil { response["error"] = err.Error() }
 +		_ = json.NewEncoder(conn).Encode(response)
 +	}()
-+	return func() { listener.Close(); <-done }, nil
++	return func() { listener.Close(); <-done; _ = os.Remove(socketPath) }, nil
 +}
 +
 +// Each committed generation owns hardlink names for its entire dependency
