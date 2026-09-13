@@ -141,8 +141,14 @@ class ClawTuneTraceWriter:
             monitor_source="cgroup-v2" if cgroup else "cube_rpc", pmu_profile=pmu,
         )
         self._native.record_tool_started(before)
-        if prediction is not None and set(prediction).issubset(ToolPrediction.model_fields):
-            self._native.record_tool_prediction(before, ToolPrediction.model_validate(prediction))
+        tool_prediction = prediction
+        if isinstance(prediction, dict) and isinstance(prediction.get("call_prediction"), dict):
+            tool_prediction = {"call_prediction": prediction["call_prediction"]}
+        if (isinstance(tool_prediction, dict)
+                and set(tool_prediction).issubset(ToolPrediction.model_fields)):
+            self._native.record_tool_prediction(
+                before, ToolPrediction.model_validate(tool_prediction)
+            )
         self._native.record_tool(after, sample)
         if not self._native.flush():
             raise RuntimeError("ClawTune trace recorder did not flush")

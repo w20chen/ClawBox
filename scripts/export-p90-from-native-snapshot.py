@@ -23,14 +23,17 @@ def main() -> None:
     if isinstance(runtime, str):
         runtime = json.loads(runtime)
     _, _, RuntimeToolResourceKB, ToolCallQuery, _, _ = _clawtune_api()
-    predictions = RuntimeToolResourceKB.from_json_obj(runtime).query(ToolCallQuery(
+    from clawbox.tuning.clawtune import predict_native_call_load
+    kb = RuntimeToolResourceKB.from_json_obj(runtime)
+    query = ToolCallQuery(
         repo=str(source["repo_fingerprint"]), tool_name="exec", command=None,
         ts_start=max(time.time(), float(runtime.get("last_query_ts") or 0.0)),
-        ambient_before_mb=0.0,
-    ))
+    )
+    predictions = kb.query(query)
+    call_load = predict_native_call_load(kb, query)
     latency = predictions["latency_ms"]
-    cpu = predictions["peak_cpu_cores"]
-    memory = predictions["peak_memory_mb"]
+    cpu = call_load.targets["cpu_avg_cores"]
+    memory = call_load.targets["memory_extra_peak_bytes"]
     values = (latency.conditional_p90, cpu.conditional_p90, memory.conditional_p90)
     if any(value is None or not math.isfinite(float(value)) or float(value) <= 0
            for value in values):
@@ -44,7 +47,7 @@ def main() -> None:
     payload["prediction"] = {
         "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
         "cpu_p90_cores": float(cpu.conditional_p90),
-        "memory_p90_bytes": float(memory.conditional_p90) * 1024.0 * 1024.0,
+        "memory_p90_bytes": float(memory.p90),
         "evidence_count": min(latency.evidence_count, cpu.evidence_count,
                               memory.evidence_count),
         "scopes": {"latency": latency.scope, "cpu": cpu.scope, "memory": memory.scope},

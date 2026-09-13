@@ -36,6 +36,9 @@ def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "prediction_source": "clawtune_call_load_v2",
         "admission_prediction_target": "environment_memory_peak_minus_baseline",
+        # Preserve the canonical prediction for the ClawTune trace writer;
+        # the derived fields below are the admission-facing projection.
+        "call_prediction": prediction,
         "predicted_incremental_memory_mib": value / (1024 * 1024),
         "clawtune_memory_extra_peak_bytes": value,
         "clawtune_memory_backend": target.get("backend"),

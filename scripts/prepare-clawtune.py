@@ -33,9 +33,15 @@ def prepare(root: Path, output: Path, *, working_tree: bool = False) -> str:
             digest.update(raw_name + b"\0" + hashlib.sha256(data).digest())
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-        revision = subprocess.check_output([
+        head_revision = subprocess.check_output([
             "git", "-C", str(root), "rev-parse", "HEAD",
-        ], text=True).strip() + "-working-tree-" + digest.hexdigest()[:12]
+        ], text=True).strip()
+        # Keep the public revision shape compatible with ClawBox provenance
+        # (a 40-hex revision) while changing whenever tracked or untracked
+        # source content changes.
+        revision = hashlib.sha1(
+            f"{head_revision}:{digest.hexdigest()}".encode("ascii")
+        ).hexdigest()
         (output / "CLAWTUNE_REVISION").write_text(revision + "\n", encoding="ascii")
         return revision
     # Fetch without switching branches or modifying the operator's working tree.

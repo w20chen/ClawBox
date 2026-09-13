@@ -147,17 +147,19 @@ def _per_tool_memory_plan(
     for workload, trace in sorted(traces.items()):
         reservations = []
         for call in _trace_tool_calls(trace):
-            prediction = kb.query(query_type(
+            query = query_type(
                 repo=repository,
                 tool_name=call["tool_name"] or "exec",
                 command=call["command"],
                 ts_start=query_ts + query_index * 1e-6,
-                ambient_before_mb=0.0,
-            ))["peak_memory_mb"]
+            )
+            prediction = predict_native_call_load(kb, query).targets[
+                "memory_extra_peak_bytes"
+            ]
             query_index += 1
-            if prediction.conditional_p90 is None:
+            if prediction.status != "available" or prediction.p90 is None:
                 raise ValueError("per-tool memory prediction is unavailable")
-            command_p90_mib = float(prediction.conditional_p90)
+            command_p90_mib = float(prediction.p90) / (1024.0 * 1024.0)
             host_ratio_p90 = float(host_calibration["ratio_p90"])
             incremental_p90_kib = math.ceil(
                 command_p90_mib * (1 + command_headroom_fraction) * 1024.0
@@ -188,10 +190,9 @@ def _per_tool_memory_plan(
                 "host_increment_p90_mib": host_increment_p90_kib / 1024.0,
                 "reservation_kib": reservation_kib,
                 "reservation_mib": reservation_mib,
-                "scope": prediction.scope,
-                "key_kind": prediction.key_kind,
-                "evidence_count": prediction.evidence_count,
-                "fallback_path": list(prediction.fallback_path),
+                "backend": prediction.backend,
+                "context": list(prediction.context),
+                "evidence_count": prediction.sample_count,
             })
         if not reservations:
             raise ValueError(f"evaluation trace {workload!r} has no concrete tool calls")
@@ -417,8 +418,10 @@ def main() -> None:
                     censored=item.exit_code not in (None, 0),
                     cpu_time_seconds=item.cpu_time_sec,
                     cpu_time_eligible=True,
-                    peak_memory_mb=float(item.rss_peak_bytes) / (1024.0 * 1024.0),
-                    peak_memory_mb_eligible=True, ambient_before_mb=0.0,
+                    # Legacy run artifacts expose guest RSS only.  RSS has no
+                    # environment baseline and is intentionally ineligible
+                    # for ClawTune's environment extra-memory target.
+                    memory_eligible=False,
                 ))
             cgroup_files = list(resource_dir.glob("cgroup-resource-*.json"))
             cgroup_loaded = read_cgroup_artifacts(resource_dir)
@@ -450,14 +453,20 @@ def main() -> None:
         # clock time makes an otherwise frozen artifact needlessly dependent
         # on when the export command happens to run.
         ts_start=max(call.ts_end for call in calls) + 1e-6,
-        ambient_before_mb=0.0,
     )
-    predictions = kb.query(query)
     call_load = predict_native_call_load(kb, query)
-    latency, memory = predictions["latency_ms"], predictions["peak_memory_mb"]
+    latency = call_load.targets["duration_ms"]
     cpu = call_load.targets["cpu_avg_cores"]
-    if cpu.status != "available":
+    memory = call_load.targets["memory_extra_peak_bytes"]
+    if latency.status != "available" or latency.p90 is None:
+        raise ValueError("training corpus has no eligible native latency evidence")
+    if cpu.status != "available" or cpu.p90 is None:
         raise ValueError("training corpus has no eligible native CPU-time evidence")
+    if memory.status != "available" or memory.p90 is None:
+        raise ValueError(
+            "training corpus has no ClawTune environment extra-memory evidence; "
+            "guest RSS cannot substitute for memory_extra_peak_bytes"
+        )
     from clawbox.clawtune_integration import source_revision
     revision = source_revision(args.clawtune_root.resolve())
     source_digest = source.hexdigest()
@@ -511,17 +520,16 @@ def main() -> None:
         "call_prediction": call_load.model_dump(mode="json"),
         "prediction": {
             "cpu_metric": "cpu_avg_cores",
-            "memory_metric": "cgroup_peak_bytes",
-            "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
+            "memory_metric": "environment_memory_peak_minus_baseline",
+            "latency_p90_sec": float(latency.p90) / 1000.0,
             "cpu_p90_cores": float(cpu.p90),
-            "memory_p90_bytes": float(memory.conditional_p90) * 1024.0 * 1024.0,
-            "evidence_count": min(latency.evidence_count, cpu.sample_count,
-                                  memory.evidence_count),
-            "scopes": {"latency": latency.scope, "cpu": cpu.context[0] if cpu.context else None,
-                       "memory": memory.scope},
-            "fallback_paths": {"latency": list(latency.fallback_path),
-                               "cpu": list(cpu.context),
-                               "memory": list(memory.fallback_path)},
+            "memory_p90_bytes": float(memory.p90),
+            "evidence_count": min(latency.sample_count, cpu.sample_count,
+                                  memory.sample_count),
+            "backends": {"latency": latency.backend, "cpu": cpu.backend,
+                          "memory": memory.backend},
+            "contexts": {"latency": list(latency.context),
+                         "cpu": list(cpu.context), "memory": list(memory.context)},
         },
         "training": training,
     }

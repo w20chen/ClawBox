@@ -52,7 +52,6 @@ def main() -> int:
         tool_name="exec",
         command=args.command,
         ts_start=ts_start,
-        ambient_before_mb=0.0,
     ))
     payload = _tool_resource_prediction_payload(
         clause_prediction,
