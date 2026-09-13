@@ -340,7 +340,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     sidecar_src_value = os.getenv("CLAWTUNE_SIDECAR_SRC", "")
     sidecar_src = Path(sidecar_src_value) if sidecar_src_value else None
     if sidecar_src is None or not sidecar_src.is_dir():
-        sidecar_src = Path(os.getenv("CLAWTUNE_ROOT", "")) / "services" / "sidecar" / "src"
+        clawtune_root = Path(os.getenv(
+            "CLAWTUNE_ROOT", str(Path(__file__).resolve().parents[3] / "ClawTune"),
+        ))
+        sidecar_src = clawtune_root / "services" / "sidecar" / "src"
     kb_source = sidecar_src / "clawtune_kb"
     if not kb_source.is_dir():
         raise RuntimeError(f"ClawTune KB source does not exist: {kb_source}")

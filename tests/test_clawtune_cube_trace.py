@@ -30,6 +30,8 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
     )
 
     writer.close()
+    assert writer.trace_path.is_file()
+    assert list((tmp_path / "traces").glob("*.jsonl")) == [writer.trace_path]
     joined, trusted = build_joined_dataset(
         tmp_path / "traces", tmp_path / "tool-bridge.jsonl",
     )

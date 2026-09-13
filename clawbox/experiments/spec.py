@@ -121,11 +121,10 @@ class ResourcesSpec(StrictFrozenModel):
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
     full_tool_memory_mib: int | None = Field(default=None, ge=1)
-    p90_predictions: str | None = None
     oracle_measurements: str | None = None
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
-    snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "full-copy"
+    snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"
     warm_snapshot_root: str | None = None
     cold_snapshot_root: str | None = None
     local_numa_node: int | None = Field(default=None, ge=0)
@@ -229,7 +228,6 @@ class ExperimentSpec(StrictFrozenModel):
         required = {
             AdmissionPolicy.TOOL_STATIC: (self.resources.static_tool_memory_mib, "static_tool_memory_mib"),
             AdmissionPolicy.TOOL_FULL: (self.resources.full_tool_memory_mib, "full_tool_memory_mib"),
-            AdmissionPolicy.TOOL_P90: (self.resources.p90_predictions, "p90_predictions"),
         }
         for policy, (value, field) in required.items():
             if policy in admissions and value is None:

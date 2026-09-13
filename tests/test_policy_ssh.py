@@ -51,6 +51,18 @@ def _argv(tool_name: str = "exec") -> list[str]:
     ]
 
 
+def test_clawtune_prediction_crosses_ssh_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    prediction = {"schema_version": "call_load.v2", "scope": "tool_call",
+                  "targets": {"memory_extra_peak_bytes": {"status": "available", "p90": 1024}}}
+    header = {"v": 1, "execution_id": "exec-a", "tool_name": "exec",
+              "call_prediction": prediction}
+    encoded = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    argv = ["tool-a", policy_ssh.PREFIX + "b64:" + encoded + "\ntrue"]
+    parsed, _command, profile = policy_ssh._envelope(argv)
+    assert profile == "true"
+    assert parsed["call_prediction"] == prediction
+
+
 def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -237,7 +237,6 @@ def test_run_b_native_prediction_loads_exact_run_a_generation(db):
         tool_name="exec",
         command="python -m pytest -q",
         ts_start=1_800_000_000.0,
-        ambient_before_mb=0.0,
     ))
 
     assert snapshot["generation"] == 1
@@ -245,7 +244,7 @@ def test_run_b_native_prediction_loads_exact_run_a_generation(db):
     assert clause.prediction.scope == "repo"
     assert clause.prediction.key_kind == "exact_clause"
     assert clause.prediction.evidence_count == 1
-    assert runtime["peak_cpu_cores"].conditional_p90 is None
+    assert runtime["cpu_peak_cores"].conditional_p90 is None
     assert runtime["latency_ms"].scope == "repo"
     assert runtime["latency_ms"].key_kind == "exact_command"
     assert runtime["latency_ms"].evidence_count == 1
@@ -271,12 +270,10 @@ def test_each_identity_domain_refines_the_same_cold_start_independently(db):
             tool_name="exec",
             command="python -m pytest -q",
             ts_start=1_800_000_000.0,
-            ambient_before_mb=0.0,
-        ))["peak_memory_mb"])
+        ))["memory_extra_peak_bytes"])
 
     assert [snapshot["generation"] for snapshot in snapshots] == [1, 1]
-    assert [prediction.scope for prediction in predictions] == ["repo", "repo"]
-    assert [prediction.conditional_p90 for prediction in predictions] == [16.0, 64.0]
+    assert [prediction.conditional_p90 for prediction in predictions] == [None, None]
     assert snapshots[0]["evidence"]["cold_start"] == snapshots[1]["evidence"]["cold_start"]
 
 

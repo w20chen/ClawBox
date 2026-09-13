@@ -73,26 +73,9 @@ def test_validation_override_replaces_case_command(tmp_path):
     assert spec.workload.cases[0].validation == 'new-command'
 
 
-@pytest.mark.parametrize('payload', [{}, {'tool-1': -1}, {'tool-1': float('nan')}, {'tool-1': True}])
-def test_managed_predictions_reject_non_command_records(tmp_path, payload):
-    source = tmp_path / 'predictions.json'
-    source.write_text(json.dumps(payload))
-    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'], p90_kb=str(source))
-    with pytest.raises(ValueError, match='no command records'):
-        validate_inputs(spec)
-
-
-def test_managed_predictions_reject_action_id_dictionary(tmp_path):
-    source = tmp_path / 'predictions.json'
-    source.write_text('{"tool-1": 256}')
-    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'], p90_kb=str(source))
-    from clawbox.experiments.spec_types import AgentDriver
-    spec = spec.model_copy(update={'agent': spec.agent.model_copy(update={'driver': AgentDriver.OPENCLAW})})
-    # Revalidate so enums match the worker's actual model.
-    from clawbox.experiments.spec import ExperimentSpec
-    spec = ExperimentSpec.model_validate(spec.model_dump(mode='json'))
-    with pytest.raises(ValueError, match='no command records'):
-        validate_inputs(spec)
+def test_clawtune_admission_requires_no_prediction_file():
+    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'])
+    assert validate_inputs(spec)['prediction_files'] == []
 
 
 def test_status_reads_finished_arms_before_summary(tmp_path, capsys):

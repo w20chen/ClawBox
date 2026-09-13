@@ -135,7 +135,7 @@ class CubeSandboxClient:
         return sandbox
 
     def connect_sandbox(self, sandbox_id: str, *,
-                        snapshot_mechanism: str = "full-copy") -> Any:
+                        snapshot_mechanism: str = "incremental-cow") -> Any:
         # Resuming the same immutable sandbox ID is idempotent. CubeMaster can
         # transiently reject or drop HTTP requests during a large restore
         # wave, so retry the control-plane transport without creating a new VM.
@@ -331,7 +331,7 @@ class CubeSandboxClient:
     def pause_sandbox(sandbox: Any, *, tier: str | None = None,
                       memory_snapshot_path: str | None = None,
                       generation: int | None = None,
-                      snapshot_mechanism: str = "full-copy") -> Mapping[str, Any] | None:
+                      snapshot_mechanism: str = "incremental-cow") -> Mapping[str, Any] | None:
         if tier is None:
             sandbox.pause(wait=True)
             return None

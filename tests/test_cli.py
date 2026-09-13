@@ -31,7 +31,7 @@ def test_baseline_catalog_is_available_from_public_cli(capsys) -> None:
     assert cli.main(["experiment", "baselines"]) == 0
     output = capsys.readouterr().out
     assert "tool-p90-wait-proactive" in output
-    assert "resources.p90_predictions" in output
+    assert "tool-p90-wait-proactive" in output
     assert "compatibility-alias" not in output
 
 
@@ -118,7 +118,6 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     command = [
         "experiment", "configure", base, str(output),
         "--baseline", "tool-p90-wait-proactive",
-        "--p90-kb", "examples/predictions/smoke-p90.json",
     ]
     assert cli.main(command) == 1
     assert not output.exists()

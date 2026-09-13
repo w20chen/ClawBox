@@ -33,5 +33,5 @@ ClawBox checks the execution ID, event support, kernel coverage, and counter
 running times before accepting a profile as reliable. Invalid PMU data is
 excluded while valid cgroup CPU and memory accounting is retained. A degraded
 Tool artifact also clears any older span-side PMU metrics. Reliable metrics
-are forwarded to the native ClawTune `runtime_tool_resource_kb_v2` targets
+are forwarded to the native ClawTune `runtime_tool_resource_kb_v3` targets
 `pmu_ipc`, `pmu_llc_mpki`, and `pmu_llc_miss_rate`.

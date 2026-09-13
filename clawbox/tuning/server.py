@@ -211,15 +211,14 @@ def create_app(db_url: str | None = None) -> FastAPI:
             ts_start=max(
                 time.time(), float(runtime_snapshot.get("last_query_ts") or 0.0),
             ),
-            ambient_before_mb=0.0,
         )
         predictions = kb.query(query)
         from .clawtune import predict_native_call_load
         call_load = predict_native_call_load(kb, query)
         latency = predictions["latency_ms"]
         cpu = call_load.targets["cpu_avg_cores"]
-        memory = predictions["peak_memory_mb"]
-        values = (latency.conditional_p90, cpu.p90, memory.conditional_p90)
+        memory = call_load.targets["memory_extra_peak_bytes"]
+        values = (latency.conditional_p90, cpu.p90, memory.p90)
         if any(value is None or not math.isfinite(float(value)) or float(value) <= 0 for value in values):
             raise HTTPException(status_code=409, detail="native snapshot has no safe positive p90")
         return {
@@ -233,22 +232,22 @@ def create_app(db_url: str | None = None) -> FastAPI:
             "call_prediction": call_load.model_dump(mode="json"),
             "prediction": {
                 "cpu_metric": "cpu_avg_cores",
-                "memory_metric": "cgroup_peak_bytes",
+                "memory_metric": "environment_memory_peak_minus_baseline",
                 "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
                 "cpu_p90_cores": float(cpu.p90),
-                "memory_p90_bytes": float(memory.conditional_p90) * 1024.0 * 1024.0,
+                "memory_p90_bytes": float(memory.p90),
                 "evidence_count": min(
-                    latency.evidence_count, cpu.sample_count, memory.evidence_count,
+                    latency.evidence_count, cpu.sample_count, memory.sample_count,
                 ),
                 "scopes": {
                     "latency": latency.scope,
                     "cpu": cpu.context[0] if cpu.context else None,
-                    "memory": memory.scope,
+                    "memory": memory.context[0] if memory.context else None,
                 },
                 "fallback_paths": {
                     "latency": list(latency.fallback_path),
                     "cpu": list(cpu.context),
-                    "memory": list(memory.fallback_path),
+                    "memory": list(memory.context),
                 },
             },
         }

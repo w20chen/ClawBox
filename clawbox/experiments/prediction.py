@@ -16,6 +16,34 @@ class PredictionUnavailable(RuntimeError):
     """Raised when a managed Tool call has no command-specific prediction."""
 
 
+def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
+    """Convert ClawTune's tool-call memory increment to a reservation."""
+    if not isinstance(prediction, dict):
+        raise PredictionUnavailable("ClawTune call prediction is missing")
+    if (prediction.get("schema_version") != "call_load.v2"
+            or prediction.get("scope") != "tool_call"):
+        raise PredictionUnavailable("ClawTune call prediction has an incompatible schema")
+    targets = prediction.get("targets")
+    target = targets.get("memory_extra_peak_bytes") if isinstance(targets, dict) else None
+    if (not isinstance(target, dict) or target.get("status") != "available"
+            or target.get("unit") != "bytes"
+            or target.get("metric_definition") != "environment_memory_peak_minus_baseline"):
+        raise PredictionUnavailable("ClawTune extra memory peak is unavailable")
+    value = target.get("p90")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not math.isfinite(value) or value < 0:
+        raise PredictionUnavailable("ClawTune extra memory peak has no valid estimate")
+    return {
+        "prediction_source": "clawtune_call_load_v2",
+        "admission_prediction_target": "environment_memory_peak_minus_baseline",
+        "predicted_incremental_memory_mib": value / (1024 * 1024),
+        "clawtune_memory_extra_peak_bytes": value,
+        "clawtune_memory_backend": target.get("backend"),
+        "clawtune_memory_method": target.get("method"),
+        "clawtune_memory_sample_count": target.get("sample_count"),
+    }
+
+
 def command_sha256(command: str) -> str:
     return hashlib.sha256(command.encode()).hexdigest()
 

@@ -328,7 +328,7 @@ def test_reliable_pmu_reaches_native_clawtune_snapshot():
     record["resources"]["pmu"] = reliable_pmu("exec-pmu")
     observation = span_end_to_observation(record)
     snapshot = build_clawtune_kb_snapshot([observation], "github.com/acme/foo")
-    assert snapshot["schema"] == "runtime_tool_resource_kb_v2"
+    assert snapshot["schema"] == "runtime_tool_resource_kb_v3"
     for target, expected in {"pmu_ipc": 0.5, "pmu_llc_mpki": 1.0, "pmu_llc_miss_rate": 0.1}.items():
         nodes = snapshot["public"][target]
         assert nodes and all(values == [expected] for _, _, values in nodes)

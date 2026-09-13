@@ -26,7 +26,6 @@ resources:
   emergency_free_memory_mib: 1024
   checkpoint_restore_headroom_mib: 1024
   static_tool_memory_mib: 256
-  p90_predictions: examples/predictions/smoke-p90.json
 policies:
   - {name: tool-static-resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
 validation: {command: "test \"$(cat /workspace/result.txt)\" = complete"}

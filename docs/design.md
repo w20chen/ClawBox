@@ -52,11 +52,10 @@ Lifetime capacity claims and incremental command reservations are distinct:
 already-resident memory must not be counted again as an incremental allocation.
 All compared policies use the configured emergency free-memory guard.
 
-Guest command memory trains demand estimates. Host physical memory measures
-density and reclamation. Converting a guest estimate into an expected host
-increment requires calibration. P90 means the estimated 90th percentile of
-demand, not a guarantee that every command fits. Keep prediction artifacts frozen
-and independent of the test workload unless explicitly studying online learning.
+ClawTune measures memory above the environment's pre-call baseline and predicts
+its peak for each Tool call. ClawBox reserves the selected p90 extra-memory
+estimate, rounded up to MiB. Host physical memory measures density and
+reclamation; the estimate does not guarantee every command fits.
 Record static fallbacks for file operations separately from command predictions.
 
 ## Checkpoint and restore

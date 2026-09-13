@@ -97,6 +97,10 @@ class ClawTuneTraceWriter:
         if self._native is None:
             self._native = AgentTestBenchTraceWriter(
                 self.trace_path.parent, scaffold="clawbox", default_repo=self.repo_fingerprint or "unknown",
+                runtime_paths={
+                    json.dumps([self.session_id, self.session_id], separators=(",", ":")):
+                    str(self.trace_path.resolve()),
+                },
             )
         end = time.time()
         start = end - max(0, result.duration_s)

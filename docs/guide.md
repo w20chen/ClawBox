@@ -89,8 +89,8 @@ clawbox experiment describe comparison.yaml
 ```
 
 This creates a two-by-two policy comparison at each selected concurrency. The
-predicted policies require independently collected command prediction data.
-Set `--p90-kb` to that file before running them.
+predicted policy uses ClawTune's current per-call extra memory peak estimate.
+An unavailable estimate rejects the Tool call.
 
 Without dimension filters or `--baseline`, `configure` retains the base file's
 policies. If both are given, dimensions filter the explicitly named baselines.
@@ -100,7 +100,7 @@ Existing output files require `--force` to replace.
 | --- | --- |
 | Fixed command reservation | `resources.static_tool_memory_mib`; CLI `--static-tool-memory-mib` |
 | Full command reservation | `resources.full_tool_memory_mib`; normally the Tool VM's configured RAM |
-| Predicted reservation | `resources.p90_predictions`; CLI `--p90-kb` |
+| Predicted reservation | ClawTune `call_load.v2` `memory_extra_peak_bytes` p90, rounded up to MiB |
 | Measured reservation | `resources.oracle_measurements`; replay only |
 | Idle timeout | `fixed_delay_seconds`; CLI `--fixed-delay-seconds` |
 | Pressure-triggered reclamation | Model-wait estimate and source in `inference.configuration` |
@@ -110,8 +110,8 @@ Existing output files require `--force` to replace.
 
 Immediate and delayed reclamation belong to the same conceptual family; early
 restoration is another decision. The selector groups them without modifying their
-underlying implementations. Reservation amounts and prediction files remain
-experiment-wide inputs. To compare their values, generate separate configurations.
+underlying implementations. Fixed reservation amounts remain experiment-wide
+inputs; ClawTune predicts extra memory for each command when it runs.
 
 The current pressure-based policy does not compare the predicted wait against
 checkpoint cost. Both tiered presets use recorded future waiting information;
@@ -211,10 +211,10 @@ replay, changing only the model backend and recording assignment. Both YAML file
 are retained with the results. A recorded response that depends on a transient
 value can still fail in a later run; task validation must detect task failure.
 
-Agent prediction files contain command records with `command`, `predicted_command_memory_p90_mib`, and
-`predicted_host_execution_increment_mib`; the latter is calibrated host demand.
-The Runtime must supply matching command metadata. An action-ID dictionary is
-not a substitute for that data. File operations use the configured static budget.
+The Runtime ClawTune plugin attaches its selected `call_load.v2` prediction to
+each command's execution envelope. ClawBox reserves the predicted
+`memory_extra_peak_bytes` above the pre-call baseline. File operations use the
+configured static budget.
 
 ### Short replay experiments
 

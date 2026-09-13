@@ -63,7 +63,6 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         start_epoch = to_epoch(start)
         end_epoch = to_epoch(end)
     cpu_cores = observation.cpu_utilization_avg_cores
-    rss_bytes = observation.rss_peak_bytes
     pmu = observation.pmu
     pmu_eligible = bool(
         observation.pmu_eligible_for_kb and pmu is not None
@@ -80,13 +79,11 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         cpu_time_seconds=observation.cpu_time_sec,
         cpu_time_eligible=observation.cpu_time_sec is not None and observation.complete,
         # Average cgroup CPU must never train the fixed-window peak target.
-        peak_cpu_cores=None,
-        peak_cpu_cores_eligible=False,
-        peak_memory_mb=(
-            float(rss_bytes) / (1024.0 * 1024.0) if rss_bytes is not None else None
-        ),
-        peak_memory_mb_eligible=rss_bytes is not None,
-        ambient_before_mb=0.0 if rss_bytes is not None else None,
+        cpu_peak_cores=None,
+        cpu_peak_cores_eligible=False,
+        # A guest process RSS peak has no pre-call environment baseline and
+        # cannot train ClawTune's environment extra-memory target.
+        memory_eligible=False,
         pmu_ipc=pmu.derived["ipc"] if pmu_eligible else None,
         pmu_llc_mpki=pmu.derived["llc_mpki"] if pmu_eligible else None,
         pmu_llc_miss_rate=pmu.derived["llc_miss_rate"] if pmu_eligible else None,
@@ -114,7 +111,6 @@ def build_clawtune_kb_snapshot(
         tool_name=first.tool_name,
         command=first.command,
         ts_start=advance_ts,
-        ambient_before_mb=0.0,
     ))
     snapshot = kb.to_json_obj()
     RuntimeToolResourceKB.from_json_obj(snapshot)
@@ -122,7 +118,7 @@ def build_clawtune_kb_snapshot(
 
 
 def predict_native_call_load(runtime, query, *, clause=None, lattice=None):
-    """Use ClawTune's canonical five-target adapter and its evidence semantics."""
+    """Use ClawTune's canonical call-load adapter and its evidence semantics."""
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
     from clawtune_sidecar.predictors.call_load import predict_call_load

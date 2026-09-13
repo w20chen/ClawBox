@@ -56,9 +56,9 @@ esac
   echo "reviewed KERNEL_SOURCE_SHA256 required for guest ${kernel_version}" >&2
   exit 65
 }
-# Resolve main once and build every ClawTune component from that clean export.
+# Freeze the current ClawTune source once for every component in this build.
 clawtune_export="$(mktemp -d "${ROOT}/.artifacts/clawtune-main.XXXXXX")/source"
-python3 "${SCRIPT_DIR}/prepare-clawtune.py" --clawtune-root "${CLAWTUNE_ROOT}" --output "${clawtune_export}"
+python3 "${SCRIPT_DIR}/prepare-clawtune.py" --clawtune-root "${CLAWTUNE_ROOT}" --working-tree --output "${clawtune_export}"
 CLAWTUNE_ROOT="${clawtune_export}"
 clawtune_revision="$(cat "${CLAWTUNE_ROOT}/CLAWTUNE_REVISION")"
 

@@ -67,7 +67,7 @@ class CubeSandboxLifecycle:
                  cold_snapshot_root: str | None = None,
                  snapshot_pool: WarmSnapshotPool | None = None,
                  snapshot_reservation_bytes: int | None = None,
-                 snapshot_mechanism: str = "full-copy", lazy_restore: bool = False) -> None:
+                 snapshot_mechanism: str = "incremental-cow", lazy_restore: bool = True) -> None:
         if snapshot_mechanism not in {"full-copy", "incremental-cow"}:
             raise ValueError("invalid snapshot mechanism")
         if snapshot_mechanism == "incremental-cow" and not lazy_restore:
@@ -296,8 +296,7 @@ class CubeSandboxLifecycle:
                     manifest = self.client.pause_sandbox(
                         self.sandbox, tier=tier.value,
                         memory_snapshot_path=path, generation=self._generation,
-                        **({"snapshot_mechanism": self.snapshot_mechanism}
-                           if self.snapshot_mechanism != "full-copy" else {}),
+                        snapshot_mechanism=self.snapshot_mechanism,
                     )
                     if tier is SnapshotTier.WARM:
                         self.snapshot_pool.commit(
@@ -418,8 +417,7 @@ class CubeSandboxLifecycle:
                 resume_attempted = True
                 self.sandbox = self.client.connect_sandbox(
                     self.sandbox_id,
-                    **({"snapshot_mechanism": self.snapshot_mechanism}
-                       if self.snapshot_mechanism != "full-copy" else {}),
+                    snapshot_mechanism=self.snapshot_mechanism,
                 )
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:

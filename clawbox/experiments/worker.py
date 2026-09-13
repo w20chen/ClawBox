@@ -46,7 +46,7 @@ from .policy import PolicyCoordinator, PolicyEventExecutor
 from .snapshot_pool import WarmSnapshotPool
 from .spec_types import InferenceBackend, SnapshotTier
 from .policy_control import PolicyControlServer
-from .prediction import CommandPredictionProvider, PredictionUnavailable
+from .prediction import CommandPredictionProvider, PredictionUnavailable, clawtune_extra_peak
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
 from .ssh_credentials import generate_ssh_credentials
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
@@ -620,14 +620,8 @@ class ExperimentWorker:
             sampler.sample_hook = record_memory_sample
         prediction_provider = None
         if (arm.agent.driver is AgentDriver.OPENCLAW
-                and arm.policy.admission in {
-                    AdmissionPolicy.TOOL_P90, AdmissionPolicy.TOOL_ORACLE,
-                }):
-            source = (
-                arm.resources.p90_predictions
-                if arm.policy.admission is AdmissionPolicy.TOOL_P90
-                else arm.resources.oracle_measurements
-            )
+                and arm.policy.admission is AdmissionPolicy.TOOL_ORACLE):
+            source = arm.resources.oracle_measurements
             if not source:
                 raise ValueError(
                     f"{arm.policy.admission.value} requires an immutable command artifact"
@@ -635,11 +629,7 @@ class ExperimentWorker:
             prediction_provider = CommandPredictionProvider(
                 Path(source),
                 repository=arm.case.repository or arm.case.case_id,
-                prediction_source=(
-                    "runtime_clawtune_immutable_kb"
-                    if arm.policy.admission is AdmissionPolicy.TOOL_P90
-                    else "runtime_tool_oracle_heldout"
-                ),
+                prediction_source="runtime_tool_oracle_heldout",
             )
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
@@ -1606,17 +1596,22 @@ class ExperimentWorker:
                     execution_scope = str(
                         request.get("execution_scope") or "agent-tool"
                     )
-                    prediction = (
-                        prediction_provider.resolve_digest(
+                    managed_command = (execution_scope == "agent-tool"
+                                       and request.get("operation") != "filesystem")
+                    if managed_command and arm.policy.admission is AdmissionPolicy.TOOL_P90:
+                        metadata = request.get("prediction")
+                        if (not isinstance(metadata, dict)
+                                or metadata.get("raw_command_sha256") != request["command_sha256"]):
+                            raise PredictionUnavailable("ClawTune prediction command identity mismatch")
+                        prediction = clawtune_extra_peak(metadata.get("call_prediction"))
+                    elif managed_command and prediction_provider is not None:
+                        prediction = prediction_provider.resolve_digest(
                             str(request["command_sha256"]), request.get("prediction")
-                        ) if prediction_provider is not None
-                        and execution_scope == "agent-tool"
-                        and request.get("operation") != "filesystem"
-                        else request.get("prediction")
-                    )
-                    if (prediction_provider is not None
-                            and (execution_scope != "agent-tool"
-                                 or request.get("operation") == "filesystem")):
+                        )
+                    else:
+                        prediction = request.get("prediction")
+                    if (arm.policy.admission in {AdmissionPolicy.TOOL_P90, AdmissionPolicy.TOOL_ORACLE}
+                            and not managed_command):
                         # File bridge operations have no shell-command KB entry.
                         # Charge their configured static budget explicitly.
                         filesystem_tool = request.get("operation") == "filesystem"

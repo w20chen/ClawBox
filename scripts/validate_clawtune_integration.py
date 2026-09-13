@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -16,17 +18,18 @@ LEGACY_MARKERS = (
 
 
 def fail(message: str) -> None:
-    raise SystemExit(f"ClawTune main integration check failed: {message}")
+    raise SystemExit(f"ClawTune integration check failed: {message}")
 
 
 def revision(root: Path) -> str:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from clawbox.clawtune_integration import source_revision
     return source_revision(root)
 
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="Validate the direct ClawTune main integration")
+    parser = argparse.ArgumentParser(description="Validate the current ClawTune integration")
     parser.add_argument("--clawtune-root", type=Path, default=project_root.parent / "ClawTune")
     parser.add_argument("--require-assets", action="store_true")
     args = parser.parse_args()
@@ -100,10 +103,31 @@ def main() -> None:
     from clawtune_sidecar.trace import AgentTestBenchTraceWriter
     from tool_resource.sdk import DockerCommandObserver, DockerExecutionContext
     from clawtune_sidecar.predictors.call_load import predict_call_load
+    from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB
+    sys.path.insert(0, str(project_root))
+    from clawbox.experiments.prediction import clawtune_extra_peak
+
+    example = json.loads((root / "contracts" / "examples" / "call-load.json").read_text(encoding="utf-8"))
+    try:
+        clawtune_extra_peak(example)
+    except Exception as exc:
+        fail(f"call_load.v2 extra memory target is incompatible: {exc}")
+    envelope_source = (plugin_dir / "src" / "exec-instrumentation.ts").read_text(encoding="utf-8")
+    if "memory_extra_peak_bytes: decision.prediction.call_prediction.targets.memory_extra_peak_bytes" not in envelope_source:
+        fail("hook-only execution envelope does not carry the selected call prediction")
     validate_seed(root / "seeds" / "bootstrap-v1")
+    seed_dir = root / "seeds" / "bootstrap-v1"
+    ClauseResourceKB.from_json_obj(json.loads(
+        (seed_dir / "clause-resource-kb.json").read_text(encoding="utf-8")
+    ))
+    RuntimeToolResourceKB.from_json_obj(json.loads(
+        (seed_dir / "runtime-tool-resource-kb.json").read_text(encoding="utf-8")
+    ))
     for method in ("record_model", "record_tool", "flush", "close"):
         if not callable(getattr(AgentTestBenchTraceWriter, method, None)):
             fail(f"trace recorder method missing: {method}")
+    if "runtime_paths" not in inspect.signature(AgentTestBenchTraceWriter).parameters:
+        fail("trace recorder lacks canonical runtime path routing")
 
     if args.require_assets:
         asset_required = (

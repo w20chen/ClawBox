@@ -56,14 +56,14 @@ clawbox experiment --help
 Expected: ARM64, accessible KVM, `cgroup2fs`, a working Docker daemon, and the
 experiment command list. Use fresh checkout directories for the clone commands.
 
-### Update ClawTune from main
+### Build with the current ClawTune source
 
-ClawBox follows ClawTune's `main` branch. Before rebuilding guest images, export
-the current remote main into a new directory. This leaves the sibling checkout's
-branch and local edits untouched:
+Before rebuilding guest images, export the sibling ClawTune working tree into a
+new directory. This includes the current `call_load.v2` extra-memory prediction
+and records a content digest without changing the sibling checkout:
 
 ```bash
-python scripts/prepare-clawtune.py --output /data/clawtune-build-source
+python scripts/prepare-clawtune.py --working-tree --output /data/clawtune-build-source
 export CLAWTUNE_ROOT=/data/clawtune-build-source
 export CLAWTUNE_SIDECAR_SRC="$CLAWTUNE_ROOT/services/sidecar/src"
 python -m pip install --upgrade "$CLAWTUNE_ROOT/services/sidecar"
@@ -78,9 +78,9 @@ docker buildx build --load --platform linux/arm64 \
 ```
 
 Use the same export for both images, then push and register their new immutable
-digests as described below. The commit records what was built; it is not a
-release-specific compatibility requirement. Use a new export directory for each
-update. The SWE-ReBench overlay rebuild script fetches and exports main itself.
+digests as described below. The recorded revision includes the source-content
+digest. Use a new export directory for each update. The SWE-ReBench overlay
+rebuild script exports the current ClawTune working tree too.
 
 Each Runtime initializes an independent working KB through ClawTune's native
 seed/state API. Use new run directories after upgrading from an older KB layout.

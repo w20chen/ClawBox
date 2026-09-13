@@ -140,7 +140,6 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--checkpoint-headroom-gib", type=float)
     configure.add_argument("--static-tool-memory-mib", type=int)
     configure.add_argument("--full-tool-memory-mib", type=int)
-    configure.add_argument("--p90-kb")
     configure.add_argument("--oracle-measurements")
     configure.add_argument("--arrival-schedule", choices=("burst", "fixed_stagger"))
     configure.add_argument("--stagger-seconds", type=float)
@@ -175,7 +174,6 @@ def main(argv: list[str] | None = None) -> int:
             admission_required = {
                 "tool_full": ["resources.full_tool_memory_mib"],
                 "tool_static": ["resources.static_tool_memory_mib"],
-                "tool_p90": ["resources.p90_predictions"],
                 "tool_oracle": ["resources.oracle_measurements"],
             }
             rows = []
@@ -255,7 +253,6 @@ def main(argv: list[str] | None = None) -> int:
                 checkpoint_headroom_gib=args.checkpoint_headroom_gib,
                 static_tool_memory_mib=args.static_tool_memory_mib,
                 full_tool_memory_mib=args.full_tool_memory_mib,
-                p90_kb=args.p90_kb,
                 oracle_measurements=args.oracle_measurements,
                 arrival_schedule=args.arrival_schedule,
                 stagger_seconds=args.stagger_seconds,

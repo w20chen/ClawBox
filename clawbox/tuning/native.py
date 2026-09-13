@@ -336,12 +336,7 @@ def project_native_manifests(
                     if cgroup.get("cpu_time_s") is not None else None
                 ),
                 cpu_time_eligible=cgroup.get("cpu_time_s") is not None,
-                peak_memory_mb=_positive_number(
-                    cgroup.get("memory_rss_peak_bytes"), "peak RSS"
-                )
-                / (1024.0 * 1024.0),
-                peak_memory_mb_eligible=True,
-                ambient_before_mb=0.0,
+                memory_eligible=False,
             )
         )
         evidence_rows.append(
@@ -375,7 +370,6 @@ def project_native_manifests(
             tool_name=first.tool_name,
             command=first.command,
             ts_start=advance_ts,
-            ambient_before_mb=0.0,
         )
     )
 

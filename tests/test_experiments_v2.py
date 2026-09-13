@@ -24,6 +24,14 @@ def test_explicit_null_disables_arm_deadline() -> None:
     assert ExecutionSpec().arm_timeout_seconds == 1800
 
 
+def test_incremental_snapshot_is_default() -> None:
+    from clawbox.experiments.spec import ResourcesSpec
+    resources = ResourcesSpec(target_node="node-a", pool_memory_budget_mib=8192,
+                              emergency_free_memory_mib=512)
+    assert resources.snapshot_mechanism == "incremental-cow"
+    assert resources.model_copy(update={"snapshot_mechanism": "full-copy"}).snapshot_mechanism == "full-copy"
+
+
 def test_runtime_network_policy_honors_explicit_internet_access() -> None:
     allowlist = ["192.0.2.10/32"]
 
@@ -51,7 +59,7 @@ def raw_spec() -> dict:
         "execution": {"concurrency_levels": [1, 4], "random_seed": 17},
         "resources": {
             "target_node": "node-a", "pool_memory_budget_mib": 100000,
-            "emergency_free_memory_mib": 10000, "p90_predictions": "p90.json",
+            "emergency_free_memory_mib": 10000,
         },
         "policies": [
             {"name": "resident", "admission": "lifetime_full", "reclamation": "resident",

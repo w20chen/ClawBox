@@ -6,7 +6,31 @@ from pathlib import Path
 
 import pytest
 
-from clawbox.experiments.prediction import CommandPredictionProvider, PredictionUnavailable
+from clawbox.experiments.prediction import CommandPredictionProvider, PredictionUnavailable, clawtune_extra_peak
+
+
+def test_clawtune_extra_peak_reserves_only_peak_above_baseline() -> None:
+    prediction = {
+        "schema_version": "call_load.v2", "scope": "tool_call",
+        "targets": {"memory_extra_peak_bytes": {
+            "status": "available", "unit": "bytes",
+            "metric_definition": "environment_memory_peak_minus_baseline",
+            "p90": 10 * 1024 * 1024 + 1, "backend": "runtime",
+            "method": "direct", "sample_count": 3,
+        }},
+    }
+    result = clawtune_extra_peak(prediction)
+    assert result["predicted_incremental_memory_mib"] > 10
+    assert result["admission_prediction_target"] == "environment_memory_peak_minus_baseline"
+    prediction["targets"]["memory_extra_peak_bytes"]["status"] = "unavailable"
+    with pytest.raises(PredictionUnavailable, match="unavailable"):
+        clawtune_extra_peak(prediction)
+
+
+def test_clawtune_total_peak_cannot_substitute_for_extra_peak() -> None:
+    with pytest.raises(PredictionUnavailable, match="unavailable"):
+        clawtune_extra_peak({"schema_version": "call_load.v2", "scope": "tool_call",
+                             "targets": {"memory_total_peak_bytes": {"p90": 1024}}})
 
 
 def _trainer_module():

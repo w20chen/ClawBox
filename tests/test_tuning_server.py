@@ -85,20 +85,15 @@ def test_native_api_publishes_atomic_pair_and_replays_idempotently(client):
     assert response.status_code == 200
     snapshot = response.json()
     assert snapshot["generation"] == 1
-    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v5"
-    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v2"
+    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v6"
+    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v3"
 
     prediction = client.get(
         "/v1/kb/admission-prediction",
         params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo", "generation": 1},
         headers=auth_headers(),
     )
-    assert prediction.status_code == 200, prediction.text
-    body = prediction.json()
-    assert body["generation"] == 1
-    assert body["prediction"]["evidence_count"] == 1
-    assert body["prediction"]["cpu_p90_cores"] == pytest.approx(1.25)
-    assert body["prediction"]["memory_p90_bytes"] == pytest.approx(16 * 1024**2)
+    assert prediction.status_code == 409, prediction.text
     missing = client.get(
         "/v1/kb/admission-prediction",
         params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo", "generation": 2},
@@ -173,7 +168,7 @@ def test_post_observations_then_read_snapshot(client):
     )
     assert claw.status_code == 200
     claw_data = claw.json()["snapshot"]
-    assert claw_data["schema"] == "runtime_tool_resource_kb_v2"
+    assert claw_data["schema"] == "runtime_tool_resource_kb_v3"
 
 
 def test_post_rejects_bad_signature(client):

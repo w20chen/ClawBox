@@ -366,6 +366,7 @@ def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
         client, template="tpl", node_name="node-a", ownership=_owner(),
         warm_snapshot_root="/warm", cold_snapshot_root="/cold",
         snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy",
     )
     lifecycle.start()
     lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
@@ -385,6 +386,7 @@ def test_lazy_restore_retains_warm_until_next_commit_or_close(capacity, expected
         client, template="tpl", node_name="node-a", ownership=_owner(),
         warm_snapshot_root="/warm", cold_snapshot_root="/cold",
         snapshot_pool=pool, snapshot_reservation_bytes=1024, lazy_restore=True,
+        snapshot_mechanism="full-copy",
     )
     lifecycle.start()
     lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
@@ -413,6 +415,7 @@ def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:
             client, template="tpl", node_name="node-a", ownership=owner,
             warm_snapshot_root="/warm", cold_snapshot_root="/cold",
             snapshot_pool=pool, snapshot_reservation_bytes=1024,
+            snapshot_mechanism="full-copy",
         )
         for owner in owners
     ]
@@ -435,6 +438,7 @@ def test_lifecycle_consumption_waits_for_selected_spill(operation: str) -> None:
         client, template="tpl", node_name="node-a", ownership=_owner(),
         warm_snapshot_root="/warm", cold_snapshot_root="/cold",
         snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy",
     )
     lifecycle.start()
     lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
@@ -742,6 +746,7 @@ def test_lifecycle_records_host_physical_memory_reclamation() -> None:
         CubeSandboxClient(sandbox_class=_Sandbox), template="tpl",
         node_name="node-a", ownership=_owner(),
         physical_observation=lambda: next(samples),
+        snapshot_mechanism="full-copy",
     )
     lifecycle.start()
     lifecycle.checkpoint_and_evict()

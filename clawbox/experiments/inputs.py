@@ -52,7 +52,6 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
     files = []
     admissions = {policy.admission for policy in spec.policies}
     for policy, source in (
-        (AdmissionPolicy.TOOL_P90, spec.resources.p90_predictions),
         (AdmissionPolicy.TOOL_ORACLE, spec.resources.oracle_measurements),
     ):
         if policy in admissions:

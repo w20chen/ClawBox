@@ -326,7 +326,12 @@ def main() -> int:
         "runtime_trace_expected": bool(metadata.get("runtime_trace_expected", True)),
         "command_sha256": command_sha256,
         "effective_command_sha256": effective_command_sha256,
-        "prediction": _prediction(command_sha256),
+        "prediction": (
+            {"call_prediction": metadata.get("call_prediction"),
+             "raw_command_sha256": command_sha256}
+            if isinstance(metadata.get("call_prediction"), dict)
+            else _prediction(command_sha256)
+        ),
         "runtime_request_at": time.time(),
     }
     try:

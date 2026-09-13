@@ -97,7 +97,6 @@ def configure_experiment(
     checkpoint_headroom_gib: float | None = None,
     static_tool_memory_mib: int | None = None,
     full_tool_memory_mib: int | None = None,
-    p90_kb: str | None = None,
     oracle_measurements: str | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
@@ -270,8 +269,6 @@ def configure_experiment(
         resources["static_tool_memory_mib"] = static_tool_memory_mib
     if full_tool_memory_mib is not None:
         resources["full_tool_memory_mib"] = full_tool_memory_mib
-    if p90_kb is not None:
-        resources["p90_predictions"] = p90_kb
     if oracle_measurements is not None:
         resources["oracle_measurements"] = oracle_measurements
 
@@ -417,7 +414,6 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             "pool_memory_gib": pool_mib / 1024,
             "static_tool_memory_mib": spec.resources.static_tool_memory_mib,
             "full_tool_memory_mib": spec.resources.full_tool_memory_mib,
-            "p90_predictions": spec.resources.p90_predictions,
             "oracle_measurements": spec.resources.oracle_measurements,
         },
         "safety": {

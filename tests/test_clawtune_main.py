@@ -89,9 +89,8 @@ def test_canonical_prediction_does_not_invent_peak_cpu_or_rss():
     from tool_resource.runtime_kb import CompletedCall, RuntimeToolResourceKB, ToolCallQuery
     kb = RuntimeToolResourceKB.fit_public([CompletedCall(
         "repo", "exec", "true", 0, 2, cpu_time_seconds=1, cpu_time_eligible=True,
-        peak_memory_mb=100, peak_memory_mb_eligible=True, ambient_before_mb=0,
     )])
     prediction = predict_native_call_load(kb, ToolCallQuery("repo", "exec", "true", 3))
     assert prediction.targets["cpu_avg_cores"].p90 == 0.5
     assert prediction.targets["cpu_peak_cores"].status == "unavailable"
-    assert prediction.targets["memory_peak_rss_bytes"].status == "unavailable"
+    assert prediction.targets["memory_extra_peak_bytes"].status == "unavailable"
