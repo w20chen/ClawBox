@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "source": "15five__scim2-filter-parser-13",
+  "source_trace_format": 5,
+  "commands": [
+    {
+      "command": "find /testbed -type f -name \"*.py\" | head -50",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && grep -rn \"attr_paths\" --include=\"*.py\"",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && grep -rn \"attr_path\" --include=\"*.py\"",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && cat setup.py",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && pip install -e \".[dev]\" 2>&1 | tail -20",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && python -m pytest tests/ -v 2>&1",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && python -c \"\nfrom scim2_filter_parser.transpilers.sql import AttrPathParts, Transpiler\n# Test named access\np = AttrPathParts('emails', 'value', None)\nprint(f'attr_name={p.attr_name}, sub_attr={p.sub_attr}, uri={p.uri}')\nprint(f'Still works as tuple: {p[0]}, {p[1]}, {p[2]}')\nprint(f'Hashable? {hash(p)}')\nprint(f'Comparable? {p == (\\\"emails\\\", \\\"value\\\", None)}')\n\n# Test with the transpiler\nattr_map = {\n    ('emails', 'value', None): 'emails.value',\n    ('name', 'familyName', None): 'name.familyname',\n}\nt = Transpiler(attr_map)\nfrom scim2_filter_parser.lexer import SCIMLexer\nfrom scim2_filter_parser.parser import SCIMParser\ntoken_stream = SCIMLexer().tokenize('name.familyName co \\\"O\\\\\\\"Malley\\\"')\nast = SCIMParser().parse(token_stream)\nresult = t.transpile(ast)\nprint(f'SQL: {result}')\nprint(f'Params: {t.params}')\nprint(f'Attr paths: {t.attr_paths}')\nprint(f'First path attr_name: {t.attr_paths[0].attr_name}')\n\"\n",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && git diff -- src/scim2_filter_parser/transpilers/sql.py > patch.txt",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "cd /testbed && cat patch.txt",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    },
+    {
+      "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt",
+      "predicted_command_memory_p90_mib": 256,
+      "predicted_host_execution_increment_mib": 256,
+      "evidence_count": 1,
+      "host_mapping_source": "synthetic_replay_envelope"
+    }
+  ]
+}

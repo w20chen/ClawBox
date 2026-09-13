@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
 import shlex
+import sysconfig
+import tarfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -323,6 +326,52 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         return result
 
     private_b64 = base64.b64encode(ssh.identity_private_key.encode()).decode()
+    # Older Runtime images do not carry the ClawTune state initializer at
+    # /usr/local/bin.  Ship the versioned helper with the Runtime setup so
+    # experiments remain self-contained while still using ClawTune's native
+    # StateStore/initialize_state implementation.
+    init_state_file = f"{home}/initialize-clawtune-state.py"
+    init_state_source = Path(__file__).resolve().parents[2] / "scripts" / "initialize-clawtune-state.py"
+    init_state_b64 = base64.b64encode(init_state_source.read_bytes()).decode()
+    # The deployed Runtime image may contain an older sidecar wheel without
+    # the main-branch clawtune_kb package.  Inject that small native package
+    # from the selected ClawTune source so the initializer and sidecar share
+    # the current StateStore contract.
+    sidecar_src = Path(os.getenv("CLAWTUNE_SIDECAR_SRC", ""))
+    if not sidecar_src.is_dir():
+        sidecar_src = Path(os.getenv("CLAWTUNE_ROOT", "")) / "services" / "sidecar" / "src"
+    kb_source = sidecar_src / "clawtune_kb"
+    if not kb_source.is_dir():
+        raise RuntimeError(f"ClawTune KB source does not exist: {kb_source}")
+    clawtune_root = sidecar_src.parents[2]
+    seed_source = clawtune_root / "seeds" / "bootstrap-v1"
+    contracts_source = clawtune_root / "contracts"
+    if not seed_source.is_dir() or not contracts_source.is_dir():
+        raise RuntimeError("ClawTune bootstrap seed/contracts are unavailable")
+    kb_archive = io.BytesIO()
+    with tarfile.open(fileobj=kb_archive, mode="w:gz") as archive:
+        archive.add(kb_source, arcname="clawtune_kb")
+        archive.add(seed_source, arcname="clawtune_kb/_data/seeds/bootstrap-v1")
+        archive.add(contracts_source, arcname="clawtune_kb/_data/contracts")
+        # The Runtime image's venv is intentionally small.  Include the
+        # pure-Python JSON-schema stack (and rpds' matching extension) used by
+        # ClawTune contracts so native seed validation works on that image.
+        site_candidates = [
+            Path(os.getenv("CLAWTUNE_RUNTIME_SITE_PACKAGES", "")),
+            Path("/home/weitianc/.local/lib/python3.11/site-packages"),
+            Path(sysconfig.get_paths()["purelib"]),
+        ]
+        site_packages = next(
+            (candidate for candidate in site_candidates if (candidate / "rpds").is_dir()),
+            Path(sysconfig.get_paths()["purelib"]),
+        )
+        for dependency in ("jsonschema", "referencing", "attrs", "attr", "jsonschema_specifications", "rpds"):
+            dependency_path = site_packages / dependency
+            if dependency_path.exists():
+                archive.add(dependency_path, arcname=dependency_path.name)
+    kb_archive_b64 = base64.b64encode(kb_archive.getvalue()).decode()
+    kb_extra_dir = f"{home}/clawtune-extra"
+    kb_archive_file = f"{home}/clawtune-kb.tar.gz"
     _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
@@ -353,6 +402,25 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     encoded_predictions = base64.b64encode(json.dumps(
         prediction_manifest or {}, sort_keys=True, separators=(",", ":"),
     ).encode()).decode()
+    # CubeSandbox limits one command's argument size.  Transfer the native
+    # ClawTune support archive in bounded chunks before the setup command.
+    archive_init = runtime_executor.execute(
+        prefix + f"mkdir -p {shlex.quote(home)}; : > {shlex.quote(kb_archive_file)}",
+        30,
+    )
+    if archive_init.exit_code:
+        raise RuntimeError(f"Runtime ClawTune archive setup failed: {archive_init.stderr[-2000:]}")
+    for offset in range(0, len(kb_archive_b64), 48 * 1024):
+        chunk = kb_archive_b64[offset:offset + 48 * 1024]
+        transferred = runtime_executor.execute(
+            prefix + f"printf %s {shlex.quote(chunk)} | base64 -d >> {shlex.quote(kb_archive_file)}",
+            30,
+        )
+        if transferred.exit_code:
+            raise RuntimeError(
+                f"Runtime ClawTune archive transfer failed at offset {offset}: "
+                f"{transferred.stderr[-2000:]}"
+            )
     setup = runtime_executor.execute(
         prefix
         + f"mkdir -p {shlex.quote(runtime_workspace)} {shlex.quote(trace_dir + '/tool-resource')} "
@@ -361,11 +429,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"printf %s {shlex.quote(private_b64)} | base64 -d > {shlex.quote(identity_file)}; "
         + f"printf %s {shlex.quote(known_b64)} | base64 -d > {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher)}; "
+        + f"printf %s {shlex.quote(init_state_b64)} | base64 -d > {shlex.quote(init_state_file)}; "
+        + f"mkdir -p {shlex.quote(kb_extra_dir)}; tar -xzf {shlex.quote(kb_archive_file)} -C {shlex.quote(kb_extra_dir)}; "
         + relay_setup
-        + f"chmod 700 {shlex.quote(ssh_launcher)}; "
+        + f"chmod 700 {shlex.quote(ssh_launcher)} {shlex.quote(init_state_file)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
-        + f"/opt/clawtune/venv/bin/python /usr/local/bin/initialize-clawtune-state.py --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
+        + f"PYTHONPATH={shlex.quote(kb_extra_dir)}:${{PYTHONPATH:-}} /opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
         + "export CLAWTUNE_POLICY=observe-only "
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
@@ -377,7 +447,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
-        + "/opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
+        + f"PYTHONPATH={shlex.quote(kb_extra_dir)}:${{PYTHONPATH:-}} /opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
         + f"--host 127.0.0.1 --port 8765 >{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
         + f"echo $! >{shlex.quote(home + '/sidecar.pid')}", 30,
     )

@@ -210,6 +210,29 @@ index 29a09f9..bc940a9 100644
  }
  
  // UpdateNetworkRequest is the wire shape for POST /cube/sandbox/network. The
+diff --git a/CubeMaster/pkg/templatecenter/store.go b/CubeMaster/pkg/templatecenter/store.go
+index 48a8da6..168d5c4 100644
+--- a/CubeMaster/pkg/templatecenter/store.go
++++ b/CubeMaster/pkg/templatecenter/store.go
+@@ -1896,6 +1896,18 @@ func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType s
+ 				if _, ok := healthyNodeIPs[replica.NodeIP]; ok {
+ 					matched = true
+ 				}
++				// A freshly restarted Master can have a healthy node in the
++				// general cache before the per-instance sorted cache is rebuilt.
++				// Preserve the same READY-replica and health requirements while
++				// avoiding a false "no local replica" rejection.
++				if n, ok := localcache.GetNode(replica.NodeID); ok && n != nil && n.Healthy {
++					matched = true
++				}
++				if ip := strings.TrimSpace(replica.NodeIP); ip != "" {
++					if n, ok := localcache.GetNodesByIp(ip); ok && n != nil && n.Healthy {
++						matched = true
++					}
++				}
+ 			}
+ 			setTemplateLocalityCache(templateID, readyReplicas)
+ 			registerReadyTemplateReplicas(templateID, readyReplicas)
 diff --git a/CubeShim/shim/src/hypervisor/cube_hypervisor.rs b/CubeShim/shim/src/hypervisor/cube_hypervisor.rs
 index d95d962..a15ed1c 100644
 --- a/CubeShim/shim/src/hypervisor/cube_hypervisor.rs

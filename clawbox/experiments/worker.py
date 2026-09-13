@@ -575,7 +575,20 @@ class ExperimentWorker:
             })
         def reclaim_local_cache() -> None:
             events.write({"event": "local_cache_reclaim_started"})
-            observation = sampler.reclaim_file_cache()
+            try:
+                observation = sampler.reclaim_file_cache()
+            except OSError as exc:
+                # memory.reclaim is root-owned on the host cgroup.  A worker
+                # may be intentionally unprivileged; failure to request
+                # cache reclaim must remain observable and let normal
+                # lifecycle eviction make progress instead of invalidating
+                # the arm.
+                events.write({
+                    "event": "local_cache_reclaim",
+                    "status": "unavailable",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                return
             events.write({"event": "local_cache_reclaim", **observation})
 
         coordinator = PolicyCoordinator(
