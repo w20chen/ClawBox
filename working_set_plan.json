@@ -1,0 +1,1023 @@
+{
+  "schema": "llc-controlled-working-set-v1",
+  "host": "kunpeng",
+  "numa_node": 0,
+  "memory_bytes": 6442450944,
+  "vcpus_per_replica": 1,
+  "replicas_per_trial": 4,
+  "repeats": 4,
+  "random_seed": 20260915,
+  "topology": {
+    "source": "live sysfs: node0/cpulist, cache/index3/shared_cpu_list, topology/cluster_cpus_list, thread_siblings_list; selected domains validated against current placement definition",
+    "numa_node": 0,
+    "linux_pool": [
+      8,
+      10,
+      12,
+      14
+    ],
+    "physical_cpus_by_slice": {
+      "S0": [
+        8,
+        10,
+        12,
+        14
+      ],
+      "S1": [
+        16,
+        18,
+        20,
+        22
+      ],
+      "S2": [
+        24,
+        26,
+        28,
+        30
+      ],
+      "S3": [
+        32,
+        34,
+        36,
+        38
+      ]
+    },
+    "slices": {
+      "S0": {
+        "llc_shared_cpu_list": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79
+        ],
+        "cluster_cpus_list": [
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "thread_siblings": [
+          [
+            8,
+            9
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            12,
+            13
+          ],
+          [
+            14,
+            15
+          ]
+        ],
+        "physical_cpus": [
+          8,
+          10,
+          12,
+          14
+        ]
+      },
+      "S1": {
+        "llc_shared_cpu_list": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79
+        ],
+        "cluster_cpus_list": [
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "thread_siblings": [
+          [
+            16,
+            17
+          ],
+          [
+            18,
+            19
+          ],
+          [
+            20,
+            21
+          ],
+          [
+            22,
+            23
+          ]
+        ],
+        "physical_cpus": [
+          16,
+          18,
+          20,
+          22
+        ]
+      },
+      "S2": {
+        "llc_shared_cpu_list": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79
+        ],
+        "cluster_cpus_list": [
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31
+        ],
+        "thread_siblings": [
+          [
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ],
+          [
+            28,
+            29
+          ],
+          [
+            30,
+            31
+          ]
+        ],
+        "physical_cpus": [
+          24,
+          26,
+          28,
+          30
+        ]
+      },
+      "S3": {
+        "llc_shared_cpu_list": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79
+        ],
+        "cluster_cpus_list": [
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39
+        ],
+        "thread_siblings": [
+          [
+            32,
+            33
+          ],
+          [
+            34,
+            35
+          ],
+          [
+            36,
+            37
+          ],
+          [
+            38,
+            39
+          ]
+        ],
+        "physical_cpus": [
+          32,
+          34,
+          36,
+          38
+        ]
+      }
+    },
+    "distinct_llc_shared_cpu_lists": [
+      [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79
+      ]
+    ],
+    "smt_siblings_used": false
+  },
+  "placements": {
+    "same-slice": {
+      "workers": [
+        [
+          8
+        ],
+        [
+          10
+        ],
+        [
+          12
+        ],
+        [
+          14
+        ]
+      ],
+      "description": "rotated in placement_variants"
+    },
+    "2-slice": {
+      "workers": [
+        [
+          8
+        ],
+        [
+          10
+        ],
+        [
+          16
+        ],
+        [
+          18
+        ]
+      ],
+      "description": "rotated in placement_variants"
+    },
+    "4-slice": {
+      "workers": [
+        [
+          8
+        ],
+        [
+          16
+        ],
+        [
+          24
+        ],
+        [
+          32
+        ]
+      ],
+      "description": "rotated in placement_variants"
+    },
+    "linux": {
+      "workers": [
+        [
+          8,
+          10,
+          12,
+          14
+        ]
+      ],
+      "description": "warmup only"
+    }
+  },
+  "placement_variants": {
+    "same-slice": [
+      {
+        "id": "S0",
+        "workers": [
+          [
+            8
+          ],
+          [
+            10
+          ],
+          [
+            12
+          ],
+          [
+            14
+          ]
+        ]
+      },
+      {
+        "id": "S1",
+        "workers": [
+          [
+            16
+          ],
+          [
+            18
+          ],
+          [
+            20
+          ],
+          [
+            22
+          ]
+        ]
+      },
+      {
+        "id": "S2",
+        "workers": [
+          [
+            24
+          ],
+          [
+            26
+          ],
+          [
+            28
+          ],
+          [
+            30
+          ]
+        ]
+      },
+      {
+        "id": "S3",
+        "workers": [
+          [
+            32
+          ],
+          [
+            34
+          ],
+          [
+            36
+          ],
+          [
+            38
+          ]
+        ]
+      }
+    ],
+    "2-slice": [
+      {
+        "id": "S0+S1",
+        "workers": [
+          [
+            8
+          ],
+          [
+            10
+          ],
+          [
+            16
+          ],
+          [
+            18
+          ]
+        ]
+      },
+      {
+        "id": "S1+S2",
+        "workers": [
+          [
+            16
+          ],
+          [
+            18
+          ],
+          [
+            24
+          ],
+          [
+            26
+          ]
+        ]
+      },
+      {
+        "id": "S2+S3",
+        "workers": [
+          [
+            24
+          ],
+          [
+            26
+          ],
+          [
+            32
+          ],
+          [
+            34
+          ]
+        ]
+      },
+      {
+        "id": "S3+S0",
+        "workers": [
+          [
+            32
+          ],
+          [
+            34
+          ],
+          [
+            8
+          ],
+          [
+            10
+          ]
+        ]
+      }
+    ],
+    "4-slice": [
+      {
+        "id": "core0",
+        "workers": [
+          [
+            8
+          ],
+          [
+            16
+          ],
+          [
+            24
+          ],
+          [
+            32
+          ]
+        ]
+      },
+      {
+        "id": "core1",
+        "workers": [
+          [
+            10
+          ],
+          [
+            18
+          ],
+          [
+            26
+          ],
+          [
+            34
+          ]
+        ]
+      },
+      {
+        "id": "core2",
+        "workers": [
+          [
+            12
+          ],
+          [
+            20
+          ],
+          [
+            28
+          ],
+          [
+            36
+          ]
+        ]
+      },
+      {
+        "id": "core3",
+        "workers": [
+          [
+            14
+          ],
+          [
+            22
+          ],
+          [
+            30
+          ],
+          [
+            38
+          ]
+        ]
+      }
+    ]
+  },
+  "targets": {
+    "pointer-chase-1MiB": {
+      "name": "pointer-chase-1MiB",
+      "size_mib": 1,
+      "steps": 1300000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 1 1300000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-2MiB": {
+      "name": "pointer-chase-2MiB",
+      "size_mib": 2,
+      "steps": 810000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 2 810000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-4MiB": {
+      "name": "pointer-chase-4MiB",
+      "size_mib": 4,
+      "steps": 675000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 4 675000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-8MiB": {
+      "name": "pointer-chase-8MiB",
+      "size_mib": 8,
+      "steps": 595000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 8 595000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-16MiB": {
+      "name": "pointer-chase-16MiB",
+      "size_mib": 16,
+      "steps": 475000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 16 475000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-32MiB": {
+      "name": "pointer-chase-32MiB",
+      "size_mib": 32,
+      "steps": 380000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 32 380000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-64MiB": {
+      "name": "pointer-chase-64MiB",
+      "size_mib": 64,
+      "steps": 260000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 64 260000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-128MiB": {
+      "name": "pointer-chase-128MiB",
+      "size_mib": 128,
+      "steps": 180000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 128 180000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "pointer-chase-256MiB": {
+      "name": "pointer-chase-256MiB",
+      "size_mib": 256,
+      "steps": 160000000,
+      "duration_s": 10.0,
+      "band": "controlled-working-set",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/pointer_chase 256 160000000 305419896",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    },
+    "sequential-stream-512MiB": {
+      "name": "sequential-stream-512MiB",
+      "size_mib": 512,
+      "passes": 330,
+      "duration_s": 10.0,
+      "band": "controlled-streaming-control",
+      "predicted_rate": 0.0,
+      "checkpoint_image": "placement-cache-pointer-chase-pretool:20260915-v2",
+      "checkpoint_image_id": "sha256:bb7471baa6f67067e9f66d1fd9c6e0761ea48ab0c7fe7fe2ce43fedb16538d92",
+      "command": "/opt/sequential_stream 512 330",
+      "workdir": "/app",
+      "expected_exit_code": 0,
+      "expected_stdout_tail": ""
+    }
+  }
+}
