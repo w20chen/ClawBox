@@ -1,1 +1,4 @@
-"""Central trace and benchmark-result ingestion service."""
+"""Deprecated control-plane module; see docs/deprecated.md.
+
+No historical compatibility guarantee. Shared current callers remain supported.
+"""

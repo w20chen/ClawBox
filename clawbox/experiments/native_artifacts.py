@@ -409,6 +409,9 @@ def validate_native_tool_join(
         execution_id = str(request.get("execution_id") or "")
         if not _SAFE_EXECUTION_ID.fullmatch(execution_id):
             raise ValueError("policy record has an invalid execution identity")
+        if item.get("admission_error"):
+            error = item["admission_error"]
+            raise ValueError(f"policy admission failed for {execution_id}: {error.get('type')}: {error.get('message')}")
         if item.get("completion") is None:
             raise ValueError(f"policy execution is incomplete: {execution_id}")
         if (item.get("admission") or {}).get("decision") != "ADMIT":

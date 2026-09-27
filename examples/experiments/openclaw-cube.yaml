@@ -42,6 +42,7 @@ execution:
   command_timeout_seconds: 60
   stabilization_seconds: 1
 resources:
+  cold_snapshot_root: /data/clawbox/cold
   target_node: hostname-txyuq.foreman.pxe
   pool_memory_budget_mib: 1600000
   emergency_free_memory_mib: 200000

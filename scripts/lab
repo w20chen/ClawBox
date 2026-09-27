@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Daily host entry point; machine settings are trusted local shell configuration.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+ENV_FILE="${CLAWBOX_MACHINE_ENV:-$HOME/.config/clawbox/machine.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+if [[ -n "${CUBE_SOURCE_DIR:-}" && -d "$CUBE_SOURCE_DIR/sdk/python/cubesandbox" ]]; then
+  export PYTHONPATH="$CUBE_SOURCE_DIR/sdk/python${PYTHONPATH:+:$PYTHONPATH}"
+fi
+cd "$ROOT"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+PYTHON="${CLAWBOX_PYTHON:-$ROOT/.venv/bin/python}"
+if [[ ! -x "$PYTHON" ]]; then
+  echo "Missing Python environment: $PYTHON. Install ClawBox in .venv (docs/installation.md)." >&2
+  exit 2
+fi
+exec "$PYTHON" -m clawbox.lab "$@"

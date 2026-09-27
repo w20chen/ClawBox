@@ -35,7 +35,11 @@ def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
     if (not isinstance(target, dict) or target.get("status") != "available"
             or target.get("unit") != "bytes"
             or target.get("metric_definition") != "environment_memory_peak_minus_baseline"):
-        raise PredictionUnavailable("ClawTune extra memory peak is unavailable")
+        reason = target.get("unavailable_reason") if isinstance(target, dict) else "missing target"
+        raise PredictionUnavailable(
+            f"ClawTune extra memory peak is unavailable ({reason}); "
+            "provide LatticeKB environment-memory observations or select a fixed/capacity baseline"
+        )
     value = target.get("p90")
     if isinstance(value, bool) or not isinstance(value, (int, float)) \
             or not math.isfinite(value) or value < 0:

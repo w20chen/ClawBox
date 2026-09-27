@@ -269,6 +269,9 @@ def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:
     assert ":08AE" in command
     assert "exit 1" in command
     assert "CLAWTUNE_GUEST_COLLECTOR_HELPER" in command
+    assert "test -S /run/clawtune/guest-collector.sock" in command
+    assert "grep -q 'guest collector ready'" in command
+    assert 'zcat /proc/config.gz | cmp -s' in command
     assert "pkill" not in command
 
     restart = native_tool_bridge_setup_command(restart=True)

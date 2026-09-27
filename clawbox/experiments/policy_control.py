@@ -14,7 +14,8 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from .http_server import LocalHTTPServer as ThreadingHTTPServer
 from typing import Any, Callable
 
 
@@ -32,6 +33,7 @@ class SessionLifecycle(str, Enum):
 class _Execution:
     request: dict[str, Any]
     admission: dict[str, Any] | None = None
+    admission_error: dict[str, str] | None = None
     completion: dict[str, Any] | None = None
     admitting: bool = False
     completing: bool = False
@@ -81,8 +83,9 @@ class _Session:
                 response.setdefault("decision", "ADMIT")
                 if response["decision"] != "ADMIT":
                     raise RuntimeError("admission callback must block or return ADMIT")
-            except Exception:
+            except Exception as exc:
                 with self.condition:
+                    execution.admission_error = {"type": type(exc).__name__, "message": str(exc)}
                     execution.admitting = False
                     execution.admission_completed_monotonic_s = time.monotonic()
                     self.condition.notify_all()
@@ -172,6 +175,7 @@ class PolicyControlSession:
                 {
                     "request": dict(item.request),
                     "admission": dict(item.admission) if item.admission else None,
+                    "admission_error": dict(item.admission_error) if item.admission_error else None,
                     "completion": dict(item.completion) if item.completion else None,
                     "timing": {
                         "admission_started_monotonic_s": item.admission_started_monotonic_s,

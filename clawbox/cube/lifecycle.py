@@ -67,7 +67,11 @@ class CubeSandboxLifecycle:
                  cold_snapshot_root: str | None = None,
                  snapshot_pool: WarmSnapshotPool | None = None,
                  snapshot_reservation_bytes: int | None = None,
-                 snapshot_mechanism: str = "incremental-cow", lazy_restore: bool = True) -> None:
+                 snapshot_mechanism: str = "incremental-cow", lazy_restore: bool = True,
+                 snapshot_storage: str = "tiered") -> None:
+        if snapshot_storage not in {"tiered", "warm-only"}:
+            raise ValueError("invalid snapshot storage")
+        self.snapshot_storage = snapshot_storage
         if snapshot_mechanism not in {"full-copy", "incremental-cow"}:
             raise ValueError("invalid snapshot mechanism")
         if snapshot_mechanism == "incremental-cow" and not lazy_restore:
@@ -247,6 +251,14 @@ class CubeSandboxLifecycle:
                 return None
             if self.sandbox is None or self._state is not SandboxState.RUNNING:
                 raise LifecycleError("CubeSandbox is not resident")
+            if self.snapshot_storage == "warm-only":
+                if tier is SnapshotTier.COLD:
+                    raise ValueError("COLD snapshots are disabled by warm-only storage")
+                tier = SnapshotTier.WARM
+            if tier is None and self.snapshot_mechanism == "incremental-cow":
+                tier = SnapshotTier.COLD
+            if tier is SnapshotTier.COLD and not self.cold_snapshot_root:
+                raise ValueError("COLD checkpoint requires cold_snapshot_root")
             before = self._state
             self._state = SandboxState.CHECKPOINTING
             started_wall, started_mono = time.time(), time.monotonic()
@@ -263,10 +275,14 @@ class CubeSandboxLifecycle:
                 if (tier is SnapshotTier.WARM and self.snapshot_pool is not None
                         and self.snapshot_reservation_bytes is not None
                         and self.snapshot_reservation_bytes > self.snapshot_pool.capacity_bytes):
+                    if self.snapshot_storage == "warm-only":
+                        raise WarmCapacityError("WARM pool is too small; disk fallback is disabled")
                     tier = SnapshotTier.COLD
                 if tier is None:
                     pause_attempted = True
-                    self.client.pause_sandbox(self.sandbox)
+                    self.client.pause_sandbox(
+                        self.sandbox, snapshot_mechanism=self.snapshot_mechanism,
+                    )
                 else:
                     if tier is SnapshotTier.LOCAL:
                         raise ValueError("cannot checkpoint a sandbox to LOCAL")
@@ -281,7 +297,7 @@ class CubeSandboxLifecycle:
                                 timeout_s=0 if predecessor is not None else 120,
                             )
                         except WarmCapacityError:
-                            if predecessor is None:
+                            if predecessor is None or self.snapshot_storage == "warm-only":
                                 raise
                             tier = SnapshotTier.COLD
                     root = (self.warm_snapshot_root if tier is SnapshotTier.WARM
@@ -307,7 +323,8 @@ class CubeSandboxLifecycle:
                                 int(manifest["transferred_bytes"])
                                 if manifest["transferred_bytes"] is not None else None
                             ),
-                            spiller=self._spill_to_cold, replaces=predecessor,
+                            spiller=(self._spill_to_cold if self.snapshot_storage != "warm-only" else None),
+                            replaces=predecessor,
                         )
                     elif predecessor is not None and self.snapshot_pool is not None:
                         self.snapshot_pool.remove(predecessor)

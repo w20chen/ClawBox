@@ -1,13 +1,7 @@
-"""Managed agent sandbox control-plane contracts (M1).
+"""Deprecated control-plane module; see docs/deprecated.md.
 
-Holds the server-generated identity, Run/Attempt/Execution state machines and
-outcome model that the Managed API, PostgreSQL, and SandboxTask CRD v1alpha2
-all conform to (ADR-002, ADR-003, roadmap §6.2 and §14.5).
-
-Nothing here touches Kubernetes or PostgreSQL directly; it is the pure contract
-layer so every component can be tested against the same invariants.
+No historical compatibility guarantee. Shared current callers remain supported.
 """
-
 from clawbox.managed.ids import new_attempt_id, new_execution_id, new_run_id, new_ulid
 from clawbox.managed.models import (
     AgentOutcome,

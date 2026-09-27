@@ -200,6 +200,8 @@ def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
         "chmod 600 /run/clawbox-ssh/host_key /run/clawbox-ssh/authorized_key; "
         + restart_command
         + "kernel_source=/lib/modules/$(uname -r)/build; test -d \"$kernel_source\"; "
+        + "zcat /proc/config.gz | cmp -s - \"$kernel_source/.config\" || "
+        "{ echo 'Guest kernel/header configuration mismatch; rebuild with scripts/lab images' >&2; exit 1; }; "
         + "if ! grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then "
         "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
@@ -212,10 +214,12 @@ def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
         "BCC_KERNEL_SOURCE=\"$kernel_source\" "
         "/usr/local/bin/tool-bridge </dev/null >/var/log/tool-bridge.log 2>&1 & "
         "fi; "
-        "ready=0; i=0; while [ $i -lt 50 ]; do "
+        "ready=0; i=0; while [ $i -lt 400 ]; do "
         "if grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then ready=1; break; fi; "
         "i=$((i + 1)); sleep 0.1; done; "
-        "if [ $ready -ne 1 ]; then cat /var/log/tool-bridge.log >&2 || true; exit 1; fi"
+        "if [ $ready -ne 1 ] || ! test -S /run/clawtune/guest-collector.sock "
+        "|| ! grep -q 'guest collector ready' /var/log/tool-bridge.log; then "
+        "cat /var/log/tool-bridge.log >&2 || true; exit 1; fi"
     )
 
 

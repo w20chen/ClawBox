@@ -16,7 +16,8 @@ import time
 import urllib.error
 import urllib.request
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from .http_server import LocalHTTPServer as ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 

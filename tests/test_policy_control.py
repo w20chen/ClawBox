@@ -136,6 +136,7 @@ def test_policy_control_records_callback_failure_detail() -> None:
         record = server.requests[-1]
         assert record["error_type"] == "OSError"
         assert record["error"] == "route unavailable"
+        assert session.records()[0]["admission_error"] == {"type": "OSError", "message": "route unavailable"}
 
 
 def test_policy_control_c60_has_no_cross_session_head_of_line_blocking() -> None:

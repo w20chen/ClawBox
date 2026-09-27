@@ -21,6 +21,16 @@ from clawbox.experiments.native_artifacts import (
 )
 
 
+def test_native_join_preserves_admission_failure_cause():
+    with pytest.raises(ValueError, match="PredictionUnavailable: missing memory evidence"):
+        validate_native_tool_join(
+            bridge_records=[], cgroup_artifacts={}, clause_artifacts={},
+            policy_records=[{"request": {"execution_id": "exec-1"},
+                             "admission_error": {"type": "PredictionUnavailable", "message": "missing memory evidence"},
+                             "completion": None}],
+        )
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="guest export uses POSIX shell tools")
 def test_real_compressed_export_exceeds_4mib_and_roundtrips_in_chunks(tmp_path, monkeypatch):
     from clawbox.experiments import native_artifacts as native

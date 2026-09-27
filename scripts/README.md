@@ -1,5 +1,9 @@
 # Administrative and development helpers
 
+`bash scripts/lab setup --warm`, `baselines`, `run TASK.yaml`, and `cleanup RUN_DIR`
+provide the [daily host workflow](../docs/lab.md). They use the existing experiment
+runner and default to RAM-only snapshots; COLD storage requires explicit selection.
+
 Experiment configuration, trace inspection, execution, status and reporting use
 `clawbox experiment`; see the [user guide](../docs/guide.md). `scripts/clawbox`
 only forwards arguments to that CLI. The former fixed-workload study launcher

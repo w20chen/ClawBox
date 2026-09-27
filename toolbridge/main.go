@@ -729,6 +729,7 @@ func main() {
 	config := loadServerConfig(hostKey, authorizedKey)
 	collectorProcess, collectorErr := startGuestCollectorProcess()
 	if collectorErr != nil {
+		guestCollectorError = collectorErr.Error()
 		log.Printf("guest collector unavailable: %v", collectorErr)
 	} else if collectorProcess != nil {
 		guestCollector = collectorProcess.client

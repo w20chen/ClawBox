@@ -32,6 +32,45 @@ def test_incremental_snapshot_is_default() -> None:
     assert resources.model_copy(update={"snapshot_mechanism": "full-copy"}).snapshot_mechanism == "full-copy"
 
 
+@pytest.mark.parametrize("root", [None, "", "   "])
+def test_incremental_reclamation_requires_cold_destination(root) -> None:
+    raw = raw_spec()
+    raw["resources"]["cold_snapshot_root"] = root
+    with pytest.raises(ValidationError, match="incremental-cow reclamation requires"):
+        ExperimentSpec.model_validate(raw)
+    raw["resources"]["snapshot_mechanism"] = "full-copy"
+    assert ExperimentSpec.model_validate(raw).resources.snapshot_mechanism == "full-copy"
+
+
+def test_policy_drain_reports_already_completed_failure() -> None:
+    from concurrent.futures import Future
+    from threading import Lock
+    from clawbox.experiments.worker import drain_policy_futures
+    success, failed = Future(), Future()
+    success.set_result(None)
+    failed.set_exception(RuntimeError("model wait policy failed"))
+    with pytest.raises(RuntimeError, match="model wait policy failed"):
+        drain_policy_futures([success, failed], Lock(), 1)
+
+
+def test_policy_drain_observes_work_submitted_by_pending_event() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, Lock
+    from clawbox.experiments.worker import drain_policy_futures
+    pending, lock, release = [], Lock(), Event()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        def fail():
+            raise RuntimeError("follow-up failed")
+        def submit_followup():
+            release.wait(2)
+            with lock:
+                pending.append(executor.submit(fail))
+        pending.append(executor.submit(submit_followup))
+        release.set()
+        with pytest.raises(RuntimeError, match="follow-up failed"):
+            drain_policy_futures(pending, lock, 2)
+
+
 def test_runtime_network_policy_honors_explicit_internet_access() -> None:
     allowlist = ["192.0.2.10/32"]
 
@@ -60,6 +99,7 @@ def raw_spec() -> dict:
         "resources": {
             "target_node": "node-a", "pool_memory_budget_mib": 100000,
             "emergency_free_memory_mib": 10000,
+            "cold_snapshot_root": "/cold",
         },
         "policies": [
             {"name": "resident", "admission": "lifetime_full", "reclamation": "resident",

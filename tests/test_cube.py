@@ -87,6 +87,18 @@ class _Sandbox:
     def pause(self, wait=True, **kwargs):
         self.state = "paused"
         if kwargs:
+            if kwargs.get("snapshot_mechanism") == "incremental-cow":
+                memory = Path(kwargs["memory_snapshot_path"])
+                memory.parent.mkdir(parents=True, exist_ok=True)
+                memory.write_bytes(bytes(4096))
+                layers = Path(str(memory) + ".layers")
+                layers.mkdir()
+                (layers / "000000.mem").hardlink_to(memory)
+                Path(str(memory) + ".lineage.json").write_text(json.dumps({
+                    "schema_version": 1, "logical_bytes": 4096,
+                    "transferred_bytes": 4096, "full_base": True,
+                    "layers": [{"name": "000000.mem"}],
+                }))
             return {
                 "memory_snapshot_path": kwargs["memory_snapshot_path"],
                 "logical_bytes": 1024, "allocated_bytes": 1024,
@@ -291,17 +303,56 @@ def test_cube_client_bounds_a_stalled_command_stream() -> None:
     assert time.monotonic() - started < 0.5
 
 
-def test_lifecycle_preserves_id_across_pause_restore_and_executor() -> None:
+def test_incremental_pause_cannot_silently_use_legacy_api() -> None:
+    sandbox = _Sandbox()
+    with pytest.raises(ValueError, match="explicit snapshot tier"):
+        CubeSandboxClient.pause_sandbox(sandbox)
+    assert sandbox.state == "running"
+    CubeSandboxClient.pause_sandbox(sandbox, snapshot_mechanism="full-copy")
+    assert sandbox.state == "paused"
+
+
+def test_missing_cold_destination_fails_before_pausing_vm() -> None:
+    _Sandbox.items = {}
+    lifecycle = CubeSandboxLifecycle(CubeSandboxClient(sandbox_class=_Sandbox),
+                                    template="tpl", node_name="node-a", ownership=_owner())
+    lifecycle.start()
+    with pytest.raises(ValueError, match="cold_snapshot_root"):
+        lifecycle.checkpoint_and_evict()
+    assert lifecycle.resident and lifecycle.sandbox.state == "running"
+    lifecycle.close()
+
+
+def test_warm_only_never_falls_back_to_cold():
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(client, template="tpl", node_name="node-a", ownership=_owner(),
+                                    warm_snapshot_root="/warm", cold_snapshot_root="/must-not-write",
+                                    snapshot_storage="warm-only", snapshot_pool=WarmSnapshotPool(512),
+                                    snapshot_reservation_bytes=1024)
+    lifecycle.start()
+    with pytest.raises(RuntimeError, match="disk fallback is disabled"):
+        lifecycle.checkpoint_and_evict()
+    assert lifecycle.resident and lifecycle.sandbox.state == "running"
+    with pytest.raises(ValueError, match="COLD snapshots are disabled"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
+    lifecycle.close()
+
+
+def test_lifecycle_preserves_id_across_pause_restore_and_executor(tmp_path) -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
     lifecycle = CubeSandboxLifecycle(
         client, template="tpl", node_name="node-a", ownership=_owner(),
+        cold_snapshot_root=str(tmp_path / "cold"),
     )
     lifecycle.start()
     sandbox_id = lifecycle.sandbox_id
     executor = CubeCommandExecutor(client, lambda: lifecycle.sandbox)
     assert executor.execute("printf ok", 5).stdout == "ok"
     lifecycle.checkpoint_and_evict()
+    assert lifecycle.tier is SnapshotTier.COLD
+    assert lifecycle.timings[-1]["snapshot_metrics"]["snapshot_mechanism"] == "incremental-cow"
     assert not lifecycle.resident
     assert lifecycle.checkpoint_and_evict() is None
     lifecycle.restore()
@@ -335,11 +386,12 @@ def test_checkpoint_manifest_failure_does_not_mark_paused_vm_running() -> None:
     assert sandbox_id not in _Sandbox.items
 
 
-def test_restore_failure_after_remote_resume_does_not_mark_vm_swapped() -> None:
+def test_restore_failure_after_remote_resume_does_not_mark_vm_swapped(tmp_path) -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
     lifecycle = CubeSandboxLifecycle(
         client, template="tpl", node_name="node-a", ownership=_owner(),
+        cold_snapshot_root=str(tmp_path / "cold"),
     )
     lifecycle.start()
     lifecycle.checkpoint_and_evict()
@@ -519,9 +571,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             item.resume_calls += 1
             return item
 
-        def pause(self, wait=True):
+        def pause(self, wait=True, **kwargs):
             self.pause_calls += 1
-            super().pause(wait=wait)
+            return super().pause(wait=wait, **kwargs)
 
     SnapshotSandbox.items = {}
     SnapshotSandbox.sequence = 0
@@ -640,7 +692,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                        "stabilization_seconds": 0},
         "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
                        "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 1,
-                       "static_tool_memory_mib": 1},
+                       "static_tool_memory_mib": 1,
+                       "cold_snapshot_root": str(tmp_path / "cold")},
         "policies": [{"name": "snapshot", "admission": "tool_static",
                       "reclamation": "snapshot_pause", "eviction": "eager",
                       "restore": "proactive", "prefetch_lead_seconds": 0.1}],

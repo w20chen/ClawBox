@@ -4,6 +4,14 @@ ClawBox compares memory-management policies while workloads execute in CubeSandb
 virtual machines. A policy controls memory reservations, saving idle VM state,
 and restoring that state. It does not change the configured VM RAM size.
 
+The default `resources.snapshot_mechanism: incremental-cow` requires
+`resources.cold_snapshot_root` whenever a policy saves VMs. Set it to the absolute
+COLD directory configured on CubeSandbox. Policies without an explicit storage
+tier checkpoint directly there; they do not silently use full snapshots. The
+first checkpoint writes a full RAM base, and later checkpoints on the same
+filesystem write dirty-page deltas. Select `full-copy` explicitly for a full-RAM
+checkpoint baseline.
+
 The public interface is `clawbox experiment`. Use the same configuration format
 and commands for every workload and concurrency level. Run the commands below
 from the repository root; relative input paths are resolved against the current

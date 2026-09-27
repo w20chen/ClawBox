@@ -56,6 +56,19 @@ from .spec import (
 )
 
 
+def drain_policy_futures(pending: list[Any], lock: Any, timeout_s: float | None) -> None:
+    """Observe every submitted result, including already completed failures."""
+    consumed = 0
+    while True:
+        with lock:
+            batch = pending[consumed:]
+        if not batch:
+            return
+        for future in batch:
+            future.result(timeout=timeout_s)
+            consumed += 1
+
+
 def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     cases = arm.session_cases or (arm.case,)
     return cases[session_index % len(cases)]
@@ -900,6 +913,7 @@ class ExperimentWorker:
             role="runtime",
             warm_snapshot_root=arm.resources.warm_snapshot_root,
             snapshot_mechanism=arm.resources.snapshot_mechanism,
+            snapshot_storage=arm.resources.snapshot_storage,
             lazy_restore=True,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
@@ -935,6 +949,7 @@ class ExperimentWorker:
             role="tool",
             warm_snapshot_root=arm.resources.warm_snapshot_root,
             snapshot_mechanism=arm.resources.snapshot_mechanism,
+            snapshot_storage=arm.resources.snapshot_storage,
             lazy_restore=True,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
@@ -965,13 +980,8 @@ class ExperimentWorker:
 
         def drain_policy_events() -> None:
             """Finish this session's queued lifecycle work before validation."""
-            while True:
-                with pending_policy_events_lock:
-                    pending = [item for item in pending_policy_events if not item.done()]
-                if not pending:
-                    return
-                for future in pending:
-                    future.result(timeout=arm.execution.arm_timeout_seconds)
+            drain_policy_futures(pending_policy_events, pending_policy_events_lock,
+                                 arm.execution.arm_timeout_seconds)
 
         if arm.agent.driver is AgentDriver.OPENCLAW:
             if self.model_gateway is None:
@@ -1655,7 +1665,7 @@ class ExperimentWorker:
                                             native_tool_bridge_setup_command(
                                                 restart=bridge_attempt in (2, 10, 20),
                                             ),
-                                            45,
+                                            60,
                                         )
                                         if candidate.exit_code == 0:
                                             bridge_result = candidate
@@ -1921,7 +1931,7 @@ class ExperimentWorker:
                         "Tool setup could not initialize OpenClaw SSH workspace: "
                         + workspace_result.stderr[-1000:]
                     )
-                tool_bridge_result = executor.execute(native_tool_bridge_setup_command(), 30)
+                tool_bridge_result = executor.execute(native_tool_bridge_setup_command(), 60)
                 if tool_bridge_result.exit_code != 0:
                     raise RuntimeError(
                         "Tool setup could not start native SSH bridge: "

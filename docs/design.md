@@ -79,8 +79,12 @@ out admission must not hold locks needed by command completion to release memory
 | COLD | Saved VM state on SSD |
 
 During LOCAL-to-WARM copying, source RAM and destination pages coexist and count
-against their respective budgets. Restore copies state into independent LOCAL
-guest RAM before retiring the WARM generation. WARM-to-COLD spill releases the
+against their respective budgets. Incremental restore maps the immutable base
+and delta ranges privately and loads pages on demand; writes use copy-on-write.
+The running VM still references its WARM generation, which remains charged to
+WARM and cannot be spilled until those references are retired. Restore-ready
+latency excludes subsequent page faults and must be reported alongside first-tool
+latency. WARM-to-COLD spill copies the complete base/delta dependency chain and releases the
 memory-backed copy. COLD restoration must distinguish actual device I/O from
 page-cache hits. Logical snapshot bytes and physical device I/O are different
 measurements.
@@ -92,7 +96,9 @@ checkpointing, not before a Tool checkpoint that may fail.
 
 LOCAL cgroup usage includes charged guest RAM, VM overhead, and retained cache.
 Checkpoint/restore headroom is inside the configured LOCAL capacity. WARM
-preallocation occurs outside that cgroup, with separate capacity accounting.
+preallocation occurs outside that cgroup, with separate capacity accounting;
+incremental checkpoints allocate only the written ranges. Admission still reserves
+the VM RAM size plus 256 MiB, then commits actual allocated layer bytes.
 Requested cache reclamation is not credited as freed memory until measured.
 Restore and spill operations must serialize ownership of each saved generation.
 

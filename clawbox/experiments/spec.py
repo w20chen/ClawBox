@@ -125,6 +125,7 @@ class ResourcesSpec(StrictFrozenModel):
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
     snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"
+    snapshot_storage: Literal["tiered", "warm-only"] = "tiered"
     warm_snapshot_root: str | None = None
     cold_snapshot_root: str | None = None
     local_numa_node: int | None = Field(default=None, ge=0)
@@ -199,6 +200,18 @@ class ExperimentSpec(StrictFrozenModel):
         if len(names) != len(set(names)):
             raise ValueError("policy names must be unique")
         admissions = {policy.admission for policy in self.policies}
+        if (self.resources.snapshot_mechanism == "incremental-cow"
+                and self.resources.snapshot_storage != "warm-only"
+                and any(policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+                        for policy in self.policies)
+                and not (self.resources.cold_snapshot_root or "").strip()):
+            raise ValueError("incremental-cow reclamation requires resources.cold_snapshot_root")
+        if self.resources.snapshot_storage == "warm-only":
+            if not self.resources.warm_snapshot_root or self.resources.warm_memory_capacity_mib <= 0:
+                raise ValueError("warm-only requires warm_snapshot_root and positive warm_memory_capacity_mib")
+            if any(p.eviction in {EvictionPolicy.TIERED_TIME_ORACLE, EvictionPolicy.TIERED_LRU_ORACLE}
+                   for p in self.policies):
+                raise ValueError("tiered policies require COLD storage; choose a non-tiered policy for warm-only")
         if any(policy.eviction is EvictionPolicy.TIME_ORACLE for policy in self.policies):
             if self.inference.backend is not InferenceBackend.REPLAY:
                 raise ValueError("time_oracle is evaluation-only and requires inference.backend=replay")
@@ -276,7 +289,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
             for concurrency in spec.execution.concurrency_levels:
                 for policy in spec.policies:
                     resources = spec.resources
-                    if policy.eviction not in {
+                    if resources.snapshot_storage != "warm-only" and policy.eviction not in {
                         EvictionPolicy.TIERED_LRU_ORACLE,
                         EvictionPolicy.TIERED_TIME_ORACLE,
                     }:

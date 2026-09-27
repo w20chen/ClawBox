@@ -7,7 +7,13 @@ VM and a separate Tool VM. ClawTune supplies command predictions and measurement
 The public interface is `clawbox experiment`. Workloads, concurrency, resources,
 and policy dimensions are configuration inputs; no particular benchmark is required.
 
+The former service-based control plane is deprecated and has no future
+compatibility guarantee. See [supported scope and deprecated modules](docs/deprecated.md).
+
 ## Start
+
+On an installed experiment host, use the [daily lab commands](docs/lab.md) to
+prepare services, choose baselines, replay traces and destroy this run's VMs.
 
 With Python 3.12 or newer, from this checkout:
 

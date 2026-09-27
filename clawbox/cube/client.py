@@ -333,6 +333,8 @@ class CubeSandboxClient:
                       generation: int | None = None,
                       snapshot_mechanism: str = "incremental-cow") -> Mapping[str, Any] | None:
         if tier is None:
+            if snapshot_mechanism != "full-copy":
+                raise ValueError("incremental-cow requires an explicit snapshot tier and path")
             sandbox.pause(wait=True)
             return None
         if not memory_snapshot_path or generation is None:

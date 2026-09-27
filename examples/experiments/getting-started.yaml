@@ -26,6 +26,8 @@ resources:
   emergency_free_memory_mib: 1024
   checkpoint_restore_headroom_mib: 1024
   static_tool_memory_mib: 256
+  # Must match the COLD root configured on the CubeSandbox host before running.
+  cold_snapshot_root: /data/clawbox/cold
 policies:
   - {name: tool-static-resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
 validation: {command: "test \"$(cat /workspace/result.txt)\" = complete"}
