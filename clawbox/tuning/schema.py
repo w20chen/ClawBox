@@ -240,6 +240,14 @@ class CgroupResource(StrictModel):
     sampling_coverage_ms: int | None = None
     cpu_source: str | None = None
     memory_source: str | None = None
+    memory_baseline_bytes: int | None = Field(default=None, ge=0)
+    memory_total_peak_bytes: int | None = Field(default=None, ge=0)
+    memory_extra_peak_bytes: int | None = Field(default=None, ge=0)
+    memory_measurement: str | None = None
+    memory_environment_id: str | None = None
+    memory_eligible: bool = False
+    memory_unavailable_reason: str | None = None
+    memory_timeline: list[tuple[float, float]] | None = None
     disk_source: str | None = None
     network_source: str | None = None
     fallback_used: bool = False
@@ -310,6 +318,12 @@ class ToolObservation(StrictModel):
     cpu_utilization_avg_cores: float | None = Field(default=None, ge=0)
     rss_peak_bytes: int | None = Field(default=None, ge=0)
     memory_rss_bytes_after: int | None = Field(default=None, ge=0)
+    memory_baseline_bytes: int | None = Field(default=None, ge=0)
+    memory_total_peak_bytes: int | None = Field(default=None, ge=0)
+    memory_extra_peak_bytes: int | None = Field(default=None, ge=0)
+    memory_measurement: str | None = None
+    memory_environment_id: str | None = None
+    memory_eligible: bool = False
     stdout_bytes: int | None = Field(default=None, ge=0)
     stderr_bytes: int | None = Field(default=None, ge=0)
     output_truncated: bool = False
@@ -460,6 +474,12 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
             cpu_utilization_avg_cores=cpu_cores,
             rss_peak_bytes=rss_peak,
             memory_rss_bytes_after=rss_after,
+            memory_baseline_bytes=_as_int(resources.get("memory_baseline_bytes")),
+            memory_total_peak_bytes=_as_int(resources.get("memory_total_peak_bytes")),
+            memory_extra_peak_bytes=_as_int(resources.get("memory_extra_peak_bytes")),
+            memory_measurement=resources.get("memory_measurement"),
+            memory_environment_id=resources.get("memory_environment_id"),
+            memory_eligible=resources.get("memory_eligible") is True,
             pmu=pmu,
             ipc=(pmu.derived.get("ipc") if pmu_eligible else None),
             llc_mpki=(pmu.derived.get("llc_mpki") if pmu_eligible else None),

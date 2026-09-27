@@ -125,7 +125,8 @@ class AdmissionPredictionProvider(Protocol):
 
 
 class HTTPAdmissionPredictionClient:
-    def __init__(self, endpoint: str, token: str, *, timeout_seconds: float = 10.0) -> None:
+    def __init__(self, endpoint: str, token: str, *, timeout_seconds: float = 10.0,
+                 command: str | None = None) -> None:
         if not endpoint:
             raise ValueError("ClawTune KB endpoint is required for p90 admission")
         if not token:
@@ -133,6 +134,7 @@ class HTTPAdmissionPredictionClient:
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.timeout_seconds = timeout_seconds
+        self.command = command
 
     def get(
         self, *, tenant_id: str, repo_fingerprint: str, generation: int | None,
@@ -143,6 +145,9 @@ class HTTPAdmissionPredictionClient:
         }
         if generation is not None:
             query["generation"] = generation
+        if not self.command:
+            raise PredictionUnavailable("LatticeKB admission requires a concrete command")
+        query["command"] = self.command
         request = urllib.request.Request(
             f"{self.endpoint}/v1/kb/admission-prediction?{urllib.parse.urlencode(query)}",
             headers={"Authorization": f"Bearer {self.token}"},
@@ -240,13 +245,14 @@ def export_main() -> None:
     parser.add_argument("--token-env", default="CLAWBOX_KB_TOKEN")
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--command", required=True, help="concrete shell command to predict with LatticeKB")
     parser.add_argument("--generation", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     token = os.getenv(args.token_env, "")
     if not token:
         parser.error(f"{args.token_env} is empty")
-    prediction = HTTPAdmissionPredictionClient(args.endpoint, token).get(
+    prediction = HTTPAdmissionPredictionClient(args.endpoint, token, command=args.command).get(
         tenant_id=args.tenant,
         repo_fingerprint=args.repository,
         generation=args.generation,

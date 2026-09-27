@@ -1,6 +1,7 @@
 """Locate ClawTune and reuse its native seed/state interfaces."""
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -45,5 +46,21 @@ def source_revision(root: Path) -> str:
                          capture_output=True, text=True)
     if top.returncode or Path(top.stdout.strip()).resolve() != root.resolve():
         return "unknown"
-    return subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    head = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    if not subprocess.check_output(
+        ["git", "-C", str(root), "status", "--porcelain"], text=True,
+    ).strip():
+        return head
+    names = subprocess.check_output([
+        "git", "-C", str(root), "ls-files", "--cached", "--others",
+        "--exclude-standard", "-z",
+    ]).split(b"\0")
+    digest = hashlib.sha256()
+    for raw_name in sorted(name for name in names if name):
+        source = root / raw_name.decode("utf-8")
+        if source.is_file():
+            digest.update(raw_name + b"\0" + hashlib.sha256(source.read_bytes()).digest())
+    return hashlib.sha1(f"{head}:{digest.hexdigest()}".encode("ascii")).hexdigest()
 

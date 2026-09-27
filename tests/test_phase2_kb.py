@@ -7,6 +7,8 @@ def intent(tenant,eid,when): return ExecutionIntent(tenant_id=tenant,execution_i
     tool_name="exec",command="python -m pytest tests -q",repo_fingerprint="repo",
     workspace_id=f"ws-{tenant}",timestamp=when)
 def test_tenant_overlay_and_duplicate_observation():
+    import json, base64
+    from tests.test_native_tuning import make_manifest
     Base.metadata.drop_all(engine);init_db(); scheduler=Scheduler(); now=utcnow()
     a=intent("tenant-a","e-a",now); b=intent("tenant-b","e-b",now)
     pa=scheduler.predict(a); pb=scheduler.predict(b); assert pa.sample_count==pb.sample_count
@@ -14,6 +16,11 @@ def test_tenant_overlay_and_duplicate_observation():
         end_time=now+timedelta(seconds=30),exit_code=0,cpu={"peak_cores":16},
         memory={"peak_bytes":1024**3},collection_quality="valid",collector_version="test",
         tool_image_digest="sha256:test",complete=True)
+    artifact = json.loads(base64.b64decode(make_manifest("e-a").artifacts[0].content_b64))
+    artifact["calls"][0]["command"] = a.command
+    artifact["provenance"]["repo"] = a.repo_fingerprint
+    artifact["calls"][0]["clauses"][0]["argv"] = ["python", "-m", "pytest", "tests", "-q"]
+    obs.clause_telemetry = artifact
     assert scheduler.observation("e-a",obs,a)==(1,True)
     assert scheduler.observation("e-a",obs,a)==(1,False)
     assert scheduler.predict(b).kb_generation==0

@@ -67,6 +67,7 @@ def main() -> None:
         "failOpen",
         "executionBackend",
         "sandboxExecEnvelope",
+        "sandboxExecPredictionModel",
         "enableCgroup",
         "enableAffinity",
         "enableNuma",
@@ -108,13 +109,21 @@ def main() -> None:
     from clawbox.experiments.prediction import clawtune_extra_peak
 
     example = json.loads((root / "contracts" / "examples" / "call-load.json").read_text(encoding="utf-8"))
+    # The public example uses ClawTune's Docker/cgroup measurement. Cube keeps
+    # the same prediction schema but supplies its explicit guest measurement.
+    example["memory_measurement"] = "guest_memtotal_minus_memavailable"
+    example["targets"]["memory_extra_peak_bytes"]["backend"] = "lattice"
     try:
         clawtune_extra_peak(example)
     except Exception as exc:
         fail(f"call_load.v2 extra memory target is incompatible: {exc}")
     envelope_source = (plugin_dir / "src" / "exec-instrumentation.ts").read_text(encoding="utf-8")
-    if "memory_extra_peak_bytes: decision.prediction.call_prediction.targets.memory_extra_peak_bytes" not in envelope_source:
-        fail("hook-only execution envelope does not carry the selected call prediction")
+    if not all(marker in envelope_source for marker in (
+        'model === "lattice" ? decision?.prediction.lattice',
+        "memory_measurement: tool.memory_measurement",
+        "targets: tool.targets",
+    )):
+        fail("hook-only execution envelope does not carry the selected LatticeKB prediction")
     validate_seed(root / "seeds" / "bootstrap-v1")
     seed_dir = root / "seeds" / "bootstrap-v1"
     ClauseResourceKB.from_json_obj(json.loads(

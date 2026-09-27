@@ -73,7 +73,8 @@ def make_manifest(
             "eligible_for_kb": True,
             "provenance": {"source_replay_control_flow_fidelity": {"replay_exit_code": 0}},
             "clauses": [{
-                "availability": {"latency": "ok", "cpu": "ok", "memory": "ok"},
+                "availability": {"latency": "ok", "cpu": "ok", "memory": "ok", "cpu_time": "ok"},
+                "cpu_time_seconds": cpu * 2.0,
                 "latency_ms": 2000.0,
                 "ts_start": start,
                 "ts_end": start + 2.0,
@@ -100,6 +101,14 @@ def make_manifest(
         "cpu_utilization_avg_cores": cpu,
         "cpu_time_s": cpu * 2.0,
         "memory_rss_peak_bytes": rss,
+        "memory_baseline_bytes": 64 * 1024**2,
+        "memory_total_peak_bytes": 64 * 1024**2 + rss,
+        "memory_extra_peak_bytes": rss,
+        "memory_measurement": "guest_memtotal_minus_memavailable",
+        "memory_environment_id": "cube:test:boot-a",
+        "memory_eligible": True,
+        "memory_timeline": [[start - 0.001, 64 * 1024**2],
+                            *[[start + i / 10, 64 * 1024**2 + rss] for i in range(1, 21)]],
         "collector_errors": [],
         "cgroup_setup_error": None,
         "cgroup_read_error": None,
@@ -142,8 +151,10 @@ def test_signed_native_ingest_is_immutable_loadable_and_idempotent(db):
         db, tenant_id="tenant-a", repo_fingerprint=REPO
     ))
     from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB
+    from tool_time.lattice_kb import LatticeTimeKB
     ClauseResourceKB.from_json_obj(snapshot["clause_snapshot"])
     RuntimeToolResourceKB.from_json_obj(snapshot["runtime_snapshot"])
+    LatticeTimeKB.from_json_obj(snapshot["lattice_snapshot"])
     assert snapshot["artifact_count"] == 2
     assert snapshot["evidence"]["runs"] == ["run-a"]
 
@@ -298,4 +309,41 @@ def test_runtime_loader_publishes_the_exact_atomic_pair(db, tmp_path):
     assert metadata["evidence"]["runs"] == ["run-a"]
     assert json.loads((tmp_path / "clause-resource-kb.json").read_text()) == snapshot["clause_snapshot"]
     assert json.loads((tmp_path / "runtime-tool-resource-kb.json").read_text()) == snapshot["runtime_snapshot"]
+    assert json.loads((tmp_path / "clause-lattice-time-kb.json").read_text()) == snapshot["lattice_snapshot"]
     assert json.loads((tmp_path / "native-kb-load.json").read_text())["pair_digest"] == snapshot["pair_digest"]
+
+
+def test_lattice_memory_requires_clause_window_samples():
+    from clawbox.tuning.native import native_clause_observations
+    manifest = make_manifest()
+    artifact = json.loads(base64.b64decode(manifest.artifacts[0].content_b64))
+    cgroup = json.loads(base64.b64decode(manifest.artifacts[1].content_b64))
+    call = artifact["calls"][0]
+    labels = native_clause_observations(REPO, call, cgroup)
+    assert labels[0].memory_extra_peak_bytes == 16 * 1024**2
+    cgroup.pop("memory_timeline")
+    without_samples = native_clause_observations(REPO, call, cgroup)
+    assert not without_samples[0].memory_eligible
+    assert without_samples[0].memory_extra_peak_bytes is None
+
+
+def test_native_snapshot_export_selects_lattice(db, tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    ingest(db, make_manifest())
+    snapshot = native_snapshot_to_dict(latest_native_snapshot(
+        db, tenant_id="tenant-a", repo_fingerprint=REPO,
+    ))
+    source, output = tmp_path / "snapshot.json", tmp_path / "p90.json"
+    source.write_text(json.dumps(snapshot), encoding="utf-8")
+    path = Path(__file__).resolve().parents[1] / "scripts" / "export-p90-from-native-snapshot.py"
+    spec = importlib.util.spec_from_file_location("export_native_p90", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(sys, "argv", [str(path), str(source), "--output", str(output),
+                                      "--command", "python -m pytest -q"])
+    module.main()
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["command"] == "python -m pytest -q"
+    assert all(payload["call_prediction"]["targets"][name]["backend"] == "lattice"
+               for name in ("duration_ms", "cpu_avg_cores", "memory_extra_peak_bytes"))

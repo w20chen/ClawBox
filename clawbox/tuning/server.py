@@ -171,17 +171,11 @@ def create_app(db_url: str | None = None) -> FastAPI:
     def get_admission_prediction(
         tenant_id: str,
         repo: str,
+        command: str,
         generation: int | None = None,
         db: Session = Depends(get_db),
     ):
-        """Return an authoritative repository-level p90 for Cell admission.
-
-        A Cell is sized before OpenClaw reveals its future commands.  Querying
-        the native runtime KB with an outer ``exec`` call and no command
-        therefore intentionally selects its repository corpus' coarse
-        tool/global node.  Static studies request an exact immutable
-        generation; elastic studies omit it and receive the latest generation.
-        """
+        """Return native LatticeKB P90s for a concrete command and generation."""
         try:
             row = (
                 native_snapshot_for_generation(
@@ -201,26 +195,34 @@ def create_app(db_url: str | None = None) -> FastAPI:
                 status_code=404,
                 detail=f"no native snapshot{qualifier} for (tenant, repo)",
             )
-        _, _, RuntimeToolResourceKB, ToolCallQuery, _, _ = _clawtune_api()
+        (
+            ClauseResourceKB, _, RuntimeToolResourceKB, ToolCallQuery,
+            _, _, LatticeTimeKB,
+        ) = _clawtune_api()
         runtime_snapshot = json.loads(row.runtime_snapshot)
         kb = RuntimeToolResourceKB.from_json_obj(runtime_snapshot)
+        clause_kb = ClauseResourceKB.from_json_obj(json.loads(row.clause_snapshot))
+        lattice_kb = LatticeTimeKB.from_json_obj(json.loads(row.lattice_snapshot))
         query = ToolCallQuery(
             repo=repo,
             tool_name="exec",
-            command=None,
+            command=command,
             ts_start=max(
                 time.time(), float(runtime_snapshot.get("last_query_ts") or 0.0),
             ),
+            memory_measurement="guest_memtotal_minus_memavailable",
         )
-        predictions = kb.query(query)
-        from .clawtune import predict_native_call_load
-        call_load = predict_native_call_load(kb, query)
-        latency = predictions["latency_ms"]
+        from .clawtune import predict_native_call_load_models
+        models = predict_native_call_load_models(
+            kb, query, clause=clause_kb, lattice=lattice_kb,
+        )
+        call_load = models["lattice"]
+        latency = call_load.targets["duration_ms"]
         cpu = call_load.targets["cpu_avg_cores"]
         memory = call_load.targets["memory_extra_peak_bytes"]
-        values = (latency.conditional_p90, cpu.p90, memory.p90)
+        values = (latency.p90, cpu.p90, memory.p90)
         if any(value is None or not math.isfinite(float(value)) or float(value) <= 0 for value in values):
-            raise HTTPException(status_code=409, detail="native snapshot has no safe positive p90")
+            raise HTTPException(status_code=409, detail="LatticeKB has no safe positive P90 for this command and measurement")
         return {
             "tenant_id": row.tenant_id,
             "repo_fingerprint": row.repo_fingerprint,
@@ -230,22 +232,28 @@ def create_app(db_url: str | None = None) -> FastAPI:
             "artifact_count": row.artifact_count,
             "clawtune_revision": row.clawtune_revision,
             "call_prediction": call_load.model_dump(mode="json"),
+            "model_predictions": {
+                "tool": models["tool"].model_dump(mode="json"),
+                "trie": models["trie"].model_dump(mode="json"),
+                "lattice": models["lattice"].model_dump(mode="json"),
+                "diagnostics": models["diagnostics"].model_dump(mode="json"),
+            },
             "prediction": {
                 "cpu_metric": "cpu_avg_cores",
                 "memory_metric": "environment_memory_peak_minus_baseline",
-                "latency_p90_sec": float(latency.conditional_p90) / 1000.0,
+                "latency_p90_sec": float(latency.p90) / 1000.0,
                 "cpu_p90_cores": float(cpu.p90),
                 "memory_p90_bytes": float(memory.p90),
                 "evidence_count": min(
-                    latency.evidence_count, cpu.sample_count, memory.sample_count,
+                    latency.sample_count, cpu.sample_count, memory.sample_count,
                 ),
                 "scopes": {
-                    "latency": latency.scope,
+                    "latency": latency.context[0] if latency.context else None,
                     "cpu": cpu.context[0] if cpu.context else None,
                     "memory": memory.context[0] if memory.context else None,
                 },
                 "fallback_paths": {
-                    "latency": list(latency.fallback_path),
+                    "latency": list(latency.context),
                     "cpu": list(cpu.context),
                     "memory": list(memory.context),
                 },

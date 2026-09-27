@@ -107,7 +107,7 @@ def ingest_native_batch(
     ingest_secret: str,
     expected_clawtune_revision: str,
 ) -> NativeIngestOutcome:
-    """Store raw bytes, validate natively, then publish one atomic KB pair."""
+    """Store raw bytes, validate natively, then publish one atomic KB set."""
 
     generation = _generation(db, manifest.tenant_id, manifest.repo_fingerprint)
     digest = manifest_digest(manifest)
@@ -242,8 +242,9 @@ def ingest_native_batch(
 
     clause_json = json_dumps(projection.clause_snapshot)
     runtime_json = json_dumps(projection.runtime_snapshot)
+    lattice_json = json_dumps(projection.lattice_snapshot)
     pair_digest = hashlib.sha256(
-        (clause_json + "\n" + runtime_json).encode("utf-8")
+        (clause_json + "\n" + runtime_json + "\n" + lattice_json).encode("utf-8")
     ).hexdigest()
     generation += 1
     db.add(
@@ -253,6 +254,7 @@ def ingest_native_batch(
             generation=generation,
             clause_snapshot=clause_json,
             runtime_snapshot=runtime_json,
+            lattice_snapshot=lattice_json,
             pair_digest=pair_digest,
             source_digest=projection.source_digest,
             artifact_count=projection.artifact_count,
@@ -284,6 +286,7 @@ def native_snapshot_to_dict(row: TuningNativeSnapshotRow) -> dict[str, Any]:
         "created_at": row.created_at.isoformat(),
         "clause_snapshot": json.loads(row.clause_snapshot),
         "runtime_snapshot": json.loads(row.runtime_snapshot),
+        "lattice_snapshot": json.loads(row.lattice_snapshot),
         "evidence": json.loads(row.evidence),
     }
 

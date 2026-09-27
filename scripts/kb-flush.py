@@ -63,6 +63,12 @@ SIGNED_FIELDS = (
     "coverage_reason",
     "cpu_utilization_avg_cores",
     "memory_rss_bytes_after",
+    "memory_baseline_bytes",
+    "memory_total_peak_bytes",
+    "memory_extra_peak_bytes",
+    "memory_measurement",
+    "memory_environment_id",
+    "memory_eligible",
     "stdout_bytes",
     "stderr_bytes",
     "output_truncated",
@@ -236,6 +242,12 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
             "cpu_utilization_avg_cores": as_float(resources.get("cpu_utilization_avg_cores")),
             "rss_peak_bytes": as_int(resources.get("rss_peak_bytes")),
             "memory_rss_bytes_after": as_int(resources.get("memory_rss_bytes_after")),
+            "memory_baseline_bytes": as_int(resources.get("memory_baseline_bytes")),
+            "memory_total_peak_bytes": as_int(resources.get("memory_total_peak_bytes")),
+            "memory_extra_peak_bytes": as_int(resources.get("memory_extra_peak_bytes")),
+            "memory_measurement": resources.get("memory_measurement"),
+            "memory_environment_id": resources.get("memory_environment_id"),
+            "memory_eligible": resources.get("memory_eligible") is True,
             "source": "clawtune_span",
             "pmu": pmu,
             "ipc": pmu_metrics["ipc"],
@@ -512,6 +524,12 @@ def join_observations(
                 out["cpu_time_sec"] = cpu_time_s
             if rss_peak is not None:
                 out["rss_peak_bytes"] = rss_peak
+            for key in (
+                "memory_baseline_bytes", "memory_total_peak_bytes",
+                "memory_extra_peak_bytes", "memory_measurement",
+                "memory_environment_id", "memory_eligible",
+            ):
+                out[key] = artifact.get(key, False if key == "memory_eligible" else None)
             sampling_quality = artifact.get("sampling_quality")
             if sampling_quality in ("valid", "degraded", "invalid"):
                 out["collection_quality"] = sampling_quality

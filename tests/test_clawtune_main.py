@@ -46,6 +46,24 @@ def test_export_fetches_main_without_touching_checkout(tmp_path):
         script("prepare-clawtune.py").prepare(checkout, output)
 
 
+def test_dirty_source_revision_matches_working_tree_export(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    (root / "tracked").write_text("before", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+    clean_export = script("prepare-clawtune.py").prepare(root, tmp_path / "clean", working_tree=True)
+    assert clean_export == source_revision(root)
+    (root / "tracked").write_text("after", encoding="utf-8")
+    (root / "untracked").write_text("new", encoding="utf-8")
+    output = tmp_path / "export"
+    exported = script("prepare-clawtune.py").prepare(root, output, working_tree=True)
+    assert source_revision(root) == exported
+
+
 def test_native_state_isolated_resumable_and_seed_unchanged(tmp_path):
     from clawtune_kb import FILES, StateStore
     seed = seed_directory()
@@ -86,11 +104,13 @@ def test_main_native_model_recording_is_replayable(tmp_path):
 
 
 def test_canonical_prediction_does_not_invent_peak_cpu_or_rss():
-    from tool_resource.runtime_kb import CompletedCall, RuntimeToolResourceKB, ToolCallQuery
-    kb = RuntimeToolResourceKB.fit_public([CompletedCall(
-        "repo", "exec", "true", 0, 2, cpu_time_seconds=1, cpu_time_eligible=True,
+    from tool_resource.runtime_kb import ClauseObservation, ToolCallQuery
+    from tool_time.lattice_kb import LatticeTimeKB
+    kb = LatticeTimeKB.fit([ClauseObservation(
+        repo="repo", bin="python", argv=("python", "-m", "pytest"), ts_start=0, ts_end=2,
+        latency_ms=2000, cpu_ns_cumulative=1000000000,
     )])
-    prediction = predict_native_call_load(kb, ToolCallQuery("repo", "exec", "true", 3))
+    prediction = predict_native_call_load(None, ToolCallQuery("repo", "exec", "python -m pytest", 3), lattice=kb)
     assert prediction.targets["cpu_avg_cores"].p90 == 0.5
     assert prediction.targets["cpu_peak_cores"].status == "unavailable"
     assert prediction.targets["memory_extra_peak_bytes"].status == "unavailable"

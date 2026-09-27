@@ -22,6 +22,7 @@ _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _COLD_START_FILES = {
     "clause": "clause-resource-kb.json",
     "runtime": "runtime-tool-resource-kb.json",
+    "lattice": "clause-lattice-time-kb.json",
 }
 
 
@@ -130,6 +131,7 @@ def verify_native_manifest(
 class NativeProjection:
     clause_snapshot: dict[str, Any]
     runtime_snapshot: dict[str, Any]
+    lattice_snapshot: dict[str, Any]
     source_digest: str
     artifact_count: int
     execution_ids: tuple[str, ...]
@@ -150,6 +152,7 @@ def _clawtune_api():
             _observations_from_call,
             _validate_artifact,
         )
+        from tool_time.lattice_kb import LatticeTimeKB  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - production image gate
         raise RuntimeError("ClawTune main package is unavailable") from exc
     return (
@@ -159,20 +162,21 @@ def _clawtune_api():
         ToolCallQuery,
         _observations_from_call,
         _validate_artifact,
+        LatticeTimeKB,
     )
 
 
 def _cold_start_directory() -> Path:
-    """Resolve the ClawTune main public-prior directory."""
+    """Resolve the validated native ClawTune initialization bundle."""
 
     from clawbox.clawtune_integration import seed_directory
     return seed_directory()
 
 
-def _load_cold_start_pair(
-    ClauseResourceKB: Any, RuntimeToolResourceKB: Any,
-) -> tuple[Any, Any, dict[str, str]]:
-    """Load a public-only cold-start pair and reject state leakage."""
+def _load_cold_start_set(
+    ClauseResourceKB: Any, RuntimeToolResourceKB: Any, LatticeTimeKB: Any,
+) -> tuple[Any, Any, Any, dict[str, str]]:
+    """Load native seed layers unchanged, with no unfinished observations."""
 
     directory = _cold_start_directory()
     payloads: dict[str, dict[str, Any]] = {}
@@ -186,8 +190,6 @@ def _load_cold_start_pair(
             raise ValueError(f"invalid ClawTune cold-start snapshot {path}") from exc
         if not isinstance(payload, dict):
             raise ValueError(f"ClawTune cold-start snapshot {path} must be an object")
-        if payload.get("repo"):
-            raise ValueError(f"ClawTune cold-start snapshot {path} contains repo state")
         if payload.get("pending"):
             raise ValueError(f"ClawTune cold-start snapshot {path} contains pending state")
         if payload.get("last_query_ts") is not None:
@@ -197,6 +199,7 @@ def _load_cold_start_pair(
     return (
         ClauseResourceKB.from_json_obj(payloads["clause"]),
         RuntimeToolResourceKB.from_json_obj(payloads["runtime"]),
+        LatticeTimeKB.from_json_obj(payloads["lattice"]),
         digests,
     )
 
@@ -207,6 +210,36 @@ def _finite_number(value: Any, name: str) -> float:
     result = float(value)
     if not math.isfinite(result) or result < 0:
         raise ValueError(f"cgroup artifact has invalid {name}")
+    return result
+
+
+def native_clause_observations(repo: str, call: Mapping[str, Any], cgroup: Mapping[str, Any]) -> list[Any]:
+    """Keep native clause CPU/time labels and derive memory only from its measured window."""
+    observations_from_call = _clawtune_api()[4]
+    observations = observations_from_call(repo, call, require_timestamps=True)
+    from clawtune_sidecar.monitoring.environment_memory import clause_memory_labels
+
+    timeline = cgroup.get("memory_timeline")
+    if not isinstance(timeline, list) or not timeline:
+        return observations
+    previous = -math.inf
+    for point in timeline:
+        if (not isinstance(point, (list, tuple)) or len(point) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       or not math.isfinite(v) or v < 0 for v in point)
+                or point[0] < previous):
+            return observations
+        previous = point[0]
+    clauses = call.get("clauses") or []
+    labels = clause_memory_labels(cgroup, clauses)
+    by_identity: dict[tuple, list[dict]] = {}
+    for row, label in zip(clauses, labels):
+        identity = (tuple(row.get("argv") or []), row.get("ts_start"), row.get("ts_end"))
+        by_identity.setdefault(identity, []).append(label)
+    result = []
+    for observation in observations:
+        matches = by_identity.get((observation.argv, observation.ts_start, observation.ts_end), [])
+        result.append(replace(observation, **matches[0]) if len(matches) == 1 and matches[0] else observation)
     return result
 
 
@@ -262,7 +295,9 @@ def project_native_manifests(
         ToolCallQuery,
         observations_from_call,
         validate_artifact,
+        LatticeTimeKB,
     ) = _clawtune_api()
+    from clawtune_sidecar.monitoring.environment_memory import memory_labels
     clause_payloads: dict[str, dict[str, Any]] = {}
     cgroup_payloads: dict[str, dict[str, Any]] = {}
     digests: list[str] = []
@@ -308,13 +343,14 @@ def project_native_manifests(
     for execution_id in sorted(clause_payloads):
         artifact = clause_payloads[execution_id]
         call = artifact["calls"][0]
-        observations = observations_from_call(
-            manifest.repo_fingerprint, call, require_timestamps=True
+        observations = native_clause_observations(
+            manifest.repo_fingerprint, call, cgroup_payloads[execution_id],
         )
         if not observations:
             raise ValueError(f"{execution_id}: native artifact has no eligible clauses")
         clause_observations.extend(observations)
         cgroup = cgroup_payloads[execution_id]
+        memory = memory_labels(cgroup)
         ts_start = _finite_number(cgroup.get("ts_start"), "ts_start")
         ts_end = _finite_number(cgroup.get("ts_end"), "ts_end")
         if ts_end < ts_start:
@@ -336,7 +372,18 @@ def project_native_manifests(
                     if cgroup.get("cpu_time_s") is not None else None
                 ),
                 cpu_time_eligible=cgroup.get("cpu_time_s") is not None,
-                memory_eligible=False,
+                memory_baseline_bytes=(
+                    int(cgroup["memory_baseline_bytes"]) if memory else None
+                ),
+                memory_total_peak_bytes=(
+                    int(memory["memory_total_peak_bytes"]) if memory else None
+                ),
+                memory_extra_peak_bytes=(
+                    int(memory["memory_extra_peak_bytes"]) if memory else None
+                ),
+                memory_measurement=(str(cgroup["memory_measurement"]) if memory else None),
+                memory_environment_id=(str(cgroup["memory_environment_id"]) if memory else None),
+                memory_eligible=bool(memory),
             )
         )
         evidence_rows.append(
@@ -348,12 +395,10 @@ def project_native_manifests(
             }
         )
 
-    # The public layer is the ClawTune main cold-start corpus.  Observations
-    # belonging to this (tenant, repo) identity refine only its repo layer.
-    # Rebuilding from all accepted manifests makes each published generation
-    # cumulative while preserving the same immutable public prior.
-    clause_kb, runtime_kb, cold_start_digests = _load_cold_start_pair(
-        ClauseResourceKB, RuntimeToolResourceKB,
+    # Each tenant starts from the same native seed, retaining its repo layers.
+    # Only this identity's accepted artifacts contribute additional history.
+    clause_kb, runtime_kb, lattice_kb, cold_start_digests = _load_cold_start_set(
+        ClauseResourceKB, RuntimeToolResourceKB, LatticeTimeKB,
     )
     for call in completed_calls:
         runtime_kb.observe_completed_call(call)
@@ -370,18 +415,23 @@ def project_native_manifests(
             tool_name=first.tool_name,
             command=first.command,
             ts_start=advance_ts,
+            memory_measurement="guest_memtotal_minus_memavailable",
         )
     )
 
     for observation in clause_observations:
         clause_kb.observe_completed_clause(observation)
+        lattice_kb.observe_completed_clause(observation)
     clause_kb._advance(max(obs.ts_end for obs in clause_observations) + 1e-6)
+    lattice_kb._advance(max(obs.ts_end for obs in clause_observations) + 1e-6)
 
     runtime_snapshot = runtime_kb.to_json_obj()
     clause_snapshot = clause_kb.to_json_obj()
+    lattice_snapshot = lattice_kb.to_json_obj()
     # The native readers are the compatibility gate, not shape checks.
     RuntimeToolResourceKB.from_json_obj(runtime_snapshot)
     ClauseResourceKB.from_json_obj(clause_snapshot)
+    LatticeTimeKB.from_json_obj(lattice_snapshot)
     source_inputs = [
         *(f"artifact:{digest}" for digest in sorted(digests)),
         *(f"cold-start:{kind}:{digest}" for kind, digest in sorted(cold_start_digests.items())),
@@ -390,6 +440,7 @@ def project_native_manifests(
     return NativeProjection(
         clause_snapshot=clause_snapshot,
         runtime_snapshot=runtime_snapshot,
+        lattice_snapshot=lattice_snapshot,
         source_digest=source_digest,
         artifact_count=len(digests),
         execution_ids=tuple(sorted(clause_payloads)),
@@ -401,6 +452,7 @@ def project_native_manifests(
                 "source": "clawtune_seed",
                 "clause_sha256": cold_start_digests["clause"],
                 "runtime_sha256": cold_start_digests["runtime"],
+                "lattice_sha256": cold_start_digests["lattice"],
             },
         },
     )

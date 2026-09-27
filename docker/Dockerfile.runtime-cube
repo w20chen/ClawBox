@@ -41,3 +41,9 @@ WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/cube-runtime-entrypoint.sh"]
 
 COPY scripts/initialize-clawtune-state.py /usr/local/bin/initialize-clawtune-state.py
+COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
+COPY scripts/clawtune-sidecar-entrypoint.sh /usr/local/bin/clawtune-sidecar-entrypoint
+COPY scripts/native-kb-pull.py /usr/local/bin/native-kb-pull.py
+COPY scripts/kb-flush.py /usr/local/bin/kb-flush.py
+RUN chmod 0755 /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint \
+    /usr/local/bin/native-kb-pull.py /usr/local/bin/kb-flush.py

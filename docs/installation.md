@@ -59,8 +59,8 @@ experiment command list. Use fresh checkout directories for the clone commands.
 ### Build with the current ClawTune source
 
 Before rebuilding guest images, export the sibling ClawTune working tree into a
-new directory. This includes the current `call_load.v2` extra-memory prediction
-and records a content digest without changing the sibling checkout:
+new directory. This includes the plugin's LatticeKB execution-envelope selection
+and records source provenance without changing the sibling checkout:
 
 ```bash
 python scripts/prepare-clawtune.py --working-tree --output /data/clawtune-build-source
@@ -78,14 +78,17 @@ docker buildx build --load --platform linux/arm64 \
 ```
 
 Use the same export for both images, then push and register their new immutable
-digests as described below. The recorded revision includes the source-content
-digest. Use a new export directory for each update. The SWE-ReBench overlay
+digests as described below. A clean checkout records its commit; local edits
+record a content-derived revision. Use a new export directory for each update. The SWE-ReBench overlay
 rebuild script exports the current ClawTune working tree too.
 
 Each Runtime initializes an independent working KB through ClawTune's native
 seed/state API. Use new run directories after upgrading from an older KB layout.
 `CLAWTUNE_COLD_START_DIR` can select a complete native seed bundle, including its
-manifest and all three snapshots. Guest eBPF uses ClawTune's unmodified collector;
+manifest and all required native snapshots. ClawBox retains the seed's native
+repository layers. Older ToolKB/Lattice snapshot schemas are not relabeled or
+converted; retain the old state separately and ingest raw artifacts into a new
+tuning database after upgrading. Guest eBPF uses ClawTune's unmodified collector;
 the running guest kernel and its BCC build headers must match.
 
 ## 2. Build and install patched CubeSandbox

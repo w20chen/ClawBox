@@ -89,8 +89,34 @@ clawbox experiment describe comparison.yaml
 ```
 
 This creates a two-by-two policy comparison at each selected concurrency. The
-predicted policy uses ClawTune's current per-call extra memory peak estimate.
-An unavailable estimate rejects the Tool call.
+predicted policy uses ClawTune LatticeKB's per-call extra memory peak estimate
+with the `guest_memtotal_minus_memavailable` measurement. An unavailable estimate
+rejects the Tool call; ToolKB and EdgeKappa are not scheduling fallbacks.
+
+Train from prior recordings containing paired `clause-telemetry-*.json` and
+`cgroup-resource-*.json` artifacts, then select the resulting initialization
+bundle before starting a new experiment:
+
+```bash
+python scripts/train-p90-from-runs.py /data/prior-run \
+  --repository owner/repo --command 'python -m pytest -q' \
+  --output /data/lattice-p90.json --seed-output /data/lattice-seed
+export CLAWTUNE_COLD_START_DIR=/data/lattice-seed
+```
+
+The seed output directory must be new. Runtime copies this bundle into its own
+working state. Existing runs retain their state. Training needs qualified native
+clause CPU/time measurements and an eligible guest memory timeline covering each
+clause; old RSS-only or call-summary records cannot supply missing labels.
+The `--command` selects the command represented by the exported P90; it does not
+execute it. The seed supports subsequent command-specific LatticeKB queries.
+
+`GET /v1/kb/admission-prediction`, `clawbox-p90-export`, and
+`scripts/export-p90-from-native-snapshot.py` also require a concrete `command`
+query parameter or `--command` argument. They return unavailable when the
+selected command lacks compatible evidence. The separate legacy tenant
+scheduler retains its static defaults (4 cores, 512 MiB, 1 second) for missing
+targets and reports them in `defaulted_targets`; they are not model predictions.
 
 Without dimension filters or `--baseline`, `configure` retains the base file's
 policies. If both are given, dimensions filter the explicitly named baselines.

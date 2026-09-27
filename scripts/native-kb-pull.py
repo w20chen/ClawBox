@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch, natively validate, and atomically publish a ClawTune KB pair."""
+"""Fetch, natively validate, and atomically publish all ClawTune KBs."""
 
 from __future__ import annotations
 
@@ -20,13 +20,16 @@ def canonical(value: dict[str, Any]) -> str:
 
 def publish_response(response: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
     from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB
+    from tool_time.lattice_kb import LatticeTimeKB
 
     clause = response["clause_snapshot"]
     runtime = response["runtime_snapshot"]
+    lattice = response["lattice_snapshot"]
     ClauseResourceKB.from_json_obj(clause)
     RuntimeToolResourceKB.from_json_obj(runtime)
+    LatticeTimeKB.from_json_obj(lattice)
     pair_digest = hashlib.sha256(
-        (canonical(clause) + "\n" + canonical(runtime)).encode()
+        (canonical(clause) + "\n" + canonical(runtime) + "\n" + canonical(lattice)).encode()
     ).hexdigest()
     if pair_digest != response["pair_digest"]:
         raise ValueError("native snapshot pair digest mismatch")
@@ -41,6 +44,7 @@ def publish_response(response: dict[str, Any], artifact_dir: Path) -> dict[str, 
     targets = (
         (artifact_dir / "clause-resource-kb.json", canonical(clause)),
         (artifact_dir / "runtime-tool-resource-kb.json", canonical(runtime)),
+        (artifact_dir / "clause-lattice-time-kb.json", canonical(lattice)),
         # Metadata is the commit marker and is published last.
         (artifact_dir / "native-kb-load.json", canonical(metadata)),
     )

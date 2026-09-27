@@ -46,44 +46,53 @@ import (
 // ClawTune cgroup_resource_v1 fields (CgroupResourceResult) so the existing
 // ClawBox pipeline (schema.py / dataset.py / join.py) parses it verbatim.
 type resourceStats struct {
-	CgroupPath         string   `json:"cgroup_path,omitempty"`
-	Source             string   `json:"source"`             // cgroup-v2 | process-tree
-	MonitorSource      string   `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
-	AttributionSource  string   `json:"attribution_source"` // tool-bridge-pgid
-	TsStart            float64  `json:"ts_start"`
-	TsEnd              float64  `json:"ts_end"`
-	DurationMS         int64    `json:"duration_ms"`
-	CPUUserSeconds     float64  `json:"cpu_user_seconds"`
-	CPUSystemSeconds   float64  `json:"cpu_system_seconds"`
-	CPUTimeSeconds     float64  `json:"cpu_time_seconds"`
-	RSSBeforeBytes     int64    `json:"rss_before_bytes"`
-	RSSAfterBytes      int64    `json:"rss_after_bytes"`
-	RSSPeakBytes       int64    `json:"rss_peak_bytes"`
-	ReadBytesDelta     int64    `json:"read_bytes_delta"`
-	WriteBytesDelta    int64    `json:"write_bytes_delta"`
-	PidCount           int      `json:"pid_count"`
-	SamplingIntervalMS int64    `json:"sampling_interval_ms"`
-	SamplingPointCount int      `json:"sampling_point_count"`
-	SamplingQuality    string   `json:"sampling_quality"`
-	SamplingCoverageMS int64    `json:"sampling_coverage_ms"`
-	CPUSource          string   `json:"cpu_source"`
-	MemorySource       string   `json:"memory_source"`
-	DiskSource         string   `json:"disk_source"`
-	NetworkSource      string   `json:"network_source"`
-	FallbackUsed       bool     `json:"fallback_used"`
-	CgroupSetupError   string   `json:"cgroup_setup_error,omitempty"`
-	CgroupReadError    string   `json:"cgroup_read_error,omitempty"`
-	CollectorErrors    []string `json:"collector_errors"`
-	PMUProfile         map[string]any `json:"pmu"`
+	CgroupPath              string         `json:"cgroup_path,omitempty"`
+	Source                  string         `json:"source"`             // cgroup-v2 | process-tree
+	MonitorSource           string         `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
+	AttributionSource       string         `json:"attribution_source"` // tool-bridge-pgid
+	TsStart                 float64        `json:"ts_start"`
+	TsEnd                   float64        `json:"ts_end"`
+	DurationMS              int64          `json:"duration_ms"`
+	CPUUserSeconds          float64        `json:"cpu_user_seconds"`
+	CPUSystemSeconds        float64        `json:"cpu_system_seconds"`
+	CPUTimeSeconds          float64        `json:"cpu_time_seconds"`
+	RSSBeforeBytes          int64          `json:"rss_before_bytes"`
+	RSSAfterBytes           int64          `json:"rss_after_bytes"`
+	RSSPeakBytes            int64          `json:"rss_peak_bytes"`
+	ReadBytesDelta          int64          `json:"read_bytes_delta"`
+	WriteBytesDelta         int64          `json:"write_bytes_delta"`
+	PidCount                int            `json:"pid_count"`
+	SamplingIntervalMS      int64          `json:"sampling_interval_ms"`
+	SamplingPointCount      int            `json:"sampling_point_count"`
+	SamplingQuality         string         `json:"sampling_quality"`
+	SamplingCoverageMS      int64          `json:"sampling_coverage_ms"`
+	CPUSource               string         `json:"cpu_source"`
+	MemorySource            string         `json:"memory_source"`
+	MemoryBaselineBytes     int64          `json:"memory_baseline_bytes,omitempty"`
+	MemoryTotalPeakBytes    int64          `json:"memory_total_peak_bytes,omitempty"`
+	MemoryExtraPeakBytes    int64          `json:"memory_extra_peak_bytes,omitempty"`
+	MemoryMeasurement       string         `json:"memory_measurement,omitempty"`
+	MemoryEnvironmentID     string         `json:"memory_environment_id,omitempty"`
+	MemoryEligible          bool           `json:"memory_eligible"`
+	MemoryTimeline          [][2]float64   `json:"memory_timeline,omitempty"`
+	MemoryUnavailableReason string         `json:"memory_unavailable_reason,omitempty"`
+	DiskSource              string         `json:"disk_source"`
+	NetworkSource           string         `json:"network_source"`
+	FallbackUsed            bool           `json:"fallback_used"`
+	CgroupSetupError        string         `json:"cgroup_setup_error,omitempty"`
+	CgroupReadError         string         `json:"cgroup_read_error,omitempty"`
+	CollectorErrors         []string       `json:"collector_errors"`
+	PMUProfile              map[string]any `json:"pmu"`
 }
 
 type resourceCollector struct {
-	mu         sync.Mutex
-	execID     string
-	traceDir   string
-	pgid       int
-	intervalMS int
-	done       chan struct{}
+	mu               sync.Mutex
+	execID           string
+	traceDir         string
+	pgid             int
+	intervalMS       int
+	done             chan struct{}
+	executionStarted time.Time
 
 	// process-tree accumulators
 	cpuUserSeconds float64
@@ -103,9 +112,41 @@ type resourceCollector struct {
 	lastWrite      map[int]int64 // pid -> last write_bytes
 
 	// cgroup v2 path ("" when unavailable)
-	cgroupPath       string
-	cgroupOK         bool
-	cgroupSetupError string
+	cgroupPath                  string
+	cgroupOK                    bool
+	cgroupSetupError            string
+	environmentSamples          []environmentMemorySample
+	environmentSamplesTruncated bool
+}
+
+type environmentMemorySample struct {
+	at    time.Time
+	bytes int64
+}
+
+var environmentCalls = struct {
+	sync.Mutex
+	active map[string]bool
+}{active: map[string]bool{}}
+
+func registerEnvironmentCall(execID string) {
+	environmentCalls.Lock()
+	defer environmentCalls.Unlock()
+	overlap := len(environmentCalls.active) > 0
+	if overlap {
+		for id := range environmentCalls.active {
+			environmentCalls.active[id] = true
+		}
+	}
+	environmentCalls.active[execID] = overlap
+}
+
+func finishEnvironmentCall(execID string) bool {
+	environmentCalls.Lock()
+	defer environmentCalls.Unlock()
+	overlap := environmentCalls.active[execID]
+	delete(environmentCalls.active, execID)
+	return overlap
 }
 
 func resourceTraceDir() string {
@@ -155,6 +196,42 @@ func readProcStatusVMRSS(pid int) int64 {
 		}
 	}
 	return 0
+}
+
+// readGuestUsedMemory measures the whole Cube guest environment. This is a
+// different metric from per-process RSS and must retain its own measurement
+// identity through training and prediction.
+func readGuestUsedMemory() (int64, bool) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, false
+	}
+	var totalKiB, availableKiB int64 = -1, -1
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch strings.TrimSuffix(fields[0], ":") {
+		case "MemTotal":
+			totalKiB, _ = strconv.ParseInt(fields[1], 10, 64)
+		case "MemAvailable":
+			availableKiB, _ = strconv.ParseInt(fields[1], 10, 64)
+		}
+	}
+	if totalKiB < 0 || availableKiB < 0 || availableKiB > totalKiB {
+		return 0, false
+	}
+	return (totalKiB - availableKiB) * 1024, true
+}
+
+func guestEnvironmentID() string {
+	bootID, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	owner := os.Getenv("TASK_ID")
+	if owner == "" {
+		owner = os.Getenv("CELL_ID")
+	}
+	return "cube:" + owner + ":" + strings.TrimSpace(string(bootID))
 }
 
 // readProcIO reads read_bytes / write_bytes from /proc/<pid>/io.
@@ -236,6 +313,19 @@ func (c *resourceCollector) scanProcessTree() {
 	if rssSum > c.rssPeakKiB {
 		c.rssPeakKiB = rssSum
 	}
+	if used, ok := readGuestUsedMemory(); ok {
+		if len(c.environmentSamples) < 20000 {
+			c.environmentSamples = append(c.environmentSamples, environmentMemorySample{now, used})
+		} else {
+			c.environmentSamplesTruncated = true
+		}
+	}
+}
+
+func (c *resourceCollector) MarkExecutionStart(started time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.executionStarted = started
 }
 
 // descendantPids returns root and all its descendants by walking
@@ -302,6 +392,7 @@ func startResourceCollectorPrepared(pgid int, execID, traceDir string, intervalM
 	// a reference point for CPU/IO deltas even if they exit before the first
 	// ticker tick.  Single-threaded here, so no lock is needed.
 	c.scanProcessTree()
+	registerEnvironmentCall(execID)
 	go func() {
 		ticker := time.NewTicker(time.Duration(c.intervalMS) * time.Millisecond)
 		defer ticker.Stop()
@@ -459,6 +550,7 @@ func readCgroupCounters(path string) (cpuUserUs, cpuSysUs, memPeak, readBytes, w
 // process-tree values (cpu/mem/io), and the artifact is labelled cgroup-v2.
 func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 	close(c.done)
+	overlapped := finishEnvironmentCall(c.execID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -486,6 +578,62 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 		FallbackUsed:       true,
 		CgroupSetupError:   c.cgroupSetupError,
 		CollectorErrors:    []string{},
+	}
+	if !c.executionStarted.IsZero() {
+		stats.TsStart = float64(c.executionStarted.UnixNano()) / 1e9
+		stats.DurationMS = tsEnd.Sub(c.executionStarted).Milliseconds()
+	}
+	stats.MemoryMeasurement = "guest_memtotal_minus_memavailable"
+	stats.MemoryEnvironmentID = guestEnvironmentID()
+	if overlapped {
+		stats.MemoryUnavailableReason = "overlapping_environment_calls"
+	} else if c.environmentSamplesTruncated {
+		stats.MemoryUnavailableReason = "memory_timeline_truncated"
+	} else if c.executionStarted.IsZero() {
+		stats.MemoryUnavailableReason = "execution_window_unavailable"
+	} else {
+		var baseline *environmentMemorySample
+		var inside []environmentMemorySample
+		previous := c.executionStarted
+		gap := false
+		for i := range c.environmentSamples {
+			sample := &c.environmentSamples[i]
+			if !sample.at.After(c.executionStarted) {
+				baseline = sample
+			} else if !sample.at.After(tsEnd) {
+				if sample.at.Before(previous) || sample.at.Sub(previous) > 150*time.Millisecond {
+					gap = true
+				}
+				previous = sample.at
+				inside = append(inside, *sample)
+			}
+		}
+		if baseline == nil || c.executionStarted.Sub(baseline.at) > 150*time.Millisecond {
+			stats.MemoryUnavailableReason = "stale_memory_baseline"
+		} else if len(inside) == 0 {
+			stats.MemoryUnavailableReason = "no_in_execution_memory_sample"
+		} else if gap || tsEnd.Sub(inside[len(inside)-1].at) > 150*time.Millisecond {
+			stats.MemoryUnavailableReason = "memory_sampling_gap"
+		} else {
+			peak := inside[0].bytes
+			for _, sample := range inside[1:] {
+				if sample.bytes > peak {
+					peak = sample.bytes
+				}
+			}
+			stats.MemoryBaselineBytes = baseline.bytes
+			stats.MemoryTotalPeakBytes = peak
+			if peak > baseline.bytes {
+				stats.MemoryExtraPeakBytes = peak - baseline.bytes
+			}
+			stats.MemoryEligible = true
+			stats.MemoryTimeline = append(stats.MemoryTimeline,
+				[2]float64{float64(baseline.at.UnixNano()) / 1e9, float64(baseline.bytes)})
+			for _, sample := range inside {
+				stats.MemoryTimeline = append(stats.MemoryTimeline,
+					[2]float64{float64(sample.at.UnixNano()) / 1e9, float64(sample.bytes)})
+			}
+		}
 	}
 	if !c.firstSample.IsZero() && !c.lastSample.IsZero() {
 		stats.SamplingCoverageMS = c.lastSample.Sub(c.firstSample).Milliseconds()
@@ -545,7 +693,7 @@ func cleanupCgroup(path string) {
 // writeResourceArtifact persists the per-execution resource artifact in the
 // ClawTune cgroup_resource_v1 layout: <traceDir>/tool-resource/
 // cgroup-resource-<execution_id>.json.
-func writeResourceArtifact(execID string, stats resourceStats, traceDir string, started time.Time) {
+func writeResourceArtifact(execID string, stats resourceStats, traceDir string) {
 	artifact := map[string]any{
 		"schema":                    "cgroup_resource_v1",
 		"execution_id":              execID,
@@ -554,7 +702,7 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string, 
 		"source":                    stats.Source,
 		"monitor_source":            stats.MonitorSource,
 		"attribution_source":        stats.AttributionSource,
-		"ts_start":                  float64(started.UnixNano()) / 1e9,
+		"ts_start":                  stats.TsStart,
 		"ts_end":                    stats.TsEnd,
 		"duration_ms":               stats.DurationMS,
 		"cpu_time_s":                stats.CPUTimeSeconds,
@@ -573,6 +721,14 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string, 
 		"sampling_coverage_ms":      stats.SamplingCoverageMS,
 		"cpu_source":                stats.CPUSource,
 		"memory_source":             stats.MemorySource,
+		"memory_baseline_bytes":     stats.MemoryBaselineBytes,
+		"memory_total_peak_bytes":   stats.MemoryTotalPeakBytes,
+		"memory_extra_peak_bytes":   stats.MemoryExtraPeakBytes,
+		"memory_measurement":        stats.MemoryMeasurement,
+		"memory_environment_id":     stats.MemoryEnvironmentID,
+		"memory_eligible":           stats.MemoryEligible,
+		"memory_timeline":           stats.MemoryTimeline,
+		"memory_unavailable_reason": nilIfEmpty(stats.MemoryUnavailableReason),
 		"disk_source":               stats.DiskSource,
 		"network_source":            stats.NetworkSource,
 		"fallback_used":             stats.FallbackUsed,

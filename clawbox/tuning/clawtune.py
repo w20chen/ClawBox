@@ -81,9 +81,12 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         # Average cgroup CPU must never train the fixed-window peak target.
         cpu_peak_cores=None,
         cpu_peak_cores_eligible=False,
-        # A guest process RSS peak has no pre-call environment baseline and
-        # cannot train ClawTune's environment extra-memory target.
-        memory_eligible=False,
+        memory_baseline_bytes=observation.memory_baseline_bytes,
+        memory_total_peak_bytes=observation.memory_total_peak_bytes,
+        memory_extra_peak_bytes=observation.memory_extra_peak_bytes,
+        memory_measurement=observation.memory_measurement,
+        memory_environment_id=observation.memory_environment_id,
+        memory_eligible=observation.memory_eligible,
         pmu_ipc=pmu.derived["ipc"] if pmu_eligible else None,
         pmu_llc_mpki=pmu.derived["llc_mpki"] if pmu_eligible else None,
         pmu_llc_miss_rate=pmu.derived["llc_miss_rate"] if pmu_eligible else None,
@@ -111,22 +114,38 @@ def build_clawtune_kb_snapshot(
         tool_name=first.tool_name,
         command=first.command,
         ts_start=advance_ts,
+        memory_measurement="guest_memtotal_minus_memavailable",
     ))
     snapshot = kb.to_json_obj()
     RuntimeToolResourceKB.from_json_obj(snapshot)
     return snapshot
 
 
-def predict_native_call_load(runtime, query, *, clause=None, lattice=None):
-    """Use ClawTune's canonical call-load adapter and its evidence semantics."""
+def predict_native_call_load_models(runtime, query, *, clause=None, lattice=None):
+    """Return every native ClawTune load model without selecting across them."""
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
     from clawtune_sidecar.predictors.call_load import predict_call_load
     from clawtune_sidecar.prediction_config import load_bucket_edges
     from tool_resource.runtime_kb import ClauseResourceKB
     from tool_time.lattice_kb import LatticeTimeKB
-    return predict_call_load(
+    tool, diagnostics = predict_call_load(
         runtime=runtime, trie=clause if clause is not None else ClauseResourceKB(),
         lattice=lattice if lattice is not None else LatticeTimeKB(), query=query,
         edges=load_bucket_edges((100.0, 500.0, 2000.0, 10000.0)),
-    )[0]
+    )
+    return {
+        "tool": tool,
+        "trie": diagnostics.backends["trie"],
+        "lattice": diagnostics.backends["lattice"],
+        "diagnostics": diagnostics,
+    }
+
+
+def predict_native_call_load(runtime, query, *, clause=None, lattice=None):
+    """Select LatticeKB for ClawBox scheduling, without cross-model fallback."""
+    if lattice is None:
+        raise ValueError("ClawBox scheduling requires a LatticeKB snapshot")
+    return predict_native_call_load_models(
+        runtime, query, clause=clause, lattice=lattice,
+    )["lattice"]

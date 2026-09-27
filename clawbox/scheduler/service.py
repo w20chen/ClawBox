@@ -56,14 +56,16 @@ class Scheduler:
             db.add(row)
             db.flush()
             meta = db.get(KBMetadataRow, observation.tenant_id)
+            updated = False
             if trusted:
                 kb = TenantKnowledgeBase(meta.snapshot)
-                kb.observe(intent, observation)
-                meta.snapshot = kb.snapshot(); meta.generation += 1
+                updated = kb.observe(intent, observation)
+                if updated:
+                    meta.snapshot = kb.snapshot(); meta.generation += 1
                 execution.state = "COMPLETED"
             else:
                 execution.state = "FAILED"
-            return meta.generation, trusted
+            return meta.generation, updated
 
     def stored_intent(self, execution_id: str) -> ExecutionIntent:
         with SessionLocal() as db:

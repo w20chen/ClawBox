@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import shlex
-from datetime import datetime
+from pathlib import Path
 
 from clawbox.common.models import ExecutionIntent, Observation, ResourcePrediction
 
@@ -10,66 +11,69 @@ from clawbox.common.models import ExecutionIntent, Observation, ResourcePredicti
 def _load_clawtune():
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
-    from tool_resource.runtime_kb import CompletedCall, RuntimeToolResourceKB, ToolCallQuery
-    return CompletedCall, RuntimeToolResourceKB, ToolCallQuery
+    from tool_time.lattice_kb import LatticeTimeKB
+    from tool_resource.runtime_kb import ToolCallQuery
+    return LatticeTimeKB, ToolCallQuery
 
 
 class TenantKnowledgeBase:
-    """Thin tenant overlay around ClawTune's unchanged RuntimeToolResourceKB."""
+    """Tenant LatticeKB with explicitly reported static resource defaults."""
 
     def __init__(self, snapshot: str | None = None) -> None:
-        CompletedCall, RuntimeKB, ToolCallQuery = _load_clawtune()
-        self.CompletedCall = CompletedCall
+        LatticeKB, ToolCallQuery = _load_clawtune()
         self.ToolCallQuery = ToolCallQuery
         if snapshot:
-            self.kb = RuntimeKB.from_json_obj(json.loads(snapshot))
+            self.kb = LatticeKB.from_json_obj(json.loads(snapshot))
         else:
-            # Compatible public baseline. Tenant observations only enter the
-            # private repo layer and are never numerically blended into it.
-            baseline = [
-                CompletedCall("public", "exec", "true", 0, 1, cpu_peak_cores=4,
-                              cpu_peak_cores_eligible=True, cpu_peak_window_ms=500),
-                CompletedCall("public", "exec", "python -m pytest", 0, 30,
-                              cpu_peak_cores=4, cpu_peak_cores_eligible=True,
-                              cpu_peak_window_ms=500),
-            ]
-            self.kb = RuntimeKB.fit_public(baseline)
+            from clawbox.clawtune_integration import seed_directory
+            self.kb = LatticeKB.from_json_obj(json.loads(
+                (seed_directory() / "clause-lattice-time-kb.json").read_text(encoding="utf-8")
+            ))
 
     def predict(self, intent: ExecutionIntent, generation: int) -> ResourcePrediction:
-        values = self.kb.query(self.ToolCallQuery(
+        from clawbox.tuning.clawtune import predict_native_call_load
+        values = predict_native_call_load(None, self.ToolCallQuery(
             repo=intent.repo_fingerprint, tool_name=intent.tool_name,
             command=intent.command, ts_start=intent.timestamp.timestamp(),
-        ))
+            memory_measurement="guest_memtotal_minus_memavailable",
+        ), lattice=self.kb).targets
         cpu = values["cpu_peak_cores"]
         memory = values["memory_extra_peak_bytes"]
-        duration = values["latency_ms"]
-        cpu_p90 = max(0.1, float(cpu.conditional_p90 or 4))
-        memory_bytes = max(1, float(memory.conditional_p90 or 512 * 1024**2))
-        duration_p90 = max(0, float(duration.conditional_p90 or 1000) / 1000)
-        scopes = [item.scope for item in (cpu, memory, duration) if item.scope]
-        counts = [item.evidence_count for item in (cpu, memory, duration)]
+        duration = values["duration_ms"]
+        def available(item):
+            return item.status == "available" and item.p90 is not None and math.isfinite(item.p90) and item.p90 > 0
+        cpu_p90 = float(cpu.p90) if available(cpu) else 4.0
+        memory_bytes = float(memory.p90) if available(memory) else 512 * 1024**2
+        duration_p90 = float(duration.p90) / 1000 if available(duration) else 1.0
+        defaults = [name for name, item in (("cpu", cpu), ("memory", memory), ("duration", duration)) if not available(item)]
+        counts = [item.sample_count for item in (cpu, memory, duration)]
         return ResourcePrediction(
             execution_id=intent.execution_id, cpu_p90=cpu_p90,
-            memory_p90=int(memory_bytes), duration_p50=duration_p90 * 0.7,
+            memory_p90=int(memory_bytes), duration_p50=float(duration.p50) / 1000 if available(duration) else 0.7,
             duration_p90=duration_p90, time_bucket=self._bucket(duration_p90),
-            match_level=scopes[0] if scopes else "global_default",
+            match_level="lattice_with_static_defaults" if defaults else "lattice",
+            prediction_backend="lattice", defaulted_targets=defaults,
             sample_count=min(counts) if counts else 0,
             confidence=min(1.0, (min(counts) if counts else 0) / 10),
             kb_generation=generation,
         )
 
-    def observe(self, intent: ExecutionIntent, observation: Observation) -> None:
-        cpu = observation.cpu.get("peak_cores")
-        memory = observation.memory.get("peak_bytes")
-        self.kb.observe_completed_call(self.CompletedCall(
-            repo=intent.repo_fingerprint, tool_name=intent.tool_name, command=intent.command,
-            ts_start=observation.start_time.timestamp(), ts_end=observation.end_time.timestamp(),
-            censored=not observation.complete or observation.exit_code != 0,
-            cpu_peak_cores=float(cpu) if cpu is not None else None,
-            cpu_peak_cores_eligible=cpu is not None,
-            cpu_peak_window_ms=500 if cpu is not None else None,
-            memory_eligible=False,
-        ))
+    def observe(self, intent: ExecutionIntent, observation: Observation) -> bool:
+        from clawbox.tuning.native import _clawtune_api, native_clause_observations
+        artifact = observation.clause_telemetry
+        if not artifact:
+            return False
+        _clawtune_api()[5](Path("observation.clause_telemetry"), artifact,
+                          expected_repo=intent.repo_fingerprint)
+        calls = artifact.get("calls", [])
+        if (len(calls) != 1 or calls[0].get("tool_call_id") != intent.execution_id
+                or calls[0].get("command") != intent.command
+                or calls[0].get("eligible_for_kb") is not True):
+            raise ValueError("clause telemetry does not match execution")
+        rows = native_clause_observations(intent.repo_fingerprint, calls[0], observation.memory)
+        for row in rows:
+            self.kb.observe_completed_clause(row)
+        return bool(rows)
 
     def snapshot(self) -> str:
         return json.dumps(self.kb.to_json_obj(), sort_keys=True, separators=(",", ":"))

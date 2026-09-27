@@ -42,6 +42,10 @@ def prepare(root: Path, output: Path, *, working_tree: bool = False) -> str:
         revision = hashlib.sha1(
             f"{head_revision}:{digest.hexdigest()}".encode("ascii")
         ).hexdigest()
+        if not subprocess.check_output([
+            "git", "-C", str(root), "status", "--porcelain",
+        ], text=True).strip():
+            revision = head_revision
         (output / "CLAWTUNE_REVISION").write_text(revision + "\n", encoding="ascii")
         return revision
     # Fetch without switching branches or modifying the operator's working tree.

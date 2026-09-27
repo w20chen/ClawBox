@@ -63,7 +63,7 @@ func TestCollectorProcessTree(t *testing.T) {
 		t.Errorf("cgroup-v2 path should report a positive RSS peak, got %d", stats.RSSPeakBytes)
 	}
 	// Artifact must be written by writeResourceArtifact in the cgroup layout.
-	writeResourceArtifact("exec-tree-test", stats, dir, time.Now().Add(-time.Second))
+	writeResourceArtifact("exec-tree-test", stats, dir)
 	artifacts, err := filepath.Glob(filepath.Join(dir, "tool-resource", "cgroup-resource-*.json"))
 	if err != nil || len(artifacts) != 1 {
 		t.Fatalf("expected 1 artifact, got %v (err=%v)", artifacts, err)
@@ -90,6 +90,39 @@ func TestCollectorProcessTree(t *testing.T) {
 	}
 }
 
+func TestGuestEnvironmentMemoryLabelAndOverlapGate(t *testing.T) {
+	start := time.Now()
+	collector := &resourceCollector{
+		execID: "memory-one", done: make(chan struct{}), executionStarted: start,
+		environmentSamples: []environmentMemorySample{
+			{at: start.Add(-time.Millisecond), bytes: 100},
+			{at: start.Add(5 * time.Millisecond), bytes: 150},
+		},
+	}
+	registerEnvironmentCall(collector.execID)
+	stats := collector.Finish(start.Add(10 * time.Millisecond))
+	if !stats.MemoryEligible || stats.MemoryBaselineBytes != 100 ||
+		stats.MemoryTotalPeakBytes != 150 || stats.MemoryExtraPeakBytes != 50 {
+		t.Fatalf("unexpected environment memory label: %+v", stats)
+	}
+	if stats.MemoryMeasurement != "guest_memtotal_minus_memavailable" {
+		t.Fatalf("unexpected memory measurement: %q", stats.MemoryMeasurement)
+	}
+
+	first := &resourceCollector{execID: "overlap-a", done: make(chan struct{}), executionStarted: start}
+	second := &resourceCollector{execID: "overlap-b", done: make(chan struct{}), executionStarted: start}
+	registerEnvironmentCall(first.execID)
+	registerEnvironmentCall(second.execID)
+	if got := first.Finish(start.Add(time.Millisecond)); got.MemoryEligible ||
+		got.MemoryUnavailableReason != "overlapping_environment_calls" {
+		t.Fatalf("first overlapping call was not rejected: %+v", got)
+	}
+	if got := second.Finish(start.Add(time.Millisecond)); got.MemoryEligible ||
+		got.MemoryUnavailableReason != "overlapping_environment_calls" {
+		t.Fatalf("second overlapping call was not rejected: %+v", got)
+	}
+}
+
 // TestReadCgroupCountersMissing verifies readCgroupCounters fails closed (ok
 // = false) when the per-exec cgroup does not exist, so the collector falls
 // back to process-tree instead of emitting garbage.
@@ -97,6 +130,33 @@ func TestReadCgroupCountersMissing(t *testing.T) {
 	_, _, _, _, _, _, ok := readCgroupCounters("/sys/fs/cgroup/clawbox/definitely-not-here")
 	if ok {
 		t.Fatal("expected ok=false for missing cgroup")
+	}
+}
+
+func TestGuestMemoryRejectsGapInsideExecution(t *testing.T) {
+	start := time.Now()
+	collector := &resourceCollector{
+		execID: "memory-gap", done: make(chan struct{}), executionStarted: start,
+		environmentSamples: []environmentMemorySample{
+			{at: start.Add(-time.Millisecond), bytes: 100},
+			{at: start.Add(5 * time.Millisecond), bytes: 150},
+			{at: start.Add(time.Second), bytes: 120},
+		},
+	}
+	registerEnvironmentCall(collector.execID)
+	stats := collector.Finish(start.Add(time.Second + time.Millisecond))
+	if stats.MemoryEligible || stats.MemoryUnavailableReason != "memory_sampling_gap" {
+		t.Fatalf("gap inside execution must exclude the label: %+v", stats)
+	}
+}
+
+func TestGuestMemoryRejectsTruncatedTimeline(t *testing.T) {
+	collector := &resourceCollector{execID: "memory-truncated", done: make(chan struct{}),
+		executionStarted: time.Now(), environmentSamplesTruncated: true}
+	registerEnvironmentCall(collector.execID)
+	stats := collector.Finish(time.Now())
+	if stats.MemoryEligible || stats.MemoryUnavailableReason != "memory_timeline_truncated" {
+		t.Fatalf("truncated memory timeline must be unavailable: %+v", stats)
 	}
 }
 

@@ -29,6 +29,10 @@ def _write_source(source):
         "def shell_command_heads(): pass\ndef shell_command_prefix_tokens(): pass\n",
         encoding="utf-8",
     )
+    (timing / "lattice_kb.py").write_text(
+        "class LatticeTimeKB: pass\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.parametrize("adapter", ["clawtune", "native", "scheduler", "scheduler_then_tuning"])

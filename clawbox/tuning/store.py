@@ -22,6 +22,7 @@ compact encoding shared with the managed tables.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -37,6 +38,8 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -171,7 +174,7 @@ class TuningNativeArtifactRow(TuningBase):
 
 
 class TuningNativeSnapshotRow(TuningBase):
-    """Atomic pair of native ClawTune snapshots for one generation."""
+    """Atomic set of native ClawTune snapshots for one generation."""
 
     __tablename__ = "tuning_native_kb_snapshots"
 
@@ -181,6 +184,7 @@ class TuningNativeSnapshotRow(TuningBase):
     generation: Mapped[int] = mapped_column(Integer)
     clause_snapshot: Mapped[str] = mapped_column(Text)
     runtime_snapshot: Mapped[str] = mapped_column(Text)
+    lattice_snapshot: Mapped[str] = mapped_column(Text)
     pair_digest: Mapped[str] = mapped_column(String(64))
     source_digest: Mapped[str] = mapped_column(String(64))
     artifact_count: Mapped[int] = mapped_column(Integer)
@@ -240,8 +244,42 @@ def tuning_session_factory(url: str | None = None):
 
 
 def init_tuning_db(engine) -> None:
-    """Create the tuning tables (dev/research path; production uses Alembic)."""
+    """Create tuning tables and upgrade the native three-KB snapshot set."""
     TuningBase.metadata.create_all(bind=engine)
+    table = TuningNativeSnapshotRow.__tablename__
+    columns = {column["name"] for column in inspect(engine).get_columns(table)}
+    added = "lattice_snapshot" not in columns
+    with engine.begin() as connection:
+        if added:
+            connection.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN lattice_snapshot TEXT"
+            ))
+        stale = connection.execute(text(
+            f"SELECT id, clause_snapshot, runtime_snapshot FROM {table} "
+            "WHERE lattice_snapshot IS NULL OR lattice_snapshot = '{}'"
+        )).mappings().all()
+        if not stale:
+            if added and engine.dialect.name != "sqlite":
+                connection.execute(text(
+                    f"ALTER TABLE {table} ALTER COLUMN lattice_snapshot SET NOT NULL"
+                ))
+            return
+        from clawbox.clawtune_integration import seed_directory
+        lattice = json_dumps(json.loads(
+            (seed_directory() / "clause-lattice-time-kb.json").read_text(encoding="utf-8")
+        ))
+        for row in stale:
+            digest = hashlib.sha256(
+                (row["clause_snapshot"] + "\n" + row["runtime_snapshot"] + "\n" + lattice).encode()
+            ).hexdigest()
+            connection.execute(text(
+                f"UPDATE {table} SET lattice_snapshot = :lattice, pair_digest = :digest "
+                "WHERE id = :id"
+            ), {"lattice": lattice, "digest": digest, "id": row["id"]})
+        if engine.dialect.name != "sqlite":
+            connection.execute(text(
+                f"ALTER TABLE {table} ALTER COLUMN lattice_snapshot SET NOT NULL"
+            ))
 
 
 # ── payload (de)serialization ──────────────────────────────────────────

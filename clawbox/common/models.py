@@ -30,6 +30,8 @@ class ExecutionIntent(StrictModel):
 
 
 class ResourcePrediction(StrictModel):
+    prediction_backend: str | None = None
+    defaulted_targets: list[str] = Field(default_factory=list)
     execution_id: str
     cpu_p90: float = Field(gt=0)
     memory_p90: int = Field(gt=0)
@@ -127,6 +129,7 @@ class ExecuteRequest(StrictModel):
 
 
 class Observation(StrictModel):
+    clause_telemetry: dict[str, Any] | None = None
     tenant_id: str
     execution_id: str
     observation_type: str = "tool-execution"

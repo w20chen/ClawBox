@@ -122,6 +122,23 @@ class ClawTuneTraceWriter:
             error_type="timeout" if result.exit_code == 124 else None, error_digest=None,
             raw_result={"exit_code": result.exit_code, "stdout": result.stdout, "stderr": result.stderr})
         c = cgroup or {}
+        measured_start = c.get("ts_start")
+        measured_end = c.get("ts_end")
+        if (isinstance(measured_start, (int, float))
+                and isinstance(measured_end, (int, float))
+                and measured_end >= measured_start):
+            start, end = float(measured_start), float(measured_end)
+            duration_ms = max(0, round((end - start) * 1000))
+        environment_memory = {
+            key: c[key]
+            for key in (
+                "memory_baseline_bytes", "memory_total_peak_bytes",
+                "memory_extra_peak_bytes", "memory_measurement",
+                "memory_environment_id", "memory_eligible",
+                "memory_unavailable_reason",
+            )
+            if key in c
+        } or None
         # Only guest measurements populate resource fields; RPC time is latency.
         sample = ToolRuntimeSample(
             event_id=execution_id, tool_call_id=execution_id, tool_name=tool_name, operation=None,
@@ -139,6 +156,7 @@ class ClawTuneTraceWriter:
             process_count_before=None, process_count_after=None,
             attribution_status="cgroup-v2" if cgroup else "unattributed",
             monitor_source="cgroup-v2" if cgroup else "cube_rpc", pmu_profile=pmu,
+            environment_memory=environment_memory,
         )
         self._native.record_tool_started(before)
         tool_prediction = prediction

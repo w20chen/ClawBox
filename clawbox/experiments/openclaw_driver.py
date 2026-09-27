@@ -348,7 +348,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     if not kb_source.is_dir():
         raise RuntimeError(f"ClawTune KB source does not exist: {kb_source}")
     clawtune_root = sidecar_src.parents[2]
-    seed_source = clawtune_root / "seeds" / "bootstrap-v1"
+    from clawbox.clawtune_integration import seed_directory
+    seed_source = seed_directory()
     contracts_source = clawtune_root / "contracts"
     if not seed_source.is_dir() or not contracts_source.is_dir():
         raise RuntimeError("ClawTune bootstrap seed/contracts are unavailable")
@@ -444,6 +445,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
+        + "CLAWTUNE_TOOL_RESOURCE_MEMORY_MEASUREMENT=guest_memtotal_minus_memavailable "
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
         + "CLAWTUNE_TRACE_MAX_MESSAGES_BYTES=67108864 "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
@@ -500,6 +502,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "plugins": {"entries": {"clawtune": {"enabled": True, "config": {
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
+            "sandboxExecPredictionModel": "lattice",
             # OpenClaw resolves the configured sandbox backend after the
             # before_tool_call hook, so hook params without an explicit host
             # are reported as "gateway" even though execution is SSH-backed.

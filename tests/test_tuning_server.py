@@ -85,18 +85,30 @@ def test_native_api_publishes_atomic_pair_and_replays_idempotently(client):
     assert response.status_code == 200
     snapshot = response.json()
     assert snapshot["generation"] == 1
-    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v6"
-    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v3"
+    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v7"
+    assert snapshot["runtime_snapshot"]["schema"] == "runtime_tool_resource_kb_v4"
+    assert snapshot["lattice_snapshot"]["schema"] == "clause_lattice_kb_v4"
 
     prediction = client.get(
         "/v1/kb/admission-prediction",
-        params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo", "generation": 1},
+        params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo", "generation": 1,
+                "command": "python -m pytest -q"},
         headers=auth_headers(),
     )
-    assert prediction.status_code == 409, prediction.text
+    assert prediction.status_code == 200, prediction.text
+    prediction_body = prediction.json()
+    assert all(prediction_body["call_prediction"]["targets"][target]["backend"] == "lattice"
+               for target in ("duration_ms", "cpu_avg_cores", "memory_extra_peak_bytes"))
+    assert prediction_body["call_prediction"]["memory_measurement"] == (
+        "guest_memtotal_minus_memavailable"
+    )
+    assert set(prediction_body["model_predictions"]) == {
+        "tool", "trie", "lattice", "diagnostics",
+    }
     missing = client.get(
         "/v1/kb/admission-prediction",
-        params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo", "generation": 2},
+        params={"tenant_id": "tenant-a", "repo": "github.com/acme/foo", "generation": 2,
+                "command": "python -m pytest -q"},
         headers=auth_headers(),
     )
     assert missing.status_code == 404
@@ -168,7 +180,7 @@ def test_post_observations_then_read_snapshot(client):
     )
     assert claw.status_code == 200
     claw_data = claw.json()["snapshot"]
-    assert claw_data["schema"] == "runtime_tool_resource_kb_v3"
+    assert claw_data["schema"] == "runtime_tool_resource_kb_v4"
 
 
 def test_post_rejects_bad_signature(client):

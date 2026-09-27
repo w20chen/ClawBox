@@ -16,7 +16,7 @@ from clawbox.cell.p90 import AdmissionPrediction
 from clawbox.replay.trace import load_trace
 from clawbox.tuning.__main__ import find_run_datasets
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts
-from clawbox.tuning.native import _clawtune_api
+from clawbox.tuning.native import _clawtune_api, native_clause_observations
 from clawbox.tuning.clawtune import predict_native_call_load
 
 
@@ -76,7 +76,8 @@ def _host_increment_calibration(paths: list[Path]) -> dict[str, Any]:
 def _evidence_paths(
     trace_dir: Path, bridge: Path, resource_dir: Path | None = None,
 ) -> list[Path]:
-    paths = {bridge, *trace_dir.glob("*.jsonl"), *trace_dir.glob("cgroup-resource-*.json")}
+    paths = {bridge, *trace_dir.glob("*.jsonl"), *trace_dir.glob("cgroup-resource-*.json"),
+             *trace_dir.glob("clause-telemetry-*.json")}
     tool_resource = trace_dir / "tool-resource"
     if tool_resource.is_dir():
         paths.update(tool_resource.glob("*.json"))
@@ -152,8 +153,9 @@ def _per_tool_memory_plan(
                 tool_name=call["tool_name"] or "exec",
                 command=call["command"],
                 ts_start=query_ts + query_index * 1e-6,
+                memory_measurement="guest_memtotal_minus_memavailable",
             )
-            prediction = predict_native_call_load(kb, query).targets[
+            prediction = predict_native_call_load(None, query, lattice=kb).targets[
                 "memory_extra_peak_bytes"
             ]
             query_index += 1
@@ -317,6 +319,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("runs", nargs="+", type=Path)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--command", required=True, help="concrete command for the exported LatticeKB P90")
     parser.add_argument("--tenant", default="offline-research")
     parser.add_argument("--generation", type=int, default=1)
     parser.add_argument("--training-set-id", default="training")
@@ -353,6 +356,8 @@ def main() -> None:
         help="held-out measured run for prediction-error/oracle analysis only",
     )
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--seed-output", type=Path,
+                        help="new native seed directory with this trained LatticeKB for Runtime startup")
     args = parser.parse_args()
     if any(value is not None for value in (
         args.held_out_run, args.held_out_trace, args.held_out_workload,
@@ -374,8 +379,9 @@ def main() -> None:
         if not sidecar_src.is_dir():
             parser.error(f"ClawTune sidecar source is missing: {sidecar_src}")
         os.environ["CLAWTUNE_SIDECAR_SRC"] = str(sidecar_src)
-    _, CompletedCall, RuntimeToolResourceKB, ToolCallQuery, _, _ = _clawtune_api()
+    _, CompletedCall, RuntimeToolResourceKB, ToolCallQuery, _, validate_artifact, LatticeTimeKB = _clawtune_api()
     calls = []
+    clauses = []
     source = hashlib.sha256()
     run_reports: list[dict[str, Any]] = []
     expected_observed_repo = args.observed_repo_fingerprint or args.repository
@@ -396,6 +402,17 @@ def main() -> None:
             joined, trusted = build_joined_dataset(
                 trace_dir, bridge, resource_dir=resource_dir,
             )
+            native_calls = {}
+            for artifact_path in _evidence_paths(trace_dir, bridge, resource_dir):
+                if artifact_path.suffix != ".json":
+                    continue
+                artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+                if not isinstance(artifact, dict) or artifact.get("version") != 2 or artifact.get("mode") != "clause":
+                    continue
+                validate_artifact(artifact_path, artifact, expected_repo=args.observed_repo_fingerprint or args.repository)
+                for call in artifact.get("calls", []):
+                    if call.get("eligible_for_kb") is True:
+                        native_calls[call["tool_call_id"]] = call
             observed_repos = sorted({
                 item.repo_fingerprint for item in trusted if item.repo_fingerprint
             })
@@ -407,9 +424,19 @@ def main() -> None:
             eligible_count = 0
             for item in trusted:
                 if (item.start_time is None or item.end_time is None
-                        or item.cpu_time_sec is None
-                        or item.rss_peak_bytes is None):
+                        or item.cpu_time_sec is None):
                     continue
+                native_call = native_calls.get(item.execution_id)
+                if native_call is None or item.cgroup is None:
+                    continue
+                if native_call.get("command") != item.command:
+                    raise ValueError("native clause command does not match the joined execution")
+                observations = native_clause_observations(
+                    args.repository, native_call, item.cgroup.model_dump(mode="json"),
+                )
+                if not observations:
+                    continue
+                clauses.extend(observations)
                 eligible_count += 1
                 calls.append(CompletedCall(
                     repo=args.repository, tool_name=item.tool_name or "exec",
@@ -418,10 +445,12 @@ def main() -> None:
                     censored=item.exit_code not in (None, 0),
                     cpu_time_seconds=item.cpu_time_sec,
                     cpu_time_eligible=True,
-                    # Legacy run artifacts expose guest RSS only.  RSS has no
-                    # environment baseline and is intentionally ineligible
-                    # for ClawTune's environment extra-memory target.
-                    memory_eligible=False,
+                    memory_baseline_bytes=item.memory_baseline_bytes,
+                    memory_total_peak_bytes=item.memory_total_peak_bytes,
+                    memory_extra_peak_bytes=item.memory_extra_peak_bytes,
+                    memory_measurement=item.memory_measurement,
+                    memory_environment_id=item.memory_environment_id,
+                    memory_eligible=item.memory_eligible,
                 ))
             cgroup_files = list(resource_dir.glob("cgroup-resource-*.json"))
             cgroup_loaded = read_cgroup_artifacts(resource_dir)
@@ -443,18 +472,17 @@ def main() -> None:
             })
     if len(calls) < 5:
         raise ValueError(f"only {len(calls)} trusted completed calls; need at least 5")
-    kb = RuntimeToolResourceKB.fit_public(calls)
-    for call in calls:
-        kb.observe_completed_call(call)
+    kb = LatticeTimeKB.fit(clauses)
     runtime = kb.to_json_obj()
     query = ToolCallQuery(
-        repo=args.repository, tool_name="exec", command=None,
+        repo=args.repository, tool_name="exec", command=args.command,
         # Query immediately after the newest training completion.  Using wall
         # clock time makes an otherwise frozen artifact needlessly dependent
         # on when the export command happens to run.
         ts_start=max(call.ts_end for call in calls) + 1e-6,
+        memory_measurement="guest_memtotal_minus_memavailable",
     )
-    call_load = predict_native_call_load(kb, query)
+    call_load = predict_native_call_load(None, query, lattice=kb)
     latency = call_load.targets["duration_ms"]
     cpu = call_load.targets["cpu_avg_cores"]
     memory = call_load.targets["memory_extra_peak_bytes"]
@@ -518,6 +546,8 @@ def main() -> None:
         "source_digest": source_digest, "artifact_count": len(calls),
         "clawtune_revision": revision,
         "call_prediction": call_load.model_dump(mode="json"),
+        "command": args.command,
+        "lattice_snapshot": runtime,
         "prediction": {
             "cpu_metric": "cpu_avg_cores",
             "memory_metric": "environment_memory_peak_minus_baseline",
@@ -573,6 +603,18 @@ def main() -> None:
                 payload["per_tool_memory"], oracle_runs,
             )
     prediction = AdmissionPrediction.from_payload(payload)
+    if args.seed_output is not None:
+        from clawbox.clawtune_integration import seed_directory
+        from clawtune_kb import create_seed, validate_seed
+        base = seed_directory()
+        manifest = validate_seed(base)
+        snapshots = {name: json.loads((base / name).read_text(encoding="utf-8"))
+                     for name in manifest["snapshots"]}
+        snapshots["clause-lattice-time-kb.json"] = runtime
+        create_seed(args.seed_output, snapshots, provenance={
+            "source": "clawbox_native_clause_training", "source_digest": source_digest,
+            "clawtune_revision": revision,
+        })
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(args.output.name + ".next")
     payload.update(prediction.as_payload())

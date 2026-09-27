@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import threading
+import json
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy import select
 
 from clawbox.tuning.kb import KnowledgeBase
@@ -24,6 +26,31 @@ from clawbox.tuning.store import (
     make_tuning_engine,
     row_to_observation,
 )
+
+
+def test_init_upgrades_legacy_native_pair_to_three_kb_set(tmp_path):
+    engine = make_tuning_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    clause = '{"schema":"runtime_clause_resource_kb_v6"}'
+    runtime = '{"schema":"runtime_tool_resource_kb_v3"}'
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE tuning_native_kb_snapshots ("
+            "id INTEGER PRIMARY KEY, clause_snapshot TEXT NOT NULL, "
+            "runtime_snapshot TEXT NOT NULL, pair_digest TEXT NOT NULL)"
+        )
+        connection.execute(text(
+            "INSERT INTO tuning_native_kb_snapshots "
+            "(id, clause_snapshot, runtime_snapshot, pair_digest) "
+            "VALUES (1, :clause, :runtime, 'old')"
+        ), {"clause": clause, "runtime": runtime})
+    init_tuning_db(engine)
+    with engine.connect() as connection:
+        row = connection.execute(text(
+            "SELECT lattice_snapshot, pair_digest FROM tuning_native_kb_snapshots WHERE id = 1"
+        )).mappings().one()
+    assert json.loads(row["lattice_snapshot"])["schema"] == "clause_lattice_kb_v4"
+    assert row["pair_digest"] != "old"
+    engine.dispose()
 from clawbox.tuning.validate import sign_observation
 
 SECRET = "test-ingest-secret"
@@ -270,7 +297,7 @@ def test_clawtune_snapshot_loadable_shape(db):
     import json
 
     clawtune = json.loads(row.clawtune_snapshot)
-    assert clawtune["schema"] == "runtime_tool_resource_kb_v3"
+    assert clawtune["schema"] == "runtime_tool_resource_kb_v4"
     assert clawtune["quantile"] == 0.9
     assert {"latency_ms", "cpu_peak_cores", "memory_total_peak_bytes",
             "memory_extra_peak_bytes"}.issubset(clawtune["public"])

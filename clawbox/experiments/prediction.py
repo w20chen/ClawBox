@@ -23,8 +23,15 @@ def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
     if (prediction.get("schema_version") != "call_load.v2"
             or prediction.get("scope") != "tool_call"):
         raise PredictionUnavailable("ClawTune call prediction has an incompatible schema")
+    measurement = prediction.get("memory_measurement")
+    if measurement != "guest_memtotal_minus_memavailable":
+        raise PredictionUnavailable(
+            "ClawTune memory prediction does not use the Cube guest environment measurement"
+        )
     targets = prediction.get("targets")
     target = targets.get("memory_extra_peak_bytes") if isinstance(targets, dict) else None
+    if isinstance(target, dict) and target.get("backend") != "lattice":
+        raise PredictionUnavailable("ClawBox scheduling requires a LatticeKB memory prediction")
     if (not isinstance(target, dict) or target.get("status") != "available"
             or target.get("unit") != "bytes"
             or target.get("metric_definition") != "environment_memory_peak_minus_baseline"):
@@ -34,7 +41,7 @@ def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
             or not math.isfinite(value) or value < 0:
         raise PredictionUnavailable("ClawTune extra memory peak has no valid estimate")
     return {
-        "prediction_source": "clawtune_call_load_v2",
+        "prediction_source": "clawtune_lattice_call_load_v2",
         "admission_prediction_target": "environment_memory_peak_minus_baseline",
         # Preserve the canonical prediction for the ClawTune trace writer;
         # the derived fields below are the admission-facing projection.
@@ -44,6 +51,7 @@ def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
         "clawtune_memory_backend": target.get("backend"),
         "clawtune_memory_method": target.get("method"),
         "clawtune_memory_sample_count": target.get("sample_count"),
+        "clawtune_memory_measurement": measurement,
     }
 
 

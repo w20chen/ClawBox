@@ -157,6 +157,29 @@ def test_cgroup_artifact_parser_valid():
     assert resource.fallback_used is False
 
 
+@pytest.mark.parametrize("eligible", [True, False])
+def test_guest_memory_join_reaches_native_training_without_stale_span_labels(eligible):
+    from clawbox.tuning.clawtune import observation_to_completed_call
+
+    span = span_end("exec-1")
+    span["resources"].update(memory_eligible=True, memory_baseline_bytes=1,
+                             memory_total_peak_bytes=999, memory_extra_peak_bytes=998,
+                             memory_measurement="cgroup_v2_memory_current",
+                             memory_environment_id="stale")
+    labels = dict(memory_eligible=True, memory_baseline_bytes=100,
+                  memory_total_peak_bytes=140, memory_extra_peak_bytes=40,
+                  memory_measurement="guest_memtotal_minus_memavailable",
+                  memory_environment_id="cube:boot-1") if eligible else {}
+    resource = cgroup_artifact_to_resource(cgroup_artifact("exec-1", **labels))
+    observation = join_trace_and_bridge(
+        [span], [bridge_record("exec-1")], {"exec-1": resource},
+    ).joined[0]
+    call = observation_to_completed_call(observation, "repo")
+    assert call.memory_eligible is eligible
+    assert call.memory_extra_peak_bytes == (40 if eligible else None)
+    assert call.memory_measurement == ("guest_memtotal_minus_memavailable" if eligible else None)
+
+
 def test_bridge_record_accepts_current_clawtune_telemetry_metadata() -> None:
     from clawbox.tuning.schema import BridgeRecord
 

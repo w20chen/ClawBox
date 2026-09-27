@@ -52,6 +52,7 @@ def main() -> int:
         tool_name="exec",
         command=args.command,
         ts_start=ts_start,
+        memory_measurement="guest_memtotal_minus_memavailable",
     ))
     payload = _tool_resource_prediction_payload(
         clause_prediction,

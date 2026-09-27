@@ -122,6 +122,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert clawtune["trace"]["redact_sensitive_data"] is False
     assert clawtune["trace"]["max_messages_bytes"] == 67108864
     assert clawtune["sandboxExecEnvelope"] is True
+    assert clawtune["sandboxExecPredictionModel"] == "lattice"
     assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
     assert clawtune["instrumentHosts"] == ["sandbox", "gateway"]
     assert "clawbox-cube-tool" not in json.dumps(config)

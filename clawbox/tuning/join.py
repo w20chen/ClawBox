@@ -125,6 +125,12 @@ def join_trace_and_bridge(
             merged.cgroup = cgroup_artifacts.get(span.execution_id)
             if merged.cgroup is not None:
                 resource = merged.cgroup
+                for name in (
+                    "memory_baseline_bytes", "memory_total_peak_bytes",
+                    "memory_extra_peak_bytes", "memory_measurement",
+                    "memory_environment_id", "memory_eligible",
+                ):
+                    setattr(merged, name, getattr(resource, name))
                 if resource.cpu_time_s is not None:
                     merged.cpu_time_sec = resource.cpu_time_s
                 if resource.cpu_utilization_avg_cores is not None:

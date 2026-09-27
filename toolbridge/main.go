@@ -355,6 +355,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	var pmuProfile map[string]any
 	gateRead, gateWrite, pipeErr := os.Pipe()
 	var err error
+	var executionEnded time.Time
 	var readyRead, readyWrite *os.File
 	if pipeErr != nil {
 		err = pipeErr
@@ -442,6 +443,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				record.TelemetryArtifact = response.ArtifactPath
 			}
 		}
+		collector.MarkExecutionStart(time.Now())
 		if _, releaseErr := gateWrite.Write([]byte{'\n'}); releaseErr != nil {
 			err = releaseErr
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -473,6 +475,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		if record.Cancelled {
 			record.ExitCode = 130
 		}
+		executionEnded = time.Now()
 		// Read counting FDs immediately at the authoritative process exit. This
 		// is independent of the eBPF drain below; its local RPC is bounded and
 		// failure never changes the tool result.
@@ -522,7 +525,10 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			_ = gateWrite.Close()
 		}
 	}
-	ended := time.Now()
+	ended := executionEnded
+	if ended.IsZero() {
+		ended = time.Now()
+	}
 	record.DurationMS = durationMS(ended.Sub(started))
 	record.StdoutBytes = stdout.total
 	record.StderrBytes = stderr.total
@@ -535,11 +541,10 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	if collector != nil {
 		stats := collector.Finish(ended)
 		stats.PMUProfile = pmuProfile
-		stats.DurationMS = record.DurationMS
 		record.UserCPUMS = int64(stats.CPUUserSeconds * 1000)
 		record.SystemCPUMS = int64(stats.CPUSystemSeconds * 1000)
 		record.MaxRSSKiB = stats.RSSPeakBytes / 1024
-		writeResourceArtifact(executionID, stats, resourceTraceDir(), started)
+		writeResourceArtifact(executionID, stats, resourceTraceDir())
 	} else if cmd.ProcessState != nil {
 		record.UserCPUMS = durationMS(cmd.ProcessState.UserTime())
 		record.SystemCPUMS = durationMS(cmd.ProcessState.SystemTime())

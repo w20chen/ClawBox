@@ -26,6 +26,10 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
             "cgroup_path": "/sys/fs/cgroup/clawbox/call-123", "sampling_quality": "valid",
             "cpu_utilization_avg_cores": 0.4,
             "memory_rss_peak_bytes": 4096, "memory_rss_after_bytes": 2048,
+            "memory_baseline_bytes": 8192, "memory_total_peak_bytes": 12288,
+            "memory_extra_peak_bytes": 4096,
+            "memory_measurement": "guest_memtotal_minus_memavailable",
+            "memory_environment_id": "cube:task:boot", "memory_eligible": True,
         })},
     )
 
@@ -44,6 +48,9 @@ def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
     assert trusted[0].rss_peak_bytes == 4096
     assert trusted[0].cgroup is not None
     assert trusted[0].cgroup.source == "cgroup-v2"
+    assert trusted[0].memory_extra_peak_bytes == 4096
+    assert trusted[0].memory_measurement == "guest_memtotal_minus_memavailable"
+    assert trusted[0].memory_eligible is True
     assert execution_id == "call-123"
 
     bridge = json.loads((tmp_path / "tool-bridge.jsonl").read_text().strip())
