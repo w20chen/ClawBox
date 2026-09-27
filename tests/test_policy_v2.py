@@ -117,10 +117,23 @@ def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
                                     operation_headroom_mib=1, startup_headroom_mib=2,
                                     physical_sample=lambda: (2 * 1024**2, 100 * 1024**2))
+    coordinator.register("running", Lifecycle())
+    coordinator.register_runtime("running", Lifecycle())
     with pytest.raises(AdmissionTimeout):
         coordinator.materialize("new-pair", 6, lambda: pytest.fail("must not start"), 0)
     coordinator.acquire("running", 6, 0)
     coordinator.release("running", 6)
+
+
+def test_first_pair_does_not_reserve_headroom_for_a_nonexistent_agent() -> None:
+    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=7, emergency_free_mib=0,
+                                    operation_headroom_mib=1, startup_headroom_mib=2,
+                                    physical_sample=lambda: (0, 100 * 1024**2))
+    created = []
+    coordinator.materialize("first-pair", 6, lambda: created.append(True) or 0.01, 0)
+    assert created == [True]
 
 
 def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
@@ -359,7 +372,7 @@ def test_time_oracle_wait_plan_uses_actual_replay_duration_at_break_even() -> No
 
 def test_tiered_time_oracle_uses_exact_two_and_twenty_second_boundaries() -> None:
     policy = PolicySpec(
-        name="tiered-time", admission="tool_p90", reclamation="snapshot_pause",
+        name="tiered-time", admission="tool_p50", reclamation="snapshot_pause",
         eviction="tiered_time_oracle", restore="reactive",
     )
     coordinator = PolicyCoordinator(
@@ -375,7 +388,7 @@ def test_tiered_time_oracle_uses_exact_two_and_twenty_second_boundaries() -> Non
 
 def test_tiered_lru_prefers_remaining_wait_of_at_least_two_seconds() -> None:
     policy = PolicySpec(
-        name="tiered-lru", admission="tool_p90", reclamation="snapshot_pause",
+        name="tiered-lru", admission="tool_p50", reclamation="snapshot_pause",
         eviction="tiered_lru_oracle", restore="reactive",
     )
     coordinator = PolicyCoordinator(

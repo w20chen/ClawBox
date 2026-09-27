@@ -374,6 +374,41 @@ def _validate_clause(payload: dict[str, Any], execution_id: str) -> None:
                 )
 
 
+def _validate_non_kb_clause(payload: dict[str, Any], execution_id: str) -> None:
+    """Validate identity/integrity for filesystem calls that never train a KB."""
+    if payload.get("version") != 2:
+        raise ValueError(f"{execution_id}: unsupported clause telemetry version")
+    if (payload.get("provenance") or {}).get("collector") != "ebpf_ebpf":
+        raise ValueError(f"{execution_id}: clause telemetry is not from eBPF")
+    if payload.get("cleanup") != "ok":
+        raise ValueError(f"{execution_id}: clause collector cleanup is not ok")
+    loss = payload.get("telemetry_loss_total")
+    if not isinstance(loss, dict) or loss.get("total") != 0:
+        raise ValueError(f"{execution_id}: clause telemetry reports event loss")
+    calls = payload.get("calls")
+    if not isinstance(calls, list) or len(calls) != 1:
+        raise ValueError(f"{execution_id}: clause telemetry call count is not exactly one")
+    call = calls[0]
+    if not isinstance(call, dict) or call.get("tool_call_id") != execution_id:
+        raise ValueError(f"{execution_id}: clause telemetry identity mismatch")
+    validity = payload.get("collection_validity")
+    if validity == "valid":
+        if call.get("eligible_for_kb") is not True:
+            raise ValueError(f"{execution_id}: valid non-KB clause telemetry has inconsistent eligibility")
+        return
+    reasons = call.get("invalid_reasons")
+    no_exec_tree = (
+        validity == "invalid"
+        and call.get("eligible_for_kb") is False
+        and isinstance(reasons, list) and len(reasons) == 1
+        and reasons[0].get("kind") == "analysis_failure"
+        and "reason=no_exec_images" in str(reasons[0].get("detail") or "")
+        and (payload.get("collector") or {}).get("health") == "healthy"
+    )
+    if not no_exec_tree:
+        raise ValueError(f"{execution_id}: non-KB clause telemetry has an unexpected invalid state")
+
+
 def _is_preflight_rejection(span: dict[str, Any]) -> bool:
     details = ((span.get("output") or {}).get("result") or {}).get("details")
     execution = span.get("execution") or {}
@@ -502,7 +537,20 @@ def validate_native_tool_join(
         if bridge.get("telemetry_state") != "complete":
             raise ValueError(f"{execution_id}: Tool telemetry is not complete")
         _validate_cgroup(cgroup_artifacts.get(execution_id, {}), execution_id)
-        _validate_clause(clause_artifacts.get(execution_id, {}), execution_id)
+        clause = clause_artifacts.get(execution_id, {})
+        # Structured OpenClaw file operations execute a bridge helper rather
+        # than an Agent shell command. They use a fixed reservation and never
+        # train either KB, so an empty command tree is expected for some fast
+        # calls. Preserve all identity/loss/cleanup checks without requiring a
+        # model-eligible clause tree. Shell exec calls remain fail-closed.
+        filesystem_non_kb = (
+            request.get("operation") == "filesystem"
+            and request.get("runtime_trace_expected") is False
+        )
+        if filesystem_non_kb:
+            _validate_non_kb_clause(clause, execution_id)
+        else:
+            _validate_clause(clause, execution_id)
 
     return {
         "valid": True,
@@ -534,6 +582,11 @@ def validate_native_tool_join(
         "exact_id_join_rate": 1.0,
         "duplicate_tool_execution_count": 0,
         "telemetry_loss_total": 0,
+        "non_kb_filesystem_execution_ids": sorted(
+            execution_id for execution_id, request in expected.items()
+            if request.get("operation") == "filesystem"
+            and request.get("runtime_trace_expected") is False
+        ),
         "wrong_session_routing": 0,
     }
 

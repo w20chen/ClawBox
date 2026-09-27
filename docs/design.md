@@ -51,9 +51,16 @@ Reservations determine whether work may start; they do not resize guest RAM.
 Lifetime capacity claims and incremental command reservations are distinct:
 already-resident memory must not be counted again as an incremental allocation.
 All compared policies use the configured emergency free-memory guard.
+While a Runtime/Tool pair is created, its configured VM capacities are reserved
+until physical sampling reflects the new residents. The create gate also leaves
+room for one call under that arm's admission policy: full capacity for
+`tool_full`, the configured fixed amount for `tool_static`, and the larger of
+the frozen artifact maximum or the filesystem fixed amount for frozen predicted
+admission. It must not silently apply full-capacity headroom to a calibrated
+static or frozen predicted arm.
 
 ClawTune measures memory above the environment's pre-call baseline and predicts
-its peak for each Tool call. ClawBox reserves the selected p90 extra-memory
+its peak for each Tool call. ClawBox reserves the selected P50 extra-memory
 estimate, rounded up to MiB. Host physical memory measures density and
 reclamation; the estimate does not guarantee every command fits.
 Record static fallbacks for file operations separately from command predictions.

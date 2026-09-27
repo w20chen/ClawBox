@@ -97,34 +97,35 @@ clawbox experiment describe comparison.yaml
 ```
 
 This creates a two-by-two policy comparison at each selected concurrency. The
-predicted policy uses ClawTune LatticeKB's per-call extra memory peak estimate
-with the `guest_memtotal_minus_memavailable` measurement. An unavailable estimate
-rejects the Tool call; ToolKB and EdgeKappa are not scheduling fallbacks.
+predicted policy uses the P50 of guest `memory_extra_peak_bytes`. ClawBox selects
+LatticeKB first, then ToolKB. Selection is in ClawBox; ClawTune model outputs
+remain unchanged. Both must use `guest_memtotal_minus_memavailable`.
 
-Train from prior recordings containing paired `clause-telemetry-*.json` and
-`cgroup-resource-*.json` artifacts, then select the resulting initialization
-bundle before starting a new experiment:
+Collect a complete task in CubeSandbox with fixed admission, then freeze predictions
+from that separate training run:
 
 ```bash
-python scripts/train-p90-from-runs.py /data/prior-run \
-  --repository owner/repo --command 'python -m pytest -q' \
-  --output /data/lattice-p90.json --seed-output /data/lattice-seed
-export CLAWTUNE_COLD_START_DIR=/data/lattice-seed
+bash scripts/lab run task.yaml --baseline tool-static-resident --run-id collect
+bash scripts/lab train ~/clawbox-results/collect --trace /data/replay.jsonl \
+  --repository owner/repo --output /data/p50.json
+bash scripts/lab run task.yaml --predictions /data/p50.json \
+  --baseline tool-static-resident --baseline tool-p50-resident --concurrency 1 4
 ```
 
-The seed output directory must be new. Runtime copies this bundle into its own
-working state. Existing runs retain their state. Training needs qualified native
-clause CPU/time measurements and an eligible guest memory timeline covering each
-clause; old RSS-only or call-summary records cannot supply missing labels.
-The `--command` selects the command represented by the exported P90; it does not
-execute it. The seed supports subsequent command-specific LatticeKB queries.
+Use a task image containing the repository and dependencies and configure
+`validation.command` to check the final result. Replay completion alone does not
+prove the recorded repair succeeded. The training output records both model
+outputs, the selected source, source hashes and per-call memory evidence. Keep
+training and evaluation runs separate; a repeated case measures repeatability,
+not generalization to unseen tasks.
 
-`GET /v1/kb/admission-prediction`, `clawbox-p90-export`, and
-`scripts/export-p90-from-native-snapshot.py` also require a concrete `command`
-query parameter or `--command` argument. They return unavailable when the
-selected command lacks compatible evidence. The separate legacy tenant
-scheduler retains its static defaults (4 cores, 512 MiB, 1 second) for missing
-targets and reports them in `defaulted_targets`; they are not model predictions.
+`resources.prediction_artifact` also selects the frozen file in an experiment
+YAML. Without a file, P50 admission uses only the Runtime's available LatticeKB
+prediction. Use a trained file for ToolKB fallback and reproducible comparisons.
+Missing estimates are ignored only for exact commands whose successful training
+calls all lasted at most 20 ms and lacked an in-execution memory sample. These
+are explicitly labelled `short_call_assumption` and receive the runner's minimum
+1 MiB reservation; they are not measured zeroes. Other missing estimates fail.
 
 Without dimension filters or `--baseline`, `configure` retains the base file's
 policies. If both are given, dimensions filter the explicitly named baselines.
@@ -134,7 +135,7 @@ Existing output files require `--force` to replace.
 | --- | --- |
 | Fixed command reservation | `resources.static_tool_memory_mib`; CLI `--static-tool-memory-mib` |
 | Full command reservation | `resources.full_tool_memory_mib`; normally the Tool VM's configured RAM |
-| Predicted reservation | ClawTune `call_load.v2` `memory_extra_peak_bytes` p90, rounded up to MiB |
+| Predicted reservation | ClawTune `call_load.v2` `memory_extra_peak_bytes` P50, rounded up to MiB |
 | Measured reservation | `resources.oracle_measurements`; replay only |
 | Idle timeout | `fixed_delay_seconds`; CLI `--fixed-delay-seconds` |
 | Pressure-triggered reclamation | Model-wait estimate and source in `inference.configuration` |

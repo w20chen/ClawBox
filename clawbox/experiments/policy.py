@@ -217,6 +217,15 @@ class PolicyCoordinator:
             reasons.append("emergency_free_memory")
         return tuple(reasons)
 
+    def _startup_headroom_needed(self, session_id: str) -> bool:
+        """A first VM pair cannot starve work because no older pair can run."""
+        for other_id, state in self._sessions.items():
+            if other_id == session_id or not state.lifecycle.resident:
+                continue
+            if state.runtime_lifecycle is None or state.runtime_lifecycle.resident:
+                return True
+        return False
+
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
                 capacity_claim: bool = False) -> float:
@@ -249,7 +258,8 @@ class PolicyCoordinator:
                     at_head = head is ticket
                     safety_reasons = self._pressure_reasons(
                         amount + (self.startup_headroom_bytes
-                                  if wait_class == "create" else 0),
+                                  if wait_class == "create"
+                                  and self._startup_headroom_needed(session_id) else 0),
                         capacity_claim=capacity_claim,
                     ) if at_head else ()
                     if at_head and not safety_reasons:

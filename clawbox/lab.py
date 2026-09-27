@@ -246,6 +246,10 @@ def prepare_spec(args, profile: dict):
         raw[role].update(profile[role])
     resources = raw.setdefault("resources", {})
     resources.update(target_node=profile["node"], full_tool_memory_mib=profile["sandbox"]["memory_mib"])
+    if getattr(args, "predictions", None):
+        resources["prediction_artifact"] = str(args.predictions.resolve())
+    if getattr(args, "static_tool_memory_mib", None) is not None:
+        resources["static_tool_memory_mib"] = args.static_tool_memory_mib
     if args.pool_gib:
         resources["pool_memory_budget_mib"] = args.pool_gib * 1024
     resources.update(snapshot_storage="warm-only" if args.storage == "memory" else "tiered",
@@ -353,6 +357,10 @@ def main(argv=None) -> int:
     setup_parser.add_argument("--warm-node", type=int, default=1)
     sub.add_parser("doctor", help="Check services, disk, KVM and templates")
     sub.add_parser("baselines", help="List supported policies and their dimensions")
+    importer = sub.add_parser("import-trace", help="Import a SWE-rebench research schema-5 trace for current OpenClaw")
+    importer.add_argument("source", type=Path)
+    importer.add_argument("--output", required=True, type=Path)
+    importer.add_argument("--python", default="python3", help="Guest Python executable used for directory listing")
     repair = sub.add_parser("repair-warm", help="Patch, test and rebuild Cubelet's interrupted WARM allocation handling on an idle host")
     repair.add_argument("--source", default=os.getenv("CUBE_SOURCE_DIR"))
     repair.add_argument("--go", default=os.getenv("CLAWBOX_GO", "go"))
@@ -378,16 +386,35 @@ def main(argv=None) -> int:
     runner.add_argument("--storage", choices=["memory", "disk"], default="memory",
                         help="memory forbids all COLD fallbacks; disk explicitly permits configured tiered storage")
     runner.add_argument("--pool-gib", type=int)
+    runner.add_argument(
+        "--static-tool-memory-mib", type=int,
+        help="Fixed per-call reservation for static-admission baselines",
+    )
     runner.add_argument("--run-id")
+    runner.add_argument("--predictions", type=Path, help="Frozen P50 predictions from lab train")
+    trainer = sub.add_parser("train", help="Fit LatticeKB and ToolKB from prior Cube runs")
+    trainer.add_argument("runs", nargs="+", type=Path)
+    trainer.add_argument("--trace", required=True, type=Path)
+    trainer.add_argument("--repository", required=True)
+    trainer.add_argument("--output", required=True, type=Path)
     for action in ("status", "cleanup"):
         sub.add_parser(action).add_argument("directory", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.action == "import-trace":
+            from .replay.import_trace import import_trace
+            print(json.dumps(import_trace(args.source, args.output, python=args.python), indent=2))
+            return 0
         if args.action == "baselines":
             from .cli import main as cli
             result = cli(["experiment", "baselines"])
-            print("Predicted admission requires available LatticeKB memory_extra_peak_bytes; missing evidence fails without fallback.")
+            print("Predicted admission uses P50: LatticeKB, then ToolKB; lab train records measured short-call exceptions.")
             return result
+        if args.action == "train":
+            from .experiments.training import train_p50
+            report = train_p50(args.runs, args.trace, args.repository, args.output)
+            print(json.dumps(report, indent=2))
+            return 2 if report["unavailable"] else 0
         if args.action == "setup":
             setup(args)
             return 0

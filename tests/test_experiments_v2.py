@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -104,7 +105,7 @@ def raw_spec() -> dict:
         "policies": [
             {"name": "resident", "admission": "lifetime_full", "reclamation": "resident",
              "eviction": "none", "restore": "none"},
-            {"name": "proposed", "admission": "tool_p90", "reclamation": "snapshot_pause",
+            {"name": "proposed", "admission": "tool_p50", "reclamation": "snapshot_pause",
              "eviction": "wait_aware_pressure", "restore": "proactive",
              "prefetch_lead_seconds": 0.5},
         ],
@@ -127,7 +128,7 @@ def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
                             local_memory_capacity_mib=65536,
                             warm_snapshot_root="/warm", cold_snapshot_root="/cold",
                             local_numa_node=0, warm_numa_node=1)
-    raw["policies"].append({"name": "tiered", "admission": "tool_p90",
+    raw["policies"].append({"name": "tiered", "admission": "tool_p50",
                             "reclamation": "snapshot_pause", "restore": "reactive",
                             "eviction": "tiered_time_oracle"})
     arms = expand_matrix(ExperimentSpec.model_validate(raw))
@@ -397,6 +398,28 @@ def test_worker_bounds_pair_creation_for_high_concurrency(monkeypatch: pytest.Mo
     monkeypatch.setenv("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "0")
     with pytest.raises(ValueError, match="positive integer"):
         ExperimentWorker._sandbox_create_limit(40)
+
+
+def test_vm_startup_headroom_matches_the_arm_admission_policy() -> None:
+    raw = raw_spec()
+    raw["workload"]["repetitions"] = 1
+    raw["execution"]["concurrency_levels"] = [1]
+    raw["resources"].update(
+        static_tool_memory_mib=512,
+        full_tool_memory_mib=4096,
+        prediction_artifact="p50.json",
+    )
+    raw["policies"] = [{
+        "name": "static", "admission": "tool_static", "reclamation": "resident",
+        "eviction": "none", "restore": "none",
+    }]
+    static_arm, = expand_matrix(ExperimentSpec.model_validate(raw))
+    assert ExperimentWorker._startup_headroom_mib(static_arm, None) == 512
+
+    raw["policies"][0].update(name="p50", admission="tool_p50")
+    p50_arm, = expand_matrix(ExperimentSpec.model_validate(raw))
+    provider = SimpleNamespace(max_incremental_memory_mib=201.3)
+    assert ExperimentWorker._startup_headroom_mib(p50_arm, provider) == 512
 
 
 def test_v2_rejects_backend_transport_and_invalid_policy() -> None:

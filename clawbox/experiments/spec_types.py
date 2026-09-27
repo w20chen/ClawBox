@@ -30,7 +30,7 @@ class AdmissionPolicy(StrEnum):
     LIFETIME_FULL = "lifetime_full"
     TOOL_FULL = "tool_full"
     TOOL_STATIC = "tool_static"
-    TOOL_P90 = "tool_p90"
+    TOOL_P50 = "tool_p50"
     TOOL_ORACLE = "tool_oracle"
 
 

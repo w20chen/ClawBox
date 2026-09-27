@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
-from .prediction import CommandPredictionProvider
+from .prediction import CommandPredictionProvider, P50PredictionProvider
 from clawbox.replay.trace import load_trace
 
 
@@ -16,6 +16,15 @@ def inspect_trace(path: Path) -> dict:
     ids = [action.action_id for action in actions]
     if len(ids) != len(set(ids)):
         raise ValueError(f"{path}: action IDs must be unique")
+    tool_names = set()
+    for action in actions:
+        if action.kind != "llm" or not isinstance(action.output, dict):
+            continue
+        message = action.output
+        if isinstance(message.get("content"), dict):
+            message = message["content"]
+        for call in message.get("tool_calls", []):
+            tool_names.add(str((call.get("function") or {}).get("name", "")))
     return {
         "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "actions": len(actions),
@@ -24,6 +33,7 @@ def inspect_trace(path: Path) -> dict:
         "model_wait_seconds": sum(action.duration_s for action in actions if action.kind == "llm"),
         "model_requests_present": all(action.input is not None for action in actions if action.kind == "llm"),
         "model_responses_present": all(action.output is not None for action in actions if action.kind == "llm"),
+        "response_tool_names": sorted(tool_names),
     }
 
 
@@ -45,6 +55,10 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             path = Path(case.replay_trace_reference or case.source_reference)
             info = inspect_trace(path)
             if spec.agent.driver is AgentDriver.OPENCLAW:
+                from .openclaw_driver import TOOL_VM_TOOLS, RUNTIME_LOCAL_TOOLS
+                unsupported = set(info["response_tool_names"]) - set((*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS))
+                if unsupported:
+                    raise ValueError(f"{case.case_id}: replay tools unavailable in OpenClaw: {sorted(unsupported)}; adapt the trace tool interface before running")
                 if (not info["model_calls"] or not info["model_requests_present"]
                         or not info["model_responses_present"]):
                     raise ValueError(f"{case.case_id}: managed replay requires recorded model requests and responses")
@@ -63,4 +77,19 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             if not provider.manifest:
                 raise ValueError(f"{path}: managed prediction data contains no command records")
             files.append(str(path))
+    if AdmissionPolicy.TOOL_P50 in admissions and spec.resources.prediction_artifact:
+        path = Path(spec.resources.prediction_artifact)
+        for case in cases:
+            provider = P50PredictionProvider(path, repository=case.repository or case.case_id,
+                sandbox_identity={k: getattr(spec.sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")})
+            if not provider.manifest:
+                raise ValueError("P50 artifact contains no commands")
+            if spec.inference.backend is InferenceBackend.REPLAY:
+                from .training import trace_commands
+                from .prediction import command_sha256
+                missing = [c for c in trace_commands(Path(case.replay_trace_reference or case.source_reference))
+                           if command_sha256(c) not in provider.manifest]
+                if missing:
+                    raise ValueError(f"P50 artifact missing {len(missing)} replay commands")
+        files.append(str(path))
     return {"traces": traces, "prediction_files": files}

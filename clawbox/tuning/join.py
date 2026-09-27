@@ -55,12 +55,13 @@ def _bridge_to_observation(bridge: BridgeRecord) -> ToolObservation:
         complete=True,
         exit_code=bridge.exit_code,
         duration_sec=bridge.duration_ms / 1000.0,
-        collection_quality="valid" if not bridge.timed_out else "degraded",
-        status_code="timeout" if bridge.timed_out else ("ok" if bridge.exit_code == 0 else "error"),
+        collection_quality="valid" if not (bridge.timed_out or bridge.cancelled) else "degraded",
+        status_code="cancelled" if bridge.cancelled else (
+            "timeout" if bridge.timed_out else ("ok" if bridge.exit_code == 0 else "error")),
         stdout_bytes=bridge.stdout_bytes,
         stderr_bytes=bridge.stderr_bytes,
         output_truncated=bridge.output_truncated,
-        trusted=not bridge.timed_out and bridge.exit_code == 0,
+        trusted=not (bridge.timed_out or bridge.cancelled) and bridge.exit_code == 0,
     )
 
 
@@ -113,8 +114,8 @@ def join_trace_and_bridge(
             merged.stderr_bytes = bridge.stderr_bytes
         merged.output_truncated = bridge.output_truncated or merged.output_truncated
         merged.complete = True
-        if bridge.timed_out:
-            merged.status_code = "timeout"
+        if bridge.timed_out or bridge.cancelled:
+            merged.status_code = "cancelled" if bridge.cancelled else "timeout"
         if bridge.exit_code != 0 and merged.status_code == "ok":
             merged.status_code = "error"
         # Attach the independent cgroup v2/procfs resource artifact when the
@@ -156,6 +157,8 @@ def join_trace_and_bridge(
                         merged.ipc = resource.pmu.derived.get("ipc")
                         merged.llc_mpki = resource.pmu.derived.get("llc_mpki")
                         merged.llc_miss_rate = resource.pmu.derived.get("llc_miss_rate")
+        if bridge.timed_out or bridge.cancelled:
+            merged.collection_quality = CollectionQuality.DEGRADED
         merged.trusted = merged.collection_quality == "valid" and merged.complete and merged.exit_code == 0
         joined.append(merged)
         used_bridge_ids.add(bridge.execution_id)

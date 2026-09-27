@@ -74,8 +74,17 @@ def test_validation_override_replaces_case_command(tmp_path):
 
 
 def test_clawtune_admission_requires_no_prediction_file():
-    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p90-resident'])
+    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p50-resident'])
     assert validate_inputs(spec)['prediction_files'] == []
+
+
+def test_replay_rejects_unavailable_tools_before_execution(tmp_path):
+    trace = tmp_path / 'unsupported.jsonl'
+    trace.write_text(Path('examples/traces/smoke.jsonl').read_text().replace(
+        '"name":"exec"', '"name":"edit_file"'), encoding='utf-8')
+    spec = configure_experiment(EXAMPLE, trace=str(trace))
+    with pytest.raises(ValueError, match='replay tools unavailable.*edit_file'):
+        validate_inputs(spec)
 
 
 def test_status_reads_finished_arms_before_summary(tmp_path, capsys):
@@ -107,7 +116,7 @@ def test_malformed_yaml_has_a_cli_error_not_a_traceback(tmp_path, capsys):
 def test_dimension_filters_select_only_catalog_combinations():
     from clawbox.experiments.preset_view import select_presets
     assert set(select_presets(estimate=['fixed', 'predicted'], idle=['resident', 'immediate'])) == {
-        'tool-static-resident', 'tool-p90-resident', 'tool-static-eager-reactive', 'tool-p90-eager-reactive'}
-    assert select_presets(['tool-static-resident', 'tool-p90-resident'], estimate=['fixed']) == ['tool-static-resident']
+        'tool-static-resident', 'tool-p50-resident', 'tool-static-eager-reactive', 'tool-p50-eager-reactive'}
+    assert select_presets(['tool-static-resident', 'tool-p50-resident'], estimate=['fixed']) == ['tool-static-resident']
     with pytest.raises(ValueError, match='No implemented preset'):
         select_presets(reserve_during=['session'], estimate=['predicted'])

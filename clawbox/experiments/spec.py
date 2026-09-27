@@ -66,6 +66,7 @@ class SandboxSpec(StrictFrozenModel):
     vcpu: int = Field(default=2, ge=1)
     memory_mib: int = Field(default=4096, ge=128)
     workspace: str = Field(default="/workspace", pattern=r"^/")
+    preflight_command: str | None = Field(default=None, min_length=1)
     allow_internet_access: bool = True
 
     @model_validator(mode="after")
@@ -121,6 +122,7 @@ class ResourcesSpec(StrictFrozenModel):
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
     full_tool_memory_mib: int | None = Field(default=None, ge=1)
+    prediction_artifact: str | None = None
     oracle_measurements: str | None = None
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)

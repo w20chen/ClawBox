@@ -31,6 +31,50 @@ VM 大小和节点，将验证后的配置保存到 `~/.config/clawbox/lab.json`
 任务 YAML 指定任务提示词、原始 trace、模型名和最终验证命令。
 任务镜像必须含有对应项目及初始版本。脚本默认回放已有模型响应，不调用付费模型 API；
 工具命令仍真实执行。不要把 schema 示例 trace 当作真实任务录制。
+回放工具名须匹配当前 OpenClaw 接口。对 SWE-rebench research schema-5 录制，先导入：
+
+```bash
+bash scripts/lab import-trace original.trace.jsonl --output replay.jsonl \
+  --python /opt/conda/envs/testbed/bin/python
+```
+
+原文件不变，输出 schema-6 replay 和 `replay.import.json`，后者记录来源摘要、
+原环境说明及逐调用转换。任务 YAML 的 trace 路径指向新文件。
+支持 `edit_file` → `edit`、仅带 path 的 `read_file` → `read`、`write_file` → `write`，
+以及 `exec.working_dir` → `workdir`。`replace_all=true` 等尚未支持的参数直接报错。
+`list_dir` 转成 Tool VM 内的 Python 目录枚举，支持排序、递归和总条目上限，
+不递归跟随目录符号链接；文本格式不保证与历史版本完全相同。其他未知工具直接拒绝。
+导入不更改原 shell 命令或编辑文本，也不会自动安装依赖。
+
+为任务镜像固定源码初始提交和测试依赖，并配置运行前检查，例如：
+
+```yaml
+sandbox:
+  template_id: tpl-task
+  workspace: /testbed
+  preflight_command: >-
+    test -d /testbed/.git &&
+    /opt/conda/envs/testbed/bin/python -c 'import pytest, sqlglot'
+validation:
+  command: cd /testbed && /opt/conda/envs/testbed/bin/python -m pytest -q
+```
+
+检查在新建 Tool VM 中、Agent 启动前执行，失败即终止并清理本 run 的 VM；
+结果保存在 events 的 `task_environment_checked` 记录中。检查命令用于验证，
+依赖安装应在构建镜像时完成。`python3` 等入口需要能启动任务虚拟环境，
+不要只把虚拟环境解释器软链接到其他目录。跨架构或依赖版本差异可能改变行为；
+回放不会重新规划，最终任务验证和遥测验证仍须通过，才能用于训练及比较。
+
+如果已构建并推送了带 ClawBox Tool 集成的新任务镜像，可以注册独立任务配置：
+
+```bash
+.venv/bin/python scripts/register-task-image.py \
+  --image REGISTRY/task@sha256:DIGEST --alias task-unique-name --output task-profile.json
+bash scripts/lab --profile task-profile.json run task.yaml --baseline tool-static-resident
+```
+
+它复用默认配置的节点、guest 内核和 VM 大小，并保留原有 lab 配置。
+新镜像需要包含任务初始代码和测试依赖；普通项目 Docker 镜像不能直接作为 Tool 模板。
 
 ```bash
 # 常驻 VM；两组实验分别运行 1 个和 4 个 Agent，每个 Agent 使用两台 VM。
@@ -41,7 +85,7 @@ bash scripts/lab run task.yaml --concurrency 1 4 \
   --reserve-during command --estimate fixed --idle resident --idle immediate
 
 # 已有覆盖任务命令的 LatticeKB 额外内存峰值数据时，使用预测准入和 WARM。
-bash scripts/lab run task.yaml --baseline tool-p90-eager-reactive --concurrency 2
+bash scripts/lab run task.yaml --baseline tool-p50-eager-reactive --concurrency 2
 
 # 只回放前 3 次模型响应，用于短验证；不代表完整任务完成。
 bash scripts/lab run task.yaml --max-model-steps 3 --concurrency 1
@@ -51,12 +95,36 @@ bash scripts/lab run task.yaml --max-model-steps 3 --concurrency 1
 维度参数与 `clawbox experiment configure` 相同：`--reserve-during`、
 `--estimate`、`--idle`、`--resume`。省略选择时使用 `tool-full-resident`。
 `--model NAME` 可补充录制模型名；`--trace FILE` 仅允许替换单任务 YAML 的录制路径，
-不会替换提示词或任务镜像。固定内存值、等待预测等参数仍由任务 YAML 配置。
+不会替换提示词或任务镜像。其他固定值仍由任务 YAML 配置；静态准入的固定预留量
+可由 `--static-tool-memory-mib` 在运行时覆盖。
 
-`tool-p90-*` 要求 LatticeKB 的 `memory_extra_peak_bytes` 预测可用，且测量口径为
-guest 的 `MemTotal - MemAvailable` 峰值减基线。只有耗时或采样 RSS 的 KB 不满足该条件。
-缺失时实验明确失败，不将缺失值视为零，也不改用其他模型；可先选择 `tool-static-*`
-或 `tool-full-resident` 验证环境，再准备独立训练数据的 KB 后运行预测组。
+`tool-p50-*` 使用 guest 额外内存峰值的 P50 预测。先用固定准入采集完整任务，
+再从通过最终验证的 CubeSandbox 训练 run 生成冻结预测文件：
+
+```bash
+bash scripts/lab train ~/clawbox-results/TRAIN_RUN --trace /data/replay.jsonl \
+  --repository owner/repo --output /data/p50.json
+bash scripts/lab run task.yaml --predictions /data/p50.json \
+  --baseline tool-static-resident --baseline tool-p50-resident --concurrency 1 4
+```
+
+静态准入的每次调用预留量可以在命令行覆盖，无需修改任务 YAML：
+
+```bash
+bash scripts/lab run task.yaml --baseline tool-static-resident \
+  --static-tool-memory-mib 512 --concurrency 4 --pool-gib 8
+```
+
+实验应记录该数值的来源。使用独立训练 run 中实测最大额外内存向上取整，
+比把每次调用都按 Tool VM 的完整配置容量计费更适合作为校准后的静态对照。
+
+ClawBox 优先使用 LatticeKB，不可用时回退 ToolKB；两者均须使用 guest
+`MemTotal - MemAvailable` 峰值减去调用前基线的测量口径。若两者均不可用，
+只有成功训练样本全部不超过 20 ms、且因执行太短而没有执行中采样的相同命令，
+才按轻量命令处理，最小预留 1 MiB。结果单独标记该假设，不将其当作实测零值。
+其他缺失预测会报错。任务 YAML 必须设置最终 `validation.command`，
+训练和评估使用独立 run，并保持 Tool 镜像与 VM 配置一致。
+不传 `--predictions` 时仅使用 Runtime 提供的 LatticeKB P50。
 
 默认 `--storage memory` 禁止 COLD checkpoint 和 WARM→COLD 溢出。
 WARM 必须为 tmpfs，且主机禁用 swap。容量不足会等待或失败，不会写磁盘大 RAM 快照。

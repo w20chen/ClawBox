@@ -16,7 +16,7 @@ def test_clawtune_extra_peak_reserves_only_peak_above_baseline() -> None:
         "targets": {"memory_extra_peak_bytes": {
             "status": "available", "unit": "bytes",
             "metric_definition": "environment_memory_peak_minus_baseline",
-            "p90": 10 * 1024 * 1024 + 1, "backend": "lattice",
+            "p50": 10 * 1024 * 1024 + 1, "p90": 100 * 1024 * 1024, "backend": "lattice",
             "method": "direct", "sample_count": 3,
         }},
     }
@@ -43,12 +43,12 @@ def test_clawtune_memory_measurement_must_match_cube_guest() -> None:
         })
 
 
-def test_toolkb_prediction_cannot_enter_lattice_admission():
+def test_unknown_backend_cannot_enter_admission():
     with pytest.raises(PredictionUnavailable, match="LatticeKB"):
         clawtune_extra_peak({
             "schema_version": "call_load.v2", "scope": "tool_call",
             "memory_measurement": "guest_memtotal_minus_memavailable",
-            "targets": {"memory_extra_peak_bytes": {"backend": "runtime", "p90": 100}},
+            "targets": {"memory_extra_peak_bytes": {"backend": "edge_kappa", "p50": 100}},
         })
 
 

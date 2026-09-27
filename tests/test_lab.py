@@ -34,6 +34,11 @@ def test_memory_baseline_preserves_warm_capacity_through_expansion():
     assert arm.resources.snapshot_storage == "warm-only"
 
 
+def test_run_can_override_static_tool_reservation():
+    spec = prepare_spec(args(static_tool_memory_mib=512), profile())
+    assert spec.resources.static_tool_memory_mib == 512
+
+
 def test_cold_dependent_policy_rejected_without_explicit_disk_permission():
     from clawbox.experiments.baselines import BASELINES
     name = next(n for n,p in BASELINES.items() if p.eviction_policy.value == "tiered_time_oracle")

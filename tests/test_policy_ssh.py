@@ -505,3 +505,27 @@ def test_policy_does_not_complete_while_ssh_child_is_active(
     assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
     completion = posted[-1][1]
     assert completion["ssh_reaped_at"] <= completion["execution_completed_at"]
+
+def test_frozen_p50_manifest_overrides_runtime_envelope(monkeypatch):
+    for key, value in {'CLAWBOX_REAL_SSH': '/fake/ssh', 'CLAWBOX_POLICY_CONTROL_URL': 'http://policy.test',
+        'CLAWBOX_POLICY_CONTROL_AUTH': 'token', 'CLAWBOX_POLICY_SESSION_ID': 'session-a',
+        'CLAWBOX_TOOL_SANDBOX_ID': 'tool-a', 'CLAWBOX_SSH_HOST_KEY_ALIAS': 'clawbox-tool-tool-a'}.items():
+        monkeypatch.setenv(key, value)
+    frozen = {'prediction_source': 'frozen_clawbox_p50', 'raw_command_sha256': 'identity'}
+    monkeypatch.setattr(policy_ssh, '_prediction', lambda _: frozen)
+    posted = []
+    def post(path, body, **kwargs):
+        posted.append(body)
+        return {'decision': 'ADMIT', 'sandbox_id': 'tool-a', 'epoch': 1,
+                'container_port': 2222, 'host': '192.0.2.20', 'port': 20020}
+    monkeypatch.setattr(policy_ssh, '_post', post)
+    class Child:
+        def wait(self): return 0
+    monkeypatch.setattr(policy_ssh.subprocess, 'Popen', lambda *a, **k: Child())
+    header = {'v': 1, 'execution_id': 'exec-a', 'tool_name': 'exec',
+              'call_prediction': {'schema_version': 'call_load.v2', 'targets': {}}}
+    argv = _argv()
+    argv[-1] = policy_ssh.PREFIX + 'b64:' + base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=') + '\nprintf /run/identity'
+    monkeypatch.setattr(sys, 'argv', ['clawbox-policy-ssh.py', *argv])
+    assert policy_ssh.main() == 0
+    assert posted[0]['prediction'] == frozen

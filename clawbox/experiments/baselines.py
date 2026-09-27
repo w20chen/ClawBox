@@ -93,8 +93,8 @@ BASELINES = MappingProxyType({
     "tool-static-resident": _resident(
         "tool-static-resident", AdmissionPolicy.TOOL_STATIC,
     ),
-    "tool-p90-resident": _resident(
-        "tool-p90-resident", AdmissionPolicy.TOOL_P90,
+    "tool-p50-resident": _resident(
+        "tool-p50-resident", AdmissionPolicy.TOOL_P50,
     ),
     "tool-oracle-resident": _resident(
         "tool-oracle-resident", AdmissionPolicy.TOOL_ORACLE,
@@ -103,20 +103,20 @@ BASELINES = MappingProxyType({
         "tool-static-eager-reactive", AdmissionPolicy.TOOL_STATIC,
         EvictionPolicy.EAGER,
     ),
-    "tool-p90-eager-reactive": _snapshot(
-        "tool-p90-eager-reactive", AdmissionPolicy.TOOL_P90,
+    "tool-p50-eager-reactive": _snapshot(
+        "tool-p50-eager-reactive", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.EAGER,
     ),
-    "tool-p90-fixed-reactive": _snapshot(
-        "tool-p90-fixed-reactive", AdmissionPolicy.TOOL_P90,
+    "tool-p50-fixed-reactive": _snapshot(
+        "tool-p50-fixed-reactive", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.FIXED_DELAY, fixed_delay_seconds=0.5,
     ),
-    "tool-p90-wait-reactive": _snapshot(
-        "tool-p90-wait-reactive", AdmissionPolicy.TOOL_P90,
+    "tool-p50-wait-reactive": _snapshot(
+        "tool-p50-wait-reactive", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.WAIT_AWARE_PRESSURE,
     ),
-    "tool-p90-wait-proactive": _snapshot(
-        "tool-p90-wait-proactive", AdmissionPolicy.TOOL_P90,
+    "tool-p50-wait-proactive": _snapshot(
+        "tool-p50-wait-proactive", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.WAIT_AWARE_PRESSURE, restore=RestorePolicy.PROACTIVE,
         prefetch_lead_seconds=0.5,
     ),
@@ -124,12 +124,12 @@ BASELINES = MappingProxyType({
         "tool-static-time-oracle-reactive", AdmissionPolicy.TOOL_STATIC,
         EvictionPolicy.TIME_ORACLE, checkpoint_break_even_seconds=4.0,
     ),
-    "tool-p90-tiered-lru-oracle-reactive": _snapshot(
-        "tool-p90-tiered-lru-oracle-reactive", AdmissionPolicy.TOOL_P90,
+    "tool-p50-tiered-lru-oracle-reactive": _snapshot(
+        "tool-p50-tiered-lru-oracle-reactive", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.TIERED_LRU_ORACLE,
     ),
-    "tool-p90-tiered-time-oracle-reactive": _snapshot(
-        "tool-p90-tiered-time-oracle-reactive", AdmissionPolicy.TOOL_P90,
+    "tool-p50-tiered-time-oracle-reactive": _snapshot(
+        "tool-p50-tiered-time-oracle-reactive", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.TIERED_TIME_ORACLE,
     ),
 
@@ -151,14 +151,14 @@ BASELINES = MappingProxyType({
         "p90-static", AdmissionPolicy.TOOL_STATIC, status="compatibility-alias",
     ),
     "p90-elastic": _resident(
-        "p90-elastic", AdmissionPolicy.TOOL_P90, status="compatibility-alias",
+        "p90-elastic", AdmissionPolicy.TOOL_P50, status="compatibility-alias",
     ),
     "p90-static-llm-wait-checkpoint": _snapshot(
         "p90-static-llm-wait-checkpoint", AdmissionPolicy.TOOL_STATIC,
         EvictionPolicy.WAIT_AWARE_PRESSURE, status="compatibility-alias",
     ),
     "p90-elastic-pressure-checkpoint": _snapshot(
-        "p90-elastic-pressure-checkpoint", AdmissionPolicy.TOOL_P90,
+        "p90-elastic-pressure-checkpoint", AdmissionPolicy.TOOL_P50,
         EvictionPolicy.WAIT_AWARE_PRESSURE, status="compatibility-alias",
     ),
 })

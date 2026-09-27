@@ -30,8 +30,8 @@ def test_validate_and_plan_v2(capsys) -> None:
 def test_baseline_catalog_is_available_from_public_cli(capsys) -> None:
     assert cli.main(["experiment", "baselines"]) == 0
     output = capsys.readouterr().out
-    assert "tool-p90-wait-proactive" in output
-    assert "tool-p90-wait-proactive" in output
+    assert "tool-p50-wait-proactive" in output
+    assert "tool-p50-wait-proactive" in output
     assert "compatibility-alias" not in output
 
 
@@ -117,7 +117,7 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
     command = [
         "experiment", "configure", base, str(output),
-        "--baseline", "tool-p90-wait-proactive",
+        "--baseline", "tool-p50-wait-proactive",
     ]
     assert cli.main(command) == 1
     assert not output.exists()

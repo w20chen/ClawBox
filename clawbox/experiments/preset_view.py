@@ -18,7 +18,7 @@ def dimensions(policy) -> dict[str, str]:
     return {
         "reserve_during": "session" if admission == "lifetime_full" else "command",
         "estimate": {"lifetime_full": "capacity", "tool_full": "capacity",
-                     "tool_static": "fixed", "tool_p90": "predicted",
+                     "tool_static": "fixed", "tool_p50": "predicted",
                      "tool_oracle": "measured"}[admission],
         "idle": {"none": "resident", "eager": "immediate", "fixed_delay": "timeout",
                  "wait_aware_pressure": "pressure", "time_oracle": "known-wait",

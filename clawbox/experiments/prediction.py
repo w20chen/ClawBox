@@ -30,22 +30,23 @@ def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
         )
     targets = prediction.get("targets")
     target = targets.get("memory_extra_peak_bytes") if isinstance(targets, dict) else None
-    if isinstance(target, dict) and target.get("backend") != "lattice":
-        raise PredictionUnavailable("ClawBox scheduling requires a LatticeKB memory prediction")
+    if isinstance(target, dict) and target.get("backend") not in {"lattice", "runtime"}:
+        raise PredictionUnavailable("ClawBox scheduling requires a LatticeKB or ToolKB memory prediction")
     if (not isinstance(target, dict) or target.get("status") != "available"
             or target.get("unit") != "bytes"
             or target.get("metric_definition") != "environment_memory_peak_minus_baseline"):
         reason = target.get("unavailable_reason") if isinstance(target, dict) else "missing target"
         raise PredictionUnavailable(
             f"ClawTune extra memory peak is unavailable ({reason}); "
-            "provide LatticeKB environment-memory observations or select a fixed/capacity baseline"
+            "provide Cube environment-memory observations or select a fixed/capacity baseline"
         )
-    value = target.get("p90")
+    value = target.get("p50")
     if isinstance(value, bool) or not isinstance(value, (int, float)) \
             or not math.isfinite(value) or value < 0:
         raise PredictionUnavailable("ClawTune extra memory peak has no valid estimate")
     return {
-        "prediction_source": "clawtune_lattice_call_load_v2",
+        "prediction_source": f"clawtune_{target.get('backend')}_p50",
+        "prediction_quantile": 0.5,
         "admission_prediction_target": "environment_memory_peak_minus_baseline",
         # Preserve the canonical prediction for the ClawTune trace writer;
         # the derived fields below are the admission-facing projection.
@@ -63,6 +64,33 @@ def command_sha256(command: str) -> str:
     return hashlib.sha256(command.encode()).hexdigest()
 
 
+def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = None) -> dict:
+    """ClawBox's admission policy; never change ClawTune's model outputs."""
+    missing = {}
+    for name in ("lattice", "tool"):
+        try:
+            result = clawtune_extra_peak(models.get(name))
+        except PredictionUnavailable as exc:
+            missing[name] = str(exc)
+            continue
+        expected_backend = "lattice" if name == "lattice" else "runtime"
+        if result["clawtune_memory_backend"] != expected_backend:
+            raise PredictionUnavailable(f"{name} prediction backend mismatch")
+        return {**result, "fallback_level": name, "unavailable_models": missing}
+    evidence = short_call_evidence or {}
+    count = evidence.get("count", 0)
+    maximum = evidence.get("max_duration_ms")
+    if (isinstance(count, int) and not isinstance(count, bool) and count > 0
+            and isinstance(maximum, (int, float)) and not isinstance(maximum, bool)
+            and math.isfinite(maximum) and 0 <= maximum <= 20
+            and evidence.get("reason") == "no_in_execution_memory_sample"):
+        return {"prediction_source": "short_call_assumption", "prediction_quantile": None,
+                "fallback_level": "short_call_assumption", "unavailable_models": missing,
+                "short_call_evidence": evidence, "predicted_incremental_memory_mib": 0,
+                "admission_prediction_target": "environment_memory_peak_minus_baseline"}
+    raise PredictionUnavailable(f"No P50 memory estimate or measured short-call evidence: {missing}")
+
+
 class CommandPredictionProvider:
     """Load one immutable P90 artifact once and resolve exact commands."""
 
@@ -74,7 +102,7 @@ class CommandPredictionProvider:
         self.sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
-            raise ValueError("P90 prediction artifact must be an object")
+            raise ValueError("Prediction artifact must be an object")
         self.payload = payload
         self._by_digest: dict[str, dict[str, Any]] = {}
         self._load_entries(payload)
@@ -109,7 +137,7 @@ class CommandPredictionProvider:
             metadata = self._metadata(item, command, digest)
             previous = self._by_digest.get(digest)
             if previous is not None and previous != metadata:
-                raise ValueError(f"P90 artifact has conflicting entries for command {digest}")
+                raise ValueError(f"Prediction artifact has conflicting entries for command {digest}")
             self._by_digest[digest] = metadata
 
     def _metadata(self, item: dict[str, Any], command: str,
@@ -147,6 +175,17 @@ class CommandPredictionProvider:
     @property
     def manifest(self) -> dict[str, dict[str, Any]]:
         return {key: dict(value) for key, value in self._by_digest.items()}
+
+    @property
+    def max_incremental_memory_mib(self) -> float:
+        """Largest frozen reservation this artifact can request."""
+        values = [
+            float(item["predicted_incremental_memory_mib"])
+            for item in self._by_digest.values()
+        ]
+        if not values:
+            raise ValueError("Prediction artifact contains no command reservations")
+        return max(values)
 
     def resolve(self, command: str, runtime_metadata: dict[str, Any] | None) -> dict[str, Any]:
         return self.resolve_digest(command_sha256(command), runtime_metadata)
@@ -196,3 +235,45 @@ class CommandPredictionProvider:
                 / len(observed) if observed else None
             ),
         }
+
+
+class P50PredictionProvider(CommandPredictionProvider):
+    """Frozen, pre-evaluation native model predictions, keyed by exact command."""
+
+    def __init__(self, path: Path, *, repository: str, sandbox_identity: dict | None = None) -> None:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema") != "clawbox_p50_v1" or payload.get("repository") != repository:
+            raise ValueError("P50 artifact schema or repository mismatch")
+        if payload.get("training_validated") is not True:
+            raise ValueError("P50 artifact requires a validated Cube training run")
+        if sandbox_identity is not None and payload.get("sandbox_identity") != sandbox_identity:
+            raise ValueError("P50 training and evaluation Tool environments differ")
+        super().__init__(path, repository=repository, prediction_source="frozen_clawbox_p50")
+
+    def provenance(self, observed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        selected = [row for row in observed or []
+                    if row.get("prediction_source") == self.prediction_source]
+        result = super().provenance(selected)
+        result["observed_fallback_rate"] = (
+            sum(row.get("fallback_level") != "lattice" for row in selected) / len(selected)
+            if selected else None
+        )
+        return result
+
+    @property
+    def manifest(self) -> dict[str, dict[str, Any]]:
+        # The Runtime witnesses command identity; model evidence stays on the
+        # host. Avoid sending a large KB/prediction body through guest exec args.
+        return {key: {field: value[field] for field in
+                      ("raw_command_sha256", "canonical_prediction_key", "prediction_source")}
+                for key, value in self._by_digest.items()}
+
+    def _metadata(self, item: dict, command: str, digest: str) -> dict:
+        if digest != command_sha256(command):
+            raise ValueError("P50 artifact command digest mismatch")
+        selected = select_p50(item.get("models") or {},
+                              short_call_evidence=item.get("short_call_evidence"))
+        return {**selected, "model_prediction_source": selected["prediction_source"],
+                "prediction_source": self.prediction_source,
+                "raw_command_sha256": digest, "canonical_prediction_key": digest,
+                "models": item.get("models"), "kb_sha256": self.payload.get("kb_sha256")}

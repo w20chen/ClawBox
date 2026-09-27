@@ -46,7 +46,7 @@ from .policy import PolicyCoordinator, PolicyEventExecutor
 from .snapshot_pool import WarmSnapshotPool
 from .spec_types import InferenceBackend, SnapshotTier
 from .policy_control import PolicyControlServer
-from .prediction import CommandPredictionProvider, PredictionUnavailable, clawtune_extra_peak
+from .prediction import CommandPredictionProvider, P50PredictionProvider, PredictionUnavailable, clawtune_extra_peak
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
 from .ssh_credentials import generate_ssh_credentials
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
@@ -302,6 +302,15 @@ def enrich_tool_execution_observations(
             "telemetry_validity": "valid",
             "telemetry_eligible_for_kb": True,
         })
+        if cgroup.get("memory_eligible") is True and cgroup.get("memory_measurement") == "guest_memtotal_minus_memavailable":
+            extra = cgroup.get("memory_extra_peak_bytes")
+            if isinstance(extra, (int, float)) and math.isfinite(extra) and extra >= 0:
+                row["actual_extra_memory_mib"] = extra / 1024**2
+                if row.get("prediction_quantile") == 0.5:
+                    value = row.get("predicted_incremental_memory_mib")
+                    if value is not None:
+                        row["p50_extra_memory_error_mib"] = float(value) - extra / 1024**2
+        row["memory_unavailable_reason"] = cgroup.get("memory_unavailable_reason")
         predicted_guest = row.get("predicted_guest_memory_p90_mib")
         if predicted_guest is not None:
             predicted_mib = float(predicted_guest)
@@ -314,7 +323,8 @@ def enrich_tool_execution_observations(
             })
         predicted_host = row.get("predicted_incremental_memory_mib")
         actual_host = row.get("actual_host_execution_increment_mib")
-        if predicted_host is not None and actual_host is not None:
+        if (predicted_host is not None and actual_host is not None
+                and row.get("admission_prediction_target") == "host_vm_rss_execution_increment"):
             host_error = float(predicted_host) - float(actual_host)
             row.update({
                 "host_increment_prediction_error_mib": host_error,
@@ -396,6 +406,10 @@ def summarize_tool_execution_observations(
         return result
 
     return {
+        "p50_extra_memory_measured_count": sum(r.get("p50_extra_memory_error_mib") is not None for r in records),
+        "p50_extra_memory_mae_mib": (statistics.fmean(abs(r["p50_extra_memory_error_mib"]) for r in records
+            if r.get("p50_extra_memory_error_mib") is not None) if any(r.get("p50_extra_memory_error_mib") is not None for r in records) else None),
+        "p50_source_counts": distribution("fallback_level"),
         "tool_execution_observation_count": len(records),
         "telemetry_valid_count": sum(
             item.get("telemetry_validity") == "valid" for item in records
@@ -496,6 +510,27 @@ class ExperimentWorker:
                 "CLAWBOX_SANDBOX_CREATE_CONCURRENCY must be a positive integer"
             )
         return min(concurrency, limit)
+
+    @staticmethod
+    def _startup_headroom_mib(
+        arm: ExperimentArm,
+        prediction_provider: CommandPredictionProvider | None,
+    ) -> int:
+        """Leave room for one in-policy Tool call while another pair starts."""
+        if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL:
+            return 0
+        if arm.policy.admission is AdmissionPolicy.TOOL_FULL:
+            return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
+        if arm.policy.admission is AdmissionPolicy.TOOL_STATIC:
+            return int(arm.resources.static_tool_memory_mib or 1)
+        if prediction_provider is not None:
+            return max(
+                int(arm.resources.static_tool_memory_mib or 1),
+                int(math.ceil(prediction_provider.max_incremental_memory_mib)),
+            )
+        # Live Runtime predictions are not frozen on the worker, so their
+        # maximum is unknown before VM creation. Preserve the capacity guard.
+        return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
 
     def run(self) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -604,11 +639,30 @@ class ExperimentWorker:
                 return
             events.write({"event": "local_cache_reclaim", **observation})
 
+        prediction_provider = None
+        if (arm.agent.driver is AgentDriver.OPENCLAW
+                and arm.policy.admission is AdmissionPolicy.TOOL_ORACLE):
+            source = arm.resources.oracle_measurements
+            if not source:
+                raise ValueError(
+                    f"{arm.policy.admission.value} requires an immutable command artifact"
+                )
+            prediction_provider = CommandPredictionProvider(
+                Path(source),
+                repository=arm.case.repository or arm.case.case_id,
+                prediction_source="runtime_tool_oracle_heldout",
+            )
+        if arm.policy.admission is AdmissionPolicy.TOOL_P50 and arm.resources.prediction_artifact:
+            prediction_provider = P50PredictionProvider(
+                Path(arm.resources.prediction_artifact),
+                repository=arm.case.repository or arm.case.case_id,
+                sandbox_identity={k: getattr(arm.sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")},
+            )
         coordinator = PolicyCoordinator(
             arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
             emergency_free_mib=arm.resources.emergency_free_memory_mib,
             operation_headroom_mib=arm.resources.checkpoint_restore_headroom_mib,
-            startup_headroom_mib=arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib,
+            startup_headroom_mib=self._startup_headroom_mib(arm, prediction_provider),
             physical_sample=sampler.current,
             reclaim_cache=reclaim_local_cache if isinstance(sampler, CgroupMemorySampler) else None,
             on_pressure_pause=record_pressure_pause,
@@ -631,19 +685,6 @@ class ExperimentWorker:
                     "warm_committed_bytes": pool["committed_bytes"],
                 })
             sampler.sample_hook = record_memory_sample
-        prediction_provider = None
-        if (arm.agent.driver is AgentDriver.OPENCLAW
-                and arm.policy.admission is AdmissionPolicy.TOOL_ORACLE):
-            source = arm.resources.oracle_measurements
-            if not source:
-                raise ValueError(
-                    f"{arm.policy.admission.value} requires an immutable command artifact"
-                )
-            prediction_provider = CommandPredictionProvider(
-                Path(source),
-                repository=arm.case.repository or arm.case.case_id,
-                prediction_source="runtime_tool_oracle_heldout",
-            )
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
         sampler.start()
@@ -1463,6 +1504,14 @@ class ExperimentWorker:
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
             )
             executor = CubeCommandExecutor(self.client, lambda: lifecycle.sandbox, cwd=arm.sandbox.workspace)
+            if arm.sandbox.preflight_command:
+                preflight = executor.execute(arm.sandbox.preflight_command, arm.execution.command_timeout_seconds)
+                events.write({"event": "task_environment_checked", "session_id": session_id,
+                              "exit_code": preflight.exit_code,
+                              "stdout": preflight.stdout[-16000:], "stderr": preflight.stderr[-16000:]})
+                if preflight.exit_code != 0:
+                    raise RuntimeError("Task environment preflight failed: " +
+                                       (preflight.stderr or preflight.stdout)[-2000:])
             agent_pid_file = f"/state/openclaw/{session_id}/agent.pid"
             agent_pid_observations: list[dict[str, Any]] = []
 
@@ -1608,7 +1657,8 @@ class ExperimentWorker:
                     )
                     managed_command = (execution_scope == "agent-tool"
                                        and request.get("operation") != "filesystem")
-                    if managed_command and arm.policy.admission is AdmissionPolicy.TOOL_P90:
+                    if (managed_command and arm.policy.admission is AdmissionPolicy.TOOL_P50
+                            and prediction_provider is None):
                         metadata = request.get("prediction")
                         if (not isinstance(metadata, dict)
                                 or metadata.get("raw_command_sha256") != request["command_sha256"]):
@@ -1620,7 +1670,7 @@ class ExperimentWorker:
                         )
                     else:
                         prediction = request.get("prediction")
-                    if (arm.policy.admission in {AdmissionPolicy.TOOL_P90, AdmissionPolicy.TOOL_ORACLE}
+                    if (arm.policy.admission in {AdmissionPolicy.TOOL_P50, AdmissionPolicy.TOOL_ORACLE}
                             and not managed_command):
                         # File bridge operations have no shell-command KB entry.
                         # Charge their configured static budget explicitly.
@@ -2284,7 +2334,7 @@ class ExperimentWorker:
             return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
         if policy is AdmissionPolicy.TOOL_STATIC:
             return int(arm.resources.static_tool_memory_mib or 1)
-        if (policy in {AdmissionPolicy.TOOL_P90, AdmissionPolicy.TOOL_ORACLE}
+        if (policy in {AdmissionPolicy.TOOL_P50, AdmissionPolicy.TOOL_ORACLE}
                 and prediction is None
                 and arm.agent.driver is AgentDriver.OPENCLAW):
             raise PredictionUnavailable(

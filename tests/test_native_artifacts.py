@@ -150,6 +150,58 @@ def _artifacts(execution_id: str, digest: str) -> tuple[list[dict], dict, dict]:
     return bridge, cgroup, clause
 
 
+def test_filesystem_call_allows_non_kb_clause_but_keeps_integrity_checks():
+    execution_id, digest = "file-edit", "a" * 64
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    policy = _policy(execution_id, digest)
+    policy[0]["request"].update(operation="filesystem", runtime_trace_expected=False)
+    clause["collection_validity"] = "invalid"
+    clause["calls"][0]["eligible_for_kb"] = False
+    clause["calls"][0]["clauses"] = []
+    clause["calls"][0]["invalid_reasons"] = [{
+        "kind": "analysis_failure", "detail": "cannot identify tree: reason=no_exec_images",
+    }]
+    clause["collector"] = {"health": "healthy"}
+
+    report = validate_native_tool_join(
+        bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+        clause_artifacts={execution_id: clause}, policy_records=policy,
+        expected_session_id="session-a",
+    )
+    assert report["non_kb_filesystem_execution_ids"] == [execution_id]
+
+    clause["telemetry_loss_total"]["total"] = 1
+    with pytest.raises(ValueError, match="reports event loss"):
+        validate_native_tool_join(
+            bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause}, policy_records=policy,
+            expected_session_id="session-a",
+        )
+
+    clause["telemetry_loss_total"]["total"] = 0
+    clause["calls"][0]["invalid_reasons"][0]["detail"] = "unexpected collector failure"
+    with pytest.raises(ValueError, match="unexpected invalid state"):
+        validate_native_tool_join(
+            bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause}, policy_records=policy,
+            expected_session_id="session-a",
+        )
+
+
+def test_shell_exec_still_rejects_non_kb_clause():
+    execution_id, digest = "exec-invalid", "b" * 64
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    clause["collection_validity"] = "invalid"
+    clause["calls"][0]["eligible_for_kb"] = False
+    with pytest.raises(ValueError, match="clause collection is not valid"):
+        validate_native_tool_join(
+            bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause},
+            policy_records=_policy(execution_id, digest),
+            expected_session_id="session-a",
+        )
+
+
 def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
     tmp_path: Path,
 ) -> None:
@@ -513,6 +565,7 @@ def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
         "prediction_source": "runtime_clawtune_immutable_kb",
         "fallback_level": "exact_command",
         "predicted_guest_memory_p90_mib": 3.0,
+        "admission_prediction_target": "host_vm_rss_execution_increment",
         "predicted_incremental_memory_mib": 4.0,
         "admitted_reservation_mib": 4,
         "admission_blocked_seconds": 0.25,
@@ -563,3 +616,16 @@ def test_native_measurement_enrichment_requires_exact_execution_set() -> None:
                 "cpu_utilization_avg_cores": 1,
             }},
         )
+
+def test_p50_errors_compare_guest_increment_not_rss_or_host():
+    records = [{'session_id': 's', 'execution_id': 'exec-1', 'prediction_quantile': .5,
+        'admission_prediction_target': 'environment_memory_peak_minus_baseline',
+        'predicted_incremental_memory_mib': 3, 'actual_host_execution_increment_mib': 99}]
+    _, cgroup, _ = _artifacts('exec-1', hashlib.sha256(b'true').hexdigest())
+    cgroup.update(memory_measurement='guest_memtotal_minus_memavailable', memory_eligible=True,
+                  memory_extra_peak_bytes=2*1024**2, memory_rss_peak_bytes=50*1024**2)
+    result = enrich_tool_execution_observations(records, {'exec-1': cgroup})[0]
+    assert result['actual_extra_memory_mib'] == 2
+    assert result['p50_extra_memory_error_mib'] == 1
+    assert 'host_increment_prediction_error_mib' not in result
+    assert summarize_tool_execution_observations(records)['p50_extra_memory_mae_mib'] == 1

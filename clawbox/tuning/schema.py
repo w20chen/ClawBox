@@ -80,6 +80,7 @@ class BridgeRecord(StrictModel):
     duration_ms: int
     exit_code: int
     timed_out: bool = False
+    cancelled: bool = False
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
     output_truncated: bool = False

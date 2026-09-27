@@ -390,3 +390,12 @@ def test_degraded_process_tree_artifact_cannot_enter_trusted_kb(tmp_path):
     assert joined.joined[0].collection_quality == "degraded"
     assert joined.joined[0].trusted is False
     assert trusted == []
+
+def test_cancelled_bridge_cannot_train_even_with_valid_cgroup_and_zero_exit():
+    bridge = bridge_record('exec-1').model_copy(update={'cancelled': True})
+    resource = cgroup_artifact_to_resource(cgroup_artifact('exec-1'))
+    joined = join_trace_and_bridge([span_end('exec-1')], [bridge], {'exec-1': resource})
+    row = joined.joined[0]
+    assert row.status_code == 'cancelled'
+    assert row.collection_quality == CollectionQuality.DEGRADED
+    assert row.trusted is False
