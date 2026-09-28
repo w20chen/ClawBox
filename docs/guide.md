@@ -1,467 +1,185 @@
-# Configure, run, and inspect experiments
+# Configure, qualify, and run experiments
 
-ClawBox compares memory-management policies while workloads execute in CubeSandbox
-virtual machines. A policy controls memory reservations, saving idle VM state,
-and restoring that state. It does not change the configured VM RAM size.
+The supported interface is `clawbox experiment`. It runs OpenClaw workloads in
+standalone CubeSandbox Runtime and Tool VMs. The host setup, qualification,
+formal run, cleanup, and result state all use this one command group.
 
-The active A+B+C policy uses `resources.snapshot_mechanism: incremental-cow`
-with a WARM tmpfs. The first checkpoint writes a full RAM base into memory, and
-later checkpoints of the same VM write dirty-page deltas. The lab entry point
-uses memory-only snapshot storage by default and refuses to spill VM RAM to a
-COLD disk directory. Historical tiered policies that require COLD storage are
-retained as deprecated entries and are excluded from normal selection.
-
-The public interface is `clawbox experiment`. Use the same configuration format
-and commands for every workload and concurrency level. Run the commands below
-from the repository root; relative input paths are resolved against the current
-working directory, not the directory containing the YAML file.
-
-## 1. Try the included input without a VM host
-
-After installing the Python package with Python 3.12 or newer:
+## 1. Inspect inputs without a VM host
 
 ```bash
-clawbox experiment trace examples/traces/smoke.jsonl
+clawbox experiment baselines
 clawbox experiment validate examples/experiments/getting-started.yaml --inputs
 clawbox experiment describe examples/experiments/getting-started.yaml
+clawbox experiment plan examples/experiments/getting-started.yaml
 ```
 
-These commands inspect files and configuration only. The trace is a small schema
-fixture, not a real agent recording. Replace it with a trace from a live run before
-starting replay experiments. Template aliases and the node name are placeholders.
+The active comparison contains three complete policy tuples:
 
-`trace` reports LLM span counts and recorded model duration. `validate --inputs`
-checks the trace and command prediction records. It does not contact CubeSandbox
-or verify the task image. `plan` prints the exact
-expanded execution configurations as JSON.
-
-## 2. Understand the configuration
-
-The complete starting file is [getting-started.yaml](../examples/experiments/getting-started.yaml).
-It uses the following sections:
-
-| Section | Meaning |
-| --- | --- |
-| `workload` | Task identities, prompts, replay files, repository revisions, repetitions |
-| `agent.driver` | `openclaw` runs the real agent for both API calls and replay |
-| `inference` | `api` obtains live model responses; `replay` supplies recorded responses and timing |
-| `runtime` | Template and fixed resources for the VM hosting the agent |
-| `sandbox` | Template, workspace, and fixed resources for the VM executing tools |
-| `execution` | Concurrency levels, arrival schedule, random seed, timeouts |
-| `resources` | Host memory budget, safety headroom, prediction inputs, optional snapshot storage |
-| `policies` | Named combinations to compare |
-| `validation.command` | Command that checks the final Tool workspace; exit status zero means success |
-
-There is one agent loop: OpenClaw. Replay replaces model responses, not tool
-execution. The agent issues tool calls normally in both modes.
-
-A *session* is one workload execution. An *arm* is one policy, concurrency level,
-case assignment, and repetition. By default, each case is expanded separately.
-With `workload.session_assignment: round_robin`, sessions cycle through the
-listed cases within the same arm. Policies run sequentially; sessions within an
-arm are concurrent. The selected cases and concurrency come from the YAML.
-
-Memory sizes ending in `_mib` use MiB; the friendly `--*-gib` options use GiB.
-Configured guest capacity is `sessions × (runtime RAM + tool RAM)`. Actual host
-memory includes overhead and cache and must be measured. A pool budget is a
-scheduling constraint; hard memory isolation also requires host cgroup setup.
-
-## 3. Select policy dimensions
-
-Use presets as convenient combinations of implemented mechanisms. You do not
-need to memorize a fixed list of baseline names:
-
-| Option | Values | Decision |
+| Ablation | Baseline | Behavior |
 | --- | --- | --- |
-| `--reserve-during` | `session`, `command` | Hold a reservation for the whole session or only command execution |
-| `--estimate` | `capacity`, `fixed`, `predicted`, `measured` | Use configured capacity, one fixed amount, command prediction, or held-out measured demand |
-| `--idle` | `resident`, `immediate`, `timeout`, `pressure`, `known-wait`, `tiered-lru`, `tiered-wait` | Keep running, reclaim on idle/timeout/pressure, or use advance timing information and optional storage tiers |
-| `--resume` | `none`, `on-demand`, `ahead` | No restore, restore when needed, or start restoration before a predicted response |
-
-The supported experiment ladder contains three active presets:
-
-| Version | Baseline | Components |
-| --- | --- | --- |
-| A | `tool-static-resident` | Calibrated fixed overcommit |
-| A+B | `tool-p50-resident` | Command-specific P50 admission |
+| A | `tool-static-resident` | Calibrated fixed Tool-memory admission; VMs remain resident |
+| A+B | `tool-p50-resident` | Frozen command-specific P50 admission; VMs remain resident |
 | A+B+C | `tool-p50-wait-reactive` | P50 admission plus wait-aware WARM checkpoint and reactive restore |
 
-All older policy recipes remain in the source as deprecated research history. They
-are excluded from normal selection; `clawbox experiment baselines --all` lists
-them with a `DEPRECATED` marker. Repeat a dimension for alternatives; different
-dimensions are combined as filters over the three active presets. Unsupported
-intersections produce an error rather than creating a new algorithm.
+`clawbox experiment baselines --all` shows retained research policies with a
+`DEPRECATED` label. Formal standalone runs reject those policies and reject a
+hand-written policy whose name and tuple do not match one of the three entries
+above.
 
-Create the complete ablation matrix explicitly:
+## 2. Configure the host
+
+Run setup on the ARM64 Linux/KVM host:
 
 ```bash
-clawbox experiment configure examples/experiments/getting-started.yaml comparison.yaml \
-  --baseline tool-static-resident --baseline tool-p50-resident \
-  --baseline tool-p50-wait-reactive --concurrency 1,4,16 \
+clawbox experiment setup \
+  --runtime-template RUNTIME_TEMPLATE_ID \
+  --tool-template TOOL_TEMPLATE_ID \
+  --node NODE_ID \
+  --cube-source "$HOME/src/CubeSandbox" \
+  --local-gib 64 \
+  --warm --warm-gib 128
+```
+
+Setup starts the installed CubeSandbox services, configures the LOCAL memory
+cgroup, configures the optional tmpfs WARM pool, then creates, executes, and
+destroys a probe VM. It saves `~/.config/clawbox/host.json` only after every
+check succeeds. It does not stop unknown VMs or delete results, templates, or
+images. With `--warm`, setup checks the installed CubeSandbox Python SDK and,
+when needed, applies only the tiered/incremental SDK hunks from this repository
+to `--cube-source` and installs that SDK. The successful source path is saved in
+the host profile, so later setup runs do not need the flag.
+
+After changing ClawTune, rebuild both guest integrations:
+
+```bash
+clawbox experiment images \
+  --registry REGISTRY/clawbox \
+  --go /path/to/go \
+  --kernel-source /path/to/linux-source \
+  --kernel-build /path/to/linux-build \
+  --direct-network
+```
+
+This command builds the current ClawTune plugin and sidecar, embeds the pinned
+ARM64 mvdan parser, pushes immutable images, registers new CubeSandbox templates,
+and updates the host profile. Formal runs verify the exact ClawTune revision and
+image digests. A successful first build saves these non-secret build inputs in
+the host profile, so later ClawTune upgrades only require:
+
+```bash
+clawbox experiment images
+```
+
+Use `--proxy-network` once to replace a saved direct-network choice.
+
+## 3. Create training and evaluation specifications
+
+Use `configure` instead of editing resource identities by hand. A training run
+uses A only and records complete CubeSandbox guest-memory measurements:
+
+```bash
+clawbox experiment configure examples/experiments/getting-started.yaml train.yaml \
+  --experiment-id train-memory \
+  --trace /data/replay.jsonl \
+  --repository owner/repo \
+  --baseline tool-static-resident \
+  --concurrency 16 \
+  --pool-memory-gib 32
+```
+
+After that run succeeds, freeze P50 predictions from its results:
+
+```bash
+clawbox experiment train /data/clawbox-results/train-01 \
+  --trace /data/replay.jsonl \
+  --repository owner/repo \
+  --output /data/clawbox/predictions/eval-p50.json
+```
+
+The artifact stores both LatticeKB and ToolKB evidence for each command. ClawBox
+selects LatticeKB first and falls back to ToolKB; this selection does not modify
+ClawTune. Missing observations are never converted to zero.
+
+Create the A/A+B/A+B+C evaluation from the same VM shapes and trace:
+
+```bash
+clawbox experiment configure examples/experiments/getting-started.yaml eval.yaml \
+  --experiment-id memory-overcommit-eval \
+  --trace /data/replay.jsonl \
+  --repository owner/repo \
+  --baseline tool-static-resident \
+  --baseline tool-p50-resident \
+  --baseline tool-p50-wait-reactive \
+  --prediction-artifact /data/clawbox/predictions/eval-p50.json \
+  --concurrency 1,4,8,16 \
+  --pool-memory-gib 32 \
+  --snapshot-storage warm-only \
   --model-wait-prediction-seconds 3 \
   --model-wait-prediction-source separate-training-run
-clawbox experiment describe comparison.yaml
 ```
 
-This creates the A/A+B/A+B+C comparison at each selected concurrency. The
-predicted policy uses the P50 of guest `memory_extra_peak_bytes`. ClawBox selects
-LatticeKB first, then ToolKB. Selection is in ClawBox; ClawTune model outputs
-remain unchanged. Both must use `guest_memtotal_minus_memavailable`.
+Use a model-wait prediction measured in a separate run; its value and source are
+part of the experiment identity. Keep one repetition unless the study explicitly
+requires uncertainty estimates. All policies in one specification share the same
+workload, concurrency, VM shapes, pool budget, arrival schedule, and validation.
 
-Collect a complete task in CubeSandbox with fixed admission, then freeze predictions
-from that separate training run:
+## 4. Validate and qualify
 
 ```bash
-bash scripts/lab run task.yaml --baseline tool-static-resident --run-id collect
-bash scripts/lab train ~/clawbox-results/collect --trace /data/replay.jsonl \
-  --repository owner/repo --output /data/p50.json
-bash scripts/lab run task.yaml --predictions /data/p50.json \
-  --baseline tool-static-resident --baseline tool-p50-resident \
-  --baseline tool-p50-wait-reactive --concurrency 1 4 16 \
-  --repetitions 3 --randomized-order --random-seed 20260928 \
-  --model-wait-prediction-seconds 3 \
-  --model-wait-prediction-source separate-training-run
+clawbox experiment validate eval.yaml --inputs
+clawbox experiment describe eval.yaml
+clawbox experiment doctor eval.yaml --probe-vm
+clawbox --output-root /data/clawbox-results experiment qualify eval.yaml
 ```
 
-The lab entry point defaults to a 64 GiB LOCAL pool. A 16-agent run offers 96 GiB
-of configured Runtime/Tool capacity, so this remains an overcommit experiment while
-leaving substantially more physical headroom than the 8 GiB c4 calibration run.
-Use a separately labelled 32 GiB pressure arm when the purpose is to trigger C.
-Snapshot policies also keep 8 GiB available for one checkpoint or restore by
-default; resident policies use the full LOCAL budget. WARM defaults to a 128 GiB tmpfs:
-c16 can conservatively reserve about 104 GiB for
-one first-generation Runtime and Tool snapshot per agent. The lab rejects an
-undersized memory-only WARM pool before creating VMs.
+Qualification uses the first model step, which must contain a Tool call, at the
+largest configured concurrency and across every selected policy. It creates real
+VMs, exercises OpenClaw, prediction, telemetry, checkpoint/restore policy paths,
+validation, hard process termination, and cleanup. A successful receipt is saved
+beside the YAML and is bound to the exact spec digest, policies, concurrency,
+node, and image digests. Any change requires a new qualification.
 
-`bash scripts/lab setup --warm` configures the CubeSandbox VM cgroup on LOCAL
-NUMA memory and mounts WARM on the other NUMA node. It records both node IDs and
-the effective capacities in the machine profile. `lab run` applies the selected
-LOCAL pool limit before starting VMs, while `lab doctor` verifies the cgroup
-limit, NUMA bindings, tmpfs size, and disabled swap.
-
-Use a task image containing the repository and dependencies and configure
-`validation.command` to check the final result. Replay completion alone does not
-prove the recorded repair succeeded. The training output records both model
-outputs, the selected source, source hashes and per-call memory evidence. Keep
-training and evaluation runs separate; a repeated case measures repeatability,
-not generalization to unseen tasks.
-
-`resources.prediction_artifact` also selects the frozen file in an experiment
-YAML. Without a file, P50 admission uses only the Runtime's available LatticeKB
-prediction. Use a trained file for ToolKB fallback and reproducible comparisons.
-Missing estimates are ignored only for exact commands whose successful training
-calls all lasted at most 20 ms and lacked an in-execution memory sample. These
-are explicitly labelled `short_call_assumption` and receive the runner's minimum
-1 MiB reservation; they are not measured zeroes. Other missing estimates fail.
-
-Without dimension filters or `--baseline`, `configure` retains the base file's
-policies. If both are given, dimensions filter the explicitly named baselines.
-Existing output files require `--force` to replace.
-
-| Mechanism | Required input or parameter |
-| --- | --- |
-| Fixed command reservation | `resources.static_tool_memory_mib`; CLI `--static-tool-memory-mib` |
-| Predicted-arm non-command reservation | `resources.non_command_tool_memory_mib`; lab CLI `--non-command-tool-memory-mib` |
-| Full command reservation | `resources.full_tool_memory_mib`; normally the Tool VM's configured RAM |
-| Predicted reservation | ClawTune `call_load.v2` `memory_extra_peak_bytes` P50, rounded up to MiB |
-| Measured reservation | `resources.oracle_measurements`; replay only |
-| Idle timeout | `fixed_delay_seconds`; CLI `--fixed-delay-seconds` |
-| Pressure-triggered reclamation | Model-wait estimate and source in `inference.configuration` |
-| Early restoration | `prefetch_lead_seconds`; CLI `--prefetch-lead-seconds`, plus a wait estimate and source |
-| Known-wait threshold | `checkpoint_break_even_seconds`; replay only |
-| Tiered storage | Local/snapshot capacities, distinct NUMA nodes, memory and disk snapshot directories; replay only for the currently implemented presets |
-
-Immediate and delayed reclamation belong to the same conceptual family; early
-restoration is another decision. The selector groups them without modifying their
-underlying implementations. Fixed reservation amounts remain experiment-wide
-inputs; ClawTune predicts extra memory for each command when it runs.
-
-The current pressure-based policy does not compare the predicted wait against
-checkpoint cost. Both tiered presets use recorded future waiting information;
-the least-recently-used choice is therefore not a pure online LRU baseline.
-Advance-information references are not proven performance optima.
-
-`describe` shows effective snapshot-memory capacity for each policy. The existing
-execution planner disables that capacity for non-tiered policies. If capacities
-differ, a performance comparison includes both policy and resource differences.
-The selector does not remove that limitation.
-
-## 4. Supply your own task and trace
-
-The only replay format is the original ClawTune schema-6 JSONL file produced by
-the Runtime sidecar. Each LLM call has a `span_start` and `span_end` with matching
-`trace_id` and `span_id`. The start contains `input.messages`; the end contains
-`output.content`, `duration_ns`, and completion status. Tool spans and resource
-records stay in that file, but do not drive replay. Select one agent run per file.
-
-ClawBox does not convert or rewrite this recording. Replay checks recorded message
-history, returns the recorded assistant output (including tool calls), and waits
-for the recorded model duration. The native format records messages rather than
-the entire HTTP request; gateway HTTP evidence is stored separately.
-
-Changing a trace should also update its task identity and validation:
+## 5. Run and recover
 
 ```bash
-clawbox experiment configure examples/experiments/getting-started.yaml task.yaml \
-  --trace /data/traces/my-task.jsonl --case-id my-task \
-  --prompt 'Implement the requested change and run its tests.' \
-  --repository organization/project --base-commit YOUR_REVISION \
-  --validation-command 'cd /testbed && python -m pytest -q'
+clawbox --output-root /data/clawbox-results \
+  experiment run eval.yaml --run-id eval-01 --detach
+
+clawbox --output-root /data/clawbox-results experiment status eval-01
+clawbox --output-root /data/clawbox-results experiment resume eval-01 --detach
+clawbox --output-root /data/clawbox-results experiment abort eval-01
+clawbox --output-root /data/clawbox-results experiment destroy eval-01
 ```
 
-This updates metadata; it does not clone a repository or build an image. The Tool
-template must already contain the matching repository, revision, dependencies,
-and workspace. For several tasks, list complete objects under `workload.cases`,
-each with its own `case_id`, `prompt`, `source: recorded_trace`,
-`source_reference`, `replay_trace_reference`, and optional `repository`,
-`base_commit`, `validation`. The singular CLI overrides deliberately reject a
-multi-case input so that one trace cannot silently replace every task.
+Each arm runs in a separate worker process under a hard deadline. The supervisor
+updates `run-state.json` atomically with its PID identity, current phase, arm,
+heartbeat, event-file progress, and cleanup result. A recorded `running` state
+with a dead supervisor is reported as `orphaned`. Resume first terminates and
+cleans an interrupted worker, then skips only successful arms whose spec digest
+and `cleanup_verified` marker match.
 
-### Record an agent workload for replay
+## 6. Interpret results
 
-To reuse an installed ClawTune setup, reference its configuration directly:
+An arm succeeds only when every requested session completes, every model response
+is delivered, at least one native Tool call executes, execution IDs join exactly
+to telemetry, task validation passes, the LOCAL pool and host OOM counters remain
+within limits, and every owned VM is confirmed absent after cleanup.
 
-```yaml
-agent: {driver: openclaw}
-inference:
-  backend: api
-  configuration:
-    clawtune_config: /path/to/ClawTune/swe_rebench/config.yaml
-```
-
-ClawBox uses ClawTune's own configuration loader to obtain the model, endpoint,
-and credential. You do not need to copy the API key or configure it again.
-Keep this reference when switching the same task to replay.
-
-Alternatively, configure a model directly. Set `agent.driver: openclaw` and
-`inference.backend: api`. In `inference.configuration`, set `base_url` to your
-provider's OpenAI-compatible API endpoint, `model` to its model identifier, and
-`api_key_env` to the name of an exported credential variable. Keep the secret out
-of YAML. The workload's prompt and Tool image define the task; replay input is
-not consumed during live inference.
-
-After a run, the original sidecar files are collected under
-`runtime-traces/<session-id>/` in the result directory. Select the JSONL containing
-the agent's LLM spans, inspect it with `clawbox experiment trace`, then use
-`configure --trace` with `--inference-backend replay --time-scale 1`.
-Keep the agent version, runtime
-configuration, original task prompt, tool image, repository, and initial workspace
-the same. Recording and replay share the validated Runtime settings: `/workspace`,
-the original task prompt without an added prefix, and the same SSH and model
-capability settings. OpenClaw and ClawTune use the configured model name and
-the same per-session runtime identity, allowing the sidecar to join proxy
-requests to model events and record their messages.
-
-Replay supplies recorded model responses in order through the normal OpenClaw
-agent loop. Tools execute again and their actual outputs remain in the new trace.
-ClawBox does not compare tool output text with the recording or apply task-specific
-log normalization. Missing or extra model steps, failed delivery, failed task
-validation, and incomplete telemetry still fail verification.
-
-Set `execution.arm_timeout_seconds: null` to remove ClawBox's arm and agent
-deadlines. OpenClaw receives its native `--timeout 0` option. Single-command and
-transport timeouts remain enabled; exceeding 30 minutes alone does not stop a
-run. The bundled OpenClaw implements its no-timeout option using the JavaScript
-timer maximum (about 24.8 days), not a 30-minute or hourly limit.
-
-Tool sessions use `PYTHONHASHSEED=0` in both live and replay runs. This keeps
-Python string hashes and hash-dependent iteration repeatable. Identical initial
-environments do not guarantee identical timestamps, process addresses, random
-values, or network responses. Keep Runtime and Tool images, repository revision,
-working directories, environment variables, and tool settings identical between
-recording and replay. The verification wrapper reuses the live configuration for
-replay, changing only the model backend and recording assignment. Both YAML files
-are retained with the results. A recorded response that depends on a transient
-value can still fail in a later run; task validation must detect task failure.
-
-The Runtime ClawTune plugin attaches its selected `call_load.v2` prediction to
-each command's execution envelope. ClawBox reserves the predicted
-`memory_extra_peak_bytes` above the pre-call baseline. File operations use the
-configured static budget.
-
-### Short replay experiments
-
-Set `inference.configuration.max_model_steps: 10` to replay only the first ten
-model calls per agent. Omit it for the full recording. Source trace files are
-never shortened or rewritten; OpenClaw executes each selected response and its
-tools normally. On the next model request, a separate, synthetic experiment
-control reply ends the agent loop. This reply is saved in
-`model-gateway/*.prefix-stop.json`, not counted as a recorded model step or model
-latency. The collected native Runtime recording also includes this control exchange.
-
-Completion evidence reports `scope: prefix`; it does not establish full task
-completion. Task validation still runs, and ten rounds need not reach the task's
-later test phase. Compare runs using the same round limit.
-
-## 5. Run on an installed host
-
-Real runs require the patched CubeSandbox server, matching SDK, registered images,
-and reachable guest control endpoints described in [installation](installation.md).
-Load your machine settings explicitly; the CLI does not source shell files:
-
-```bash
-set -a
-source ~/.config/clawbox/machine.env
-set +a
-clawbox experiment configure examples/experiments/getting-started.yaml local.yaml \
-  --target-node "$CUBE_NODE" \
-  --runtime-template-id "$CLAWBOX_RUNTIME_TEMPLATE" \
-  --runtime-image-reference "$CLAWBOX_RUNTIME_IMAGE" \
-  --runtime-image-digest "${CLAWBOX_RUNTIME_IMAGE##*@}" \
-  --tool-template-id "$CLAWBOX_TOOL_TEMPLATE" \
-  --tool-image-reference "$CLAWBOX_TOOL_IMAGE" \
-  --tool-image-digest "${CLAWBOX_TOOL_IMAGE##*@}"
-clawbox experiment validate local.yaml --inputs
-clawbox experiment describe local.yaml
-clawbox --output-root /data/clawbox-results experiment run local.yaml --run-id marker-01
-```
-
-Use a fresh run identifier and an idle VM pool. `run` is a foreground command:
-keep the shell connected or use `nohup`:
-
-```bash
-nohup clawbox --output-root /data/clawbox-results experiment run local.yaml \
-  --run-id marker-02 > /data/clawbox-results/marker-02.log 2>&1 < /dev/null &
-```
-
-It checks inputs
-before creating VMs, uses the selected concurrency and workload, and replays the
-full input. There is no implicit truncation or injected stop response. Use a
-complete shorter recording if you need a shorter task.
-
-The two example templates must match 2 vCPU/2 GiB and 2 vCPU/4 GiB respectively.
-Changing VM sizes requires corresponding templates and provenance. Pool budgets
-and emergency free-memory limits must fit the host's actual available capacity.
-
-## 6. Inspect results and failures
-
-For a prepared single-task configuration, run the live/replay verification matrix:
-
-```bash
-python scripts/verify-agent-roundtrip.py task.yaml \
-  --clawtune-config ../ClawTune/swe_rebench/config.yaml \
-  --output /data/clawbox-results/agent-verification-01
-```
-
-This runs c1 and c4 with fixed/resident, fixed/immediate/on-demand, and
-capacity/resident command reservations. Every successful live run is followed
-by replay of its own unmodified recordings. For c4, each agent gets its own
-recording. The output directory must be new. `verification.json` records each
-completed run; the individual run directories retain all experimental evidence.
-Use `--estimate fixed|capacity` and `--idle resident|immediate` to select a subset.
-Use `--concurrency 1` or `--concurrency 4` to repeat just one concurrency level.
-To repeat only replay after a fix, add `--recordings-root` pointing to an earlier
-verification directory and choose a new `--output`. The script reads the original
-live configurations and recordings; it does not make new API calls or edit traces.
-This is a correctness check, not a policy performance comparison: live model
-outputs can differ. For performance comparisons, replay the same resident-run
-recordings across policies with identical initial task images and resource limits.
-
-```bash
-clawbox --output-root /data/clawbox-results experiment status marker-01
-clawbox --output-root /data/clawbox-results experiment report marker-01
-clawbox --output-root /data/clawbox-results experiment collect marker-01
-```
-
-`status` lists available arm results, including before the final summary exists.
-An incomplete summary does not prove the worker is still running.
-`report` prints the generated Markdown summary, and
-`collect` returns the complete summary as JSON. The result directory contains:
+The run root contains:
 
 | Path | Contents |
 | --- | --- |
-| `summary.json`, `summary.csv`, `summary.md` | Combined arm results, configuration/provenance, and summaries |
-| `arms/` | Individual results and completion markers |
-| `events/` | Memory samples, admission, lifecycle, and session events |
-| `model-gateway/` | Actual HTTP requests, responses, and replay step/delivery evidence |
-| `runtime-traces/` | Unmodified ClawTune recordings collected from each Runtime |
-| `policy-control/`, `tool-artifacts/` | Tool admission, measurements, and validation evidence |
-| `owned-sandboxes.jsonl` | VM ownership for cleanup and failure investigation |
+| `run-state.json` | Authoritative live or terminal state |
+| `experiment.yaml`, `qualification.json` | Frozen configuration and qualification receipt |
+| `summary.json`, `summary.csv`, `summary.md` | Results for completed arms |
+| `arms/*.json`, `arms/*.complete` | Canonical arm result and verified-success marker |
+| `attempts/ATTEMPT/ARM/` | Logs, events, gateway state, telemetry, and ownership journal for one attempt |
 
-Summary files are written when the worker finishes; inspect per-arm files and
-events for a run that has not produced a summary yet. A failed or interrupted run
-is not evidence of success. Preserve its directory before starting another attempt.
+For a valid memory-overcommit result, compare throughput, JCT, admission wait,
+physical LOCAL memory, checkpoint/restore cost, and validation under the same
+offered concurrency. A run with `pool_budget_exceeded`, an OOM increment,
+incomplete telemetry, failed validation, or unverified cleanup is a failed arm,
+not performance evidence.
 
-For memory-overcommit results, inspect `memory.pool_budget_exceeded` and
-`memory.peak_over_budget_bytes` together with OOM events and task validation.
-P50 is allowed to underestimate individual calls; a throughput improvement that
-crosses the configured pool budget is not a safe capacity result.
-
-ClawBox lifecycle and policy measurements remain separate from ClawTune traces:
-VM creation and destruction, checkpoint and restore spans, physical memory,
-NUMA placement, snapshot tiers, reservation waits, and policy decisions are saved
-in events and results. Tool-level eBPF and cgroup evidence and execution-ID joins
-remain in tool artifacts. Changing the replay input format does not remove these
-measurements or insert them into the native ClawTune recording.
-
-### Checkpoint time breakdown
-
-The patched Cubelet and VMM append checkpoint phases to
-`/data/log/clawbox-checkpoint-phases.jsonl` on each sandbox host, even when normal
-service logging is restricted to warnings. Rebuild and install both components
-after applying the backend patches. Keep this file with the experiment results;
-it is separate from the native ClawTune trace.
-
-Existing templates can select a versioned shim under
-`/data/cubelet/root/component_versions/cube-shim/<version>/bin/` rather than the
-default installation binary. When updating an existing host, update the component
-actually selected by the template while its VMs are stopped. Check for both
-`cubelet` and `vmm` records after a test pause; Cubelet records alone cannot
-separate guest-memory writes from the rest of the snapshot call.
-
-For a single-host run, summarize it with the run's ownership file:
-
-```bash
-python scripts/report-checkpoint-phases.py /data/log/clawbox-checkpoint-phases.jsonl \
-  --ownership /data/clawbox-results/my-run/owned-sandboxes.jsonl \
-  --output /data/clawbox-results/my-run/checkpoint-breakdown.json
-```
-
-The report separates VM freezing, state capture, guest-memory writes, storage
-synchronization, cache release, VM deletion, and Cubelet metadata and cleanup.
-It subtracts nested spans before adding them; incomplete checkpoints are listed
-separately. Memory-write bytes are logical bytes passed to the snapshot writer,
-not measured physical SSD traffic. A write to tmpfs or the page cache is not a
-durable SSD write. Synchronization and cache-release phases appear only where
-the cold-snapshot path actually executes them.
-An unmatched synchronization/cache-release pair is reported as incomplete.
-Logging is best effort: if both records are lost, the report cannot distinguish
-that loss from a path that omitted both operations. Retain the original logs
-and verify collection on the intended storage path before interpreting totals.
-
-`cubelet.total` measures the backend pause operation. The ClawBox lifecycle
-pause also includes client and transport overhead. Neither is a standalone
-memory-transfer measurement. `memory.send_total` includes memory writes and
-their storage handling; it must not be added again to those child phases.
-
-OpenClaw can reject an `exec` call before sending it to the Tool VM. These
-preflight rejections remain in the native trace and are counted separately from
-executed commands; they cannot have Tool VM resource measurements. A cancelled
-command that did execute must still finish its telemetry and admission record.
-
-For `exec`, stdout and stderr are combined in the Tool VM before SSH transport,
-so separate SSH channels do not reorder sequential output. This applies to both
-live recording and replay; filesystem transfers keep separate channels. Older
-recordings can contain channel-order differences and are not rewritten to hide
-them. Record a new live run when validating this execution setup.
-
-OpenClaw generates new handles for background processes on each run. Replay
-matches the tool call that created each handle and uses the current handle in
-subsequent recorded model responses, so OpenClaw can poll or cancel the real
-process. The gateway records these bindings in `replay_process_sessions`;
-the source trace and actual tool results are unchanged. This is handle translation
-for the OpenClaw process API, not a task-specific output comparison.
-
-A successful comparison needs all sessions requested by the arm to finish and
-pass task validation. For managed replay, also check complete model-step delivery,
-exact execution-ID joins, telemetry loss, duplicate execution, and leaked VMs.
-Missing metrics are not zero. Compare completion time, throughput, admission wait,
-host memory over time, and checkpoint/restore cost under the same workload and
-resource scope. Median and percentile results need enough observations; repeat
-experiments to estimate variability.
-
-If input checks fail, use the reported case and file path. If VM creation fails,
-check template readiness, image provenance, disk capacity, and memory. If replay
-fails, compare the rejected-request evidence with the recording and initial image;
-do not edit responses to conceal a different workload. Administrative diagnosis
-and storage setup are covered in [installation](installation.md).
+See [host workflow](lab.md) for the same sequence in Chinese and
+[installation](installation.md) for installing the patched CubeSandbox services.

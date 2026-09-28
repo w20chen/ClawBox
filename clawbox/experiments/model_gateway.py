@@ -238,15 +238,36 @@ class ManagedModelGateway:
         self._started = True
         return self
 
-    def __exit__(self, *_args: object) -> None:
+    def __exit__(self, exc_type: object, exc: BaseException | None,
+                 _traceback: object) -> None:
         with self._lock:
             tokens = list(self._sessions)
             self._started = False
+        failures: list[str] = []
         for token in tokens:
-            self.unregister(token, timeout=30)
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
+            try:
+                if not self.unregister(token, timeout=30):
+                    failures.append(f"session {token[:8]} did not drain")
+            except Exception as drain_error:
+                failures.append(
+                    f"session {token[:8]}: {type(drain_error).__name__}: {drain_error}"
+                )
+        try:
+            self.server.shutdown()
+            self.server.server_close()
+            self.thread.join(timeout=5)
+            if self.thread.is_alive():
+                failures.append("server thread did not stop")
+        except Exception as shutdown_error:
+            failures.append(
+                f"server shutdown: {type(shutdown_error).__name__}: {shutdown_error}"
+            )
+        if failures:
+            failure = RuntimeError("ModelGateway cleanup incomplete: " + "; ".join(failures))
+            if exc is not None:
+                exc.add_note(str(failure))
+            else:
+                raise failure
 
     @property
     def url_without_version(self) -> str:

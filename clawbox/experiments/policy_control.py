@@ -344,12 +344,33 @@ class PolicyControlServer:
         self.thread.start()
         return self
 
-    def __exit__(self, *_args: object) -> None:
+    def __exit__(self, _exc_type: object, exc: BaseException | None,
+                 _traceback: object) -> None:
         with self._lock:
             tokens = list(self._sessions)
+        failures: list[str] = []
         for token in tokens:
-            self.unregister(token, timeout=30)
+            try:
+                if not self.unregister(token, timeout=30):
+                    failures.append(f"session {token[:8]} did not drain")
+            except Exception as drain_error:
+                failures.append(
+                    f"session {token[:8]}: {type(drain_error).__name__}: {drain_error}"
+                )
         self._started = False
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
+        try:
+            self.server.shutdown()
+            self.server.server_close()
+            self.thread.join(timeout=5)
+            if self.thread.is_alive():
+                failures.append("server thread did not stop")
+        except Exception as shutdown_error:
+            failures.append(
+                f"server shutdown: {type(shutdown_error).__name__}: {shutdown_error}"
+            )
+        if failures:
+            failure = RuntimeError("PolicyControl cleanup incomplete: " + "; ".join(failures))
+            if exc is not None:
+                exc.add_note(str(failure))
+            else:
+                raise failure

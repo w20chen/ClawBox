@@ -21,7 +21,8 @@ from clawbox.replay.lifecycle import CommandResult
 
 def test_explicit_null_disables_arm_deadline() -> None:
     from clawbox.experiments.spec import ExecutionSpec
-    assert ExecutionSpec(arm_timeout_seconds=None).arm_timeout_seconds is None
+    with pytest.raises(ValueError):
+        ExecutionSpec(arm_timeout_seconds=None)
     assert ExecutionSpec().arm_timeout_seconds == 1800
 
 

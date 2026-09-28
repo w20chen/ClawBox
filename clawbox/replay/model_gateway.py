@@ -211,7 +211,7 @@ class ModelGateway:
             if request is None:
                 index = len(self._requests) if self.mode == "replay" else None
                 if (index is not None and self.max_model_steps is not None
-                        and self.max_model_steps < len(self.actions)
+                        and self.max_model_steps <= len(self.actions)
                         and index >= self.max_model_steps):
                     # A harness control response ends OpenClaw only after it
                     # has executed the final selected round's tools. It is not
@@ -299,7 +299,21 @@ class ModelGateway:
             while not request.ready:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("model gateway request timed out")
+                    # A timed-out logical request is terminal.  Leaving it in
+                    # the pending state makes an identical HTTP retry wait for
+                    # another full timeout and lets a late producer publish a
+                    # response after the experiment has already failed.
+                    now = time.time()
+                    request.status_code = int(HTTPStatus.GATEWAY_TIMEOUT)
+                    request.content_type = "application/json"
+                    request.response_b64 = ""
+                    request.error = "model gateway request timed out"
+                    request.ready = True
+                    request.response_released_unix_s = now
+                    request.completed_unix_s = now
+                    self._persist()
+                    self._changed.notify_all()
+                    raise TimeoutError(request.error)
                 self._changed.wait(timeout=remaining)
             if request.error:
                 raise RuntimeError(request.error)
@@ -403,7 +417,11 @@ class ModelGateway:
         """Return a strict, auditable completion verdict for this session."""
         records = self.records()
         expected = len(self.actions) if self.mode == "replay" else None
-        prefix = expected is not None and self.max_model_steps is not None and self.max_model_steps < expected
+        prefix = (
+            expected is not None
+            and self.max_model_steps is not None
+            and self.max_model_steps <= expected
+        )
         if prefix:
             expected = self.max_model_steps
         incomplete = [
@@ -526,6 +544,11 @@ class ModelGateway:
             status, content_type, body, error, admission = 500, "application/json", b"", str(exc), {}
         with self._changed:
             request = self._requests[request_id]
+            # The waiter may have made this request terminal while an
+            # upstream call or lifecycle callback was still running.  Never
+            # overwrite that timeout with a late response.
+            if request.ready:
+                return
             request.status_code = status
             request.content_type = content_type
             request.response_b64 = base64.b64encode(body).decode()

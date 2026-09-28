@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
+import os
 import pytest
 from clawbox.lab import prepare_spec, template_record
 
@@ -165,12 +166,69 @@ def test_setup_does_not_retry_ambiguous_create_failure(monkeypatch):
         lab.wait_for_vm_ready(profile())
 
 
+def test_snapshot_sdk_ready_checkout_is_inferred(tmp_path, monkeypatch):
+    import clawbox.lab as lab
+    source = tmp_path / "CubeSandbox"
+    module = source / "sdk/python/cubesandbox/sandbox.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# ready\n", encoding="utf-8")
+    monkeypatch.setattr(lab, "_snapshot_sdk_info", lambda: {
+        "ready": True, "file": str(module),
+    })
+    assert lab.ensure_snapshot_sdk() == source.resolve()
+
+
+def test_snapshot_sdk_applies_only_sdk_hunks_and_reinstalls(tmp_path, monkeypatch):
+    import clawbox.lab as lab
+    monkeypatch.setattr(lab.sys, "path", list(lab.sys.path))
+    source = tmp_path / "CubeSandbox"
+    (source / ".git").mkdir(parents=True)
+    module = source / "sdk/python/cubesandbox/sandbox.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("class Sandbox:\n    pass\n", encoding="utf-8")
+    inspections = iter((
+        {"ready": False, "file": None},
+        {"ready": True, "file": str(module)},
+    ))
+    calls = []
+    monkeypatch.setattr(lab, "_snapshot_sdk_info", lambda: next(inspections))
+    monkeypatch.setattr(
+        lab, "command",
+        lambda *argv, **kwargs: calls.append((argv, kwargs)) or "",
+    )
+
+    assert lab.ensure_snapshot_sdk(source) == source.resolve()
+    apply_calls = [argv for argv, _ in calls if argv[:3] == ("git", "-C", str(source.resolve()))]
+    assert len(apply_calls) == 4
+    assert all("--include=sdk/python/cubesandbox/sandbox.py" in argv for argv in apply_calls)
+    assert calls[-1][0][:5] == (
+        os.sys.executable, "-m", "pip", "install", "--no-deps",
+    )
+    assert lab.sys.path[0] == str((source / "sdk/python").resolve())
+
+
+def test_atomic_profile_write_preserves_previous_file_on_publish_failure(tmp_path, monkeypatch):
+    import clawbox.lab as lab
+    target = tmp_path / "host.json"
+    target.write_text('{"old": true}\n', encoding="utf-8")
+    monkeypatch.setattr(lab.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError, match="boom"):
+        lab._write_json_atomic(target, {"new": True})
+    assert target.read_text(encoding="utf-8") == '{"old": true}\n'
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_warm_cleanup_rejects_path_escape(tmp_path):
     from clawbox.lab import cleanup_warm_snapshots
     with pytest.raises(ValueError, match="Invalid sandbox ID"):
         cleanup_warm_snapshots(tmp_path, ["../unrelated"])
     outside = tmp_path.parent/"unrelated"
-    (tmp_path/("a"*32)).symlink_to(outside, target_is_directory=True)
+    try:
+        (tmp_path/("a"*32)).symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account cannot create directory symlinks")
+        raise
     with pytest.raises(ValueError, match="escapes root"):
         cleanup_warm_snapshots(tmp_path, ["a"*32])
 

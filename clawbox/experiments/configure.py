@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 import yaml
 
-from .baselines import resolve_baseline
+from .baselines import ensure_supported_experiment, resolve_baseline
 from .spec import ExperimentSpec, expand_matrix
 
 
@@ -95,8 +95,18 @@ def configure_experiment(
     pool_memory_gib: float | None = None,
     emergency_free_memory_gib: float | None = None,
     checkpoint_headroom_gib: float | None = None,
+    local_memory_capacity_mib: int | None = None,
+    warm_memory_capacity_mib: int | None = None,
+    local_memory_cgroup: str | None = None,
+    warm_snapshot_root: str | None = None,
+    cold_snapshot_root: str | None = None,
+    local_numa_node: int | None = None,
+    warm_numa_node: int | None = None,
+    snapshot_mechanism: str | None = None,
+    snapshot_storage: str | None = None,
     static_tool_memory_mib: int | None = None,
     full_tool_memory_mib: int | None = None,
+    prediction_artifact: str | None = None,
     oracle_measurements: str | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
@@ -265,10 +275,29 @@ def configure_experiment(
         resources["checkpoint_restore_headroom_mib"] = gib_to_mib(
             checkpoint_headroom_gib, name="checkpoint headroom", allow_zero=True,
         )
+    for key, value in (
+        ("local_memory_capacity_mib", local_memory_capacity_mib),
+        ("warm_memory_capacity_mib", warm_memory_capacity_mib),
+        ("local_numa_node", local_numa_node),
+        ("warm_numa_node", warm_numa_node),
+    ):
+        if value is not None:
+            resources[key] = value
+    for key, value in (
+        ("local_memory_cgroup", local_memory_cgroup),
+        ("warm_snapshot_root", warm_snapshot_root),
+        ("cold_snapshot_root", cold_snapshot_root),
+        ("snapshot_mechanism", snapshot_mechanism),
+        ("snapshot_storage", snapshot_storage),
+    ):
+        if value is not None:
+            resources[key] = value
     if static_tool_memory_mib is not None:
         resources["static_tool_memory_mib"] = static_tool_memory_mib
     if full_tool_memory_mib is not None:
         resources["full_tool_memory_mib"] = full_tool_memory_mib
+    if prediction_artifact is not None:
+        resources["prediction_artifact"] = prediction_artifact
     if oracle_measurements is not None:
         resources["oracle_measurements"] = oracle_measurements
 
@@ -341,7 +370,9 @@ def configure_experiment(
                 "wait-aware baselines require --model-wait-prediction-source"
             )
 
-    return ExperimentSpec.model_validate(root)
+    spec = ExperimentSpec.model_validate(root)
+    ensure_supported_experiment(spec)
+    return spec
 
 
 def dump_experiment(spec: ExperimentSpec) -> str:

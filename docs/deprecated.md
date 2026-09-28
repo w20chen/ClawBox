@@ -11,6 +11,10 @@ supported deployment entry points. Future changes need not preserve these
 modules' behavior, historical APIs, schemas, aliases, or stored-state formats.
 Do not deploy these services for the current experiment workflow.
 
+The parallel `scripts/lab` command-line interface is also deprecated. Its shared
+host setup and image helpers are still called by `clawbox experiment setup` and
+`clawbox experiment images`; use the public experiment commands for new runs.
+
 The experiment policy catalog also retains superseded research baselines so old
 result files remain interpretable. Only `tool-static-resident` (A),
 `tool-p50-resident` (A+B), and `tool-p50-wait-reactive` (A+B+C) are active.

@@ -1,208 +1,181 @@
-# 日常实验入口
+# 独立完成 CubeSandbox 实验
 
-CubeSandbox 在这里使用单机 standalone 部署：它管理 VM、模板和网络，
-不需要部署 Kubernetes。`scripts/lab` 负责检查本机环境，调用同一套
-`clawbox experiment` 执行逻辑，并清理本次创建的 VM。
+正式入口只有 `clawbox experiment`。它直接使用 standalone CubeSandbox，不需要
+Kubernetes。一次 run 会创建所需的 Runtime/Tool VM，逐个执行 arm，并销毁该
+arm 拥有的 VM；不会保存新的大 VM 镜像。`scripts/lab` 旧入口已经弃用。
 
-在已安装 CubeSandbox、匹配 SDK、Runtime/Tool 模板和 ClawBox Python
-环境的 Linux 主机上使用。首次安装或迁移到空白机器仍需要
-[安装文档](installation.md)中的镜像和内核；脚本不会格式化磁盘或删除旧实验。
+## 1. 配置主机
 
-## 开机后准备一次
+在 ARM64 Linux/KVM 主机上执行：
 
 ```bash
-cd /path/to/ClawBox
-bash scripts/lab setup --warm
-bash scripts/lab doctor
-bash scripts/lab baselines
+clawbox experiment setup \
+  --runtime-template RUNTIME_TEMPLATE_ID \
+  --tool-template TOOL_TEMPLATE_ID \
+  --node NODE_IP \
+  --cube-source "$HOME/src/CubeSandbox" \
+  --local-gib 64 \
+  --warm --warm-gib 128
 ```
 
-脚本自动读取 `~/.config/clawbox/machine.env`，从模板 API 获取真实镜像摘要、
-VM 大小和节点，将验证后的配置保存到 `~/.config/clawbox/lab.json`。
-已有配置优先于旧环境文件；重复 setup 不会把升级后的模板换回旧版本。
-首次可通过 `setup --runtime-template ID --tool-template ID --node NODE` 指定模板。
-`--warm` 在空闲主机上准备 tmpfs；已有运行中的 VM 不会被停止。
-需要对已安装的 systemd 服务和挂载操作有 sudo 权限。
-准备阶段会等待节点完成初始化，并创建、执行、销毁一台临时 VM 验证可用性。
-`--warm` 会备份并同步 standalone 启动配置中的快照目录，必要时重启空闲节点的相关服务。
+启用 WARM 时，`setup` 会检查当前 Python SDK；如版本不匹配，它只把本仓库的
+tiered/incremental SDK 补丁应用到 `--cube-source`，再安装该 SDK。成功后源码
+路径会写入主机配置，后续执行 `setup` 无需重复传入。
 
-## 选择 baseline 并运行 trace
+`setup` 启动已安装的 CubeSandbox 服务，配置 LOCAL memory cgroup，并在启用
+`--warm` 时配置 tmpfs WARM pool。它会创建、执行、销毁一台探测 VM，全部
+通过后才保存 `~/.config/clawbox/host.json`。它要求空闲主机，不会停止未知 VM，
+也不会清理实验目录、模板或镜像。
 
-任务 YAML 指定任务提示词、原始 trace、模型名和最终验证命令。
-任务镜像必须含有对应项目及初始版本。脚本默认回放已有模型响应，不调用付费模型 API；
-工具命令仍真实执行。不要把 schema 示例 trace 当作真实任务录制。
-回放工具名须匹配当前 OpenClaw 接口。对 SWE-rebench research schema-5 录制，先导入：
+升级 ClawTune 后，可重建 Runtime/Tool 集成并生成新模板。该命令同时把固定版本的
+ARM64 mvdan 命令解析器编译进镜像，正式运行不会临时下载编译器：
 
 ```bash
-bash scripts/lab import-trace original.trace.jsonl --output replay.jsonl \
+clawbox experiment images \
+  --registry REGISTRY/clawbox \
+  --go /path/to/go \
+  --kernel-source /path/to/linux-source \
+  --kernel-build /path/to/linux-build \
+  --direct-network
+```
+
+首次成功后，命令会把 registry、Go 可执行文件、客户机内核源码/构建目录和网络模式写入
+`~/.config/clawbox/host.json`。后续升级 ClawTune 时只需执行：
+
+```bash
+clawbox experiment images
+```
+
+如果需要重新使用代理，执行一次 `clawbox experiment images --proxy-network`，新的选择会在成功后保存。
+密码和代理凭据不会写入主机配置。
+
+把新模板 ID 和不可变镜像 digest 写入实验 YAML。旧模板不会被删除。
+
+## 2. 准备配置与 trace
+
+查看正式 baseline：
+
+```bash
+clawbox experiment baselines
+```
+
+当前正式比较只有：
+
+- `tool-static-resident`：A，校准后的固定内存准入，VM 常驻。
+- `tool-p50-resident`：A+B，使用 P50 预测准入，VM 常驻。
+- `tool-p50-wait-reactive`：A+B+C，P50 准入加等待期 WARM checkpoint/restore。
+
+旧策略仍可用 `clawbox experiment baselines --all` 查看，但均标为
+`DEPRECATED`，不进入新实验。
+
+从完整 CubeSandbox 训练 run 生成 P50 预测：
+
+```bash
+clawbox experiment train RESULT_DIR \
+  --trace /data/replay.jsonl \
+  --repository owner/repo \
+  --output /data/p50.json
+```
+
+预测优先使用 LatticeKB，无法给出结果时由 ClawBox 回退到 ToolKB。这个回退
+只在 ClawBox 中实现。没有测量依据的缺失值不会被写成 0。
+
+包含 A+B 或 A+B+C 的正式配置必须通过 `--prediction-artifact /data/p50.json`
+引用这份冻结产物。这样评估开始前已经固定每个命令使用 LatticeKB、ToolKB
+回退或有测量依据的短调用假设；运行中不会学习评估数据。
+
+`configure` 默认读取 `~/.config/clawbox/host.json`，自动填入 setup/images 生成的
+模板 ID、镜像 digest、节点、LOCAL cgroup 和 WARM 容量。选择 A+B+C 时增加
+`--snapshot-storage warm-only`，即可明确要求使用 tmpfs WARM；不允许静默回退到磁盘。
+
+如果输入是受支持的研究 trace，先转换为当前 schema 6：
+
+```bash
+clawbox experiment import-trace old.jsonl \
+  --output replay.jsonl \
   --python /opt/conda/envs/testbed/bin/python
 ```
 
-原文件不变，输出 schema-6 replay 和 `replay.import.json`，后者记录来源摘要、
-原环境说明及逐调用转换。任务 YAML 的 trace 路径指向新文件。
-支持 `edit_file` → `edit`、仅带 path 的 `read_file` → `read`、`write_file` → `write`，
-以及 `exec.working_dir` → `workdir`。`replace_all=true` 等尚未支持的参数直接报错。
-`list_dir` 转成 Tool VM 内的 Python 目录枚举，支持排序、递归和总条目上限，
-不递归跟随目录符号链接；文本格式不保证与历史版本完全相同。其他未知工具直接拒绝。
-导入不更改原 shell 命令或编辑文本，也不会自动安装依赖。
-
-为任务镜像固定源码初始提交和测试依赖，并配置运行前检查，例如：
-
-```yaml
-sandbox:
-  template_id: tpl-task
-  workspace: /testbed
-  preflight_command: >-
-    test -d /testbed/.git &&
-    /opt/conda/envs/testbed/bin/python -c 'import pytest, sqlglot'
-validation:
-  command: cd /testbed && /opt/conda/envs/testbed/bin/python -m pytest -q
-```
-
-检查在新建 Tool VM 中、Agent 启动前执行，失败即终止并清理本 run 的 VM；
-结果保存在 events 的 `task_environment_checked` 记录中。检查命令用于验证，
-依赖安装应在构建镜像时完成。`python3` 等入口需要能启动任务虚拟环境，
-不要只把虚拟环境解释器软链接到其他目录。跨架构或依赖版本差异可能改变行为；
-回放不会重新规划，最终任务验证和遥测验证仍须通过，才能用于训练及比较。
-
-如果已构建并推送了带 ClawBox Tool 集成的新任务镜像，可以注册独立任务配置：
+随后检查完整输入和资源形状：
 
 ```bash
-.venv/bin/python scripts/register-task-image.py \
-  --image REGISTRY/task@sha256:DIGEST --alias task-unique-name --output task-profile.json
-bash scripts/lab --profile task-profile.json run task.yaml --baseline tool-static-resident
+clawbox experiment validate experiment.yaml --inputs
+clawbox experiment describe experiment.yaml
+clawbox experiment doctor experiment.yaml --probe-vm
 ```
 
-它复用默认配置的节点、guest 内核和 VM 大小，并保留原有 lab 配置。
-新镜像需要包含任务初始代码和测试依赖；普通项目 Docker 镜像不能直接作为 Tool 模板。
+`doctor` 会核对服务、KVM、模板及镜像 digest、LOCAL memory.max、NUMA、
+WARM tmpfs 容量和当前 ClawTune revision。配置不符时不会启动正式 run。
+
+## 3. 先做短资格验证
+
+每个正式配置必须先通过同一目标并发的短验证：
 
 ```bash
-# A：校准后的固定内存超卖。
-bash scripts/lab run task.yaml --baseline tool-static-resident \
-  --static-tool-memory-mib 512 --concurrency 1 4 16
-
-# A+B：为每条命令使用冻结的 P50 预测。
-bash scripts/lab run task.yaml --baseline tool-p50-resident \
-  --predictions /data/p50.json --non-command-tool-memory-mib 16 \
-  --concurrency 1 4 16
-
-# A+B+C：P50 准入，加上等待感知的 WARM checkpoint 和按需恢复。
-bash scripts/lab run task.yaml --baseline tool-p50-wait-reactive \
-  --predictions /data/p50.json --non-command-tool-memory-mib 16 \
-  --model-wait-prediction-seconds 3 \
-  --model-wait-prediction-source separate-training-run \
-  --concurrency 1 4 16
-
-# 只回放前 3 次模型响应，用于短验证；不代表完整任务完成。
-bash scripts/lab run task.yaml --max-model-steps 3 --concurrency 1
+clawbox --output-root /data/clawbox-results \
+  experiment qualify experiment.yaml
 ```
 
-可以重复 `--baseline NAME`；`baselines` 只列出 A、A+B、A+B+C 三个正式版本。
-`clawbox experiment baselines --all` 可查看保留的旧策略，它们均标记为
-`DEPRECATED`，不会进入新的默认实验。
-维度参数与 `clawbox experiment configure` 相同：`--reserve-during`、
-`--estimate`、`--idle`、`--resume`。省略选择时使用 A，即
-`tool-static-resident`。
-`--model NAME` 可补充录制模型名；`--trace FILE` 仅允许替换单任务 YAML 的录制路径，
-不会替换提示词或任务镜像。其他固定值仍由任务 YAML 配置；静态准入的固定预留量
-可由 `--static-tool-memory-mib` 在运行时覆盖。
+资格验证使用 replay trace 的第一个模型步骤（该步骤必须含 Tool 调用），在配置的最大并发
+和全部正式策略上真实创建 VM、执行 OpenClaw、采集 Tool 遥测并验证清理。若配置含
+快照策略，它还会额外创建一台 Tool VM，按配置执行 checkpoint、restore、恢复后命令和
+销毁往返。它同时故障注入一个卡住的 worker，确认主机可以杀死整个进程树。成功后在
+YAML 旁生成 `experiment.yaml.qualification.json`。receipt 绑定完整 spec digest、
+并发、策略、节点和两个镜像 digest；任一项改变都必须重新资格验证。
 
-`tool-p50-*` 使用 guest 额外内存峰值的 P50 预测。先用固定准入采集完整任务，
-再从通过最终验证的 CubeSandbox 训练 run 生成冻结预测文件：
+## 4. 运行、观察和恢复
+
+前台运行：
 
 ```bash
-bash scripts/lab train ~/clawbox-results/TRAIN_RUN --trace /data/replay.jsonl \
-  --repository owner/repo --output /data/p50.json
-bash scripts/lab run task.yaml --predictions /data/p50.json \
-  --baseline tool-static-resident --baseline tool-p50-resident \
-  --baseline tool-p50-wait-reactive \
-  --static-tool-memory-mib 512 --non-command-tool-memory-mib 16 \
-  --model-wait-prediction-seconds 3 \
-  --model-wait-prediction-source separate-training-run \
-  --concurrency 1 4 16
+clawbox --output-root /data/clawbox-results \
+  experiment run experiment.yaml --run-id formal-01
 ```
 
-静态准入的每次调用预留量可以在命令行覆盖，无需修改任务 YAML：
+后台运行：
 
 ```bash
-bash scripts/lab run task.yaml --baseline tool-static-resident \
-  --static-tool-memory-mib 512 --concurrency 16 --pool-gib 64
+clawbox --output-root /data/clawbox-results \
+  experiment run experiment.yaml --run-id formal-01 --detach
 ```
 
-`lab run` 的 LOCAL pool 默认是 64 GiB，适合 2 GiB Runtime 加 4 GiB Tool
-的 c16 实验；需要主动制造回收压力时显式使用 `--pool-gib 32`，并在结果中
-检查预算越界。默认另留 8 GiB checkpoint/restore 操作余量，可由
-`--checkpoint-headroom-gib` 覆盖；该余量只从执行快照的策略扣除，resident
-策略可使用完整 LOCAL 预算。`lab setup --warm` 默认建立 128 GiB tmpfs。c16 的 A+B+C
-最坏情况下同时保存 16 对 Runtime/Tool，首代快照保守预留约 104 GiB；运行前
-会拒绝容量不足的 WARM 配置，不会回退到 COLD 磁盘。
-
-实验应记录该数值的来源。使用独立训练 run 中实测最大额外内存向上取整，
-比把每次调用都按 Tool VM 的完整配置容量计费更适合作为校准后的静态对照。
-`--non-command-tool-memory-mib` 只用于预测 arm 中没有 shell KB 条目的文件操作和
-SSH 后端维护；它也必须由独立训练 run 的实测峰值向上取整，不能把缺失值当作零。
-
-正式比较可以用 `--repetitions N` 重复每个 arm，并用
-`--randomized-order --random-seed SEED` 固定随机执行顺序；单次容量边界实验将
-`--repetitions` 设为 1。
-
-ClawBox 优先使用 LatticeKB，不可用时回退 ToolKB；两者均须使用 guest
-`MemTotal - MemAvailable` 峰值减去调用前基线的测量口径。若两者均不可用，
-只有成功训练样本全部不超过 20 ms、且因执行太短而没有执行中采样的相同命令，
-才按轻量命令处理，最小预留 1 MiB。结果单独标记该假设，不将其当作实测零值。
-其他缺失预测会报错。任务 YAML 必须设置最终 `validation.command`，
-训练和评估使用独立 run，并保持 Tool 镜像与 VM 配置一致。
-`lab train` 只拟合明确传入的 CubeSandbox 训练 run，不合并 ClawTune 的
-bootstrap seed；因此同命令评估不能被表述为未见命令的冷启动结果。
-不传 `--predictions` 时仅使用 Runtime 提供的 LatticeKB P50。
-
-默认 `--storage memory` 禁止 COLD checkpoint 和 WARM→COLD 溢出。
-WARM 必须为 tmpfs，且主机禁用 swap。容量不足会等待或失败，不会写磁盘大 RAM 快照。
-`incremental-cow` 的首代仍是完整内存基线，保存在 tmpfs；后续代保存脏页增量。
-因此 WARM 容量要容纳首代基线及仍被引用的增量，不能只按单次 delta 大小配置。
-依赖 COLD 的分层 baseline 必须显式使用 `--storage disk`，并在 YAML 中配置
-COLD 路径和分层资源。Guest 正常的文件系统写入、镜像与模板仍使用磁盘。
-
-## 查看与清理
+查看真实运行状态：
 
 ```bash
-bash scripts/lab status ~/clawbox-results/RUN_ID
-bash scripts/lab cleanup ~/clawbox-results/RUN_ID
+clawbox --output-root /data/clawbox-results experiment status formal-01
 ```
 
-每次运行生成独立目录，包含展开后的 `experiment.yaml`、`lab-state.json`、
-原始测量和报告。结束、失败或可处理的中断后，脚本销毁本 run 的 VM 并检查归属清单。
-不导出 VM 镜像包，保留任务模板供下次使用。SSH 断开或进程被强杀后可再次执行
-`cleanup`；它不会删除别人的 VM 或结果。运行期间保持终端连接，或在 tmux 中运行。
+状态来自原子更新的 `run-state.json`，包含 supervisor PID 身份、当前 arm、阶段、
+心跳、事件文件进度和每个 arm 的清理结论。`running` 但 PID 身份失效会显示为
+`orphaned`，不再以“没有 summary”推测进程仍在运行。
 
-## 更新镜像集成
-
-升级 ClawTune 插件、Sidecar 或 Tool bridge 后，使用同一源码重建两种模板：
+中断或机器重连后：
 
 ```bash
-bash scripts/lab images --registry REGISTRY/clawbox
+clawbox --output-root /data/clawbox-results experiment resume formal-01
 ```
 
-该命令需要 Node/npm、Go、Docker 和可推送的镜像仓库；`CLAWTUNE_ROOT` 指向匹配源码。
-它保留选中任务镜像的项目环境，只更新集成代码，注册新模板，成功后更新 lab 配置。
-原模板不删除。Go 不在 PATH 时用 `--go /path/to/go`；失效的本机代理可用
-`--direct-network` 绕过，也可指定 `--pip-index URL`。
-镜像更新记录保存在配置旁的 `lab.images.json`，中断后可据此核对已注册的模板。
-Tool 镜像更新面向 ARM64；在 `machine.env` 中配置 `CLAWBOX_GUEST_KERNEL_SOURCE` 和
-`CLAWBOX_GUEST_KERNEL_BUILD`，分别指向构建实际 guest 内核的源码和输出目录，也可用
-`--kernel-source`、`--kernel-build` 指定。脚本临时启动 VM 核对内核配置，使用该次构建生成的
-eBPF 头文件。只更新 Tool 可加 `--role sandbox`，只更新 Runtime 可加 `--role runtime`。
+resume 只跳过 spec digest 匹配、结果成功且清理已验证的 arm。失败或超时 arm
+使用新的 attempt 目录重跑，旧 attempt 证据保留。
 
-## 修复 Cubelet 的 WARM 分配中断
-
-使用尚未处理 `fallocate(EINTR)` 的增量 CubeSandbox 构建时，在空闲主机执行一次：
+主动停止和清理：
 
 ```bash
-bash scripts/lab repair-warm
-bash scripts/lab setup --warm
+clawbox --output-root /data/clawbox-results experiment abort formal-01
+clawbox --output-root /data/clawbox-results experiment destroy formal-01
 ```
 
-`CUBE_SOURCE_DIR` 指向已安装版本的源码，`CLAWBOX_GO` 指向 Go 工具链。
-若源码未包含 COW 构建依赖，`CLAWBOX_COW_SDK` 指向匹配版本的 `include/` 和 `lib/` 目录。
-命令修复源码、测试 EINTR 重试及空间不足失败、构建并备份替换 Cubelet；有运行中 VM 时拒绝安装。
-它只重试被信号中断的同一分配范围，不重试空间不足等其他分配错误。
+清理只依据本 run 的 task UID、Cube metadata 和持久 ownership journal。清理本身
+在有硬超时的独立进程中执行；无法确认 VM 全部消失时，run 会失败并保留明确的
+`cleanup_verified: false`，不会继续下一个 arm。
+
+## 5. 结果成立条件
+
+一个 arm 只有同时满足以下条件才标记为 `succeeded`：模型响应完整交付、所有
+Tool 调用完成、最终验证通过、Tool 遥测按 execution ID 完整关联、没有 host OOM
+或 pool 越界，并且拥有的 VM 已全部清理。父 supervisor 为每个 arm 设置硬截止
+时间；线程或 SDK 调用卡住时会终止整个 worker 进程树。
+
+结果位于 `RUN_ID/summary.json`、`summary.csv`、`summary.md` 和 `arms/`。每次
+尝试的完整日志、事件、gateway 状态和 ownership journal 位于
+`RUN_ID/attempts/ATTEMPT_ID/ARM_ID/`。

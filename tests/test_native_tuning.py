@@ -327,7 +327,9 @@ def test_lattice_memory_requires_clause_window_samples():
     assert without_samples[0].memory_extra_peak_bytes is None
 
 
-def test_native_snapshot_export_selects_lattice(db, tmp_path, monkeypatch):
+def test_native_snapshot_export_selects_lattice(
+    db, tmp_path, monkeypatch, clawtune_shell_parser,
+):
     import sys
     from pathlib import Path
     ingest(db, make_manifest())

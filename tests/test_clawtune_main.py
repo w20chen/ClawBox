@@ -103,7 +103,7 @@ def test_main_native_model_recording_is_replayable(tmp_path):
     assert actions[0].input == messages
 
 
-def test_canonical_prediction_does_not_invent_peak_cpu_or_rss():
+def test_canonical_prediction_does_not_invent_peak_cpu_or_rss(clawtune_shell_parser):
     from tool_resource.runtime_kb import ClauseObservation, ToolCallQuery
     from tool_time.lattice_kb import LatticeTimeKB
     kb = LatticeTimeKB.fit([ClauseObservation(

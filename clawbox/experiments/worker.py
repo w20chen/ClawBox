@@ -99,6 +99,31 @@ def _runtime_network_deny_out(
     return ["0.0.0.0/0"] if allow_out and not allow_internet_access else None
 
 
+class RuntimeStatusPoller:
+    """Poll a detached Runtime without coupling resident policy to callbacks."""
+
+    def __init__(self, *, lifecycle: CubeSandboxLifecycle,
+                 executor: CubeCommandExecutor, lifecycle_lock: Lock,
+                 snapshot_enabled: bool) -> None:
+        self.lifecycle = lifecycle
+        self.executor = executor
+        self.lifecycle_lock = lifecycle_lock
+        self.snapshot_enabled = snapshot_enabled
+
+    def __call__(self, command: str, timeout: float) -> CommandResult | None:
+        if not self.snapshot_enabled:
+            if not self.lifecycle.resident:
+                return None
+            return _execute_idempotent(self.executor, command, timeout)
+        # Snapshot policies serialize a bounded status command with the state
+        # transition. Resident policies have no transition to serialize and
+        # must leave the lock available to the ModelGateway callback.
+        with self.lifecycle_lock:
+            if not self.lifecycle.resident:
+                return None
+            return _execute_idempotent(self.executor, command, timeout)
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -540,13 +565,22 @@ class ExperimentWorker:
         # maximum is unknown before VM creation. Preserve the capacity guard.
         return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
 
-    def run(self) -> list[ResultEnvelope]:
+    def run(self, *, arm_ids: set[str] | None = None,
+            write_summary: bool = True) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
         control_host = os.environ.get("CLAWBOX_CONTROL_HOST", "").strip()
         policy_port = int(os.environ.get("CLAWBOX_POLICY_PORT", "18080"))
         gateway_host = os.environ.get("CLAWBOX_MODEL_GATEWAY_HOST", control_host).strip()
         gateway_port = int(os.environ.get("CLAWBOX_MODEL_GATEWAY_PORT", "18081"))
         arms = list(expand_matrix(self.spec))
+        if arm_ids is not None:
+            known = {arm.arm_id for arm in arms}
+            unknown = arm_ids - known
+            if unknown:
+                raise ValueError(f"unknown experiment arm ids: {sorted(unknown)}")
+            arms = [arm for arm in arms if arm.arm_id in arm_ids]
+            if not arms:
+                raise ValueError("at least one experiment arm must be selected")
         requires_control = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
         if requires_control and not control_host:
             raise RuntimeError("native SSH policy control requires CLAWBOX_CONTROL_HOST")
@@ -579,7 +613,8 @@ class ExperimentWorker:
                 self.results.append(self._run_arm(arm, result_path, marker_path))
             self.policy_control = None
             self.model_gateway = None
-        self._write_summary()
+        if write_summary:
+            self._write_summary()
         return self.results
 
     @staticmethod
@@ -738,7 +773,22 @@ class ExperimentWorker:
                         "error_type": type(exc).__name__,
                     })
                     failure = failure or exc
-            pool.shutdown(wait=True)
+                    # Fail the arm immediately.  Destroying its owned VMs
+                    # unblocks sibling Cube calls; the process supervisor is
+                    # the final hard boundary if a third-party call ignores
+                    # cancellation.
+                    for pending in futures:
+                        pending.cancel()
+                    try:
+                        self.client.kill_owned_sandboxes(self.task_uid)
+                    except Exception as cleanup_exc:
+                        exc.add_note(
+                            "early arm cleanup failed: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        )
+                    interrupted = True
+                    break
+            pool.shutdown(wait=not interrupted, cancel_futures=interrupted)
             if failure is not None:
                 raise failure
         except (KeyboardInterrupt, SystemExit):
@@ -787,6 +837,12 @@ class ExperimentWorker:
                     "host OOM kill observed during arm: "
                     f"{memory.host_oom_kill_events}"
                 )
+            pool_budget_bytes = arm.resources.pool_memory_budget_mib * 1024 * 1024
+            if memory.peak_used_delta_bytes > pool_budget_bytes:
+                failure = failure or RuntimeError(
+                    "execution pool budget exceeded: "
+                    f"peak={memory.peak_used_delta_bytes} budget={pool_budget_bytes}"
+                )
         status = RunStatus.SUCCEEDED if failure is None else RunStatus.FAILED
         duration = time.monotonic() - started
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
@@ -814,7 +870,6 @@ class ExperimentWorker:
                 [item for item in tool_execution_observations
                  if item.get("execution_scope", "agent-tool") == "agent-tool"]
             )
-        pool_budget_bytes = arm.resources.pool_memory_budget_mib * 1024 * 1024
         peak_over_budget_bytes = max(0, memory.peak_used_delta_bytes - pool_budget_bytes)
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
@@ -912,7 +967,10 @@ class ExperimentWorker:
         # Result first, complete marker second. A crash between them retries the
         # entire arm, never treating a partial result as complete.
         atomic_json(result_path, result.model_dump(mode="json"))
-        atomic_marker(marker_path, arm.spec_digest)
+        if result.status is RunStatus.SUCCEEDED:
+            atomic_marker(marker_path, arm.spec_digest)
+        else:
+            marker_path.unlink(missing_ok=True)
         return result
 
     def _run_session(self, arm: ExperimentArm, index: int, coordinator: PolicyCoordinator,
@@ -2076,19 +2134,12 @@ class ExperimentWorker:
                     host_key_alias=native_ssh_host_key_alias(setup_route.sandbox_id),
                 )
 
-                def poll_resident_runtime(
-                    command: str, timeout: float,
-                ) -> CommandResult | None:
-                    # Do not open a Cube command stream while Runtime is being
-                    # snapshotted. The short poll and pause/restore operations
-                    # share this lock, so the host never causes an implicit
-                    # resume or replays the detached Agent invocation.
-                    with wait_lock:
-                        if not runtime_lifecycle.resident:
-                            return None
-                        return _execute_idempotent(
-                            runtime_executor, command, timeout,
-                        )
+                poll_resident_runtime = RuntimeStatusPoller(
+                    lifecycle=runtime_lifecycle,
+                    executor=runtime_executor,
+                    lifecycle_lock=wait_lock,
+                    snapshot_enabled=runtime_snapshot_enabled,
+                )
 
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
@@ -2320,60 +2371,95 @@ class ExperimentWorker:
                      ),
                      "timeline": timeline}
         finally:
+            cleanup_errors: list[str] = []
+
+            def cleanup_step(label: str, operation: Any) -> Any:
+                try:
+                    return operation()
+                except Exception as exc:
+                    cleanup_errors.append(f"{label}: {type(exc).__name__}: {exc}")
+                    return None
+
             if locals().get("trace_writer") is not None:
-                trace_writer.close()
+                cleanup_step("trace writer", trace_writer.close)
             if finalization_active:
-                coordinator.set_tool_active(session_id, False)
+                cleanup_step(
+                    "tool active flag",
+                    lambda: coordinator.set_tool_active(session_id, False),
+                )
                 finalization_active = False
             timeline["sandbox_cleanup_start"] = time.time()
-            with wait_lock:
-                if wait_timer is not None:
-                    wait_timer.cancel()
-                if restore_timer is not None:
-                    restore_timer.cancel()
+            # Timer.cancel is thread-safe.  Cleanup must not wait for a policy
+            # callback that may itself be blocked in external Cube I/O.
+            if wait_timer is not None:
+                wait_timer.cancel()
+            if restore_timer is not None:
+                restore_timer.cancel()
             if gateway_session is not None and self.model_gateway is not None:
-                self.model_gateway.unregister(gateway_session.token, timeout=30)
+                gateway_drained = cleanup_step(
+                    "model gateway session",
+                    lambda: self.model_gateway.unregister(
+                        gateway_session.token, timeout=30,
+                    ),
+                )
+                if gateway_drained is False:
+                    cleanup_errors.append("model gateway session did not drain")
             if policy_session is not None:
-                policy_drained = policy_session.close(timeout=30)
+                policy_drained = cleanup_step(
+                    "policy session", lambda: policy_session.close(timeout=30),
+                )
+                if policy_drained is False:
+                    cleanup_errors.append(f"policy session did not drain: {session_id}")
             for host_sampler in tuple(locals().get("host_rss_samplers", {}).values()):
-                host_sampler.stop()
-            try:
-                tool_destroy_s = lifecycle.close()
-                events.write({
+                cleanup_step("host RSS sampler", host_sampler.stop)
+            tool_destroy_s = cleanup_step("Tool sandbox", lifecycle.close)
+            if tool_destroy_s is not None:
+                cleanup_step("Tool destroy event", lambda: events.write({
                     "event": "sandbox_destroyed", "session_id": session_id,
                     "role": "tool", "service_seconds": tool_destroy_s,
                     "lifecycle_timing": lifecycle.timings[-1],
-                })
-            finally:
-                try:
-                    runtime_destroy_s = runtime_lifecycle.close()
-                    events.write({
-                        "event": "sandbox_destroyed", "session_id": session_id,
-                        "role": "runtime", "service_seconds": runtime_destroy_s,
-                        "lifecycle_timing": runtime_lifecycle.timings[-1],
-                    })
-                finally:
-                    timeline["lifecycle_timings"] = [
-                        {"role": "tool", **timing}
-                        for timing in lifecycle.timings
-                    ] + [
-                        {"role": "runtime", **timing}
-                        for timing in runtime_lifecycle.timings
-                    ]
-                    timeline["sandbox_cleanup_end"] = time.time()
-                    timeline["session_finished"] = timeline["sandbox_cleanup_end"]
-                    timeline["time_spans"] = build_time_spans(timeline)
-                    events.write({"event": "session_timing", "session_id": session_id,
-                                  "time_spans": timeline["time_spans"]})
-                    if timeline.get("validation_end"):
-                        timeline["cleanup_overhead_seconds"] = max(
-                            0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]
-                        )
-                    if lifetime and lifetime_acquired:
-                        coordinator.release_capacity(session_id, lifetime)
-                    coordinator.unregister(session_id)
-                    if not policy_drained:
-                        raise RuntimeError(f"policy session did not drain: {session_id}")
+                }))
+            runtime_destroy_s = cleanup_step("Runtime sandbox", runtime_lifecycle.close)
+            if runtime_destroy_s is not None:
+                cleanup_step("Runtime destroy event", lambda: events.write({
+                    "event": "sandbox_destroyed", "session_id": session_id,
+                    "role": "runtime", "service_seconds": runtime_destroy_s,
+                    "lifecycle_timing": runtime_lifecycle.timings[-1],
+                }))
+            timeline["lifecycle_timings"] = [
+                {"role": "tool", **timing}
+                for timing in lifecycle.timings
+            ] + [
+                {"role": "runtime", **timing}
+                for timing in runtime_lifecycle.timings
+            ]
+            timeline["sandbox_cleanup_end"] = time.time()
+            timeline["session_finished"] = timeline["sandbox_cleanup_end"]
+            timeline["time_spans"] = build_time_spans(timeline)
+            cleanup_step("session timing event", lambda: events.write({
+                "event": "session_timing", "session_id": session_id,
+                "time_spans": timeline["time_spans"],
+            }))
+            if timeline.get("validation_end"):
+                timeline["cleanup_overhead_seconds"] = max(
+                    0.0, timeline["sandbox_cleanup_end"] - timeline["validation_end"]
+                )
+            if lifetime and lifetime_acquired:
+                cleanup_step(
+                    "lifetime capacity",
+                    lambda: coordinator.release_capacity(session_id, lifetime),
+                )
+            cleanup_step("coordinator session", lambda: coordinator.unregister(session_id))
+            if cleanup_errors:
+                failure = RuntimeError(
+                    f"session cleanup incomplete for {session_id}: "
+                    + "; ".join(cleanup_errors)
+                )
+                active_exception = sys.exception()
+                if active_exception is not None:
+                    active_exception.add_note(str(failure))
+                else:
+                    raise failure
 
 
     def _restore_with_one_victim(self, arm: ExperimentArm, session_id: str,
@@ -2537,17 +2623,27 @@ class ExperimentWorker:
         }
 
     def _write_summary(self) -> None:
-        summary = {"run_id": self.run_id, "attempt_id": self.attempt_id,
-                   "experiment_id": self.spec.experiment_id,
-                   "arms": [item.model_dump(mode="json") for item in self.results]}
-        atomic_json(self.output_root / "summary.json", summary)
-        path = self.output_root / "summary.csv"
+        write_summary(
+            self.output_root, run_id=self.run_id,
+            attempt_id=self.attempt_id, task_uid=self.task_uid,
+            experiment_id=self.spec.experiment_id, results=self.results,
+        )
+
+
+def write_summary(output_root: Path, *, run_id: str, attempt_id: str,
+                  task_uid: str, experiment_id: str,
+                  results: list[ResultEnvelope]) -> None:
+        summary = {"run_id": run_id, "attempt_id": attempt_id,
+                   "experiment_id": experiment_id,
+                   "arms": [item.model_dump(mode="json") for item in results]}
+        atomic_json(output_root / "summary.json", summary)
+        path = output_root / "summary.csv"
         temporary = path.with_name(path.name + ".tmp")
         with temporary.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=["arm_id", "policy", "concurrency",
                                                         "repetition", "status", "duration_seconds"])
             writer.writeheader()
-            for item in self.results:
+            for item in results:
                 writer.writerow({"arm_id": item.arm.arm_id, "policy": item.arm.policy.name,
                                  "concurrency": item.arm.concurrency, "repetition": item.arm.repetition,
                                  "status": item.status, "duration_seconds": item.performance.get("duration_seconds")})
@@ -2555,20 +2651,20 @@ class ExperimentWorker:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         lines = [
-            f"# Experiment {self.spec.experiment_id}", "",
-            f"Run: `{self.run_id}`  ",
-            f"Attempt: `{self.attempt_id}`  ",
-            f"SandboxTask UID: `{self.task_uid}`", "",
+            f"# Experiment {experiment_id}", "",
+            f"Run: `{run_id}`  ",
+            f"Attempt: `{attempt_id}`  ",
+            f"SandboxTask UID: `{task_uid}`", "",
             "| Arm | Policy | Agents | Status | Duration (s) | Pauses | Resumes |",
             "|---|---|---:|---|---:|---:|---:|",
         ]
-        for item in self.results:
+        for item in results:
             lines.append(
                 f"| `{item.arm.arm_id}` | {item.arm.policy.name} | {item.arm.concurrency} | "
                 f"{item.status.value} | {item.performance.get('duration_seconds', 0):.3f} | "
                 f"{item.performance.get('pause_count', 0)} | {item.performance.get('resume_count', 0)} |"
             )
-        markdown = self.output_root / "summary.md"
+        markdown = output_root / "summary.md"
         markdown_tmp = markdown.with_name(markdown.name + ".tmp")
         markdown_tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
         os.replace(markdown_tmp, markdown)
@@ -2580,10 +2676,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", default=os.environ.get("CLAWBOX_RUN_ID"), required=os.environ.get("CLAWBOX_RUN_ID") is None)
     parser.add_argument("--attempt-id", default=os.environ.get("CLAWBOX_ATTEMPT_ID"), required=os.environ.get("CLAWBOX_ATTEMPT_ID") is None)
     parser.add_argument("--task-uid", default=os.environ.get("CLAWBOX_TASK_UID"), required=os.environ.get("CLAWBOX_TASK_UID") is None)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--arm-id")
+    parser.add_argument("--no-summary", action="store_true")
     args = parser.parse_args(argv)
     try:
-        results = ExperimentWorker(load_experiment(args.spec), run_id=args.run_id,
-                                   attempt_id=args.attempt_id, task_uid=args.task_uid).run()
+        results = ExperimentWorker(
+            load_experiment(args.spec), run_id=args.run_id,
+            attempt_id=args.attempt_id, task_uid=args.task_uid,
+            output_root=args.output_root,
+        ).run(
+            arm_ids={args.arm_id} if args.arm_id else None,
+            write_summary=not args.no_summary,
+        )
     except Exception as exc:
         # Preserve a useful diagnostic when a pre-arm infrastructure gate
         # fails. Keep the log useful without

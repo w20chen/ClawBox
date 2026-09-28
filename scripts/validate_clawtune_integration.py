@@ -49,6 +49,9 @@ def main() -> None:
         root / "tools" / "guest_collector_server.py",
         sidecar_dir / "src" / "clawtune_sidecar" / "trace.py",
         sidecar_dir / "src" / "tool_resource" / "sdk.py",
+        sidecar_dir / "src" / "tool_resource" / "mvdan_client.py",
+        sidecar_dir / "src" / "tool_resource" / "_mvdan_adapter" / "go.mod",
+        sidecar_dir / "src" / "tool_resource" / "_mvdan_adapter" / "main.go",
         sidecar_dir / "src" / "clawtune_kb" / "store.py",
     )
     missing = [str(path) for path in required if not path.is_file()]

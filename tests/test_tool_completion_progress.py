@@ -4,6 +4,54 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
 
+from clawbox.experiments.worker import RuntimeStatusPoller
+from clawbox.replay.lifecycle import CommandResult
+
+
+def test_resident_runtime_poll_does_not_take_model_lifecycle_lock():
+    lifecycle_lock = Lock()
+    lifecycle_lock.acquire()
+    executor = SimpleNamespace(
+        execute=lambda command, timeout: CommandResult(0, command, "", 0.0),
+    )
+    poller = RuntimeStatusPoller(
+        lifecycle=SimpleNamespace(resident=True), executor=executor,
+        lifecycle_lock=lifecycle_lock, snapshot_enabled=False,
+    )
+    completed = Event()
+    result = []
+
+    thread = Thread(
+        target=lambda: (result.append(poller("status", 1)), completed.set()),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert completed.wait(1), "resident status polling must not block model delivery"
+    finally:
+        lifecycle_lock.release()
+        thread.join(1)
+    assert result[0].stdout == "status"
+
+
+def test_snapshot_runtime_poll_serializes_with_lifecycle_transition():
+    lifecycle_lock = Lock()
+    lifecycle_lock.acquire()
+    executor = SimpleNamespace(
+        execute=lambda command, timeout: CommandResult(0, command, "", 0.0),
+    )
+    poller = RuntimeStatusPoller(
+        lifecycle=SimpleNamespace(resident=True), executor=executor,
+        lifecycle_lock=lifecycle_lock, snapshot_enabled=True,
+    )
+    completed = Event()
+    thread = Thread(target=lambda: (poller("status", 1), completed.set()), daemon=True)
+    thread.start()
+    assert not completed.wait(0.05)
+    lifecycle_lock.release()
+    thread.join(1)
+    assert completed.is_set()
+
 
 def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
     source = Path(__file__).resolve().parents[1] / 'clawbox/experiments/worker.py'

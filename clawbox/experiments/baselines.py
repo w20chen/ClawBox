@@ -4,9 +4,8 @@ The catalog is deliberately backend-free. A baseline selects one complete
 ``PolicySpec`` tuple; the experiment specification still selects the agent,
 inference backend, CubeSandbox templates, workload, and concurrency.
 
-The names retained from the pre-schema-v2 planner are compatibility aliases.
-They resolve to the closest supported schema-v2 policy and are marked as such
-so callers do not mistake them for a second execution architecture.
+Names from the pre-schema-v2 planner remain as deprecated research records.
+The standalone workflow rejects them; they impose no compatibility contract.
 """
 from __future__ import annotations
 
@@ -146,8 +145,7 @@ BASELINES = MappingProxyType({
         EvictionPolicy.TIERED_TIME_ORACLE, status="deprecated",
     ),
 
-    # Pre-schema-v2 names retained as explicit compatibility aliases. They no
-    # longer select Kubernetes, direct Firecracker, or any other backend.
+    # Pre-schema-v2 names retained only as deprecated research records.
     "fixed-resident": _resident(
         "fixed-resident", AdmissionPolicy.LIFETIME_FULL,
         status="deprecated",
@@ -184,3 +182,28 @@ def resolve_baseline(name: str) -> Baseline:
         raise ValueError(
             f"unknown baseline {name!r}; choose one of: {', '.join(BASELINES)}"
         ) from exc
+
+
+def ensure_supported_experiment(spec: object) -> None:
+    """Reject legacy or hand-renamed policies from the standalone workflow."""
+    policies = getattr(spec, "policies", ())
+    for policy in policies:
+        baseline = BASELINES.get(policy.name)
+        if baseline is None or baseline.implementation_status != "implemented":
+            raise ValueError(
+                f"policy {policy.name!r} is not supported by the standalone workflow; "
+                f"choose only: {', '.join(ACTIVE_BASELINES)}"
+            )
+        expected = baseline.as_policy()
+        if policy != expected:
+            raise ValueError(
+                f"policy {policy.name!r} does not match its canonical baseline tuple"
+            )
+    if any(policy.admission is AdmissionPolicy.TOOL_P50 for policy in policies):
+        resources = getattr(spec, "resources", None)
+        if not str(getattr(resources, "prediction_artifact", "") or "").strip():
+            raise ValueError(
+                "P50 baselines require resources.prediction_artifact from a separate "
+                "validated CubeSandbox training run so LatticeKB and ToolKB fallback "
+                "are frozen before evaluation"
+            )

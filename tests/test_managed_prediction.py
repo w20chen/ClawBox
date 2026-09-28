@@ -146,7 +146,9 @@ def test_host_calibration_excludes_backend_maintenance(tmp_path: Path) -> None:
     assert calibration["ratio_max"] == 5
 
 
-def test_per_tool_plan_queries_guest_memory_model(monkeypatch, tmp_path):
+def test_per_tool_plan_queries_guest_memory_model(
+    monkeypatch, tmp_path, clawtune_shell_parser,
+):
     from tool_resource.runtime_kb import ClauseObservation, ToolCallQuery
     from tool_time.lattice_kb import LatticeTimeKB
 
@@ -172,7 +174,9 @@ def test_per_tool_plan_queries_guest_memory_model(monkeypatch, tmp_path):
     assert call["predicted_host_execution_increment_mib"] == 3
 
 
-def test_training_cli_uses_guest_labels_without_process_rss(monkeypatch, tmp_path):
+def test_training_cli_uses_guest_labels_without_process_rss(
+    monkeypatch, tmp_path, clawtune_shell_parser,
+):
     import sys
     from tests.test_cgroup_join import span_end, bridge_record, cgroup_artifact
     from tests.test_native_tuning import make_manifest

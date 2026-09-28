@@ -60,7 +60,9 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def test_native_api_publishes_atomic_pair_and_replays_idempotently(client):
+def test_native_api_publishes_atomic_pair_and_replays_idempotently(
+    client, clawtune_shell_parser,
+):
     manifest = make_manifest()
     payload = manifest.model_dump(mode="json", by_alias=True)
     body = {

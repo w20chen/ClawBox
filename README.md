@@ -12,8 +12,9 @@ compatibility guarantee. See [supported scope and deprecated modules](docs/depre
 
 ## Start
 
-On an installed experiment host, use the [daily lab commands](docs/lab.md) to
-prepare services, choose baselines, replay traces and destroy this run's VMs.
+On an installed experiment host, use the [standalone experiment workflow](docs/lab.md)
+to configure CubeSandbox, qualify the exact spec, run or resume it, inspect live
+state, and destroy only that run's VMs.
 
 With Python 3.12 or newer, from this checkout:
 

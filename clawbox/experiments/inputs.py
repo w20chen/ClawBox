@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases
@@ -48,6 +49,20 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
     cases = load_workload_cases(spec.workload)
     if not cases:
         raise ValueError("workload contains no cases")
+    if spec.agent.driver is AgentDriver.OPENCLAW:
+        from .llm_config import resolve_llm_configuration
+
+        configuration, _ = resolve_llm_configuration(
+            spec.inference.configuration, live=False,
+        )
+        model = str(
+            configuration.get("model") or os.getenv("OPENCLAW_MODEL_REF", "")
+        ).strip()
+        if not model:
+            raise ValueError(
+                "OpenClaw requires inference.configuration.model (or "
+                "OPENCLAW_MODEL_REF); configure it before any VMs are started"
+            )
     for case in cases:
         if spec.agent.driver is AgentDriver.OPENCLAW and not case.prompt.strip():
             raise ValueError(f"{case.case_id}: OpenClaw requires a nonempty task prompt")

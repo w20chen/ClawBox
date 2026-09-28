@@ -47,6 +47,25 @@ def test_missing_trace_is_rejected_before_worker_creation(tmp_path, monkeypatch,
     assert "missing.jsonl" in capsys.readouterr().err
 
 
+def test_missing_openclaw_model_is_rejected_before_worker_creation(
+    tmp_path, monkeypatch, capsys,
+):
+    import clawbox.experiments.worker as worker
+
+    monkeypatch.delenv("OPENCLAW_MODEL_REF", raising=False)
+    monkeypatch.setattr(
+        worker, "ExperimentWorker",
+        lambda *a, **k: pytest.fail("worker constructed"),
+    )
+    raw = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    raw["inference"]["configuration"].pop("model")
+    path = tmp_path / "missing-model.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    assert cli.main(["experiment", "run", str(path)]) == 1
+    assert "OpenClaw requires inference.configuration.model" in capsys.readouterr().err
+
+
 def test_duplicate_action_ids_are_rejected(tmp_path):
     path = tmp_path / "duplicate.jsonl"
     row = Path("examples/traces/smoke.jsonl").read_text().splitlines()[0]
@@ -73,9 +92,9 @@ def test_validation_override_replaces_case_command(tmp_path):
     assert spec.workload.cases[0].validation == 'new-command'
 
 
-def test_clawtune_admission_requires_no_prediction_file():
-    spec = configure_experiment(EXAMPLE, baseline_names=['tool-p50-resident'])
-    assert validate_inputs(spec)['prediction_files'] == []
+def test_p50_admission_requires_a_frozen_training_artifact():
+    with pytest.raises(ValueError, match='prediction_artifact'):
+        configure_experiment(EXAMPLE, baseline_names=['tool-p50-resident'])
 
 
 def test_replay_rejects_unavailable_tools_before_execution(tmp_path):
@@ -87,15 +106,22 @@ def test_replay_rejects_unavailable_tools_before_execution(tmp_path):
         validate_inputs(spec)
 
 
-def test_status_reads_finished_arms_before_summary(tmp_path, capsys):
-    root = tmp_path / 'running' / 'arms'
+def test_status_marks_running_state_with_dead_supervisor_as_orphaned(tmp_path, capsys):
+    root = tmp_path / 'running'
     root.mkdir(parents=True)
-    (root / 'one.json').write_text(json.dumps({'arm': {'arm_id': 'one'}, 'status': 'succeeded'}))
-    (root / 'writing.json').write_text('{')
+    (root / 'run-state.json').write_text(json.dumps({
+        'schema_version': 1,
+        'run_id': 'running',
+        'state': 'running',
+        'supervisor': {'pid': 999_999_999, 'create_time': 0},
+        'arms': {'one': {'status': 'succeeded'}},
+    }))
     assert cli.main(['--output-root', str(tmp_path), 'experiment', 'status', 'running']) == 0
     value = json.loads(capsys.readouterr().out)
-    assert value['summaryComplete'] is False
-    assert value['arms'] == [{'armId': 'one', 'status': 'succeeded'}]
+    assert value['state'] == 'orphaned'
+    assert value['stored_state'] == 'running'
+    assert value['supervisor_alive'] is False
+    assert value['arms']['one']['status'] == 'succeeded'
 
 
 def test_run_refuses_existing_results_before_worker_creation(tmp_path, monkeypatch, capsys):
@@ -103,7 +129,7 @@ def test_run_refuses_existing_results_before_worker_creation(tmp_path, monkeypat
     monkeypatch.setattr(worker, 'ExperimentWorker', lambda *a, **kw: pytest.fail('worker constructed'))
     (tmp_path / 'old-run').mkdir()
     assert cli.main(['--output-root', str(tmp_path), 'experiment', 'run', str(EXAMPLE), '--run-id', 'old-run']) == 1
-    assert 'fresh --run-id' in capsys.readouterr().err
+    assert 'experiment resume old-run' in capsys.readouterr().err
 
 
 def test_malformed_yaml_has_a_cli_error_not_a_traceback(tmp_path, capsys):

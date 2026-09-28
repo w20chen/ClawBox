@@ -7,6 +7,31 @@ from pathlib import Path
 from typing import Any
 
 
+def _allocated_bytes(path: Path, stat: os.stat_result | None = None) -> int:
+    """Return physical allocation without substituting logical file length."""
+    value = stat or path.stat()
+    blocks = getattr(value, "st_blocks", None)
+    if blocks is not None:
+        return int(blocks) * 512
+    if os.name == "nt":
+        # Windows does not expose st_blocks. GetCompressedFileSizeW returns
+        # the physical bytes allocated for sparse and compressed files too.
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel32.GetCompressedFileSizeW
+        function.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        function.restype = wintypes.DWORD
+        high = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        low = function(str(path), ctypes.byref(high))
+        if low == 0xFFFFFFFF and ctypes.get_last_error():
+            raise OSError(ctypes.get_last_error(), f"cannot read allocation for {path}")
+        return (int(high.value) << 32) | int(low)
+    raise RuntimeError(f"physical allocation is unavailable for {path}")
+
+
 def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[str, Any]:
     memory = Path(path)
     sidecar = Path(path + ".lineage.json")
@@ -14,11 +39,14 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         if require_lineage:
             raise RuntimeError("incremental checkpoint did not publish a native RAM lineage")
         stat = memory.stat()
-        result = {"logical_bytes": stat.st_size, "allocated_bytes": stat.st_blocks * 512}
+        result = {"logical_bytes": stat.st_size,
+                  "allocated_bytes": _allocated_bytes(memory, stat)}
         metrics = Path(path + ".metrics.json")
         if metrics.exists():
             result.update(json.loads(metrics.read_text(encoding="utf-8")))
-            result["allocated_bytes"] = (stat.st_blocks + metrics.stat().st_blocks) * 512
+            result["allocated_bytes"] = (
+                _allocated_bytes(memory, stat) + _allocated_bytes(metrics)
+            )
         return result
     manifest = json.loads(sidecar.read_text(encoding="utf-8"))
     layers = manifest.get("layers")
@@ -42,7 +70,7 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
     unique = {}
     for file in files:
         stat = file.stat()
-        unique[(stat.st_dev, stat.st_ino)] = stat.st_blocks * 512
+        unique[(stat.st_dev, stat.st_ino)] = _allocated_bytes(file, stat)
     return {
         "snapshot_mechanism": "incremental-cow",
         "logical_bytes": logical,

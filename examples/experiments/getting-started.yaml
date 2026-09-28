@@ -11,7 +11,7 @@ workload:
       replay_trace_reference: examples/traces/smoke.jsonl
       prompt: Create /workspace/result.txt containing complete.
 agent: {driver: openclaw}
-inference: {backend: replay, configuration: {time_scale: 1.0}}
+inference: {backend: replay, configuration: {model: example-model, time_scale: 1.0}}
 # Replace these aliases with templates registered on your ARM64 Linux host.
 runtime: {template_alias: runtime-example-arm64, vcpu: 2, memory_mib: 2048}
 sandbox: {template_alias: tool-example-arm64, vcpu: 2, memory_mib: 4096, workspace: /workspace}

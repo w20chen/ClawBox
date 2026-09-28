@@ -28,6 +28,117 @@ DEFAULT_CHECKPOINT_HEADROOM_GIB = 8
 DEFAULT_LOCAL_CGROUP = "/sys/fs/cgroup/cube_sandbox/sandbox"
 
 
+def _write_json_atomic(path: Path, value: dict) -> None:
+    """Publish one complete profile while preserving the previous file on failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _snapshot_sdk_info() -> dict:
+    """Inspect the installed SDK in a fresh interpreter without caching imports."""
+    program = r"""
+import inspect, json
+from pathlib import Path
+from cubesandbox import Sandbox
+import cubesandbox.sandbox as module
+pause = set(inspect.signature(Sandbox.pause).parameters)
+connect = set(inspect.signature(Sandbox.connect).parameters)
+required_pause = {
+    "snapshot_tier", "memory_snapshot_path", "snapshot_generation",
+    "snapshot_mechanism",
+}
+print(json.dumps({
+    "file": str(Path(inspect.getfile(module)).resolve()),
+    "pause": sorted(pause),
+    "connect": sorted(connect),
+    "relocate": hasattr(Sandbox, "relocate_snapshot"),
+    "ready": required_pause <= pause and "snapshot_mechanism" in connect
+             and hasattr(Sandbox, "relocate_snapshot"),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True,
+        timeout=30,
+    )
+    if result.returncode:
+        return {"ready": False, "file": None, "error": result.stderr.strip()}
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("CubeSandbox SDK inspection returned invalid output") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("CubeSandbox SDK inspection returned a non-object")
+    return value
+
+
+def _sdk_source_from_module(module_file: str | None) -> Path | None:
+    if not module_file:
+        return None
+    path = Path(module_file).resolve()
+    expected = Path("sdk/python/cubesandbox/sandbox.py").parts
+    if len(path.parts) < len(expected) or path.parts[-len(expected):] != expected:
+        return None
+    return path.parents[3]
+
+
+def ensure_snapshot_sdk(cube_source: str | Path | None = None) -> Path | None:
+    """Install the exact tiered/incremental SDK required by WARM experiments."""
+    info = _snapshot_sdk_info()
+    explicit = Path(cube_source).expanduser().resolve() if cube_source else None
+    inferred = _sdk_source_from_module(info.get("file"))
+    source = explicit or inferred
+    if info.get("ready"):
+        if explicit and not (explicit / "sdk/python/cubesandbox/sandbox.py").is_file():
+            raise ValueError(f"CubeSandbox source lacks its Python SDK: {explicit}")
+        return source
+    if source is None:
+        raise RuntimeError(
+            "WARM mode requires the patched CubeSandbox SDK; pass --cube-source "
+            "PATH (or set CUBE_SOURCE_DIR) so setup can install it"
+        )
+    sdk_file = source / "sdk/python/cubesandbox/sandbox.py"
+    if not (source / ".git").exists() or not sdk_file.is_file():
+        raise ValueError(
+            f"CubeSandbox source must be a Git checkout containing sdk/python: {source}"
+        )
+    source_text = sdk_file.read_text(encoding="utf-8")
+    patches = (
+        ("def relocate_snapshot", ROOT / "deploy/cubesandbox/tiered-memory-api.patch"),
+        ("snapshot_mechanism: str | None", ROOT / "deploy/cubesandbox/incremental-cow-snapshot.patch"),
+    )
+    for marker, patch in patches:
+        if marker in source_text:
+            continue
+        include = "sdk/python/cubesandbox/sandbox.py"
+        command("git", "-C", str(source), "apply", "--check", f"--include={include}", str(patch))
+        command("git", "-C", str(source), "apply", f"--include={include}", str(patch))
+        source_text = sdk_file.read_text(encoding="utf-8")
+    command(
+        sys.executable, "-m", "pip", "install", "--no-deps",
+        "--no-build-isolation", "-e", str(source / "sdk/python"), timeout=120,
+    )
+    verified = _snapshot_sdk_info()
+    if not verified.get("ready"):
+        detail = verified.get("error") or verified
+        raise RuntimeError(f"patched CubeSandbox SDK is still unavailable: {detail}")
+    # Editable-install path files are loaded only when an interpreter starts.
+    # Setup must use the freshly installed SDK later in this same process.
+    sdk_path = str((source / "sdk/python").resolve())
+    if sdk_path not in sys.path:
+        sys.path.insert(0, sdk_path)
+        importlib.invalidate_caches()
+    return source
+
+
 def command(*args: str, timeout: int = 30) -> str:
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
@@ -143,7 +254,10 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
             env = {e["key"]: e.get("value") for c in containers for e in c.get("envs", [])}
             return revision != "unknown" and env.get("CLAWTUNE_REVISION") == revision
         for role in ("runtime", "sandbox"):
-            checks.append((role + " current ClawTune (update with lab images)", lambda r=role: matches(r)))
+            checks.append((
+                role + " current ClawTune (update with clawbox experiment images)",
+                lambda r=role: matches(r),
+            ))
     if warm:
         for unit in ("cube-sandbox-cubemaster", "cube-sandbox-cubelet"):
             checks.append((unit + " WARM root", lambda u=unit: service_setting(u, "CLAWBOX_WARM_SNAPSHOT_ROOT") == profile["warm_root"]))
@@ -155,7 +269,17 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         if profile.get("warm_numa_node") is not None:
             checks.append(("WARM NUMA node", lambda: f"mpol=bind:{profile['warm_numa_node']}"
                            in command("findmnt", "-n", "-o", "OPTIONS", "-M", profile["warm_root"])))
-        checks.append(("incremental SDK", lambda: "snapshot_mechanism" in inspect.signature(sdk()[0].pause).parameters))
+        def snapshot_sdk_ready() -> bool:
+            sandbox = sdk()[0]
+            pause = set(inspect.signature(sandbox.pause).parameters)
+            connect = set(inspect.signature(sandbox.connect).parameters)
+            return (
+                {"snapshot_tier", "memory_snapshot_path", "snapshot_generation",
+                 "snapshot_mechanism"} <= pause
+                and "snapshot_mechanism" in connect
+                and hasattr(sandbox, "relocate_snapshot")
+            )
+        checks.append(("tiered incremental SDK", snapshot_sdk_ready))
         checks.append(("host swap disabled", lambda: len(Path("/proc/swaps").read_text().splitlines()) == 1))
     for name, check in checks:
         try:
@@ -173,6 +297,17 @@ def setup(args) -> dict:
         raise ValueError("Run setup on the Linux KVM host, not the Windows client")
     if shutil.disk_usage(ROOT).free < 5 * 1024**3:
         raise ValueError("Less than 5 GiB free. Free disk space before starting services; setup never deletes old data")
+    previous = json.loads(args.profile.read_text(encoding="utf-8")) if args.profile.exists() else {}
+    if not isinstance(previous, dict):
+        raise ValueError("Host profile root must be a JSON object")
+    cube_source = (
+        getattr(args, "cube_source", None) or previous.get("cube_source")
+        or os.getenv("CUBE_SOURCE_DIR")
+    )
+    if args.warm:
+        resolved_source = ensure_snapshot_sdk(cube_source)
+        if resolved_source is not None:
+            cube_source = str(resolved_source)
     # Start only the installed CubeSandbox deployment, never unrelated containers.
     command("sudo", "-n", "systemctl", "start", "containerd", "docker", timeout=120)
     for name in CONTAINERS:
@@ -188,7 +323,6 @@ def setup(args) -> dict:
             time.sleep(1)
     for unit in SERVICES:
         command("sudo", "-n", "systemctl", "start", unit, timeout=120)
-    previous = json.loads(args.profile.read_text()) if args.profile.exists() else {}
     runtime = args.runtime_template or previous.get("runtime", {}).get("template_id") or os.getenv("CLAWBOX_RUNTIME_TEMPLATE")
     tool = args.tool_template or previous.get("sandbox", {}).get("template_id") or os.getenv("CLAWBOX_TOOL_TEMPLATE")
     if not runtime or not tool:
@@ -210,6 +344,10 @@ def setup(args) -> dict:
         warm_capacity_mib=args.warm_gib * 1024,
         warm_numa_node=args.warm_node,
     )
+    if cube_source:
+        profile["cube_source"] = str(Path(cube_source).expanduser().resolve())
+    if isinstance(previous.get("image_build"), dict):
+        profile["image_build"] = previous["image_build"]
     apply_environment(profile)
     if any(x.get("state") == "running" for x in sdk()[0].list_v2()):
         raise ValueError("Lab setup requires an idle VM host; existing VMs will not be stopped")
@@ -263,8 +401,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
     if doctor(profile, warm=args.warm):
         raise RuntimeError("Host checks failed; profile not saved")
     wait_for_vm_ready(profile)
-    args.profile.parent.mkdir(parents=True, exist_ok=True)
-    args.profile.write_text(json.dumps(profile, indent=2) + "\n")
+    _write_json_atomic(args.profile, profile)
     print(f"Saved host profile: {args.profile}")
     return profile
 
@@ -447,6 +584,7 @@ def main(argv=None) -> int:
     setup_parser.add_argument("--runtime-template")
     setup_parser.add_argument("--tool-template")
     setup_parser.add_argument("--node")
+    setup_parser.add_argument("--cube-source", help="patched CubeSandbox checkout used to install the matching SDK")
     setup_parser.add_argument("--warm", action="store_true", help="Prepare optional tmpfs snapshot storage on an idle host")
     setup_parser.add_argument("--warm-root", default="/mnt/clawbox-warm")
     setup_parser.add_argument("--warm-gib", type=int, default=DEFAULT_WARM_GIB)

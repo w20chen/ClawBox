@@ -1,3 +1,5 @@
+# DEPRECATED research fixture. Use `clawbox experiment configure` with the
+# active A/A+B/A+B+C baselines for new runs.
 schema_version: 2
 experiment_id: openclaw-cube-replay-c40
 workload:

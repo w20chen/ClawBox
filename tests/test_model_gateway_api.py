@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -9,6 +10,52 @@ import pytest
 from trace_fixtures import llm_spans, write_spans
 
 from clawbox.replay.model_gateway import ModelGateway
+
+
+def test_gateway_timeout_is_terminal_for_retries_and_late_producer(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    write_spans(trace, llm_spans([], {"content": "late"}, duration_ms=0))
+    release_producer = threading.Event()
+    callback_started = threading.Event()
+    callback_finished = threading.Event()
+
+    def block_response(_index: int | None, _message: dict) -> dict:
+        callback_started.set()
+        release_producer.wait(timeout=5)
+        callback_finished.set()
+        return {"decision": "late"}
+
+    gateway = ModelGateway(
+        tmp_path / "session.json", mode="replay", trace=trace,
+        timeout_s=0.05, before_response_ready=block_response,
+    )
+    payload = {"messages": [{"role": "user", "content": "hello"}]}
+    try:
+        with pytest.raises(TimeoutError, match="request timed out"):
+            gateway.complete_http(payload)
+        assert callback_started.wait(timeout=1)
+
+        retry_started = time.monotonic()
+        with pytest.raises(RuntimeError, match="request timed out"):
+            gateway.complete_http(payload)
+        assert time.monotonic() - retry_started < 0.04
+
+        record = gateway.records()[0]
+        assert record["ready"] is True
+        assert record["status_code"] == 504
+        assert record["error"] == "model gateway request timed out"
+        assert record["http_attempts"] == 2
+    finally:
+        release_producer.set()
+
+    assert callback_finished.wait(timeout=1)
+    time.sleep(0.02)
+    record = gateway.records()[0]
+    assert record["status_code"] == 504
+    assert record["error"] == "model gateway request timed out"
+    assert record["admission"] == {}
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -41,6 +88,47 @@ def test_prefix_stop_is_separate_from_recorded_model_steps(tmp_path, stream):
     assert len(gateway.records()) == gateway.logical_model_steps() == 2
     assert json.loads((tmp_path / "session.prefix-stop.json").read_text())["synthetic"]
     assert trace.read_bytes() == original
+
+
+def test_bounded_replay_stops_after_the_only_recorded_tool_round(tmp_path):
+    trace = tmp_path / "single-tool-round.jsonl"
+    write_spans(trace, llm_spans(
+        [{"role": "user", "content": "run it"}],
+        {"content": None, "tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {"name": "exec", "arguments": "{\"command\":\"true\"}"},
+        }]},
+        duration_ms=0,
+    ))
+    gateway = ModelGateway(
+        tmp_path / "session.json", mode="replay", trace=trace,
+        max_model_steps=1,
+    )
+    _, _, _, first_id = gateway.complete_http({
+        "messages": [{"role": "user", "content": "run it"}],
+    })
+    gateway.mark_delivery(first_id, delivered=True)
+
+    status, _, body, stop_id = gateway.complete_http({
+        "messages": [
+            {"role": "user", "content": "run it"},
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call-1", "type": "function",
+                "function": {"name": "exec", "arguments": "{\"command\":\"true\"}"},
+            }]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        ],
+    })
+    assert status == 200
+    assert b"configured replay round limit" in body
+    gateway.mark_delivery(stop_id, delivered=True)
+
+    verdict = gateway.replay_completeness()
+    assert verdict["complete"] is True
+    assert verdict["scope"] == "prefix"
+    assert verdict["source_model_steps"] == 1
+    assert verdict["expected_replay_model_steps"] == 1
+    assert verdict["prefix_stop_delivered"] is True
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, "10", 1.5])

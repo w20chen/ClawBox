@@ -4,6 +4,8 @@ import tempfile
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _test_database = Path(tempfile.gettempdir()) / f"clawbox-tests-{os.getpid()}.db"
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_test_database.as_posix()}")
@@ -15,6 +17,19 @@ os.environ.setdefault("NUMA_CAPACITY", "0:64")
 _clawtune_src = Path(__file__).resolve().parents[2] / "ClawTune" / "services" / "sidecar" / "src"
 if _clawtune_src.is_dir():
     sys.path.insert(0, str(_clawtune_src))
+
+
+@pytest.fixture(scope="session")
+def clawtune_shell_parser() -> Path:
+    """Require ClawTune's native parser on Linux; unsupported clients may skip."""
+    from tool_resource.mvdan_client import MvdanClientError, ensure_compatible_adapter
+
+    try:
+        return ensure_compatible_adapter()
+    except MvdanClientError:
+        if sys.platform != "linux":
+            pytest.skip("ClawTune builds its pinned mvdan adapter automatically on Linux")
+        raise
 
 
 @atexit.register

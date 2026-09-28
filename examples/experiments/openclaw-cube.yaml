@@ -1,3 +1,5 @@
+# DEPRECATED live-API fixture. The supported controlled workflow uses a frozen
+# replay trace and one or more active A/A+B/A+B+C baselines.
 schema_version: 2
 experiment_id: openclaw-cube
 workload:
