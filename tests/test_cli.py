@@ -1,10 +1,32 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import yaml
 
 from clawbox import cli
+
+
+def test_images_subprocess_can_import_repository_package(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_call(command, *, env):
+        captured["command"] = command
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(cli.subprocess, "call", fake_call)
+    assert cli.main([
+        "experiment", "images", "--profile", str(tmp_path / "host.json"),
+    ]) == 0
+
+    repository = str(Path(cli.__file__).resolve().parents[1])
+    assert captured["command"][1] == str(
+        Path(repository) / "scripts" / "refresh-lab-images.py"
+    )
+    assert str(captured["env"]["PYTHONPATH"]).split(os.pathsep)[0] == repository
 
 
 def test_public_cli_contains_only_experiment_group() -> None:
@@ -123,6 +145,33 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
     assert overview["pair_memory_gib"] == 3
     assert overview["concurrency"][-1]["memory_overcommit"] is True
     assert overview["arm_count"] == 6
+    assert overview["admission"]["policy_budget_gib"] == 32
+    assert overview["admission"]["static"]["per_command_mib"] == 256
+
+
+def test_configure_can_use_validated_training_p90_for_static_admission(
+    tmp_path, capsys,
+) -> None:
+    artifact = tmp_path / "p50.json"
+    artifact.write_text(json.dumps({
+        "schema": "clawbox_p50_v1",
+        "repository": "owner/repo",
+        "training_validated": True,
+        "static_tool_memory_calibration": {
+            "recommended_mib": 347,
+        },
+    }), encoding="utf-8")
+    output = tmp_path / "auto-static.yaml"
+
+    assert cli.main([
+        "experiment", "configure", "examples/experiments/getting-started.yaml",
+        str(output), "--repository", "owner/repo",
+        "--prediction-artifact", str(artifact),
+        "--static-tool-memory-mib", "auto",
+    ]) == 0
+    capsys.readouterr()
+    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert configured["resources"]["static_tool_memory_mib"] == 347
 
 
 def test_configure_refuses_to_replace_existing_output(tmp_path, capsys) -> None:
@@ -200,6 +249,26 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     assert configured["inference"]["configuration"][
         "model_wait_prediction_source"
     ] == "separate-recording-v1"
+
+
+def test_configure_can_freeze_scaled_trace_median_model_wait(tmp_path, capsys) -> None:
+    output = tmp_path / "auto-wait.yaml"
+    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+
+    assert cli.main([
+        "experiment", "configure", base, str(output),
+        "--baseline", "tool-p50-wait-reactive",
+        "--prediction-artifact", "/data/frozen-p50.json",
+        "--model-wait-prediction-seconds", "auto",
+    ]) == 0
+    capsys.readouterr()
+    configuration = yaml.safe_load(output.read_text(encoding="utf-8"))[
+        "inference"
+    ]["configuration"]
+    assert configuration["model_wait_prediction_seconds"] > 0
+    assert configuration["model_wait_prediction_source"].startswith(
+        "recorded-trace-median-scaled:"
+    )
 
 
 def test_configure_rejects_vm_shape_change_without_new_template(

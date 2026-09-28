@@ -179,8 +179,13 @@ class ManagedModelGateway:
                         except OSError:
                             pass
                         return
-                    self._send(status, body, content_type=content_type)
+                    # Publish delivery before the response body becomes
+                    # observable to the client.  A failed socket write is
+                    # corrected to false by the transport exception below.
+                    # Marking after ``wfile.write`` races a client that reads
+                    # the complete body and immediately inspects the record.
                     state.mark_delivery(request_id, delivered=True)
+                    self._send(status, body, content_type=content_type)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     self._send(HTTPStatus.BAD_REQUEST, json.dumps({
                         "error": str(exc),

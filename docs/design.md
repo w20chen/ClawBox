@@ -91,8 +91,9 @@ out admission must not hold locks needed by command completion to release memory
 
 | Name in configuration/results | Physical meaning |
 | --- | --- |
-| LOCAL | Memory where a VM executes, normally a selected NUMA node |
-| WARM | Saved VM state in tmpfs on another NUMA node; the VM is not executing there |
+| LOCAL | Normal live-VM memory on the selected NUMA node |
+| SHARED-LIVE | A running VM rebound to the shared NUMA node as the hard-watermark OOM safety path |
+| WARM | Saved, non-executing VM state in tmpfs on the shared NUMA node |
 | COLD | Saved VM state on SSD |
 
 During LOCAL-to-WARM copying, source RAM and destination pages coexist and count
@@ -118,6 +119,16 @@ incremental checkpoints allocate only the written ranges. Admission still reserv
 the VM RAM size plus 256 MiB, then commits actual allocated layer bytes.
 Requested cache reclamation is not credited as freed memory until measured.
 Restore and spill operations must serialize ownership of each saved generation.
+
+SHARED-LIVE and WARM use one physical 128 GiB pool and one atomic accounting
+ledger. A live borrow reserves the VM's configured capacity before its leaf
+cgroup is rebound, not its current RSS, so later guest growth is already covered.
+Live reservations are capped at 50% of the pool (64 GiB); live reservations plus
+snapshot reservations and committed snapshot bytes can never exceed 128 GiB.
+During checkpointing, the borrowed source VM and destination snapshot coexist
+and both remain charged. The parent VM cgroup's `memory.max` covers LOCAL hard
+capacity plus the live-borrow cap; per-node `memory.numa_stat`, rather than the
+combined cgroup charge, enforces and reports the 28/32/36 GiB LOCAL state machine.
 
 The current tiered presets require replay timing. One chooses least-recently-used
 candidates under pressure, using actual remaining wait for filtering and

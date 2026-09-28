@@ -27,6 +27,25 @@ def test_reservation_and_commit_never_double_count() -> None:
     assert (pool.reserved_bytes, pool.committed_bytes) == (0, 50)
 
 
+def test_live_borrow_and_snapshots_share_one_capacity() -> None:
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)
+    pool.reserve_borrow("vm-a", 60)
+    assert pool.borrowed_bytes == 60
+    pool.reserve(key(1), 68)
+    with pytest.raises(WarmCapacityError, match="shared NUMA capacity"):
+        pool.reserve_borrow("vm-b", 1)
+    pool.abort(key(1))
+    assert pool.release_borrow("vm-a") == 60
+    assert pool.snapshot()["borrowed_bytes"] == 0
+
+
+def test_live_borrow_cannot_exceed_half_pool_limit() -> None:
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)
+    pool.reserve_borrow("vm-a", 64)
+    with pytest.raises(WarmCapacityError, match="live-borrow"):
+        pool.reserve_borrow("vm-b", 1)
+
+
 def test_retained_lineage_is_not_spillable_and_commit_counts_only_new_pages():
     pool = WarmSnapshotPool(100)
     commit(pool, 1, 60)

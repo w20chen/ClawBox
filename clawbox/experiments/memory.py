@@ -52,6 +52,11 @@ class MemorySummary:
     minimum_available_bytes: int
     storage_used_delta_bytes: int
     host_oom_kill_events: int
+    host_baseline_used_bytes: int | None
+    host_mean_used_delta_bytes: float | None
+    host_peak_used_delta_bytes: int | None
+    host_min_used_delta_bytes: int | None
+    host_memory_time_integral_byte_seconds: float | None
 
 
 class NodeMemorySampler:
@@ -69,6 +74,8 @@ class NodeMemorySampler:
         self._samples: list[tuple[float, int, int]] = []
         self._thread: Thread | None = None
         total, available = read_meminfo(self.meminfo)
+        self.host_mem_total = total
+        self.host_baseline_used = total - available
         self.total = total
         self.baseline_used = total - available
         self.storage_used_before = self._storage_used()
@@ -116,6 +123,19 @@ class NodeMemorySampler:
         integral = sum((samples[index][0] - samples[index - 1][0]) *
                        (samples[index][1] + samples[index - 1][1]) / 2
                        for index in range(1, len(samples)))
+        host_deltas = None
+        host_integral = None
+        if self.host_mem_total is not None and self.host_baseline_used is not None:
+            host_deltas = [
+                self.host_mem_total - item[2] - self.host_baseline_used
+                for item in samples
+            ]
+            host_integral = sum(
+                (samples[index][0] - samples[index - 1][0])
+                * (host_deltas[index] + host_deltas[index - 1]) / 2
+                for index in range(1, len(samples))
+            )
+        duration = samples[-1][0] - samples[0][0]
         return MemorySummary(
             self.total, self.baseline_used,
             integral / (samples[-1][0] - samples[0][0])
@@ -126,6 +146,12 @@ class NodeMemorySampler:
                 0,
                 read_vmstat_counter(self.vmstat, "oom_kill") - self.oom_kill_before,
             ),
+            self.host_baseline_used,
+            (host_integral / duration if host_deltas is not None and duration > 0
+             else float(host_deltas[-1]) if host_deltas is not None else None),
+            max(host_deltas) if host_deltas is not None else None,
+            min(host_deltas) if host_deltas is not None else None,
+            host_integral,
         )
 
     def samples(self) -> list[dict[str, int | float]]:
@@ -173,6 +199,8 @@ class NumaNodeMemorySampler(NodeMemorySampler):
         self._samples: list[tuple[float, int, int]] = []
         self._thread = None
         total, free = read_numa_meminfo(self.numa_meminfo)
+        self.host_mem_total = None
+        self.host_baseline_used = None
         self.total = total
         self.baseline_used = total - free
         self.storage_used_before = self._storage_used()
@@ -255,6 +283,65 @@ class CgroupMemorySampler(NodeMemorySampler):
             "local_memory_events": (self.cgroup / "memory.events").read_text().strip()
             if (self.cgroup / "memory.events").exists() else "unavailable",
             "experiment_used_delta_bytes": used,
+        })
+        return observation
+
+
+class NumaCgroupMemorySampler(CgroupMemorySampler):
+    """Measure LOCAL and live-borrowed pages separately in one VM cgroup."""
+
+    def __init__(self, cgroup: Path, *, local_capacity_bytes: int,
+                 total_capacity_bytes: int, local_numa_node: int,
+                 shared_numa_node: int, **kwargs) -> None:
+        NodeMemorySampler.__init__(self, **kwargs)
+        self.cgroup = cgroup
+        limit = (cgroup / "memory.max").read_text().strip()
+        if limit != str(total_capacity_bytes):
+            raise ValueError(
+                f"combined live memory.max {limit} does not match {total_capacity_bytes}"
+            )
+        nodes = (cgroup / "cpuset.mems.effective").read_text().strip()
+        granted: set[int] = set()
+        for part in nodes.split(","):
+            start, separator, end = part.partition("-")
+            granted.update(range(int(start), int(end) + 1) if separator else (int(start),))
+        if not {local_numa_node, shared_numa_node}.issubset(granted):
+            raise ValueError(
+                f"VM cgroup cpuset {nodes} does not include LOCAL/shared nodes "
+                f"{local_numa_node},{shared_numa_node}"
+            )
+        self.total = local_capacity_bytes
+        self.baseline_used = 0
+        self.local_numa_node = local_numa_node
+        self.shared_numa_node = shared_numa_node
+
+    def tier_usage(self) -> tuple[int, int, int]:
+        from .numa_borrow import read_numa_lru_bytes
+        resident, unattributed = read_numa_lru_bytes(self.cgroup)
+        local = resident.get(self.local_numa_node, 0) + unattributed
+        shared = resident.get(self.shared_numa_node, 0)
+        total = int((self.cgroup / "memory.current").read_text())
+        return local, shared, total
+
+    def current(self) -> tuple[int, int]:
+        _, available = read_meminfo(self.meminfo)
+        local, _, _ = self.tier_usage()
+        return local, available
+
+    def observe(self) -> dict[str, int | str]:
+        observation = NodeMemorySampler.observe(self)
+        local, shared, total = self.tier_usage()
+        observation.update({
+            "metric": "cgroup_v2_numa_tier_memory",
+            "local_memory_cgroup": str(self.cgroup),
+            "local_numa_node": self.local_numa_node,
+            "shared_numa_node": self.shared_numa_node,
+            "local_capacity_bytes": self.total,
+            "local_used_bytes": local,
+            "shared_live_used_bytes": shared,
+            "combined_live_used_bytes": total,
+            "experiment_used_delta_bytes": local,
+            "local_memory_events": (self.cgroup / "memory.events").read_text().strip(),
         })
         return observation
 

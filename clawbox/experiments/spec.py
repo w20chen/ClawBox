@@ -120,6 +120,9 @@ class ExecutionSpec(StrictFrozenModel):
 class ResourcesSpec(StrictFrozenModel):
     target_node: str = Field(min_length=1)
     pool_memory_budget_mib: int = Field(ge=1)
+    local_memory_low_watermark_mib: int | None = Field(default=None, ge=1)
+    local_memory_high_watermark_mib: int | None = Field(default=None, ge=1)
+    shared_memory_borrow_limit_mib: int | None = Field(default=None, ge=1)
     emergency_free_memory_mib: int = Field(ge=1)
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
@@ -136,6 +139,34 @@ class ResourcesSpec(StrictFrozenModel):
     local_numa_node: int | None = Field(default=None, ge=0)
     local_memory_cgroup: str | None = None
     warm_numa_node: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        values = (
+            self.local_memory_low_watermark_mib,
+            self.local_memory_high_watermark_mib,
+            self.local_memory_capacity_mib,
+            self.shared_memory_borrow_limit_mib,
+        )
+        if any(value is not None for value in (values[0], values[1], values[3])):
+            if any(value is None for value in values):
+                raise ValueError(
+                    "LOW/HIGH shared borrowing requires low, high, LOCAL hard, and borrow limit"
+                )
+            low, high, hard, borrow = (int(value) for value in values)
+            if not low < high < hard:
+                raise ValueError("memory watermarks must satisfy LOW < HIGH < LOCAL hard")
+            if self.warm_numa_node is None or self.local_numa_node is None:
+                raise ValueError("shared borrowing requires LOCAL and shared NUMA nodes")
+            if self.warm_numa_node == self.local_numa_node:
+                raise ValueError("LOCAL and shared NUMA nodes must differ")
+            if borrow * 2 > self.warm_memory_capacity_mib:
+                raise ValueError(
+                    "live borrow limit cannot exceed 50% of the shared NUMA pool"
+                )
+            if self.pool_memory_budget_mib != high:
+                raise ValueError("pool_memory_budget_mib must equal the HIGH watermark")
+        return self
 
 
 class PolicySpec(StrictFrozenModel):

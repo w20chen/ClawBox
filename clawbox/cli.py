@@ -22,6 +22,30 @@ def emit(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True, default=str))
 
 
+def static_memory_value(value: str) -> int | str:
+    if value == "auto":
+        return value
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive MiB integer or 'auto'") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive MiB integer or 'auto'")
+    return parsed
+
+
+def positive_float_or_auto(value: str) -> float | str:
+    if value == "auto":
+        return value
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive number or 'auto'") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number or 'auto'")
+    return parsed
+
+
 def emit_overview(value: dict[str, Any]) -> None:
     """Render the pre-run resource shape for a human at the terminal."""
     runtime = value["runtime"]
@@ -55,6 +79,42 @@ def emit_overview(value: dict[str, Any]) -> None:
         f"Safety: host free floor={safety['emergency_free_memory_gib']:g} GiB, "
         f"checkpoint/restore headroom={safety['checkpoint_restore_headroom_gib']:g} GiB"
     )
+    admission = value["admission"]
+    local_capacity = admission["physical_local_capacity_gib"]
+    if admission.get("local_low_watermark_gib") is not None:
+        print(
+            "Memory scopes: "
+            f"LOCAL LOW/HIGH/HARD={admission['local_low_watermark_gib']:g}/"
+            f"{admission['local_high_watermark_gib']:g}/{local_capacity:g} GiB, "
+            f"shared pool={admission['shared_pool_capacity_gib']:g} GiB, "
+            f"live-borrow cap={admission['shared_live_borrow_limit_gib']:g} GiB, "
+            f"combined live cgroup limit={admission['combined_live_cgroup_limit_gib']:g} GiB"
+        )
+    else:
+        print(
+            "Memory scopes: "
+            f"physical LOCAL cgroup={local_capacity if local_capacity is not None else 'unknown'} GiB, "
+            f"experiment policy budget={admission['policy_budget_gib']:g} GiB, "
+            f"usable after operation headroom={admission['available_after_headroom_gib']:g} GiB"
+        )
+    static = admission["static"]
+    print(
+        f"Admission A: fixed={static['per_command_mib']} MiB, "
+        f"reservation-only ceiling={static['reservation_only_slots']} concurrent commands"
+    )
+    p50 = admission.get("p50")
+    if p50:
+        if p50.get("error"):
+            print(f"Admission A+B/C: unavailable ({p50['error']})")
+        else:
+            print(
+                "Admission A+B/C: frozen P50 range="
+                f"{p50['min_mib']:g}..{p50['max_mib']:g} MiB "
+                f"(median={p50['median_mib']:g}, entries={p50['entry_count']}), "
+                "reservation-only ceiling at max="
+                f"{p50['reservation_only_slots_at_max']} concurrent commands"
+            )
+    print("Admission ceilings above exclude measured resident VM memory; run results enforce both.")
     print(f"Policies ({len(value['policies'])}), arms ({value['arm_count']}):")
     for policy in value["policies"]:
         labels = dimensions(PolicySpec.model_validate(policy))
@@ -63,9 +123,8 @@ def emit_overview(value: dict[str, Any]) -> None:
         )
     for name, resources in value["effective_policy_resources"].items():
         print(f"  {name}: execution pool={resources['pool_memory_gib']:g} GiB, "
-              f"snapshot memory={resources['snapshot_memory_gib']:g} GiB")
-    if len({row['snapshot_memory_gib'] for row in value['effective_policy_resources'].values()}) > 1:
-        print("Comparison: snapshot-memory capacities differ between policies.")
+              f"shared pool={resources['shared_pool_gib']:g} GiB, "
+              f"snapshot migration={'enabled' if resources['snapshot_enabled'] else 'disabled'}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -100,6 +159,9 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument("--local-memory-cgroup", default="/sys/fs/cgroup/cube_sandbox/sandbox")
     setup.add_argument("--local-gib", type=int, default=64)
     setup.add_argument("--local-node", type=int, default=0)
+    setup.add_argument("--low-gib", type=int)
+    setup.add_argument("--high-gib", type=int)
+    setup.add_argument("--shared-borrow-percent", type=int, default=50)
     setup.add_argument("--warm", action="store_true")
     setup.add_argument("--warm-root", default="/mnt/clawbox-warm")
     setup.add_argument("--warm-gib", type=int, default=128)
@@ -205,7 +267,10 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--warm-root")
     configure.add_argument("--warm-memory-gib", type=float)
     configure.add_argument("--cold-root")
-    configure.add_argument("--static-tool-memory-mib", type=int)
+    configure.add_argument(
+        "--static-tool-memory-mib", type=static_memory_value,
+        help="fixed Tool admission in MiB, or auto for training-artifact P90",
+    )
     configure.add_argument("--full-tool-memory-mib", type=int)
     configure.add_argument(
         "--prediction-artifact",
@@ -221,7 +286,10 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--stabilization-seconds", type=float)
     configure.add_argument("--time-scale", type=float)
     configure.add_argument("--openclaw-exec-yield-ms", type=int)
-    configure.add_argument("--model-wait-prediction-seconds", type=float)
+    configure.add_argument(
+        "--model-wait-prediction-seconds", type=positive_float_or_auto,
+        help="predicted model wait, or auto for the scaled recorded-trace median",
+    )
     configure.add_argument("--model-wait-prediction-source")
     configure.add_argument("--fixed-delay-seconds", type=float)
     configure.add_argument("--prefetch-lead-seconds", type=float)
@@ -253,7 +321,8 @@ def main(argv: list[str] | None = None) -> int:
             emit(report)
             return 1 if report["unavailable"] else 0
         if args.command == "images":
-            script = Path(__file__).resolve().parents[1] / "scripts" / "refresh-lab-images.py"
+            repository = Path(__file__).resolve().parents[1]
+            script = repository / "scripts" / "refresh-lab-images.py"
             command = [
                 sys.executable, str(script), "--profile", str(args.profile),
                 "--pip-index", args.pip_index,
@@ -265,7 +334,12 @@ def main(argv: list[str] | None = None) -> int:
                 *(["--direct-network"] if args.direct_network is True else []),
                 *(["--proxy-network"] if args.direct_network is False else []),
             ]
-            return subprocess.call(command)
+            environment = os.environ.copy()
+            python_path = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                [str(repository), *([python_path] if python_path else [])]
+            )
+            return subprocess.call(command, env=environment)
         if args.command == "setup":
             from clawbox.lab import setup as setup_host
 
@@ -442,10 +516,24 @@ def main(argv: list[str] | None = None) -> int:
                 target_node=(
                     args.target_node or profile.get("node") or os.getenv("CUBE_NODE")
                 ),
-                pool_memory_gib=args.pool_memory_gib,
+                pool_memory_gib=(
+                    args.pool_memory_gib
+                    if args.pool_memory_gib is not None else
+                    profile.get("local_memory_high_watermark_mib", 0) / 1024
+                    if profile.get("local_memory_high_watermark_mib") else None
+                ),
                 emergency_free_memory_gib=args.emergency_free_memory_gib,
                 checkpoint_headroom_gib=args.checkpoint_headroom_gib,
                 local_memory_capacity_mib=profile.get("local_memory_capacity_mib"),
+                local_memory_low_watermark_mib=profile.get(
+                    "local_memory_low_watermark_mib"
+                ),
+                local_memory_high_watermark_mib=profile.get(
+                    "local_memory_high_watermark_mib"
+                ),
+                shared_memory_borrow_limit_mib=profile.get(
+                    "shared_memory_borrow_limit_mib"
+                ),
                 warm_memory_capacity_mib=(
                     gib_to_mib(args.warm_memory_gib, name="warm memory")
                     if args.warm_memory_gib is not None
@@ -604,7 +692,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "report":
-            print((run_root / "summary.md").read_text(encoding="utf-8"), end="")
+            from clawbox.experiments.reporting import write_run_report_artifacts
+
+            report, _memory = write_run_report_artifacts(run_root)
+            print(report.read_text(encoding="utf-8"), end="")
             return 0
         summary = run_root / "summary.json"
         if not summary.exists():

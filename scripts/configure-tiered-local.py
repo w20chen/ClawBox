@@ -13,10 +13,15 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--capacity-mib", type=int, default=65536)
 parser.add_argument("--numa-node", type=int, default=0)
+parser.add_argument("--shared-borrow-mib", type=int, default=0)
+parser.add_argument("--shared-node", type=int)
 parser.add_argument("--reclaim-storage-cache", action="store_true")
 args = parser.parse_args()
-if args.capacity_mib <= 0 or args.numa_node < 0:
+if (args.capacity_mib <= 0 or args.numa_node < 0 or args.shared_borrow_mib < 0
+        or (args.shared_borrow_mib and args.shared_node is None)):
     parser.error("capacity must be positive and NUMA node non-negative")
+if args.shared_borrow_mib and args.shared_node == args.numa_node:
+    parser.error("LOCAL and shared NUMA nodes must differ")
 base = Path("/sys/fs/cgroup/cube_sandbox")
 group = base / "sandbox"
 if "populated 0" not in (group / "cgroup.events").read_text().splitlines():
@@ -26,14 +31,19 @@ before = int((group / "memory.current").read_text())
 for parent in (base, group):
     if "cpuset" not in (parent / "cgroup.subtree_control").read_text().split():
         (parent / "cgroup.subtree_control").write_text("+cpuset")
-(group / "cpuset.mems").write_text(str(args.numa_node))
+(group / "cpuset.mems").write_text(
+    str(args.numa_node) if not args.shared_borrow_mib
+    else f"{args.numa_node},{args.shared_node}"
+)
 (group / "cpuset.cpus").write_text(cpus)
 storage_group = base / "cubelet"
 # Snapshot-copy work also represents work on the LOCAL host. The WARM mount
 # keeps its explicit NUMA1 memory policy; only CPU affinity is constrained here.
 (storage_group / "cpuset.cpus").write_text(cpus)
 (group / "memory.swap.max").write_text("0")
-(group / "memory.max").write_text(str(args.capacity_mib * 1024 * 1024))
+(group / "memory.max").write_text(
+    str((args.capacity_mib + args.shared_borrow_mib) * 1024 * 1024)
+)
 reclaim_status = "not_needed"
 if before:
     try:
@@ -57,6 +67,8 @@ if args.reclaim_storage_cache:
             storage_reclaim = "partial_EAGAIN"
 print(json.dumps({
     "cgroup": str(group), "idle_before": True,
+    "local_capacity_mib": args.capacity_mib,
+    "shared_borrow_capacity_mib": args.shared_borrow_mib,
     "memory_before_bytes": before, "reclaim": reclaim_status,
     "storage_cache_reclaim": storage_reclaim,
     "storage_memory_current": (storage_group / "memory.current").read_text().strip(),

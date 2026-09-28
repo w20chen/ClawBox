@@ -21,7 +21,7 @@ from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
-from threading import Lock, Semaphore, Timer
+from threading import Event, Lock, RLock, Semaphore, Thread, Timer
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,19 +31,23 @@ from clawbox.cube import (
 )
 from .llm_config import resolve_llm_configuration
 from clawbox.replay.trace import find_recordings, load_trace
-from clawbox.replay.lifecycle import CommandResult
+from clawbox.replay.lifecycle import CommandResult, LifecycleError
 
-from .memory import CgroupMemorySampler, NodeMemorySampler, NumaNodeMemorySampler, SandboxRSSSampler
+from .memory import (
+    CgroupMemorySampler, NodeMemorySampler, NumaCgroupMemorySampler,
+    NumaNodeMemorySampler, SandboxRSSSampler,
+)
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
+from .numa_borrow import SandboxNumaBorrower
 from .openclaw_driver import (
     NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
     native_tool_bridge_setup_command, openclaw_shared_ssh_runtime_directory,
     run_openclaw,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
-from .snapshot_pool import WarmSnapshotPool
+from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
 from .spec_types import InferenceBackend, SnapshotTier
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, P50PredictionProvider, PredictionUnavailable, clawtune_extra_peak
@@ -79,6 +83,198 @@ def policy_operation_headroom_mib(arm: ExperimentArm) -> int:
     if arm.policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
         return 0
     return arm.resources.checkpoint_restore_headroom_mib
+
+
+def policy_progress_budget_mib(arm: ExperimentArm) -> int | None:
+    """Return the live-memory domain available to already admitted sessions.
+
+    HIGH governs admission of new VM pairs.  Existing sessions must be able to
+    reach the logical LOCAL hard watermark, at which point the watermark
+    controller redirects whole VMs to the bounded shared NUMA borrow pool.
+    Charging their pending Tool reservations against LOCAL hard would stop
+    progress before the controller can observe HARD and borrow, so their
+    liveness budget is the enforced combined cgroup limit instead.
+    """
+    borrow = arm.resources.shared_memory_borrow_limit_mib
+    local = arm.resources.local_memory_capacity_mib
+    if borrow is None or local is None:
+        return None
+    return local + borrow
+
+
+class WatermarkController:
+    """Enforce LOW/HIGH LOCAL hysteresis with shared-memory OOM protection."""
+
+    def __init__(self, arm: ExperimentArm, coordinator: PolicyCoordinator,
+                 sampler: NumaCgroupMemorySampler, borrower: SandboxNumaBorrower,
+                 events: "EventWriter") -> None:
+        self.arm = arm
+        self.coordinator = coordinator
+        self.sampler = sampler
+        self.borrower = borrower
+        self.events = events
+        self.low = arm.resources.local_memory_low_watermark_mib * 1024 * 1024
+        self.high = arm.resources.local_memory_high_watermark_mib * 1024 * 1024
+        self.hard = arm.resources.local_memory_capacity_mib * 1024 * 1024
+        self._lifecycles: dict[str, tuple[CubeSandboxLifecycle, CubeSandboxLifecycle]] = {}
+        self._lock = RLock()
+        self._borrow_lock = Lock()
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self._error: Exception | None = None
+        self.high_crossings = 0
+        self.high_overshoot_byte_seconds = 0.0
+        self.hard_overshoot_byte_seconds = 0.0
+        self.high_overshoot_seconds = 0.0
+        self.hard_overshoot_seconds = 0.0
+        self.peak_local_bytes = 0
+        self.peak_shared_live_bytes = 0
+        self.peak_combined_live_bytes = 0
+        self.peak_shared_total_bytes = 0
+        self.borrow_count = 0
+        self.borrow_service_seconds = 0.0
+        self._last_reactive_borrow_local_bytes: int | None = None
+
+    def register(self, session_id: str, tool: CubeSandboxLifecycle,
+                 runtime: CubeSandboxLifecycle) -> None:
+        with self._lock:
+            self._lifecycles[session_id] = (tool, runtime)
+
+    def unregister(self, session_id: str) -> None:
+        with self._lock:
+            self._lifecycles.pop(session_id, None)
+
+    def start(self) -> None:
+        self._thread = Thread(target=self._run, name="memory-watermarks", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=30)
+            if self._thread.is_alive():
+                raise RuntimeError("memory watermark controller did not stop")
+        if self._error is not None:
+            raise RuntimeError("memory watermark controller failed") from self._error
+
+    def _record_borrow(self, lifecycle: CubeSandboxLifecycle, *, reason: str) -> bool:
+        with self._borrow_lock:
+            if lifecycle.sandbox_id in set(self.borrower.borrowed()):
+                return True
+            try:
+                record = lifecycle.borrow_shared()
+            except (LifecycleError, WarmCapacityError):
+                return False
+            self.borrow_count += 1
+            self.borrow_service_seconds += record.service_seconds
+            self.events.write({
+                "event": "shared_memory_borrowed",
+                "role": lifecycle.role,
+                "reason": reason,
+                **asdict(record),
+            })
+            return True
+
+    def route_progress_to_shared(self, lifecycle: CubeSandboxLifecycle,
+                                 predicted_increment_mib: int) -> bool:
+        """Borrow before an existing Tool's prediction would cross LOCAL HARD."""
+        if lifecycle.sandbox_id in set(self.borrower.borrowed()):
+            return True
+        projected = self.coordinator.projected_local_commitment(predicted_increment_mib)
+        if projected <= self.hard:
+            return False
+        if not self._record_borrow(lifecycle, reason="predicted_local_hard_guard"):
+            raise RuntimeError(
+                "predicted LOCAL hard crossing has no shared borrow capacity"
+            )
+        return True
+
+    def _borrow_one(self) -> bool:
+        borrowed = set(self.borrower.borrowed())
+        with self._lock:
+            candidates = [
+                lifecycle
+                for session in self._lifecycles.values()
+                for lifecycle in session
+                if lifecycle.resident and lifecycle.sandbox_id not in borrowed
+            ]
+        candidates.sort(
+            key=lambda item: (
+                -(item.configured_memory_bytes or 0), item.sandbox_id or "",
+            )
+        )
+        for lifecycle in candidates:
+            if self._record_borrow(lifecycle, reason="observed_local_hard_guard"):
+                return True
+        return False
+
+    def _run(self) -> None:
+        previous = time.monotonic()
+        above_high = False
+        try:
+            while not self._stop.wait(self.sampler.interval_s):
+                now = time.monotonic()
+                elapsed = max(0.0, now - previous)
+                previous = now
+                above_high = self._sample_once(elapsed, above_high)
+        except Exception as exc:
+            self._error = exc
+
+    def _sample_once(self, elapsed: float, above_high: bool) -> bool:
+        """Apply one deterministic watermark decision; split out for audit tests."""
+        local, shared, combined = self.sampler.tier_usage()
+        pool = self.borrower.shared_pool.snapshot()
+        snapshot_claim = int(pool["reserved_bytes"]) + int(pool["committed_bytes"])
+        shared_total = shared + snapshot_claim
+        self.peak_local_bytes = max(self.peak_local_bytes, local)
+        self.peak_shared_live_bytes = max(self.peak_shared_live_bytes, shared)
+        self.peak_combined_live_bytes = max(self.peak_combined_live_bytes, combined)
+        self.peak_shared_total_bytes = max(self.peak_shared_total_bytes, shared_total)
+        if shared_total > int(pool["capacity_bytes"]):
+            raise RuntimeError(
+                "shared NUMA physical capacity exceeded: "
+                f"live={shared} snapshot_claim={snapshot_claim} "
+                f"capacity={pool['capacity_bytes']}"
+            )
+        self.high_overshoot_byte_seconds += max(0, local - self.high) * elapsed
+        self.hard_overshoot_byte_seconds += max(0, local - self.hard) * elapsed
+        if local > self.high:
+            self.high_overshoot_seconds += elapsed
+        if local > self.hard:
+            self.hard_overshoot_seconds += elapsed
+        if local >= self.high and not above_high:
+            above_high = True
+            self.coordinator.set_new_session_admission_blocked(True)
+            self.high_crossings += 1
+            self.events.write({
+                "event": "local_high_watermark_crossed",
+                "local_used_bytes": local, "shared_live_used_bytes": shared,
+                "combined_live_used_bytes": combined,
+            })
+        if local <= self.low and above_high:
+            above_high = False
+            self.coordinator.set_new_session_admission_blocked(False)
+            self.events.write({
+                "event": "local_low_watermark_reached",
+                "local_used_bytes": local, "shared_live_used_bytes": shared,
+            })
+        if above_high and (
+            self.arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+        ):
+            if self.coordinator.evict_one_for_watermark():
+                return above_high
+        if local >= self.hard:
+            # cpuset rebinding redirects future faults but this kernel does not
+            # synchronously migrate already-resident pages. Borrow again only
+            # when LOCAL keeps growing, not every 200 ms while the same pages
+            # remain charged on node 0.
+            growth_step = 64 * 1024 * 1024
+            if (self._last_reactive_borrow_local_bytes is None
+                    or local >= self._last_reactive_borrow_local_bytes + growth_step):
+                if not self._borrow_one():
+                    raise RuntimeError("LOCAL hard watermark reached with no borrowable VM")
+                self._last_reactive_borrow_local_bytes = local
+        return above_high
 
 
 def _network_target(endpoint: str, *, label: str) -> str:
@@ -638,7 +834,19 @@ class ExperimentWorker:
                     sandbox.template, sandbox.image_digest,
                 )
         events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
+        shared_borrow_mib = arm.resources.shared_memory_borrow_limit_mib
         sampler = (
+            NumaCgroupMemorySampler(
+                Path(arm.resources.local_memory_cgroup),
+                local_capacity_bytes=arm.resources.local_memory_capacity_mib * 1024 * 1024,
+                total_capacity_bytes=(
+                    arm.resources.local_memory_capacity_mib + shared_borrow_mib
+                ) * 1024 * 1024,
+                local_numa_node=arm.resources.local_numa_node,
+                shared_numa_node=arm.resources.warm_numa_node,
+                interval_s=arm.execution.memory_sample_interval_seconds,
+            )
+            if arm.resources.local_memory_cgroup and shared_borrow_mib is not None else
             CgroupMemorySampler(
                 Path(arm.resources.local_memory_cgroup),
                 capacity_bytes=(arm.resources.local_memory_capacity_mib or
@@ -714,13 +922,24 @@ class ExperimentWorker:
             arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
             emergency_free_mib=arm.resources.emergency_free_memory_mib,
             operation_headroom_mib=policy_operation_headroom_mib(arm),
+            progress_budget_mib=policy_progress_budget_mib(arm),
             startup_headroom_mib=self._startup_headroom_mib(arm, prediction_provider),
             physical_sample=sampler.current,
             reclaim_cache=reclaim_local_cache if isinstance(sampler, CgroupMemorySampler) else None,
             on_pressure_pause=record_pressure_pause,
         )
         snapshot_pool = WarmSnapshotPool(
-            arm.resources.warm_memory_capacity_mib * 1024 * 1024
+            arm.resources.warm_memory_capacity_mib * 1024 * 1024,
+            borrow_capacity_bytes=(shared_borrow_mib or 0) * 1024 * 1024,
+        )
+        numa_borrower = (
+            SandboxNumaBorrower(
+                Path(arm.resources.local_memory_cgroup),
+                local_node=arm.resources.local_numa_node,
+                shared_node=arm.resources.warm_numa_node,
+                shared_pool=snapshot_pool,
+            )
+            if shared_borrow_mib is not None else None
         )
         if arm.resources.local_memory_cgroup:
             def record_memory_sample(used: int, available: int) -> None:
@@ -732,14 +951,31 @@ class ExperimentWorker:
                 events.write({
                     "event": "memory_sample", "local_used_bytes": used,
                     "host_available_bytes": available,
+                    "host_used_bytes": sampler.host_mem_total - available,
+                    "host_used_delta_bytes": (
+                        sampler.host_mem_total - available
+                        - sampler.host_baseline_used
+                    ),
+                    "shared_live_used_bytes": (
+                        sampler.tier_usage()[1]
+                        if isinstance(sampler, NumaCgroupMemorySampler) else 0
+                    ),
                     "warm_allocated_bytes": warm_physical,
                     "warm_reserved_bytes": pool["reserved_bytes"],
                     "warm_committed_bytes": pool["committed_bytes"],
+                    "shared_borrow_reserved_bytes": pool["borrowed_bytes"],
                 })
             sampler.sample_hook = record_memory_sample
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
+        watermark_controller = (
+            WatermarkController(arm, coordinator, sampler, numa_borrower, events)
+            if isinstance(sampler, NumaCgroupMemorySampler)
+            and numa_borrower is not None else None
+        )
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
         sampler.start()
+        if watermark_controller is not None:
+            watermark_controller.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
         interrupted = False
@@ -755,7 +991,7 @@ class ExperimentWorker:
                     self._run_session, arm, index, coordinator, events,
                     policy_events, prediction_provider, sandbox_create_gate,
                     sampler.observe, arm_started_wall, arm_started_monotonic,
-                    snapshot_pool,
+                    snapshot_pool, numa_borrower, watermark_controller,
                 ): index
                 for index in range(arm.concurrency)
             }
@@ -818,6 +1054,11 @@ class ExperimentWorker:
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
             policy_events.close(wait=not interrupted)
+            if watermark_controller is not None:
+                try:
+                    watermark_controller.stop()
+                except Exception as exc:
+                    failure = failure or exc
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
@@ -825,6 +1066,9 @@ class ExperimentWorker:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception as exc:
                 cleanup_error = exc
+            if numa_borrower is not None:
+                for sandbox_id in numa_borrower.borrowed():
+                    numa_borrower.release_destroyed(sandbox_id)
             time.sleep(arm.execution.stabilization_seconds)
             memory = sampler.stop()
             events.write({"event": "memory_sampling", "observation": sampler.observe(),
@@ -838,7 +1082,8 @@ class ExperimentWorker:
                     f"{memory.host_oom_kill_events}"
                 )
             pool_budget_bytes = arm.resources.pool_memory_budget_mib * 1024 * 1024
-            if memory.peak_used_delta_bytes > pool_budget_bytes:
+            if (watermark_controller is None
+                    and memory.peak_used_delta_bytes > pool_budget_bytes):
                 failure = failure or RuntimeError(
                     "execution pool budget exceeded: "
                     f"peak={memory.peak_used_delta_bytes} budget={pool_budget_bytes}"
@@ -921,6 +1166,34 @@ class ExperimentWorker:
                 "pause_service_seconds": coordinator.pause_service_seconds,
                 "resume_count": coordinator.resume_count,
                 "resume_service_seconds": coordinator.resume_service_seconds,
+                "local_high_crossings": (
+                    watermark_controller.high_crossings
+                    if watermark_controller is not None else None
+                ),
+                "local_high_overshoot_byte_seconds": (
+                    watermark_controller.high_overshoot_byte_seconds
+                    if watermark_controller is not None else None
+                ),
+                "local_high_overshoot_seconds": (
+                    watermark_controller.high_overshoot_seconds
+                    if watermark_controller is not None else None
+                ),
+                "local_hard_overshoot_byte_seconds": (
+                    watermark_controller.hard_overshoot_byte_seconds
+                    if watermark_controller is not None else None
+                ),
+                "local_hard_overshoot_seconds": (
+                    watermark_controller.hard_overshoot_seconds
+                    if watermark_controller is not None else None
+                ),
+                "shared_memory_borrow_count": (
+                    watermark_controller.borrow_count
+                    if watermark_controller is not None else None
+                ),
+                "shared_memory_borrow_service_seconds": (
+                    watermark_controller.borrow_service_seconds
+                    if watermark_controller is not None else None
+                ),
                 "blocked_admission_seconds": coordinator.blocked_seconds,
                 "admission_control": coordinator.admission_metrics(),
                 "tool_execution_observations": tool_execution_observations,
@@ -940,9 +1213,38 @@ class ExperimentWorker:
             },
             memory={
                 **asdict(memory),
-                "pool_budget_bytes": pool_budget_bytes,
-                "pool_budget_exceeded": peak_over_budget_bytes > 0,
-                "peak_over_budget_bytes": peak_over_budget_bytes,
+                "admission_high_watermark_bytes": pool_budget_bytes,
+                "local_high_watermark_exceeded": peak_over_budget_bytes > 0,
+                "peak_local_high_overshoot_bytes": peak_over_budget_bytes,
+                "local_low_watermark_bytes": (
+                    watermark_controller.low if watermark_controller is not None else None
+                ),
+                "local_high_watermark_bytes": (
+                    watermark_controller.high if watermark_controller is not None else None
+                ),
+                "local_hard_limit_bytes": (
+                    watermark_controller.hard if watermark_controller is not None else None
+                ),
+                "shared_memory_borrow_limit_bytes": (
+                    (shared_borrow_mib or 0) * 1024 * 1024
+                    if watermark_controller is not None else None
+                ),
+                "peak_local_tier_bytes": (
+                    watermark_controller.peak_local_bytes
+                    if watermark_controller is not None else None
+                ),
+                "peak_shared_live_bytes": (
+                    watermark_controller.peak_shared_live_bytes
+                    if watermark_controller is not None else None
+                ),
+                "peak_combined_live_bytes": (
+                    watermark_controller.peak_combined_live_bytes
+                    if watermark_controller is not None else None
+                ),
+                "peak_shared_total_bytes": (
+                    watermark_controller.peak_shared_total_bytes
+                    if watermark_controller is not None else None
+                ),
                 "peak_commitment_bytes": coordinator.peak_commitment_bytes,
             },
             artifacts={
@@ -980,7 +1282,9 @@ class ExperimentWorker:
                      physical_observation: Any = None,
                      arm_started_wall: float | None = None,
                      arm_started_monotonic: float | None = None,
-                     snapshot_pool: WarmSnapshotPool | None = None) -> dict[str, Any]:
+                     snapshot_pool: WarmSnapshotPool | None = None,
+                     numa_borrower: SandboxNumaBorrower | None = None,
+                     watermark_controller: WatermarkController | None = None) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         if session_case != arm.case:
             arm = arm.model_copy(update={"case": session_case})
@@ -1071,6 +1375,8 @@ class ExperimentWorker:
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             snapshot_reservation_bytes=(arm.runtime.memory_mib + 256) * 1024 * 1024,
+            numa_borrower=numa_borrower,
+            configured_memory_bytes=arm.runtime.memory_mib * 1024 * 1024,
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {
@@ -1107,7 +1413,11 @@ class ExperimentWorker:
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             snapshot_reservation_bytes=(arm.sandbox.memory_mib + 256) * 1024 * 1024,
+            numa_borrower=numa_borrower,
+            configured_memory_bytes=arm.sandbox.memory_mib * 1024 * 1024,
         )
+        if watermark_controller is not None:
+            watermark_controller.register(session_id, lifecycle, runtime_lifecycle)
         lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
                     if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
         gateway_session: SessionGatewayState | None = None
@@ -1815,11 +2125,19 @@ class ExperimentWorker:
                             ),
                         }
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
+                    local_amount = amount
+                    admission_memory_tier = "local"
+                    if (watermark_controller is not None
+                            and watermark_controller.route_progress_to_shared(
+                                lifecycle, amount,
+                            )):
+                        local_amount = 0
+                        admission_memory_tier = "shared"
                     reservation_acquired = False
                     with wait_lock:
                         try:
                             admission_wait = coordinator.begin_tool_admission(
-                                session_id, amount, arm.execution.arm_timeout_seconds
+                                session_id, local_amount, arm.execution.arm_timeout_seconds
                             )
                             reservation_acquired = True
                             restored_tool = not lifecycle.resident
@@ -1927,7 +2245,7 @@ class ExperimentWorker:
                             host_sampler = SandboxRSSSampler(route.sandbox_id)
                             host_sampler.start()
                             with reservation_lock:
-                                active_reservations[execution_id] = amount
+                                active_reservations[execution_id] = local_amount
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
                                 if execution_scope == "agent-tool":
@@ -1942,7 +2260,7 @@ class ExperimentWorker:
                                 "reservation_acquired": reservation_acquired,
                             })
                             if reservation_acquired:
-                                coordinator.release(session_id, amount)
+                                coordinator.release(session_id, local_amount)
                             coordinator.set_tool_active(session_id, False)
                             raise
                     prediction_record = dict(prediction or {})
@@ -1965,6 +2283,8 @@ class ExperimentWorker:
                                  "execution_scope": execution_scope,
                                  "actual_measured_memory_mib": None,
                                  "admitted_reservation_mib": amount,
+                                 "local_admitted_reservation_mib": local_amount,
+                                 "admission_memory_tier": admission_memory_tier,
                                  "admission_blocked_seconds": admission_wait,
                     })
                     prediction_records.append(prediction_record)
@@ -1979,6 +2299,8 @@ class ExperimentWorker:
                             "predicted_incremental_memory_mib"
                         ),
                         "admitted_memory_mib": amount,
+                        "local_admitted_memory_mib": local_amount,
+                        "admission_memory_tier": admission_memory_tier,
                         "admission_blocked_seconds": admission_wait,
                         "endpoint_sandbox_id": route.sandbox_id,
                         "endpoint_epoch": route.epoch,
@@ -1987,6 +2309,8 @@ class ExperimentWorker:
                     })
                     return {
                         "decision": "ADMIT", "admitted_memory_mib": amount,
+                        "local_admitted_memory_mib": local_amount,
+                        "admission_memory_tier": admission_memory_tier,
                         "admission_blocked_seconds": admission_wait,
                         "sandbox_id": route.sandbox_id, "epoch": route.epoch,
                         "container_port": route.container_port,
@@ -2450,6 +2774,10 @@ class ExperimentWorker:
                     lambda: coordinator.release_capacity(session_id, lifetime),
                 )
             cleanup_step("coordinator session", lambda: coordinator.unregister(session_id))
+            if watermark_controller is not None:
+                cleanup_step(
+                    "watermark session", lambda: watermark_controller.unregister(session_id),
+                )
             if cleanup_errors:
                 failure = RuntimeError(
                     f"session cleanup incomplete for {session_id}: "

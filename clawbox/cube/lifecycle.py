@@ -68,7 +68,8 @@ class CubeSandboxLifecycle:
                  snapshot_pool: WarmSnapshotPool | None = None,
                  snapshot_reservation_bytes: int | None = None,
                  snapshot_mechanism: str = "incremental-cow", lazy_restore: bool = True,
-                 snapshot_storage: str = "tiered") -> None:
+                 snapshot_storage: str = "tiered", numa_borrower: Any = None,
+                 configured_memory_bytes: int | None = None) -> None:
         if snapshot_storage not in {"tiered", "warm-only"}:
             raise ValueError("invalid snapshot storage")
         self.snapshot_storage = snapshot_storage
@@ -93,6 +94,8 @@ class CubeSandboxLifecycle:
         self.cold_snapshot_root = cold_snapshot_root
         self.snapshot_pool = snapshot_pool
         self.snapshot_reservation_bytes = snapshot_reservation_bytes
+        self.numa_borrower = numa_borrower
+        self.configured_memory_bytes = configured_memory_bytes
         self.sandbox = None
         self.sandbox_id: str | None = None
         self._state = SandboxState.NEW
@@ -220,6 +223,8 @@ class CubeSandboxLifecycle:
                     network_deny_out=self.network_deny_out or None,
                 )
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
+                if self.numa_borrower is not None:
+                    self.numa_borrower.pin_local(self.sandbox_id)
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
                                     started_wall, started_mono,
@@ -332,6 +337,8 @@ class CubeSandboxLifecycle:
                     self._snapshot_tier = tier
                     self._tier = tier
                 self._state = SandboxState.SWAPPED
+                if self.numa_borrower is not None and self.sandbox_id is not None:
+                    self.numa_borrower.release_destroyed(self.sandbox_id)
                 return self._record("checkpoint", before, self._state,
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,
@@ -436,6 +443,8 @@ class CubeSandboxLifecycle:
                     self.sandbox_id,
                     snapshot_mechanism=self.snapshot_mechanism,
                 )
+                if self.numa_borrower is not None:
+                    self.numa_borrower.pin_local(self.sandbox_id)
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
                         raise RuntimeError("WARM snapshot accounting disappeared before restore")
@@ -484,6 +493,24 @@ class CubeSandboxLifecycle:
                     host_memory_before=host_memory_before,
                 )
                 raise
+
+    def borrow_shared(self):
+        with self._lock:
+            if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
+                raise LifecycleError("only a running sandbox can borrow shared memory")
+            if self.numa_borrower is None or self.configured_memory_bytes is None:
+                raise LifecycleError("shared NUMA borrowing is not configured")
+            return self.numa_borrower.borrow(
+                self.sandbox_id, self.configured_memory_bytes,
+            )
+
+    def return_local_memory(self):
+        with self._lock:
+            if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
+                raise LifecycleError("only a running sandbox can return LOCAL memory")
+            if self.numa_borrower is None:
+                raise LifecycleError("shared NUMA borrowing is not configured")
+            return self.numa_borrower.return_local(self.sandbox_id)
 
     def ensure_network_allow_out(self, cidr: str) -> bool:
         """Allow one additional destination CIDR, updating a running VM.
@@ -535,6 +562,8 @@ class CubeSandboxLifecycle:
             try:
                 if self.sandbox_id is not None:
                     self.client.kill_sandbox(self.sandbox_id)
+                    if self.numa_borrower is not None:
+                        self.numa_borrower.release_destroyed(self.sandbox_id)
                 if (self._snapshot_key is not None and
                         self._snapshot_tier is SnapshotTier.WARM and
                         self.snapshot_pool is not None):

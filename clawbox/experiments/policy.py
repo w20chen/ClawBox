@@ -70,6 +70,7 @@ class PolicyCoordinator:
 
     def __init__(self, policy: PolicySpec, *, budget_mib: int,
                  emergency_free_mib: int, operation_headroom_mib: int,
+                 progress_budget_mib: int | None = None,
                  startup_headroom_mib: int = 0,
                  reclaim_cache: Callable[[], None] | None = None,
                  physical_sample: Callable[[], tuple[int, int]] | None = None,
@@ -79,6 +80,12 @@ class PolicyCoordinator:
                  ) -> None:
         self.policy = policy
         self.budget_bytes = budget_mib * MIB
+        self.progress_budget_bytes = (
+            progress_budget_mib * MIB
+            if progress_budget_mib is not None else self.budget_bytes
+        )
+        if self.progress_budget_bytes < self.budget_bytes:
+            raise ValueError("progress budget cannot be below the admission budget")
         self.emergency_free_bytes = emergency_free_mib * MIB
         self.operation_headroom_bytes = operation_headroom_mib * MIB
         self.operation_headroom_mib = operation_headroom_mib
@@ -114,6 +121,13 @@ class PolicyCoordinator:
         }
         self.safety_intervention_count = 0
         self.safety_interventions_by_reason: dict[str, int] = {}
+        self._new_session_admission_blocked = False
+
+    def set_new_session_admission_blocked(self, blocked: bool) -> None:
+        """Latch only new VM-pair admission; existing sessions must make progress."""
+        with self._condition:
+            self._new_session_admission_blocked = blocked
+            self._condition.notify_all()
 
     def register(self, session_id: str, lifecycle: Pausable) -> None:
         with self._condition:
@@ -221,6 +235,17 @@ class PolicyCoordinator:
     def pressure(self, additional_bytes: int = 0) -> bool:
         return bool(self._pressure_reasons(additional_bytes))
 
+    def projected_local_commitment(self, additional_mib: int = 0) -> int:
+        """Return LOCAL usage plus still-unmaterialized LOCAL reservations."""
+        with self._condition:
+            used, _available = self.physical_sample()
+            return (
+                max(used, sum(self._capacity_claims.values()))
+                + sum(self._reservations.values())
+                + additional_mib * MIB
+                + self.operation_headroom_bytes
+            )
+
     def blocked_demand_pressure(self) -> bool:
         """Include the next runnable blocked admission in pressure detection."""
         with self._condition:
@@ -235,10 +260,12 @@ class PolicyCoordinator:
                 amount += self.startup_headroom_bytes
             return bool(self._pressure_reasons(
                 amount, capacity_claim=request.capacity_claim,
+                existing_progress=(request.wait_class == "tool_admission"),
             ))
 
     def _pressure_reasons(self, additional_bytes: int = 0, *,
-                          capacity_claim: bool = False) -> tuple[str, ...]:
+                          capacity_claim: bool = False,
+                          existing_progress: bool = False) -> tuple[str, ...]:
         used, available = self.physical_sample()
         incremental = sum(self._reservations.values())
         capacity = sum(self._capacity_claims.values())
@@ -248,7 +275,12 @@ class PolicyCoordinator:
             incremental += additional_bytes
         charged = max(used, capacity) + incremental + self.operation_headroom_bytes
         reasons = []
-        if charged > self.budget_bytes:
+        effective_budget = (
+            self.progress_budget_bytes
+            if existing_progress and used >= self.budget_bytes
+            else self.budget_bytes
+        )
+        if charged > effective_budget:
             reasons.append("configured_memory_budget")
         if available < self.emergency_free_bytes:
             reasons.append("emergency_free_memory")
@@ -304,7 +336,13 @@ class PolicyCoordinator:
                                   if wait_class == "create"
                                   and self._startup_headroom_needed(session_id) else 0),
                         capacity_claim=capacity_claim,
+                        existing_progress=(wait_class == "tool_admission"),
                     ) if at_head else ()
+                    if (
+                        at_head and wait_class == "create"
+                        and self._new_session_admission_blocked
+                    ):
+                        safety_reasons = (*safety_reasons, "local_high_hysteresis")
                     if at_head and not safety_reasons:
                         break
                     # Admission stops below memory.max, so the kernel may never
@@ -510,6 +548,41 @@ class PolicyCoordinator:
             victim.eviction_in_progress = False
             victim.eviction_eligible = False
             self._condition.notify_all()
+
+    def evict_one_for_watermark(self) -> bool:
+        """Checkpoint one safe waiting session without requiring an admission waiter."""
+        with self._condition:
+            victim = self._claim_victim_locked(exclude="")
+        if victim is None:
+            return False
+        tool_elapsed = None
+        runtime_elapsed = None
+        try:
+            tool_elapsed = victim.lifecycle.checkpoint_and_evict()
+            if (
+                victim.runtime_lifecycle is not None
+                and victim.runtime_lifecycle.resident
+                and victim.wait_id is not None
+                and not victim.response_ready
+            ):
+                if victim.runtime_before_pause is not None:
+                    victim.runtime_before_pause()
+                runtime_elapsed = victim.runtime_lifecycle.checkpoint_and_evict()
+        finally:
+            self.release_victim(victim)
+        elapsed = sum(
+            value for value in (tool_elapsed, runtime_elapsed) if value is not None
+        )
+        paused_vms = sum(value is not None for value in (tool_elapsed, runtime_elapsed))
+        if paused_vms:
+            with self._condition:
+                self.pause_count += paused_vms
+                self.pause_service_seconds += elapsed
+            if self.on_pressure_pause is not None:
+                self.on_pressure_pause(
+                    victim, tool_elapsed, runtime_elapsed, "local_high_watermark",
+                )
+        return bool(paused_vms)
 
     def model_wait_plan(
         self, predicted_duration_s: float | None, *,

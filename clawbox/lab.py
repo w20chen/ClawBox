@@ -238,11 +238,22 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         checks.append((role + " template", lambda r=role: bool(template_record(profile[r]["template_id"]))))
     if profile.get("local_memory_cgroup"):
         local = Path(profile["local_memory_cgroup"])
+        borrow_mib = int(profile.get("shared_memory_borrow_limit_mib") or 0)
+        expected_nodes = {int(profile["local_numa_node"])}
+        if borrow_mib:
+            expected_nodes.add(int(profile["warm_numa_node"]))
+        def cpuset_nodes() -> set[int]:
+            nodes: set[int] = set()
+            for part in (local / "cpuset.mems.effective").read_text().strip().split(","):
+                start, separator, end = part.partition("-")
+                nodes.update(
+                    range(int(start), int(end) + 1) if separator else (int(start),)
+                )
+            return nodes
         checks.extend([
-            ("LOCAL memory.max", lambda: (local/"memory.max").read_text().strip()
-             == str(profile["local_memory_capacity_mib"] * 1024 * 1024)),
-            ("LOCAL NUMA node", lambda: (local/"cpuset.mems.effective").read_text().strip()
-             == str(profile["local_numa_node"])),
+            ("combined live memory.max", lambda: (local/"memory.max").read_text().strip()
+             == str((profile["local_memory_capacity_mib"] + borrow_mib) * 1024 * 1024)),
+            ("LOCAL/shared NUMA nodes", lambda: cpuset_nodes() == expected_nodes),
             ("LOCAL swap disabled", lambda: (local/"memory.swap.max").read_text().strip() == "0"),
         ])
     if current_images:
@@ -335,11 +346,23 @@ def setup(args) -> dict:
         nodes.add(node)
     if node not in nodes:
         raise ValueError("Select a node with READY replicas of both templates using --node")
+    low_gib = args.low_gib if args.low_gib is not None else args.local_gib - 8
+    high_gib = args.high_gib if args.high_gib is not None else args.local_gib - 4
+    if args.warm and not (0 < low_gib < high_gib < args.local_gib):
+        raise ValueError("memory watermarks must satisfy 0 < LOW < HIGH < LOCAL hard")
+    if not 0 <= args.shared_borrow_percent <= 50:
+        raise ValueError("--shared-borrow-percent must be between 0 and 50")
+    shared_borrow_mib = (
+        args.warm_gib * 1024 * args.shared_borrow_percent // 100 if args.warm else 0
+    )
     profile.update(
         node=node,
         local_memory_cgroup=args.local_memory_cgroup,
         local_memory_capacity_mib=args.local_gib * 1024,
         local_numa_node=args.local_node,
+        local_memory_low_watermark_mib=low_gib * 1024 if args.warm else None,
+        local_memory_high_watermark_mib=high_gib * 1024 if args.warm else None,
+        shared_memory_borrow_limit_mib=shared_borrow_mib,
         warm_root=args.warm_root,
         warm_capacity_mib=args.warm_gib * 1024,
         warm_numa_node=args.warm_node,
@@ -354,7 +377,9 @@ def setup(args) -> dict:
     command(
         "sudo", "-n", sys.executable, str(ROOT/"scripts/configure-tiered-local.py"),
         "--capacity-mib", str(profile["local_memory_capacity_mib"]),
-        "--numa-node", str(profile["local_numa_node"]), timeout=120,
+        "--numa-node", str(profile["local_numa_node"]),
+        "--shared-borrow-mib", str(profile["shared_memory_borrow_limit_mib"]),
+        "--shared-node", str(profile["warm_numa_node"]), timeout=120,
     )
     command(
         "sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}",

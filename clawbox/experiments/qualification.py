@@ -6,6 +6,8 @@ import sys
 import time
 import uuid
 import os
+import hashlib
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from clawbox.replay.trace import load_trace
 
 from .results import RunStatus
 from .snapshot_pool import WarmSnapshotPool
+from .numa_borrow import SandboxNumaBorrower
 from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, expand_matrix,
     load_workload_cases, spec_digest,
@@ -25,7 +28,24 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 2
+QUALIFICATION_SCHEMA_VERSION = 4
+
+
+def implementation_digest() -> str:
+    """Bind qualification to the exact supported Python implementation tree."""
+    root = Path(__file__).resolve().parents[2]
+    files = sorted((root / "clawbox").rglob("*.py"))
+    if not files:
+        raise RuntimeError(f"ClawBox source tree is unavailable below {root}")
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def default_receipt_path(spec_path: Path) -> Path:
@@ -43,6 +63,15 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
         "sandbox": sandbox(spec.sandbox),
         "local_memory_cgroup": spec.resources.local_memory_cgroup,
         "local_memory_capacity_mib": spec.resources.local_memory_capacity_mib,
+        "local_memory_low_watermark_mib": (
+            spec.resources.local_memory_low_watermark_mib
+        ),
+        "local_memory_high_watermark_mib": (
+            spec.resources.local_memory_high_watermark_mib
+        ),
+        "shared_memory_borrow_limit_mib": (
+            spec.resources.shared_memory_borrow_limit_mib
+        ),
         "local_numa_node": spec.resources.local_numa_node,
         "warm_root": spec.resources.warm_snapshot_root,
         "warm_capacity_mib": spec.resources.warm_memory_capacity_mib,
@@ -205,6 +234,98 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path) -> dic
     }
 
 
+def live_borrow_roundtrip_test(
+    spec: ExperimentSpec, *, artifact_root: Path,
+) -> dict[str, Any]:
+    """Prove a running Cube VM can borrow NUMA1 and return without interruption."""
+    limit_mib = spec.resources.shared_memory_borrow_limit_mib
+    if limit_mib is None:
+        return {"required": False, "passed": True}
+    probe_id = "qualification-borrow-" + uuid.uuid4().hex[:12]
+    artifact_root.mkdir(parents=True, exist_ok=False)
+    journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
+    client = CubeSandboxClient(journal=journal)
+    shared_pool = WarmSnapshotPool(
+        spec.resources.warm_memory_capacity_mib * 1024 * 1024,
+        borrow_capacity_bytes=limit_mib * 1024 * 1024,
+    )
+    borrower = SandboxNumaBorrower(
+        Path(spec.resources.local_memory_cgroup),
+        local_node=spec.resources.local_numa_node,
+        shared_node=spec.resources.warm_numa_node,
+        shared_pool=shared_pool,
+    )
+    lifecycle = CubeSandboxLifecycle(
+        client,
+        template=spec.sandbox.template,
+        node_name=spec.resources.target_node,
+        ownership=Ownership(
+            run_id=probe_id, attempt_id="live-borrow-roundtrip",
+            task_uid=probe_id, experiment_id=spec.experiment_id,
+            session_id=probe_id, policy_name="qualification-live-borrow",
+        ),
+        allow_internet_access=spec.sandbox.allow_internet_access,
+        role="tool", numa_borrower=borrower,
+        configured_memory_bytes=spec.sandbox.memory_mib * 1024 * 1024,
+    )
+    primary_error: BaseException | None = None
+    borrow_record = return_record = None
+    try:
+        lifecycle.start()
+        before = lifecycle.sandbox.commands.run("printf local-ready", timeout=30)
+        if before.exit_code or before.stdout != "local-ready":
+            raise RuntimeError("live-borrow probe could not execute on LOCAL")
+        borrow_record = lifecycle.borrow_shared()
+        during = lifecycle.sandbox.commands.run("printf shared-alive", timeout=30)
+        if during.exit_code or during.stdout != "shared-alive":
+            raise RuntimeError("VM did not execute while using shared memory")
+        if borrow_record.shared_bytes_after <= borrow_record.shared_bytes_before:
+            raise RuntimeError("NUMA1 residency did not increase after live borrow")
+        return_record = lifecycle.return_local_memory()
+        after = lifecycle.sandbox.commands.run("printf local-again", timeout=30)
+        if after.exit_code or after.stdout != "local-again":
+            raise RuntimeError("VM did not execute after returning to LOCAL")
+        if return_record.local_bytes_after <= return_record.local_bytes_before:
+            raise RuntimeError("NUMA0 residency did not increase after return")
+        if shared_pool.borrowed_bytes:
+            raise RuntimeError("live-borrow reservation remained after return")
+    except BaseException as exc:
+        primary_error = exc
+    cleanup_errors: list[str] = []
+    try:
+        lifecycle.close()
+    except Exception as exc:
+        cleanup_errors.append(f"lifecycle close: {type(exc).__name__}: {exc}")
+    try:
+        client.kill_owned_sandboxes(probe_id)
+    except Exception as exc:
+        cleanup_errors.append(f"owned cleanup: {type(exc).__name__}: {exc}")
+    remaining = client.list_owned_sandboxes(probe_id)
+    if remaining:
+        cleanup_errors.append(f"owned sandboxes remain: {len(remaining)}")
+    result = {
+        "required": True,
+        "passed": primary_error is None and not cleanup_errors,
+        "borrow_limit_bytes": limit_mib * 1024 * 1024,
+        "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024,
+        "borrow": asdict(borrow_record) if borrow_record is not None else None,
+        "return": asdict(return_record) if return_record is not None else None,
+        "failure": (
+            f"{type(primary_error).__name__}: {primary_error}"
+            if primary_error is not None else None
+        ),
+        "cleanup_errors": cleanup_errors,
+    }
+    atomic_json(artifact_root / "result.json", result)
+    if primary_error is not None:
+        if cleanup_errors:
+            primary_error.add_note("live-borrow cleanup: " + "; ".join(cleanup_errors))
+        raise primary_error
+    if cleanup_errors:
+        raise RuntimeError("live-borrow cleanup failed: " + "; ".join(cleanup_errors))
+    return {**result, "artifact_root": str(artifact_root)}
+
+
 def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) -> ExperimentSpec:
     if spec.inference.backend is not InferenceBackend.REPLAY:
         raise ValueError("qualification requires inference.backend=replay")
@@ -257,8 +378,12 @@ def qualify(
     run_id = f"qualification-{uuid.uuid4().hex[:12]}"
     attempt_id = f"attempt-{uuid.uuid4().hex[:12]}"
     run_root = output_base / run_id
+    probe_root = output_base / ".qualification-probes" / run_id
     snapshot_test = snapshot_roundtrip_test(
-        spec, artifact_root=output_base / ".qualification-probes" / run_id,
+        spec, artifact_root=probe_root / "snapshot",
+    )
+    borrow_test = live_borrow_roundtrip_test(
+        spec, artifact_root=probe_root / "live-borrow",
     )
     results = ExperimentSupervisor(
         qualified, run_id=run_id, attempt_id=attempt_id,
@@ -269,6 +394,7 @@ def qualify(
     receipt = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
+        "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": time.time(),
         "concurrency": max(qualified.execution.concurrency_levels),
@@ -279,10 +405,11 @@ def qualify(
         "run_root": str(run_root),
         "supervision_fault_test": fault_test,
         "snapshot_roundtrip_test": snapshot_test,
+        "live_borrow_roundtrip_test": borrow_test,
         "arm_ids": [arm.arm_id for arm in expand_matrix(qualified)],
         "cleanup_verified": all(
             item.correctness.get("cleanup_verified") is True for item in results
-        ) and snapshot_test["passed"],
+        ) and snapshot_test["passed"] and borrow_test["passed"],
         "status": "succeeded",
     }
     if not receipt["cleanup_verified"]:
@@ -301,6 +428,7 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     expected = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
+        "implementation_digest": implementation_digest(),
         "target_node": spec.resources.target_node,
         "runtime_image_digest": spec.runtime.image_digest,
         "tool_image_digest": spec.sandbox.image_digest,
@@ -332,6 +460,15 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         )
     ):
         mismatches.append("snapshot_roundtrip_test")
+    if spec.resources.shared_memory_borrow_limit_mib is not None and not (
+        isinstance(receipt.get("live_borrow_roundtrip_test"), dict)
+        and receipt["live_borrow_roundtrip_test"].get("passed") is True
+        and receipt["live_borrow_roundtrip_test"].get("borrow_limit_bytes")
+        == spec.resources.shared_memory_borrow_limit_mib * 1024 * 1024
+        and receipt["live_borrow_roundtrip_test"].get("shared_capacity_bytes")
+        == spec.resources.warm_memory_capacity_mib * 1024 * 1024
+    ):
+        mismatches.append("live_borrow_roundtrip_test")
     if mismatches:
         raise ValueError(
             "qualification receipt does not cover this experiment: "

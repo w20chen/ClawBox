@@ -7,14 +7,18 @@ or policy path.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import statistics
 from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
 
+from clawbox.replay.trace import load_trace
 from .baselines import ensure_supported_experiment, resolve_baseline
-from .spec import ExperimentSpec, expand_matrix
+from .spec import ExperimentSpec, ReclamationPolicy, expand_matrix
 
 
 def parse_concurrency(value: str) -> list[int]:
@@ -46,6 +50,27 @@ def _mapping(raw: Any, *, name: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{name} must be a YAML mapping")
     return raw
+
+
+def calibrated_static_tool_memory(path: Path, repository: str) -> int:
+    """Read the fixed-baseline P90 chosen by a validated training export."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read prediction artifact {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != "clawbox_p50_v1":
+        raise ValueError("automatic static calibration requires a clawbox_p50_v1 artifact")
+    if payload.get("repository") != repository or payload.get("training_validated") is not True:
+        raise ValueError("automatic static calibration requires matching validated training")
+    calibration = payload.get("static_tool_memory_calibration")
+    if not isinstance(calibration, dict):
+        raise ValueError(
+            "prediction artifact has no static Tool-memory calibration; rerun experiment train"
+        )
+    value = calibration.get("recommended_mib")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("prediction artifact has an invalid static Tool-memory calibration")
+    return value
 
 
 def _set_template(
@@ -96,6 +121,9 @@ def configure_experiment(
     emergency_free_memory_gib: float | None = None,
     checkpoint_headroom_gib: float | None = None,
     local_memory_capacity_mib: int | None = None,
+    local_memory_low_watermark_mib: int | None = None,
+    local_memory_high_watermark_mib: int | None = None,
+    shared_memory_borrow_limit_mib: int | None = None,
     warm_memory_capacity_mib: int | None = None,
     local_memory_cgroup: str | None = None,
     warm_snapshot_root: str | None = None,
@@ -104,7 +132,7 @@ def configure_experiment(
     warm_numa_node: int | None = None,
     snapshot_mechanism: str | None = None,
     snapshot_storage: str | None = None,
-    static_tool_memory_mib: int | None = None,
+    static_tool_memory_mib: int | str | None = None,
     full_tool_memory_mib: int | None = None,
     prediction_artifact: str | None = None,
     oracle_measurements: str | None = None,
@@ -117,7 +145,7 @@ def configure_experiment(
     stabilization_seconds: float | None = None,
     time_scale: float | None = None,
     openclaw_exec_yield_ms: int | None = None,
-    model_wait_prediction_seconds: float | None = None,
+    model_wait_prediction_seconds: float | str | None = None,
     model_wait_prediction_source: str | None = None,
     fixed_delay_seconds: float | None = None,
     prefetch_lead_seconds: float | None = None,
@@ -277,6 +305,9 @@ def configure_experiment(
         )
     for key, value in (
         ("local_memory_capacity_mib", local_memory_capacity_mib),
+        ("local_memory_low_watermark_mib", local_memory_low_watermark_mib),
+        ("local_memory_high_watermark_mib", local_memory_high_watermark_mib),
+        ("shared_memory_borrow_limit_mib", shared_memory_borrow_limit_mib),
         ("warm_memory_capacity_mib", warm_memory_capacity_mib),
         ("local_numa_node", local_numa_node),
         ("warm_numa_node", warm_numa_node),
@@ -292,14 +323,29 @@ def configure_experiment(
     ):
         if value is not None:
             resources[key] = value
-    if static_tool_memory_mib is not None:
-        resources["static_tool_memory_mib"] = static_tool_memory_mib
     if full_tool_memory_mib is not None:
         resources["full_tool_memory_mib"] = full_tool_memory_mib
     if prediction_artifact is not None:
         resources["prediction_artifact"] = prediction_artifact
     if oracle_measurements is not None:
         resources["oracle_measurements"] = oracle_measurements
+    if static_tool_memory_mib == "auto":
+        cases = workload.get("cases")
+        repositories = {
+            item.get("repository") for item in cases or [] if isinstance(item, dict)
+        }
+        if len(repositories) != 1 or None in repositories:
+            raise ValueError("automatic static calibration requires one workload repository")
+        artifact = resources.get("prediction_artifact")
+        if not artifact:
+            raise ValueError(
+                "automatic static calibration requires --prediction-artifact"
+            )
+        resources["static_tool_memory_mib"] = calibrated_static_tool_memory(
+            Path(artifact), repositories.pop(),
+        )
+    elif static_tool_memory_mib is not None:
+        resources["static_tool_memory_mib"] = static_tool_memory_mib
 
     if stagger_seconds is not None:
         if stagger_seconds <= 0:
@@ -341,16 +387,37 @@ def configure_experiment(
         configuration["time_scale"] = time_scale
     if openclaw_exec_yield_ms is not None:
         configuration["openclaw_exec_yield_ms"] = openclaw_exec_yield_ms
-    if model_wait_prediction_seconds is not None:
-        configuration["model_wait_prediction_seconds"] = model_wait_prediction_seconds
-    if model_wait_prediction_source is not None:
-        configuration["model_wait_prediction_source"] = model_wait_prediction_source
     if model is not None:
         configuration["model"] = model
     if base_url is not None:
         configuration["base_url"] = base_url
     if api_key_env is not None:
         configuration["api_key_env"] = api_key_env
+
+    if model_wait_prediction_seconds == "auto":
+        if inference.get("backend") != "replay":
+            raise ValueError("automatic model-wait prediction requires replay inference")
+        trace_path = Path(str(workload.get("input") or ""))
+        try:
+            durations = [action.duration_s for action in load_trace(trace_path)]
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"cannot calibrate model wait from recorded trace {trace_path}: {exc}"
+            ) from exc
+        scale = float(configuration.get("time_scale", 1.0))
+        configuration["model_wait_prediction_seconds"] = (
+            statistics.median(durations) * scale
+        )
+        configuration["model_wait_prediction_source"] = (
+            "recorded-trace-median-scaled:"
+            + hashlib.sha256(trace_path.read_bytes()).hexdigest()
+        )
+    elif model_wait_prediction_seconds is not None:
+        configuration["model_wait_prediction_seconds"] = model_wait_prediction_seconds
+        if model_wait_prediction_source is not None:
+            configuration["model_wait_prediction_source"] = model_wait_prediction_source
+    elif model_wait_prediction_source is not None:
+        configuration["model_wait_prediction_source"] = model_wait_prediction_source
 
     if any(item.get("eviction") == "wait_aware_pressure" for item in policy_mappings):
         predicted_wait = configuration.get("model_wait_prediction_seconds")
@@ -381,6 +448,40 @@ def dump_experiment(spec: ExperimentSpec) -> str:
     )
 
 
+def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
+    if not any(policy.admission.value == "tool_p50" for policy in spec.policies):
+        return None
+    artifact = spec.resources.prediction_artifact
+    if artifact is None:
+        return {"error": "prediction artifact is not configured"}
+    try:
+        payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"path": str(artifact), "error": str(exc)}
+    values: list[float] = []
+    sources: dict[str, int] = {}
+    for row in payload.get("commands") or []:
+        if not isinstance(row, dict) or not isinstance(row.get("selection"), dict):
+            continue
+        selection = row["selection"]
+        value = selection.get("predicted_incremental_memory_mib")
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) and float(value) >= 0):
+            values.append(float(value))
+            source = str(selection.get("fallback_level") or "unknown")
+            sources[source] = sources.get(source, 0) + 1
+    if not values:
+        return {"path": str(artifact), "error": "no usable command reservations"}
+    return {
+        "path": str(artifact),
+        "entry_count": len(values),
+        "fallback_levels": sources,
+        "min_mib": min(values),
+        "median_mib": statistics.median(values),
+        "max_mib": max(values),
+    }
+
+
 def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
     runtime_mib = spec.runtime.memory_mib
     tool_mib = spec.sandbox.memory_mib
@@ -403,9 +504,57 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
     effective_resources = {
         arm.policy.name: {
             "pool_memory_gib": arm.resources.pool_memory_budget_mib / 1024,
-            "snapshot_memory_gib": arm.resources.warm_memory_capacity_mib / 1024,
+            "shared_pool_gib": arm.resources.warm_memory_capacity_mib / 1024,
+            "snapshot_enabled": (
+                arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+            ),
         } for arm in expand_matrix(spec)
     }
+    usable_reservation_mib = max(
+        0, pool_mib - spec.resources.checkpoint_restore_headroom_mib,
+    )
+    p50_summary = _p50_admission_summary(spec)
+    static_mib = spec.resources.static_tool_memory_mib
+    admission: dict[str, Any] = {
+        "physical_local_capacity_gib": (
+            spec.resources.local_memory_capacity_mib / 1024
+            if spec.resources.local_memory_capacity_mib is not None else None
+        ),
+        "policy_budget_gib": pool_mib / 1024,
+        "local_low_watermark_gib": (
+            spec.resources.local_memory_low_watermark_mib / 1024
+            if spec.resources.local_memory_low_watermark_mib is not None else None
+        ),
+        "local_high_watermark_gib": (
+            spec.resources.local_memory_high_watermark_mib / 1024
+            if spec.resources.local_memory_high_watermark_mib is not None else None
+        ),
+        "shared_pool_capacity_gib": spec.resources.warm_memory_capacity_mib / 1024,
+        "shared_live_borrow_limit_gib": (
+            spec.resources.shared_memory_borrow_limit_mib / 1024
+            if spec.resources.shared_memory_borrow_limit_mib is not None else None
+        ),
+        "combined_live_cgroup_limit_gib": (
+            (spec.resources.local_memory_capacity_mib
+             + spec.resources.shared_memory_borrow_limit_mib) / 1024
+            if spec.resources.local_memory_capacity_mib is not None
+            and spec.resources.shared_memory_borrow_limit_mib is not None else None
+        ),
+        "available_after_headroom_gib": usable_reservation_mib / 1024,
+        "reservation_capacity_excludes_measured_resident_memory": True,
+        "static": {
+            "per_command_mib": static_mib,
+            "reservation_only_slots": usable_reservation_mib // static_mib,
+        },
+        "p50": p50_summary,
+        "full_tool_memory_mib": spec.resources.full_tool_memory_mib,
+        "oracle_measurements": spec.resources.oracle_measurements,
+    }
+    if p50_summary is not None and "max_mib" in p50_summary:
+        maximum = p50_summary["max_mib"]
+        p50_summary["reservation_only_slots_at_max"] = (
+            math.floor(usable_reservation_mib / maximum) if maximum else None
+        )
     return {
         "effective_policy_resources": effective_resources,
         "experiment_id": spec.experiment_id,
@@ -441,12 +590,7 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             ),
             "stabilization_seconds": spec.execution.stabilization_seconds,
         },
-        "admission": {
-            "pool_memory_gib": pool_mib / 1024,
-            "static_tool_memory_mib": spec.resources.static_tool_memory_mib,
-            "full_tool_memory_mib": spec.resources.full_tool_memory_mib,
-            "oracle_measurements": spec.resources.oracle_measurements,
-        },
+        "admission": admission,
         "safety": {
             "emergency_free_memory_gib": (
                 spec.resources.emergency_free_memory_mib / 1024

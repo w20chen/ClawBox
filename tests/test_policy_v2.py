@@ -111,6 +111,46 @@ def test_running_tool_can_pass_a_capacity_blocked_new_pair() -> None:
     assert created.is_set()
 
 
+def test_existing_tool_progress_uses_hard_budget_only_after_high_is_crossed() -> None:
+    gib = 1024 ** 3
+    used = [31 * gib]
+    policy = PolicySpec(
+        name="resident", admission="tool_p50", reclamation="resident",
+        eviction="none", restore="none",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=32 * 1024, progress_budget_mib=36 * 1024,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        physical_sample=lambda: (used[0], 100 * gib),
+    )
+    with pytest.raises(AdmissionTimeout):
+        coordinator.acquire("existing", 2 * 1024, 0, wait_class="tool_admission")
+    used[0] = 33 * gib
+    coordinator.acquire("existing", 2 * 1024, 0, wait_class="tool_admission")
+    coordinator.release("existing", 2 * 1024)
+    with pytest.raises(AdmissionTimeout):
+        coordinator.acquire("existing", 4 * 1024, 0, wait_class="tool_admission")
+
+
+def test_high_hysteresis_blocks_only_new_session_creation() -> None:
+    policy = PolicySpec(
+        name="resident", admission="tool_p50", reclamation="resident",
+        eviction="none", restore="none",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=32, progress_budget_mib=36,
+        emergency_free_mib=0, operation_headroom_mib=0,
+    )
+    coordinator.set_new_session_admission_blocked(True)
+    with pytest.raises(AdmissionTimeout):
+        coordinator.acquire("new", 1, 0, wait_class="create")
+    coordinator.acquire("existing", 1, 0, wait_class="tool_admission")
+    coordinator.release("existing", 1)
+    coordinator.set_new_session_admission_blocked(False)
+    coordinator.acquire("new", 1, 0, wait_class="create")
+    coordinator.release("new", 1)
+
+
 def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
     policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
                         eviction="none", restore="none")
@@ -153,6 +193,43 @@ def test_wait_aware_pressure_includes_a_blocked_create_request() -> None:
         used[0] = 0
         pending.result(timeout=2)
     assert created.is_set()
+
+
+def test_high_watermark_proactively_evicts_a_safe_waiting_pair() -> None:
+    policy = PolicySpec(
+        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=32, emergency_free_mib=0,
+        operation_headroom_mib=0,
+    )
+    tool, runtime = Lifecycle(), Lifecycle()
+    runtime_pauses = []
+    coordinator.register("waiting", tool)
+    coordinator.register_runtime(
+        "waiting", runtime, before_pause=lambda: runtime_pauses.append(True),
+    )
+    coordinator.begin_model_wait("waiting", "wait-1", 10.0)
+
+    assert coordinator.evict_one_for_watermark() is True
+    assert (tool.pauses, runtime.pauses) == (1, 1)
+    assert runtime_pauses == [True]
+    assert coordinator.pause_count == 2
+    assert coordinator.evict_one_for_watermark() is False
+
+
+def test_resident_policy_has_no_high_watermark_eviction_victim() -> None:
+    policy = PolicySpec(
+        name="resident", admission="tool_p50", reclamation="resident",
+        eviction="none", restore="none",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=32, emergency_free_mib=0,
+        operation_headroom_mib=0,
+    )
+    coordinator.register("running", Lifecycle())
+    assert coordinator.evict_one_for_watermark() is False
 
 
 def test_wait_aware_admission_pauses_both_vms_during_model_wait() -> None:

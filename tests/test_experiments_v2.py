@@ -14,9 +14,13 @@ from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
     EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
-    policy_operation_headroom_mib, session_case_for,
+    WatermarkController, policy_operation_headroom_mib, policy_progress_budget_mib,
+    session_case_for,
 )
+from clawbox.experiments.snapshot_pool import WarmSnapshotPool
+from clawbox.experiments.numa_borrow import NumaBorrowRecord
 from clawbox.replay.lifecycle import CommandResult
+from clawbox.experiments.spec import ReclamationPolicy
 
 
 def test_explicit_null_disables_arm_deadline() -> None:
@@ -32,6 +36,169 @@ def test_incremental_snapshot_is_default() -> None:
                               emergency_free_memory_mib=512)
     assert resources.snapshot_mechanism == "incremental-cow"
     assert resources.model_copy(update={"snapshot_mechanism": "full-copy"}).snapshot_mechanism == "full-copy"
+
+
+def test_shared_memory_watermarks_are_ordered_and_use_half_pool() -> None:
+    from clawbox.experiments.spec import ResourcesSpec
+    resources = ResourcesSpec(
+        target_node="node-a", pool_memory_budget_mib=32768,
+        emergency_free_memory_mib=512,
+        local_memory_low_watermark_mib=28672,
+        local_memory_high_watermark_mib=32768,
+        local_memory_capacity_mib=36864,
+        shared_memory_borrow_limit_mib=65536,
+        warm_memory_capacity_mib=131072,
+        local_numa_node=0, warm_numa_node=1,
+    )
+    assert resources.shared_memory_borrow_limit_mib * 2 == resources.warm_memory_capacity_mib
+    arm = SimpleNamespace(resources=resources)
+    assert policy_progress_budget_mib(arm) == 102400
+    with pytest.raises(ValidationError, match="LOW < HIGH < LOCAL hard"):
+        resources.model_copy(
+            update={"local_memory_low_watermark_mib": 32768},
+        ).__class__.model_validate(
+            resources.model_dump() | {"local_memory_low_watermark_mib": 32768}
+        )
+    with pytest.raises(ValidationError, match="50%"):
+        resources.__class__.model_validate(
+            resources.model_dump() | {"shared_memory_borrow_limit_mib": 65537}
+        )
+
+
+def test_watermark_controller_drains_to_low_after_crossing_high() -> None:
+    gib = 1024 ** 3
+    usage = [33 * gib, 0, 33 * gib]
+
+    class Sampler:
+        interval_s = 0.01
+
+        def tier_usage(self):
+            return tuple(usage)
+
+    class Coordinator:
+        def __init__(self):
+            self.evictions = 0
+            self.new_sessions_blocked = False
+
+        def set_new_session_admission_blocked(self, blocked):
+            self.new_sessions_blocked = blocked
+
+        def evict_one_for_watermark(self):
+            self.evictions += 1
+            return True
+
+    class Borrower:
+        def __init__(self):
+            self.shared_pool = WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib)
+
+        def borrowed(self):
+            return ()
+
+    class Events:
+        def __init__(self):
+            self.rows = []
+
+        def write(self, row):
+            self.rows.append(row)
+
+    arm = SimpleNamespace(
+        resources=SimpleNamespace(
+            local_memory_low_watermark_mib=28 * 1024,
+            local_memory_high_watermark_mib=32 * 1024,
+            local_memory_capacity_mib=36 * 1024,
+        ),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE),
+    )
+    coordinator, events = Coordinator(), Events()
+    controller = WatermarkController(arm, coordinator, Sampler(), Borrower(), events)
+
+    latched = controller._sample_once(0.5, False)
+    assert latched and coordinator.evictions == 1
+    assert coordinator.new_sessions_blocked is True
+    usage[:] = [31 * gib, 0, 31 * gib]
+    latched = controller._sample_once(0.5, latched)
+    assert latched and coordinator.evictions == 2
+    usage[:] = [28 * gib, 0, 28 * gib]
+    assert controller._sample_once(0.5, latched) is False
+    assert coordinator.new_sessions_blocked is False
+    assert [row["event"] for row in events.rows] == [
+        "local_high_watermark_crossed", "local_low_watermark_reached",
+    ]
+
+
+def test_watermark_controller_rejects_shared_live_plus_snapshots_over_pool() -> None:
+    gib = 1024 ** 3
+    pool = WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib)
+    from clawbox.experiments.snapshot_pool import SnapshotKey
+    key = SnapshotKey("session", "tool", 1)
+    pool.reserve(key, 70 * gib)
+
+    sampler = SimpleNamespace(
+        interval_s=0.01,
+        tier_usage=lambda: (10 * gib, 60 * gib, 70 * gib),
+    )
+    borrower = SimpleNamespace(shared_pool=pool, borrowed=lambda: ())
+    arm = SimpleNamespace(
+        resources=SimpleNamespace(
+            local_memory_low_watermark_mib=28 * 1024,
+            local_memory_high_watermark_mib=32 * 1024,
+            local_memory_capacity_mib=36 * 1024,
+        ),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.RESIDENT),
+    )
+    controller = WatermarkController(
+        arm, SimpleNamespace(), sampler, borrower, SimpleNamespace(write=lambda row: None),
+    )
+    with pytest.raises(RuntimeError, match="shared NUMA physical capacity exceeded"):
+        controller._sample_once(0.1, False)
+
+
+def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None:
+    gib = 1024 ** 3
+    borrowed = set()
+    pool = WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib)
+
+    class Borrower:
+        shared_pool = pool
+
+        def borrowed(self):
+            return tuple(borrowed)
+
+    class Lifecycle:
+        sandbox_id = "tool-1"
+        role = "tool"
+        resident = True
+        configured_memory_bytes = 4 * gib
+
+        def borrow_shared(self):
+            borrowed.add(self.sandbox_id)
+            return NumaBorrowRecord(
+                self.sandbox_id, "/cgroup/tool-1", 4 * gib, 0, 1,
+                1.0, 1.1, 0.1, 33 * gib, 33 * gib, 0, 0,
+            )
+
+    coordinator = SimpleNamespace(
+        projected_local_commitment=lambda amount: (35 * gib) + amount * 1024 ** 2,
+    )
+    arm = SimpleNamespace(
+        resources=SimpleNamespace(
+            local_memory_low_watermark_mib=28 * 1024,
+            local_memory_high_watermark_mib=32 * 1024,
+            local_memory_capacity_mib=36 * 1024,
+        ),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.RESIDENT),
+    )
+    events = []
+    controller = WatermarkController(
+        arm, coordinator,
+        SimpleNamespace(interval_s=.2, tier_usage=lambda: (35 * gib, 0, 35 * gib)),
+        Borrower(), SimpleNamespace(write=events.append),
+    )
+
+    assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
+    assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
+    assert controller.borrow_count == 1
+    assert events[0]["reason"] == "predicted_local_hard_guard"
 
 
 @pytest.mark.parametrize("root", [None, "", "   "])

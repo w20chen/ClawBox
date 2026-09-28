@@ -22,13 +22,14 @@ if _clawtune_src.is_dir():
 @pytest.fixture(scope="session")
 def clawtune_shell_parser() -> Path:
     """Require ClawTune's native parser on Linux; unsupported clients may skip."""
+    if sys.platform != "linux":
+        pytest.skip("ClawTune's pinned mvdan adapter is exercised on Linux")
+
     from tool_resource.mvdan_client import MvdanClientError, ensure_compatible_adapter
 
     try:
         return ensure_compatible_adapter()
     except MvdanClientError:
-        if sys.platform != "linux":
-            pytest.skip("ClawTune builds its pinned mvdan adapter automatically on Linux")
         raise
 
 

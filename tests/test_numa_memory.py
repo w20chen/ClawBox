@@ -2,7 +2,7 @@ from pathlib import Path
 import pytest
 
 from clawbox.experiments.memory import NumaNodeMemorySampler, read_numa_meminfo
-from clawbox.experiments.memory import CgroupMemorySampler
+from clawbox.experiments.memory import CgroupMemorySampler, NumaCgroupMemorySampler
 
 
 def test_numa_meminfo_and_baseline_delta(tmp_path: Path) -> None:
@@ -58,3 +58,34 @@ def test_local_cache_reclaim_excludes_shmem_and_keeps_actual_accounting(tmp_path
     assert (tmp_path / "memory.reclaim").read_text() == "70000"
     assert result["observed_net_reclaimed_bytes"] == 0
     assert sampler.current()[0] == 200000
+
+
+def test_numa_cgroup_separates_local_and_shared_live_memory(tmp_path: Path) -> None:
+    group = tmp_path / "group"
+    group.mkdir()
+    (group / "memory.max").write_text("1000")
+    (group / "memory.current").write_text("700")
+    (group / "memory.events").write_text("oom_kill 0\n")
+    (group / "cpuset.mems.effective").write_text("0-1")
+    (group / "memory.numa_stat").write_text(
+        "inactive_anon N0=200 N1=100\nactive_anon N0=100 N1=100\n"
+        "inactive_file N0=50 N1=50\nactive_file N0=0 N1=0\n"
+        "unevictable N0=0 N1=0\n"
+    )
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 10000 kB\nMemAvailable: 7000 kB\n")
+    sampler = NumaCgroupMemorySampler(
+        group, local_capacity_bytes=360, total_capacity_bytes=1000,
+        local_numa_node=0, shared_numa_node=1,
+        meminfo=meminfo, storage=tmp_path,
+    )
+    # 100 bytes are not attributable by NUMA and are conservatively LOCAL.
+    assert sampler.tier_usage() == (450, 250, 700)
+    assert sampler.current() == (450, 7000 * 1024)
+    assert sampler.observe()["shared_live_used_bytes"] == 250
+    sampler.start()
+    meminfo.write_text("MemTotal: 10000 kB\nMemAvailable: 6000 kB\n")
+    summary = sampler.stop()
+    assert summary.host_baseline_used_bytes == 3000 * 1024
+    assert summary.host_peak_used_delta_bytes == 1000 * 1024
+    assert summary.host_min_used_delta_bytes == 0

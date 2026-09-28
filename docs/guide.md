@@ -36,8 +36,8 @@ clawbox experiment setup \
   --tool-template TOOL_TEMPLATE_ID \
   --node NODE_ID \
   --cube-source "$HOME/src/CubeSandbox" \
-  --local-gib 64 \
-  --warm --warm-gib 128
+  --local-gib 36 --low-gib 28 --high-gib 32 \
+  --warm --warm-gib 128 --shared-borrow-percent 50
 ```
 
 Setup starts the installed CubeSandbox services, configures the LOCAL memory
@@ -48,6 +48,18 @@ images. With `--warm`, setup checks the installed CubeSandbox Python SDK and,
 when needed, applies only the tiered/incremental SDK hunks from this repository
 to `--cube-source` and installs that SDK. The successful source path is saved in
 the host profile, so later setup runs do not need the flag.
+
+This configuration advertises the VM capacity selected by the experiment (for
+the c16, 6 GiB-per-agent study: 96 GiB) while controlling NUMA0 with
+LOW/HIGH/HARD = 28/32/36 GiB. Crossing HIGH stops capacity growth and makes
+A+B+C checkpoint safe waiting VMs until LOCAL reaches LOW. Crossing HIGH is
+allowed and measured; it is not a failure. HARD triggers the live-VM safety
+path: a whole VM cgroup is rebound to NUMA1 while it continues running. Live
+borrow reservations are charged at configured VM capacity, may use at most 50%
+of the 128 GiB shared pool, and share that pool with in-flight and committed
+snapshots. The parent VM cgroup therefore has a 100 GiB combined live limit
+(36 GiB LOCAL plus 64 GiB borrow); 36 GiB remains the NUMA0 tier boundary, not
+the combined cgroup `memory.max`.
 
 After changing ClawTune, rebuild both guest integrations:
 
@@ -111,17 +123,24 @@ clawbox experiment configure examples/experiments/getting-started.yaml eval.yaml
   --baseline tool-p50-resident \
   --baseline tool-p50-wait-reactive \
   --prediction-artifact /data/clawbox/predictions/eval-p50.json \
+  --static-tool-memory-mib auto \
   --concurrency 1,4,8,16 \
   --pool-memory-gib 32 \
   --snapshot-storage warm-only \
-  --model-wait-prediction-seconds 3 \
-  --model-wait-prediction-source separate-training-run
+  --model-wait-prediction-seconds auto
 ```
 
-Use a model-wait prediction measured in a separate run; its value and source are
-part of the experiment identity. Keep one repetition unless the study explicitly
-requires uncertainty estimates. All policies in one specification share the same
+`auto` freezes the recorded trace's median model duration after replay time
+scaling and records the trace digest as its source. Its value and source are
+part of the experiment identity. Use at least three randomized repetitions for
+a comparative result that reports run-to-run uncertainty; a one-repetition run
+is only a functional pilot. All policies in one specification share the same
 workload, concurrency, VM shapes, pool budget, arrival schedule, and validation.
+`auto` takes A's fixed reservation from the validated training run's measured
+extra-memory P90. `describe` prints physical LOCAL capacity, the smaller policy
+budget when one is configured, and reservation-only admission ceilings; those
+ceilings deliberately exclude resident VM memory, which is measured and enforced
+during the run.
 
 ## 4. Validate and qualify
 
@@ -146,6 +165,7 @@ clawbox --output-root /data/clawbox-results \
   experiment run eval.yaml --run-id eval-01 --detach
 
 clawbox --output-root /data/clawbox-results experiment status eval-01
+clawbox --output-root /data/clawbox-results experiment report eval-01
 clawbox --output-root /data/clawbox-results experiment resume eval-01 --detach
 clawbox --output-root /data/clawbox-results experiment abort eval-01
 clawbox --output-root /data/clawbox-results experiment destroy eval-01
@@ -162,8 +182,9 @@ and `cleanup_verified` marker match.
 
 An arm succeeds only when every requested session completes, every model response
 is delivered, at least one native Tool call executes, execution IDs join exactly
-to telemetry, task validation passes, the LOCAL pool and host OOM counters remain
-within limits, and every owned VM is confirmed absent after cleanup.
+to telemetry, task validation passes, no OOM occurs, live borrow stays within its
+64 GiB cap, combined NUMA1 live residency plus snapshot claims stays within the
+128 GiB shared pool, and every owned VM is confirmed absent after cleanup.
 
 The run root contains:
 
@@ -176,10 +197,17 @@ The run root contains:
 | `attempts/ATTEMPT/ARM/` | Logs, events, gateway state, telemetry, and ownership journal for one attempt |
 
 For a valid memory-overcommit result, compare throughput, JCT, admission wait,
-physical LOCAL memory, checkpoint/restore cost, and validation under the same
-offered concurrency. A run with `pool_budget_exceeded`, an OOM increment,
-incomplete telemetry, failed validation, or unverified cleanup is a failed arm,
-not performance evidence.
+physical LOCAL memory, time and GiB-seconds above HIGH, live-borrow count/cost,
+checkpoint/restore cost, and validation under the same offered concurrency.
+Transient LOCAL use above 32 GiB is expected prediction error and remains valid.
+An OOM, shared-pool overflow, incomplete telemetry, failed validation, or
+unverified cleanup invalidates the arm as performance evidence.
+
+`experiment report` reads completed arm records and event streams and reports
+those fields together with WARM transfer/commitment and prediction coverage,
+source, and error. It keeps configured VM capacity, reservations, predictions,
+measured NUMA0 use, live NUMA1 residency, and snapshot bytes as separate
+quantities.
 
 See [host workflow](lab.md) for the same sequence in Chinese and
 [installation](installation.md) for installing the patched CubeSandbox services.

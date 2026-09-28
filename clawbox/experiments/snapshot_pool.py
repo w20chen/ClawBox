@@ -47,15 +47,21 @@ class WarmSnapshotPool:
     both ledgers, and every mutation checks the configured hard capacity.
     """
 
-    def __init__(self, capacity_bytes: int, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, capacity_bytes: int, *,
+                 borrow_capacity_bytes: int = 0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         if capacity_bytes < 0:
             raise ValueError("capacity_bytes must be non-negative")
+        if borrow_capacity_bytes < 0 or borrow_capacity_bytes > capacity_bytes:
+            raise ValueError("borrow_capacity_bytes must be between zero and capacity")
         self.capacity_bytes = capacity_bytes
+        self.borrow_capacity_bytes = borrow_capacity_bytes
         self._clock = clock
         self._lock = RLock()
         self._changed = Condition(self._lock)
         self._admission_lock = Lock()
         self._reservations: dict[SnapshotKey, int] = {}
+        self._borrow_reservations: dict[str, int] = {}
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
 
@@ -68,6 +74,42 @@ class WarmSnapshotPool:
     def committed_bytes(self) -> int:
         with self._lock:
             return sum(item.allocated_bytes for item in self._manifests.values())
+
+    @property
+    def borrowed_bytes(self) -> int:
+        with self._lock:
+            return sum(self._borrow_reservations.values())
+
+    def reserve_borrow(self, sandbox_id: str, upper_bound_bytes: int) -> None:
+        """Reserve live VM capacity on the shared NUMA node.
+
+        The configured VM footprint is reserved rather than its current RSS so
+        future guest growth cannot silently consume space already promised to
+        an in-flight checkpoint.
+        """
+        if not sandbox_id:
+            raise ValueError("sandbox_id must be non-empty")
+        if upper_bound_bytes <= 0:
+            raise ValueError("upper_bound_bytes must be positive")
+        with self._lock:
+            if sandbox_id in self._borrow_reservations:
+                raise RuntimeError(f"duplicate shared-memory borrow: {sandbox_id}")
+            if self.borrowed_bytes + upper_bound_bytes > self.borrow_capacity_bytes:
+                raise WarmCapacityError("shared live-borrow capacity exceeded")
+            if self._usage_locked() + upper_bound_bytes > self.capacity_bytes:
+                raise WarmCapacityError("shared NUMA capacity exceeded")
+            self._borrow_reservations[sandbox_id] = upper_bound_bytes
+            self._assert_capacity_locked()
+            self._changed.notify_all()
+
+    def release_borrow(self, sandbox_id: str) -> int:
+        with self._lock:
+            try:
+                released = self._borrow_reservations.pop(sandbox_id)
+            except KeyError as exc:
+                raise RuntimeError(f"unknown shared-memory borrow: {sandbox_id}") from exc
+            self._changed.notify_all()
+            return released
 
     def reserve(self, key: SnapshotKey, upper_bound_bytes: int) -> None:
         if upper_bound_bytes <= 0:
@@ -291,6 +333,9 @@ class WarmSnapshotPool:
                 "committed_bytes": sum(
                     item.allocated_bytes for item in self._manifests.values()
                 ),
+                "borrow_capacity_bytes": self.borrow_capacity_bytes,
+                "borrowed_bytes": sum(self._borrow_reservations.values()),
+                "borrow_reservations": dict(sorted(self._borrow_reservations.items())),
                 "reservations": {
                     repr(key): value for key, value in self._reservations.items()
                 },
@@ -306,7 +351,7 @@ class WarmSnapshotPool:
             }
 
     def _usage_locked(self) -> int:
-        return sum(self._reservations.values()) + sum(
+        return sum(self._borrow_reservations.values()) + sum(self._reservations.values()) + sum(
             item.allocated_bytes for item in self._manifests.values()
         )
 
