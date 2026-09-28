@@ -30,9 +30,16 @@ def test_validate_and_plan_v2(capsys) -> None:
 def test_baseline_catalog_is_available_from_public_cli(capsys) -> None:
     assert cli.main(["experiment", "baselines"]) == 0
     output = capsys.readouterr().out
-    assert "tool-p50-wait-proactive" in output
-    assert "tool-p50-wait-proactive" in output
-    assert "compatibility-alias" not in output
+    assert "tool-static-resident" in output
+    assert "tool-p50-resident" in output
+    assert "tool-p50-wait-reactive" in output
+    assert "tool-full-resident" not in output
+    assert "DEPRECATED" not in output
+
+    assert cli.main(["experiment", "baselines", "--all"]) == 0
+    all_output = capsys.readouterr().out
+    assert "tool-full-resident [DEPRECATED]" in all_output
+    assert "tool-p50-wait-proactive [DEPRECATED]" in all_output
 
 
 def test_status_and_collect_read_standalone_results(tmp_path, capsys) -> None:
@@ -79,7 +86,7 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
         "--tool-image-digest", "sha256:" + "b" * 64,
         "--pool-memory-gib", "32",
         "--baseline", "tool-static-resident",
-        "--baseline", "tool-static-eager-reactive",
+        "--baseline", "tool-p50-resident",
     ]) == 0
     configured = yaml.safe_load(output.read_text(encoding="utf-8"))
     assert configured["experiment_id"] == "friendly"
@@ -88,7 +95,7 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
     assert configured["sandbox"]["memory_mib"] == 2048
     assert configured["resources"]["pool_memory_budget_mib"] == 32768
     assert [item["name"] for item in configured["policies"]] == [
-        "tool-static-resident", "tool-static-eager-reactive",
+        "tool-static-resident", "tool-p50-resident",
     ]
     rendered = capsys.readouterr().out
     assert "c60: 120 VMs" in rendered
@@ -117,7 +124,7 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
     command = [
         "experiment", "configure", base, str(output),
-        "--baseline", "tool-p50-wait-proactive",
+        "--baseline", "tool-p50-wait-reactive",
     ]
     assert cli.main(command) == 1
     assert not output.exists()

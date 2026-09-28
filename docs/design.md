@@ -47,17 +47,27 @@ LLC misses. Full field and validation details live in the sibling ClawTune
 
 ## Reservations and physical memory
 
+The public ablation has three versions. A is calibrated fixed tool-memory
+overcommit (`tool-static-resident`); A+B replaces the fixed estimate with a
+command-specific P50 (`tool-p50-resident`); A+B+C adds pressure-triggered,
+wait-aware WARM checkpoint and reactive restore (`tool-p50-wait-reactive`). Other
+catalog recipes are retained only as deprecated research history.
+
 Reservations determine whether work may start; they do not resize guest RAM.
 Lifetime capacity claims and incremental command reservations are distinct:
 already-resident memory must not be counted again as an incremental allocation.
 All compared policies use the configured emergency free-memory guard.
+The checkpoint/restore operation headroom is charged only to snapshot policies;
+resident policies never perform those operations and retain the full LOCAL budget.
 While a Runtime/Tool pair is created, its configured VM capacities are reserved
 until physical sampling reflects the new residents. The create gate also leaves
-room for one call under that arm's admission policy: full capacity for
+room for one call from an already runnable session under that arm's admission
+policy: full capacity for
 `tool_full`, the configured fixed amount for `tool_static`, and the larger of
 the frozen artifact maximum or the filesystem fixed amount for frozen predicted
 admission. It must not silently apply full-capacity headroom to a calibrated
-static or frozen predicted arm.
+static or frozen predicted arm. The first pair has no older session to protect,
+so it does not reserve this extra call headroom.
 
 ClawTune measures memory above the environment's pre-call baseline and predicts
 its peak for each Tool call. ClawBox reserves the selected P50 extra-memory

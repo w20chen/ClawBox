@@ -42,6 +42,10 @@ def test_frozen_provider_checks_repository_command_and_uses_training_prediction(
     assert provider.max_incremental_memory_mib == 1
     entry = next(iter(provider.manifest.values()))
     assert provider.resolve('pytest', entry)['fallback_level'] == 'tool'
+    assert provider.resolve('pytest', {
+        'raw_command_sha256': entry['raw_command_sha256'],
+        'call_prediction': model('lattice', 999 * 2**20),
+    })['predicted_incremental_memory_mib'] == 1
     assert provider.provenance([
         {'prediction_source': 'frozen_clawbox_p50', 'fallback_level': 'lattice'},
         {'prediction_source': 'frozen_clawbox_p50', 'fallback_level': 'tool'},

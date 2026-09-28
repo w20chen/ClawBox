@@ -125,6 +125,101 @@ def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
     coordinator.release("running", 6)
 
 
+def test_wait_aware_pressure_includes_a_blocked_create_request() -> None:
+    policy = PolicySpec(
+        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive",
+    )
+    used = [2 * 1024**2]
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=0,
+        operation_headroom_mib=1, startup_headroom_mib=2,
+        physical_sample=lambda: (used[0], 100 * 1024**2),
+    )
+    coordinator.register("running", Lifecycle())
+    coordinator.register_runtime("running", Lifecycle())
+    created = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            coordinator.materialize, "new-pair", 6,
+            lambda: created.set() or 0.01, 2,
+        )
+        deadline = time.monotonic() + 1
+        while not coordinator._waiters and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert coordinator._waiters
+        assert coordinator.pressure() is False
+        assert coordinator.model_wait_plan(3.0) == (0.0, None)
+        used[0] = 0
+        pending.result(timeout=2)
+    assert created.is_set()
+
+
+def test_wait_aware_admission_pauses_both_vms_during_model_wait() -> None:
+    policy = PolicySpec(
+        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive",
+    )
+    used = [9 * 1024**2]
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=0,
+        operation_headroom_mib=0,
+        physical_sample=lambda: (used[0], 100 * 1024**2),
+    )
+    tool = Lifecycle()
+    runtime = Lifecycle()
+    coordinator.register("waiting", tool)
+    before_runtime_pause = []
+    coordinator.register_runtime(
+        "waiting", runtime,
+        before_pause=lambda: before_runtime_pause.append(True),
+    )
+    coordinator.begin_model_wait("waiting", "request-1", 3.0)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            coordinator.materialize, "new-pair", 4,
+            lambda: 0.01, 2,
+        )
+        deadline = time.monotonic() + 1
+        while (tool.pauses == 0 or runtime.pauses == 0) and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert tool.pauses == 1
+        assert runtime.pauses == 1
+        assert before_runtime_pause == [True]
+        used[0] = 0
+        pending.result(timeout=2)
+
+
+
+def test_model_response_waits_for_claimed_pair_checkpoint() -> None:
+    policy = PolicySpec(
+        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=0,
+        operation_headroom_mib=0,
+    )
+    coordinator.register("waiting", Lifecycle())
+    coordinator.register_runtime("waiting", Lifecycle())
+    coordinator.begin_model_wait("waiting", "request-1", 3.0)
+    victim = coordinator.victim_for_restore("other")
+    assert victim is not None
+
+    completed = threading.Event()
+    thread = threading.Thread(
+        target=lambda: (
+            coordinator.complete_model_wait("waiting", "request-1"),
+            completed.set(),
+        )
+    )
+    thread.start()
+    assert not completed.wait(timeout=0.05)
+    coordinator.release_victim(victim)
+    assert completed.wait(timeout=1)
+    thread.join(timeout=1)
+
+
 def test_first_pair_does_not_reserve_headroom_for_a_nonexistent_agent() -> None:
     policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
                         eviction="none", restore="none")
@@ -158,7 +253,7 @@ def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
 
 def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     policy = PolicySpec(name="snapshot", admission="tool_static", reclamation="snapshot_pause",
-                        eviction="wait_aware_pressure", restore="reactive")
+                        eviction="eager", restore="reactive")
     coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
                                     operation_headroom_mib=0,
                                     physical_sample=lambda: (2 * 1024**2, 100 * 1024**2))
@@ -170,6 +265,21 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     victim = coordinator.victim_for_restore("requester")
     assert victim is not None and victim.session_id == "idle"
     coordinator.release_victim(victim)
+
+
+def test_wait_aware_policy_never_selects_an_idle_non_waiting_session() -> None:
+    policy = PolicySpec(
+        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=1, emergency_free_mib=1,
+        operation_headroom_mib=0,
+    )
+    lifecycle = Lifecycle()
+    coordinator.register("idle", lifecycle)
+    coordinator.set_eviction_eligible("idle", True)
+    assert coordinator.victim_for_restore("requester") is None
 
 
 def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:

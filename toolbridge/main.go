@@ -668,7 +668,14 @@ func handleConnection(raw net.Conn, config *ssh.ServerConfig, workdir string, ti
 		log.Printf("ssh handshake failed remote=%s error=%q", raw.RemoteAddr(), err)
 		return
 	}
-	_ = raw.SetDeadline(time.Time{})
+	// Each OpenClaw Tool invocation uses a fresh SSH connection.  Keep a
+	// connection-wide deadline after the handshake so a peer that stops
+	// reading the final output or exit-status cannot strand the handler after
+	// the command and telemetry have already completed.
+	if err := raw.SetDeadline(time.Now().Add(timeout + 30*time.Second)); err != nil {
+		log.Printf("ssh command deadline failed remote=%s error=%q", raw.RemoteAddr(), err)
+		return
+	}
 	defer connection.Close()
 	go ssh.DiscardRequests(requests)
 	for incoming := range channels {

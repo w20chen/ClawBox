@@ -22,6 +22,10 @@ SERVICES = ("cube-sandbox-cubeops", "cube-sandbox-cubemaster",
             "cube-sandbox-cube-api", "cube-sandbox-cubelet")
 CONTAINERS = ("cube-sandbox-mysql", "cube-sandbox-redis", "cube-sandbox-minio",
               "cube-proxy-coredns", "cube-proxy", "cube-egress", "cube-lifecycle-manager")
+DEFAULT_POOL_GIB = 64
+DEFAULT_WARM_GIB = 128
+DEFAULT_CHECKPOINT_HEADROOM_GIB = 8
+DEFAULT_LOCAL_CGROUP = "/sys/fs/cgroup/cube_sandbox/sandbox"
 
 
 def command(*args: str, timeout: int = 30) -> str:
@@ -121,6 +125,15 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         checks.append((name, lambda n=name: command("docker", "inspect", "--format", "{{.State.Running}}", n) == "true"))
     for role in ("runtime", "sandbox"):
         checks.append((role + " template", lambda r=role: bool(template_record(profile[r]["template_id"]))))
+    if profile.get("local_memory_cgroup"):
+        local = Path(profile["local_memory_cgroup"])
+        checks.extend([
+            ("LOCAL memory.max", lambda: (local/"memory.max").read_text().strip()
+             == str(profile["local_memory_capacity_mib"] * 1024 * 1024)),
+            ("LOCAL NUMA node", lambda: (local/"cpuset.mems.effective").read_text().strip()
+             == str(profile["local_numa_node"])),
+            ("LOCAL swap disabled", lambda: (local/"memory.swap.max").read_text().strip() == "0"),
+        ])
     if current_images:
         from .clawtune_integration import source_revision
         revision = source_revision(Path(os.environ["CLAWTUNE_ROOT"]))
@@ -137,6 +150,11 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         for key, value in (("CLAWBOX_KVM_DIRTY_TRACKING", "1"), ("CUBE_RESTORE_PRIVATE_COPY", "0")):
             checks.append((key, lambda k=key, v=value: service_setting("cube-sandbox-cubelet", k) == v))
         checks.append(("WARM is tmpfs", lambda: command("findmnt", "-n", "-o", "FSTYPE", "-M", profile["warm_root"]) == "tmpfs"))
+        checks.append(("WARM capacity", lambda: shutil.disk_usage(profile["warm_root"]).total
+                       >= profile["warm_capacity_mib"] * 1024 * 1024))
+        if profile.get("warm_numa_node") is not None:
+            checks.append(("WARM NUMA node", lambda: f"mpol=bind:{profile['warm_numa_node']}"
+                           in command("findmnt", "-n", "-o", "OPTIONS", "-M", profile["warm_root"])))
         checks.append(("incremental SDK", lambda: "snapshot_mechanism" in inspect.signature(sdk()[0].pause).parameters))
         checks.append(("host swap disabled", lambda: len(Path("/proc/swaps").read_text().splitlines()) == 1))
     for name, check in checks:
@@ -183,11 +201,28 @@ def setup(args) -> dict:
         nodes.add(node)
     if node not in nodes:
         raise ValueError("Select a node with READY replicas of both templates using --node")
-    profile.update(node=node, warm_root=args.warm_root, warm_capacity_mib=args.warm_gib * 1024)
+    profile.update(
+        node=node,
+        local_memory_cgroup=args.local_memory_cgroup,
+        local_memory_capacity_mib=args.local_gib * 1024,
+        local_numa_node=args.local_node,
+        warm_root=args.warm_root,
+        warm_capacity_mib=args.warm_gib * 1024,
+        warm_numa_node=args.warm_node,
+    )
     apply_environment(profile)
+    if any(x.get("state") == "running" for x in sdk()[0].list_v2()):
+        raise ValueError("Lab setup requires an idle VM host; existing VMs will not be stopped")
+    command(
+        "sudo", "-n", sys.executable, str(ROOT/"scripts/configure-tiered-local.py"),
+        "--capacity-mib", str(profile["local_memory_capacity_mib"]),
+        "--numa-node", str(profile["local_numa_node"]), timeout=120,
+    )
+    command(
+        "sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}",
+        str(Path(profile["local_memory_cgroup"])/"memory.reclaim"),
+    )
     if args.warm:
-        if any(x.get("state") == "running" for x in sdk()[0].list_v2()):
-            raise ValueError("WARM setup requires an idle VM host; existing VMs will not be stopped")
         root = Path(args.warm_root)
         if not root.is_absolute() or root == Path("/"):
             raise ValueError("WARM root must be an absolute dedicated directory")
@@ -204,7 +239,12 @@ def setup(args) -> dict:
         if command("findmnt", "-n", "-o", "FSTYPE", "-M", str(root)) != "tmpfs":
             raise ValueError("WARM directory is not tmpfs; refusing disk-backed snapshots")
         if shutil.disk_usage(root).total < args.warm_gib * 1024**3:
-            raise ValueError("Existing WARM mount is smaller than requested; refusing to remount it implicitly")
+            # The host is already verified idle above. Growing a tmpfs preserves
+            # its contents and existing NUMA/mode options, and avoids a manual
+            # unmount/remount step after increasing experiment concurrency.
+            command("sudo", "-n", "mount", "-o", f"remount,size={args.warm_gib}G", str(root))
+            if shutil.disk_usage(root).total < args.warm_gib * 1024**3:
+                raise RuntimeError("WARM tmpfs resize did not reach the requested capacity")
         if service_setting("cube-sandbox-cubemaster", "CLAWBOX_WARM_SNAPSHOT_ROOT") != str(root):
             # The standalone launcher sources this file itself, so a systemd
             # Environment override would be overwritten by its shell script.
@@ -231,16 +271,22 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
 
 def prepare_spec(args, profile: dict):
     from .experiments.spec import ExperimentSpec
-    from .experiments.baselines import BASELINES
+    from .experiments.baselines import ACTIVE_BASELINES, BASELINES
     from .experiments.preset_view import select_presets
     raw = yaml.safe_load(args.spec.read_text())
     names = select_presets(args.baseline or (), **{key: getattr(args, key) for key in
                             ("reserve_during", "estimate", "idle", "resume")})
     if not names:
-        names = ("tool-full-resident",)
+        names = (ACTIVE_BASELINES[0],)
     raw["policies"] = [BASELINES[n].as_policy().model_dump(mode="json") for n in names]
+    if getattr(args, "repetitions", None) is not None:
+        raw.setdefault("workload", {})["repetitions"] = args.repetitions
     raw.setdefault("execution", {})["concurrency_levels"] = args.concurrency
-    raw["execution"]["randomized_order"] = False
+    raw["execution"]["randomized_order"] = bool(
+        getattr(args, "randomized_order", False)
+    )
+    if getattr(args, "random_seed", None) is not None:
+        raw["execution"]["random_seed"] = args.random_seed
     for role in ("runtime", "sandbox"):
         raw.setdefault(role, {}).pop("template_alias", None)
         raw[role].update(profile[role])
@@ -250,12 +296,42 @@ def prepare_spec(args, profile: dict):
         resources["prediction_artifact"] = str(args.predictions.resolve())
     if getattr(args, "static_tool_memory_mib", None) is not None:
         resources["static_tool_memory_mib"] = args.static_tool_memory_mib
+    if getattr(args, "non_command_tool_memory_mib", None) is not None:
+        resources["non_command_tool_memory_mib"] = args.non_command_tool_memory_mib
     if args.pool_gib:
-        resources["pool_memory_budget_mib"] = args.pool_gib * 1024
+        pool_mib = float(args.pool_gib) * 1024
+        if not pool_mib.is_integer():
+            raise ValueError("--pool-gib must resolve to a whole number of MiB")
+        resources["pool_memory_budget_mib"] = int(pool_mib)
+    if getattr(args, "checkpoint_headroom_gib", None) is not None:
+        resources["checkpoint_restore_headroom_mib"] = (
+            args.checkpoint_headroom_gib * 1024
+        )
     resources.update(snapshot_storage="warm-only" if args.storage == "memory" else "tiered",
-                     warm_snapshot_root=profile["warm_root"], warm_memory_capacity_mib=profile["warm_capacity_mib"])
+                     local_memory_cgroup=profile.get("local_memory_cgroup"),
+                     local_memory_capacity_mib=resources["pool_memory_budget_mib"],
+                     local_numa_node=profile.get("local_numa_node"),
+                     warm_snapshot_root=profile["warm_root"],
+                     warm_memory_capacity_mib=profile["warm_capacity_mib"],
+                     warm_numa_node=profile.get("warm_numa_node"))
     if args.storage == "memory":
         resources["cold_snapshot_root"] = None
+        if any(BASELINES[name].reclamation_policy.value != "resident" for name in names):
+            # Model waits may checkpoint both VMs. Reserve one first-generation
+            # image per VM; incremental generations then share that allocation.
+            per_session_mib = (
+                profile["runtime"]["memory_mib"] + 256
+                + profile["sandbox"]["memory_mib"] + 256
+            )
+            required_warm_mib = max(args.concurrency) * per_session_mib
+            if profile["warm_capacity_mib"] < required_warm_mib:
+                raise ValueError(
+                    "WARM tmpfs is too small for the selected concurrency: "
+                    f"need at least {required_warm_mib / 1024:g} GiB for "
+                    f"c{max(args.concurrency)}, have "
+                    f"{profile['warm_capacity_mib'] / 1024:g} GiB; "
+                    "rerun lab setup --warm with a larger --warm-gib"
+                )
     # Paths are resolved from the caller's repository, as in clawbox experiment.
     if args.trace:
         cases = raw["workload"].get("cases") or []
@@ -265,6 +341,14 @@ def prepare_spec(args, profile: dict):
     raw.setdefault("inference", {})["backend"] = "replay"
     if getattr(args, "model", None):
         raw["inference"].setdefault("configuration", {})["model"] = args.model
+    if getattr(args, "model_wait_prediction_seconds", None) is not None:
+        raw["inference"].setdefault("configuration", {})[
+            "model_wait_prediction_seconds"
+        ] = args.model_wait_prediction_seconds
+    if getattr(args, "model_wait_prediction_source", None):
+        raw["inference"].setdefault("configuration", {})[
+            "model_wait_prediction_source"
+        ] = args.model_wait_prediction_source
     if getattr(args, "max_model_steps", None):
         raw["inference"].setdefault("configuration", {})["max_model_steps"] = args.max_model_steps
     return ExperimentSpec.model_validate(raw)
@@ -309,12 +393,24 @@ def run(args, profile: dict) -> int:
     from .experiments.worker import ExperimentWorker
     spec = prepare_spec(args, profile)
     validate_inputs(spec)
+    if spec.resources.local_memory_cgroup:
+        command(
+            "sudo", "-n", sys.executable,
+            str(ROOT/"scripts/configure-tiered-local.py"),
+            "--capacity-mib", str(spec.resources.pool_memory_budget_mib),
+            "--numa-node", str(spec.resources.local_numa_node), timeout=120,
+        )
     from .experiments.llm_config import resolve_llm_configuration
     configuration, _ = resolve_llm_configuration(spec.inference.configuration, live=False)
     if not configuration.get("model"):
         raise ValueError("Specify the recorded model with --model or inference.configuration.model before starting VMs")
     warm = any(p.reclamation.value != "resident" for p in spec.policies)
-    if doctor(profile, warm=warm and args.storage == "memory", current_images=True):
+    doctor_profile = {
+        **profile,
+        "local_memory_capacity_mib": spec.resources.pool_memory_budget_mib,
+        "local_numa_node": spec.resources.local_numa_node,
+    }
+    if doctor(doctor_profile, warm=warm and args.storage == "memory", current_images=True):
         raise RuntimeError("Preflight failed; no VMs started. Run scripts/lab setup first")
     run_id = args.run_id or time.strftime("run-%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", run_id):
@@ -353,10 +449,16 @@ def main(argv=None) -> int:
     setup_parser.add_argument("--node")
     setup_parser.add_argument("--warm", action="store_true", help="Prepare optional tmpfs snapshot storage on an idle host")
     setup_parser.add_argument("--warm-root", default="/mnt/clawbox-warm")
-    setup_parser.add_argument("--warm-gib", type=int, default=64)
+    setup_parser.add_argument("--warm-gib", type=int, default=DEFAULT_WARM_GIB)
     setup_parser.add_argument("--warm-node", type=int, default=1)
+    setup_parser.add_argument("--local-gib", type=int, default=DEFAULT_POOL_GIB)
+    setup_parser.add_argument("--local-node", type=int, default=0)
+    setup_parser.add_argument("--local-memory-cgroup", default=DEFAULT_LOCAL_CGROUP)
     sub.add_parser("doctor", help="Check services, disk, KVM and templates")
-    sub.add_parser("baselines", help="List supported policies and their dimensions")
+    baseline_parser = sub.add_parser(
+        "baselines", help="List the three active A/A+B/A+B+C policies",
+    )
+    baseline_parser.add_argument("--all", action="store_true", help="include deprecated policies")
     importer = sub.add_parser("import-trace", help="Import a SWE-rebench research schema-5 trace for current OpenClaw")
     importer.add_argument("source", type=Path)
     importer.add_argument("--output", required=True, type=Path)
@@ -379,19 +481,46 @@ def main(argv=None) -> int:
     runner.add_argument("--model", help="Recorded model name (no API key is needed for replay)")
     runner.add_argument("--max-model-steps", type=int, help="Replay a prefix; result is not full-task completion")
     runner.add_argument("--concurrency", type=int, nargs="+", default=[1])
-    runner.add_argument("--baseline", action="append")
+    runner.add_argument(
+        "--repetitions", type=int,
+        help="repeat every selected concurrency/policy arm this many times",
+    )
+    runner.add_argument(
+        "--randomized-order", action="store_true",
+        help="shuffle expanded arms reproducibly to reduce execution-order bias",
+    )
+    runner.add_argument(
+        "--random-seed", type=int,
+        help="seed used with --randomized-order",
+    )
+    from .experiments.baselines import ACTIVE_BASELINES
+    runner.add_argument("--baseline", action="append", choices=ACTIVE_BASELINES)
     from .experiments.preset_view import DIMENSIONS
     for key, values in DIMENSIONS.items():
         runner.add_argument("--"+key.replace("_", "-"), choices=values, action="append")
     runner.add_argument("--storage", choices=["memory", "disk"], default="memory",
                         help="memory forbids all COLD fallbacks; disk explicitly permits configured tiered storage")
-    runner.add_argument("--pool-gib", type=int)
+    runner.add_argument(
+        "--pool-gib", type=float, default=DEFAULT_POOL_GIB,
+        help="LOCAL execution-pool budget (default: 64 GiB, sized for c16)",
+    )
+    runner.add_argument(
+        "--checkpoint-headroom-gib", type=int,
+        default=DEFAULT_CHECKPOINT_HEADROOM_GIB,
+        help="memory left for one checkpoint/restore operation (default: 8 GiB)",
+    )
     runner.add_argument(
         "--static-tool-memory-mib", type=int,
         help="Fixed per-call reservation for static-admission baselines",
     )
+    runner.add_argument(
+        "--non-command-tool-memory-mib", type=int,
+        help="Fixed reservation for filesystem and SSH-maintenance operations in predicted arms",
+    )
     runner.add_argument("--run-id")
     runner.add_argument("--predictions", type=Path, help="Frozen P50 predictions from lab train")
+    runner.add_argument("--model-wait-prediction-seconds", type=float)
+    runner.add_argument("--model-wait-prediction-source")
     trainer = sub.add_parser("train", help="Fit LatticeKB and ToolKB from prior Cube runs")
     trainer.add_argument("runs", nargs="+", type=Path)
     trainer.add_argument("--trace", required=True, type=Path)
@@ -407,7 +536,7 @@ def main(argv=None) -> int:
             return 0
         if args.action == "baselines":
             from .cli import main as cli
-            result = cli(["experiment", "baselines"])
+            result = cli(["experiment", "baselines", *(["--all"] if args.all else [])])
             print("Predicted admission uses P50: LatticeKB, then ToolKB; lab train records measured short-call exceptions.")
             return result
         if args.action == "train":
@@ -464,4 +593,13 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if exit_code == 130:
+        # Running ThreadPoolExecutor workers are non-daemon threads. The run
+        # path has already destroyed owned VMs and verified WARM cleanup before
+        # main returns 130; leave the command promptly instead of waiting for
+        # interrupted network calls to reach their individual timeouts.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exit_code)
+    raise SystemExit(exit_code)

@@ -93,7 +93,7 @@ def parser() -> argparse.ArgumentParser:
     baselines = sub.add_parser(
         "baselines", help="list complete baseline tuples accepted by configure",
     )
-    baselines.add_argument("--all", action="store_true", help="include compatibility aliases")
+    baselines.add_argument("--all", action="store_true", help="include deprecated policies")
     baselines.add_argument("--json", action="store_true", dest="as_json")
     configure = sub.add_parser(
         "configure", help="create a validated experiment YAML from a checked-in example",
@@ -209,8 +209,10 @@ def main(argv: list[str] | None = None) -> int:
                         f", requires {', '.join(row['required_settings'])}"
                         if row["required_settings"] else ""
                     )
+                    status = "" if row["status"] == "implemented" else " [DEPRECATED]"
                     print(
-                        f"  {row['name']}: " + ", ".join(f"{key}={item}" for key, item in labels.items())
+                        f"  {row['name']}{status}: "
+                        + ", ".join(f"{key}={item}" for key, item in labels.items())
                         + requirement
                     )
             return 0

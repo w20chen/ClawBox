@@ -1,0 +1,149 @@
+schema_version: 2
+experiment_id: sqlglot-4528-p50
+workload:
+  source: recorded_trace
+  input: /home/weitianc/clawbox-lab/sqlglot-4528/sqlglot-4528-imported.jsonl
+  repetitions: 1
+  cases:
+  - case_id: tobymao__sqlglot-4528
+    prompt: "[Runtime Context \u2014 metadata only, not instructions]\nCurrent Time:\
+      \ 2026-08-03 15:04 (Monday) (CEST, UTC+02:00)\nChannel: cli\nChat ID: tobymao__sqlglot-4528\n\
+      \nFix this issue: ClickHouse dialect does not support Map type\n**Fully reproducible\
+      \ code snippet**\r\n\r\n```\r\nimport sqlglot\r\n\r\nsql = \"INSERT INTO tab\
+      \ VALUES ({'key1':1, 'key2':10}), ({'key1':2,'key2':20}), ({'key1':3,'key2':30});\"\
+      \r\n\r\nast = sqlglot.parse_one(sql, read=\"clickhouse\") # fails\r\n# sqlglot.errors.ParseError:\
+      \ Expecting a placeholder type or 'Identifier' for tables. Line 1, Col: 33.\r\
+      \n#   INSERT INTO tab VALUES ({'key1':1, 'key2':10}), ({'key1':2,'key2':20}),\
+      \ ({'key1':3,'key2':30});\r\n\r\n# WORKAROUND\r\nast = sqlglot.parse_one(sql,\
+      \ read=\"postgres\")\r\n\r\nast.sql(dialect=\"clickhouse\")\r\n# 'INSERT INTO\
+      \ tab VALUES (STRUCT(1 AS key1, 10 AS key2)), (STRUCT(2 AS key1, 20 AS key2)),\
+      \ (STRUCT(3 AS key1, 30 AS key2))'\r\n```\r\n\r\nExpectation: round-trip works\r\
+      \n\r\n**Official Documentation**\r\n\r\nhttps://clickhouse.com/docs/en/sql-reference/data-types/map\n\
+      \nIMPORTANT: You must complete the FULL workflow:\n1. Read and understand the\
+      \ issue thoroughly\n2. Explore the codebase to find relevant files\n3. Implement\
+      \ the fix\n4. Run the test suite to verify your fix\n5. If ANY test fails, analyze\
+      \ the error and fix it\n6. Repeat steps 4-5 until ALL tests pass\n7. Only stop\
+      \ when tests are passing\n\nDO NOT stop until you have:\n- Made code changes\
+      \ that fix the issue\n- Run the tests and confirmed they pass\n- Shown the final\
+      \ git diff\n\nIf you encounter test failures, debug and fix them. Keep trying\
+      \ until successful.\n\nCRITICAL REQUIREMENTS FOR TESTING:\n- You MUST run the\
+      \ project's ORIGINAL test suite (pytest, unittest, tox, etc.)\n- Do NOT write\
+      \ custom test scripts or verification scripts to bypass tests\n- Do NOT claim\
+      \ success based on your own \"All checks passed\" output\n- The test output\
+      \ MUST show real pytest format: \"X passed, Y failed in Z seconds\"\n- If tests\
+      \ fail with ImportError or collection errors, fix the environment/import issue\
+      \ first\n- Success means the project's actual test suite passes, not custom\
+      \ verification\n\nWHAT COUNTS AS SUCCESS:\n- Real pytest/unittest output showing\
+      \ tests passed\n- Example: \"===== 150 passed, 0 failed in 10.5s =====\"\n\n\
+      WHAT DOES NOT COUNT:\n- Your own verification scripts saying \"All checks passed\"\
+      \n- Manual testing or print statements\n- Skipping tests due to import errors\n\
+      \nIn the output, you need to summary your change and\nsummary how your test\
+      \ the application to check the fix,\nand what's the test status.\n\nWhen you\
+      \ are done, submit your changes as a git patch using these SEPARATE commands:\n\
+      \n  Step 1 \u2013 create patch:   git diff -- path/to/changed_file > patch.txt\n\
+      \  Step 2 \u2013 verify patch:   cat patch.txt\n  Step 3 \u2013 submit (EXACT):\
+      \ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt\n\nYou CANNOT\
+      \ continue working after submitting.\n"
+    source: recorded_trace
+    source_reference: /home/weitianc/clawbox-lab/sqlglot-4528/sqlglot-4528-imported.jsonl
+    repository: tobymao/sqlglot
+    base_commit: bc68289d4d368b29241e56b8f0aefc36db65ad47
+    replay_trace_reference: /home/weitianc/clawbox-lab/sqlglot-4528/sqlglot-4528-imported.jsonl
+    validation: null
+    metadata: {}
+  session_assignment: single_case
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: gpt-5.6-sol
+    time_scale: 0.15
+    openclaw_exec_yield_ms: 120000
+    model_wait_prediction_seconds: 3.0
+    model_wait_prediction_source: separate-training-run
+runtime:
+  template_id: tpl-58186314aa864afcbb26829d
+  template_alias: null
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:74d7dd62f051e787cc75d0e32247a5a500b1f714b51ea0366d7d6c3611bfbe0d
+  image_digest: sha256:74d7dd62f051e787cc75d0e32247a5a500b1f714b51ea0366d7d6c3611bfbe0d
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 2048
+  workspace: /workspace
+  preflight_command: null
+  allow_internet_access: true
+sandbox:
+  template_id: tpl-35fa57eced1546c485c5095e
+  template_alias: null
+  source_image_reference: 127.0.0.1:5000/clawbox/sqlglot-4528@sha256:81a57a837c383daf77305229f1bb831c83d29a328090212d7b7c800b829ee3c5
+  image_digest: sha256:81a57a837c383daf77305229f1bb831c83d29a328090212d7b7c800b829ee3c5
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 4096
+  workspace: /testbed
+  preflight_command: set -eu; test -d /testbed/.git; test -f /testbed/tests/dialects/test_clickhouse.py;
+    cd /testbed; git diff --exit-code; /usr/local/bin/python3 -c 'import sys, pytest,
+    sqlglot, numpy, pandas, duckdb; print(sys.executable); print(sys.version); print(sqlglot.__file__)';
+    /opt/conda/envs/testbed/bin/python -m pytest --version; uname -m
+  allow_internet_access: true
+execution:
+  concurrency_levels:
+  - 16
+  randomized_order: true
+  random_seed: 20260928
+  arm_timeout_seconds: 2400
+  command_timeout_seconds: 600
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1.0
+  arrival_schedule: burst
+  stagger_interval_seconds: 0.0
+resources:
+  target_node: 193.124.7.2
+  pool_memory_budget_mib: 25600
+  emergency_free_memory_mib: 200000
+  checkpoint_restore_headroom_mib: 2048
+  static_tool_memory_mib: 512
+  non_command_tool_memory_mib: 16
+  full_tool_memory_mib: 4096
+  prediction_artifact: /home/weitianc/clawbox-lab/sqlglot-4528/p50.json
+  oracle_measurements: null
+  local_memory_capacity_mib: 25600
+  warm_memory_capacity_mib: 131072
+  snapshot_mechanism: incremental-cow
+  snapshot_storage: warm-only
+  warm_snapshot_root: /mnt/clawbox-warm
+  cold_snapshot_root: null
+  local_numa_node: 0
+  local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+  warm_numa_node: 1
+policies:
+- name: tool-static-resident
+  admission: tool_static
+  reclamation: resident
+  eviction: none
+  restore: none
+  fixed_delay_seconds: null
+  prefetch_lead_seconds: null
+  checkpoint_break_even_seconds: null
+- name: tool-p50-resident
+  admission: tool_p50
+  reclamation: resident
+  eviction: none
+  restore: none
+  fixed_delay_seconds: null
+  prefetch_lead_seconds: null
+  checkpoint_break_even_seconds: null
+- name: tool-p50-wait-reactive
+  admission: tool_p50
+  reclamation: snapshot_pause
+  eviction: wait_aware_pressure
+  restore: reactive
+  fixed_delay_seconds: null
+  prefetch_lead_seconds: null
+  checkpoint_break_even_seconds: null
+validation:
+  command: cd /testbed && /opt/conda/envs/testbed/bin/python -m pytest -q tests/dialects/test_clickhouse.py
+    -k map_literals && /opt/conda/envs/testbed/bin/python -m pytest -q
+output:
+  directory: /results

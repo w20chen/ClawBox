@@ -1,0 +1,23 @@
+{
+  "runtime": {
+    "template_id": "tpl-58186314aa864afcbb26829d",
+    "source_image_reference": "127.0.0.1:5000/clawbox/lab-runtime@sha256:74d7dd62f051e787cc75d0e32247a5a500b1f714b51ea0366d7d6c3611bfbe0d",
+    "image_digest": "sha256:74d7dd62f051e787cc75d0e32247a5a500b1f714b51ea0366d7d6c3611bfbe0d",
+    "memory_mib": 2048,
+    "vcpu": 2
+  },
+  "sandbox": {
+    "template_id": "tpl-35fa57eced1546c485c5095e",
+    "source_image_reference": "127.0.0.1:5000/clawbox/sqlglot-4528@sha256:81a57a837c383daf77305229f1bb831c83d29a328090212d7b7c800b829ee3c5",
+    "image_digest": "sha256:81a57a837c383daf77305229f1bb831c83d29a328090212d7b7c800b829ee3c5",
+    "memory_mib": 4096,
+    "vcpu": 2
+  },
+  "node": "193.124.7.2",
+  "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+  "local_memory_capacity_mib": 65536,
+  "local_numa_node": 0,
+  "warm_root": "/mnt/clawbox-warm",
+  "warm_capacity_mib": 131072,
+  "warm_numa_node": 1
+}

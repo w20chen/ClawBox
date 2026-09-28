@@ -15,28 +15,86 @@ def args(**changes):
 def profile():
     template = dict(template_id="tpl-test", source_image_reference="registry/image@sha256:" + "a"*64,
                     image_digest="sha256:"+"a"*64, memory_mib=2048, vcpu=2)
-    return dict(node="node-a", runtime=template, sandbox=template,
-                warm_root="/mnt/warm", warm_capacity_mib=32768)
+    return dict(
+        node="node-a", runtime=template, sandbox=template,
+        local_memory_cgroup="/sys/fs/cgroup/cube_sandbox/sandbox",
+        local_memory_capacity_mib=65536, local_numa_node=0,
+        warm_root="/mnt/warm", warm_capacity_mib=32768, warm_numa_node=1,
+    )
 
 
 def test_default_runs_resident_without_disk_snapshots():
     spec = prepare_spec(args(), profile())
-    assert spec.policies[0].name == "tool-full-resident"
+    assert spec.policies[0].name == "tool-static-resident"
     assert spec.resources.snapshot_storage == "warm-only"
     assert spec.resources.cold_snapshot_root is None
+    assert spec.resources.local_memory_cgroup == "/sys/fs/cgroup/cube_sandbox/sandbox"
+    assert spec.resources.local_numa_node == 0
+    assert spec.resources.warm_numa_node == 1
 
 
 def test_memory_baseline_preserves_warm_capacity_through_expansion():
     from clawbox.experiments.spec import expand_matrix
-    spec = prepare_spec(args(baseline=["tool-static-eager-reactive"]), profile())
+    spec = prepare_spec(args(baseline=["tool-p50-wait-reactive"]), profile())
     arm, = expand_matrix(spec)
     assert arm.resources.warm_memory_capacity_mib == 32768
     assert arm.resources.snapshot_storage == "warm-only"
 
 
 def test_run_can_override_static_tool_reservation():
-    spec = prepare_spec(args(static_tool_memory_mib=512), profile())
+    spec = prepare_spec(args(static_tool_memory_mib=512,
+                             non_command_tool_memory_mib=16), profile())
     assert spec.resources.static_tool_memory_mib == 512
+    assert spec.resources.non_command_tool_memory_mib == 16
+
+
+def test_run_accepts_fractional_gib_pool_at_mib_precision():
+    spec = prepare_spec(args(pool_gib=14.25), profile())
+    assert spec.resources.pool_memory_budget_mib == 14592
+
+
+def test_run_can_supply_wait_prediction_for_final_baseline():
+    spec = prepare_spec(args(
+        baseline=["tool-p50-wait-reactive"],
+        model_wait_prediction_seconds=3.0,
+        model_wait_prediction_source="separate-training-run",
+    ), profile())
+    assert spec.inference.configuration["model_wait_prediction_seconds"] == 3.0
+    assert spec.inference.configuration["model_wait_prediction_source"] == (
+        "separate-training-run"
+    )
+
+
+def test_run_can_repeat_and_randomize_formal_arms():
+    spec = prepare_spec(args(
+        baseline=["tool-static-resident", "tool-p50-resident"],
+        repetitions=3, randomized_order=True, random_seed=20260928,
+    ), profile())
+    assert spec.workload.repetitions == 3
+    assert spec.execution.randomized_order is True
+    assert spec.execution.random_seed == 20260928
+
+
+def test_c16_final_baseline_requires_room_for_both_vm_snapshots():
+    roomy = profile()
+    roomy["warm_capacity_mib"] = 128 * 1024
+    spec = prepare_spec(args(
+        baseline=["tool-p50-wait-reactive"], concurrency=[16], pool_gib=64,
+        checkpoint_headroom_gib=8,
+        model_wait_prediction_seconds=3.0,
+        model_wait_prediction_source="separate-training-run",
+    ), roomy)
+    assert spec.execution.concurrency_levels == (16,)
+    assert spec.resources.pool_memory_budget_mib == 64 * 1024
+    assert spec.resources.warm_memory_capacity_mib == 128 * 1024
+    assert spec.resources.checkpoint_restore_headroom_mib == 8 * 1024
+
+    undersized = profile()
+    undersized["warm_capacity_mib"] = 64 * 1024
+    with pytest.raises(ValueError, match="WARM tmpfs is too small.*c16"):
+        prepare_spec(args(
+            baseline=["tool-p50-wait-reactive"], concurrency=[16], pool_gib=64,
+        ), undersized)
 
 
 def test_cold_dependent_policy_rejected_without_explicit_disk_permission():

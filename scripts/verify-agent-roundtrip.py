@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run live OpenClaw agents, then replay their untouched ClawTune recordings."""
+"""Deprecated historical matrix; use scripts/lab with the A/A+B/A+B+C baselines."""
 import argparse
 import copy
 import json

@@ -260,6 +260,40 @@ class P50PredictionProvider(CommandPredictionProvider):
         )
         return result
 
+    def resolve_digest(self, digest: str,
+                       runtime_metadata: dict[str, Any] | None) -> dict[str, Any]:
+        """Use Runtime only as the raw-command identity witness.
+
+        Current ClawTune attaches its live ``call_prediction`` plus the raw
+        command digest.  The frozen model choice and reservation remain host
+        artifact data; requiring Runtime to echo host-only provenance fields
+        rejects valid current OpenClaw requests.
+        """
+        expected = self._by_digest.get(digest)
+        if expected is None:
+            with self._lock:
+                self._fallback_counts["missing_command"] = (
+                    self._fallback_counts.get("missing_command", 0) + 1
+                )
+            raise PredictionUnavailable(
+                f"no command-specific P50 prediction for command sha256 {digest}"
+            )
+        if not isinstance(runtime_metadata, dict):
+            with self._lock:
+                self._fallback_counts["runtime_metadata_missing"] = (
+                    self._fallback_counts.get("runtime_metadata_missing", 0) + 1
+                )
+            raise PredictionUnavailable("Runtime did not provide command identity metadata")
+        if runtime_metadata.get("raw_command_sha256") != digest:
+            raise PredictionUnavailable("Runtime prediction command identity mismatch")
+        canonical = runtime_metadata.get("canonical_prediction_key")
+        if canonical is not None and canonical != expected["canonical_prediction_key"]:
+            raise PredictionUnavailable("Runtime prediction canonical key mismatch")
+        source = runtime_metadata.get("prediction_source")
+        if source is not None and source != expected["prediction_source"]:
+            raise PredictionUnavailable("Runtime prediction source mismatch")
+        return {**expected, "session_runtime_metadata": dict(runtime_metadata)}
+
     @property
     def manifest(self) -> dict[str, dict[str, Any]]:
         # The Runtime witnesses command identity; model evidence stays on the

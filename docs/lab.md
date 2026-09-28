@@ -77,23 +77,32 @@ bash scripts/lab --profile task-profile.json run task.yaml --baseline tool-stati
 新镜像需要包含任务初始代码和测试依赖；普通项目 Docker 镜像不能直接作为 Tool 模板。
 
 ```bash
-# 常驻 VM；两组实验分别运行 1 个和 4 个 Agent，每个 Agent 使用两台 VM。
-bash scripts/lab run task.yaml --concurrency 1 4 --baseline tool-full-resident
+# A：校准后的固定内存超卖。
+bash scripts/lab run task.yaml --baseline tool-static-resident \
+  --static-tool-memory-mib 512 --concurrency 1 4 16
 
-# 比较固定内存预留下的常驻与立即保存策略；默认只允许内存快照。
-bash scripts/lab run task.yaml --concurrency 1 4 \
-  --reserve-during command --estimate fixed --idle resident --idle immediate
+# A+B：为每条命令使用冻结的 P50 预测。
+bash scripts/lab run task.yaml --baseline tool-p50-resident \
+  --predictions /data/p50.json --non-command-tool-memory-mib 16 \
+  --concurrency 1 4 16
 
-# 已有覆盖任务命令的 LatticeKB 额外内存峰值数据时，使用预测准入和 WARM。
-bash scripts/lab run task.yaml --baseline tool-p50-eager-reactive --concurrency 2
+# A+B+C：P50 准入，加上等待感知的 WARM checkpoint 和按需恢复。
+bash scripts/lab run task.yaml --baseline tool-p50-wait-reactive \
+  --predictions /data/p50.json --non-command-tool-memory-mib 16 \
+  --model-wait-prediction-seconds 3 \
+  --model-wait-prediction-source separate-training-run \
+  --concurrency 1 4 16
 
 # 只回放前 3 次模型响应，用于短验证；不代表完整任务完成。
 bash scripts/lab run task.yaml --max-model-steps 3 --concurrency 1
 ```
 
-可以重复 `--baseline NAME`；`baselines` 列出所有支持的组合及额外配置要求。
+可以重复 `--baseline NAME`；`baselines` 只列出 A、A+B、A+B+C 三个正式版本。
+`clawbox experiment baselines --all` 可查看保留的旧策略，它们均标记为
+`DEPRECATED`，不会进入新的默认实验。
 维度参数与 `clawbox experiment configure` 相同：`--reserve-during`、
-`--estimate`、`--idle`、`--resume`。省略选择时使用 `tool-full-resident`。
+`--estimate`、`--idle`、`--resume`。省略选择时使用 A，即
+`tool-static-resident`。
 `--model NAME` 可补充录制模型名；`--trace FILE` 仅允许替换单任务 YAML 的录制路径，
 不会替换提示词或任务镜像。其他固定值仍由任务 YAML 配置；静态准入的固定预留量
 可由 `--static-tool-memory-mib` 在运行时覆盖。
@@ -105,18 +114,37 @@ bash scripts/lab run task.yaml --max-model-steps 3 --concurrency 1
 bash scripts/lab train ~/clawbox-results/TRAIN_RUN --trace /data/replay.jsonl \
   --repository owner/repo --output /data/p50.json
 bash scripts/lab run task.yaml --predictions /data/p50.json \
-  --baseline tool-static-resident --baseline tool-p50-resident --concurrency 1 4
+  --baseline tool-static-resident --baseline tool-p50-resident \
+  --baseline tool-p50-wait-reactive \
+  --static-tool-memory-mib 512 --non-command-tool-memory-mib 16 \
+  --model-wait-prediction-seconds 3 \
+  --model-wait-prediction-source separate-training-run \
+  --concurrency 1 4 16
 ```
 
 静态准入的每次调用预留量可以在命令行覆盖，无需修改任务 YAML：
 
 ```bash
 bash scripts/lab run task.yaml --baseline tool-static-resident \
-  --static-tool-memory-mib 512 --concurrency 4 --pool-gib 8
+  --static-tool-memory-mib 512 --concurrency 16 --pool-gib 64
 ```
+
+`lab run` 的 LOCAL pool 默认是 64 GiB，适合 2 GiB Runtime 加 4 GiB Tool
+的 c16 实验；需要主动制造回收压力时显式使用 `--pool-gib 32`，并在结果中
+检查预算越界。默认另留 8 GiB checkpoint/restore 操作余量，可由
+`--checkpoint-headroom-gib` 覆盖；该余量只从执行快照的策略扣除，resident
+策略可使用完整 LOCAL 预算。`lab setup --warm` 默认建立 128 GiB tmpfs。c16 的 A+B+C
+最坏情况下同时保存 16 对 Runtime/Tool，首代快照保守预留约 104 GiB；运行前
+会拒绝容量不足的 WARM 配置，不会回退到 COLD 磁盘。
 
 实验应记录该数值的来源。使用独立训练 run 中实测最大额外内存向上取整，
 比把每次调用都按 Tool VM 的完整配置容量计费更适合作为校准后的静态对照。
+`--non-command-tool-memory-mib` 只用于预测 arm 中没有 shell KB 条目的文件操作和
+SSH 后端维护；它也必须由独立训练 run 的实测峰值向上取整，不能把缺失值当作零。
+
+正式比较可以用 `--repetitions N` 重复每个 arm，并用
+`--randomized-order --random-seed SEED` 固定随机执行顺序；单次容量边界实验将
+`--repetitions` 设为 1。
 
 ClawBox 优先使用 LatticeKB，不可用时回退 ToolKB；两者均须使用 guest
 `MemTotal - MemAvailable` 峰值减去调用前基线的测量口径。若两者均不可用，
@@ -124,6 +152,8 @@ ClawBox 优先使用 LatticeKB，不可用时回退 ToolKB；两者均须使用 
 才按轻量命令处理，最小预留 1 MiB。结果单独标记该假设，不将其当作实测零值。
 其他缺失预测会报错。任务 YAML 必须设置最终 `validation.command`，
 训练和评估使用独立 run，并保持 Tool 镜像与 VM 配置一致。
+`lab train` 只拟合明确传入的 CubeSandbox 训练 run，不合并 ClawTune 的
+bootstrap seed；因此同命令评估不能被表述为未见命令的冷启动结果。
 不传 `--predictions` 时仅使用 Runtime 提供的 LatticeKB P50。
 
 默认 `--storage memory` 禁止 COLD checkpoint 和 WARM→COLD 溢出。

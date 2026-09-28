@@ -11,6 +11,13 @@ supported deployment entry points. Future changes need not preserve these
 modules' behavior, historical APIs, schemas, aliases, or stored-state formats.
 Do not deploy these services for the current experiment workflow.
 
+The experiment policy catalog also retains superseded research baselines so old
+result files remain interpretable. Only `tool-static-resident` (A),
+`tool-p50-resident` (A+B), and `tool-p50-wait-reactive` (A+B+C) are active.
+`clawbox experiment baselines --all` shows every retained policy with an explicit
+`DEPRECATED` marker. Deprecated policies are excluded from new CLI selections and
+future work does not preserve their behavior.
+
 This does not deprecate shared functionality still used by current commands:
 
 - `cell.p90` prediction export and its admission prediction data contract remain

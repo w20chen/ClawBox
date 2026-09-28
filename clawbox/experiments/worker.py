@@ -74,6 +74,13 @@ def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     return cases[session_index % len(cases)]
 
 
+def policy_operation_headroom_mib(arm: ExperimentArm) -> int:
+    """Charge checkpoint/restore workspace only to policies that use it."""
+    if arm.policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
+        return 0
+    return arm.resources.checkpoint_restore_headroom_mib
+
+
 def _network_target(endpoint: str, *, label: str) -> str:
     parsed = urllib.parse.urlsplit(endpoint)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -525,7 +532,8 @@ class ExperimentWorker:
             return int(arm.resources.static_tool_memory_mib or 1)
         if prediction_provider is not None:
             return max(
-                int(arm.resources.static_tool_memory_mib or 1),
+                int(arm.resources.non_command_tool_memory_mib
+                    or arm.resources.static_tool_memory_mib or 1),
                 int(math.ceil(prediction_provider.max_incremental_memory_mib)),
             )
         # Live Runtime predictions are not frozen on the worker, so their
@@ -611,16 +619,25 @@ class ExperimentWorker:
             if arm.resources.local_numa_node is not None and os.name != "nt"
             else NodeMemorySampler(interval_s=arm.execution.memory_sample_interval_seconds)
         )
-        def record_pressure_pause(state: Any, elapsed: float, reason: str) -> None:
-            timings = state.lifecycle.timings
-            events.write({
-                "event": "sandbox_paused",
-                "session_id": state.session_id,
-                "role": "tool",
-                "service_seconds": elapsed,
-                "reason": reason,
-                "lifecycle_timing": timings[-1] if timings else None,
-            })
+        def record_pressure_pause(
+            state: Any, tool_elapsed: float | None,
+            runtime_elapsed: float | None, reason: str,
+        ) -> None:
+            for role, lifecycle, elapsed in (
+                ("tool", state.lifecycle, tool_elapsed),
+                ("runtime", state.runtime_lifecycle, runtime_elapsed),
+            ):
+                if elapsed is None or lifecycle is None:
+                    continue
+                timings = lifecycle.timings
+                events.write({
+                    "event": "sandbox_paused",
+                    "session_id": state.session_id,
+                    "role": role,
+                    "service_seconds": elapsed,
+                    "reason": reason,
+                    "lifecycle_timing": timings[-1] if timings else None,
+                })
         def reclaim_local_cache() -> None:
             events.write({"event": "local_cache_reclaim_started"})
             try:
@@ -661,7 +678,7 @@ class ExperimentWorker:
         coordinator = PolicyCoordinator(
             arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
             emergency_free_mib=arm.resources.emergency_free_memory_mib,
-            operation_headroom_mib=arm.resources.checkpoint_restore_headroom_mib,
+            operation_headroom_mib=policy_operation_headroom_mib(arm),
             startup_headroom_mib=self._startup_headroom_mib(arm, prediction_provider),
             physical_sample=sampler.current,
             reclaim_cache=reclaim_local_cache if isinstance(sampler, CgroupMemorySampler) else None,
@@ -690,38 +707,67 @@ class ExperimentWorker:
         sampler.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
+        interrupted = False
         arm_started_wall = time.time()
         arm_started_monotonic = time.monotonic()
+        pool = ThreadPoolExecutor(
+            max_workers=arm.concurrency, thread_name_prefix="agent"
+        )
+        futures: dict[Any, int] = {}
         try:
-            with ThreadPoolExecutor(max_workers=arm.concurrency, thread_name_prefix="agent") as pool:
-                futures = {
-                    pool.submit(
-                        self._run_session, arm, index, coordinator, events,
-                        policy_events, prediction_provider, sandbox_create_gate,
-                        sampler.observe, arm_started_wall, arm_started_monotonic,
-                        snapshot_pool,
-                    ): index
-                    for index in range(arm.concurrency)
-                }
-                for future in as_completed(futures, timeout=arm.execution.arm_timeout_seconds):
-                    try:
-                        sessions.append(future.result())
-                    except Exception as exc:  # one failed session fails the whole arm
-                        index = futures[future]
-                        events.write({
-                            "event": "session_failed",
-                            "session_id": f"{arm.arm_id}-{index:04d}",
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
-                        })
-                        failure = failure or exc
+            futures = {
+                pool.submit(
+                    self._run_session, arm, index, coordinator, events,
+                    policy_events, prediction_provider, sandbox_create_gate,
+                    sampler.observe, arm_started_wall, arm_started_monotonic,
+                    snapshot_pool,
+                ): index
+                for index in range(arm.concurrency)
+            }
+            for future in as_completed(
+                futures, timeout=arm.execution.arm_timeout_seconds,
+            ):
+                try:
+                    sessions.append(future.result())
+                except Exception as exc:  # one failed session fails the whole arm
+                    index = futures[future]
+                    events.write({
+                        "event": "session_failed",
+                        "session_id": f"{arm.arm_id}-{index:04d}",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    })
+                    failure = failure or exc
+            pool.shutdown(wait=True)
             if failure is not None:
                 raise failure
+        except (KeyboardInterrupt, SystemExit):
+            # ThreadPoolExecutor's context manager waits for every running
+            # session before unwinding. On SIGTERM/KeyboardInterrupt that can
+            # strand the CLI behind blocked VM calls and prevent lab cleanup.
+            # Destroy this run's VMs first so those calls unblock, and cancel
+            # sessions that have not started.
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            try:
+                self.client.kill_owned_sandboxes(self.task_uid)
+            except Exception:
+                pass
+            interrupted = True
+            raise
         except Exception as exc:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            try:
+                self.client.kill_owned_sandboxes(self.task_uid)
+            except Exception:
+                pass
             failure = exc
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
-            policy_events.close()
+            policy_events.close(wait=not interrupted)
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
@@ -768,6 +814,8 @@ class ExperimentWorker:
                 [item for item in tool_execution_observations
                  if item.get("execution_scope", "agent-tool") == "agent-tool"]
             )
+        pool_budget_bytes = arm.resources.pool_memory_budget_mib * 1024 * 1024
+        peak_over_budget_bytes = max(0, memory.peak_used_delta_bytes - pool_budget_bytes)
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
             sandbox_task_uid=self.task_uid,
@@ -835,7 +883,13 @@ class ExperimentWorker:
                     item.get("timeline", {}).get("time_spans", []) for item in sessions
                 ],
             },
-            memory={**asdict(memory), "peak_commitment_bytes": coordinator.peak_commitment_bytes},
+            memory={
+                **asdict(memory),
+                "pool_budget_bytes": pool_budget_bytes,
+                "pool_budget_exceeded": peak_over_budget_bytes > 0,
+                "peak_over_budget_bytes": peak_over_budget_bytes,
+                "peak_commitment_bytes": coordinator.peak_commitment_bytes,
+            },
             artifacts={
                 "events": str(events.path),
                 **{
@@ -1218,7 +1272,15 @@ class ExperimentWorker:
                         return
                 coordinator.set_eviction_eligible(session_id, True)
                 oracle_wait = event.get("oracle_model_wait_seconds")
-                if arm.policy.eviction in {
+                if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+                    if prediction_wait is None:
+                        raise RuntimeError(
+                            "wait-aware policy is missing model wait prediction"
+                        )
+                    coordinator.begin_model_wait(
+                        session_id, request_id, prediction_wait,
+                    )
+                elif arm.policy.eviction in {
                     EvictionPolicy.TIERED_LRU_ORACLE,
                     EvictionPolicy.TIERED_TIME_ORACLE,
                 }:
@@ -1235,7 +1297,7 @@ class ExperimentWorker:
                 elif arm.policy.eviction is EvictionPolicy.FIXED_DELAY:
                     delay = float(arm.policy.fixed_delay_seconds or 0.0)
                 elif arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
-                    delay = 0.0 if coordinator.pressure() else None
+                    delay = 0.0 if coordinator.blocked_demand_pressure() else None
                 elif arm.policy.eviction is EvictionPolicy.TIME_ORACLE:
                     break_even = float(
                         arm.policy.checkpoint_break_even_seconds or 0.0
@@ -1422,7 +1484,13 @@ class ExperimentWorker:
         # occupying policy state even though the main cleanup block was never
         # entered.
         coordinator.register(session_id, lifecycle)
-        coordinator.register_runtime(session_id, runtime_lifecycle)
+        coordinator.register_runtime(
+            session_id, runtime_lifecycle,
+            before_pause=(
+                gateway_session.invalidate_pending_delivery
+                if gateway_session is not None else None
+            ),
+        )
         try:
             if lifetime:
                 coordinator.acquire_capacity(
@@ -1684,7 +1752,8 @@ class ExperimentWorker:
                             ),
                             "fallback_level": "not_applicable",
                             "predicted_incremental_memory_mib": int(
-                                arm.resources.static_tool_memory_mib or 1
+                                arm.resources.non_command_tool_memory_mib
+                                or arm.resources.static_tool_memory_mib or 1
                             ),
                         }
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
@@ -2441,6 +2510,12 @@ class ExperimentWorker:
                 "target_node": arm.resources.target_node,
                 "pool_memory_budget_mib": pool_memory_budget_mib,
                 "emergency_free_memory_mib": arm.resources.emergency_free_memory_mib,
+                "configured_checkpoint_restore_headroom_mib": (
+                    arm.resources.checkpoint_restore_headroom_mib
+                ),
+                "effective_checkpoint_restore_headroom_mib": (
+                    policy_operation_headroom_mib(arm)
+                ),
                 "runtime_memory_mib_per_agent": arm.runtime.memory_mib,
                 "tool_memory_mib_per_agent": arm.sandbox.memory_mib,
                 "pair_memory_mib_per_agent": pair_memory_mib,

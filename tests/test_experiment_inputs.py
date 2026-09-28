@@ -116,7 +116,7 @@ def test_malformed_yaml_has_a_cli_error_not_a_traceback(tmp_path, capsys):
 def test_dimension_filters_select_only_catalog_combinations():
     from clawbox.experiments.preset_view import select_presets
     assert set(select_presets(estimate=['fixed', 'predicted'], idle=['resident', 'immediate'])) == {
-        'tool-static-resident', 'tool-p50-resident', 'tool-static-eager-reactive', 'tool-p50-eager-reactive'}
+        'tool-static-resident', 'tool-p50-resident'}
     assert select_presets(['tool-static-resident', 'tool-p50-resident'], estimate=['fixed']) == ['tool-static-resident']
     with pytest.raises(ValueError, match='No implemented preset'):
         select_presets(reserve_during=['session'], estimate=['predicted'])

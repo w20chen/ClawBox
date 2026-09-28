@@ -14,7 +14,7 @@ from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
     EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
-    session_case_for,
+    policy_operation_headroom_mib, session_case_for,
 )
 from clawbox.replay.lifecycle import CommandResult
 
@@ -120,6 +120,15 @@ def test_v2_matrix_is_complete_stable_and_randomized() -> None:
     assert [arm.arm_id for arm in first] == [arm.arm_id for arm in second]
     assert all(arm.spec_digest == spec_digest(spec) for arm in first)
     assert {arm.policy.name for arm in first} == {"resident", "proposed"}
+
+
+def test_checkpoint_headroom_is_only_charged_to_snapshot_policy() -> None:
+    arms = expand_matrix(ExperimentSpec.model_validate(raw_spec()))
+    effective = {
+        arm.policy.name: policy_operation_headroom_mib(arm)
+        for arm in arms if arm.concurrency == 1 and arm.repetition == 0
+    }
+    assert effective == {"resident": 0, "proposed": 1024}
 
 
 def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
@@ -351,7 +360,15 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
 
 
 def test_baseline_catalog_materializes_only_current_policy_tuples() -> None:
+    from clawbox.experiments.baselines import ACTIVE_BASELINES
     assert BASELINES
+    assert ACTIVE_BASELINES == (
+        "tool-static-resident", "tool-p50-resident", "tool-p50-wait-reactive",
+    )
+    assert {name for name, baseline in BASELINES.items()
+            if baseline.implementation_status == "implemented"} == set(ACTIVE_BASELINES)
+    assert all(BASELINES[name].implementation_status == "deprecated"
+               for name in BASELINES if name not in ACTIVE_BASELINES)
     for name, baseline in BASELINES.items():
         policy = baseline.as_policy()
         assert policy.name == name
@@ -406,6 +423,7 @@ def test_vm_startup_headroom_matches_the_arm_admission_policy() -> None:
     raw["execution"]["concurrency_levels"] = [1]
     raw["resources"].update(
         static_tool_memory_mib=512,
+        non_command_tool_memory_mib=16,
         full_tool_memory_mib=4096,
         prediction_artifact="p50.json",
     )
@@ -419,7 +437,7 @@ def test_vm_startup_headroom_matches_the_arm_admission_policy() -> None:
     raw["policies"][0].update(name="p50", admission="tool_p50")
     p50_arm, = expand_matrix(ExperimentSpec.model_validate(raw))
     provider = SimpleNamespace(max_incremental_memory_mib=201.3)
-    assert ExperimentWorker._startup_headroom_mib(p50_arm, provider) == 512
+    assert ExperimentWorker._startup_headroom_mib(p50_arm, provider) == 202
 
 
 def test_v2_rejects_backend_transport_and_invalid_policy() -> None:

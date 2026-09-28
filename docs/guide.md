@@ -4,13 +4,12 @@ ClawBox compares memory-management policies while workloads execute in CubeSandb
 virtual machines. A policy controls memory reservations, saving idle VM state,
 and restoring that state. It does not change the configured VM RAM size.
 
-The default `resources.snapshot_mechanism: incremental-cow` requires
-`resources.cold_snapshot_root` whenever a policy saves VMs. Set it to the absolute
-COLD directory configured on CubeSandbox. Policies without an explicit storage
-tier checkpoint directly there; they do not silently use full snapshots. The
-first checkpoint writes a full RAM base, and later checkpoints on the same
-filesystem write dirty-page deltas. Select `full-copy` explicitly for a full-RAM
-checkpoint baseline.
+The active A+B+C policy uses `resources.snapshot_mechanism: incremental-cow`
+with a WARM tmpfs. The first checkpoint writes a full RAM base into memory, and
+later checkpoints of the same VM write dirty-page deltas. The lab entry point
+uses memory-only snapshot storage by default and refuses to spill VM RAM to a
+COLD disk directory. Historical tiered policies that require COLD storage are
+retained as deprecated entries and are excluded from normal selection.
 
 The public interface is `clawbox experiment`. Use the same configuration format
 and commands for every workload and concurrency level. Run the commands below
@@ -79,24 +78,32 @@ need to memorize a fixed list of baseline names:
 | `--idle` | `resident`, `immediate`, `timeout`, `pressure`, `known-wait`, `tiered-lru`, `tiered-wait` | Keep running, reclaim on idle/timeout/pressure, or use advance timing information and optional storage tiers |
 | `--resume` | `none`, `on-demand`, `ahead` | No restore, restore when needed, or start restoration before a predicted response |
 
-Repeat a dimension for alternatives; different dimensions are combined as filters.
-Omitted dimensions are unrestricted. Only implemented preset combinations are
-selected. Unsupported intersections produce an error rather than creating a new
-algorithm. `clawbox experiment baselines` lists the available combinations and
-their original identifiers; those identifiers remain in saved configurations and
-results for compatibility.
+The supported experiment ladder contains three active presets:
 
-For example, compare fixed and predicted reservations with and without immediate
-idle reclamation:
+| Version | Baseline | Components |
+| --- | --- | --- |
+| A | `tool-static-resident` | Calibrated fixed overcommit |
+| A+B | `tool-p50-resident` | Command-specific P50 admission |
+| A+B+C | `tool-p50-wait-reactive` | P50 admission plus wait-aware WARM checkpoint and reactive restore |
+
+All older policy recipes remain in the source as deprecated research history. They
+are excluded from normal selection; `clawbox experiment baselines --all` lists
+them with a `DEPRECATED` marker. Repeat a dimension for alternatives; different
+dimensions are combined as filters over the three active presets. Unsupported
+intersections produce an error rather than creating a new algorithm.
+
+Create the complete ablation matrix explicitly:
 
 ```bash
 clawbox experiment configure examples/experiments/getting-started.yaml comparison.yaml \
-  --reserve-during command --estimate fixed --estimate predicted \
-  --idle resident --idle immediate --concurrency 1,4
+  --baseline tool-static-resident --baseline tool-p50-resident \
+  --baseline tool-p50-wait-reactive --concurrency 1,4,16 \
+  --model-wait-prediction-seconds 3 \
+  --model-wait-prediction-source separate-training-run
 clawbox experiment describe comparison.yaml
 ```
 
-This creates a two-by-two policy comparison at each selected concurrency. The
+This creates the A/A+B/A+B+C comparison at each selected concurrency. The
 predicted policy uses the P50 of guest `memory_extra_peak_bytes`. ClawBox selects
 LatticeKB first, then ToolKB. Selection is in ClawBox; ClawTune model outputs
 remain unchanged. Both must use `guest_memtotal_minus_memavailable`.
@@ -109,8 +116,28 @@ bash scripts/lab run task.yaml --baseline tool-static-resident --run-id collect
 bash scripts/lab train ~/clawbox-results/collect --trace /data/replay.jsonl \
   --repository owner/repo --output /data/p50.json
 bash scripts/lab run task.yaml --predictions /data/p50.json \
-  --baseline tool-static-resident --baseline tool-p50-resident --concurrency 1 4
+  --baseline tool-static-resident --baseline tool-p50-resident \
+  --baseline tool-p50-wait-reactive --concurrency 1 4 16 \
+  --repetitions 3 --randomized-order --random-seed 20260928 \
+  --model-wait-prediction-seconds 3 \
+  --model-wait-prediction-source separate-training-run
 ```
+
+The lab entry point defaults to a 64 GiB LOCAL pool. A 16-agent run offers 96 GiB
+of configured Runtime/Tool capacity, so this remains an overcommit experiment while
+leaving substantially more physical headroom than the 8 GiB c4 calibration run.
+Use a separately labelled 32 GiB pressure arm when the purpose is to trigger C.
+Snapshot policies also keep 8 GiB available for one checkpoint or restore by
+default; resident policies use the full LOCAL budget. WARM defaults to a 128 GiB tmpfs:
+c16 can conservatively reserve about 104 GiB for
+one first-generation Runtime and Tool snapshot per agent. The lab rejects an
+undersized memory-only WARM pool before creating VMs.
+
+`bash scripts/lab setup --warm` configures the CubeSandbox VM cgroup on LOCAL
+NUMA memory and mounts WARM on the other NUMA node. It records both node IDs and
+the effective capacities in the machine profile. `lab run` applies the selected
+LOCAL pool limit before starting VMs, while `lab doctor` verifies the cgroup
+limit, NUMA bindings, tmpfs size, and disabled swap.
 
 Use a task image containing the repository and dependencies and configure
 `validation.command` to check the final result. Replay completion alone does not
@@ -134,6 +161,7 @@ Existing output files require `--force` to replace.
 | Mechanism | Required input or parameter |
 | --- | --- |
 | Fixed command reservation | `resources.static_tool_memory_mib`; CLI `--static-tool-memory-mib` |
+| Predicted-arm non-command reservation | `resources.non_command_tool_memory_mib`; lab CLI `--non-command-tool-memory-mib` |
 | Full command reservation | `resources.full_tool_memory_mib`; normally the Tool VM's configured RAM |
 | Predicted reservation | ClawTune `call_load.v2` `memory_extra_peak_bytes` P50, rounded up to MiB |
 | Measured reservation | `resources.oracle_measurements`; replay only |
@@ -353,6 +381,11 @@ An incomplete summary does not prove the worker is still running.
 Summary files are written when the worker finishes; inspect per-arm files and
 events for a run that has not produced a summary yet. A failed or interrupted run
 is not evidence of success. Preserve its directory before starting another attempt.
+
+For memory-overcommit results, inspect `memory.pool_budget_exceeded` and
+`memory.peak_over_budget_bytes` together with OOM events and task validation.
+P50 is allowed to underestimate individual calls; a throughput improvement that
+crosses the configured pool budget is not a safe capacity result.
 
 ClawBox lifecycle and policy measurements remain separate from ClawTune traces:
 VM creation and destruction, checkpoint and restore spans, physical memory,

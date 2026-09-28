@@ -29,10 +29,19 @@ class SessionState:
     eviction_in_progress: bool = False
     last_used: float = 0.0
     runtime_lifecycle: Pausable | None = None
+    runtime_before_pause: Callable[[], None] | None = None
     wait_id: str | None = None
     wait_started_monotonic_s: float | None = None
     wait_deadline_monotonic_s: float | None = None
     response_ready: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionRequest:
+    session_id: str
+    amount_bytes: int
+    wait_class: str
+    capacity_claim: bool
 
 
 class AdmissionTimeout(RuntimeError):
@@ -52,8 +61,8 @@ class PolicyEventExecutor:
         # allowed to perform checkpoint/restore work in the gateway callback.
         return self._executor.submit(operation, *args, **kwargs)
 
-    def close(self) -> None:
-        self._executor.shutdown(wait=True, cancel_futures=False)
+    def close(self, *, wait: bool = True) -> None:
+        self._executor.shutdown(wait=wait, cancel_futures=not wait)
 
 
 class PolicyCoordinator:
@@ -64,7 +73,9 @@ class PolicyCoordinator:
                  startup_headroom_mib: int = 0,
                  reclaim_cache: Callable[[], None] | None = None,
                  physical_sample: Callable[[], tuple[int, int]] | None = None,
-                 on_pressure_pause: Callable[[SessionState, float, str], None] | None = None,
+                 on_pressure_pause: Callable[
+                     [SessionState, float | None, float | None, str], None
+                 ] | None = None,
                  ) -> None:
         self.policy = policy
         self.budget_bytes = budget_mib * MIB
@@ -86,6 +97,7 @@ class PolicyCoordinator:
         self._reservations: dict[str, int] = {}
         self._capacity_claims: dict[str, int] = {}
         self._waiters: deque[object] = deque()
+        self._waiter_requests: dict[object, AdmissionRequest] = {}
         self._progress_waiters: set[object] = set()
         self._sessions: dict[str, SessionState] = {}
         self.blocked_seconds = 0.0
@@ -107,9 +119,13 @@ class PolicyCoordinator:
         with self._condition:
             self._sessions[session_id] = SessionState(session_id, lifecycle, last_used=time.monotonic())
 
-    def register_runtime(self, session_id: str, lifecycle: Pausable) -> None:
+    def register_runtime(
+        self, session_id: str, lifecycle: Pausable, *,
+        before_pause: Callable[[], None] | None = None,
+    ) -> None:
         with self._condition:
             self._sessions[session_id].runtime_lifecycle = lifecycle
+            self._sessions[session_id].runtime_before_pause = before_pause
 
     def begin_model_wait(self, session_id: str, wait_id: str,
                          oracle_duration_s: float) -> None:
@@ -129,6 +145,11 @@ class PolicyCoordinator:
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
         with self._condition:
             state = self._sessions[session_id]
+            # Admission may already have atomically claimed this waiting pair.
+            # Let that checkpoint finish before the gateway publishes its
+            # response; the response callback can then restore Runtime first.
+            while state.eviction_in_progress:
+                self._condition.wait()
             if state.wait_id == wait_id:
                 state.response_ready = True
                 state.eviction_eligible = False
@@ -200,6 +221,22 @@ class PolicyCoordinator:
     def pressure(self, additional_bytes: int = 0) -> bool:
         return bool(self._pressure_reasons(additional_bytes))
 
+    def blocked_demand_pressure(self) -> bool:
+        """Include the next runnable blocked admission in pressure detection."""
+        with self._condition:
+            if not self._waiters:
+                return self.pressure()
+            head = next((item for item in self._waiters
+                         if item in self._progress_waiters), self._waiters[0])
+            request = self._waiter_requests[head]
+            amount = request.amount_bytes
+            if (request.wait_class == "create"
+                    and self._startup_headroom_needed(request.session_id)):
+                amount += self.startup_headroom_bytes
+            return bool(self._pressure_reasons(
+                amount, capacity_claim=request.capacity_claim,
+            ))
+
     def _pressure_reasons(self, additional_bytes: int = 0, *,
                           capacity_claim: bool = False) -> tuple[str, ...]:
         used, available = self.physical_sample()
@@ -240,6 +277,12 @@ class PolicyCoordinator:
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
+            self._waiter_requests[ticket] = AdmissionRequest(
+                session_id=session_id,
+                amount_bytes=amount,
+                wait_class=wait_class,
+                capacity_claim=capacity_claim,
+            )
             if wait_class != "create" and not capacity_claim:
                 self._progress_waiters.add(ticket)
             recorded_safety_reasons: set[str] = set()
@@ -288,31 +331,56 @@ class PolicyCoordinator:
                               if at_head else None)
                     if at_head and victim is not None:
                         self._condition.release()
+                        tool_elapsed = None
+                        runtime_elapsed = None
                         try:
                             target = (
                                 self.pressure_oracle_tier(victim)
                                 if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE
                                 else None
                             )
-                            elapsed = (
+                            tool_elapsed = (
                                 victim.lifecycle.checkpoint_and_evict(tier=target)
                                 if target is not None
                                 else victim.lifecycle.checkpoint_and_evict()
                             )
-                            if (target is not None and victim.runtime_lifecycle is not None
-                                    and victim.runtime_lifecycle.resident):
-                                victim.runtime_lifecycle.checkpoint_and_evict(tier=target)
+                            pause_runtime = (
+                                victim.runtime_lifecycle is not None
+                                and victim.runtime_lifecycle.resident
+                                and victim.wait_id is not None
+                                and not victim.response_ready
+                                and self.policy.eviction in {
+                                    EvictionPolicy.WAIT_AWARE_PRESSURE,
+                                    EvictionPolicy.TIERED_LRU_ORACLE,
+                                }
+                            )
+                            if pause_runtime:
+                                if victim.runtime_before_pause is not None:
+                                    victim.runtime_before_pause()
+                                runtime_elapsed = (
+                                    victim.runtime_lifecycle.checkpoint_and_evict(tier=target)
+                                    if target is not None
+                                    else victim.runtime_lifecycle.checkpoint_and_evict()
+                                )
                         finally:
                             self._condition.acquire()
                             victim.eviction_in_progress = False
                             victim.eviction_eligible = False
                             self._condition.notify_all()
-                        if elapsed is not None:
-                            self.pause_count += 1
+                        elapsed = sum(
+                            value for value in (tool_elapsed, runtime_elapsed)
+                            if value is not None
+                        )
+                        paused_vms = sum(
+                            value is not None for value in (tool_elapsed, runtime_elapsed)
+                        )
+                        if paused_vms:
+                            self.pause_count += paused_vms
                             self.pause_service_seconds += elapsed
                             if self.on_pressure_pause is not None:
                                 self.on_pressure_pause(
-                                    victim, elapsed, "memory_admission",
+                                    victim, tool_elapsed, runtime_elapsed,
+                                    "memory_admission",
                                 )
                         continue
                     remaining = 0.2 if deadline is None else deadline - time.monotonic()
@@ -320,6 +388,7 @@ class PolicyCoordinator:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
                     self._condition.wait(min(0.2, remaining))
                 self._waiters.remove(ticket)
+                self._waiter_requests.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
                 ledger = self._capacity_claims if capacity_claim else self._reservations
                 ledger[session_id] = ledger.get(session_id, 0) + amount
@@ -331,6 +400,7 @@ class PolicyCoordinator:
             except Exception:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
+                self._waiter_requests.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
                 self._condition.notify_all()
                 waited = time.monotonic() - started
@@ -453,7 +523,8 @@ class PolicyCoordinator:
         elif self.policy.eviction is EvictionPolicy.FIXED_DELAY:
             delay = self.policy.fixed_delay_seconds or 0.0
         elif self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
-            if predicted_duration_s is None or predicted_duration_s <= 0 or not self.pressure():
+            if (predicted_duration_s is None or predicted_duration_s <= 0
+                    or not self.blocked_demand_pressure()):
                 return None, None
             delay = 0.0
         elif self.policy.eviction is EvictionPolicy.TIME_ORACLE:
@@ -517,7 +588,7 @@ class PolicyCoordinator:
                         self.pause_service_seconds += elapsed
                         if self.on_pressure_pause is not None:
                             self.on_pressure_pause(
-                                victim, elapsed, "cube_restore_capacity",
+                                victim, elapsed, None, "cube_restore_capacity",
                             )
                 elapsed = operation()  # second rejection is deliberately final
                 self.resume_count += 1
@@ -533,15 +604,19 @@ class PolicyCoordinator:
                       if state.session_id != exclude and state.eviction_eligible
                       and not state.eviction_in_progress and not state.tool_active
                       and state.lifecycle.resident]
-        if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
+        if self.policy.eviction in {
+            EvictionPolicy.WAIT_AWARE_PRESSURE,
+            EvictionPolicy.TIERED_LRU_ORACLE,
+        }:
             now = time.monotonic()
             candidates = [state for state in candidates
                           if state.wait_id is not None and not state.response_ready
                           and state.wait_deadline_monotonic_s is not None]
-            worthwhile = [state for state in candidates
-                           if state.wait_deadline_monotonic_s - now >= 2.0]
-            if worthwhile:
-                candidates = worthwhile
+            if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
+                worthwhile = [state for state in candidates
+                               if state.wait_deadline_monotonic_s - now >= 2.0]
+                if worthwhile:
+                    candidates = worthwhile
         return min(candidates, key=lambda state: state.last_used, default=None)
 
     def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:

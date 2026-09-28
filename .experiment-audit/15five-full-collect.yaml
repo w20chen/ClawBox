@@ -1,0 +1,124 @@
+agent:
+  driver: openclaw
+execution:
+  arm_timeout_seconds: 1800
+  arrival_schedule: fixed_stagger
+  command_timeout_seconds: 300
+  concurrency_levels:
+  - 2
+  memory_sample_interval_seconds: 0.2
+  random_seed: 20260913
+  randomized_order: false
+  stabilization_seconds: 1.0
+  stagger_interval_seconds: 0.2
+experiment_id: 15five-clawbox-tiered-incremental-cow
+inference:
+  backend: replay
+  configuration:
+    model: deepseek-v4-flash
+    openclaw_exec_yield_ms: 120000
+    repo_fingerprint: 15five/scim2-filter-parser
+    time_scale: 0.15
+output:
+  directory: /home/weitianc/clawbox-tiered-study-20260913
+policies:
+- admission: tool_static
+  checkpoint_break_even_seconds: null
+  eviction: none
+  fixed_delay_seconds: null
+  name: tool-static-resident
+  prefetch_lead_seconds: null
+  reclamation: resident
+  restore: none
+- admission: tool_static
+  checkpoint_break_even_seconds: null
+  eviction: eager
+  fixed_delay_seconds: null
+  name: tool-static-eager-reactive
+  prefetch_lead_seconds: null
+  reclamation: snapshot_pause
+  restore: reactive
+resources:
+  checkpoint_restore_headroom_mib: 4096
+  cold_snapshot_root: null
+  emergency_free_memory_mib: 200000
+  full_tool_memory_mib: 4096
+  local_memory_capacity_mib: null
+  local_memory_cgroup: null
+  local_numa_node: null
+  oracle_measurements: /home/weitianc/ClawBox-incremental-20260913/examples/predictions/15five-scim2-p90.json
+  pool_memory_budget_mib: 65536
+  snapshot_mechanism: incremental-cow
+  snapshot_storage: warm-only
+  static_tool_memory_mib: 512
+  target_node: 193.124.7.2
+  warm_memory_capacity_mib: 65536
+  warm_numa_node: null
+  warm_snapshot_root: /mnt/clawbox-warm
+runtime:
+  allow_internet_access: false
+  architecture: arm64
+  image_digest: sha256:74d7dd62f051e787cc75d0e32247a5a500b1f714b51ea0366d7d6c3611bfbe0d
+  memory_mib: 2048
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:74d7dd62f051e787cc75d0e32247a5a500b1f714b51ea0366d7d6c3611bfbe0d
+  template_alias: null
+  template_id: tpl-58186314aa864afcbb26829d
+  vcpu: 2
+  workspace: /workspace
+sandbox:
+  allow_internet_access: false
+  architecture: arm64
+  image_digest: sha256:8b156eb57342052f56e0b501e1845164b6774d82e512296bd048ec47808cb17c
+  memory_mib: 4096
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-sandbox@sha256:8b156eb57342052f56e0b501e1845164b6774d82e512296bd048ec47808cb17c
+  template_alias: null
+  template_id: tpl-98c3705756e646a98b91c835
+  vcpu: 2
+  workspace: /workspace
+schema_version: 2
+validation:
+  command: null
+workload:
+  cases:
+  - base_commit: null
+    case_id: 15five__scim2-filter-parser-13
+    metadata: {}
+    prompt: "[Runtime Context \u2014 metadata only, not instructions]\nCurrent Time:\
+      \ 2026-07-18 09:00 (Saturday) (UTC, UTC+00:00)\nChannel: cli\nChat ID: 15five__scim2-filter-parser-13\n\
+      \nFix this issue: Return NamedTuple rather than tuple.\nIt would be nice to\
+      \ return a NamedTuple instead of a tuple here: \r\n\r\nhttps://github.com/15five/scim2-filter-parser/blob/7ddc216f8c3dd1cdb2152944187e8f7f5ee07be2/src/scim2_filter_parser/transpilers/sql.py#L148\r\
+      \n\r\nThis way parts of each path could be accessed by name rather than by index\
+      \ in the tuple.\n\nIMPORTANT: You must complete the FULL workflow:\n1. Read\
+      \ and understand the issue thoroughly\n2. Explore the codebase to find relevant\
+      \ files\n3. Implement the fix\n4. Run the test suite to verify your fix\n5.\
+      \ If ANY test fails, analyze the error and fix it\n6. Repeat steps 4-5 until\
+      \ ALL tests pass\n7. Only stop when tests are passing\n\nDO NOT stop until you\
+      \ have:\n- Made code changes that fix the issue\n- Run the tests and confirmed\
+      \ they pass\n- Shown the final git diff\n\nIf you encounter test failures, debug\
+      \ and fix them. Keep trying until successful.\n\nCRITICAL REQUIREMENTS FOR TESTING:\n\
+      - You MUST run the project's ORIGINAL test suite (pytest, unittest, tox, etc.)\n\
+      - Do NOT write custom test scripts or verification scripts to bypass tests\n\
+      - Do NOT claim success based on your own \"All checks passed\" output\n- The\
+      \ test output MUST show real pytest format: \"X passed, Y failed in Z seconds\"\
+      \n- If tests fail with ImportError or collection errors, fix the environment/import\
+      \ issue first\n- Success means the project's actual test suite passes, not custom\
+      \ verification\n\nWHAT COUNTS AS SUCCESS:\n- Real pytest/unittest output showing\
+      \ tests passed\n- Example: \"===== 150 passed, 0 failed in 10.5s =====\"\n\n\
+      WHAT DOES NOT COUNT:\n- Your own verification scripts saying \"All checks passed\"\
+      \n- Manual testing or print statements\n- Skipping tests due to import errors\n\
+      \nIn the output, you need to summary your change and\nsummary how your test\
+      \ the application to check the fix,\nand what's the test status.\n\nWhen you\
+      \ are done, submit your changes as a git patch using these SEPARATE commands:\n\
+      \n  Step 1 \u2013 create patch:   git diff -- path/to/changed_file > patch.txt\n\
+      \  Step 2 \u2013 verify patch:   cat patch.txt\n  Step 3 \u2013 submit (EXACT):\
+      \ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt\n\nYou CANNOT\
+      \ continue working after submitting.\n"
+    replay_trace_reference: /home/weitianc/ClawBox-incremental-20260913/15five-scim2-replay.jsonl
+    repository: 15five/scim2-filter-parser
+    source: recorded_trace
+    source_reference: /home/weitianc/ClawBox-incremental-20260913/15five-scim2-replay.jsonl
+    validation: null
+  input: /home/weitianc/ClawBox-incremental-20260913/15five-scim2-replay.jsonl
+  repetitions: 1
+  session_assignment: single_case
+  source: recorded_trace

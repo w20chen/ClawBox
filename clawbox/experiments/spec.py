@@ -121,6 +121,7 @@ class ResourcesSpec(StrictFrozenModel):
     emergency_free_memory_mib: int = Field(ge=1)
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
+    non_command_tool_memory_mib: int | None = Field(default=None, ge=1)
     full_tool_memory_mib: int | None = Field(default=None, ge=1)
     prediction_artifact: str | None = None
     oracle_measurements: str | None = None

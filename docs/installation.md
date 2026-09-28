@@ -263,8 +263,8 @@ Then follow [configure and run](guide.md#5-run-on-an-installed-host).
 ## Optional: isolated memory and tiered snapshots
 
 This section requires two NUMA nodes and an idle CubeSandbox VM pool. Choose
-capacities from available node memory; the numbers below are example budgets,
-not universal requirements. Inspect the nodes first:
+capacities from available node memory. The values below match the c16 lab
+defaults and require enough physical RAM on both nodes. Inspect the nodes first:
 
 ```bash
 numactl --hardware
@@ -275,10 +275,10 @@ Continue only if `populated 0`. Set paths in `machine.env` and matching values i
 the experiment's `resources` section:
 
 ```yaml
-pool_memory_budget_mib: 16384
-local_memory_capacity_mib: 16384
-warm_memory_capacity_mib: 8192
-checkpoint_restore_headroom_mib: 1024
+pool_memory_budget_mib: 65536
+local_memory_capacity_mib: 65536
+warm_memory_capacity_mib: 131072
+checkpoint_restore_headroom_mib: 8192
 local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
 local_numa_node: 0
 warm_numa_node: 1
