@@ -292,6 +292,7 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
 
     def __init__(self, cgroup: Path, *, local_capacity_bytes: int,
                  total_capacity_bytes: int, local_numa_node: int,
+                 local_numa_nodes: tuple[int, ...] = (),
                  shared_numa_node: int, **kwargs) -> None:
         NodeMemorySampler.__init__(self, **kwargs)
         self.cgroup = cgroup
@@ -305,7 +306,8 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
         for part in nodes.split(","):
             start, separator, end = part.partition("-")
             granted.update(range(int(start), int(end) + 1) if separator else (int(start),))
-        if not {local_numa_node, shared_numa_node}.issubset(granted):
+        self.local_numa_nodes = local_numa_nodes or (local_numa_node,)
+        if not {*self.local_numa_nodes, shared_numa_node}.issubset(granted):
             raise ValueError(
                 f"VM cgroup cpuset {nodes} does not include LOCAL/shared nodes "
                 f"{local_numa_node},{shared_numa_node}"
@@ -318,7 +320,7 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
     def tier_usage(self) -> tuple[int, int, int]:
         from .numa_borrow import read_numa_lru_bytes
         resident, unattributed = read_numa_lru_bytes(self.cgroup)
-        local = resident.get(self.local_numa_node, 0) + unattributed
+        local = sum(resident.get(n, 0) for n in self.local_numa_nodes) + unattributed
         shared = resident.get(self.shared_numa_node, 0)
         total = int((self.cgroup / "memory.current").read_text())
         return local, shared, total
@@ -335,6 +337,7 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
             "metric": "cgroup_v2_numa_tier_memory",
             "local_memory_cgroup": str(self.cgroup),
             "local_numa_node": self.local_numa_node,
+            "local_numa_nodes": list(self.local_numa_nodes),
             "shared_numa_node": self.shared_numa_node,
             "local_capacity_bytes": self.total,
             "local_used_bytes": local,
@@ -344,6 +347,11 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
             "local_memory_events": (self.cgroup / "memory.events").read_text().strip(),
         })
         return observation
+
+    def node_usage(self) -> dict:
+        from .numa_borrow import read_numa_lru_bytes
+        resident, unattributed = read_numa_lru_bytes(self.cgroup)
+        return {"resident_bytes_by_numa": resident, "unattributed_bytes": unattributed}
 
 
 def sandbox_process_rss_bytes(sandbox_id: str, *,

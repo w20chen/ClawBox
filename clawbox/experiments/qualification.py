@@ -59,6 +59,7 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
 
     return {
         "node": spec.resources.target_node,
+        "compute_nodes": [n.model_dump() for n in spec.resources.compute_nodes],
         "runtime": sandbox(spec.runtime),
         "sandbox": sandbox(spec.sandbox),
         "local_memory_cgroup": spec.resources.local_memory_cgroup,
@@ -113,8 +114,28 @@ def supervision_fault_test() -> dict[str, Any]:
     return {"passed": True, "duration_seconds": time.monotonic() - started}
 
 
-def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path) -> dict[str, Any]:
-    """Exercise the configured Cube checkpoint and restore mechanism once."""
+def _node_spec(spec, node):
+    return spec.model_copy(update={"resources": spec.resources.model_copy(update={
+        "compute_nodes": (), "local_numa_node": node.numa_node,
+        "local_memory_capacity_mib": node.memory_capacity_mib,
+        "local_memory_low_watermark_mib": node.low_watermark_mib,
+        "local_memory_high_watermark_mib": node.high_watermark_mib,
+        "pool_memory_budget_mib": node.high_watermark_mib,
+    })})
+
+
+def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=None) -> dict[str, Any]:
+    """Exercise checkpoint/restore and placement on every compute node."""
+    if spec.resources.compute_nodes:
+        nodes = {node.node_id: snapshot_roundtrip_test(
+            _node_spec(spec, node), artifact_root=artifact_root / node.node_id, _node=node,
+        ) for node in spec.resources.compute_nodes}
+        result = {"required": any(r["required"] for r in nodes.values()),
+                  "passed": all(r["passed"] for r in nodes.values()), "nodes": nodes,
+                  "mechanism": spec.resources.snapshot_mechanism, "storage": spec.resources.snapshot_storage,
+                  "incremental_delta_verified": all(r.get("incremental_delta_verified", False) for r in nodes.values())}
+        atomic_json(artifact_root / "result.json", result)
+        return result
     required = any(
         policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
         for policy in spec.policies
@@ -151,6 +172,11 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path) -> dic
         snapshot_mechanism=spec.resources.snapshot_mechanism,
         snapshot_storage=spec.resources.snapshot_storage,
         lazy_restore=True,
+        numa_borrower=SandboxNumaBorrower(
+            Path(spec.resources.local_memory_cgroup), local_node=spec.resources.local_numa_node,
+            shared_node=spec.resources.warm_numa_node, shared_pool=pool,
+            cpus=_node.cpus if _node else None, node_id=_node.node_id if _node else None,
+        ) if spec.resources.shared_memory_borrow_limit_mib is not None else None,
     )
     primary_error: BaseException | None = None
     incremental_delta_verified = False
@@ -211,6 +237,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path) -> dic
         "storage": spec.resources.snapshot_storage,
         "incremental_delta_verified": incremental_delta_verified,
         "timings": lifecycle.timings,
+        "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
         "failure": (
             f"{type(primary_error).__name__}: {primary_error}"
             if primary_error is not None else None
@@ -230,17 +257,29 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path) -> dic
         "storage": spec.resources.snapshot_storage,
         "incremental_delta_verified": incremental_delta_verified,
         "timings": lifecycle.timings,
+        "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
         "artifact_root": str(artifact_root),
     }
 
 
 def live_borrow_roundtrip_test(
-    spec: ExperimentSpec, *, artifact_root: Path,
+    spec: ExperimentSpec, *, artifact_root: Path, _node=None,
 ) -> dict[str, Any]:
-    """Prove a running Cube VM can borrow NUMA1 and return without interruption."""
+    """Prove a VM on each compute node can borrow and return without interruption."""
+    if spec.resources.compute_nodes:
+        nodes = {node.node_id: live_borrow_roundtrip_test(
+            _node_spec(spec, node), artifact_root=artifact_root / node.node_id, _node=node,
+        ) for node in spec.resources.compute_nodes}
+        result = {"required": bool(spec.resources.shared_memory_borrow_limit_mib),
+                  "passed": all(r["passed"] for r in nodes.values()), "nodes": nodes,
+                  "borrow_limit_bytes": spec.resources.shared_memory_borrow_limit_mib * 1024 * 1024,
+                  "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024}
+        atomic_json(artifact_root / "result.json", result)
+        return result
     limit_mib = spec.resources.shared_memory_borrow_limit_mib
-    if limit_mib is None:
-        return {"required": False, "passed": True}
+    if not limit_mib:
+        return {"required": False, "passed": True, "borrow_limit_bytes": 0,
+                "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024}
     probe_id = "qualification-borrow-" + uuid.uuid4().hex[:12]
     artifact_root.mkdir(parents=True, exist_ok=False)
     journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
@@ -254,6 +293,7 @@ def live_borrow_roundtrip_test(
         local_node=spec.resources.local_numa_node,
         shared_node=spec.resources.warm_numa_node,
         shared_pool=shared_pool,
+        cpus=_node.cpus if _node else None, node_id=_node.node_id if _node else None,
     )
     lifecycle = CubeSandboxLifecycle(
         client,
@@ -280,13 +320,13 @@ def live_borrow_roundtrip_test(
         if during.exit_code or during.stdout != "shared-alive":
             raise RuntimeError("VM did not execute while using shared memory")
         if borrow_record.shared_bytes_after <= borrow_record.shared_bytes_before:
-            raise RuntimeError("NUMA1 residency did not increase after live borrow")
+            raise RuntimeError("shared NUMA residency did not increase after live borrow")
         return_record = lifecycle.return_local_memory()
         after = lifecycle.sandbox.commands.run("printf local-again", timeout=30)
         if after.exit_code or after.stdout != "local-again":
             raise RuntimeError("VM did not execute after returning to LOCAL")
         if return_record.local_bytes_after <= return_record.local_bytes_before:
-            raise RuntimeError("NUMA0 residency did not increase after return")
+            raise RuntimeError("compute NUMA residency did not increase after return")
         if shared_pool.borrowed_bytes:
             raise RuntimeError("live-borrow reservation remained after return")
     except BaseException as exc:
@@ -308,6 +348,7 @@ def live_borrow_roundtrip_test(
         "passed": primary_error is None and not cleanup_errors,
         "borrow_limit_bytes": limit_mib * 1024 * 1024,
         "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024,
+        "placements": borrower.placements,
         "borrow": asdict(borrow_record) if borrow_record is not None else None,
         "return": asdict(return_record) if return_record is not None else None,
         "failure": (

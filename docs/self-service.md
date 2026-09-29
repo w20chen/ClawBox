@@ -1,7 +1,7 @@
 # 从主机配置到第一次实验
 
 在 ARM64 Linux/KVM 主机的终端中执行下面的命令。`clawbox experiment`
-是实验入口；不需要 Codex 或其他代码代理。先完成单并发例子，再增加并发和策略。
+是实验入口；不需要 Codex 或其他代码代理。默认用两个计算节点、两个并发会话验证链路，再增加负载和策略。
 
 ## 1. 新机器准备
 
@@ -53,12 +53,42 @@ clawbox experiment host init "$HOME/.config/clawbox/host.yaml" \
 `node` 是两个模板均 READY 的 CubeSandbox 节点名称/IP，不是 NUMA 编号。
 旧 profile 没有保存 COLD 路径时，必须把 `cold_root` 改成实际安装值。
 
+新生成的配置默认使用 NUMA 0、1 作为两个计算节点，NUMA 2 作为共享内存池。
+从单节点 profile 导入时会保留原配置；切换到双节点时删除顶层的
+`local_node/local_gib/low_gib/high_gib`，加入以下内容：
+
+```yaml
+compute_nodes:
+  - node_id: node0
+    numa_node: 0
+    cpus: null
+    memory_gib: 36
+    low_gib: 28
+    high_gib: 32
+  - node_id: node1
+    numa_node: 1
+    cpus: null
+    memory_gib: 36
+    low_gib: 28
+    high_gib: 32
+warm: true
+warm_node: 2
+warm_gib: 128
+shared_borrow_percent: 50
+warm_root: /mnt/clawbox-pool
+```
+
+`cpus: null` 选择该 NUMA 的全部 CPU，也可以填字符串子集，例如 `"0-39"`。
+先用 `host inspect` 核对实际编号；脚本拒绝越过该节点的 CPU 或重复的节点/CPU。
+每个计算节点可配置不同容量和水位。这里本地容量合计 72 GiB，但每节点独立管理 36 GiB；
+共享池只有一份 128 GiB，全部节点合计最多借用 64 GiB。
+
 | 主机 YAML 字段 | 用途 |
 | --- | --- |
-| `local_node` | 本地 CPU 与内存所在 NUMA；CPU 取该节点 CPU 集合 |
-| `local_gib` | LOCAL 层容量边界，GiB |
-| `low_gib`, `high_gib` | 回收目标与触发水位，满足 `0 < LOW < HIGH < LOCAL` |
-| `warm` | 是否配置共享内存与 WARM 快照；只运行常驻方案可设为 `false` |
+| `compute_nodes[].numa_node`, `cpus` | 各计算节点的 NUMA 和 CPU 集合 |
+| `compute_nodes[].memory_gib` | 该计算节点的 LOCAL 容量边界，GiB |
+| `compute_nodes[].low_gib`, `high_gib` | 各节点回收目标与触发水位，满足 `0 < LOW < HIGH < LOCAL` |
+| `warm` | 双节点共享池模式使用 `true`；单节点模式也支持无 WARM |
 | `warm_node`, `warm_gib` | 共享池 NUMA 与容量，须与 LOCAL 不同节点 |
 | `shared_borrow_percent` | 活跃 VM 借用共享池的最大比例，0–50；其余容量与快照共享计账 |
 | `warm_root` | 独立 tmpfs 挂载目录；不能隐藏已有磁盘文件，也不能与其他数据目录嵌套 |
@@ -89,8 +119,12 @@ systemd 的 `active` 不表示节点已经可以创建 VM。
 
 这套模拟用一台机器的 NUMA 域表示 LOCAL 与共享内存，约束 CPU 位置、内存层和借用。
 它没有模拟任意超节点的交换网络、跨机协议或可配置互连带宽/延迟。NUMA 距离由真实
-硬件决定。`local_gib + warm_gib × 借用比例` 是活跃 VM 父 cgroup 的组合上限；
-LOCAL 边界由实验控制器依据 NUMA 测量实施，不能把组合上限误读为 LOCAL 占用。
+硬件决定。`sum(compute_nodes[].memory_gib) + warm_gib × 借用比例` 是活跃 VM 父 cgroup 的
+内核强制组合上限；每节点 LOCAL 边界由控制器依据 NUMA 测量实施，可能出现采样间隔内的超调，
+不是每 NUMA 的内核硬配额，也不是预先占满这些内存。绑定发生在 VM 创建/恢复后、Worker 分发后续工作前；
+启动和 Guest 自主恢复期间存在绑定前窗口，已有页是否迁移必须看实际驻留数据。详见[超节点配置与测量](supernode.md)。
+
+单计算节点仍可使用不含 `compute_nodes` 的 `local_node/local_gib/low_gib/high_gib` 配置。
 
 ## 3. 运行最小例子
 
@@ -102,7 +136,7 @@ mkdir -p "$CLAWBOX_OUTPUT_ROOT" "$HOME/clawbox-specs"
 clawbox experiment configure examples/experiments/getting-started.yaml \
   "$HOME/clawbox-specs/smoke.yaml" \
   --trace "$PWD/examples/traces/smoke.jsonl" \
-  --experiment-id first-smoke --concurrency 1 --pool-memory-gib 32
+  --experiment-id first-smoke --concurrency 2
 clawbox experiment validate "$HOME/clawbox-specs/smoke.yaml" --inputs
 clawbox experiment describe "$HOME/clawbox-specs/smoke.yaml"
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
@@ -111,7 +145,7 @@ clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment status smoke-01
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment report smoke-01
 ```
 
-这里的 32 GiB 准入预算对应默认主机 HIGH=32；若改过主机容量，一并修改。
+准入预算由主机 profile 自动填入，默认等于两个节点 HIGH 之和 64 GiB；每节点独立执行 32 GiB HIGH。
 `configure` 从成功 profile 填入模板、镜像摘要、NUMA 和容量；默认拒绝覆盖已有 YAML。
 覆盖时显式加 `--force`，并为新实验选择新 run ID。
 
@@ -140,7 +174,7 @@ clawbox experiment configure examples/experiments/getting-started.yaml \
   --trace "$PWD/examples/traces/memory-smoke.jsonl" \
   --prompt 'Allocate and touch 64 MiB for three seconds, then write complete to /workspace/result.txt.' \
   --repository self-service/memory --experiment-id memory-train \
-  --baseline tool-static-resident --concurrency 1 --pool-memory-gib 32
+  --baseline tool-static-resident --concurrency 2
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
   "$HOME/clawbox-specs/memory-train.yaml" --run-id memory-train-01
 clawbox experiment train "$CLAWBOX_OUTPUT_ROOT/memory-train-01" \

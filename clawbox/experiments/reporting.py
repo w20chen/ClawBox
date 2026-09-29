@@ -101,16 +101,22 @@ def write_memory_timeseries(run_root: Path) -> Path:
     """Export plot-ready memory samples without changing their measurement scope."""
     output = run_root / "memory-timeseries.csv"
     temporary = output.with_name(output.name + ".tmp")
+    results = _completed_results(run_root)
+    numa_nodes = sorted({node for result in results for node in (
+        *[n["numa_node"] for n in result.get("arm", {}).get("resources", {}).get("compute_nodes", [])],
+        result.get("arm", {}).get("resources", {}).get("warm_numa_node"),
+    ) if node is not None})
     fields = [
         "arm_id", "policy", "repetition", "sample", "elapsed_seconds",
         "local_used_gib", "shared_live_used_gib", "combined_live_used_gib",
         "warm_allocated_gib", "warm_committed_gib", "shared_total_gib",
         "host_used_delta_gib", "host_used_gib", "host_available_gib",
     ]
+    fields += [f"numa_{node}_resident_gib" for node in numa_nodes] + ["unattributed_gib"]
     with temporary.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
-        for result in _completed_results(run_root):
+        for result in results:
             arm = result.get("arm") or {}
             path = _event_path(run_root, result)
             if path is None:
@@ -130,7 +136,14 @@ def write_memory_timeseries(run_root: Path) -> Path:
                     shared_live = int(row.get("shared_live_used_bytes") or 0)
                     warm_allocated = int(row.get("warm_allocated_bytes") or 0)
                     gib = 1024 ** 3
+                    residency = row.get("numa_residency") or {}
+                    by_node = residency.get("resident_bytes_by_numa", {})
                     writer.writerow({
+                        **{f"numa_{node}_resident_gib": (
+                            f"{by_node[str(node)] / gib:.6f}" if str(node) in by_node else ""
+                        ) for node in numa_nodes},
+                        "unattributed_gib": (f"{residency['unattributed_bytes'] / gib:.6f}"
+                                             if "unattributed_bytes" in residency else ""),
                         "arm_id": arm.get("arm_id"),
                         "policy": (arm.get("policy") or {}).get("name"),
                         "repetition": arm.get("repetition"),
@@ -301,10 +314,31 @@ def render_run_report(run_root: Path) -> str:
     lines.extend([
         "",
         "Configured VM capacity, admission reservations, predictions, LOCAL physical "
-        "use, live NUMA1 borrowing, and WARM snapshot bytes are distinct quantities. "
+        "use, live shared-NUMA borrowing, and WARM snapshot bytes are distinct quantities. "
         "Crossing HIGH is an observed control event, not a failed arm. OOMs, crossing "
         "the shared-pool capacity, validation failures, telemetry loss, or unverified "
         "cleanup invalidate performance comparison. One repetition does not estimate "
         "run-to-run uncertainty.",
     ])
+    if any(row["result"].get("arm", {}).get("resources", {}).get("compute_nodes") for row in rows):
+        lines.extend(["", "## Compute nodes", "",
+            "Each node has independent admission and LOW/HIGH/HARD. Overshoot seconds in the aggregate table sum node-seconds. "
+            "Node peaks include conservatively charged unattributed bytes; they must not be summed as a simultaneous physical peak.", "",
+            "| Arm | Node | NUMA | CPUs | LOW/HIGH/HARD GiB | Peak local GiB | HIGH crossings | Borrows | Verified placements |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"])
+        for row in rows:
+            result = row["result"]
+            for node_id, node in result.get("performance", {}).get("compute_nodes", {}).items():
+                w = node.get("watermarks") or {}
+                r = node["resources"]
+                placements = node.get("placements") or []
+                cpus = placements[0].get("effective_cpus") if placements else "n/a"
+                lines.append(f"| {result['arm']['arm_id']} | {node_id} | {r.get('local_numa_node')} | {cpus} | "
+                    f"{_gib(w.get('low'))}/{_gib(w.get('high'))}/{_gib(w.get('hard'))} | "
+                    f"{_gib(w.get('peak_local_bytes'))} | {w.get('high_crossings', 'n/a')} | "
+                    f"{w.get('borrow_count', 'n/a')} | {len(placements)} |")
+        lines.extend(["", "CPU/memory bindings are verified after VM creation and restore, before further worker dispatch. "
+            "Boot and autonomous guest resume may execute before binding. "
+            "They do not prove that existing pages migrated. Per-NUMA physical samples are in memory-timeseries.csv; "
+            "session placement and cgroup evidence are in each arm's JSON.", ""])
     return "\n".join(lines) + "\n"

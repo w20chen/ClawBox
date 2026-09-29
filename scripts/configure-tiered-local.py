@@ -45,6 +45,8 @@ except OSError as exc:
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--capacity-mib", type=int, default=65536)
 parser.add_argument("--numa-node", type=int, default=0)
+parser.add_argument("--numa-nodes", help="comma-separated compute NUMA nodes")
+parser.add_argument("--cpus", help="compute CPU subset; must belong to the selected nodes")
 parser.add_argument("--shared-borrow-mib", type=int, default=0)
 parser.add_argument("--shared-node", type=int)
 parser.add_argument("--reclaim-storage-cache", action="store_true")
@@ -58,19 +60,33 @@ base = Path("/sys/fs/cgroup/cube_sandbox")
 group = base / "sandbox"
 if "populated 0" not in (group / "cgroup.events").read_text().splitlines():
     raise SystemExit("refusing to change LOCAL limits: standalone VMs are still running")
-cpus = (Path("/sys/devices/system/node") / f"node{args.numa_node}" / "cpulist").read_text().strip()
+nodes = [int(n) for n in args.numa_nodes.split(",")] if args.numa_nodes else [args.numa_node]
+if len(set(nodes)) != len(nodes) or any(n < 0 for n in nodes) or args.shared_node in nodes and args.shared_borrow_mib:
+    parser.error("compute NUMA nodes must be unique, non-negative and distinct from shared")
+def cpu_set(value):
+    result = set()
+    for item in value.split(","):
+        ends = item.split("-")
+        result.update(range(int(ends[0]), int(ends[-1]) + 1))
+    return result
+available = set()
+for node in nodes:
+    available.update(cpu_set((Path("/sys/devices/system/node") / f"node{node}" / "cpulist").read_text().strip()))
+chosen = cpu_set(args.cpus) if args.cpus else available
+if not chosen or not chosen <= available:
+    parser.error("CPU subset must belong to the compute NUMA nodes")
+cpus = ",".join(map(str, sorted(chosen)))
 before = int((group / "memory.current").read_text())
 for parent in (base, group):
     if "cpuset" not in (parent / "cgroup.subtree_control").read_text().split():
         (parent / "cgroup.subtree_control").write_text("+cpuset")
 (group / "cpuset.mems").write_text(
-    str(args.numa_node) if not args.shared_borrow_mib
-    else f"{args.numa_node},{args.shared_node}"
+    ",".join(map(str, sorted(set(nodes) | ({args.shared_node} if args.shared_node is not None else set()))))
 )
 (group / "cpuset.cpus").write_text(cpus)
 storage_group = base / "cubelet"
 # Snapshot-copy work also represents work on the LOCAL host. The WARM mount
-# keeps its explicit NUMA1 memory policy; only CPU affinity is constrained here.
+# keeps its explicit shared-NUMA memory policy; only CPU affinity is constrained here.
 (storage_group / "cpuset.cpus").write_text(cpus)
 (group / "memory.swap.max").write_text("0")
 (group / "memory.max").write_text(

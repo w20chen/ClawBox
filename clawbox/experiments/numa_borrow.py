@@ -1,8 +1,9 @@
 """Live VM borrowing from the shared NUMA pool.
 
 CubeSandbox places each microVM in a descendant cgroup.  Rebinding that leaf's
-``cpuset.mems`` keeps the VM running while Linux migrates its pages and directs
-future allocations to the shared node.  Capacity is reserved before the
+``cpuset.mems`` keeps the VM running and directs future allocations to the
+shared node. Existing-page migration is kernel dependent and measured separately.
+Capacity is reserved before the
 rebind, so live borrowing and WARM snapshots cannot independently overcommit
 the same physical pool.
 """
@@ -58,6 +59,7 @@ def read_numa_lru_bytes(cgroup: Path) -> tuple[dict[int, int], int]:
 class SandboxNumaBorrower:
     def __init__(self, cgroup_root: Path, *, local_node: int, shared_node: int,
                  shared_pool: WarmSnapshotPool,
+                 cpus: str | None = None, node_id: str | None = None,
                  proc_root: Path = Path("/proc"),
                  cgroup_mount: Path = Path("/sys/fs/cgroup"),
                  writer: Callable[[Path, str], None] | None = None) -> None:
@@ -68,6 +70,9 @@ class SandboxNumaBorrower:
         self.local_node = local_node
         self.shared_node = shared_node
         self.shared_pool = shared_pool
+        self.cpus = cpus
+        self.node_id = node_id
+        self.placements: list[dict] = []
         self.proc_root = proc_root
         self.cgroup_mount = cgroup_mount.resolve()
         self.writer = writer or self._privileged_write
@@ -130,6 +135,7 @@ class SandboxNumaBorrower:
         started_wall = time.time()
         started = time.monotonic()
         try:
+            self._verify_cpus(leaf)
             self.writer(leaf / "cpuset.mems", str(target_node))
             effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
             if effective != str(target_node):
@@ -165,17 +171,41 @@ class SandboxNumaBorrower:
             return record
 
     def pin_local(self, sandbox_id: str) -> None:
-        """Pin a newly created/restored VM before user work is released."""
+        """Pin after create/restore, before the worker releases further work.
+
+        Cube's VM boot/resume precedes this hook. Autonomous guest activity in
+        that interval may already have run under the parent's allowed set.
+        """
         with self._lock:
             if sandbox_id in self._borrowed:
                 raise RuntimeError(f"borrowed sandbox cannot be newly pinned: {sandbox_id}")
             leaf = self._leaf_for(sandbox_id)
+            if self.cpus is not None:
+                self.writer(leaf / "cpuset.cpus", self.cpus)
+                self._verify_cpus(leaf)
             self.writer(leaf / "cpuset.mems", str(self.local_node))
             effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
             if effective != str(self.local_node):
                 raise RuntimeError(
                     f"VM LOCAL pin did not take effect: requested {self.local_node}, got {effective}"
                 )
+            self.placements.append({
+                "sandbox_id": sandbox_id, "node_id": self.node_id,
+                "numa_node": self.local_node, "cpus": self.cpus,
+                "effective_mems": effective,
+                "effective_cpus": (leaf / "cpuset.cpus.effective").read_text().strip()
+                    if self.cpus is not None else None,
+                "cgroup": str(leaf), "verified_unix_s": time.time(),
+                "scope": "after_create_or_restore_before_worker_dispatch",
+            })
+
+    def _verify_cpus(self, leaf: Path) -> None:
+        if self.cpus is None:
+            return
+        from .topology import parse_cpu_list
+        effective = (leaf / "cpuset.cpus.effective").read_text().strip()
+        if parse_cpu_list(effective) != parse_cpu_list(self.cpus):
+            raise RuntimeError(f"VM CPU pin did not take effect: requested {self.cpus}, got {effective}")
 
     def return_local(self, sandbox_id: str) -> NumaBorrowRecord:
         with self._lock:

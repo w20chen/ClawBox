@@ -294,8 +294,9 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
     if profile.get("local_memory_cgroup"):
         local = Path(profile["local_memory_cgroup"])
         borrow_mib = int(profile.get("shared_memory_borrow_limit_mib") or 0)
-        expected_nodes = {int(profile["local_numa_node"])}
-        if borrow_mib:
+        domains = profile.get("compute_nodes") or []
+        expected_nodes = {int(n["numa_node"]) for n in domains} if domains else {int(profile["local_numa_node"])}
+        if profile.get("local_memory_high_watermark_mib") is not None:
             expected_nodes.add(int(profile["warm_numa_node"]))
         def cpuset_nodes() -> set[int]:
             nodes: set[int] = set()
@@ -311,6 +312,14 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
             ("LOCAL/shared NUMA nodes", lambda: cpuset_nodes() == expected_nodes),
             ("LOCAL swap disabled", lambda: (local/"memory.swap.max").read_text().strip() == "0"),
         ])
+        if domains:
+            from .experiments.topology import parse_cpu_list
+            checks.append(("compute CPU set", lambda: parse_cpu_list((local / "cpuset.cpus.effective").read_text().strip())
+                           == set().union(*(parse_cpu_list(n["cpus"]) for n in domains))))
+            for node in domains:
+                checks.append((f"{node['node_id']} CPUs belong to NUMA{node['numa_node']}",
+                    lambda n=node: parse_cpu_list(n["cpus"]) <= parse_cpu_list(
+                        Path(f"/sys/devices/system/node/node{n['numa_node']}/cpulist").read_text().strip())))
     if current_images:
         from .clawtune_integration import source_revision
         revision = source_revision(Path(os.environ["CLAWTUNE_ROOT"]))
@@ -362,6 +371,7 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
 
 
 def setup(args) -> dict:
+    domains = getattr(args, "compute_nodes", None) or []
     # Reject invalid requests before starting services or touching cgroups.
     low_gib = args.low_gib if args.low_gib is not None else args.local_gib - 8
     high_gib = args.high_gib if args.high_gib is not None else args.local_gib - 4
@@ -427,7 +437,8 @@ def setup(args) -> dict:
         node=node,
         local_memory_cgroup=args.local_memory_cgroup,
         local_memory_capacity_mib=args.local_gib * 1024,
-        local_numa_node=args.local_node,
+        local_numa_node=None if domains else args.local_node,
+        compute_nodes=domains,
         local_memory_low_watermark_mib=low_gib * 1024 if args.warm else None,
         local_memory_high_watermark_mib=high_gib * 1024 if args.warm else None,
         shared_memory_borrow_limit_mib=shared_borrow_mib,
@@ -449,9 +460,11 @@ def setup(args) -> dict:
     command(
         "sudo", "-n", sys.executable, str(ROOT/"scripts/configure-tiered-local.py"),
         "--capacity-mib", str(profile["local_memory_capacity_mib"]),
-        "--numa-node", str(profile["local_numa_node"]),
+        "--numa-node", str(args.local_node),
+        *(["--numa-nodes", ",".join(str(n["numa_node"]) for n in domains),
+           "--cpus", ",".join(n["cpus"] for n in domains)] if domains else []),
         "--shared-borrow-mib", str(profile["shared_memory_borrow_limit_mib"]),
-        "--shared-node", str(profile["warm_numa_node"]), timeout=120,
+        *(["--shared-node", str(profile["warm_numa_node"])] if args.warm else []), timeout=120,
     )
     command(
         "sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}",

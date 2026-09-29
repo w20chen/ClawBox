@@ -4,11 +4,14 @@ The supported interface is `clawbox experiment`. It runs OpenClaw workloads in
 standalone CubeSandbox Runtime and Tool VMs. The host setup, qualification,
 formal run, cleanup, and result state all use this one command group.
 
+For two compute nodes on NUMA 0/1 and a shared pool on NUMA 2, follow the
+[command-by-command setup](self-service.md) and [supernode configuration](supernode.md).
+
 Install the command once from a checkout; later commands do not require a
 source-directory working directory or a manual `PYTHONPATH`:
 
 ```bash
-python3 -m pip install --no-build-isolation -e .
+python3 -m pip install -e .
 clawbox experiment --help
 ```
 

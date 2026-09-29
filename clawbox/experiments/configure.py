@@ -95,6 +95,9 @@ def _set_template(
 def configure_experiment(
     base_path: Path,
     *,
+    compute_nodes: list[dict] | None = None,
+    placement_policy: str | None = None,
+    session_compute_nodes: list[str] | None = None,
     experiment_id: str | None = None,
     trace: str | None = None,
     case_id: str | None = None,
@@ -165,6 +168,16 @@ def configure_experiment(
     tool = _mapping(root.get("sandbox"), name="sandbox")
     execution = _mapping(root.get("execution"), name="execution")
     resources = _mapping(root.get("resources"), name="resources")
+    if compute_nodes is not None:
+        resources["compute_nodes"] = compute_nodes
+        if compute_nodes:
+            resources["local_numa_node"] = None
+    if placement_policy is not None:
+        execution["placement_policy"] = placement_policy
+        if placement_policy == "round_robin" and session_compute_nodes is None:
+            execution["session_compute_nodes"] = []
+    if session_compute_nodes is not None:
+        execution["session_compute_nodes"] = session_compute_nodes
     inference = _mapping(root.get("inference"), name="inference")
     configuration = inference.setdefault("configuration", {})
     configuration = _mapping(configuration, name="inference.configuration")
@@ -510,9 +523,11 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             ),
         } for arm in expand_matrix(spec)
     }
-    usable_reservation_mib = max(
-        0, pool_mib - spec.resources.checkpoint_restore_headroom_mib,
-    )
+    node_budgets = [n.high_watermark_mib for n in spec.resources.compute_nodes] or [pool_mib]
+    usable_node_reservations = [
+        max(0, budget - spec.resources.checkpoint_restore_headroom_mib) for budget in node_budgets
+    ]
+    usable_reservation_mib = sum(usable_node_reservations)
     p50_summary = _p50_admission_summary(spec)
     static_mib = spec.resources.static_tool_memory_mib
     admission: dict[str, Any] = {
@@ -544,7 +559,7 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
         "reservation_capacity_excludes_measured_resident_memory": True,
         "static": {
             "per_command_mib": static_mib,
-            "reservation_only_slots": usable_reservation_mib // static_mib,
+            "reservation_only_slots": sum(budget // static_mib for budget in usable_node_reservations),
         },
         "p50": p50_summary,
         "full_tool_memory_mib": spec.resources.full_tool_memory_mib,
@@ -553,10 +568,13 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
     if p50_summary is not None and "max_mib" in p50_summary:
         maximum = p50_summary["max_mib"]
         p50_summary["reservation_only_slots_at_max"] = (
-            math.floor(usable_reservation_mib / maximum) if maximum else None
+            sum(math.floor(budget / maximum) for budget in usable_node_reservations) if maximum else None
         )
     return {
         "effective_policy_resources": effective_resources,
+        "compute_nodes": [node.model_dump(mode="json") for node in spec.resources.compute_nodes],
+        "placement_policy": spec.execution.placement_policy,
+        "session_compute_nodes": list(spec.execution.session_compute_nodes),
         "experiment_id": spec.experiment_id,
         "agent_driver": spec.agent.driver.value,
         "inference_backend": spec.inference.backend.value,

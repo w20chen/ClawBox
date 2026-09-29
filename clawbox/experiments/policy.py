@@ -66,7 +66,7 @@ class PolicyEventExecutor:
 
 
 class PolicyCoordinator:
-    """One process-wide admission ledger and LRU view for an experiment arm."""
+    """Admission ledger and LRU view for one compute memory domain in an arm."""
 
     def __init__(self, policy: PolicySpec, *, budget_mib: int,
                  emergency_free_mib: int, operation_headroom_mib: int,

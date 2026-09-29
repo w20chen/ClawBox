@@ -130,6 +130,7 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
             self.sandbox = type(
                 "Sandbox", (), {"commands": Commands(), "files": Files()},
             )()
+            self.numa_borrower = kwargs.get("numa_borrower")
             self.timings = []
             self.generation = 0
 
@@ -214,6 +215,7 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
             return []
 
     class Borrower:
+        placements = []
         def __init__(self, *args, shared_pool, **kwargs):
             self.shared_pool = shared_pool
 

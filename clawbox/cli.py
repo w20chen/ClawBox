@@ -58,6 +58,15 @@ def emit_overview(value: dict[str, Any]) -> None:
         f"Tool={tool['vcpu']} vCPU/{tool['memory_gib']:g} GiB, "
         f"pair={value['pair_memory_gib']:g} GiB"
     )
+    if value.get("compute_nodes"):
+        print(f"Compute placement: {value['placement_policy']} (Runtime + Tool stay together)")
+        for node in value["compute_nodes"]:
+            print(f"  {node['node_id']}: NUMA {node['numa_node']}, CPUs {node['cpus']}, "
+                  f"LOW/HIGH/HARD={node['low_watermark_mib']/1024:g}/"
+                  f"{node['high_watermark_mib']/1024:g}/{node['memory_capacity_mib']/1024:g} GiB")
+        if value.get("session_compute_nodes"):
+            print("  Session node IDs: " + ", ".join(value["session_compute_nodes"]))
+        print("  Aggregate capacities below are sums; admission is independent on each compute node.")
     print("Concurrency:")
     for row in value["concurrency"]:
         print(
@@ -277,6 +286,8 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--runtime-memory-gib", type=float)
     configure.add_argument("--tool-memory-gib", type=float)
     configure.add_argument("--target-node")
+    configure.add_argument("--placement-policy", choices=("round_robin", "explicit"))
+    configure.add_argument("--session-compute-nodes", help="comma-separated compute node IDs for explicit placement")
     configure.add_argument("--pool-memory-gib", type=float)
     configure.add_argument("--emergency-free-memory-gib", type=float)
     configure.add_argument("--checkpoint-headroom-gib", type=float)
@@ -619,6 +630,9 @@ def main(argv: list[str] | None = None) -> int:
 
             spec = configure_experiment(
                 args.base,
+                compute_nodes=profile.get("compute_nodes"),
+                placement_policy=args.placement_policy,
+                session_compute_nodes=args.session_compute_nodes.split(",") if args.session_compute_nodes else None,
                 experiment_id=args.experiment_id,
                 trace=args.trace,
                 case_id=args.case_id,

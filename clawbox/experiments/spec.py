@@ -14,6 +14,7 @@ from .spec_types import (
     AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, InferenceBackend,
     ReclamationPolicy, RestorePolicy, SessionAssignment, WorkloadSource,
 )
+from .topology import ComputeNode, validate_compute_nodes
 
 
 class StrictFrozenModel(BaseModel):
@@ -81,6 +82,8 @@ class SandboxSpec(StrictFrozenModel):
 
 
 class ExecutionSpec(StrictFrozenModel):
+    placement_policy: Literal["round_robin", "explicit"] = "round_robin"
+    session_compute_nodes: tuple[str, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
     randomized_order: bool = True
     random_seed: int = 0
@@ -118,11 +121,12 @@ class ExecutionSpec(StrictFrozenModel):
 
 
 class ResourcesSpec(StrictFrozenModel):
+    compute_nodes: tuple[ComputeNode, ...] = ()
     target_node: str = Field(min_length=1)
     pool_memory_budget_mib: int = Field(ge=1)
     local_memory_low_watermark_mib: int | None = Field(default=None, ge=1)
     local_memory_high_watermark_mib: int | None = Field(default=None, ge=1)
-    shared_memory_borrow_limit_mib: int | None = Field(default=None, ge=1)
+    shared_memory_borrow_limit_mib: int | None = Field(default=None, ge=0)
     emergency_free_memory_mib: int = Field(ge=1)
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
@@ -142,6 +146,21 @@ class ResourcesSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        if self.compute_nodes:
+            validate_compute_nodes(self.compute_nodes, self.warm_numa_node)
+            if self.local_numa_node is not None:
+                raise ValueError("compute_nodes replaces local_numa_node; do not specify both")
+            if not self.local_memory_cgroup or self.warm_numa_node is None or self.shared_memory_borrow_limit_mib is None:
+                raise ValueError("compute_nodes requires a VM cgroup, shared NUMA node and borrow limit")
+            for field, node_field in (
+                ("local_memory_capacity_mib", "memory_capacity_mib"),
+                ("local_memory_low_watermark_mib", "low_watermark_mib"),
+                ("local_memory_high_watermark_mib", "high_watermark_mib"),
+            ):
+                total = sum(getattr(node, node_field) for node in self.compute_nodes)
+                if getattr(self, field) not in (None, total):
+                    raise ValueError(f"{field} must equal the sum over compute_nodes")
+                object.__setattr__(self, field, total)
         values = (
             self.local_memory_low_watermark_mib,
             self.local_memory_high_watermark_mib,
@@ -156,7 +175,7 @@ class ResourcesSpec(StrictFrozenModel):
             low, high, hard, borrow = (int(value) for value in values)
             if not low < high < hard:
                 raise ValueError("memory watermarks must satisfy LOW < HIGH < LOCAL hard")
-            if self.warm_numa_node is None or self.local_numa_node is None:
+            if self.warm_numa_node is None or (self.local_numa_node is None and not self.compute_nodes):
                 raise ValueError("shared borrowing requires LOCAL and shared NUMA nodes")
             if self.warm_numa_node == self.local_numa_node:
                 raise ValueError("LOCAL and shared NUMA nodes must differ")
@@ -223,6 +242,15 @@ class ExperimentSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_v2(self) -> "ExperimentSpec":
+        assignment = self.execution.session_compute_nodes
+        nodes = self.resources.compute_nodes
+        if self.execution.placement_policy == "explicit":
+            if not nodes or len(assignment) < max(self.execution.concurrency_levels):
+                raise ValueError("explicit placement requires compute_nodes and one node ID per offered session")
+            if set(assignment) - {node.node_id for node in nodes}:
+                raise ValueError("session_compute_nodes contains unknown compute node IDs")
+        elif assignment:
+            raise ValueError("session_compute_nodes requires placement_policy=explicit")
         if self.schema_version != 2:
             raise ValueError("only schema_version: 2 is supported; migrate schema v1")
         if not self.policies:

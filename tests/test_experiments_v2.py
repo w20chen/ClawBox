@@ -88,6 +88,7 @@ def test_watermark_controller_drains_to_low_after_crossing_high() -> None:
             return True
 
     class Borrower:
+        node_id = "node0"
         def __init__(self):
             self.shared_pool = WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib)
 
@@ -159,6 +160,7 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
     pool = WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib)
 
     class Borrower:
+        node_id = "node0"
         shared_pool = pool
 
         def borrowed(self):

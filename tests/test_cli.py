@@ -211,6 +211,7 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
     base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
     assert cli.main([
         "experiment", "configure", base, str(output),
+        "--profile", str(tmp_path / "no-host-profile.json"),
         "--experiment-id", "friendly",
         "--concurrency", "1,5,60",
         "--runtime-memory-gib", "1",

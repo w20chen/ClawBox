@@ -48,6 +48,7 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
+from .topology import place_session
 from .spec_types import InferenceBackend, SnapshotTier
 from .policy_control import PolicyControlServer
 from .prediction import CommandPredictionProvider, P50PredictionProvider, PredictionUnavailable, clawtune_extra_peak
@@ -262,7 +263,7 @@ class WatermarkController:
             self.coordinator.set_new_session_admission_blocked(True)
             self.high_crossings += 1
             self.events.write({
-                "event": "local_high_watermark_crossed",
+                "event": "local_high_watermark_crossed", "compute_node": self.borrower.node_id,
                 "local_used_bytes": local, "shared_live_used_bytes": shared,
                 "combined_live_used_bytes": combined,
             })
@@ -270,7 +271,7 @@ class WatermarkController:
             above_high = False
             self.coordinator.set_new_session_admission_blocked(False)
             self.events.write({
-                "event": "local_low_watermark_reached",
+                "event": "local_low_watermark_reached", "compute_node": self.borrower.node_id,
                 "local_used_bytes": local, "shared_live_used_bytes": shared,
             })
         if above_high and (
@@ -282,7 +283,7 @@ class WatermarkController:
             # cpuset rebinding redirects future faults but this kernel does not
             # synchronously migrate already-resident pages. Borrow again only
             # when LOCAL keeps growing, not every 200 ms while the same pages
-            # remain charged on node 0.
+            # remain charged on the original compute node.
             growth_step = 64 * 1024 * 1024
             if (self._last_reactive_borrow_local_bytes is None
                     or local >= self._last_reactive_borrow_local_bytes + growth_step):
@@ -857,7 +858,9 @@ class ExperimentWorker:
                 total_capacity_bytes=(
                     arm.resources.local_memory_capacity_mib + shared_borrow_mib
                 ) * 1024 * 1024,
-                local_numa_node=arm.resources.local_numa_node,
+                local_numa_node=(arm.resources.compute_nodes[0].numa_node
+                                 if arm.resources.compute_nodes else arm.resources.local_numa_node),
+                local_numa_nodes=tuple(n.numa_node for n in arm.resources.compute_nodes),
                 shared_numa_node=arm.resources.warm_numa_node,
                 interval_s=arm.execution.memory_sample_interval_seconds,
             )
@@ -933,29 +936,60 @@ class ExperimentWorker:
                 repository=arm.case.repository or arm.case.case_id,
                 sandbox_identity={k: getattr(arm.sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")},
             )
-        coordinator = PolicyCoordinator(
-            arm.policy, budget_mib=arm.resources.pool_memory_budget_mib,
-            emergency_free_mib=arm.resources.emergency_free_memory_mib,
-            operation_headroom_mib=policy_operation_headroom_mib(arm),
-            progress_budget_mib=policy_progress_budget_mib(arm),
-            startup_headroom_mib=self._startup_headroom_mib(arm, prediction_provider),
-            physical_sample=sampler.current,
-            reclaim_cache=reclaim_local_cache if isinstance(sampler, CgroupMemorySampler) else None,
-            on_pressure_pause=record_pressure_pause,
-        )
         snapshot_pool = WarmSnapshotPool(
             arm.resources.warm_memory_capacity_mib * 1024 * 1024,
             borrow_capacity_bytes=(shared_borrow_mib or 0) * 1024 * 1024,
         )
-        numa_borrower = (
-            SandboxNumaBorrower(
-                Path(arm.resources.local_memory_cgroup),
-                local_node=arm.resources.local_numa_node,
-                shared_node=arm.resources.warm_numa_node,
-                shared_pool=snapshot_pool,
+        domains = {}
+        for node in arm.resources.compute_nodes or (None,):
+            domain_arm = arm
+            domain_sampler = sampler
+            if node is not None:
+                domain_arm = arm.model_copy(update={"resources": arm.resources.model_copy(update={
+                    "compute_nodes": (), "local_numa_node": node.numa_node,
+                    "local_memory_capacity_mib": node.memory_capacity_mib,
+                    "local_memory_low_watermark_mib": node.low_watermark_mib,
+                    "local_memory_high_watermark_mib": node.high_watermark_mib,
+                    "pool_memory_budget_mib": node.high_watermark_mib,
+                })})
+                domain_sampler = NumaCgroupMemorySampler(
+                    Path(arm.resources.local_memory_cgroup),
+                    local_capacity_bytes=node.memory_capacity_mib * 1024 * 1024,
+                    total_capacity_bytes=(arm.resources.local_memory_capacity_mib + shared_borrow_mib) * 1024 * 1024,
+                    local_numa_node=node.numa_node, shared_numa_node=arm.resources.warm_numa_node,
+                    interval_s=arm.execution.memory_sample_interval_seconds,
+                )
+            coordinator = PolicyCoordinator(
+                arm.policy, budget_mib=domain_arm.resources.pool_memory_budget_mib,
+                emergency_free_mib=arm.resources.emergency_free_memory_mib,
+                operation_headroom_mib=policy_operation_headroom_mib(domain_arm),
+                progress_budget_mib=policy_progress_budget_mib(domain_arm),
+                startup_headroom_mib=self._startup_headroom_mib(domain_arm, prediction_provider),
+                physical_sample=domain_sampler.current,
+                reclaim_cache=reclaim_local_cache if isinstance(sampler, CgroupMemorySampler) else None,
+                on_pressure_pause=record_pressure_pause,
             )
-            if shared_borrow_mib is not None else None
-        )
+            numa_borrower = (
+                SandboxNumaBorrower(
+                    Path(arm.resources.local_memory_cgroup),
+                    local_node=domain_arm.resources.local_numa_node,
+                    shared_node=arm.resources.warm_numa_node, shared_pool=snapshot_pool,
+                    cpus=node.cpus if node else None, node_id=node.node_id if node else None,
+                ) if shared_borrow_mib is not None else None
+            )
+            controller = (
+                WatermarkController(domain_arm, coordinator, domain_sampler, numa_borrower, events)
+                if isinstance(domain_sampler, NumaCgroupMemorySampler) and numa_borrower is not None else None
+            )
+            domains[node.node_id if node else "local"] = SimpleNamespace(
+                arm=domain_arm, sampler=domain_sampler, coordinator=coordinator,
+                borrower=numa_borrower, controller=controller,
+            )
+        def session_domain(index):
+            if not arm.resources.compute_nodes:
+                return domains["local"]
+            node = place_session(arm.resources.compute_nodes, index, arm.execution.session_compute_nodes)
+            return domains[node.node_id]
         if arm.resources.local_memory_cgroup:
             def record_memory_sample(used: int, available: int) -> None:
                 pool = snapshot_pool.snapshot()
@@ -965,6 +999,8 @@ class ExperimentWorker:
                     warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
                 events.write({
                     "event": "memory_sample", "local_used_bytes": used,
+                    "numa_residency": sampler.node_usage() if isinstance(sampler, NumaCgroupMemorySampler) else None,
+                    "combined_live_used_bytes": sampler.tier_usage()[2] if isinstance(sampler, NumaCgroupMemorySampler) else used,
                     "host_available_bytes": available,
                     "host_used_bytes": sampler.host_mem_total - available,
                     "host_used_delta_bytes": (
@@ -982,15 +1018,12 @@ class ExperimentWorker:
                 })
             sampler.sample_hook = record_memory_sample
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
-        watermark_controller = (
-            WatermarkController(arm, coordinator, sampler, numa_borrower, events)
-            if isinstance(sampler, NumaCgroupMemorySampler)
-            and numa_borrower is not None else None
-        )
+        watermark_controller = next(iter(domains.values())).controller
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
         sampler.start()
-        if watermark_controller is not None:
-            watermark_controller.start()
+        for domain in domains.values():
+            if domain.controller is not None:
+                domain.controller.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
         interrupted = False
@@ -1003,10 +1036,10 @@ class ExperimentWorker:
         try:
             futures = {
                 pool.submit(
-                    self._run_session, arm, index, coordinator, events,
+                    self._run_session, session_domain(index).arm, index, session_domain(index).coordinator, events,
                     policy_events, prediction_provider, sandbox_create_gate,
-                    sampler.observe, arm_started_wall, arm_started_monotonic,
-                    snapshot_pool, numa_borrower, watermark_controller,
+                    session_domain(index).sampler.observe, arm_started_wall, arm_started_monotonic,
+                    snapshot_pool, session_domain(index).borrower, session_domain(index).controller,
                 ): index
                 for index in range(arm.concurrency)
             }
@@ -1069,11 +1102,12 @@ class ExperimentWorker:
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
             policy_events.close(wait=not interrupted)
-            if watermark_controller is not None:
-                try:
-                    watermark_controller.stop()
-                except Exception as exc:
-                    failure = failure or exc
+            for domain in domains.values():
+                if domain.controller is not None:
+                    try:
+                        domain.controller.stop()
+                    except Exception as exc:
+                        failure = failure or exc
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
@@ -1081,9 +1115,11 @@ class ExperimentWorker:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception as exc:
                 cleanup_error = exc
-            if numa_borrower is not None:
-                for sandbox_id in numa_borrower.borrowed():
-                    numa_borrower.release_destroyed(sandbox_id)
+            if cleanup_error is None:
+                for domain in domains.values():
+                    if domain.borrower is not None:
+                        for sandbox_id in domain.borrower.borrowed():
+                            domain.borrower.release_destroyed(sandbox_id)
             time.sleep(arm.execution.stabilization_seconds)
             memory = sampler.stop()
             events.write({"event": "memory_sampling", "observation": sampler.observe(),
@@ -1103,6 +1139,42 @@ class ExperimentWorker:
                     "execution pool budget exceeded: "
                     f"peak={memory.peak_used_delta_bytes} budget={pool_budget_bytes}"
                 )
+        node_results = {}
+        for node_id, domain in domains.items():
+            c = domain.controller
+            node_results[node_id] = {
+                "resources": domain.arm.resources.model_dump(mode="json"),
+                "admission_control": domain.coordinator.admission_metrics(),
+                "peak_commitment_bytes": domain.coordinator.peak_commitment_bytes,
+                "placements": domain.borrower.placements if domain.borrower else [],
+                "watermarks": {name: getattr(c, name) for name in (
+                    "low", "high", "hard", "peak_local_bytes", "high_crossings",
+                    "high_overshoot_byte_seconds", "high_overshoot_seconds",
+                    "hard_overshoot_byte_seconds", "hard_overshoot_seconds", "borrow_count",
+                )} if c else None,
+            }
+        if arm.resources.compute_nodes:
+            coordinators = [d.coordinator for d in domains.values()]
+            coordinator = SimpleNamespace(**{
+                name: sum(getattr(c, name) for c in coordinators) for name in (
+                    "pause_count", "pause_service_seconds", "resume_count", "resume_service_seconds", "blocked_seconds",
+                )
+            }, peak_commitment_bytes=None,
+                admission_metrics=lambda: {"scope": "per_compute_node", "nodes": {
+                    key: value["admission_control"] for key, value in node_results.items()
+                }})
+            controllers = [d.controller for d in domains.values()]
+            watermark_controller = SimpleNamespace(**{
+                name: sum(getattr(c, name) for c in controllers) for name in (
+                    "low", "high", "hard", "high_crossings", "high_overshoot_byte_seconds",
+                    "high_overshoot_seconds", "hard_overshoot_byte_seconds", "hard_overshoot_seconds",
+                    "borrow_count", "borrow_service_seconds",
+                )
+            }, peak_local_bytes=memory.peak_used_delta_bytes, **{
+                name: max(getattr(c, name) for c in controllers) for name in (
+                    "peak_shared_live_bytes", "peak_combined_live_bytes", "peak_shared_total_bytes",
+                )
+            })
         status = RunStatus.SUCCEEDED if failure is None else RunStatus.FAILED
         duration = time.monotonic() - started
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
@@ -1130,7 +1202,10 @@ class ExperimentWorker:
                 [item for item in tool_execution_observations
                  if item.get("execution_scope", "agent-tool") == "agent-tool"]
             )
-        peak_over_budget_bytes = max(0, memory.peak_used_delta_bytes - pool_budget_bytes)
+        peak_over_budget_bytes = (
+            max(max(0, d.controller.peak_local_bytes - d.controller.high) for d in domains.values())
+            if arm.resources.compute_nodes else max(0, memory.peak_used_delta_bytes - pool_budget_bytes)
+        )
         result = ResultEnvelope(
             run_id=self.run_id, attempt_id=self.attempt_id,
             sandbox_task_uid=self.task_uid,
@@ -1211,6 +1286,8 @@ class ExperimentWorker:
                 ),
                 "blocked_admission_seconds": coordinator.blocked_seconds,
                 "admission_control": coordinator.admission_metrics(),
+                "compute_nodes": node_results,
+                "placement_policy": arm.execution.placement_policy,
                 "tool_execution_observations": tool_execution_observations,
                 **observation_summary,
                 "session_trace_assignment": [
@@ -1218,6 +1295,7 @@ class ExperimentWorker:
                         "session_id": item.get("session_id"),
                         "case_id": item.get("case_id"),
                         "trace_reference": item.get("trace_reference"),
+                        "compute_node": item.get("compute_node"),
                     }
                     for item in sorted(sessions, key=lambda value: value["session_id"])
                 ],
@@ -1229,6 +1307,8 @@ class ExperimentWorker:
             memory={
                 **asdict(memory),
                 "admission_high_watermark_bytes": pool_budget_bytes,
+                "watermark_scope": "independent_compute_nodes" if arm.resources.compute_nodes else "local",
+                "overshoot_seconds_scope": "sum_of_node_seconds" if arm.resources.compute_nodes else "wall_seconds",
                 "local_high_watermark_exceeded": peak_over_budget_bytes > 0,
                 "peak_local_high_overshoot_bytes": peak_over_budget_bytes,
                 "local_low_watermark_bytes": (
@@ -2736,6 +2816,7 @@ class ExperimentWorker:
             if policy_event_errors:
                 raise RuntimeError("policy event executor failed: " + "; ".join(policy_event_errors))
             return {"session_id": session_id, "case_id": arm.case.case_id,
+                    "compute_node": numa_borrower.node_id if numa_borrower else None,
                     "trace_reference": (
                         arm.case.replay_trace_reference or arm.case.source_reference
                     ),

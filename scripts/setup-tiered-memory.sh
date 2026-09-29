@@ -83,7 +83,8 @@ if text != updated:
         temporary.unlink(missing_ok=True)
 PY
 systemctl daemon-reload
-python3 "$script_dir/configure-tiered-local.py" --capacity-mib "$local_mib" --numa-node "$local_node"
+python3 "$script_dir/configure-tiered-local.py" --capacity-mib "$local_mib" --numa-node "$local_node" \
+  --numa-nodes "${CLAWBOX_LOCAL_NODES:-$local_node}"
 chown "$owner:$(id -gn "$owner")" /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim
 chmod u+w /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim
 findmnt -n -o TARGET,FSTYPE,OPTIONS --target "$warm"
