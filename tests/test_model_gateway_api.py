@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from trace_fixtures import llm_spans, write_spans
 
-from clawbox.replay.model_gateway import ModelGateway
+from clawbox.replay.model_gateway import ModelGateway, _defer_exec_tool_timeouts, _response_message
 
 
 def test_gateway_timeout_is_terminal_for_retries_and_late_producer(
@@ -56,6 +56,67 @@ def test_gateway_timeout_is_terminal_for_retries_and_late_producer(
     assert record["status_code"] == 504
     assert record["error"] == "model gateway request timed out"
     assert record["admission"] == {}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_exec_timeout_starts_after_policy_admission(tmp_path: Path, stream: bool) -> None:
+    trace = tmp_path / "trace.jsonl"
+    write_spans(trace, llm_spans([], {
+        "content": None,
+        "tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {
+                "name": "exec",
+                "arguments": json.dumps({"command": "sleep 1", "timeout": 300}),
+            },
+        }],
+    }, duration_ms=0))
+    gateway = ModelGateway(
+        tmp_path / "session.json", mode="replay", trace=trace,
+        tool_transport_timeout_s=3660,
+    )
+
+    _status, content_type, body, _request_id = gateway.complete_http({
+        "messages": [{"role": "user", "content": "run"}], "stream": stream,
+    })
+    if stream:
+        data = next(
+            json.loads(line[5:].strip()) for line in body.decode().splitlines()
+            if line.startswith("data:") and line[5:].strip() != "[DONE]"
+        )
+        message = data["choices"][0]["delta"]
+    else:
+        assert content_type == "application/json"
+        message = json.loads(body)["choices"][0]["message"]
+    arguments = json.loads(message["tool_calls"][0]["function"]["arguments"])
+    assert arguments["timeout"] == 3660
+    assert arguments["command"] == (
+        "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS=300\nsleep 1"
+    )
+
+
+def test_fragmented_streaming_exec_arguments_are_reassembled_before_rewrite() -> None:
+    chunks = [
+        {"id": "x", "choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "id": "call-1", "type": "function",
+            "function": {"name": "exec", "arguments": '{"command":"sleep 1",'},
+        }]}, "finish_reason": None}]},
+        {"id": "x", "choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "function": {"arguments": '"timeout":300}'},
+        }]}, "finish_reason": "tool_calls"}]},
+    ]
+    body = ("".join(
+        "data: " + json.dumps(chunk, separators=(",", ":")) + "\n\n"
+        for chunk in chunks
+    ) + "data: [DONE]\n\n").encode()
+
+    rewritten = _defer_exec_tool_timeouts("text/event-stream", body, 3660)
+    message = _response_message("text/event-stream", rewritten)
+    arguments = json.loads(message["tool_calls"][0]["function"]["arguments"])
+    assert arguments == {
+        "command": "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS=300\nsleep 1",
+        "timeout": 3660,
+    }
 
 
 @pytest.mark.parametrize("stream", [False, True])

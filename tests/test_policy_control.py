@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
+import struct
 import time
 import urllib.error
 import urllib.request
@@ -137,6 +139,52 @@ def test_policy_control_records_callback_failure_detail() -> None:
         assert record["error_type"] == "OSError"
         assert record["error"] == "route unavailable"
         assert session.records()[0]["admission_error"] == {"type": "OSError", "message": "route unavailable"}
+
+
+def test_policy_control_rolls_back_admission_when_response_connection_is_lost() -> None:
+    admitted = Event()
+    release = Event()
+    abandoned: list[str] = []
+    server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
+                                 bind_host="127.0.0.1", bind_port=0)
+    server.advertised_port = server.actual_port
+
+    def admit(request: dict) -> dict:
+        admitted.set()
+        release.wait(5)
+        return {"decision": "ADMIT", "admitted_memory_mib": 128}
+
+    with server:
+        session = server.register(
+            "session-a", admit=admit, complete=lambda _request: {},
+            abandon=lambda request, _response: abandoned.append(request["execution_id"]),
+        )
+        body = json.dumps({
+            "session_id": session.session_id,
+            "execution_id": "exec-lost",
+            "command_sha256": hashlib.sha256(b"exec-lost").hexdigest(),
+            "operation": "exec",
+        }).encode()
+        request = (
+            f"POST /v1/tool/admit HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Authorization: Bearer {session.token}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode() + body
+        client = socket.create_connection(("127.0.0.1", server.actual_port))
+        client.sendall(request)
+        assert admitted.wait(2)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()
+        release.set()
+        for _ in range(100):
+            if abandoned:
+                break
+            time.sleep(0.01)
+        assert abandoned == ["exec-lost"]
+        assert session.records() == []
+        assert session.close(timeout=1)
+        assert any(record.get("admission_rolled_back") for record in server.requests)
 
 
 def test_policy_control_c60_has_no_cross_session_head_of_line_blocking() -> None:

@@ -277,7 +277,9 @@ class PolicyCoordinator:
         reasons = []
         effective_budget = (
             self.progress_budget_bytes
-            if existing_progress and used >= self.budget_bytes
+            if existing_progress and (
+                used >= self.budget_bytes or not self._reservations
+            )
             else self.budget_bytes
         )
         if charged > effective_budget:

@@ -49,6 +49,7 @@ class _Session:
     token: str
     admit: Callable[[dict[str, Any]], dict[str, Any]]
     complete: Callable[[dict[str, Any]], dict[str, Any]]
+    abandon: Callable[[dict[str, Any], dict[str, Any]], None] | None = None
     lifecycle: SessionLifecycle = SessionLifecycle.ACTIVE
     executions: dict[str, _Execution] = field(default_factory=dict)
     condition: threading.Condition = field(default_factory=threading.Condition)
@@ -133,6 +134,38 @@ class _Session:
             execution.completion_completed_monotonic_s = time.monotonic()
             self.condition.notify_all()
             return dict(response), False
+
+    def abandon_admission(self, request: dict[str, Any]) -> None:
+        """Roll back an ADMIT response that could not reach its caller.
+
+        The SSH subprocess cannot start until the Runtime receives and parses
+        the complete response.  A broken response connection therefore makes
+        the reservation safe to release and the execution ID safe to retry.
+        """
+        execution_id = request["execution_id"]
+        with self.condition:
+            execution = self.executions.get(execution_id)
+            if (execution is None or execution.admission is None
+                    or execution.completion is not None):
+                return
+            admission = dict(execution.admission)
+            execution.admitting = True
+        try:
+            if self.abandon is not None:
+                self.abandon(dict(execution.request), admission)
+        except Exception as exc:
+            with self.condition:
+                execution.admission_error = {
+                    "type": type(exc).__name__, "message": str(exc),
+                }
+                execution.admitting = False
+                self.condition.notify_all()
+            raise
+        with self.condition:
+            if self.executions.get(execution_id) is execution:
+                self.executions.pop(execution_id)
+            execution.admitting = False
+            self.condition.notify_all()
 
     def drain(self, timeout: float | None) -> bool:
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -243,7 +276,18 @@ class PolicyControlServer:
                     response["session_id"] = state.session_id
                     response["execution_id"] = body["execution_id"]
                     response["duplicate"] = duplicate
-                    self._json(HTTPStatus.OK, response)
+                    try:
+                        self._json(HTTPStatus.OK, response)
+                    except (BrokenPipeError, ConnectionResetError) as exc:
+                        if self.path.endswith("/admit") and not duplicate:
+                            state.abandon_admission(body)
+                        record.update(
+                            status=499, error_type=type(exc).__name__,
+                            error=str(exc), admission_rolled_back=(
+                                self.path.endswith("/admit") and not duplicate
+                            ),
+                        )
+                        return
                     record.update(status=200, duplicate=duplicate)
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                     record["status"] = 400
@@ -255,6 +299,10 @@ class PolicyControlServer:
                     record["error_type"] = type(exc).__name__
                     record["error"] = str(exc)
                     self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    record["status"] = 499
+                    record["error_type"] = type(exc).__name__
+                    record["error"] = str(exc)
                 except Exception as exc:
                     record["status"] = 503
                     record["error_type"] = type(exc).__name__
@@ -311,11 +359,13 @@ class PolicyControlServer:
 
     def register(self, session_id: str, *,
                  admit: Callable[[dict[str, Any]], dict[str, Any]],
-                 complete: Callable[[dict[str, Any]], dict[str, Any]]) -> PolicyControlSession:
+                 complete: Callable[[dict[str, Any]], dict[str, Any]],
+                 abandon: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+                 ) -> PolicyControlSession:
         if not _IDENTITY.fullmatch(session_id):
             raise ValueError("invalid session_id")
         token = secrets.token_urlsafe(32)
-        state = _Session(session_id, token, admit, complete)
+        state = _Session(session_id, token, admit, complete, abandon)
         with self._lock:
             if not self._started:
                 raise RuntimeError("PolicyControlServer is not started")

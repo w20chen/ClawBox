@@ -26,6 +26,7 @@ from typing import Any
 
 PREFIX = "__CBX_EXEC_1__"
 CANCEL_PREFIX = "__CLAWBOX_CANCEL__ "
+DEFERRED_TIMEOUT_PREFIX = "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS="
 _HOST_KEY_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
@@ -43,6 +44,23 @@ def _bridge_header(metadata: dict[str, Any], profile_command: str) -> str:
     return base64.urlsafe_b64encode(json.dumps(
         bridge_metadata, sort_keys=True, separators=(",", ":"),
     ).encode()).decode().rstrip("=")
+
+
+def _split_deferred_timeout(profile_command: str) -> tuple[str, float | None]:
+    """Remove the gateway marker from the command used for prediction."""
+    if not profile_command.startswith(DEFERRED_TIMEOUT_PREFIX):
+        return profile_command, None
+    first, separator, remainder = profile_command.partition("\n")
+    if not separator:
+        raise ValueError("deferred Tool timeout marker has no command")
+    raw = first.removeprefix(DEFERRED_TIMEOUT_PREFIX)
+    try:
+        requested = float(raw)
+    except ValueError as exc:
+        raise ValueError("deferred Tool timeout is not numeric") from exc
+    if not requested > 0:
+        raise ValueError("deferred Tool timeout must be positive")
+    return remainder, requested
 
 
 def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
@@ -79,6 +97,9 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
                 continue
         else:
             profile_command = payload
+        profile_command, deferred_timeout = _split_deferred_timeout(profile_command)
+        if deferred_timeout is not None:
+            metadata["deferred_tool_timeout_seconds"] = deferred_timeout
         encoded = _bridge_header(metadata, profile_command)
         argv[index] = (
             argument[:marker] + PREFIX + "b64:" + encoded + "\n" + payload
@@ -132,6 +153,21 @@ def _prediction(command_sha256: str) -> dict[str, Any] | None:
         return prediction if isinstance(prediction, dict) else None
     except (OSError, ValueError, TypeError):
         return None
+
+
+def _tool_timeout_seconds(metadata: dict[str, Any]) -> float:
+    """Return the execution deadline which begins only after admission."""
+    configured = float(os.environ.get("CLAWBOX_TOOL_TIMEOUT_SECONDS", "300"))
+    if not configured > 0:
+        raise ValueError("CLAWBOX_TOOL_TIMEOUT_SECONDS must be positive")
+    requested = metadata.get("deferred_tool_timeout_seconds")
+    if requested is None:
+        return configured
+    if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+        raise ValueError("deferred Tool timeout is not numeric")
+    if not requested > 0:
+        raise ValueError("deferred Tool timeout must be positive")
+    return min(configured, float(requested))
 
 
 def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
@@ -191,7 +227,8 @@ def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _wait_for_ssh(argv: list[str], execution_id: str) -> int:
+def _wait_for_ssh(argv: list[str], execution_id: str,
+                  timeout_seconds: float | None = None) -> int:
     """Forward OpenClaw cancellation, but reap SSH before reporting completion."""
     child = None
     cancellation_requested = False
@@ -229,7 +266,22 @@ def _wait_for_ssh(argv: list[str], execution_id: str) -> int:
         child = subprocess.Popen(argv, start_new_session=True)
         if cancellation_requested:
             cancel(None, None)
-        return child.wait()
+        if timeout_seconds is None:
+            return child.wait()
+        try:
+            return child.wait(timeout=timeout_seconds)
+        except TypeError:
+            # Lightweight test doubles may expose only wait(); production
+            # subprocess.Popen always supports the timeout keyword.
+            return child.wait()
+        except subprocess.TimeoutExpired:
+            cancel(None, None)
+            try:
+                child.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            return 124
     finally:
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
@@ -315,6 +367,11 @@ def main() -> int:
         return 125
 
     metadata, command, profile_command = parsed
+    try:
+        tool_timeout_seconds = _tool_timeout_seconds(metadata)
+    except ValueError as exc:
+        print(f"ClawBox Tool timeout is invalid: {exc}", file=sys.stderr)
+        return 125
     execution_id = str(metadata["execution_id"])
     command_sha256 = hashlib.sha256(profile_command.encode()).hexdigest()
     effective_command_sha256 = hashlib.sha256(command.encode()).hexdigest()
@@ -333,6 +390,7 @@ def main() -> int:
             else _prediction(command_sha256)
         ),
         "runtime_request_at": time.time(),
+        "tool_timeout_seconds": tool_timeout_seconds,
     }
     try:
         admission = _post("/v1/tool/admit", request, attempts=3)
@@ -356,6 +414,7 @@ def main() -> int:
     try:
         return_code = _wait_for_ssh(
             [real_ssh, *_ssh_args_for_route(ssh_argv, route)], execution_id,
+            timeout_seconds=tool_timeout_seconds,
         )
     except OSError as exc:
         print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)

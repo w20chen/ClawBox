@@ -172,7 +172,8 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
     return f"{user}@{rendered}:{port}"
 
 
-def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
+def native_tool_bridge_setup_command(*, restart: bool = False,
+                                     command_timeout_seconds: int = 300) -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
     Cube restores a template snapshot before applying per-sandbox environment
@@ -206,6 +207,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False) -> str:
         "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
+        f"TOOL_EXEC_TIMEOUT_SECONDS={int(command_timeout_seconds)} "
         "PYTHONHASHSEED=0 "
         "CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py "
         "CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python "
@@ -248,6 +250,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     gateway_key_env = "CLAWBOX_MODEL_GATEWAY_TOKEN"
     upstream_url = model_gateway.url if model_gateway is not None else base_url
     upstream_key_env = gateway_key_env if model_gateway is not None else key_env
+    transport_timeout_seconds = (
+        None if timeout_seconds is None
+        else min(86400, max(120, int(timeout_seconds) + 60))
+    )
+    tool_timeout_seconds = int(configuration.get("command_timeout_seconds") or 300)
+    if tool_timeout_seconds < 1:
+        raise ValueError("command_timeout_seconds must be positive")
     exec_yield_value = configuration.get("openclaw_exec_yield_ms")
     exec_yield_ms: int | None = None
     exec_yield_export = ""
@@ -301,6 +310,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_CONTROL_AUTH={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
+        f"CLAWBOX_TOOL_TIMEOUT_SECONDS={tool_timeout_seconds} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
         f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
@@ -404,6 +414,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             f"nohup env CLAWBOX_RELAY_UPSTREAM={shlex.quote(upstream_url)} "
             f"CLAWBOX_RELAY_TOKEN=\"${{{upstream_key_env}}}\" "
             f"CLAWBOX_RELAY_PORT={RELAY_PORT} "
+            f"CLAWBOX_RELAY_TIMEOUT_SECONDS={transport_timeout_seconds} "
             f"/opt/clawtune/venv/bin/python {shlex.quote(relay_script_file)} </dev/null "
             f">{shlex.quote(home + '/logs/model-relay.log')} 2>&1 & "
             f"echo $! >{shlex.quote(relay_pid_file)}; "
@@ -479,6 +490,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     exec_tool_config: dict[str, object] = {
         "host": "sandbox", "security": "full", "ask": "off",
     }
+    if transport_timeout_seconds is not None:
+        # OpenClaw's timeout covers only the transport wrapper.  The wrapper
+        # starts the user-visible Tool deadline after policy admission.
+        exec_tool_config["timeoutSec"] = transport_timeout_seconds
     if exec_yield_ms is not None:
         # Set the OpenClaw configuration as well as the process environment.
         # The config is consumed directly by the exec tool factory and avoids
@@ -531,6 +546,17 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     # Preserve the request envelope used by the validated recording. Apply this
     # to live recording too, rather than keeping a replay-only configuration.
     invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
+    if timeout_seconds is not None:
+        # Admission control can intentionally hold an already-issued model
+        # request while earlier Tools release their memory reservations.  The
+        # provider's 120-second idle default must not turn that policy wait
+        # into a false model failure before the arm-level deadline expires.
+        assert transport_timeout_seconds is not None
+        provider_timeout_seconds = transport_timeout_seconds
+        invoke([
+            "config", "set", "models.providers.vllm.timeoutSeconds",
+            str(provider_timeout_seconds),
+        ])
     instruction = prompt
     agent_args = [
         "agent", "--local", "--agent", "main", "--session-id", session_id,

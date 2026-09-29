@@ -111,7 +111,7 @@ def test_running_tool_can_pass_a_capacity_blocked_new_pair() -> None:
     assert created.is_set()
 
 
-def test_existing_tool_progress_uses_hard_budget_only_after_high_is_crossed() -> None:
+def test_existing_tool_progress_uses_hard_budget_at_high_or_when_idle() -> None:
     gib = 1024 ** 3
     used = [31 * gib]
     policy = PolicySpec(
@@ -123,13 +123,55 @@ def test_existing_tool_progress_uses_hard_budget_only_after_high_is_crossed() ->
         emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (used[0], 100 * gib),
     )
+    coordinator.acquire("holder", 1 * 1024, 0, wait_class="tool_admission")
     with pytest.raises(AdmissionTimeout):
         coordinator.acquire("existing", 2 * 1024, 0, wait_class="tool_admission")
+    coordinator.release("holder", 1 * 1024)
+    # No Tool is active, so allow one existing session to cross HIGH and make
+    # progress rather than deadlocking just below the watermark.
+    coordinator.acquire("existing", 2 * 1024, 0, wait_class="tool_admission")
+    coordinator.release("existing", 2 * 1024)
     used[0] = 33 * gib
     coordinator.acquire("existing", 2 * 1024, 0, wait_class="tool_admission")
     coordinator.release("existing", 2 * 1024)
     with pytest.raises(AdmissionTimeout):
         coordinator.acquire("existing", 4 * 1024, 0, wait_class="tool_admission")
+
+
+def test_completion_releases_exactly_one_progress_waiter_below_high() -> None:
+    """Reproduce the c16 boundary: idle at HIGH-minus-64MiB must not deadlock."""
+    gib = 1024 ** 3
+    mib = 1024 ** 2
+    used = [31 * gib]
+    policy = PolicySpec(
+        name="resident", admission="tool_static", reclamation="resident",
+        eviction="none", restore="none",
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=32 * 1024, progress_budget_mib=36 * 1024,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        physical_sample=lambda: (used[0], 100 * gib),
+    )
+    coordinator.acquire("finishing", 259, 1, wait_class="tool_admission")
+    used[0] = 32 * gib - 64 * mib
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            coordinator.acquire, "next", 259, 2,
+            wait_class="tool_admission",
+        )
+        deadline = time.monotonic() + 1
+        while not coordinator._waiters and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert coordinator._waiters and not pending.done()
+
+        coordinator.release("finishing", 259)
+        pending.result(timeout=1)
+
+    # The escape hatch admits one progress request, not the whole queue.
+    with pytest.raises(AdmissionTimeout):
+        coordinator.acquire("second", 259, 0, wait_class="tool_admission")
+    coordinator.release("next", 259)
 
 
 def test_high_hysteresis_blocks_only_new_session_creation() -> None:

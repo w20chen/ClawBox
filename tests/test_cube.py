@@ -614,6 +614,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                           resident_poll=None, checkpoint_relay=False):
         assert resident_poll is not None
         assert checkpoint_relay is True
+        assert model_gateway.gateway.timeout_s == 120
         assert (
             SnapshotSandbox.created[1].create_kwargs["env_vars"]
             ["CLAWBOX_MODEL_GATEWAY_TOKEN"]

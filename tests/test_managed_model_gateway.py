@@ -98,6 +98,27 @@ def test_managed_gateway_keeps_replay_cursors_and_delivery_state_session_local(t
         assert gateway.session_count == 0
 
 
+def test_managed_gateway_forwards_session_request_timeout(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    write_trace(trace)
+    with ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    ) as gateway:
+        default = gateway.register(
+            session_id="default", store_path=tmp_path / "default.json",
+            mode="replay", trace=trace, time_scale=0,
+        )
+        custom = gateway.register(
+            session_id="custom", store_path=tmp_path / "custom.json",
+            mode="replay", trace=trace, time_scale=0, request_timeout_s=3660,
+            tool_transport_timeout_s=3660,
+        )
+        assert default.gateway.timeout_s == 600.0
+        assert custom.gateway.timeout_s == 3660
+        assert custom.gateway.tool_transport_timeout_s == 3660
+
+
 def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(
     tmp_path: Path,
 ) -> None:

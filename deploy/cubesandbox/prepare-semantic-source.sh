@@ -16,6 +16,7 @@ TIER_API_PATCH_FILE=$SCRIPT_DIR/tiered-memory-api.patch
 TIER_ISOLATION_PATCH_FILE=$SCRIPT_DIR/tiered-memory-isolation.patch
 TIMING_PATCH_FILE=$SCRIPT_DIR/checkpoint-phase-timing.patch
 INCREMENTAL_PATCH_FILE=$SCRIPT_DIR/incremental-cow-snapshot.patch
+TEMPLATE_BASE_PATCH_FILE=$SCRIPT_DIR/template-base-lineage.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 
 require() {
@@ -29,6 +30,7 @@ require git
 [[ -f "$TIER_API_PATCH_FILE" && -f "$TIER_ISOLATION_PATCH_FILE" ]] || { echo "missing tiered memory patches" >&2; exit 1; }
 [[ -f "$TIMING_PATCH_FILE" ]] || { echo "missing checkpoint timing patch" >&2; exit 1; }
 [[ -f "$INCREMENTAL_PATCH_FILE" ]] || { echo "missing incremental CoW patch" >&2; exit 1; }
+[[ -f "$TEMPLATE_BASE_PATCH_FILE" ]] || { echo "missing template base lineage patch" >&2; exit 1; }
 
 # Later patches change some endpoint hunks, so the first patch alone cannot
 # recognize a fully prepared checkout. The final patch is applied last.
@@ -40,6 +42,10 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$INCREMENTAL_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$INCREMENTAL_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$INCREMENTAL_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$TEMPLATE_BASE_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$TEMPLATE_BASE_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$TEMPLATE_BASE_PATCH_FILE"
   fi
   git -C "$SOURCE_DIR" diff --check
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -81,6 +87,7 @@ apply_once "$TIER_API_PATCH_FILE" "tiered snapshot API and lifecycle timing"
 apply_once "$TIER_ISOLATION_PATCH_FILE" "physical memory tier isolation"
 apply_once "$TIMING_PATCH_FILE" "checkpoint phase timing"
 apply_once "$INCREMENTAL_PATCH_FILE" "incremental CoW RAM snapshots"
+apply_once "$TEMPLATE_BASE_PATCH_FILE" "template RAM external base lineage"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$SOURCE_DIR"

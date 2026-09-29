@@ -55,20 +55,32 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
     logical = manifest.get("logical_bytes")
     if type(logical) is not int or logical <= 0:
         raise RuntimeError("invalid native RAM logical size")
-    files = [sidecar, memory]
+    # External layer zero is the immutable template RAM image.  It is a
+    # dependency of the lineage, but it is not owned by (or charged to) the
+    # WARM snapshot pool.
+    owned_files = [sidecar, memory]
+    layer_files = []
     for index, layer in enumerate(layers):
         name = layer.get("name")
         if name != f"{index:06d}.mem":
             raise RuntimeError("invalid native RAM layer name")
-        file = Path(path + ".layers") / name
+        external_path = layer.get("external_path")
+        if external_path is not None:
+            if index != 0 or not isinstance(external_path, str) or not Path(external_path).is_absolute():
+                raise RuntimeError("invalid external native RAM base")
+            file = Path(external_path)
+        else:
+            file = Path(path + ".layers") / name
         stat = file.stat()
         if file.is_symlink() or stat.st_size != logical:
             raise RuntimeError("missing or truncated native RAM layer")
-        files.append(file)
-    if not os.path.samefile(memory, files[-1]):
+        layer_files.append(file)
+        if external_path is None:
+            owned_files.append(file)
+    if not os.path.samefile(memory, layer_files[-1]):
         raise RuntimeError("native RAM manifest does not identify the current delta")
     unique = {}
-    for file in files:
+    for file in owned_files:
         stat = file.stat()
         unique[(stat.st_dev, stat.st_ino)] = _allocated_bytes(file, stat)
     return {
@@ -80,4 +92,5 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         "full_base": manifest["full_base"],
         "lineage_layers": len(layers),
         "lineage_manifest_path": str(sidecar),
+        "external_base_path": layers[0].get("external_path"),
     }

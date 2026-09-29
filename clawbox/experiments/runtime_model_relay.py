@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = os.environ["CLAWBOX_RELAY_UPSTREAM"].rstrip("/") + "/chat/completions"
 TOKEN = os.environ["CLAWBOX_RELAY_TOKEN"]
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("CLAWBOX_RELAY_TIMEOUT_SECONDS", "660"))
 PENDING = {}
 PENDING_LOCK = threading.Lock()
 
@@ -48,7 +49,7 @@ class Pending:
                      "Content-Type": self.content_type},
         )
         try:
-            with urllib.request.urlopen(request, timeout=650) as response:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 result = (response.status,
                           response.headers.get("Content-Type", "application/json"),
                           response.read())
@@ -104,7 +105,10 @@ class Handler(BaseHTTPRequestHandler):
         pending.start()
         try:
             with pending.condition:
-                pending.condition.wait_for(lambda: pending.response is not None, timeout=660)
+                pending.condition.wait_for(
+                    lambda: pending.response is not None,
+                    timeout=REQUEST_TIMEOUT_SECONDS + 10,
+                )
                 response = pending.response
             if response is None:
                 self.send_error(504)

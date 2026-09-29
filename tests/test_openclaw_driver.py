@@ -117,6 +117,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
     assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
     assert config["tools"]["exec"]["backgroundMs"] == 120000
+    assert config["tools"]["exec"]["timeoutSec"] == 120
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
     assert clawtune["trace"]["redact_sensitive_data"] is False
@@ -129,6 +130,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
+    assert "CLAWBOX_TOOL_TIMEOUT_SECONDS=300" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "XDG_CACHE_HOME=/opt/clawtune/cache" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)
@@ -138,6 +140,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert config["agents"]["defaults"]["workspace"] == "/workspace"
     assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
     assert any("config unset models.providers.vllm.models.0.reasoning" in command
+               for command in commands)
+    assert any("config set models.providers.vllm.timeoutSeconds 120" in command
                for command in commands)
     assert any(b"exec /usr/local/bin/ssh" in base64.b64decode(encoded)
                for command in commands
@@ -236,6 +240,7 @@ def test_checkpoint_relay_keeps_clawtune_in_model_path(tmp_path: Path) -> None:
         output_dir=tmp_path, timeout_seconds=60,
         model_gateway=Gateway(), checkpoint_relay=True,
     )
+    assert any("CLAWBOX_RELAY_TIMEOUT_SECONDS=120" in command for command in commands)
     setup = "\n".join(commands)
     assert "model-relay.py" in setup
     assert "CLAWBOX_RELAY_UPSTREAM=http://192.0.2.30:18081/v1" in setup
@@ -273,10 +278,14 @@ def test_native_tool_bridge_setup_is_explicit_and_waits_for_port() -> None:
     assert "grep -q 'guest collector ready'" in command
     assert 'zcat /proc/config.gz | cmp -s' in command
     assert "pkill" not in command
+    assert "TOOL_EXEC_TIMEOUT_SECONDS=300" in command
 
-    restart = native_tool_bridge_setup_command(restart=True)
+    restart = native_tool_bridge_setup_command(
+        restart=True, command_timeout_seconds=600,
+    )
     assert "pkill -x tool-bridge" in restart
     assert "guest-collector.sock" in restart
+    assert "TOOL_EXEC_TIMEOUT_SECONDS=600" in restart
 
 
 def test_native_tool_bridge_setup_only_removes_dev_fd_for_replay() -> None:

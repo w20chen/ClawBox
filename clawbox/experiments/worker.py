@@ -73,6 +73,21 @@ def drain_policy_futures(pending: list[Any], lock: Any, timeout_s: float | None)
             consumed += 1
 
 
+def wait_for_admission_without_lifecycle_lock(
+    lifecycle_lock: Any, operation: Any,
+) -> Any:
+    """Run a blocking memory admission while its completion path stays runnable.
+
+    The caller owns ``lifecycle_lock`` through a surrounding context manager.
+    Reacquiring in ``finally`` preserves that context even when admission fails.
+    """
+    lifecycle_lock.release()
+    try:
+        return operation()
+    finally:
+        lifecycle_lock.acquire()
+
+
 def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     cases = arm.session_cases or (arm.case,)
     return cases[session_index % len(cases)]
@@ -1832,6 +1847,15 @@ class ExperimentWorker:
                 trace=trace_path,
                 time_scale=float(inference_configuration.get("time_scale", 1.0)),
                 max_model_steps=inference_configuration.get("max_model_steps"),
+                # The supervisor's arm deadline is the authoritative limit.
+                # A model response may be intentionally held for admission
+                # longer than the gateway's historical 600-second default.
+                request_timeout_s=max(
+                    120, arm.execution.arm_timeout_seconds + 60,
+                ),
+                tool_transport_timeout_s=max(
+                    120, arm.execution.arm_timeout_seconds + 60,
+                ),
                 upstream_base_url=str(inference_configuration.get("base_url") or "") or None,
                 upstream_api_key=credential or None,
                 upstream_model=str(inference_configuration.get("model") or "") or None,
@@ -2084,6 +2108,7 @@ class ExperimentWorker:
                 active_reservations: dict[str, int] = {}
                 admitted_routes: dict[str, NativeSSHRoute] = {}
                 host_rss_samplers: dict[str, SandboxRSSSampler] = {}
+                pending_admissions: set[str] = set()
                 reservation_lock = Lock()
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
@@ -2134,10 +2159,20 @@ class ExperimentWorker:
                         local_amount = 0
                         admission_memory_tier = "shared"
                     reservation_acquired = False
+                    with reservation_lock:
+                        pending_admissions.add(execution_id)
                     with wait_lock:
                         try:
-                            admission_wait = coordinator.begin_tool_admission(
-                                session_id, local_amount, arm.execution.arm_timeout_seconds
+                            # Memory admission may intentionally wait for a
+                            # running Tool to finish. Do not hold the lifecycle
+                            # lock during that wait: the completion callback
+                            # needs it to publish the result and make progress.
+                            admission_wait = wait_for_admission_without_lifecycle_lock(
+                                wait_lock,
+                                lambda: coordinator.begin_tool_admission(
+                                    session_id, local_amount,
+                                    arm.execution.arm_timeout_seconds,
+                                ),
                             )
                             reservation_acquired = True
                             restored_tool = not lifecycle.resident
@@ -2159,6 +2194,9 @@ class ExperimentWorker:
                                         candidate = executor.execute(
                                             native_tool_bridge_setup_command(
                                                 restart=bridge_attempt in (2, 10, 20),
+                                                command_timeout_seconds=(
+                                                    arm.execution.command_timeout_seconds
+                                                ),
                                             ),
                                             60,
                                         )
@@ -2245,12 +2283,15 @@ class ExperimentWorker:
                             host_sampler = SandboxRSSSampler(route.sandbox_id)
                             host_sampler.start()
                             with reservation_lock:
+                                pending_admissions.discard(execution_id)
                                 active_reservations[execution_id] = local_amount
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
                                 if execution_scope == "agent-tool":
                                     lifecycle.claim_first_tool_after_restore(execution_id)
                         except Exception as exc:
+                            with reservation_lock:
+                                pending_admissions.discard(execution_id)
                             events.write({
                                 "event": "tool_admission_failed",
                                 "session_id": session_id,
@@ -2261,7 +2302,11 @@ class ExperimentWorker:
                             })
                             if reservation_acquired:
                                 coordinator.release(session_id, local_amount)
-                            coordinator.set_tool_active(session_id, False)
+                            with reservation_lock:
+                                coordinator.set_tool_active(
+                                    session_id,
+                                    bool(active_reservations or pending_admissions),
+                                )
                             raise
                     prediction_record = dict(prediction or {})
                     prediction_record.setdefault(
@@ -2402,7 +2447,10 @@ class ExperimentWorker:
                     # Keep lifecycle/idle transitions serialized with admission.
                     # Never hold reservation_lock while waiting for wait_lock.
                     with wait_lock, reservation_lock:
-                        coordinator.set_tool_active(session_id, bool(active_reservations))
+                        coordinator.set_tool_active(
+                            session_id,
+                            bool(active_reservations or pending_admissions),
+                        )
                     if report is not None:
                         events.write({"event": "first_tool_after_restore", "session_id": session_id, **report})
                     events.write({"event": "tool_completed", "session_id": session_id,
@@ -2412,11 +2460,49 @@ class ExperimentWorker:
                                   "endpoint_epoch": expected_route[1]})
                     return {"status": "COMPLETED"}
 
+                def abandon_openclaw_tool(
+                    request: dict[str, Any], _admission: dict[str, Any],
+                ) -> None:
+                    """Release an admission whose HTTP response was not delivered."""
+                    execution_id = str(request["execution_id"])
+                    with reservation_lock:
+                        amount = active_reservations.pop(execution_id, None)
+                        admitted_routes.pop(execution_id, None)
+                        host_sampler = host_rss_samplers.pop(execution_id, None)
+                        if amount is None or host_sampler is None:
+                            raise RuntimeError(
+                                f"abandoned admission has no active reservation for {execution_id}"
+                            )
+                        host_sampler.stop()
+                        report = lifecycle.complete_first_tool_after_restore(
+                            execution_id, tool_seconds=0.0,
+                            status="admission_response_lost",
+                        )
+                        coordinator.release(session_id, amount)
+                    with wait_lock, reservation_lock:
+                        coordinator.set_tool_active(
+                            session_id,
+                            bool(active_reservations or pending_admissions),
+                        )
+                    if report is not None:
+                        events.write({
+                            "event": "first_tool_after_restore",
+                            "session_id": session_id, **report,
+                        })
+                    events.write({
+                        "event": "tool_admission_abandoned",
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "reason": "response_connection_lost",
+                        "released_memory_mib": amount,
+                    })
+
                 if self.policy_control is None:
                     raise RuntimeError("PolicyControlServer is not active")
                 policy_session = self.policy_control.register(
                     session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
+                    abandon=abandon_openclaw_tool,
                 )
                 # The Tool VM is authoritative for mutable state. Mark the
                 # installed shared SSH runtime as initialized so OpenClaw does
@@ -2432,7 +2518,9 @@ class ExperimentWorker:
                         "Tool setup could not initialize OpenClaw SSH workspace: "
                         + workspace_result.stderr[-1000:]
                     )
-                tool_bridge_result = executor.execute(native_tool_bridge_setup_command(), 60)
+                tool_bridge_result = executor.execute(native_tool_bridge_setup_command(
+                    command_timeout_seconds=arm.execution.command_timeout_seconds,
+                ), 60)
                 if tool_bridge_result.exit_code != 0:
                     raise RuntimeError(
                         "Tool setup could not start native SSH bridge: "
@@ -2467,7 +2555,10 @@ class ExperimentWorker:
 
                 outcome = run_openclaw(
                     prompt=arm.case.prompt, session_id=session_id,
-                    configuration=inference_configuration,
+                    configuration={
+                        **inference_configuration,
+                        "command_timeout_seconds": arm.execution.command_timeout_seconds,
+                    },
                     ssh=ssh_config,
                     policy_control=policy_session, runtime_executor=runtime_executor,
                     output_dir=self.output_root,

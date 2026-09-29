@@ -4,7 +4,9 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
 
-from clawbox.experiments.worker import RuntimeStatusPoller
+from clawbox.experiments.worker import (
+    RuntimeStatusPoller, wait_for_admission_without_lifecycle_lock,
+)
 from clawbox.replay.lifecycle import CommandResult
 
 
@@ -53,6 +55,36 @@ def test_snapshot_runtime_poll_serializes_with_lifecycle_transition():
     assert completed.is_set()
 
 
+def test_blocked_admission_does_not_block_tool_completion():
+    lifecycle_lock = Lock()
+    admission_started = Event()
+    release_admission = Event()
+    completion_finished = Event()
+
+    def admission():
+        admission_started.set()
+        assert release_admission.wait(2)
+        return 1.25
+
+    def run_admission():
+        with lifecycle_lock:
+            assert wait_for_admission_without_lifecycle_lock(
+                lifecycle_lock, admission,
+            ) == 1.25
+
+    thread = Thread(target=run_admission, daemon=True)
+    thread.start()
+    assert admission_started.wait(1)
+    with lifecycle_lock:
+        completion_finished.set()
+    assert completion_finished.is_set(), (
+        "Tool completion must acquire the lifecycle lock while admission waits"
+    )
+    release_admission.set()
+    thread.join(1)
+    assert not thread.is_alive()
+
+
 def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
     source = Path(__file__).resolve().parents[1] / 'clawbox/experiments/worker.py'
     tree = ast.parse(source.read_text(encoding='utf-8'))
@@ -69,6 +101,7 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
     environment = dict(
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
         active_reservations={'exec': 512}, admitted_routes={'exec': route},
+        pending_admissions=set(),
         host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})}, prediction_records=[],
         lifecycle=SimpleNamespace(complete_first_tool_after_restore=lambda *args, **kwargs: None),
         coordinator=SimpleNamespace(release=lambda *args: released.set(),

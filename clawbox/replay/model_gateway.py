@@ -21,6 +21,9 @@ from .trace import ReplayAction, load_trace
 from .process_sessions import bind_process_sessions, rebind_process_sessions
 
 
+DEFERRED_TOOL_TIMEOUT_PREFIX = "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS="
+
+
 @dataclass(slots=True)
 class GatewayRequest:
     request_id: str
@@ -54,6 +57,7 @@ class ModelGateway:
                  time_scale: float = 1.0, upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None, upstream_model: str | None = None,
                  timeout_s: float = 600.0,
+                 tool_transport_timeout_s: float | None = None,
                  max_model_steps: int | None = None,
                  request_namespace: str = "default",
                  on_request_started: Callable[[], None] | None = None,
@@ -80,6 +84,7 @@ class ModelGateway:
         self.upstream_api_key = upstream_api_key or ""
         self.upstream_model = upstream_model or ""
         self.timeout_s = timeout_s
+        self.tool_transport_timeout_s = tool_transport_timeout_s
         self.request_namespace = str(request_namespace).strip()
         if not self.request_namespace:
             raise ValueError("request_namespace must not be empty")
@@ -508,6 +513,10 @@ class ModelGateway:
                 status = response.status_code
                 content_type = response.headers.get("content-type", "application/json")
                 body = response.content
+            if self.tool_transport_timeout_s is not None and 200 <= int(status) < 300:
+                body = _defer_exec_tool_timeouts(
+                    content_type, body, self.tool_transport_timeout_s,
+                )
             # Capture the pure model/replay completion before any policy or
             # restore operation. ``completed_unix_s`` remains the legacy
             # response-release timestamp for old consumers.
@@ -629,6 +638,81 @@ def _replay_response(action: ReplayAction, stream: bool) -> tuple[int, str, byte
              "finish_reason": finish}]}
     body = f"data: {json.dumps(chunk, separators=(',', ':'))}\n\ndata: [DONE]\n\n".encode()
     return 200, "text/event-stream", body
+
+
+def _rewrite_exec_tool_calls(message: dict[str, Any], transport_timeout_s: float) -> bool:
+    """Move an exec timeout behind admission while preserving it in-band."""
+    rendered_transport = max(1, int(transport_timeout_s))
+    changed = False
+    for tool_call in message.get("tool_calls") or []:
+        function = tool_call.get("function") or {}
+        if function.get("name") != "exec":
+            continue
+        encoded = function.get("arguments")
+        if not isinstance(encoded, str):
+            continue
+        try:
+            arguments = json.loads(encoded)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        timeout = arguments.get("timeout")
+        command = arguments.get("command")
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or timeout <= 0 or not isinstance(command, str)):
+            continue
+        if command.startswith(DEFERRED_TOOL_TIMEOUT_PREFIX):
+            continue
+        rendered_actual = max(1, int(timeout))
+        arguments["command"] = (
+            f"{DEFERRED_TOOL_TIMEOUT_PREFIX}{rendered_actual}\n{command}"
+        )
+        arguments["timeout"] = rendered_transport
+        function["arguments"] = json.dumps(
+            arguments, ensure_ascii=False, separators=(",", ":"),
+        )
+        changed = True
+    return changed
+
+
+def _defer_exec_tool_timeouts(
+    content_type: str, body: bytes, transport_timeout_s: float,
+) -> bytes:
+    """Keep OpenClaw's transport alive; the SSH shim starts timeout after ADMIT."""
+    if "text/event-stream" not in content_type.lower():
+        response = json.loads(body)
+        for choice in response.get("choices") or []:
+            message = choice.get("message")
+            if isinstance(message, dict):
+                _rewrite_exec_tool_calls(message, transport_timeout_s)
+        return json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode()
+
+    chunks: list[dict[str, Any]] = []
+    for raw_line in body.decode("utf-8").splitlines():
+        if not raw_line.startswith("data:"):
+            continue
+        encoded = raw_line[5:].strip()
+        if not encoded or encoded == "[DONE]":
+            continue
+        chunks.append(json.loads(encoded))
+    if not chunks:
+        return body
+    message = _response_message(content_type, body)
+    if not _rewrite_exec_tool_calls(message, transport_timeout_s):
+        return body
+    template = {key: value for key, value in chunks[0].items() if key != "choices"}
+    finish_reason = next((
+        choice.get("finish_reason")
+        for chunk in reversed(chunks)
+        for choice in chunk.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ), "tool_calls")
+    template["choices"] = [{
+        "index": 0, "delta": message, "finish_reason": finish_reason,
+    }]
+    return (
+        "data: " + json.dumps(template, ensure_ascii=False, separators=(",", ":"))
+        + "\n\ndata: [DONE]\n\n"
+    ).encode()
 
 
 def _response_message(content_type: str, body: bytes) -> dict[str, Any]:

@@ -1,0 +1,195 @@
+diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
+index 1d77c39..e7be511 100644
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -1389,7 +1389,7 @@ impl MemoryManager {
+             }
+             let memory_file = if fast_restore {
+                 Some(if let Some(lineage) = &lineage {
+-                    File::open(crate::snapshot_lineage::layer_dir(&memory_file_target.path)
+-                        .join(&lineage.layers[0].name))
++                    File::open(lineage.layers[0]
++                        .file_path(&memory_file_target.path))
+                 } else { memory_file_target.open_read() }.map_err(Error::SnapshotOpen)?)
+             } else { None };
+@@ -1417,11 +1417,20 @@ impl MemoryManager {
+                     .fill_saved_regions(memory_file_target.path.clone(), mem_snapshot.memory_ranges)?;
+             }
+ 
++            // Official template RAM files predate the incremental sidecar.  A
++            // fast private restore can nevertheless use that immutable file as
++            // lineage layer zero, so the first pause writes only KVM dirty RAM.
++            let lineage = lineage.or_else(|| {
++                (fast_restore
++                    && std::env::var("CLAWBOX_KVM_DIRTY_TRACKING").as_deref() == Ok("1"))
++                    .then(|| crate::snapshot_lineage::Lineage::external_base(
++                        memory_file_target.path.clone(), layout.clone()))
++            });
+             if let Some(lineage) = lineage {
+                 let mut manager = mm.lock().unwrap();
+                 for layer in lineage.layers.iter().skip(1) {
+-                    let file = File::open(crate::snapshot_lineage::layer_dir(&memory_file_target.path)
+-                        .join(&layer.name)).map_err(Error::SnapshotOpen)?;
++                    let file = File::open(layer.file_path(&memory_file_target.path))
++                        .map_err(Error::SnapshotOpen)?;
+                     for range in &layer.ranges {
+                         let memory = manager.guest_memory.memory();
+                         let region = memory.find_region(GuestAddress(range.gpa))
+@@ -3112,11 +3120,13 @@ impl MemoryManager {
+         // full base on retry, never reuse a baseline with lost dirty history.
+         let valid = self.snapshot_parent_valid.swap(false, Ordering::SeqCst);
+-        let parent = self.snapshot_parent.as_ref().filter(|(path, _lineage)| {
+-            valid && std::fs::metadata(path).ok().zip(file.metadata().ok())
+-                    .map(|(a, b)| {
+-                        use std::os::unix::fs::MetadataExt;
+-                        a.dev() == b.dev()
+-                    }).unwrap_or(false)
++        let parent = self.snapshot_parent.as_ref().filter(|(path, lineage)| {
++            valid && (lineage.layers.iter().all(|layer| layer.external_path.is_some())
++                || std::fs::metadata(path).ok().zip(file.metadata().ok())
++                    .map(|(a, b)| {
++                            use std::os::unix::fs::MetadataExt;
++                            a.dev() == b.dev()
++                        })
++                        .unwrap_or(false))
+         });
+         let ranges = if parent.is_some() { self.snapshot_dirty_ranges()? } else { layout };
+         let volatile = snapshot_lineage::volatile(&file).map_err(io_error)?;
+diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapshot_lineage.rs
+index 191449b..033b338 100644
+--- a/hypervisor/vmm/src/snapshot_lineage.rs
++++ b/hypervisor/vmm/src/snapshot_lineage.rs
+@@ -20,6 +20,15 @@ pub struct Range {
+ pub struct Layer {
+     pub name: String,
+     pub ranges: Vec<Range>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub external_path: Option<PathBuf>,
++}
++
++impl Layer {
++    pub fn file_path(&self, owner: &Path) -> PathBuf {
++        self.external_path.clone()
++            .unwrap_or_else(|| layer_dir(owner).join(&self.name))
++    }
+ }
+ 
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+@@ -87,7 +96,12 @@ impl Lineage {
+             if layer.name != format!("{:06}.mem", index) {
+                 return Err(invalid("invalid RAM layer name"));
+             }
+-            let metadata = fs::symlink_metadata(layer_dir(path).join(&layer.name))?;
++            if let Some(external) = &layer.external_path {
++                if index != 0 || !external.is_absolute() {
++                    return Err(invalid("invalid external RAM base"));
++                }
++            }
++            let metadata = fs::symlink_metadata(layer.file_path(path))?;
+             if !metadata.is_file() || metadata.len() != lineage.logical_bytes {
+                 return Err(invalid("missing or truncated RAM layer"));
+             }
+@@ -112,19 +127,31 @@ impl Lineage {
+         Ok(Some(lineage))
+     }
+ 
++    pub fn external_base(path: PathBuf, ranges: Vec<Range>) -> Self {
++        let logical_bytes = ranges.iter().map(|range| range.length).sum();
++        Self {
++            schema_version: 1, logical_bytes, allocated_bytes: 0,
++            dirty_bytes: None, transferred_bytes: 0, full_base: false,
++            layers: vec![Layer {
++                name: "000000.mem".into(), ranges, external_path: Some(path),
++            }],
++        }
++    }
++
+     /// Give the new snapshot its own names for every immutable dependency.
+     /// Unlinking the predecessor then cannot break this snapshot or a live mmap.
+-    /// Cross-filesystem inheritance is deliberately rejected: the lifecycle
+-    /// must relocate the complete snapshot first, or explicitly create a base.
++    /// Owned layers remain hardlinked; an immutable external template base is
++    /// referenced directly and may reside on another filesystem.
+     pub fn inherit(path: &Path, parent: Option<(&Path, &Self)>, logical_bytes: u64)
+         -> io::Result<Self>
+     {
+         fs::create_dir(layer_dir(path))?;
+         let mut layers = Vec::new();
+         if let Some((parent_path, parent)) = parent {
+             for layer in &parent.layers {
+-                fs::hard_link(layer_dir(parent_path).join(&layer.name),
+-                              layer_dir(path).join(&layer.name))?;
++                if layer.external_path.is_none() {
++                    fs::hard_link(layer.file_path(parent_path), layer.file_path(path))?;
++                }
+                 layers.push(layer.clone());
+             }
+         }
+@@ -141,9 +167,12 @@ impl Lineage {
+         self.dirty_bytes = if self.full_base { None } else { Some(self.transferred_bytes) };
+         let name = format!("{:06}.mem", self.layers.len());
+         fs::hard_link(path, layer_dir(path).join(&name))?;
+-        self.layers.push(Layer { name, ranges });
++        self.layers.push(Layer { name, ranges, external_path: None });
+         for layer in &self.layers {
+-            let file = File::open(layer_dir(path).join(&layer.name))?;
++            if layer.external_path.is_some() {
++                continue;
++            }
++            let file = File::open(layer.file_path(path))?;
+             self.allocated_bytes += file.metadata()?.blocks() * 512;
+             if durable { file.sync_all()?; }
+         }
+@@ -205,8 +234,8 @@ mod tests {
+         assert!(!child.full_base);
+         assert_eq!(child.logical_bytes, 3 * page);
+-        let mut restored = fs::read(layer_dir(&delta).join(&child.layers[0].name)).unwrap();
++        let mut restored = fs::read(child.layers[0].file_path(&delta)).unwrap();
+         for layer in child.layers.iter().skip(1) {
+-            let file = File::open(layer_dir(&delta).join(&layer.name)).unwrap();
++            let file = File::open(layer.file_path(&delta)).unwrap();
+             for r in &layer.ranges {
+                 file.read_exact_at(&mut restored[r.offset as usize..(r.offset + r.length) as usize], r.offset).unwrap();
+             }
+@@ -221,6 +250,6 @@ mod tests {
+         assert!(restored[2 * page as usize..].iter().all(|v| *v == 0x5a));
+         // Missing dependencies fail before a VM can resume with zero-filled holes.
+-        fs::remove_file(layer_dir(&delta).join(&child.layers[0].name)).unwrap();
++        fs::remove_file(child.layers[0].file_path(&delta)).unwrap();
+         assert!(Lineage::load(&delta, &layout, page).is_err());
+     }
+ 
+@@ -237,4 +266,33 @@ mod tests {
+         let changed = vec![Range { gpa: 0x80000000, offset: 0, length: page }];
+         assert!(Lineage::load(&path, &changed, page).is_err());
+     }
++
++    #[test]
++    fn external_template_base_is_inherited_without_copy_or_charge() {
++        let directory = Directory::new();
++        let template = directory.0.join("template.mem");
++        let delta = directory.0.join("delta.mem");
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
++        let layout = vec![Range { gpa: 0x40000000, offset: 0, length: 2 * page }];
++        fs::write(&template, vec![0x5a; (2 * page) as usize]).unwrap();
++        let file = File::create(&delta).unwrap();
++        file.set_len(2 * page).unwrap();
++        file.write_all_at(&vec![0; page as usize], page).unwrap();
++        Lineage::inherit(
++            &delta,
++            Some((&template, &Lineage::external_base(template.clone(), layout.clone()))),
++            2 * page,
++        ).unwrap().publish(
++            &delta,
++            vec![Range { gpa: 0x40000000 + page, offset: page, length: page }],
++            false,
++        ).unwrap();
++        let child = Lineage::load(&delta, &layout, page).unwrap().unwrap();
++        assert_eq!(child.layers[0].external_path.as_ref(), Some(&template));
++        assert_eq!(child.allocated_bytes, file.metadata().unwrap().blocks() * 512);
++        assert_eq!(child.dirty_bytes, Some(page));
++        assert!(!layer_dir(&delta).join("000000.mem").exists());
++        fs::remove_file(&template).unwrap();
++        assert!(Lineage::load(&delta, &layout, page).is_err());
++    }
+ }

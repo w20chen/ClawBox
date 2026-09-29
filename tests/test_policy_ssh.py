@@ -318,6 +318,87 @@ def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
     assert launched_remote.endswith("\n" + logical + "'\n} 2>&1")
 
 
+def test_deferred_timeout_is_removed_from_profile_and_begins_after_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_TOKEN", "token")
+    monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    monkeypatch.setenv("CLAWBOX_TOOL_TIMEOUT_SECONDS", "600")
+    logical = "printf logical"
+    deferred = policy_ssh.DEFERRED_TIMEOUT_PREFIX + "300\n" + logical
+    logical_b64 = base64.urlsafe_b64encode(deferred.encode()).decode().rstrip("=")
+    metadata = base64.urlsafe_b64encode(json.dumps({
+        "v": 1, "execution_id": "exec-deferred", "tool_name": "exec",
+        "profile_command_b64": logical_b64,
+    }, separators=(",", ":")).encode()).decode().rstrip("=")
+    remote = policy_ssh.PREFIX + "b64:" + metadata + "\n" + deferred
+    posted: list[tuple[str, dict]] = []
+    waited: list[float] = []
+
+    def post(path: str, body: dict, *, attempts: int) -> dict:
+        posted.append((path, body))
+        if path.endswith("/admit"):
+            return {
+                "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 1,
+                "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+            }
+        return {"status": "COMPLETED"}
+
+    def wait(_argv: list[str], _execution_id: str,
+             timeout_seconds: float | None = None) -> int:
+        waited.append(timeout_seconds or 0)
+        return 0
+
+    monkeypatch.setattr(policy_ssh, "_post", post)
+    monkeypatch.setattr(policy_ssh, "_wait_for_ssh", wait)
+    monkeypatch.setattr(sys, "argv", [
+        "clawbox-policy-ssh.py", "-F", "/tmp/config", "openclaw-sandbox", remote,
+    ])
+
+    assert policy_ssh.main() == 0
+    request = posted[0][1]
+    assert request["command_sha256"] == hashlib.sha256(logical.encode()).hexdigest()
+    assert request["tool_timeout_seconds"] == 300
+    assert waited == [300]
+
+
+def test_real_ssh_timeout_is_reported_as_124_and_sends_cancel(monkeypatch) -> None:
+    class Child:
+        waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("ssh", timeout)
+            return 0
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            raise AssertionError("cooperative cancel should reap SSH")
+
+    child = Child()
+    cancellations: list[list[str]] = []
+    monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    monkeypatch.setattr(
+        policy_ssh.subprocess, "run",
+        lambda argv, **_kwargs: (
+            cancellations.append(argv)
+            or subprocess.CompletedProcess(argv, 0)
+        ),
+    )
+
+    assert policy_ssh._wait_for_ssh(
+        ["ssh", "target", "command"], "exec-timeout", timeout_seconds=300,
+    ) == 124
+    assert cancellations == [["ssh", "target", policy_ssh.CANCEL_PREFIX + "exec-timeout"]]
+
+
 def test_policy_rejects_cross_tool_endpoint_before_spawning_ssh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
