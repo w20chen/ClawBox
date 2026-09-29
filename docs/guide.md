@@ -4,6 +4,30 @@ The supported interface is `clawbox experiment`. It runs OpenClaw workloads in
 standalone CubeSandbox Runtime and Tool VMs. The host setup, qualification,
 formal run, cleanup, and result state all use this one command group.
 
+Install the command once from a checkout; later commands do not require a
+source-directory working directory or a manual `PYTHONPATH`:
+
+```bash
+python3 -m pip install --no-build-isolation -e .
+clawbox experiment --help
+```
+
+For routine use after the one-time host setup, one command performs input
+validation, host checks, snapshot-storage cache refresh, qualification when
+needed, and the formal run:
+
+```bash
+clawbox --output-root /data/clawbox-results \
+  experiment launch eval.yaml --run-id eval-01 --detach
+```
+
+The command is idempotent for a run ID: an active run is reported rather than
+duplicated, a successful run prints its existing report without repeating host
+or qualification work, and a failed or orphaned run is resumed only when its
+frozen spec matches. For a new or resumed run, a valid receipt is reused;
+changes to the spec, implementation, images, target node, policies, or
+concurrency automatically require a fresh qualification.
+
 ## 1. Inspect inputs without a VM host
 
 ```bash
@@ -159,6 +183,18 @@ beside the YAML and is bound to the exact spec digest, policies, concurrency,
 node, and image digests. Any change requires a new qualification.
 
 ## 5. Run and recover
+
+The recommended entry point is:
+
+```bash
+clawbox --output-root /data/clawbox-results \
+  experiment launch eval.yaml --run-id eval-01 --detach
+```
+
+To generate the spec and launch it in one invocation, append
+`--launch --run-id eval-01 --detach` to the `experiment configure` command.
+The lower-level commands below remain available for inspection and manual
+recovery:
 
 ```bash
 clawbox --output-root /data/clawbox-results \

@@ -173,6 +173,16 @@ def parser() -> argparse.ArgumentParser:
     qualify.add_argument("spec", type=Path)
     qualify.add_argument("--concurrency", type=int)
     qualify.add_argument("--receipt", type=Path)
+    launch = sub.add_parser(
+        "launch",
+        help="validate, refresh host state, qualify when needed, and run or resume",
+    )
+    launch.add_argument("spec", type=Path)
+    launch.add_argument("--run-id")
+    launch.add_argument("--qualification", type=Path)
+    launch.add_argument("--qualification-concurrency", type=int)
+    launch.add_argument("--force-qualify", action="store_true")
+    launch.add_argument("--detach", action="store_true")
     importer = sub.add_parser("import-trace", help="convert a supported research trace to replay schema 6")
     importer.add_argument("source", type=Path)
     importer.add_argument("--output", required=True, type=Path)
@@ -298,7 +308,104 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--model")
     configure.add_argument("--base-url")
     configure.add_argument("--api-key-env")
+    configure.add_argument(
+        "--launch", action="store_true",
+        help="validate, qualify, and run the generated spec after writing it",
+    )
+    configure.add_argument("--run-id", help="run ID used with --launch")
+    configure.add_argument(
+        "--qualification-concurrency", type=int,
+        help="override qualification concurrency used with --launch",
+    )
+    configure.add_argument(
+        "--force-qualify", action="store_true",
+        help="rerun qualification even when the existing receipt is valid",
+    )
+    configure.add_argument(
+        "--detach", action="store_true",
+        help="start the formal run in the background when used with --launch",
+    )
     return root
+
+
+def launch_experiment(args: argparse.Namespace) -> int:
+    """Run the complete safe path while making repeated invocations idempotent."""
+    from clawbox.experiments.inputs import validate_inputs
+    from clawbox.experiments.qualification import (
+        default_receipt_path, qualify, require_host_ready, validate_receipt,
+    )
+    from clawbox.experiments.reporting import write_run_report_artifacts
+    from clawbox.experiments.supervisor import status_for_run
+
+    spec = load_experiment(args.spec)
+    ensure_supported_experiment(spec)
+    run_id = args.run_id or f"run-{uuid.uuid4().hex[:16]}"
+    run_root = args.output_root / run_id
+    action = "run"
+    if run_root.exists():
+        frozen_path = run_root / "experiment.yaml"
+        if not frozen_path.is_file():
+            raise ValueError(
+                f"result directory exists without a frozen experiment: {run_root}"
+            )
+        frozen = load_experiment(frozen_path)
+        if spec_digest(frozen) != spec_digest(spec):
+            raise ValueError(
+                f"run ID {run_id!r} belongs to a different experiment; "
+                "choose another --run-id"
+            )
+        status = status_for_run(run_root)
+        if status.get("supervisor_alive"):
+            emit({
+                "runId": run_id,
+                "state": status.get("state"),
+                "output": str(run_root),
+                "qualificationReused": qualification_reused,
+                "message": "run is already active",
+            })
+            return 0
+        if status.get("state") == "succeeded":
+            report, _memory = write_run_report_artifacts(run_root)
+            print(report.read_text(encoding="utf-8"), end="")
+            return 0
+        action = "resume"
+
+    validate_inputs(spec)
+    require_host_ready(spec)
+
+    receipt_path = args.qualification or default_receipt_path(args.spec)
+    qualification_reused = False
+    if not args.force_qualify:
+        try:
+            validate_receipt(spec, receipt_path)
+            qualification_reused = True
+        except (OSError, ValueError):
+            pass
+    if not qualification_reused:
+        qualify(
+            spec, output_base=args.output_root,
+            receipt_path=receipt_path,
+            concurrency=args.qualification_concurrency,
+        )
+
+    if action == "run":
+        action_args = [
+            str(args.spec), "--run-id", run_id,
+            "--qualification", str(receipt_path),
+        ]
+    else:
+        action_args = [run_id]
+    if args.detach:
+        action_args.append("--detach")
+    code = main([
+        "--output-root", str(args.output_root),
+        "experiment", action, *action_args,
+    ])
+    if code or args.detach:
+        return code
+    report, _memory = write_run_report_artifacts(run_root)
+    print(report.read_text(encoding="utf-8"), end="")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -376,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             emit(receipt)
             return 0
+        if args.command == "launch":
+            return launch_experiment(args)
         if args.command == "baselines":
             admission_required = {
                 "tool_full": ["resources.full_tool_memory_mib"],
@@ -459,6 +568,29 @@ def main(argv: list[str] | None = None) -> int:
                         f"host profile {label} record is missing: {', '.join(missing)}"
                     )
 
+            runtime_profile_shape_changed = use_runtime_profile and (
+                (args.runtime_vcpu is not None
+                 and args.runtime_vcpu != runtime_profile.get("vcpu"))
+                or (args.runtime_memory_gib is not None
+                    and gib_to_mib(args.runtime_memory_gib, name="runtime memory")
+                    != runtime_profile.get("memory_mib"))
+            )
+            tool_profile_shape_changed = use_tool_profile and (
+                (args.tool_vcpu is not None
+                 and args.tool_vcpu != tool_profile.get("vcpu"))
+                or (args.tool_memory_gib is not None
+                    and gib_to_mib(args.tool_memory_gib, name="tool memory")
+                    != tool_profile.get("memory_mib"))
+            )
+            if runtime_profile_shape_changed:
+                raise ValueError(
+                    "changing Runtime CPU or memory requires a new Runtime template"
+                )
+            if tool_profile_shape_changed:
+                raise ValueError(
+                    "changing Tool CPU or memory requires a new Tool template"
+                )
+
             spec = configure_experiment(
                 args.base,
                 experiment_id=args.experiment_id,
@@ -482,36 +614,50 @@ def main(argv: list[str] | None = None) -> int:
                     else args.tool_template_id
                 ),
                 runtime_image_reference=(
-                    runtime_profile.get("source_image_reference") if use_runtime_profile
-                    else args.runtime_image_reference
+                    args.runtime_image_reference
+                    if args.runtime_image_reference is not None
+                    else runtime_profile.get("source_image_reference")
+                    if use_runtime_profile else None
                 ),
                 tool_image_reference=(
-                    tool_profile.get("source_image_reference") if use_tool_profile
-                    else args.tool_image_reference
+                    args.tool_image_reference
+                    if args.tool_image_reference is not None
+                    else tool_profile.get("source_image_reference")
+                    if use_tool_profile else None
                 ),
                 runtime_image_digest=(
-                    runtime_profile.get("image_digest") if use_runtime_profile
-                    else args.runtime_image_digest
+                    args.runtime_image_digest
+                    if args.runtime_image_digest is not None
+                    else runtime_profile.get("image_digest")
+                    if use_runtime_profile else None
                 ),
                 tool_image_digest=(
-                    tool_profile.get("image_digest") if use_tool_profile
-                    else args.tool_image_digest
+                    args.tool_image_digest
+                    if args.tool_image_digest is not None
+                    else tool_profile.get("image_digest")
+                    if use_tool_profile else None
                 ),
                 runtime_vcpu=(
-                    runtime_profile.get("vcpu") if use_runtime_profile
-                    else args.runtime_vcpu
+                    args.runtime_vcpu
+                    if args.runtime_vcpu is not None
+                    else runtime_profile.get("vcpu") if use_runtime_profile else None
                 ),
                 tool_vcpu=(
-                    tool_profile.get("vcpu") if use_tool_profile
-                    else args.tool_vcpu
+                    args.tool_vcpu
+                    if args.tool_vcpu is not None
+                    else tool_profile.get("vcpu") if use_tool_profile else None
                 ),
                 runtime_memory_gib=(
-                    runtime_profile.get("memory_mib", 0) / 1024
-                    if use_runtime_profile else args.runtime_memory_gib
+                    args.runtime_memory_gib
+                    if args.runtime_memory_gib is not None
+                    else runtime_profile.get("memory_mib", 0) / 1024
+                    if use_runtime_profile else None
                 ),
                 tool_memory_gib=(
-                    tool_profile.get("memory_mib", 0) / 1024
-                    if use_tool_profile else args.tool_memory_gib
+                    args.tool_memory_gib
+                    if args.tool_memory_gib is not None
+                    else tool_profile.get("memory_mib", 0) / 1024
+                    if use_tool_profile else None
                 ),
                 target_node=(
                     args.target_node or profile.get("node") or os.getenv("CUBE_NODE")
@@ -574,8 +720,21 @@ def main(argv: list[str] | None = None) -> int:
             args.output.write_text(dump_experiment(spec), encoding="utf-8")
             emit_overview(overview)
             print(f"Wrote: {args.output}")
-            print(f"Next: clawbox experiment validate {args.output}")
-            print(f"Run:  clawbox --output-root <result-directory> experiment run {args.output}")
+            if args.launch:
+                launch_args = [
+                    "--output-root", str(args.output_root),
+                    "experiment", "launch", str(args.output),
+                    *(["--run-id", args.run_id] if args.run_id else []),
+                    *(
+                        ["--qualification-concurrency",
+                         str(args.qualification_concurrency)]
+                        if args.qualification_concurrency is not None else []
+                    ),
+                    *(["--force-qualify"] if args.force_qualify else []),
+                    *(["--detach"] if args.detach else []),
+                ]
+                return main(launch_args)
+            print(f"Next: clawbox --output-root <results> experiment launch {args.output}")
             return 0
         if args.command == "describe":
             from clawbox.experiments.configure import experiment_overview

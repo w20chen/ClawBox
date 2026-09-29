@@ -38,8 +38,108 @@ def test_public_cli_contains_only_experiment_group() -> None:
     assert set(commands.choices) == {
         "baselines", "configure", "describe", "validate", "plan", "run", "status",
         "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
-        "trace", "import-trace", "train", "images", "report",
+        "trace", "import-trace", "train", "images", "report", "launch",
     }
+
+
+def test_launch_qualifies_when_needed_then_starts_run(
+    monkeypatch, tmp_path,
+) -> None:
+    from argparse import Namespace
+    import clawbox.experiments.inputs as inputs
+    import clawbox.experiments.qualification as qualification
+
+    spec_path = Path("examples/experiments/getting-started.yaml")
+    receipt = tmp_path / "qualification.json"
+    calls: list[object] = []
+    monkeypatch.setattr(inputs, "validate_inputs", lambda spec: calls.append("inputs"))
+    monkeypatch.setattr(
+        qualification, "require_host_ready",
+        lambda spec: calls.append("host"),
+    )
+    monkeypatch.setattr(
+        qualification, "validate_receipt",
+        lambda spec, path: (_ for _ in ()).throw(ValueError("stale")),
+    )
+    monkeypatch.setattr(
+        qualification, "qualify",
+        lambda spec, **kwargs: calls.append(("qualify", kwargs)) or {"status": "succeeded"},
+    )
+    monkeypatch.setattr(
+        cli, "main",
+        lambda argv=None: calls.append(("main", argv)) or 0,
+    )
+
+    assert cli.launch_experiment(Namespace(
+        spec=spec_path,
+        output_root=tmp_path,
+        qualification=receipt,
+        qualification_concurrency=4,
+        force_qualify=False,
+        run_id="self-service",
+        detach=True,
+    )) == 0
+    assert calls[:2] == ["inputs", "host"]
+    assert calls[2][0] == "qualify"
+    assert calls[2][1]["receipt_path"] == receipt
+    assert calls[2][1]["concurrency"] == 4
+    assert calls[3] == (
+        "main",
+        [
+            "--output-root", str(tmp_path), "experiment", "run",
+            str(spec_path), "--run-id", "self-service",
+            "--qualification", str(receipt), "--detach",
+        ],
+    )
+
+
+def test_launch_existing_success_skips_host_and_qualification(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    from argparse import Namespace
+    import clawbox.experiments.inputs as inputs
+    import clawbox.experiments.qualification as qualification
+    import clawbox.experiments.reporting as reporting
+    import clawbox.experiments.supervisor as supervisor
+
+    spec_path = Path("examples/experiments/getting-started.yaml")
+    run_root = tmp_path / "already-done"
+    run_root.mkdir()
+    (run_root / "experiment.yaml").write_text(
+        spec_path.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    report = run_root / "report.md"
+    report.write_text("existing report\n", encoding="utf-8")
+    monkeypatch.setattr(
+        inputs, "validate_inputs",
+        lambda spec: (_ for _ in ()).throw(AssertionError("inputs revalidated")),
+    )
+    monkeypatch.setattr(
+        qualification, "require_host_ready",
+        lambda spec: (_ for _ in ()).throw(AssertionError("host rechecked")),
+    )
+    monkeypatch.setattr(
+        qualification, "validate_receipt",
+        lambda spec, path: (_ for _ in ()).throw(AssertionError("receipt rechecked")),
+    )
+    monkeypatch.setattr(
+        supervisor, "status_for_run",
+        lambda path: {"state": "succeeded", "supervisor_alive": False},
+    )
+    monkeypatch.setattr(
+        reporting, "write_run_report_artifacts", lambda path: (report, None),
+    )
+
+    assert cli.launch_experiment(Namespace(
+        spec=spec_path,
+        output_root=tmp_path,
+        qualification=None,
+        qualification_concurrency=None,
+        force_qualify=False,
+        run_id="already-done",
+        detach=False,
+    )) == 0
+    assert capsys.readouterr().out == "existing report\n"
 
 
 def test_validate_and_plan_v2(capsys) -> None:
@@ -278,6 +378,38 @@ def test_configure_rejects_vm_shape_change_without_new_template(
     base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
     assert cli.main([
         "experiment", "configure", base, str(output),
+        "--runtime-memory-gib", "1",
+    ]) == 1
+    assert not output.exists()
+    assert "requires a new Runtime template" in capsys.readouterr().err
+
+
+def test_configure_explicit_shape_wins_over_host_profile(
+    tmp_path, capsys,
+) -> None:
+    output = tmp_path / "wrong-shape.yaml"
+    profile = tmp_path / "host.json"
+    profile.write_text(json.dumps({
+        "runtime": {
+            "template_id": "tpl-runtime",
+            "source_image_reference": "registry/runtime:current",
+            "image_digest": "sha256:" + "a" * 64,
+            "vcpu": 2,
+            "memory_mib": 2048,
+        },
+        "sandbox": {
+            "template_id": "tpl-tool",
+            "source_image_reference": "registry/tool:current",
+            "image_digest": "sha256:" + "b" * 64,
+            "vcpu": 2,
+            "memory_mib": 4096,
+        },
+    }), encoding="utf-8")
+
+    assert cli.main([
+        "experiment", "configure",
+        "examples/experiments/getting-started.yaml", str(output),
+        "--profile", str(profile),
         "--runtime-memory-gib", "1",
     ]) == 1
     assert not output.exists()

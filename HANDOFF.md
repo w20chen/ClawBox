@@ -15,8 +15,10 @@ Use this run for results:
 - Result root: `/home/weitianc/clawbox-lab/sqlglot-4528/results-tiered/eval-tiered-c16-r2-final6-20260929`
 - Spec: `/home/weitianc/clawbox-lab/sqlglot-4528/current-eval-tiered-r2.yaml`
 - Qualification receipt: `/home/weitianc/clawbox-lab/sqlglot-4528/eval-tiered-r2-qualification.json`
-- Remote ClawBox source: `/tmp/clawbox-post-training-20260928/ClawBox`
-- Remote ClawTune source: `/tmp/clawbox-verify-20260928/ClawTune`
+- Installed command: `/home/weitianc/miniconda3/bin/clawbox`
+- Durable remote ClawBox source: `/home/weitianc/clawbox-stack/ClawBox`
+- Durable remote ClawTune source: `/home/weitianc/clawbox-stack/ClawTune`
+- Active host profile: `/home/weitianc/.config/clawbox/host.json`
 
 Do not use `final2`, `final3`, `final4`, or `final5` for performance claims. They were
 diagnostic runs made before the final concurrency, liveness, and Runtime-image fixes.
@@ -102,10 +104,7 @@ Under the final result root:
 Regenerate the report without rerunning workloads:
 
 ```bash
-cd /tmp/clawbox-post-training-20260928/ClawBox
-CLAWTUNE_ROOT=/tmp/clawbox-verify-20260928/ClawTune PYTHONPATH=. \
-python3 -m clawbox.cli \
-  --output-root /home/weitianc/clawbox-lab/sqlglot-4528/results-tiered \
+clawbox --output-root /home/weitianc/clawbox-lab/sqlglot-4528/results-tiered \
   experiment report eval-tiered-c16-r2-final6-20260929
 ```
 
@@ -129,33 +128,38 @@ combined HIGH-boundary regression also passed on both machines. `git diff --chec
 ## Self-service workflow
 
 The public workflow is documented in `docs/lab.md` and should be used instead of manually
-editing cgroups, NUMA placement, templates, or arm matrices:
+editing cgroups, NUMA placement, templates, or arm matrices. On `kunpeng`, setup and the
+first image build are already complete, so routine work is only configure plus launch:
 
 ```bash
-clawbox experiment setup ...
-clawbox experiment images ...        # first refresh saves non-secret build inputs
-clawbox experiment configure ...
-clawbox experiment validate SPEC --inputs
-clawbox experiment qualify SPEC --receipt RECEIPT
-clawbox --output-root RESULTS experiment run SPEC \
-  --run-id RUN_ID --qualification RECEIPT --detach
+clawbox experiment configure BASE.yaml SPEC.yaml ... \
+  --launch --run-id RUN_ID --detach
+
+# Or launch an existing spec. This automatically validates, checks the host,
+# refreshes snapshot storage, qualifies if needed, and starts or resumes.
+clawbox --output-root RESULTS experiment launch SPEC.yaml \
+  --run-id RUN_ID --detach
+
 clawbox --output-root RESULTS experiment status RUN_ID
 clawbox --output-root RESULTS experiment report RUN_ID
 ```
 
-The temporary profile `/tmp/clawbox-final-suite-2/host.json` records a historical 64 GiB
-LOCAL capacity. Do not use it to regenerate this 28/32/36 experiment without explicitly
-overriding the memory configuration. The final r2 spec is correct and authoritative.
+The active profile now records 28/32/36 GiB LOCAL watermarks, a 128 GiB NUMA1 shared
+pool, a 64 GiB live-borrow cap, both immutable template/image records, and the saved
+non-secret image-build inputs. `clawbox experiment images` therefore needs no repeated
+path arguments after the next ClawTune source update.
+
+The self-service path was verified on `kunpeng`: setup completed with a real VM probe;
+after restarting CubeMaster, `doctor --probe-vm` refreshed snapshot storage and completed
+the first VM create/execute/destroy cycle; a repeated successful `launch` returned the
+existing report in 1.484 seconds without qualification or workload replay. The relevant
+local and remote test selection passed 88 tests.
 
 ## Remaining limitations
 
 - This is one repetition, as requested. It demonstrates the mechanism and a large C
   effect, but does not estimate run-to-run variance or confidence intervals.
 - B's command-level prediction-error metrics are unavailable as described above.
-- The normal user profile `~/.config/clawbox/host.json` has not been promoted from the
-  temporary lab profiles. Before a new study, run the documented `setup` once with the
-  desired 28/32/36 and 128 GiB WARM values, then run `images` once with explicit build
-  inputs so subsequent refreshes are argument-free.
 - Working-tree changes are not committed. Review and commit only the supported workflow,
   tests, scripts, and user-facing documentation; do not include experiment results or
   temporary verification directories.

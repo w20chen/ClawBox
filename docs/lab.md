@@ -4,6 +4,38 @@
 运行 Runtime VM 和 Tool VM，不依赖 Kubernetes，也不需要人工拼装 cgroup、
 NUMA 或镜像参数。
 
+## 最短自助流程
+
+首次从仓库安装命令（之后不需要再设置 `PYTHONPATH` 或进入源码目录）：
+
+```bash
+python3 -m pip install --no-build-isolation -e .
+clawbox experiment --help
+```
+
+主机只需初始化一次。以后已有 spec 的实验使用一条命令：
+
+```bash
+clawbox --output-root /data/clawbox-results \
+  experiment launch eval.yaml --run-id eval-01 --detach
+```
+
+对于新建或恢复的 run，`launch` 会依次完成输入校验、主机检查、CubeMaster
+快照存储状态刷新、资格验证和正式运行。已有且仍然有效的资格 receipt 会自动
+复用；spec、实现、镜像、并发或节点发生变化时会自动重新资格验证。同一个
+run ID 再次执行时，正在运行的任务直接显示状态，成功任务直接显示已有报告，
+两者都不会再做资格验证或重复启动；失败或中断任务走安全恢复。
+
+也可以在 `experiment configure` 命令末尾添加：
+
+```bash
+--launch --run-id eval-01 --detach
+```
+
+这样生成 spec 后会立即执行完整安全流程。训练数据和冻结预测仍然必须来自独立
+训练 run；对于真正需要启动或恢复负载的 run，`launch` 不会伪造缺失预测，
+也不会跳过资格验证。
+
 ## 1. 一次性配置实验主机
 
 在 ARM64 Linux/KVM 主机上执行：

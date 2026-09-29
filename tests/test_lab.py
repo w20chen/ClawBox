@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
+import json
 import os
 import pytest
 from clawbox.lab import prepare_spec, template_record
@@ -164,6 +165,30 @@ def test_setup_does_not_retry_ambiguous_create_failure(monkeypatch):
     monkeypatch.setattr(lab.time, "sleep", lambda _: pytest.fail("ambiguous create must not retry"))
     with pytest.raises(ApiError, match="timed out"):
         lab.wait_for_vm_ready(profile())
+
+
+def test_snapshot_storage_refresh_requires_target_node_and_writable_mode(
+    monkeypatch,
+):
+    import clawbox.lab as lab
+
+    monkeypatch.setattr(lab.Path, "is_file", lambda self: True)
+    monkeypatch.setattr(lab, "command", lambda *args, **kwargs: json.dumps({
+        "ret": {"ret_code": 200, "ret_msg": "success"},
+        "data": [{
+            "node_id": "node-a",
+            "node_ip": "10.0.0.1",
+            "usage_pct": 70,
+            "mode": "warn",
+        }],
+    }))
+    assert lab.refresh_snapshot_storage({"node": "node-a"}) is True
+
+    monkeypatch.setattr(lab, "command", lambda *args, **kwargs: json.dumps({
+        "ret": {"ret_code": 200, "ret_msg": "success"},
+        "data": [{"node_id": "node-a", "mode": "delete_only"}],
+    }))
+    assert lab.refresh_snapshot_storage({"node": "node-a"}) is False
 
 
 def test_snapshot_sdk_ready_checkout_is_inferred(tmp_path, monkeypatch):

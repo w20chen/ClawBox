@@ -314,6 +314,27 @@ def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
             65536 if arm.policy.name == "tiered" else 0)
 
 
+def test_shared_pool_capacity_remains_for_live_borrow_in_resident_arms() -> None:
+    raw = raw_spec()
+    raw["resources"].update(
+        warm_memory_capacity_mib=131072,
+        shared_memory_borrow_limit_mib=65536,
+        pool_memory_budget_mib=32768,
+        local_memory_capacity_mib=36864,
+        local_memory_low_watermark_mib=28672,
+        local_memory_high_watermark_mib=32768,
+        warm_snapshot_root="/warm",
+        cold_snapshot_root="/cold",
+        local_numa_node=0,
+        warm_numa_node=1,
+    )
+    arms = expand_matrix(ExperimentSpec.model_validate(raw))
+    assert all(arm.resources.warm_memory_capacity_mib == 131072 for arm in arms)
+    assert all(
+        arm.resources.shared_memory_borrow_limit_mib == 65536 for arm in arms
+    )
+
+
 def test_round_robin_workload_builds_one_arm_and_stable_session_mix() -> None:
     raw = raw_spec()
     raw["workload"]["repetitions"] = 1

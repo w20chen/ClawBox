@@ -328,7 +328,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                     if resources.snapshot_storage != "warm-only" and policy.eviction not in {
                         EvictionPolicy.TIERED_LRU_ORACLE,
                         EvictionPolicy.TIERED_TIME_ORACLE,
-                    }:
+                    } and resources.shared_memory_borrow_limit_mib is None:
                         resources = resources.model_copy(update={"warm_memory_capacity_mib": 0})
                     identity = {"spec_digest": digest,
                                 "case_ids": [item.case_id for item in session_cases],

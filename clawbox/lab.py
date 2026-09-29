@@ -140,9 +140,18 @@ def ensure_snapshot_sdk(cube_source: str | Path | None = None) -> Path | None:
 
 
 def command(*args: str, timeout: int = 30) -> str:
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {' '.join(args)}"
+        ) from exc
     if result.returncode:
-        raise RuntimeError(f"Command failed: {' '.join(args)} (exit {result.returncode})")
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"Command failed: {' '.join(args)} (exit {result.returncode})"
+            + (f": {detail}" if detail else "")
+        )
     return result.stdout.strip()
 
 
@@ -159,18 +168,45 @@ def service_setting(unit: str, key: str) -> str | None:
     return next((entry.split("=", 1)[1] for entry in entries if entry.startswith(key + "=")), None)
 
 
+def refresh_snapshot_storage(profile: dict) -> bool:
+    """Refresh CubeMaster's node storage cache and require a writable mode."""
+    cli = Path("/usr/local/services/cubetoolbox/CubeMaster/bin/cubemastercli")
+    if not cli.is_file():
+        return False
+    try:
+        payload = json.loads(command(
+            str(cli), "--address", "127.0.0.1", "--timeout", "10s",
+            "storage", "status", "--refresh", "--json", timeout=15,
+        ))
+    except (json.JSONDecodeError, RuntimeError, subprocess.TimeoutExpired):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    ret = payload.get("ret")
+    if not isinstance(ret, dict) or int(ret.get("ret_code", -1)) != 200:
+        return False
+    target = str(profile.get("node") or "").strip()
+    records = payload.get("data")
+    if not target or not isinstance(records, list):
+        return False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        node_ids = {str(record.get("node_id") or ""), str(record.get("node_ip") or "")}
+        if target in node_ids:
+            return str(record.get("mode") or "").lower() in {"normal", "warn"}
+    return False
+
+
 def wait_for_vm_ready(profile: dict) -> None:
     from cubesandbox import Sandbox, ApiError
     deadline = time.monotonic() + 600
     print("Checking VM creation and guest execution (node startup can take several minutes)...", flush=True)
     while True:
-        cli = Path("/usr/local/services/cubetoolbox/CubeMaster/bin/cubemastercli")
-        if cli.is_file():
-            try:
-                command(str(cli), "--address", "127.0.0.1", "--timeout", "10s",
-                        "storage", "status", "--refresh", "--json", timeout=15)
-            except (RuntimeError, subprocess.TimeoutExpired):
-                pass  # Node boot may still be in progress; create proves readiness.
+        # CubeMaster loses this in-memory cache across restarts. Refresh it
+        # before scheduling so the first create does not fail with a stale
+        # "snapshot storage unavailable" locality decision.
+        refresh_snapshot_storage(profile)
         try:
             probe = Sandbox.create(template=profile["sandbox"]["template_id"], timeout=120,
                                    lifecycle={"on_timeout": "kill", "auto_resume": False},
@@ -292,6 +328,7 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
             )
         checks.append(("tiered incremental SDK", snapshot_sdk_ready))
         checks.append(("host swap disabled", lambda: len(Path("/proc/swaps").read_text().splitlines()) == 1))
+        checks.append(("snapshot storage writable", lambda: refresh_snapshot_storage(profile)))
     for name, check in checks:
         try:
             ok = bool(check())
