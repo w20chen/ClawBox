@@ -167,8 +167,26 @@ def test_setup_does_not_retry_ambiguous_create_failure(monkeypatch):
         lab.wait_for_vm_ready(profile())
 
 
+def test_setup_waits_for_storage_heartbeat_before_probing(monkeypatch):
+    import clawbox.lab as lab
+    ready = iter([False, False, True])
+    sleeps = []
+    monkeypatch.setattr(lab, "refresh_snapshot_storage", lambda _: next(ready))
+    monkeypatch.setattr(lab.time, "sleep", sleeps.append)
+    lab.wait_for_snapshot_storage(profile(), timeout=10)
+    assert len(sleeps) == 2
+
+
+def test_storage_wait_is_bounded_and_explains_failure(monkeypatch):
+    import clawbox.lab as lab
+    monkeypatch.setattr(lab, "refresh_snapshot_storage", lambda _: False)
+    with pytest.raises(RuntimeError, match="heartbeat.*Profile not saved"):
+        lab.wait_for_snapshot_storage(profile(), timeout=0)
+
+
+@pytest.mark.parametrize("writable_mode", ["healthy", "warn"])
 def test_snapshot_storage_refresh_requires_target_node_and_writable_mode(
-    monkeypatch,
+    monkeypatch, writable_mode,
 ):
     import clawbox.lab as lab
 
@@ -179,7 +197,7 @@ def test_snapshot_storage_refresh_requires_target_node_and_writable_mode(
             "node_id": "node-a",
             "node_ip": "10.0.0.1",
             "usage_pct": 70,
-            "mode": "warn",
+            "mode": writable_mode,
         }],
     }))
     assert lab.refresh_snapshot_storage({"node": "node-a"}) is True

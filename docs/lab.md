@@ -1,5 +1,8 @@
 # 独立 CubeSandbox 实验流程
 
+第一次安装或希望逐条执行命令，请先阅读[自助流程](self-service.md)。
+主机参数建议保存为 `host.yaml`，通过 `experiment host check/apply` 检查和应用。
+
 正式入口统一为 `clawbox experiment`。它直接使用 standalone CubeSandbox
 运行 Runtime VM 和 Tool VM，不依赖 Kubernetes，也不需要人工拼装 cgroup、
 NUMA 或镜像参数。
@@ -109,7 +112,7 @@ clawbox experiment configure examples/experiments/getting-started.yaml train.yam
   --pool-memory-gib 32
 
 clawbox --output-root /data/clawbox-results \
-  experiment run train.yaml --run-id train-01
+  experiment launch train.yaml --run-id train-01
 
 clawbox experiment train /data/clawbox-results/train-01 \
   --trace /data/replay.jsonl \

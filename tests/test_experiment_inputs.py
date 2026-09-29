@@ -16,8 +16,18 @@ EXAMPLE = Path("examples/experiments/getting-started.yaml")
 def test_documented_example_validates_without_host(capsys):
     assert cli.main(["experiment", "validate", str(EXAMPLE), "--inputs"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["inputs"]["traces"][0]["model_calls"] == 1
+    assert result["inputs"]["traces"][0]["model_calls"] == 2
     assert result["armCount"] == 1
+
+
+def test_incomplete_tool_request_trace_fails_before_creating_vms(tmp_path):
+    path = tmp_path / "truncated.jsonl"
+    path.write_text("\n".join(Path("examples/traces/smoke.jsonl").read_text().splitlines()[:2]) + "\n")
+    spec = configure_experiment(EXAMPLE, trace=str(path))
+    with pytest.raises(ValueError, match="no final model response"):
+        validate_inputs(spec)
+    spec.inference.configuration["max_model_steps"] = 1
+    assert validate_inputs(spec)["traces"][0]["ends_with_tool_request"]
 
 
 def test_arbitrary_trace_and_case_replace_single_case_and_keep_concurrency(tmp_path):

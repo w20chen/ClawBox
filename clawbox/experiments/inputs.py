@@ -18,12 +18,14 @@ def inspect_trace(path: Path) -> dict:
     if len(ids) != len(set(ids)):
         raise ValueError(f"{path}: action IDs must be unique")
     tool_names = set()
+    last_model_requests_tools = False
     for action in actions:
         if action.kind != "llm" or not isinstance(action.output, dict):
             continue
         message = action.output
         if isinstance(message.get("content"), dict):
             message = message["content"]
+        last_model_requests_tools = bool(message.get("tool_calls"))
         for call in message.get("tool_calls", []):
             tool_names.add(str((call.get("function") or {}).get("name", "")))
     return {
@@ -35,6 +37,7 @@ def inspect_trace(path: Path) -> dict:
         "model_requests_present": all(action.input is not None for action in actions if action.kind == "llm"),
         "model_responses_present": all(action.output is not None for action in actions if action.kind == "llm"),
         "response_tool_names": sorted(tool_names),
+        "ends_with_tool_request": last_model_requests_tools,
     }
 
 
@@ -77,6 +80,11 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
                 if (not info["model_calls"] or not info["model_requests_present"]
                         or not info["model_responses_present"]):
                     raise ValueError(f"{case.case_id}: managed replay requires recorded model requests and responses")
+                if limit is None and info["ends_with_tool_request"]:
+                    raise ValueError(
+                        f"{case.case_id}: full replay ends with a tool request and has no final model response; "
+                        "supply the complete trace, or explicitly configure max_model_steps for a prefix experiment"
+                    )
             traces.append({"case_id": case.case_id, **info})
     files = []
     admissions = {policy.admission for policy in spec.policies}

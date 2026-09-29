@@ -20,6 +20,15 @@ warm_node=${CLAWBOX_WARM_NODE:-1}
 [[ $warm =~ ^/[A-Za-z0-9_./-]+$ && $cold =~ ^/[A-Za-z0-9_./-]+$ ]] || {
   echo 'snapshot roots must use letters, digits, slash, dot, underscore or hyphen' >&2; exit 1;
 }
+[[ $local_mib =~ ^[1-9][0-9]*$ && $warm_mib =~ ^[1-9][0-9]*$ && $local_node =~ ^[0-9]+$ && $warm_node =~ ^[0-9]+$ ]] || {
+  echo 'capacities must be positive MiB integers; NUMA nodes must be non-negative integers' >&2; exit 1;
+}
+[[ -d /sys/devices/system/node/node$local_node && -d /sys/devices/system/node/node$warm_node ]] || {
+  echo 'selected NUMA node does not exist; inspect numactl --hardware' >&2; exit 1;
+}
+[[ $cold != "$warm/"* && $warm != "$cold/"* ]] || {
+  echo 'WARM and COLD directories must not contain one another' >&2; exit 1;
+}
 # Check the idle prerequisite before mounting storage or changing the service.
 grep -qx 'populated 0' /sys/fs/cgroup/cube_sandbox/sandbox/cgroup.events || {
   echo 'refusing setup while standalone VMs are running' >&2; exit 1;
@@ -35,14 +44,44 @@ fi
   echo 'WARM must be tmpfs' >&2; exit 1;
 }
 options=$(findmnt -n -o OPTIONS --target "$warm")
-[[ ,$options, == *,mpol=bind:${warm_node},* && ,$options, == *,noswap,* ]] || {
+[[ ,$options, == *,mpol=bind:${warm_node},* ]] || {
   echo "unexpected WARM mount policy: $options" >&2; exit 1;
 }
+if [[ ,$options, != *,noswap,* ]] && [[ $(wc -l < /proc/swaps) != 1 ]]; then
+  echo 'WARM can swap: disable host swap or use a noswap tmpfs' >&2; exit 1
+fi
 chown "$owner:$(id -gn "$owner")" "$warm" "$cold"
 install -D -m 644 "$script_dir/../deploy/cubesandbox/tiered-memory.conf" \
   /etc/systemd/system/cube-sandbox-cubelet.service.d/tiered-memory.conf
 printf 'Environment=CLAWBOX_WARM_SNAPSHOT_ROOT=%s\nEnvironment=CLAWBOX_COLD_SNAPSHOT_ROOT=%s\n' \
   "$warm" "$cold" >> /etc/systemd/system/cube-sandbox-cubelet.service.d/tiered-memory.conf
+# The standalone launchers source this file after systemd supplies Environment.
+# Keep it consistent with the drop-in so changing paths actually takes effect.
+python3 - "$warm" "$cold" <<'PY'
+from pathlib import Path
+import os, re, shlex, shutil, sys, time
+p = Path('/usr/local/services/cubetoolbox/.one-click.env')
+text = p.read_text()
+updated = text
+for key, value in {
+    'CLAWBOX_WARM_SNAPSHOT_ROOT': sys.argv[1],
+    'CLAWBOX_COLD_SNAPSHOT_ROOT': sys.argv[2],
+    'CLAWBOX_KVM_DIRTY_TRACKING': '1',
+    'CUBE_RESTORE_PRIVATE_COPY': '0',
+    'CLAWBOX_WARM_PREALLOCATE': '1',
+}.items():
+    updated = re.sub(r'^(?:export )?' + key + r'=.*\n?', '', updated, flags=re.M)
+    updated = updated.rstrip() + '\n' + key + '=' + shlex.quote(value) + '\n'
+if text != updated:
+    shutil.copy2(p, p.with_name(p.name + '.pre-host-' + str(time.time_ns())))
+    temporary = p.with_name(p.name + '.host-tmp-' + str(os.getpid()))
+    try:
+        shutil.copy2(p, temporary)
+        temporary.write_text(updated)
+        os.replace(temporary, p)
+    finally:
+        temporary.unlink(missing_ok=True)
+PY
 systemctl daemon-reload
 python3 "$script_dir/configure-tiered-local.py" --capacity-mib "$local_mib" --numa-node "$local_node"
 chown "$owner:$(id -gn "$owner")" /sys/fs/cgroup/cube_sandbox/sandbox/memory.reclaim

@@ -52,6 +52,11 @@ above.
 
 ## 2. Configure the host
 
+For an editable host YAML and read-only prerequisite checks before applying it,
+follow the [self-service walkthrough](self-service.md). This is the recommended
+first-time path, including storage/service setup; the low-level `setup` command
+below assumes matching WARM service settings already exist.
+
 Run setup on the ARM64 Linux/KVM host:
 
 ```bash
@@ -121,6 +126,9 @@ clawbox experiment configure examples/experiments/getting-started.yaml train.yam
   --baseline tool-static-resident \
   --concurrency 16 \
   --pool-memory-gib 32
+
+clawbox --output-root /data/clawbox-results \
+  experiment launch train.yaml --run-id train-01
 ```
 
 After that run succeeds, freeze P50 predictions from its results:

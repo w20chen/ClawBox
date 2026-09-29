@@ -16,5 +16,6 @@ docker tag "$CLAWBOX_TOOL_IMAGE" clawbox-transfer/tool:research
 docker save -o "$destination/guest-images.tar" clawbox-transfer/runtime:research clawbox-transfer/tool:research
 kernel_root=${CLAWBOX_KERNEL_ROOT:-/usr/local/services/cubetoolbox/cube-kernel-scf}
 cp "$kernel_root/vmlinux-bm" "$kernel_root/version" "$kernel_root/version.json" "$destination/kernel/"
+(cd "$destination" && sha256sum guest-images.tar kernel/vmlinux-bm kernel/version kernel/version.json > SHA256SUMS)
 echo "Exported guest images and the matching kernel to $destination"
 echo 'Copy the approved replay trace separately. This export does not include passwords, host configuration, or live VMs.'

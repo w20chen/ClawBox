@@ -12,6 +12,9 @@ compatibility guarantee. See [supported scope and deprecated modules](docs/depre
 
 ## Start
 
+从新机器准备到第一次真实实验，按[逐条命令自助流程](docs/self-service.md)操作。
+它包含可编辑主机配置、只读检查、NUMA/内存池/磁盘参数与失败后的处理步骤。
+
 On an installed experiment host, use the [standalone experiment workflow](docs/lab.md)
 to configure CubeSandbox, qualify the exact spec, run or resume it, inspect live
 state, and destroy only that run's VMs.

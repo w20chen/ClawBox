@@ -4,6 +4,9 @@ Scope: a dedicated ARM64 Linux host with KVM, systemd, cgroup v2, and Docker.
 Package commands below target Ubuntu 24.04 ARM64 and install standalone CubeSandbox.
 Commands must finish successfully before proceeding.
 
+After installation, use the [self-service workflow](self-service.md) to save
+NUMA, capacity and disk settings in one YAML, check them, and run the first experiment.
+
 ## Required artifacts
 
 | Input | Required contents |
@@ -100,6 +103,7 @@ Copy the supplied bundle to the destination, then prepare the server from
 read -r -p 'Source SSH address (user@host): ' ASSET_HOST
 sudo install -d -o "$USER" -g "$(id -gn)" /data/clawbox-transfer
 rsync -a "$ASSET_HOST:/data/clawbox-transfer/" /data/clawbox-transfer/
+(cd /data/clawbox-transfer && sha256sum -c SHA256SUMS)
 test -s /data/clawbox-transfer/guest-images.tar
 test -s /data/clawbox-transfer/kernel/vmlinux-bm
 test -s /data/clawbox-transfer/kernel/version.json
@@ -390,7 +394,6 @@ confirming it has no unrelated workloads.
 
 ## Verification boundary
 
-CLI examples and repository helper arguments are checked against source. The
-upstream release commands are checked against the pinned v0.7.0 files. A fresh
-physical-host installation has not been executed as part of this documentation
-change; the VM and kernel checks above remain required on the target host.
+Do not use service startup alone as installation acceptance. Run the endpoint,
+Guest kernel/telemetry and configured snapshot checks on each target host, then
+complete the self-service smoke experiment before increasing concurrency.

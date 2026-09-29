@@ -26,6 +26,7 @@ dependencies = [
   # does not declare the package dependency itself.
   "e2b==2.29.5",
   "PyYAML>=6.0",
+  "jsonschema>=4",
 ]
 
 [project.optional-dependencies]

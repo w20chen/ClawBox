@@ -1,5 +1,9 @@
 # Administrative and development helpers
 
+For first-time use, follow the [self-service workflow](../docs/self-service.md):
+`clawbox experiment host inspect/init/check/apply` provides an editable host plan
+and checks prerequisites before applying NUMA and storage settings.
+
 `bash scripts/lab setup --warm`, `baselines`, `run TASK.yaml`, and `cleanup RUN_DIR`
 provide the [daily host workflow](../docs/lab.md). They use the existing experiment
 runner and default to RAM-only snapshots; COLD storage requires explicit selection.

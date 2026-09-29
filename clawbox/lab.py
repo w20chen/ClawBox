@@ -194,8 +194,27 @@ def refresh_snapshot_storage(profile: dict) -> bool:
             continue
         node_ids = {str(record.get("node_id") or ""), str(record.get("node_ip") or "")}
         if target in node_ids:
-            return str(record.get("mode") or "").lower() in {"normal", "warn"}
+            return str(record.get("mode") or "").lower() in {"healthy", "warn"}
     return False
+
+
+def wait_for_snapshot_storage(profile: dict, *, timeout: float = 600) -> None:
+    """A running systemd wrapper does not imply Cubelet has begun heartbeats."""
+    deadline = time.monotonic() + timeout
+    next_notice = 0.0
+    while not refresh_snapshot_storage(profile):
+        now = time.monotonic()
+        if now >= deadline:
+            raise RuntimeError(
+                f"Node {profile['node']} snapshot storage was not writable within {timeout:g}s. "
+                "Check Cubelet startup/heartbeats, S3lvol socket/backend and data-disk space; "
+                "rerun host apply after fixing the cause. Profile not saved."
+            )
+        if now >= next_notice:
+            print(f"Waiting for node {profile['node']} storage/heartbeat readiness "
+                  f"({deadline - now:.0f}s remaining)...", flush=True)
+            next_notice = now + 30
+        time.sleep(min(2, deadline - now))
 
 
 def wait_for_vm_ready(profile: dict) -> None:
@@ -330,17 +349,35 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         checks.append(("host swap disabled", lambda: len(Path("/proc/swaps").read_text().splitlines()) == 1))
         checks.append(("snapshot storage writable", lambda: refresh_snapshot_storage(profile)))
     for name, check in checks:
+        detail = ""
         try:
             ok = bool(check())
-        except Exception:
+        except Exception as exc:
             ok = False
-        print(f"{'OK' if ok else 'FAIL'}  {name}", flush=True)
+            detail = f": {exc}"
+        print(f"{'OK' if ok else 'FAIL'}  {name}{detail}", flush=True)
         if not ok:
             failures.append(name)
     return failures
 
 
 def setup(args) -> dict:
+    # Reject invalid requests before starting services or touching cgroups.
+    low_gib = args.low_gib if args.low_gib is not None else args.local_gib - 8
+    high_gib = args.high_gib if args.high_gib is not None else args.local_gib - 4
+    if args.local_gib <= 0 or args.local_node < 0:
+        raise ValueError("LOCAL capacity must be positive and NUMA node non-negative")
+    if args.local_memory_cgroup != DEFAULT_LOCAL_CGROUP:
+        raise ValueError(f"standalone CubeSandbox requires --local-memory-cgroup {DEFAULT_LOCAL_CGROUP}")
+    if args.warm:
+        if not (0 < low_gib < high_gib < args.local_gib):
+            raise ValueError("memory watermarks must satisfy 0 < LOW < HIGH < LOCAL hard")
+        if args.warm_gib <= 0 or args.warm_node < 0 or args.local_node == args.warm_node:
+            raise ValueError("WARM capacity must be positive and use a distinct non-negative NUMA node")
+        if not Path(args.warm_root).is_absolute() or Path(args.warm_root) == Path("/"):
+            raise ValueError("WARM root must be an absolute dedicated directory")
+    if not 0 <= args.shared_borrow_percent <= 50:
+        raise ValueError("--shared-borrow-percent must be between 0 and 50")
     if not Path("/dev/kvm").exists():
         raise ValueError("Run setup on the Linux KVM host, not the Windows client")
     if shutil.disk_usage(ROOT).free < 5 * 1024**3:
@@ -348,6 +385,10 @@ def setup(args) -> dict:
     previous = json.loads(args.profile.read_text(encoding="utf-8")) if args.profile.exists() else {}
     if not isinstance(previous, dict):
         raise ValueError("Host profile root must be a JSON object")
+    runtime = args.runtime_template or previous.get("runtime", {}).get("template_id") or os.getenv("CLAWBOX_RUNTIME_TEMPLATE")
+    tool = args.tool_template or previous.get("sandbox", {}).get("template_id") or os.getenv("CLAWBOX_TOOL_TEMPLATE")
+    if not runtime or not tool:
+        raise ValueError("Supply --runtime-template and --tool-template, or export them from machine.env")
     cube_source = (
         getattr(args, "cube_source", None) or previous.get("cube_source")
         or os.getenv("CUBE_SOURCE_DIR")
@@ -371,10 +412,6 @@ def setup(args) -> dict:
             time.sleep(1)
     for unit in SERVICES:
         command("sudo", "-n", "systemctl", "start", unit, timeout=120)
-    runtime = args.runtime_template or previous.get("runtime", {}).get("template_id") or os.getenv("CLAWBOX_RUNTIME_TEMPLATE")
-    tool = args.tool_template or previous.get("sandbox", {}).get("template_id") or os.getenv("CLAWBOX_TOOL_TEMPLATE")
-    if not runtime or not tool:
-        raise ValueError("Supply --runtime-template and --tool-template, or set them in machine.env")
     profile = {"runtime": template_record(runtime), "sandbox": template_record(tool)}
     nodes = set(profile["runtime"].pop("nodes")) & set(profile["sandbox"].pop("nodes"))
     node = args.node or previous.get("node") or os.getenv("CUBE_NODE")
@@ -383,12 +420,6 @@ def setup(args) -> dict:
         nodes.add(node)
     if node not in nodes:
         raise ValueError("Select a node with READY replicas of both templates using --node")
-    low_gib = args.low_gib if args.low_gib is not None else args.local_gib - 8
-    high_gib = args.high_gib if args.high_gib is not None else args.local_gib - 4
-    if args.warm and not (0 < low_gib < high_gib < args.local_gib):
-        raise ValueError("memory watermarks must satisfy 0 < LOW < HIGH < LOCAL hard")
-    if not 0 <= args.shared_borrow_percent <= 50:
-        raise ValueError("--shared-borrow-percent must be between 0 and 50")
     shared_borrow_mib = (
         args.warm_gib * 1024 * args.shared_borrow_percent // 100 if args.warm else 0
     )
@@ -401,11 +432,15 @@ def setup(args) -> dict:
         local_memory_high_watermark_mib=high_gib * 1024 if args.warm else None,
         shared_memory_borrow_limit_mib=shared_borrow_mib,
         warm_root=args.warm_root,
-        warm_capacity_mib=args.warm_gib * 1024,
+        warm_capacity_mib=args.warm_gib * 1024 if args.warm else 0,
         warm_numa_node=args.warm_node,
     )
     if cube_source:
         profile["cube_source"] = str(Path(cube_source).expanduser().resolve())
+    for key in ("cold_root", "output_root"):
+        value = getattr(args, key, None) or previous.get(key)
+        if value:
+            profile[key] = value
     if isinstance(previous.get("image_build"), dict):
         profile["image_build"] = previous["image_build"]
     apply_environment(profile)
@@ -433,17 +468,19 @@ def setup(args) -> dict:
         command("sudo", "-n", "mkdir", "-p", str(root))
         mounted = subprocess.run(["findmnt", "-M", str(root)], capture_output=True).returncode == 0
         if not mounted:
+            if any(root.iterdir()):
+                raise ValueError(f"Refusing to hide existing files under WARM root: {root}")
             command("sudo", "-n", "mount", "-t", "tmpfs", "-o",
                     f"size={args.warm_gib}G,mode=0770,uid={os.getuid()},gid={os.getgid()},mpol=bind:{args.warm_node}",
                     "clawbox-warm", str(root))
         if command("findmnt", "-n", "-o", "FSTYPE", "-M", str(root)) != "tmpfs":
             raise ValueError("WARM directory is not tmpfs; refusing disk-backed snapshots")
-        if shutil.disk_usage(root).total < args.warm_gib * 1024**3:
-            # The host is already verified idle above. Growing a tmpfs preserves
-            # its contents and existing NUMA/mode options, and avoids a manual
-            # unmount/remount step after increasing experiment concurrency.
+        if shutil.disk_usage(root).total != args.warm_gib * 1024**3:
+            if shutil.disk_usage(root).used > args.warm_gib * 1024**3:
+                raise ValueError("Requested WARM capacity is smaller than existing snapshot data")
+            # Resize an idle pool without hiding or removing its contents.
             command("sudo", "-n", "mount", "-o", f"remount,size={args.warm_gib}G", str(root))
-            if shutil.disk_usage(root).total < args.warm_gib * 1024**3:
+            if shutil.disk_usage(root).total != args.warm_gib * 1024**3:
                 raise RuntimeError("WARM tmpfs resize did not reach the requested capacity")
         if service_setting("cube-sandbox-cubemaster", "CLAWBOX_WARM_SNAPSHOT_ROOT") != str(root):
             # The standalone launcher sources this file itself, so a systemd
@@ -460,6 +497,8 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
             command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cubemaster", timeout=120)
         if service_setting("cube-sandbox-cubelet", "CLAWBOX_WARM_SNAPSHOT_ROOT") != str(root):
             command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cubelet", timeout=120)
+    if args.warm:
+        wait_for_snapshot_storage(profile)
     if doctor(profile, warm=args.warm):
         raise RuntimeError("Host checks failed; profile not saved")
     wait_for_vm_ready(profile)
@@ -653,6 +692,9 @@ def main(argv=None) -> int:
     setup_parser.add_argument("--warm-node", type=int, default=1)
     setup_parser.add_argument("--local-gib", type=int, default=DEFAULT_POOL_GIB)
     setup_parser.add_argument("--local-node", type=int, default=0)
+    setup_parser.add_argument("--low-gib", type=int)
+    setup_parser.add_argument("--high-gib", type=int)
+    setup_parser.add_argument("--shared-borrow-percent", type=int, default=50)
     setup_parser.add_argument("--local-memory-cgroup", default=DEFAULT_LOCAL_CGROUP)
     sub.add_parser("doctor", help="Check services, disk, KVM and templates")
     baseline_parser = sub.add_parser(

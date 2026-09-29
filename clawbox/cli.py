@@ -149,6 +149,18 @@ def parser() -> argparse.ArgumentParser:
     resume.add_argument("run_id")
     resume.add_argument("--attempt-id")
     resume.add_argument("--detach", action="store_true")
+    host = sub.add_parser("host", help="inspect, configure and check a standalone host before changing it")
+    host_actions = host.add_subparsers(dest="host_action", required=True)
+    host_actions.add_parser("inspect", help="show NUMA CPUs, RAM and distances without changing the host")
+    host_init = host_actions.add_parser("init", help="write an editable host YAML; never overwrite")
+    host_init.add_argument("config", type=Path)
+    host_init.add_argument("--from-profile", type=Path)
+    for action in ("check", "apply"):
+        host_command = host_actions.add_parser(action)
+        host_command.add_argument("config", type=Path)
+        if action == "apply":
+            host_command.add_argument("--profile", type=Path,
+                                      default=Path.home() / ".config/clawbox/host.json")
     setup = sub.add_parser("setup", help="configure and verify this CubeSandbox host")
     setup.add_argument("--profile", type=Path,
                        default=Path.home() / ".config" / "clawbox" / "host.json")
@@ -447,6 +459,20 @@ def main(argv: list[str] | None = None) -> int:
                 [str(repository), *([python_path] if python_path else [])]
             )
             return subprocess.call(command, env=environment)
+        if args.command == "host":
+            from clawbox.experiments import host
+            if args.host_action == "inspect":
+                emit(host.inventory())
+            elif args.host_action == "init":
+                host.init_config(args.config, args.from_profile)
+                emit({"config": args.config, "next": f"Edit {args.config}, then run clawbox experiment host check {args.config}"})
+            elif args.host_action == "check":
+                report = host.check(host.load_config(args.config))
+                emit(report)
+                return 0 if report["ready_for_apply"] else 2
+            else:
+                emit({"ready": True, "profile": host.apply(host.load_config(args.config), args.profile)})
+            return 0
         if args.command == "setup":
             from clawbox.lab import setup as setup_host
 
@@ -687,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 local_memory_cgroup=profile.get("local_memory_cgroup"),
                 warm_snapshot_root=args.warm_root or profile.get("warm_root"),
-                cold_snapshot_root=args.cold_root,
+                cold_snapshot_root=args.cold_root or profile.get("cold_root"),
                 local_numa_node=profile.get("local_numa_node"),
                 warm_numa_node=profile.get("warm_numa_node"),
                 snapshot_mechanism=args.snapshot_mechanism,
@@ -831,6 +857,10 @@ def main(argv: list[str] | None = None) -> int:
             ).run()
             emit({"runId": run_id, "attemptId": attempt_id, "ownerId": owner_id,
                   "output": str(output),
+                  "failures": [{"armId": item.arm.arm_id,
+                                "reason": item.correctness.get("failure"),
+                                "artifacts": item.artifacts}
+                               for item in results if item.status.value != "succeeded"],
                   "succeeded": all(item.status.value == "succeeded" for item in results)})
             return 0 if all(item.status.value == "succeeded" for item in results) else 1
         run_root = args.output_root / args.run_id

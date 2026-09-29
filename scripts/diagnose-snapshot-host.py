@@ -45,7 +45,8 @@ def main():
               "online nodes: " + ",".join(nodes))
     rc, mount = command("findmnt", "-M", str(warm), "-n", "-o", "FSTYPE,OPTIONS")
     check("WARM tmpfs mount", rc == 0 and mount.startswith("tmpfs ")
-          and f"mpol=bind:{warm_node}" in mount and "noswap" in mount, mount or "not mounted")
+          and f"mpol=bind:{warm_node}" in mount
+          and ("noswap" in mount or len((read("/proc/swaps") or "").splitlines()) == 1), mount or "not mounted")
     if warm.is_dir():
         total = os.statvfs(warm).f_blocks * os.statvfs(warm).f_frsize
         check("WARM capacity", rc == 0 and total >= warm_mib * 1024 * 1024,
