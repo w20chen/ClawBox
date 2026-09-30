@@ -1,4 +1,8 @@
-# Placement experiment result
+# Historical placement experiment result
+
+This is a completed Docker/QEMU study, separate from the supported
+`clawbox experiment` workflow. Its topology and measured results are specific
+to that run; [placement.md](../placement.md) describes the reusable offline tools.
 
 The experiment used four real calls reconstructed from immutable pre-call
 Docker checkpoints: two Terminal-Bench `Rscript` calls (A/B) and two

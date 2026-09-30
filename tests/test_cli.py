@@ -93,6 +93,47 @@ def test_launch_qualifies_when_needed_then_starts_run(
     )
 
 
+def test_launch_existing_active_returns_status_without_requalification(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    from argparse import Namespace
+    import clawbox.experiments.inputs as inputs
+    import clawbox.experiments.qualification as qualification
+    import clawbox.experiments.supervisor as supervisor
+
+    spec_path = Path("examples/experiments/getting-started.yaml")
+    run_root = tmp_path / "already-running"
+    run_root.mkdir()
+    (run_root / "experiment.yaml").write_text(
+        spec_path.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        inputs, "validate_inputs",
+        lambda spec: (_ for _ in ()).throw(AssertionError("inputs revalidated")),
+    )
+    monkeypatch.setattr(
+        qualification, "require_host_ready",
+        lambda spec: (_ for _ in ()).throw(AssertionError("host rechecked")),
+    )
+    monkeypatch.setattr(
+        supervisor, "status_for_run",
+        lambda path: {"state": "running", "supervisor_alive": True},
+    )
+
+    assert cli.launch_experiment(Namespace(
+        spec=spec_path,
+        output_root=tmp_path,
+        qualification=None,
+        qualification_concurrency=None,
+        force_qualify=False,
+        run_id="already-running",
+        detach=False,
+    )) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["state"] == "running"
+    assert output["message"] == "run is already active"
+
+
 def test_launch_existing_success_skips_host_and_qualification(
     monkeypatch, tmp_path, capsys,
 ) -> None:

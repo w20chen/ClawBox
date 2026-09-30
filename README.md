@@ -1,56 +1,30 @@
 # ClawBox
 
-ClawBox compares memory reservation, idle-VM reclamation, and restoration policies
-for coding-agent workloads on standalone CubeSandbox. Each session has a Runtime
-VM and a separate Tool VM. ClawTune supplies command predictions and measurements.
+ClawBox 在 standalone CubeSandbox 上比较编码 Agent 的内存准入、空闲 VM 回收和恢复策略。
+每个会话包含一个 Runtime VM 和一个 Tool VM；ClawTune 提供命令级预测与测量。
+默认用 NUMA 0、1 模拟两个计算节点，NUMA 2 提供共享内存池。
 
-The public interface is `clawbox experiment`. Workloads, concurrency, resources,
-and policy dimensions are configuration inputs; no particular benchmark is required.
+**从[逐条命令入门](docs/self-service.md)开始。** 正式入口是 `clawbox experiment`，
+不需要 Codex、代码代理或 Kubernetes。真实执行需要 ARM64 Linux/KVM 主机、
+带补丁的 CubeSandbox 和配套 Guest 构件；仓库不包含可直接运行的完整 Guest 镜像。
 
-The former service-based control plane is deprecated and has no future
-compatibility guarantee. See [supported scope and deprecated modules](docs/deprecated.md).
-
-## Start
-
-从新机器准备到第一次真实实验，按[逐条命令自助流程](docs/self-service.md)操作。
-它包含可编辑主机配置、只读检查、NUMA/内存池/磁盘参数与失败后的处理步骤。
-
-On an installed experiment host, use the [standalone experiment workflow](docs/lab.md)
-to configure CubeSandbox, qualify the exact spec, run or resume it, inspect live
-state, and destroy only that run's VMs.
-
-With Python 3.12 or newer, from this checkout:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-clawbox experiment trace examples/traces/smoke.jsonl
-clawbox experiment validate examples/experiments/getting-started.yaml --inputs
-clawbox experiment describe examples/experiments/getting-started.yaml
-```
-
-These commands need no VM host. Running the example requires registered ARM64
-CubeSandbox templates; the included template aliases are placeholders.
-
-| Document | Contents |
+| 你要做什么 | 阅读位置 |
 | --- | --- |
-| [User guide](docs/guide.md) | Configuration, policy dimensions, trace format, recording, execution, results |
-| [Installation](docs/installation.md) | Host dependencies, guest artifacts, server/SDK setup, templates, memory checks |
-| [Design contracts](docs/design.md) | Admission ordering, memory accounting, checkpoint semantics, evidence requirements |
+| 配置主机，跑通第一个实验，再训练和评估 | [入门流程](docs/self-service.md) |
+| 从新机器安装服务、导入镜像、注册模板、更新 ClawTune | [安装与更新](docs/installation.md) |
+| 修改 NUMA、CPU 子集、内存、水位、共享池或磁盘 | [主机与超节点配置](docs/supernode.md) |
+| 查实验字段、trace 要求、命令区别、恢复和结果含义 | [配置与命令参考](docs/guide.md) |
+| 理解准入、快照、计账及 PMU 的实现边界 | [执行与测量契约](docs/design.md) |
+| 开展独立的 LLC 放置研究 | [辅助放置工具](docs/placement.md) |
 
-The included [experiment](examples/experiments/getting-started.yaml) and
-[trace](examples/traces/smoke.jsonl) form a small direct-command replay check.
-Real agent runs use the same CLI with `agent.driver: openclaw` and live or recorded
-model responses. Other checked-in experiment files are research fixtures with
-machine-specific references, not installation defaults.
+[getting-started.yaml](examples/experiments/getting-started.yaml) 和
+[smoke.jsonl](examples/traces/smoke.jsonl) 是最小入门输入；训练示例使用
+[memory-smoke.jsonl](examples/traces/memory-smoke.jsonl)。其他 experiment/prediction 文件
+是研究输入，可能含机器路径、占位模板或旧策略，不是新机器默认配置。
 
-## Development
+开发者运行相关检查：`python -m pytest`。公共参数以 `clawbox experiment --help`
+及各子命令的 `--help` 为准；字段定义见 [spec.py](clawbox/experiments/spec.py)。
+修改公共行为时同步更新对应参考页，完整命令流程只维护在入门页。
 
-ClawTune is built from a frozen export of the sibling working tree;
-`CLAWTUNE_SIDECAR_SRC` can select its source. Use the
-[update instructions](docs/installation.md#build-with-the-current-clawtune-source)
-to build Runtime and Tool images from the same latest-main export.
-Run relevant checks with `python -m pytest`.
-Guest integration requires the patched server, matching SDK, images and kernel
-listed in the installation guide. Store generated outputs outside Git.
+旧控制面和 `scripts/lab` 的范围见[弃用说明](docs/deprecated.md)。
+[历史实验记录](docs/archive/README.md)只保留当时的配置、结果与局限，不表示当前部署状态。

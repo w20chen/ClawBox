@@ -196,27 +196,6 @@ python scripts/audit-cube-sandboxes.py --json
 
 ## 4. Register templates and verify SSH
 
-BCC needs headers prepared for the **running guest kernel configuration**, not
-just the same kernel version. A mismatch can produce eBPF events with invalid
-CPU or memory counters. If your Tool image has the matching kernel source but
-was prepared with a different configuration, build a corrected image from an
-existing template on this host:
-
-```bash
-python scripts/prepare-guest-kernel-headers.py \
-  --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
-  --image "$CLAWBOX_TOOL_IMAGE" --tag "$REGISTRY/tool:matching-headers" \
-  --output /data/clawbox-specs/header-build-01
-docker push "$REGISTRY/tool:matching-headers"
-export CLAWBOX_TOOL_IMAGE=$(docker image inspect "$REGISTRY/tool:matching-headers" \
-  --format '{{index .RepoDigests 0}}')
-```
-
-This reads `/proc/config.gz` from a temporary guest, prepares the headers in a
-new image, and preserves the configuration and build log. Register the new image
-below. On a fresh installation, register an initial template first to perform
-this check; do not start experiments until the resource probe passes.
-
 Read the installed guest-kernel component and register new aliases. The commands
 match the starting example's VM sizes; disk capacity belongs to the template:
 
@@ -262,90 +241,58 @@ python scripts/smoke-cubesandbox-agent-pair.py \
   --output "$CLAWBOX_OUTPUT_ROOT/agent-pair.json"
 ```
 
-Then follow [configure and run](guide.md#5-run-on-an-installed-host).
+### If the Tool kernel headers do not match
 
-## Optional: isolated memory and tiered snapshots
-
-This section requires two NUMA nodes and an idle CubeSandbox VM pool. Choose
-capacities from available node memory. The values below match the c16 lab
-defaults and require enough physical RAM on both nodes. Inspect the nodes first:
-
-```bash
-numactl --hardware
-cat /sys/fs/cgroup/cube_sandbox/sandbox/cgroup.events
-```
-
-Continue only if `populated 0`. Set paths in `machine.env` and matching values in
-the experiment's `resources` section:
-
-```yaml
-pool_memory_budget_mib: 65536
-local_memory_capacity_mib: 65536
-warm_memory_capacity_mib: 131072
-checkpoint_restore_headroom_mib: 8192
-local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
-local_numa_node: 0
-warm_numa_node: 1
-warm_snapshot_root: /data/clawbox/warm
-cold_snapshot_root: /data/clawbox/cold
-snapshot_mechanism: incremental-cow  # use full-copy for the baseline
-```
-
-Keep the host-specific, non-secret values in one file and run the repeatable
-setup on an idle host:
+BCC requires headers prepared for the running guest kernel configuration, not
+only the same version. If the agent-pair telemetry probe reports invalid or
+missing eBPF CPU/memory measurements, build a corrected Tool image from the
+initial Tool template:
 
 ```bash
-cp examples/clawbox-snapshot-host.env.example "$HOME/.config/clawbox/snapshot-host.env"
-# Edit paths, capacities, NUMA nodes, and CUBE_SOURCE_DIR for this machine.
-source "$HOME/.config/clawbox/snapshot-host.env"
-bash scripts/snapshot-host.sh "$HOME/.config/clawbox/snapshot-host.env" apply
-sudo systemctl restart cube-sandbox-cubelet.service
-sudo systemctl restart cube-sandbox-cube-egress.service
-bash scripts/snapshot-host.sh "$HOME/.config/clawbox/snapshot-host.env" apply
-bash scripts/snapshot-host.sh "$HOME/.config/clawbox/snapshot-host.env" check \
-  > "$CLAWBOX_OUTPUT_ROOT/snapshot-host-check.json"
+python scripts/prepare-guest-kernel-headers.py \
+  --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
+  --image "$CLAWBOX_TOOL_IMAGE" --tag "$REGISTRY/tool:matching-headers" \
+  --output /data/clawbox-specs/header-build-01
+docker push "$REGISTRY/tool:matching-headers"
+export CLAWBOX_TOOL_IMAGE=$(docker image inspect "$REGISTRY/tool:matching-headers" \
+  --format '{{index .RepoDigests 0}}')
 ```
 
-Expected: every `checks[].ok` is true. The check reports the configured LOCAL
-limit, WARM tmpfs size and NUMA policy, COLD disk space, service flags, and source
-files without printing credentials. A failed check exits 2. Repeat `apply` after
-reboot or service recreation; restart services only to activate changed flags.
-Never restart them during an experiment. Use the same WARM/COLD roots in the
-experiment YAML and `machine.env`; otherwise Cubelet rejects the snapshot path.
+This reads `/proc/config.gz` from a temporary guest and preserves the build
+log. Register a **new** Tool template with the corrected digest using the Tool
+registration command above and a fresh alias. Update
+`CLAWBOX_TOOL_TEMPLATE` and `CLAWBOX_TOOL_IMAGE` in `machine.env`, then
+repeat the endpoint and agent-pair probes. Do not launch formal runs until the
+telemetry probe passes.
 
-Validate physical snapshot placement:
+Then follow the [self-service workflow](self-service.md) to inspect the actual NUMA topology, save a host YAML, apply it on an idle host, and launch the smoke experiment.
+
+## Configure memory and snapshot storage
+
+Use the editable host YAML described in the [self-service workflow](self-service.md)
+and [supernode reference](supernode.md). `host inspect` reads the actual NUMA
+topology; `host check` checks prerequisites; `host apply` configures the
+LOCAL cgroup, shared WARM tmpfs, snapshot roots and CubeSandbox services on an
+idle host. The example uses NUMA 0 and 1 for compute, NUMA 2 for the shared pool.
+Change node IDs, CPU lists, memory capacities and storage paths to fit the host.
+The resulting experiment spec must use the same templates and snapshot roots.
+Match `CLAWBOX_WARM_ROOT`, `CLAWBOX_COLD_ROOT`, and `CLAWBOX_OUTPUT_ROOT` in
+`machine.env` to `warm_root`, `cold_root`, and `output_root` in the host YAML;
+source the file again before the storage probe.
+
+For tiered snapshots, run a live storage probe after applying the host YAML:
 
 ```bash
 python scripts/validate-tiered-storage.py \
   --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
   --warm "$CLAWBOX_WARM_ROOT" --cold "$CLAWBOX_COLD_ROOT" \
-  --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa "$CLAWBOX_LOCAL_NODE" \
+  --helper-image "$CLAWBOX_TOOL_IMAGE" \
   --expected-memory-mib 4096 --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
 
-After installing the CubeAPI, CubeMaster, Cubelet, and template-selected shim
-from the patched CubeSandbox source, compare repeated checkpoints under both
-mechanisms. Use separate output files and the same template, node, and RAM size:
-
-```bash
-for mode in full-copy incremental-cow; do
-  python scripts/validate-tiered-storage.py \
-    --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
-    --warm "$CLAWBOX_WARM_ROOT" --cold "$CLAWBOX_COLD_ROOT" \
-    --helper-image "$CLAWBOX_TOOL_IMAGE" --require-local-numa "$CLAWBOX_LOCAL_NODE" \
-    --expected-memory-mib 4096 --snapshot-mechanism "$mode" --rounds 8 \
-    --output "$CLAWBOX_OUTPUT_ROOT/storage-$mode.json"
-done
-```
-
-The last generation spills to COLD. The JSON contains checkpoint P50/P95
-both with and without the initial base, restore-ready P50/P95, first-tool
-latency, host VM faults/read bytes, and each
-generation's logical, allocated, dirty, and transferred bytes. The process
-state token and changed Guest RAM byte must survive every restore.
-
-This helper uses privileged Docker inspection. Memory setup, endpoint checks,
-and storage checks do not establish a completed agent benchmark.
+Set `--expected-memory-mib` to the registered Tool template memory.
+The probe reports checkpoint and restore times, allocated bytes and disk I/O.
+It tests storage behavior; the full Agent experiment is the acceptance step.
 
 ## After a reboot
 
@@ -356,15 +303,14 @@ systemctl is-active cube-sandbox-cube-api.service cube-sandbox-cubemaster.servic
   cube-sandbox-cubelet.service cube-sandbox-cube-egress.service
 ```
 
-For tiered experiments, reapply the snapshot settings on an idle pool, then
-run `snapshot-host.sh HOST_ENV check` before the live storage validation. The
-[kunpeng example](../deploy/hosts/kunpeng.snapshot.env.example) records its
-observed non-secret paths and can be copied as `HOST_ENV`; review its capacities
-before applying it.
+On an idle pool, run `clawbox experiment host check HOST.yaml`, then
+`clawbox experiment host apply HOST.yaml` after reboot before launching a run.
+Use the saved host YAML, not an old machine-specific example. Re-run the live
+storage probe above when tiered storage is selected.
 
 For an S3lvol-backed installation, also check `cube-sandbox-s3lvol.service` and
 `test -S /var/run/s3lvol.sock`. Restore its configured backend before restarting
-Cubelet if the socket is missing. Reapply the memory setup above on an idle pool.
+Cubelet if the socket is missing. Reapply the saved host YAML on an idle pool.
 
 When using the bundled MinIO backend, start it before S3lvol:
 
@@ -388,7 +334,9 @@ or unused build cache, keeping templates, recordings and experiment results.
 Allow additional space for snapshots during the run, not just enough to pass
 the initial check. Run the storage validation above again before experiments.
 
-Keep interrupted results and start with a new run ID; reboot does not resume a run.
+For an interrupted run, keep its result directory and launch the same frozen
+YAML with the same run ID after restoring the host. Choose a new ID when changing
+the experiment.
 Disable the old kubelet on a dedicated host migrated from Kubernetes, after
 confirming it has no unrelated workloads.
 

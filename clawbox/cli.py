@@ -383,7 +383,6 @@ def launch_experiment(args: argparse.Namespace) -> int:
                 "runId": run_id,
                 "state": status.get("state"),
                 "output": str(run_root),
-                "qualificationReused": qualification_reused,
                 "message": "run is already active",
             })
             return 0

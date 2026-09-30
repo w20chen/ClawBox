@@ -1,37 +1,37 @@
-# Four-call placement audit
+# Auxiliary four-call placement analysis
 
-Run the offline checks from the repository root with the ClawBox environment:
+This module analyzes an independent LLC-placement study. It is not part of the
+`clawbox experiment` launch path. The current reporter assumes four calls
+(A–D), a verified four-core pool, and NUMA 0 memory placement; its result cannot
+be generalized to the two-compute-node supernode without changing those guards.
 
-```powershell
-python -m clawbox.experiments.placement inspect --traces <trace-root> --output <output-dir>
-python -m clawbox.experiments.placement topology --host kunpeng --output <output-dir>/topology.json
-python -m clawbox.experiments.placement plan --calls <output-dir>/calls.json --output <output-dir>
-```
-
-`quality.json` records attribution, PMU coverage and replay exclusions. `calls.json` preserves the original tool calls. `plan.json` contains the task-level chronological split, historical prediction evidence, candidate funnel and any frozen P1/P2/P3 decisions. The planner never reads the final KB snapshot. Thresholds can be set with `--test-fraction`, `--min-active-seconds` and `--seed`.
-
-Only run counterfactual trials after each candidate has a verified pre-call CubeSandbox checkpoint and the four actual host computation cores and NUMA memory placement have been checked. A trace export or a post-call workspace is not a checkpoint. Once verified paired rounds exist, summarize them with:
-
-```powershell
-python -m clawbox.experiments.placement report --plan <output-dir>/plan.json --rounds <rounds.json> --topology <output-dir>/topology.json --output <output-dir>/report.json
-```
-
-The reporter requires five paired rounds for P1, P2, P3 and the same four-core Linux pool. It keeps the placement selected in the frozen plan separate from the fastest placement observed afterward.
-
-For the measured Docker/QEMU checkpoint experiment, copy `placement_docker.py`,
-`placement_docker_all.py` and the frozen `plan.json` to `kunpeng` together. Run
-two sacrificial warmups, then run the five randomized rounds:
+From the repository root, with the ClawBox Python environment active:
 
 ```bash
-python3 placement_docker.py --warmup
-python3 -m placement_docker_all
+python -m clawbox.experiments.placement inspect --traces TRACE_ROOT --output OUT
+python -m clawbox.experiments.placement topology --host HOST --output OUT/topology.json
+python -m clawbox.experiments.placement plan --calls OUT/calls.json --output OUT
 ```
 
-The runner creates a fresh container from the target checkpoint for every
-tool/placement/round, releases all four tools through a barrier, and stores the
-timing, cgroup mapping, NUMA statistics, cgroup CPU accounting and `perf stat`
-output under `PLACEMENT_FORMAL_ROOT`. A trial is accepted only when the target
-exit code and stdout match the recorded call, the effective cpuset and NUMA
-node match the plan, and all requested PMU events report 100% running time.
+`inspect` writes `quality.json` for attribution and PMU coverage and
+`calls.json` for original calls. `plan` freezes the chronological task split,
+prediction evidence and P1/P2/P3 choice in `plan.json`; it does not read the
+final KB snapshot. Adjust the split with `--test-fraction`, the call filter
+with `--min-active-seconds`, and sampling with `--seed`.
 
-The checked-in follow-up result is described in `docs/placement-results.md`.
+A round submitted to `report` needs a verified pre-call checkpoint and
+effective host CPU and NUMA mapping for each call. Preserve the command result
+and PMU coverage separately when making a scientific claim. A trace export or
+post-call workspace is not a checkpoint. After collecting at least five paired
+rounds for P1, P2, P3 and the same Linux four-core control pool:
+
+```bash
+python -m clawbox.experiments.placement report \
+  --plan OUT/plan.json --rounds ROUNDS.json \
+  --topology OUT/topology.json --output OUT/report.json
+```
+
+The reporter checks the frozen plan hash and verified mapping. It keeps the
+preselected placement separate from the fastest placement observed afterward.
+The [historical result](archive/placement-2026.md) used Docker/QEMU checkpoints
+on Kunpeng; it does not establish a native ARM or general NUMA-aware result.

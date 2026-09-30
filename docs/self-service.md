@@ -97,7 +97,14 @@ warm_root: /mnt/clawbox-pool
 | `output_root` | **检查**结果盘空间；启动时仍显式传 `--output-root` |
 | `minimum_disk_free_gib` | 每个数据文件系统需要的最低空闲空间；还须保持使用率低于 85% |
 
+把 `machine.env` 中的 `CLAWBOX_WARM_ROOT`、`CLAWBOX_COLD_ROOT` 和
+`CLAWBOX_OUTPUT_ROOT` 改成这份主机 YAML 的 `warm_root`、`cold_root`、`output_root`，
+然后在当前终端重新 `source`。这也让后续独立存储探测使用同一块磁盘和共享池。
+
 ```bash
+set -a
+source "$HOME/.config/clawbox/machine.env"
+set +a
 clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
 clawbox experiment host apply "$HOME/.config/clawbox/host.yaml"
 ```
@@ -128,11 +135,11 @@ systemd 的 `active` 不表示节点已经可以创建 VM。
 
 ## 3. 运行最小例子
 
-选可写的结果目录，首次使用先创建：
+使用主机 YAML 检查过的结果目录；安装步骤已创建它：
 
 ```bash
-export CLAWBOX_OUTPUT_ROOT="$HOME/clawbox-results"
-mkdir -p "$CLAWBOX_OUTPUT_ROOT" "$HOME/clawbox-specs"
+test -w "$CLAWBOX_OUTPUT_ROOT"
+mkdir -p "$HOME/clawbox-specs"
 clawbox experiment configure examples/experiments/getting-started.yaml \
   "$HOME/clawbox-specs/smoke.yaml" \
   --trace "$PWD/examples/traces/smoke.jsonl" \
@@ -196,7 +203,7 @@ clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment report memory-eval-01
 轻负载未触发 HIGH 时正式 arm 可以没有暂停；qualification 仍须验证配置的快照恢复
 与共享借用。确认成功后，用自己的真实任务、独立训练与多次重复开展正式实验。
 
-使用[训练与评估流程](lab.md#2-用命令生成实验配置)，先运行 A 的真实训练，再用
+按本页训练与评估命令，先运行 A 的真实训练，再用
 `experiment train` 导出预测文件，最后运行 A / A+B / A+B+C。训练输入必须是完整、
 成功、清理已验证的独立训练 run；不能用 qualification 前缀或伪造内存数据代替。
 新任务的 Tool 模板须包含对应仓库、依赖和正确基线版本；修改 trace 不会自动安装任务环境。

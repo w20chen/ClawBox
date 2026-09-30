@@ -1,8 +1,9 @@
 # Execution and measurement contracts
 
 This reference defines behavior that implementations and experiment reports must
-preserve. Configuration and commands are in the [user guide](guide.md); host setup
-is in [installation](installation.md).
+preserve. Configuration and commands are in the [command reference](guide.md);
+host setup is in [the self-service workflow](self-service.md) and
+[installation](installation.md).
 
 ## Agent and tool isolation
 
@@ -42,8 +43,13 @@ coverage and never alter Tool exit status.
 
 ARM64 uses Linux's `PERF_TYPE_HW_CACHE` last-level read mappings. Generic cache
 misses and HiSilicon `hisi_l3c` uncore counts are never relabeled as task-level
-LLC misses. Full field and validation details live in the sibling ClawTune
-`docs/pmu-profiling.md` and `contracts/pmu-profile.schema.json`.
+LLC misses. A PMU profile is usable only when the execution ID matches, the four requested
+events are supported, coverage is complete and each running ratio is 100%.
+Missing or degraded profiles must not fail the Tool command or train PMU targets;
+CPU and memory accounting remain available. Inspect retained `pmu-profile-*.json`
+artifacts and coverage status on the target guest kernel before using LLC results.
+Full field details live in the sibling ClawTune `docs/pmu-profiling.md` and
+`contracts/pmu-profile.schema.json`.
 
 ## Reservations and physical memory
 
@@ -107,10 +113,11 @@ memory-backed copy. COLD restoration must distinguish actual device I/O from
 page-cache hits. Logical snapshot bytes and physical device I/O are different
 measurements.
 
-If WARM is disabled or a VM snapshot cannot fit its total capacity, that snapshot
-goes directly to COLD. This supports the SSD-only ablation without changing the
-wait-based placement policy. Model transport invalidation occurs at Runtime
-checkpointing, not before a Tool checkpoint that may fail.
+In `tiered` storage, a VM snapshot too large for WARM goes to COLD, and
+eligible older WARM generations may spill there. In `warm-only` storage, a
+capacity failure propagates; there is no disk fallback. Model transport
+invalidation occurs at Runtime checkpointing, not before a Tool checkpoint
+that may fail.
 
 LOCAL cgroup usage includes charged guest RAM, VM overhead, and retained cache.
 Checkpoint/restore headroom is inside the configured LOCAL capacity. WARM
@@ -120,31 +127,37 @@ the VM RAM size plus 256 MiB, then commits actual allocated layer bytes.
 Requested cache reclamation is not credited as freed memory until measured.
 Restore and spill operations must serialize ownership of each saved generation.
 
-SHARED-LIVE and WARM use one physical 128 GiB pool and one atomic accounting
-ledger. A live borrow reserves the VM's configured capacity before its leaf
-cgroup is rebound, not its current RSS, so later guest growth is already covered.
-Live reservations are capped at 50% of the pool (64 GiB); live reservations plus
-snapshot reservations and committed snapshot bytes can never exceed 128 GiB.
-During checkpointing, the borrowed source VM and destination snapshot coexist
-and both remain charged. The parent VM cgroup's `memory.max` covers LOCAL hard
-capacity plus the live-borrow cap; per-node `memory.numa_stat`, rather than the
-combined cgroup charge, enforces and reports the 28/32/36 GiB LOCAL state machine.
+Each compute node has its own LOCAL capacity and LOW/HIGH watermarks. Sessions
+bind to a configured node; admission and pressure decisions use that node's
+physical usage and reservations. The default host profile assigns NUMA 0 and 1
+to compute and NUMA 2 to a single SHARED-LIVE/WARM pool, but these IDs and
+capacities are editable. Live borrow reserves the VM's configured capacity
+before its memory binding changes, not merely its current RSS, so later guest
+growth is covered. The global live-borrow cap is the configured fraction of
+the shared pool; live and WARM reservations share one ledger. During a
+checkpoint, borrowed source RAM and destination pages coexist and both count.
 
-The current tiered presets require replay timing. One chooses least-recently-used
-candidates under pressure, using actual remaining wait for filtering and
-placement; another places state according to actual wait duration. Neither is an
-online policy without future information. Non-tiered presets disable WARM in the
-existing planner. Report effective capacities rather than assuming all policies
-have equal total memory.
+The parent VM cgroup's `memory.max` covers the sum of LOCAL capacities plus
+the global live-borrow cap. It is not an independent hard limit for each NUMA
+node. Per-node `memory.numa_stat` drives the LOCAL control state and reports
+physical residency. The controller accounts unattributed kernel charge
+conservatively for per-node admission but counts it once in host totals.
+Binding a VM does not instantly migrate every existing physical page.
+See [supernode.md](supernode.md) for placement and report interpretation.
 
-This is a single-host NUMA approximation of tiered storage. It does not measure a
+The supported wait-aware policy uses model-response waiting periods to select
+safe checkpoint candidates under pressure. Replay supplies the observed wait
+timing. Report the effective LOCAL and shared capacities for every run.
+
+This is a single-host NUMA approximation of a supernode and tiered storage. It does not measure a
 CXL fabric, cross-host contention, ownership transfer, or failure recovery. Report
 host topology and measured transfer costs; do not claim absolute multi-host
 speedups from these measurements.
 
 ## Replay and evidence
 
-Record and replay use the same agent configuration and initial guest environment.
+Replay requires the same agent configuration and initial guest environment used
+when recording the trace. The public CLI has no record command.
 The gateway supplies model responses in order and preserves recorded model wait
 separately from policy-induced response-release delay. OpenClaw executes tools
 normally. Actual tool outputs are retained, not compared with recorded text or
