@@ -1,86 +1,82 @@
-# Historical single-node c16 result (2026-09-29)
+# Historical 16-session, single-compute-node result (2026-09-29)
 
-This record describes one past installation and its experiment artifacts. Its
-NUMA 0 compute / NUMA 1 shared-pool settings, commands, paths and host status
-are not the current two-compute-node configuration. For a new run, start with
-[self-service](../self-service.md) and [supernode configuration](../supernode.md).
+This result used NUMA 0 for running VMs and NUMA 1 for the shared memory
+pool on one Kunpeng host. It predates the two-compute-node configuration.
+For a new run, follow the [step-by-step guide](../self-service.md) and
+[host configuration reference](../supernode.md).
 
-## Recorded run
+Run ID: `eval-tiered-c16-r2-final6-20260929`. Each of the three policy
+trials completed 16 of 16 sessions, passed task validation, recorded no
+OOM kills or telemetry loss, linked all tool measurements to executions,
+and verified VM cleanup.
 
-The run ID was `eval-tiered-c16-r2-final6-20260929` on Kunpeng.
-The final one-repetition c16 evaluation completed successfully for all three policies.
-Every arm completed 16/16 sessions, passed workload validation, reported zero OOM kills
-and zero telemetry loss, joined native Tool telemetry at 100%, and verified cleanup.
+## Configuration
 
-## Final experiment configuration
+- Workload: deterministic replay of `tobymao__sqlglot-4528`
+- Offered concurrency: 16 sessions, each with a 2 GiB agent VM and a 4 GiB tool VM
+- Total configured guest RAM: 96 GiB
+- Compute-node low/high/capacity thresholds: 28/32/36 GiB
+- Shared memory pool on NUMA 1: 128 GiB; at most 64 GiB reserved for running VMs
+- Parent VM cgroup memory limit: 100 GiB, covering compute-node capacity plus the borrowing limit
+- Arrival pattern: all sessions at once; one repetition
+- Fixed per-command reservation: 259 MiB, calibrated from the training 90th percentile
+- Predicted per-command reservations: 21.8867–225 MiB across 20 command entries
+- Snapshot storage: memory-backed only, using incremental copy-on-write
+- Agent VM image: `sha256:aefbc09b9d7b76a23284aa04a258cdd1a9057586742da2926bcd2922faf0dd40`
+- Tool VM image: `sha256:98e10fcc9444e4d29cc4a154237800619396a9ef31ae43d1a81174fc84244deb`
 
-- Workload: deterministic managed replay of `tobymao__sqlglot-4528`
-- Offered concurrency: 16 agents, each with one 2 GiB Runtime VM and one 4 GiB Tool VM
-- Advertised/configured VM capacity: 96 GiB
-- LOCAL LOW/HIGH/HARD: 28/32/36 GiB
-- WARM/shared NUMA1 pool: 128 GiB
-- Maximum live NUMA1 borrow: 64 GiB
-- Combined LOCAL plus live-borrow cgroup limit: 100 GiB
-- Arrival: burst; repetitions: one
-- A static Tool reservation: 259 MiB, calibrated training P90
-- B/C frozen P50 reservations: 21.8867 to 225 MiB across 20 command entries
-- Snapshot mechanism: WARM-only incremental CoW
-- Runtime image: `sha256:aefbc09b9d7b76a23284aa04a258cdd1a9057586742da2926bcd2922faf0dd40`
-- Tool image: `sha256:98e10fcc9444e4d29cc4a154237800619396a9ef31ae43d1a81174fc84244deb`
+The saved experiment and preflight files are the authority for these
+identities if reproducing the result.
 
-The Tool digest above is recorded exactly in the final result and qualification artifacts;
-use those artifacts as the authority if copying the digest into another configuration.
+## Results
 
-## Final results
+The admission-wait column sums waits across sessions and can exceed
+the trial's elapsed time. Peak memory is measured on the compute node;
+the host total also includes memory-backed snapshots.
 
-| Policy | Duration | Agents/min | JCT p50 / p95 | Admission blocked | LOCAL peak | HIGH exposure | Borrow | Migration |
+| Policy | Trial duration | Sessions/min | Completion time P50/P95 | Total admission wait | Compute-node peak | Time above high watermark | Shared-pool use by running VMs | Checkpoints/restores |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| A: `tool-static-resident` | 1757.29 s | 0.577 | 1656.01 / 1661.07 s | 13269.56 s | 32.10 GiB | 3.86 s / 0.32 GiB-s | 1, 3.97 s | none |
-| A+B: `tool-p50-resident` | 1693.34 s | 0.600 | 1553.63 / 1587.85 s | 12651.03 s | 33.16 GiB | 284.41 s / 113.16 GiB-s | none | none |
-| A+B+C: `tool-p50-wait-reactive` | 1019.86 s | 1.035 | 898.11 / 922.08 s | 120.38 s | 28.68 GiB | 0 s / 0 GiB-s | none | 16 pause + 16 restore |
+| Fixed reservation (`tool-static-resident`) | 1757.29 s | 0.577 | 1656.01 / 1661.07 s | 13269.56 s | 32.10 GiB | 3.86 s / 0.32 GiB-s | 1 VM, 3.97 s | none |
+| Predicted reservation (`tool-p50-resident`) | 1693.34 s | 0.600 | 1553.63 / 1587.85 s | 12651.03 s | 33.16 GiB | 284.41 s / 113.16 GiB-s | none | none |
+| Predicted reservation and checkpointing (`tool-p50-wait-reactive`) | 1019.86 s | 1.035 | 898.11 / 922.08 s | 120.38 s | 28.68 GiB | 0 s / 0 GiB-s | none | 16 / 16 |
 
-Derived comparisons:
+Relative to the fixed-reservation policy, the predicted-reservation
+policy reduced trial duration by 3.6% and increased throughput by 3.9%.
+Adding checkpointing reduced trial duration by 42.0% and increased
+throughput by 79.3% relative to fixed reservations in this one run.
 
-- B versus A: duration -3.6%, agents/min +3.9%, JCT p50 -6.2%, admission wait -4.7%.
-- B+C versus A: duration -42.0%, agents/min +79.3%, JCT p50 -45.8%, admission wait -99.1%.
-- B+C versus B: duration -39.8%, agents/min +72.6%, JCT p50 -42.2%, admission wait -99.0%.
+The mean reserved-to-observed extra-memory ratio fell from 19.85 with
+fixed reservations to 3.70 with predictions. Completion time improved
+only modestly because the running VMs' resident memory dominated under
+pressure. The predicted-reservation trial spent longer above the high
+watermark but stayed below configured capacity and completed without
+an OOM; a sampled high-watermark crossing alone is not a failure.
 
-B materially reduced reservation waste: the mean reservation/actual ratio fell from
-19.85x for A to 3.70x. Its end-to-end improvement is modest because resident Runtime and
-Tool memory, rather than command reservation alone, dominates the high-pressure tail.
-B also spent longer above HIGH, but remained below HARD and completed without OOM; this
-is a valid transient overshoot, not a failed run.
+Under the checkpointing policy, pressure selected VM pairs that were
+waiting for model responses and had no active tool command. It
+checkpointed eight pairs and restored them on demand. Total checkpoint
+service time was 26.33 s; restore service time was 11.81 s. Peak
+memory-backed checkpoint allocation was 48 GiB, and the combined
+running-VM plus checkpoint peak in the shared pool was 48.46 GiB.
+Measured compute-node use stayed below its high watermark, so this
+trial did not need shared-pool memory for running VMs.
 
-C produced the main system result. Admission pressure selected model-waiting, response-not-
-ready, no-active-Tool VM pairs in LRU order. It checkpointed eight Runtime+Tool pairs
-(16 pauses), restored all of them on demand (16 restores), and every restored session
-continued. Pause service time was 26.33 s, restore service time was 11.81 s, WARM transfer
-and peak committed size were 48 GiB, and shared live-plus-WARM peak was 48.46 GiB. This
-kept measured LOCAL below HIGH, so the final C arm had zero actual HIGH crossings and did
-not need live borrowing.
+The whole-host peak increase was 71.19 GiB, higher than for the other
+policies, because it includes memory-backed snapshots. Checkpointing
+moves VM state from compute-node memory to the shared pool; it does
+not make those pages disappear.
 
-The whole-host peak delta for C was 71.19 GiB, higher than A/B, because the node-level
-metric includes WARM tmpfs snapshots. This is expected: C moves state from LOCAL to NUMA1;
-it does not claim that snapshot bytes disappear. LOCAL physical use, WARM bytes, live
-borrow, and whole-host use must be reported separately.
+## Prediction evidence and limits
 
-## Prediction interpretation
+The predicted-reservation trials used frozen predictions for all
+managed replay commands: 320 predicted command admissions and 512
+fixed reservations for filesystem or other tool operations per trial.
+The report's prediction-error and coverage fields are `n/a`
+because it contains no paired prediction-versus-observation records.
+This result supports the measured reservation and performance
+comparisons above, but no claim about prediction mean absolute
+error or exceedance rate.
 
-The frozen P50 policy successfully resolved all managed replay commands. There were 320
-frozen P50 Tool admissions and 512 fixed filesystem/backend admissions in each B/C arm.
-The explicit-timeout command that previously failed now resolves under its original hash
-and receives a 21.8867 MiB reservation.
-
-Do not claim measured command-level prediction accuracy from this run. The final report's
-prediction coverage/error fields are `n/a` because no prediction-error observations were
-emitted, even though the frozen predictions were used for admission. The supported claim
-is reduced reservation waste and the measured end-to-end behavior above, not a quantified
-MAE or exceedance rate. A future accuracy study must add prediction-versus-observed labels
-to the formal result before making that claim.
-
-## Limits of this result
-
-This is one repetition and does not estimate run-to-run uncertainty. The
-command-level prediction-error metrics in the report are unavailable; see the
-interpretation above. The result belongs to the historical single-compute-node
-topology and should not be compared directly with two-node runs.
+There was one repetition, so the result does not estimate run-to-run
+uncertainty. Its single-compute-node topology should not be directly
+compared with a two-compute-node run.

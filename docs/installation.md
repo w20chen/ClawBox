@@ -11,15 +11,15 @@ NUMA, capacity and disk settings in one YAML, check them, and run the first expe
 
 | Input | Required contents |
 | --- | --- |
-| Guest image archive | ARM64 Runtime image with OpenClaw, ClawTune and the SSH launcher; Tool image with its workspace, dependencies, SSH service and telemetry collectors |
-| Guest kernel | `vmlinux-bm`, `version`, `version.json`, with the required eBPF/kprobe support |
+| VM image archive | ARM64 agent VM image (Runtime) with OpenClaw, ClawTune, and the SSH launcher; tool VM image (Tool) with its workspace, dependencies, SSH service, and telemetry collectors |
+| Guest kernel | `vmlinux-bm`, `version`, and `version.json`, with the required eBPF/kprobe support |
 | Registry | A registry reachable from the new host, with permission to push the images |
 
 These guest artifacts are not published with this repository. The existing
 Dockerfiles reference private base images; cloning the repository alone cannot
 rebuild them. Obtain an image/kernel bundle from an existing compatible deployment
 or supply equivalent artifacts with the same entrypoints. Task repositories live
-in the Tool image; no particular benchmark trace is an installation dependency.
+in the tool VM image; no particular benchmark trace is an installation dependency.
 
 On an existing deployment whose `machine.env` identifies the image digests:
 
@@ -59,11 +59,13 @@ clawbox experiment --help
 Expected: ARM64, accessible KVM, `cgroup2fs`, a working Docker daemon, and the
 experiment command list. Use fresh checkout directories for the clone commands.
 
-### Build with the current ClawTune source
+### Optional: rebuild images with the current ClawTune source
 
-Before rebuilding guest images, export the sibling ClawTune working tree into a
-new directory. This includes the plugin's LatticeKB execution-envelope selection
-and records source provenance without changing the sibling checkout:
+Skip this subsection when installing from a supplied guest-image bundle.
+Rebuilding requires access to the private base images referenced by the
+Dockerfiles. If they are available, export the sibling ClawTune working tree
+into a new directory. This captures the current prediction and measurement
+code and records its source revision without changing the checkout:
 
 ```bash
 python scripts/prepare-clawtune.py --working-tree --output /data/clawtune-build-source
@@ -80,19 +82,17 @@ docker buildx build --load --platform linux/arm64 \
   -f docker/Dockerfile.tool-cube -t clawbox/tool-cube:main .
 ```
 
-Use the same export for both images, then push and register their new immutable
-digests as described below. A clean checkout records its commit; local edits
-record a content-derived revision. Use a new export directory for each update. The SWE-ReBench overlay
-rebuild script exports the current ClawTune working tree too.
+Use the same export for both images, then push and register their immutable
+image digests using steps 3 and 4 below. A clean checkout records its commit; local
+edits produce a content-derived revision. Use a new export directory for each
+update.
 
-Each Runtime initializes an independent working KB through ClawTune's native
-seed/state API. Use new run directories after upgrading from an older KB layout.
-`CLAWTUNE_COLD_START_DIR` can select a complete native seed bundle, including its
-manifest and all required native snapshots. ClawBox retains the seed's native
-repository layers. Older ToolKB/Lattice snapshot schemas are not relabeled or
-converted; retain the old state separately and ingest raw artifacts into a new
-tuning database after upgrading. Guest eBPF uses ClawTune's unmodified collector;
-the running guest kernel and its BCC build headers must match.
+Each agent VM starts with independent prediction state. If setting
+`CLAWTUNE_COLD_START_DIR`, supply a complete seed directory with its manifest
+and required snapshots. After a change to the stored prediction format, use a
+new run directory and retrain from raw measurements; old snapshots are not
+converted automatically. Guest eBPF uses ClawTune's collector, so the running
+guest kernel and BCC headers must match.
 
 ## 2. Build and install patched CubeSandbox
 
@@ -221,7 +221,8 @@ export CLAWBOX_TOOL_TEMPLATE=$(jq -er .template_id /data/clawbox-specs/tool-temp
 
 Save both IDs in `machine.env`. Registration waits for READY and checks kernel
 binding. If it fails ambiguously, inspect the alias inventory before resubmitting.
-Check the semantic TCP endpoint instead of guessing a guest IP:
+Check CubeSandbox's semantic TCP endpoint, which identifies a VM and port,
+instead of guessing a guest IP:
 
 ```bash
 python scripts/validate-cubesandbox-tcp-endpoints.py \
@@ -241,12 +242,12 @@ python scripts/smoke-cubesandbox-agent-pair.py \
   --output "$CLAWBOX_OUTPUT_ROOT/agent-pair.json"
 ```
 
-### If the Tool kernel headers do not match
+### If the tool VM kernel headers do not match
 
 BCC requires headers prepared for the running guest kernel configuration, not
 only the same version. If the agent-pair telemetry probe reports invalid or
-missing eBPF CPU/memory measurements, build a corrected Tool image from the
-initial Tool template:
+missing eBPF CPU/memory measurements, build a corrected tool VM image from the
+initial tool VM template:
 
 ```bash
 python scripts/prepare-guest-kernel-headers.py \
@@ -259,20 +260,35 @@ export CLAWBOX_TOOL_IMAGE=$(docker image inspect "$REGISTRY/tool:matching-header
 ```
 
 This reads `/proc/config.gz` from a temporary guest and preserves the build
-log. Register a **new** Tool template with the corrected digest using the Tool
-registration command above and a fresh alias. Update
-`CLAWBOX_TOOL_TEMPLATE` and `CLAWBOX_TOOL_IMAGE` in `machine.env`, then
-repeat the endpoint and agent-pair probes. Do not launch formal runs until the
-telemetry probe passes.
+log. Register a **new** tool VM template with a fresh alias and the corrected
+image digest:
 
-Then follow the [self-service workflow](self-service.md) to inspect the actual NUMA topology, save a host YAML, apply it on an idle host, and launch the smoke experiment.
+```bash
+TEMPLATE_SUFFIX=$(date -u +%Y%m%d%H%M%S)
+python scripts/register-cube-template.py "$CLAWBOX_TOOL_IMAGE" \
+  --alias "tool-headers-$TEMPLATE_SUFFIX" --node "$CUBE_NODE" \
+  --cpu-millicores 2000 --memory-mib 4096 --writable-layer-size 40G \
+  --exposed-port 49983 --exposed-port 2222 --probe-port 49983 \
+  --command /usr/local/bin/cube-tool-entrypoint.sh \
+  --expected-kernel-version "$GUEST_KERNEL_COMPONENT" \
+  > /data/clawbox-specs/tool-template-headers.json
+export CLAWBOX_TOOL_TEMPLATE=$(jq -er .template_id \
+  /data/clawbox-specs/tool-template-headers.json)
+```
+
+Save `CLAWBOX_TOOL_TEMPLATE` and `CLAWBOX_TOOL_IMAGE` in `machine.env`, then
+repeat the endpoint and agent-pair probes. Do not launch formal runs until
+the telemetry probe passes.
+
+Then use the [step-by-step guide](self-service.md) to inspect the NUMA layout,
+apply an editable host configuration, and run the starter experiment.
 
 ## Configure memory and snapshot storage
 
 Use the editable host YAML described in the [self-service workflow](self-service.md)
-and [supernode reference](supernode.md). `host inspect` reads the actual NUMA
+and [host and memory reference](supernode.md). `host inspect` reads the actual NUMA
 topology; `host check` checks prerequisites; `host apply` configures the
-LOCAL cgroup, shared WARM tmpfs, snapshot roots and CubeSandbox services on an
+VM cgroup, shared-pool tmpfs, snapshot roots, and CubeSandbox services on an
 idle host. The example uses NUMA 0 and 1 for compute, NUMA 2 for the shared pool.
 Change node IDs, CPU lists, memory capacities and storage paths to fit the host.
 The resulting experiment spec must use the same templates and snapshot roots.
@@ -290,7 +306,7 @@ python scripts/validate-tiered-storage.py \
   --expected-memory-mib 4096 --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
 
-Set `--expected-memory-mib` to the registered Tool template memory.
+Set `--expected-memory-mib` to the registered tool VM template memory.
 The probe reports checkpoint and restore times, allocated bytes and disk I/O.
 It tests storage behavior; the full Agent experiment is the acceptance step.
 

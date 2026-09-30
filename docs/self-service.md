@@ -1,18 +1,22 @@
-# 从主机配置到第一次实验
+# Run an experiment on a new host
 
-在 ARM64 Linux/KVM 主机的终端中执行下面的命令。`clawbox experiment`
-是实验入口；不需要 Codex 或其他代码代理。默认用两个计算节点、两个并发会话验证链路，再增加负载和策略。
+Run these commands in a terminal on an ARM64 Linux/KVM host. The supported
+interface is `clawbox experiment`; no coding assistant is needed. Start
+with two concurrent sessions so both compute nodes are exercised, then move
+to a measured workload.
 
-## 1. 新机器准备
+## 1. Install and inspect the host
 
-先按[安装指南](installation.md)的第 1–4 步安装主机依赖、带补丁的 CubeSandbox、
-匹配的 Python SDK，导入 Guest 镜像和内核并注册 Runtime/Tool 模板。每一步的检查
-通过后再继续。仓库没有发布完整 Guest 镜像与内核；需要从已有部署导出，或提供同等
-构件。仅 `git clone` 和 `pip install` 不足以创建可运行的 VM。
+Complete [installation steps 1–4](installation.md) first. They install the
+patched standalone CubeSandbox and matching Python SDK, import guest images
+and a guest kernel, and register the agent and tool VM templates. These
+artifacts are not distributed with this repository; cloning it and
+installing the Python package alone cannot create working VMs.
 
-磁盘先由管理员挂载到预定目录。安装 CubeSandbox 前，在其安装 `.env` 中选择实际
-存储位置；这里的主机配置不会格式化磁盘、移动已有 Cubelet 数据或修改 S3 凭据。
-先确认文件系统，再分配容量：
+Mount the intended storage devices before configuring CubeSandbox. Select
+the Cubelet data location in the installer's `.env` file. The ClawBox host
+configuration does not format disks, move existing Cubelet data, or change
+storage credentials. Check the actual disks and NUMA layout:
 
 ```bash
 lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINTS
@@ -20,10 +24,11 @@ df -hT /data /data/cubelet
 numactl --hardware
 ```
 
-以下命令从 ClawBox checkout 执行。每次新登录先加载环境：
+Run subsequent commands from the ClawBox checkout. In each new shell, load
+the Python environment and the machine settings created during installation:
 
 ```bash
-cd "$HOME/src/ClawBox"  # 改为你的 checkout
+cd "$HOME/src/ClawBox"  # Use your checkout path.
 source .venv/bin/activate
 set -a
 source "$HOME/.config/clawbox/machine.env"
@@ -32,30 +37,39 @@ sudo -v
 clawbox experiment host inspect
 ```
 
-`inspect` 显示 NUMA 编号、CPU 列表、物理容量和距离。`free_mib` 不包含可回收缓存，
-不能把它当作整机可用内存，也不能把物理总容量全部承诺给实验。
+`host inspect` lists NUMA nodes, CPU lists, memory, and distances.
+Its `free_mib` value excludes reclaimable cache; it is neither the host's
+available-memory figure nor a safe capacity to allocate in full.
 
-## 2. 保存并检查主机配置
+## 2. Configure the compute nodes and shared pool
+
+Create an editable host configuration and open it:
 
 ```bash
 clawbox experiment host init "$HOME/.config/clawbox/host.yaml"
 ${EDITOR:-vi} "$HOME/.config/clawbox/host.yaml"
 ```
 
-已有成功的 `host.json` 时，可改用以下命令生成初始配置；目标文件必须不存在：
+For an existing installation, you can instead initialize from its applied
+`host.json` profile. Use this *instead of* the first `host init` command;
+the destination file must not already exist:
 
 ```bash
 clawbox experiment host init "$HOME/.config/clawbox/host.yaml" \
   --from-profile "$HOME/.config/clawbox/host.json"
 ```
 
-至少填写 `runtime_template`、`tool_template`、`node`、`cube_source`，检查所有目录。
-`node` 是两个模板均 READY 的 CubeSandbox 节点名称/IP，不是 NUMA 编号。
-旧 profile 没有保存 COLD 路径时，必须把 `cold_root` 改成实际安装值。
+Fill in `runtime_template`, `tool_template`, `node`, and
+`cube_source`, and review every directory. `node` is the CubeSandbox
+node where both templates have READY replicas; it is not a NUMA number.
+For an imported profile, verify `cold_root` against the installed
+snapshot directory.
 
-新生成的配置默认使用 NUMA 0、1 作为两个计算节点，NUMA 2 作为共享内存池。
-从单节点 profile 导入时会保留原配置；切换到双节点时删除顶层的
-`local_node/local_gib/low_gib/high_gib`，加入以下内容：
+A new configuration uses NUMA 0 and 1 for compute and NUMA 2 for the
+shared pool. Use `host inspect` to adapt the IDs, CPU lists, and capacities
+to the actual machine. When converting a single-node profile, remove its
+top-level `local_node`, `local_gib`, `low_gib`, and `high_gib` fields
+and use this structure:
 
 ```yaml
 compute_nodes:
@@ -78,28 +92,31 @@ shared_borrow_percent: 50
 warm_root: /mnt/clawbox-pool
 ```
 
-`cpus: null` 选择该 NUMA 的全部 CPU，也可以填字符串子集，例如 `"0-39"`。
-先用 `host inspect` 核对实际编号；脚本拒绝越过该节点的 CPU 或重复的节点/CPU。
-每个计算节点可配置不同容量和水位。这里本地容量合计 72 GiB，但每节点独立管理 36 GiB；
-共享池只有一份 128 GiB，全部节点合计最多借用 64 GiB。
+`cpus: null` selects all CPUs on that NUMA node. To use a subset,
+provide a CPU-list string such as `"0-39"`; `host check` rejects CPUs
+outside the node and overlapping CPU lists. Each compute node may have
+different capacity and watermarks. The example has 36 GiB of local
+capacity per compute node and one 128 GiB shared pool. At most 50% of the
+pool, or 64 GiB, is reserved for running VMs across both nodes.
 
-| 主机 YAML 字段 | 用途 |
+| Host YAML field | Meaning |
 | --- | --- |
-| `compute_nodes[].numa_node`, `cpus` | 各计算节点的 NUMA 和 CPU 集合 |
-| `compute_nodes[].memory_gib` | 该计算节点的 LOCAL 容量边界，GiB |
-| `compute_nodes[].low_gib`, `high_gib` | 各节点回收目标与触发水位，满足 `0 < LOW < HIGH < LOCAL` |
-| `warm` | 双节点共享池模式使用 `true`；单节点模式也支持无 WARM |
-| `warm_node`, `warm_gib` | 共享池 NUMA 与容量，须与 LOCAL 不同节点 |
-| `shared_borrow_percent` | 活跃 VM 借用共享池的最大比例，0–50；其余容量与快照共享计账 |
-| `warm_root` | 独立 tmpfs 挂载目录；不能隐藏已有磁盘文件，也不能与其他数据目录嵌套 |
-| `cold_root` | 磁盘快照目录；WARM-only 实验不向它溢出 |
-| `cubelet_data_root` | **检查** Cubelet 实际数据盘空间的路径，不改变 Cubelet 的存储配置 |
-| `output_root` | **检查**结果盘空间；启动时仍显式传 `--output-root` |
-| `minimum_disk_free_gib` | 每个数据文件系统需要的最低空闲空间；还须保持使用率低于 85% |
+| `compute_nodes[].numa_node`, `cpus` | NUMA node and allowed CPUs for each compute node |
+| `compute_nodes[].memory_gib` | Local memory capacity used by that node's controller, in GiB |
+| `compute_nodes[].low_gib`, `high_gib` | Per-node reclaim target and high watermark; require `0 < low < high < capacity` |
+| `warm_node`, `warm_gib` | Shared-pool NUMA node and capacity; it must differ from the compute nodes |
+| `shared_borrow_percent` | Maximum share of the pool that running VMs may reserve, from 0 to 50 |
+| `warm_root` | Dedicated tmpfs mount path; use an empty directory outside other data roots |
+| `cold_root` | Disk-backed snapshot path; `warm-only` runs do not spill there |
+| `cubelet_data_root` | Path whose Cubelet disk space is checked; it does not relocate Cubelet data |
+| `output_root` | Path whose result-disk space is checked; pass it through `--output-root` when running |
+| `minimum_disk_free_gib` | Minimum free space on each checked data filesystem; usage must also stay below 85% |
 
-把 `machine.env` 中的 `CLAWBOX_WARM_ROOT`、`CLAWBOX_COLD_ROOT` 和
-`CLAWBOX_OUTPUT_ROOT` 改成这份主机 YAML 的 `warm_root`、`cold_root`、`output_root`，
-然后在当前终端重新 `source`。这也让后续独立存储探测使用同一块磁盘和共享池。
+Set `CLAWBOX_WARM_ROOT`, `CLAWBOX_COLD_ROOT`, and
+`CLAWBOX_OUTPUT_ROOT` in `machine.env` to the corresponding
+`warm_root`, `cold_root`, and `output_root` values in the host YAML.
+Reload it, check prerequisites, and apply the configuration while the VM
+pool is idle:
 
 ```bash
 set -a
@@ -109,33 +126,27 @@ clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
 clawbox experiment host apply "$HOME/.config/clawbox/host.yaml"
 ```
 
-`check` 只读，不启动服务、不建 VM、不修改限制；退出 0 且
-`ready_for_apply: true` 表示可以应用配置。失败退出 2，每项提供 `detail` 和 `remedy`。
-YAML 格式或字段错误退出 1。它检查安装前提，不代表实验已通过。
+`host check` reports `ready_for_apply: true` on success without
+creating VMs or changing host settings. The report supplies a remedy for
+each failed check. `host apply` checks again, configures memory and
+snapshot storage, updates CubeSandbox service settings when needed, and
+creates and destroys a probe VM. It saves
+`~/.config/clawbox/host.json` only after the probe succeeds. If it
+fails after partially applying host settings, correct the reported cause
+and run `host apply` again on an idle VM pool.
 
-`apply` 再检查一次，在空闲 VM 池上配置 cgroup、WARM、服务参数；参数改变时启动或
-重启相应 CubeSandbox 服务。随后创建探测 VM、执行命令并销毁，全部通过才保存
-`~/.config/clawbox/host.json`。失败不会写成功 profile；部分主机设置可能已经应用，
-修复报告中的原因后重跑同一条命令。不会自动清空磁盘或销毁其他实验 VM。
-Cubelet 重启后可能需要数分钟重建网络并上报心跳；脚本最多等待十分钟，期间输出进度。
-systemd 的 `active` 不表示节点已经可以创建 VM。
+After changing NUMA nodes, capacities, CPU lists, watermarks, or paths,
+repeat `host check` and `host apply`, then generate a new experiment
+YAML. If changing the NUMA node of an existing tmpfs mount, preserve
+needed snapshots and have the old mount unmounted while the VM pool is
+idle, or choose a new empty path. Reapply the saved host YAML after a
+reboot. For the exact placement and memory limits, see
+[Host and memory configuration](supernode.md).
 
-修改 NUMA、容量、水位或路径后重复 `check`、`apply`，再重新生成实验 YAML。
-切换已挂载 WARM 的 NUMA 时，先在空闲池上保存所需快照并由管理员卸载旧挂载，
-或者选择新的空目录。重启主机后也要重新 `apply`，恢复 tmpfs 和 cgroup。
+## 3. Run the starter workload
 
-这套模拟用一台机器的 NUMA 域表示 LOCAL 与共享内存，约束 CPU 位置、内存层和借用。
-它没有模拟任意超节点的交换网络、跨机协议或可配置互连带宽/延迟。NUMA 距离由真实
-硬件决定。`sum(compute_nodes[].memory_gib) + warm_gib × 借用比例` 是活跃 VM 父 cgroup 的
-内核强制组合上限；每节点 LOCAL 边界由控制器依据 NUMA 测量实施，可能出现采样间隔内的超调，
-不是每 NUMA 的内核硬配额，也不是预先占满这些内存。绑定发生在 VM 创建/恢复后、Worker 分发后续工作前；
-启动和 Guest 自主恢复期间存在绑定前窗口，已有页是否迁移必须看实际驻留数据。详见[超节点配置与测量](supernode.md)。
-
-单计算节点仍可使用不含 `compute_nodes` 的 `local_node/local_gib/low_gib/high_gib` 配置。
-
-## 3. 运行最小例子
-
-使用主机 YAML 检查过的结果目录；安装步骤已创建它：
+Use the result directory checked by the host configuration. The
+installation procedure creates it:
 
 ```bash
 test -w "$CLAWBOX_OUTPUT_ROOT"
@@ -152,28 +163,36 @@ clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment status smoke-01
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment report smoke-01
 ```
 
-准入预算由主机 profile 自动填入，默认等于两个节点 HIGH 之和 64 GiB；每节点独立执行 32 GiB HIGH。
-`configure` 从成功 profile 填入模板、镜像摘要、NUMA 和容量；默认拒绝覆盖已有 YAML。
-覆盖时显式加 `--force`，并为新实验选择新 run ID。
+`configure` copies the templates, image digests, NUMA layout, and
+capacity from the applied host profile. With the example layout, the
+total admission budget is the sum of both 32 GiB high watermarks, while
+each node makes its own admission decisions. `configure` will not
+overwrite an existing output YAML unless given `--force`. Use a new
+run ID for a changed configuration.
 
-`launch` 自动检查环境、验证目标并发的真实 VM 运行，再启动正式实验。
-成功标准是最终 `state: succeeded`、结果验证和清理通过，而不是只看到服务 active
-或探测 VM 创建成功。例子会通过 Runtime 调用 Tool，在 `/workspace/result.txt`
-写入 `complete` 并验证。它验证执行链路，不代表已验证高并发内存压力实验。
+`launch` checks inputs and host readiness, tests VM execution at the
+required concurrency, then runs the workload. Look for final
+`state: succeeded`, successful task validation, and verified cleanup.
+The starter task writes `complete` to `/workspace/result.txt` through
+the agent and tool VMs. It checks the execution path; it is not a
+high-pressure performance result. Repeating `launch` with the same YAML
+and run ID returns the active run's status or its completed report, or
+resumes an interrupted run. Add `--detach` for a long run and use
+`status` to monitor it.
 
-同一 run ID 再次 `launch` 会显示/恢复原任务；不会把成功任务重复运行。
-长实验可以加 `--detach`，然后用 `status` 查看。主动停止和清理：
+To stop and clean up a run that you own:
 
 ```bash
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment abort smoke-01
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment destroy smoke-01
 ```
 
-## 4. 改工作负载、资源与策略
+## 4. Train a prediction file and compare policies
 
-先用下面的小内存负载走完训练和三方案评估。它启动 Python，分配 64 MiB 并保持三秒，
-让 Guest 内存采样有可观测窗口。普通 `smoke.jsonl` 的内建 `printf` 太短，不适合作为
-内存训练集；`No valid Cube guest extra-memory labels` 不能通过填零绕过。
+The next trace touches 64 MiB for three seconds so guest memory
+sampling has a measurable interval. The short `smoke.jsonl` command
+is not suitable for memory training. Missing memory observations
+cannot be replaced with zeroes.
 
 ```bash
 clawbox experiment configure examples/experiments/getting-started.yaml \
@@ -199,49 +218,50 @@ clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment report memory-eval-01
 ```
 
-此步骤要求 `warm: true`。单样本只验证训练/预测的数据链路，不用于性能结论。
-轻负载未触发 HIGH 时正式 arm 可以没有暂停；qualification 仍须验证配置的快照恢复
-与共享借用。确认成功后，用自己的真实任务、独立训练与多次重复开展正式实验。
+This walkthrough requires `warm: true`. A single repetition checks
+the training and prediction path, not performance differences. A light
+workload may never cross a high watermark and therefore may not pause a
+VM during the formal run; the preflight run still checks snapshot,
+restoration, and shared-pool borrowing. For a real study, train on a
+separate, successful run with complete measurements, use multiple
+repetitions, and retain failures. The tool VM image must contain the
+task repository, dependencies, and intended starting version; editing
+a trace does not prepare the guest environment.
 
-按本页训练与评估命令，先运行 A 的真实训练，再用
-`experiment train` 导出预测文件，最后运行 A / A+B / A+B+C。训练输入必须是完整、
-成功、清理已验证的独立训练 run；不能用 qualification 前缀或伪造内存数据代替。
-新任务的 Tool 模板须包含对应仓库、依赖和正确基线版本；修改 trace 不会自动安装任务环境。
+Use `clawbox experiment configure --help` for all overrides and
+`clawbox experiment baselines` for the supported policy names.
 
-```bash
-clawbox experiment configure --help
-clawbox experiment baselines
-```
-
-| 想修改什么 | 操作位置 |
+| To change | Use |
 | --- | --- |
-| 并发、重复次数 | `configure --concurrency 1,4,8 --repetitions 3` |
-| 准入预算、恢复余量、整机安全余量 | `--pool-memory-gib`、`--checkpoint-headroom-gib`、`--emergency-free-memory-gib` |
-| 本地内存与共享池物理配置 | 改主机 YAML 后 `host apply`，再 `configure` |
-| 每个 VM 的 vCPU、Guest RAM | 用安装指南的模板注册命令更改 `--cpu-millicores`、`--memory-mib`，将新模板 ID 写回主机 YAML 并 `apply` |
-| 每个 VM 的可写盘 | 注册模板时 `--writable-layer-size 40G`；不会因改变结果目录而改变 |
-| Cubelet 数据盘 | 安装时设置实际存储位置；已有数据迁移由管理员完成，再更新 `cubelet_data_root` 检查路径 |
-| 快照方式 | `--snapshot-mechanism full-copy` 或 `incremental-cow` |
-| 快照层 | `--snapshot-storage warm-only` 或 `tiered`，按所选策略支持范围使用；`--cold-root` 必须与主机服务一致 |
-| 命令/整轮超时、采样间隔、随机种子 | `--command-timeout-seconds`、`--arm-timeout-seconds`、`--memory-sample-interval-seconds`、`--random-seed` |
-| P50 预测、静态内存预留、模型等待预测 | `--prediction-artifact`、`--static-tool-memory-mib`、`--model-wait-prediction-seconds` |
+| Concurrency and repetitions | `--concurrency 1,4,8 --repetitions 3` |
+| Admission budget and safety margins | `--pool-memory-gib`, `--checkpoint-headroom-gib`, `--emergency-free-memory-gib` |
+| NUMA nodes, allowed CPUs, local capacities, or shared-pool size | Edit the host YAML, run `host check` and `host apply`, then `configure` |
+| VM vCPUs or guest RAM | Register a new template with the desired `--cpu-millicores` and `--memory-mib`, update the host YAML, then apply it |
+| VM writable disk | Set `--writable-layer-size` when registering the template |
+| Cubelet data disk | Select its location during CubeSandbox installation; move existing data separately before updating `cubelet_data_root` |
+| Snapshot mechanism and storage | `--snapshot-mechanism full-copy` or `incremental-cow`; `--snapshot-storage warm-only` or `tiered` |
+| Timeouts, sampling interval, and random seed | `--command-timeout-seconds`, `--arm-timeout-seconds`, `--memory-sample-interval-seconds`, `--random-seed` |
+| Predictions and command memory reservation | `--prediction-artifact`, `--static-tool-memory-mib`, `--model-wait-prediction-seconds` |
 
-未提供 CLI 快捷参数的配置可以编辑生成的 YAML；完整字段见[用户指南](guide.md)。
-每次改动后运行 `validate --inputs`、`describe` 和 `launch`，重新执行必要资格验证。
-VM 配置 RAM、准入预留、实测 LOCAL/共享内存、WARM 快照空间是不同量，报告中应分别读取。
+You can edit fields without a CLI option in the generated YAML; see the
+[configuration reference](guide.md). After a change, run `validate
+--inputs`, `describe`, and `launch` again with a new run ID. Keep VM
+configured RAM, admission reservations, measured memory use, and snapshot
+storage separate when reading the report.
 
-## 5. 遇到失败时
+## 5. Resolve common failures
 
-| 输出/现象 | 可执行的下一步 |
+| Result | Next step |
 | --- | --- |
-| `host check` 失败 | 按对应 `remedy` 修正配置或安装，再重跑 check；不要先 apply |
-| VM 池不空闲 | `experiment status RUN_ID`，等待完成或对自己 run 执行 abort/destroy |
-| 模板无 READY 副本 | 检查节点名称和模板注册输出；不要把 NUMA 编号当节点名 |
-| `no more resource` / snapshot storage unavailable | 检查 Cubelet 数据盘 `df -h`，低于 85% 使用率并留出快照空间；检查 S3lvol socket 与后端，见安装指南 |
-| ClawTune revision 不匹配 | 按用户指南运行 `experiment images` 更新 Runtime 和 Tool，重新 configure；不要跳过验证 |
-| WARM policy 不匹配 | 确认配置节点和 `findmnt -M WARM_PATH`；换新空目录或在保存快照后调整旧挂载 |
-| Guest BCC/遥测失败 | 按安装指南核对运行 Guest 内核与 headers，修复镜像后重新注册模板 |
-| SSH 断开/实验中断 | 同一 YAML、run ID 再次 launch；保留旧结果，勿手工删除 ownership 文件 |
+| `host check` fails | Follow that check's `remedy`, then repeat `host check` before applying |
+| VM pool is busy | Check `status RUN_ID`; wait or use `abort`/`destroy` for a run you own |
+| Template has no READY replica | Check its registered CubeSandbox node and template ID; the node name is not a NUMA number |
+| Snapshot storage reports `no more resource` | Check Cubelet disk usage and the S3lvol backend if enabled; see [installation](installation.md) |
+| ClawTune revision differs from the images | Update both guest images with `clawbox experiment images`, then reconfigure the experiment |
+| Shared-pool tmpfs has the wrong NUMA policy | Check `findmnt -M WARM_PATH`; preserve snapshots before changing the mount |
+| Guest telemetry fails | Check guest kernel headers against the running guest kernel, then rebuild and register the tool image |
+| SSH disconnects or a run is interrupted | Restore host settings, then `launch` the same YAML and run ID; keep the result directory |
 
-失败日志、`run-state.json` 和每个 arm 的原始结果留在结果目录，可用于定位。
-不需要为了重试删除整个结果目录，也不要把失败退出码当作可以继续下一步的提示。
+Logs, `run-state.json`, and per-trial results remain in the run
+directory. Do not delete ownership files or treat a failed command as
+permission to proceed to the next step.

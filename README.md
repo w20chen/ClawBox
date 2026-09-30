@@ -1,30 +1,39 @@
 # ClawBox
 
-ClawBox 在 standalone CubeSandbox 上比较编码 Agent 的内存准入、空闲 VM 回收和恢复策略。
-每个会话包含一个 Runtime VM 和一个 Tool VM；ClawTune 提供命令级预测与测量。
-默认用 NUMA 0、1 模拟两个计算节点，NUMA 2 提供共享内存池。
+ClawBox compares memory admission, idle VM checkpointing, and restoration
+policies for coding agents on standalone CubeSandbox. Each session has an agent
+VM and a tool VM. ClawTune supplies per-command resource predictions and
+measurements. The default configuration uses NUMA nodes 0 and 1 as two compute
+nodes and NUMA node 2 as a shared memory pool.
 
-**从[逐条命令入门](docs/self-service.md)开始。** 正式入口是 `clawbox experiment`，
-不需要 Codex、代码代理或 Kubernetes。真实执行需要 ARM64 Linux/KVM 主机、
-带补丁的 CubeSandbox 和配套 Guest 构件；仓库不包含可直接运行的完整 Guest 镜像。
+Start with the [step-by-step guide](docs/self-service.md). The supported command
+interface is `clawbox experiment`; running it does not require a coding
+assistant or Kubernetes. Live experiments require an ARM64 Linux/KVM host,
+patched CubeSandbox, and compatible guest images and kernel files. The
+repository does not include ready-to-run guest images.
 
-| 你要做什么 | 阅读位置 |
+| Task | Documentation |
 | --- | --- |
-| 配置主机，跑通第一个实验，再训练和评估 | [入门流程](docs/self-service.md) |
-| 从新机器安装服务、导入镜像、注册模板、更新 ClawTune | [安装与更新](docs/installation.md) |
-| 修改 NUMA、CPU 子集、内存、水位、共享池或磁盘 | [主机与超节点配置](docs/supernode.md) |
-| 查实验字段、trace 要求、命令区别、恢复和结果含义 | [配置与命令参考](docs/guide.md) |
-| 理解准入、快照、计账及 PMU 的实现边界 | [执行与测量契约](docs/design.md) |
-| 开展独立的 LLC 放置研究 | [辅助放置工具](docs/placement.md) |
+| Configure a host, run the first experiment, then train and compare policies | [Step-by-step guide](docs/self-service.md) |
+| Install services, import images, register VM templates, or update ClawTune | [Installation](docs/installation.md) |
+| Change NUMA nodes, CPU lists, memory limits, the shared pool, or disk paths | [Host and memory configuration](docs/supernode.md) |
+| Look up experiment fields, trace requirements, commands, recovery, and results | [Command and configuration reference](docs/guide.md) |
+| Understand admission, snapshots, memory accounting, and PMU limits | [Execution and measurement](docs/design.md) |
+| Analyze a separate four-call CPU placement study | [Placement analysis](docs/placement.md) |
 
-[getting-started.yaml](examples/experiments/getting-started.yaml) 和
-[smoke.jsonl](examples/traces/smoke.jsonl) 是最小入门输入；训练示例使用
-[memory-smoke.jsonl](examples/traces/memory-smoke.jsonl)。其他 experiment/prediction 文件
-是研究输入，可能含机器路径、占位模板或旧策略，不是新机器默认配置。
+The [starter configuration](examples/experiments/getting-started.yaml) and
+[smoke trace](examples/traces/smoke.jsonl) are the smallest example inputs.
+The training walkthrough uses a longer
+[memory trace](examples/traces/memory-smoke.jsonl). Other example experiment
+and prediction files may contain host-specific paths, placeholder templates,
+or older policies; review them before use on a new machine.
 
-开发者运行相关检查：`python -m pytest`。公共参数以 `clawbox experiment --help`
-及各子命令的 `--help` 为准；字段定义见 [spec.py](clawbox/experiments/spec.py)。
-修改公共行为时同步更新对应参考页，完整命令流程只维护在入门页。
+Use `clawbox experiment --help` and each subcommand's `--help` for current
+options. Experiment fields are defined in [spec.py](clawbox/experiments/spec.py).
+Developers can run `python -m pytest`; update the relevant reference page
+when changing a public option, and keep the full command sequence in the
+step-by-step guide.
 
-旧控制面和 `scripts/lab` 的范围见[弃用说明](docs/deprecated.md)。
-[历史实验记录](docs/archive/README.md)只保留当时的配置、结果与局限，不表示当前部署状态。
+The [deprecated-components note](docs/deprecated.md) covers the old control
+plane and `scripts/lab`. [Historical results](docs/archive/README.md) record
+earlier configurations and measurements, not the current host state.

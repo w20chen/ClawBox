@@ -1,19 +1,28 @@
-# 双计算节点与共享内存池
+# Two compute nodes and one shared memory pool
 
-按[逐条命令指南](self-service.md)执行 `host init → check → apply → configure → launch → report`。
-默认节点为 NUMA 0、1，各有 36 GiB LOCAL，LOW/HIGH 为 28/32 GiB；NUMA 2 提供一份
-128 GiB 共享池。主机必须至少有三个 NUMA 域，CPU 编号以 `host inspect` 为准。
+Follow the [step-by-step guide](self-service.md) to initialize and apply the
+host configuration before running an experiment. By default, NUMA nodes 0 and
+1 are compute nodes with 36 GiB of local memory capacity each and low/high
+watermarks of 28/32 GiB. NUMA node 2 supplies one 128 GiB shared pool. The
+host needs at least three NUMA nodes; use `host inspect` to check its actual
+CPU and memory layout.
 
-## 配置和放置
+## Configuration and placement
 
-主机 YAML 的 `compute_nodes` 分别设置节点 ID、NUMA、CPU 子集、内存容量和水位；
-`warm_node/warm_gib/shared_borrow_percent` 设置唯一共享池。修改后重新 `host check/apply`，
-再 `configure`。`--pool-memory-gib` 必须等于各节点 HIGH 之和；默认由成功的主机 profile 填入，
-无需手工指定。总量相同不代表节点分布相同，比较实验时必须保留完整拓扑。
+In the host YAML, `compute_nodes` sets the name, NUMA node, allowed CPUs,
+memory capacity, and watermarks for each compute node.
+`warm_node`, `warm_gib`, and `shared_borrow_percent` describe the one
+shared pool. After changing them, run `host check` and `host apply`, then
+generate a new experiment YAML with `configure`. The experiment's
+`--pool-memory-gib` must equal the sum of the compute nodes' high
+watermarks; `configure` normally copies that value from the applied host
+profile. Record the full topology when comparing runs, even if two
+configurations have the same total capacity.
 
-默认 `round_robin` 按会话序号在配置的节点列表中轮流放置，同一会话的 Runtime 和 Tool
-始终选同一节点，各策略重复使用相同映射。并发 1 只运行在第一个计算节点；并发 2 覆盖两个节点。
-固定映射可以作为后续 NUMA-aware 策略的对照：
+The default `round_robin` placement assigns sessions to compute nodes in
+configuration order. The agent and tool VMs of a session stay on the same
+node, and each policy uses the same mapping. Concurrency 1 uses the first
+compute node; concurrency 2 covers both. To study a fixed mapping:
 
 ```bash
 clawbox experiment configure eval.yaml eval-explicit.yaml \
@@ -24,37 +33,60 @@ clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
   eval-explicit.yaml --run-id explicit-01
 ```
 
-显式列表必须覆盖最大并发数，较小并发使用它的前缀。这里是静态会话放置，不会在运行中搬迁
-会话或按负载自动重调度。CPU 集合是允许执行的位置，不是 vCPU 配额，也不禁止宿主机其他进程
-使用这些 CPU；VM 的 vCPU 数量仍来自 Runtime/Tool 模板。
+The explicit list must have at least as many entries as the highest
+concurrency level; lower levels use its prefix. This is static placement:
+sessions are not moved or rebalanced while running. A CPU list restricts
+where a VM may execute. It does not set a vCPU quota or reserve those CPUs
+from other host processes. The VM template sets its vCPU count.
 
-## 内存控制与科研边界
+## Memory behavior and limits
 
-- 每个计算节点独立执行准入、LOW/HIGH 滞回、回收及 HARD 借用决策。一个节点越过 HIGH，
-  只阻塞该节点的新会话；不能用另一节点的空闲容量掩盖它的压力。
-- NUMA 2 上的活跃 VM 借用和 WARM 快照共享同一份全局账本。借用先预留 VM 配置容量，
-  再改变其内存绑定；所有计算节点的借用之和受 `shared_borrow_percent` 限制。
-- Runtime/Tool 创建及恢复后，在 Worker 分发后续工作前验证叶 cgroup 的 CPU 和内存绑定；
-  借用只改变内存节点，CPU 仍在原计算节点。恢复重新绑定到原计算节点。
-- LOCAL 容量是依据采样执行的控制器边界。内核 `memory.max` 约束所有 VM 的
-  `LOCAL 容量之和 + 全局借用上限`，不能解释成每 NUMA 的硬配额。
-- 初始启动、恢复时 Guest 自主继续运行到绑定完成之间存在短暂窗口，受父 cgroup 的
-  计算节点合集约束；当前接口不提供启动前的逐 VM 绑定。`cpuset.mems` 的变更不保证已有页立即迁移。真实物理驻留由
-  `memory.numa_stat` 测量。无法归属 NUMA 的内核 charge 保守计入每节点准入，
-  聚合物理占用只计算一次，所以不能把各节点控制用量简单相加。
-- WARM tmpfs 容量是上限，内存按实际写入消耗。其页不在 VM 父 cgroup 中；
-  报告分别给出共享池活跃页、WARM 物理分配和快照账本预留，不能互相替代。
-- 该模型复用真实 NUMA 距离，未仿真 UB 协议、交换网络或可调链路带宽/延迟。
+- Each compute node makes its own admission and pressure decisions using
+  local memory measurements and its low/high watermarks. Pressure on one node
+  blocks new sessions there without treating another node's free memory as
+  local capacity.
+- Running VMs temporarily using NUMA node 2 and snapshots stored there share
+  one capacity ledger. The system reserves a VM's configured memory before
+  changing its memory binding. The combined live reservation is capped by
+  `shared_borrow_percent`.
+- After VM creation or restoration, the worker verifies its cgroup CPU and
+  memory bindings before sending more work. Using the shared pool changes
+  memory placement, not CPU placement. Restoration returns the VM to its
+  original compute node.
+- The local capacity is enforced by a sampled controller, not by a separate
+  kernel memory limit for each NUMA node. The parent VM cgroup's
+  `memory.max` covers the sum of local capacities plus the global shared
+  borrowing limit.
+- A newly created or restored VM may run briefly before its individual
+  binding is applied. The parent cgroup permits the configured compute
+  CPUs and the compute and shared NUMA memory nodes during that interval.
+  Changing `cpuset.mems` does not guarantee migration of existing pages.
+  Physical residency comes from
+  `memory.numa_stat`. Memory charges that cannot be attributed to a NUMA
+  node are counted conservatively for each node's admission decision but
+  only once in the host total.
+- The shared-pool tmpfs size is a limit; pages consume memory as they are
+  written. Snapshot pages lie outside the parent VM cgroup. Reports keep
+  running-VM residency, allocated snapshot pages, and reserved snapshot
+  capacity separate.
+- This model uses the host's real NUMA distances. It does not simulate an
+  inter-node fabric, a cross-host protocol, or configurable link bandwidth
+  and latency.
 
-## 检查结果
+## Reading the results
 
-`launch` 的资格验证逐节点测试共享内存借还和配置的快照恢复机制；正式并发运行验证
-会话放置。失败不会变成成功结果。`report` 包含每节点容量、峰值、HIGH 次数和已验证绑定数。
-各 arm JSON 的 `performance.compute_nodes` 保存实际绑定记录、逐节点准入与水位数据；
-`session_trace_assignment[].compute_node` 给出会话映射。
+Before a formal run, `launch` tests the configured snapshot/restore
+mechanism and shared-memory borrowing on each compute node. The formal
+concurrent run then records session placement. The report includes
+per-node capacity, peak use, high-watermark crossings, and verified bindings.
+In each trial JSON file, `performance.compute_nodes` contains placement and
+per-node admission data; `session_trace_assignment[].compute_node` identifies the
+node assigned to each session.
 
-`memory-timeseries.csv` 的 `numa_N_resident_gib` 是对应 NUMA 的驻留字节，
-`unattributed_gib` 是未归属的 charge，空值表示没有该项观测。
-聚合表的越水位时间在多节点模式下是各节点秒数之和，不是全局墙钟持续时间；
-各节点峰值出现时刻可能不同，不应相加当作同时峰值。后续 CPU 调度研究应同时保留
-会话映射、CPU 集合、NUMA 驻留时间序列及原始 PMU 记录。
+In `memory-timeseries.csv`, `numa_N_resident_gib` is measured residency
+on NUMA node N in GiB, and `unattributed_gib` is memory not assigned to a
+NUMA node. An empty cell means that measurement was unavailable. In
+multi-node summaries, time above a watermark is summed across nodes; it is
+not whole-host elapsed time. Node peaks may occur at different times, so
+their sum is not a simultaneous peak. For CPU scheduling studies, retain
+session mappings, CPU lists, NUMA residency over time, and raw PMU records.
