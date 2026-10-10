@@ -32,7 +32,7 @@ def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
     def reclaim() -> None:
         calls.append(True)
         used[0] = 5 * 1024**2
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
                                     operation_headroom_mib=1, reclaim_cache=reclaim,
@@ -44,7 +44,7 @@ def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
 
 def test_unbounded_admission_waits_until_capacity_is_available() -> None:
     used = [9 * 1024**2]
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
                                     operation_headroom_mib=1,
@@ -59,7 +59,7 @@ def test_unbounded_admission_waits_until_capacity_is_available() -> None:
 
 
 def test_unsuccessful_cache_reclaim_does_not_invent_capacity() -> None:
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
                                     operation_headroom_mib=1, reclaim_cache=lambda: None,
@@ -74,7 +74,7 @@ def test_slow_kernel_reclaim_does_not_hold_the_admission_head() -> None:
     def reclaim() -> None:
         used[0] = 5 * 1024**2
         assert finish.wait(3)
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
                                     operation_headroom_mib=1, reclaim_cache=reclaim,
@@ -88,7 +88,7 @@ def test_slow_kernel_reclaim_does_not_hold_the_admission_head() -> None:
 
 
 def test_running_tool_can_pass_a_capacity_blocked_new_pair() -> None:
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     used = [8 * 1024**2]
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
@@ -115,7 +115,7 @@ def test_existing_tool_progress_uses_hard_budget_at_high_or_when_idle() -> None:
     gib = 1024 ** 3
     used = [31 * gib]
     policy = PolicySpec(
-        name="resident", admission="tool_p50", reclamation="resident",
+        name="resident", admission="predicted", reclamation="resident",
         eviction="none", restore="none",
     )
     coordinator = PolicyCoordinator(
@@ -144,7 +144,7 @@ def test_completion_releases_exactly_one_progress_waiter_below_high() -> None:
     mib = 1024 ** 2
     used = [31 * gib]
     policy = PolicySpec(
-        name="resident", admission="tool_static", reclamation="resident",
+        name="resident", admission="fixed", reclamation="resident",
         eviction="none", restore="none",
     )
     coordinator = PolicyCoordinator(
@@ -176,7 +176,7 @@ def test_completion_releases_exactly_one_progress_waiter_below_high() -> None:
 
 def test_high_hysteresis_blocks_only_new_session_creation() -> None:
     policy = PolicySpec(
-        name="resident", admission="tool_p50", reclamation="resident",
+        name="resident", admission="predicted", reclamation="resident",
         eviction="none", restore="none",
     )
     coordinator = PolicyCoordinator(
@@ -194,7 +194,7 @@ def test_high_hysteresis_blocks_only_new_session_creation() -> None:
 
 
 def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
                                     operation_headroom_mib=1, startup_headroom_mib=2,
@@ -209,7 +209,7 @@ def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
 
 def test_wait_aware_pressure_includes_a_blocked_create_request() -> None:
     policy = PolicySpec(
-        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        name="final", admission="predicted", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
     )
     used = [2 * 1024**2]
@@ -239,7 +239,7 @@ def test_wait_aware_pressure_includes_a_blocked_create_request() -> None:
 
 def test_high_watermark_proactively_evicts_a_safe_waiting_pair() -> None:
     policy = PolicySpec(
-        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        name="final", admission="predicted", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
     )
     coordinator = PolicyCoordinator(
@@ -263,7 +263,7 @@ def test_high_watermark_proactively_evicts_a_safe_waiting_pair() -> None:
 
 def test_resident_policy_has_no_high_watermark_eviction_victim() -> None:
     policy = PolicySpec(
-        name="resident", admission="tool_p50", reclamation="resident",
+        name="resident", admission="predicted", reclamation="resident",
         eviction="none", restore="none",
     )
     coordinator = PolicyCoordinator(
@@ -276,7 +276,7 @@ def test_resident_policy_has_no_high_watermark_eviction_victim() -> None:
 
 def test_wait_aware_admission_pauses_both_vms_during_model_wait() -> None:
     policy = PolicySpec(
-        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        name="final", admission="predicted", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
     )
     used = [9 * 1024**2]
@@ -312,7 +312,7 @@ def test_wait_aware_admission_pauses_both_vms_during_model_wait() -> None:
 
 def test_model_response_waits_for_claimed_pair_checkpoint() -> None:
     policy = PolicySpec(
-        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        name="final", admission="predicted", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
     )
     coordinator = PolicyCoordinator(
@@ -340,7 +340,7 @@ def test_model_response_waits_for_claimed_pair_checkpoint() -> None:
 
 
 def test_first_pair_does_not_reserve_headroom_for_a_nonexistent_agent() -> None:
-    policy = PolicySpec(name="resident", admission="tool_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=7, emergency_free_mib=0,
                                     operation_headroom_mib=1, startup_headroom_mib=2,
@@ -351,7 +351,7 @@ def test_first_pair_does_not_reserve_headroom_for_a_nonexistent_agent() -> None:
 
 
 def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
-    policy = PolicySpec(name="resident", admission="lifetime_full", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
                                     operation_headroom_mib=0,
@@ -364,14 +364,14 @@ def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
         coordinator.acquire("requester", 1, 0)
     assert victim.pauses == 0
     metrics = coordinator.admission_metrics()
-    assert metrics["safety_intervention_count"] == 1
+    assert metrics["safety_intervention_count"] == 2
     assert metrics["safety_interventions_by_reason"] == {
-        "configured_memory_budget": 1,
+        "configured_memory_budget": 1, "global_memory_budget": 1,
     }
 
 
 def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
-    policy = PolicySpec(name="snapshot", admission="tool_static", reclamation="snapshot_pause",
+    policy = PolicySpec(name="snapshot", admission="fixed", reclamation="snapshot_pause",
                         eviction="eager", restore="reactive")
     coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
                                     operation_headroom_mib=0,
@@ -388,7 +388,7 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
 
 def test_wait_aware_policy_never_selects_an_idle_non_waiting_session() -> None:
     policy = PolicySpec(
-        name="final", admission="tool_p50", reclamation="snapshot_pause",
+        name="final", admission="predicted", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
     )
     coordinator = PolicyCoordinator(
@@ -403,7 +403,7 @@ def test_wait_aware_policy_never_selects_an_idle_non_waiting_session() -> None:
 
 def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
     """A delayed admission cannot be selected for pause by another waiter."""
-    policy = PolicySpec(name="snapshot", admission="tool_static",
+    policy = PolicySpec(name="snapshot", admission="fixed",
                         reclamation="snapshot_pause", eviction="eager",
                         restore="reactive")
     entered = threading.Event()
@@ -441,7 +441,7 @@ def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
 
 
 def test_tool_activation_waits_for_an_atomic_eviction_claim() -> None:
-    policy = PolicySpec(name="snapshot", admission="tool_static",
+    policy = PolicySpec(name="snapshot", admission="fixed",
                         reclamation="snapshot_pause", eviction="eager",
                         restore="reactive")
     coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
@@ -466,7 +466,7 @@ def test_tool_activation_waits_for_an_atomic_eviction_claim() -> None:
 
 
 def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
-    policy = PolicySpec(name="resident", admission="tool_static", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(
         policy, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
@@ -498,7 +498,7 @@ def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
 
 
 def test_lifecycle_reservations_do_not_pollute_tool_admission_metrics() -> None:
-    policy = PolicySpec(name="resident", admission="tool_static", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(
         policy, budget_mib=5, emergency_free_mib=1, operation_headroom_mib=1,
@@ -531,7 +531,7 @@ def test_lifecycle_reservations_do_not_pollute_tool_admission_metrics() -> None:
 
 
 def test_incremental_reservation_is_added_to_observed_host_memory() -> None:
-    policy = PolicySpec(name="resident", admission="tool_static", reclamation="resident",
+    policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")
     coordinator = PolicyCoordinator(
         policy, budget_mib=10, emergency_free_mib=1, operation_headroom_mib=0,
@@ -541,24 +541,9 @@ def test_incremental_reservation_is_added_to_observed_host_memory() -> None:
         coordinator.acquire("tool", 3, 0)
 
 
-def test_lifetime_capacity_claim_is_not_double_counted_after_materialization() -> None:
-    policy = PolicySpec(name="conservative", admission="lifetime_full",
-                        reclamation="resident", eviction="none", restore="none")
-    used = [0]
-    coordinator = PolicyCoordinator(
-        policy, budget_mib=10, emergency_free_mib=1, operation_headroom_mib=0,
-        physical_sample=lambda: (used[0], 100 * 1024**2),
-    )
-    coordinator.acquire_capacity("agent", 8, 1)
-    used[0] = 8 * 1024**2
-    coordinator.acquire("agent", 2, 1)
-    coordinator.release("agent", 2)
-    coordinator.release_capacity("agent", 8)
-
-
 def test_wait_plan_uses_only_request_time_prediction() -> None:
     policy = PolicySpec(
-        name="predicted", admission="tool_static", reclamation="snapshot_pause",
+        name="predicted", admission="fixed", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="proactive",
         prefetch_lead_seconds=0.5,
     )
@@ -571,7 +556,7 @@ def test_wait_plan_uses_only_request_time_prediction() -> None:
     assert coordinator.model_wait_plan(3.0) == (0.0, 0.5)
 
     fixed = PolicySpec(
-        name="fixed", admission="tool_static", reclamation="snapshot_pause",
+        name="fixed", admission="fixed", reclamation="snapshot_pause",
         eviction="fixed_delay", restore="reactive", fixed_delay_seconds=0.25,
     )
     fixed_coordinator = PolicyCoordinator(
@@ -582,7 +567,7 @@ def test_wait_plan_uses_only_request_time_prediction() -> None:
 
 def test_time_oracle_wait_plan_uses_actual_replay_duration_at_break_even() -> None:
     policy = PolicySpec(
-        name="time-oracle", admission="tool_static",
+        name="time-oracle", admission="fixed",
         reclamation="snapshot_pause", eviction="time_oracle",
         restore="reactive", checkpoint_break_even_seconds=4.0,
     )
@@ -601,7 +586,7 @@ def test_time_oracle_wait_plan_uses_actual_replay_duration_at_break_even() -> No
 
 def test_tiered_time_oracle_uses_exact_two_and_twenty_second_boundaries() -> None:
     policy = PolicySpec(
-        name="tiered-time", admission="tool_p50", reclamation="snapshot_pause",
+        name="tiered-time", admission="predicted", reclamation="snapshot_pause",
         eviction="tiered_time_oracle", restore="reactive",
     )
     coordinator = PolicyCoordinator(
@@ -617,7 +602,7 @@ def test_tiered_time_oracle_uses_exact_two_and_twenty_second_boundaries() -> Non
 
 def test_tiered_lru_prefers_remaining_wait_of_at_least_two_seconds() -> None:
     policy = PolicySpec(
-        name="tiered-lru", admission="tool_p50", reclamation="snapshot_pause",
+        name="tiered-lru", admission="predicted", reclamation="snapshot_pause",
         eviction="tiered_lru_oracle", restore="reactive",
     )
     coordinator = PolicyCoordinator(

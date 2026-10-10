@@ -565,7 +565,7 @@ def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
         "prediction_source": "runtime_clawtune_immutable_kb",
         "fallback_level": "exact_command",
         "predicted_guest_memory_p90_mib": 3.0,
-        "admission_prediction_target": "host_vm_rss_execution_increment",
+        "admission_prediction_target": "host_cgroup_memory_current_increment",
         "predicted_incremental_memory_mib": 4.0,
         "admitted_reservation_mib": 4,
         "admission_blocked_seconds": 0.25,
@@ -618,7 +618,7 @@ def test_native_measurement_enrichment_requires_exact_execution_set() -> None:
         )
 
 def test_p50_errors_compare_guest_increment_not_rss_or_host():
-    records = [{'session_id': 's', 'execution_id': 'exec-1', 'prediction_quantile': .5,
+    records = [{'session_id': 's', 'execution_id': 'exec-1', 'prediction_quantile': .5, 'predicted_guest_extra_memory_mib': 3,
         'admission_prediction_target': 'environment_memory_peak_minus_baseline',
         'predicted_incremental_memory_mib': 3, 'actual_host_execution_increment_mib': 99}]
     _, cgroup, _ = _artifacts('exec-1', hashlib.sha256(b'true').hexdigest())

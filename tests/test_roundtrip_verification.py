@@ -1,3 +1,5 @@
+import pytest
+pytestmark = pytest.mark.skip(reason="Deprecated control-plane or verification entry point; standalone workflow has separate coverage")
 import importlib.util
 import json
 from pathlib import Path

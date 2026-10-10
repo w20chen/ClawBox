@@ -296,7 +296,7 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         borrow_mib = int(profile.get("shared_memory_borrow_limit_mib") or 0)
         domains = profile.get("compute_nodes") or []
         expected_nodes = {int(n["numa_node"]) for n in domains} if domains else {int(profile["local_numa_node"])}
-        if profile.get("local_memory_high_watermark_mib") is not None:
+        if profile.get("shared_memory_borrow_limit_mib") is not None:
             expected_nodes.add(int(profile["warm_numa_node"]))
         def cpuset_nodes() -> set[int]:
             nodes: set[int] = set()
@@ -439,12 +439,12 @@ def setup(args) -> dict:
         local_memory_capacity_mib=args.local_gib * 1024,
         local_numa_node=None if domains else args.local_node,
         compute_nodes=domains,
-        local_memory_low_watermark_mib=low_gib * 1024 if args.warm else None,
-        local_memory_high_watermark_mib=high_gib * 1024 if args.warm else None,
-        shared_memory_borrow_limit_mib=shared_borrow_mib,
-        warm_root=args.warm_root,
+        local_memory_low_watermark_mib=low_gib * 1024 if args.warm or domains else None,
+        local_memory_high_watermark_mib=high_gib * 1024 if args.warm or domains else None,
+        shared_memory_borrow_limit_mib=shared_borrow_mib if args.warm else None,
+        warm_root=args.warm_root if args.warm else None,
         warm_capacity_mib=args.warm_gib * 1024 if args.warm else 0,
-        warm_numa_node=args.warm_node,
+        warm_numa_node=args.warm_node if args.warm else None,
     )
     if cube_source:
         profile["cube_source"] = str(Path(cube_source).expanduser().resolve())
@@ -463,7 +463,7 @@ def setup(args) -> dict:
         "--numa-node", str(args.local_node),
         *(["--numa-nodes", ",".join(str(n["numa_node"]) for n in domains),
            "--cpus", ",".join(n["cpus"] for n in domains)] if domains else []),
-        "--shared-borrow-mib", str(profile["shared_memory_borrow_limit_mib"]),
+        "--shared-borrow-mib", str(profile["shared_memory_borrow_limit_mib"] or 0),
         *(["--shared-node", str(profile["warm_numa_node"])] if args.warm else []), timeout=120,
     )
     command(

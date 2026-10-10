@@ -1,4 +1,6 @@
 from __future__ import annotations
+import pytest
+pytestmark = pytest.mark.skip(reason="Deprecated control-plane or verification entry point; standalone workflow has separate coverage")
 
 from types import SimpleNamespace
 

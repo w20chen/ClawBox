@@ -1,6 +1,6 @@
-# DEPRECATED research fixture. Use `clawbox experiment configure` with the
-# active A/A+B/A+B+C baselines for new runs.
-schema_version: 2
+# Historical host-specific fixture, expressed in the current schema.
+# Use `clawbox experiment configure` and current presets for new runs.
+schema_version: 3
 experiment_id: openclaw-cube-replay-c60-overcommit
 workload:
   source: recorded_trace
@@ -58,7 +58,7 @@ resources:
   checkpoint_restore_headroom_mib: 2048
   static_tool_memory_mib: 256
 policies:
-  - {name: resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
-  - {name: eager-reactive, admission: tool_static, reclamation: snapshot_pause, eviction: eager, restore: reactive}
+  - {name: runtime-resident, admission: "off", runtime_control: agentcgroup_cgroup, reclamation: resident, eviction: none, restore: none}
+  - {name: uncontrolled-resident, admission: "off", runtime_control: "off", reclamation: resident, eviction: none, restore: none}
 validation: {command: "test \"$(cat /workspace/result.txt)\" = openclaw-cube-replay-ok"}
 output: {directory: /results}

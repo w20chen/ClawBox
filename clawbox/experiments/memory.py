@@ -293,7 +293,7 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
     def __init__(self, cgroup: Path, *, local_capacity_bytes: int,
                  total_capacity_bytes: int, local_numa_node: int,
                  local_numa_nodes: tuple[int, ...] = (),
-                 shared_numa_node: int, **kwargs) -> None:
+                 shared_numa_node: int | None, **kwargs) -> None:
         NodeMemorySampler.__init__(self, **kwargs)
         self.cgroup = cgroup
         limit = (cgroup / "memory.max").read_text().strip()
@@ -307,7 +307,10 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
             start, separator, end = part.partition("-")
             granted.update(range(int(start), int(end) + 1) if separator else (int(start),))
         self.local_numa_nodes = local_numa_nodes or (local_numa_node,)
-        if not {*self.local_numa_nodes, shared_numa_node}.issubset(granted):
+        required = set(self.local_numa_nodes)
+        if shared_numa_node is not None:
+            required.add(shared_numa_node)
+        if not required.issubset(granted):
             raise ValueError(
                 f"VM cgroup cpuset {nodes} does not include LOCAL/shared nodes "
                 f"{local_numa_node},{shared_numa_node}"
@@ -431,8 +434,13 @@ class SandboxRSSSampler:
     """Execution-window host RSS sampler for one CubeSandbox microVM."""
 
     def __init__(self, sandbox_id: str, *, proc_root: Path = Path("/proc"),
-                 interval_s: float = 0.05) -> None:
+                 interval_s: float = 0.05, cgroup: Path | None = None) -> None:
         self.sandbox_id = sandbox_id
+        self.cgroup = cgroup
+        self.charge_baseline = int((cgroup/'memory.current').read_text()) if cgroup else None
+        self.charge_peak = self.charge_baseline
+        self.charge_samples = 0
+        self.charge_error = None
         self.proc_root = proc_root
         self.interval_s = interval_s
         self._stop = Event()
@@ -479,9 +487,17 @@ class SandboxRSSSampler:
         )
         return {
             "metric": "host_proc_vm_rss",
+            "host_cgroup_metric": "host_cgroup_memory_current_increment",
+            "host_cgroup_baseline_bytes": self.charge_baseline,
+            "host_cgroup_peak_bytes": self.charge_peak,
+            "host_cgroup_sample_count": self.charge_samples,
+            "host_cgroup_error": self.charge_error,
+            "host_cgroup_execution_increment_bytes": (
+                max(0, self.charge_peak - self.charge_baseline)
+                if self.charge_peak is not None and not self.charge_error else None),
             "host_vm_rss_baseline_bytes": self.baseline_bytes,
             "host_vm_rss_peak_bytes": peak,
-            "actual_host_execution_increment_bytes": increment,
+            "host_vm_rss_execution_increment_bytes": increment,
             "sample_count": len(samples),
             "validity": "valid" if increment is not None else "unavailable",
             **sandbox_process_counter_deltas(
@@ -496,6 +512,13 @@ class SandboxRSSSampler:
             self._sample()
 
     def _sample(self) -> None:
+        if self.cgroup is not None:
+            try:
+                charge = int((self.cgroup/'memory.current').read_text())
+                self.charge_peak = max(self.charge_peak, charge)
+                self.charge_samples += 1
+            except (OSError, ValueError) as exc:
+                self.charge_error = str(exc)
         value = sandbox_process_rss_bytes(
             self.sandbox_id, proc_root=self.proc_root, process_paths=self._process_paths,
         )

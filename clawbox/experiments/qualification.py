@@ -28,7 +28,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 4
+QUALIFICATION_SCHEMA_VERSION = 6
 
 
 def implementation_digest() -> str:
@@ -266,6 +266,10 @@ def live_borrow_roundtrip_test(
     spec: ExperimentSpec, *, artifact_root: Path, _node=None,
 ) -> dict[str, Any]:
     """Prove a VM on each compute node can borrow and return without interruption."""
+    limit_mib = spec.resources.shared_memory_borrow_limit_mib
+    if not limit_mib:
+        return {"required": False, "passed": True, "borrow_limit_bytes": 0,
+                "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024}
     if spec.resources.compute_nodes:
         nodes = {node.node_id: live_borrow_roundtrip_test(
             _node_spec(spec, node), artifact_root=artifact_root / node.node_id, _node=node,
@@ -276,10 +280,6 @@ def live_borrow_roundtrip_test(
                   "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024}
         atomic_json(artifact_root / "result.json", result)
         return result
-    limit_mib = spec.resources.shared_memory_borrow_limit_mib
-    if not limit_mib:
-        return {"required": False, "passed": True, "borrow_limit_bytes": 0,
-                "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024}
     probe_id = "qualification-borrow-" + uuid.uuid4().hex[:12]
     artifact_root.mkdir(parents=True, exist_ok=False)
     journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
@@ -420,6 +420,8 @@ def qualify(
     attempt_id = f"attempt-{uuid.uuid4().hex[:12]}"
     run_root = output_base / run_id
     probe_root = output_base / ".qualification-probes" / run_id
+    from .runtime_qualification import runtime_roundtrip_test
+    runtime_test = runtime_roundtrip_test(spec, artifact_root=probe_root / 'runtime-control')
     snapshot_test = snapshot_roundtrip_test(
         spec, artifact_root=probe_root / "snapshot",
     )
@@ -447,10 +449,11 @@ def qualify(
         "supervision_fault_test": fault_test,
         "snapshot_roundtrip_test": snapshot_test,
         "live_borrow_roundtrip_test": borrow_test,
+        "runtime_control_test": runtime_test,
         "arm_ids": [arm.arm_id for arm in expand_matrix(qualified)],
         "cleanup_verified": all(
             item.correctness.get("cleanup_verified") is True for item in results
-        ) and snapshot_test["passed"] and borrow_test["passed"],
+        ) and snapshot_test["passed"] and borrow_test["passed"] and runtime_test['passed'],
         "status": "succeeded",
     }
     if not receipt["cleanup_verified"]:
@@ -479,6 +482,16 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     mismatches = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
+    if spec.resources.local_memory_cgroup and not (
+        isinstance(receipt.get('runtime_control_test'), dict)
+        and receipt['runtime_control_test'].get('passed') is True
+        and receipt['runtime_control_test'].get('kernel_control', {}).get('activation_verified') is True
+        and receipt['runtime_control_test'].get('kernel_control', {}).get('low_throttling_verified') is True
+        and receipt['runtime_control_test'].get('vm_control', {}).get('passed') is True
+        and (not any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in spec.policies)
+             or receipt['runtime_control_test'].get('restore_verified') is True)
+    ):
+        mismatches.append('runtime_control_test')
     if receipt.get("concurrency", 0) < max(spec.execution.concurrency_levels):
         mismatches.append("concurrency")
     if receipt.get("policy_names") != [policy.name for policy in spec.policies]:

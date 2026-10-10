@@ -52,7 +52,7 @@ def test_shared_memory_watermarks_are_ordered_and_use_half_pool() -> None:
     )
     assert resources.shared_memory_borrow_limit_mib * 2 == resources.warm_memory_capacity_mib
     arm = SimpleNamespace(resources=resources)
-    assert policy_progress_budget_mib(arm) == 102400
+    assert policy_progress_budget_mib(arm) == 36864
     with pytest.raises(ValidationError, match="LOW < HIGH < LOCAL hard"):
         resources.model_copy(
             update={"local_memory_low_watermark_mib": 32768},
@@ -252,7 +252,7 @@ def test_runtime_network_policy_honors_explicit_internet_access() -> None:
 
 def raw_spec() -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "experiment_id": "unit",
         "workload": {
             "source": "recorded_trace", "input": "trace.jsonl", "repetitions": 2,
@@ -270,12 +270,12 @@ def raw_spec() -> dict:
         "resources": {
             "target_node": "node-a", "pool_memory_budget_mib": 100000,
             "emergency_free_memory_mib": 10000,
-            "cold_snapshot_root": "/cold",
+            "cold_snapshot_root": "/cold", "prediction_artifact": "frozen.json",
         },
         "policies": [
-            {"name": "resident", "admission": "lifetime_full", "reclamation": "resident",
+            {"name": "resident", "admission": "off", "reclamation": "resident",
              "eviction": "none", "restore": "none"},
-            {"name": "proposed", "admission": "tool_p50", "reclamation": "snapshot_pause",
+            {"name": "proposed", "admission": "predicted", "reclamation": "snapshot_pause",
              "eviction": "wait_aware_pressure", "restore": "proactive",
              "prefetch_lead_seconds": 0.5},
         ],
@@ -305,9 +305,10 @@ def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
     raw = raw_spec()
     raw["resources"].update(warm_memory_capacity_mib=65536,
                             local_memory_capacity_mib=65536,
+                            pool_memory_budget_mib=65536,
                             warm_snapshot_root="/warm", cold_snapshot_root="/cold",
                             local_numa_node=0, warm_numa_node=1)
-    raw["policies"].append({"name": "tiered", "admission": "tool_p50",
+    raw["policies"].append({"name": "tiered", "admission": "predicted",
                             "reclamation": "snapshot_pause", "restore": "reactive",
                             "eviction": "tiered_time_oracle"})
     arms = expand_matrix(ExperimentSpec.model_validate(raw))
@@ -503,7 +504,7 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
     actions = load_trace(Path("examples/traces/openclaw-cube-replay.jsonl"))
     assert spec.agent.driver.value == "openclaw"
     assert spec.execution.concurrency_levels == (40,)
-    assert [policy.name for policy in spec.policies] == ["resident", "eager-reactive"]
+    assert [policy.name for policy in spec.policies] == ["runtime-resident", "uncontrolled-resident"]
     assert actions[0].output["tool_calls"][0]["function"]["name"] == "exec"
     assert json.loads(actions[0].output["tool_calls"][0]["function"]["arguments"])[
         "command"
@@ -550,33 +551,26 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
         audit_experiments([path])
 
 
-def test_baseline_catalog_materializes_only_current_policy_tuples() -> None:
-    from clawbox.experiments.baselines import ACTIVE_BASELINES
-    assert BASELINES
-    assert ACTIVE_BASELINES == (
-        "tool-static-resident", "tool-p50-resident", "tool-p50-wait-reactive",
-    )
-    assert {name for name, baseline in BASELINES.items()
-            if baseline.implementation_status == "implemented"} == set(ACTIVE_BASELINES)
-    assert all(BASELINES[name].implementation_status == "deprecated"
-               for name in BASELINES if name not in ACTIVE_BASELINES)
-    for name, baseline in BASELINES.items():
-        policy = baseline.as_policy()
-        assert policy.name == name
-        assert policy.admission == baseline.admission_policy
-        assert policy.reclamation == baseline.reclamation_policy
-    assert resolve_baseline("p90-elastic-pressure-checkpoint").as_policy().eviction.value == (
-        "wait_aware_pressure"
-    )
-    oracle = resolve_baseline("tool-static-time-oracle-reactive").as_policy()
-    assert oracle.eviction.value == "time_oracle"
-    assert oracle.checkpoint_break_even_seconds == 4.0
+def test_baseline_catalog_and_independent_policy_names():
+    from clawbox.experiments.baselines import ACTIVE_BASELINES, ensure_supported_experiment
+    assert len(ACTIVE_BASELINES) == 6
+    assert all(BASELINES[n].implementation_status == 'implemented' for n in ACTIVE_BASELINES)
+    raw = raw_spec()
+    raw['policies'] = [resolve_baseline('runtime-resident').as_policy(name='custom-label').model_dump(mode='json')]
+    spec = ExperimentSpec.model_validate(raw)
+    ensure_supported_experiment(spec)
+    arm = expand_matrix(spec)[0]
+    assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=None) == 0
+    assert ExperimentWorker._startup_headroom_mib(arm, None) == 256
+    raw['policies'][0]['admission'] = 'tool_congestion'
+    with pytest.raises(ValidationError):
+        ExperimentSpec.model_validate(raw)
 
 
 def test_time_oracle_is_replay_only_and_requires_break_even() -> None:
     raw = raw_spec()
     raw["policies"] = [{
-        "name": "time-oracle", "admission": "tool_static",
+        "name": "time-oracle", "admission": "fixed",
         "reclamation": "snapshot_pause", "eviction": "time_oracle",
         "restore": "reactive", "checkpoint_break_even_seconds": 4.0,
     }]
@@ -615,20 +609,19 @@ def test_vm_startup_headroom_matches_the_arm_admission_policy() -> None:
     raw["resources"].update(
         static_tool_memory_mib=512,
         non_command_tool_memory_mib=16,
-        full_tool_memory_mib=4096,
         prediction_artifact="p50.json",
     )
     raw["policies"] = [{
-        "name": "static", "admission": "tool_static", "reclamation": "resident",
+        "name": "static", "admission": "fixed", "reclamation": "resident",
         "eviction": "none", "restore": "none",
     }]
     static_arm, = expand_matrix(ExperimentSpec.model_validate(raw))
-    assert ExperimentWorker._startup_headroom_mib(static_arm, None) == 512
+    assert ExperimentWorker._startup_headroom_mib(static_arm, None) == 256
 
-    raw["policies"][0].update(name="p50", admission="tool_p50")
+    raw["policies"][0].update(name="p50", admission="predicted")
     p50_arm, = expand_matrix(ExperimentSpec.model_validate(raw))
     provider = SimpleNamespace(max_incremental_memory_mib=201.3)
-    assert ExperimentWorker._startup_headroom_mib(p50_arm, provider) == 202
+    assert ExperimentWorker._startup_headroom_mib(p50_arm, provider) == 256
 
 
 def test_v2_rejects_backend_transport_and_invalid_policy() -> None:
@@ -655,9 +648,9 @@ def test_yaml_loader_and_v1_error(tmp_path: Path) -> None:
     path = tmp_path / "experiment.yaml"
     import yaml
     path.write_text(yaml.safe_dump(raw_spec()), encoding="utf-8")
-    assert load_experiment(path).schema_version == 2
+    assert load_experiment(path).schema_version == 3
     path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="migrate schema v1"):
+    with pytest.raises(ValueError, match="only schema_version: 3"):
         load_experiment(path)
 
 

@@ -1,5 +1,6 @@
 """Exercise the worker's actual completion callback with a blocked admission."""
 import ast
+import pytest
 from pathlib import Path
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
@@ -85,7 +86,8 @@ def test_blocked_admission_does_not_block_tool_completion():
     assert not thread.is_alive()
 
 
-def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
+@pytest.mark.parametrize('runtime_enabled', [False, True])
+def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_enabled):
     source = Path(__file__).resolve().parents[1] / 'clawbox/experiments/worker.py'
     tree = ast.parse(source.read_text(encoding='utf-8'))
     callback = next(node for node in ast.walk(tree)
@@ -97,6 +99,7 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
     released = Event()
     wait_lock = Lock()
     idle_updates = []
+    runtime_released = Event()
     route = SimpleNamespace(sandbox_id='tool', epoch=1, host='host', port=2222)
     environment = dict(
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
@@ -107,6 +110,8 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
         coordinator=SimpleNamespace(release=lambda *args: released.set(),
                                     set_tool_active=lambda *args: idle_updates.append(args)),
         session_id='session', timeline={}, _record_time_span=lambda *args, **kwargs: None,
+        self=SimpleNamespace(_runtime_memory=(SimpleNamespace(
+            complete=lambda key: runtime_released.set()) if runtime_enabled else None)),
         events=SimpleNamespace(write=lambda value: None),
     )
     exec(compile(module, str(source), 'exec'), environment)
@@ -130,4 +135,5 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock():
         thread.join(2)
     assert not thread.is_alive()
     assert not errors
+    assert not runtime_released.is_set()  # Runtime control owns no execution tickets.
     assert idle_updates == [('session', False)]

@@ -31,20 +31,104 @@ selects the CLI's result directory, independently of
 
 ## Supported comparison policies
 
-| Behavior | `--baseline` value | Required input |
-| --- | --- | --- |
-| Fixed per-command memory reservation; VMs remain running | `tool-static-resident` | `static_tool_memory_mib` |
-| Recorded per-command P50 prediction; VMs remain running | `tool-p50-resident` | `prediction_artifact` |
-| P50 prediction plus pressure-triggered checkpointing while the agent waits for a model response | `tool-p50-wait-reactive` | Prediction file and model-wait estimate with its source |
+| Preset | Runtime control | Admission | Residency |
+| --- | --- | --- | --- |
+| `runtime-resident` | Official cgroup fallback | off | resident |
+| `predicted-resident` | Official cgroup fallback | predicted | resident |
+| `fixed-resident` | Official cgroup fallback | fixed | resident |
+| `uncontrolled-resident` | off | off | resident |
+| `prediction-only-resident` | off | predicted | resident |
+| `predicted-wait-snapshot` | Official cgroup fallback | predicted | wait-aware snapshot |
 
-Repeat `--baseline` to compare policies in one experiment.
-`--reserve-during`, `--estimate`, `--idle`, and `--resume`
-filter the predefined policy catalog; they do not create arbitrary
-combinations. Policies marked `DEPRECATED` in `baselines --all`
-are excluded from the supported workflow.
+Repeat `--baseline` to compare presets. In YAML, policy names are labels:
+`admission: "off"`, `fixed`, or `predicted` is independent of
+`runtime_control: "off"` or `agentcgroup_cgroup`, and of reclamation.
+Quote `"off"` in YAML so it is not parsed as a boolean. Runtime control defaults
+to the official fallback. Snapshot policies require `eviction: wait_aware_pressure`
+and `restore: reactive`; resident policies use `none` for both.
+
+The main admission ablation compares `runtime-resident` against
+`predicted-resident`. Add `uncontrolled-resident` and `prediction-only-resident`
+to measure the interaction. Keep workload, physical budget, priorities, placement,
+creation margins and residency fixed. Repeat this matrix separately on an
+ordinary pool and on the supernode configuration; neither controller requires
+shared NUMA memory. See [control-ablation.yaml](../examples/experiments/control-ablation.yaml).
+
+The unmodified upstream `memcg_controller.py` from commit
+`551ca1689b7d2d30db6b8a8613414750103cc68b` is bundled and hash-checked.
+Its [provenance and license](../clawbox/experiments/vendor/agentcgroup/PROVENANCE.md)
+are included with the source and Python package.
+`resources.agentcgroup_source` optionally selects an external copy with that
+same hash. This selects the official **cgroup v2 fallback** explicitly.
+`agentcgroup_bpf` is rejected until a patched kernel and descendant fault
+accounting have been qualified; it never silently selects the fallback.
+The upstream sched_ext CPU scheduler is not enabled. HIGH/LOW CPU weights
+are proportional to offered session counts and identical across policies,
+avoiding an accidental 50/50 CPU split between one HIGH session and all LOW
+sessions. These are group shares, not CPU reservations; nested groups and
+disjoint CPU masks can still differ from a flat CPU scheduler under contention.
+
+Apply the host budget before launch: `resources.local_memory_cgroup` defaults
+to `/sys/fs/cgroup/cube_sandbox/sandbox` and must have finite `memory.max` and
+delegated memory, CPU and cpuset controllers. Install the Cubelet/Shim builds
+from the complete `prepare-semantic-source.sh` patch set. Run launch, qualify,
+abort and destroy as root, preserving the configured environment, for example
+`sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch ...`.
+The worker writes root-only cgroup capabilities under `/run/clawbox/cgroups`.
+Concurrent experiments in the same physical cgroup are rejected.
+
+Each repetition assigns exactly one HIGH session, rotating through session
+indices across repetitions. The assignment is identical across policies at
+the same concurrency; use a multiple of the concurrency as the repetition
+count for balanced priorities. The remaining sessions share one LOW group,
+matching the upstream daemon's aggregate LOW layout. Both agent and tool VMs
+keep their session's priority during commands, model waits and restore.
+Creation and restore enter the leaf before guest RAM allocation. Per-node
+CPU/NUMA placement, shared borrowing and snapshot storage remain separate;
+the controller uses one physical budget spanning all simulated compute nodes.
+
+The fallback runs every 100 ms, including periods with no active tools. Its
+upstream triggers are HIGH `memory.events.high`, parent PSI, or parent usage
+at least 85% of `memory.max`. Protection lasts one second: HIGH `memory.low`
+becomes 80% of the parent budget and aggregate LOW `memory.high` becomes 50%.
+Normal values are 0 and `max`. Tool completion never resets this state.
+On kernels without PSI the other two upstream signals remain active and
+results report `psi_available: false`. Required control-file failures fail
+the arm. These controls throttle growth and influence reclaim; they do not
+guarantee host RAM release when a guest frees memory or guarantee no OOM.
+
+Predicted and fixed admission use the same physical-demand ledger. Admission
+checks measured charges plus growth not yet observed, the candidate, and
+`resources.admission_margin_mib` (default 256 MiB) against the global budget.
+It also checks the home-node budget. A shared allocation is credited only after
+the live-borrow pool has granted it. Completed calls release pending demand;
+retained resident pages remain in the next measurement.
+
+A request that fits proceeds immediately. Excess predicted demand queues before
+execution; observed sustained congestion also closes the gate (90% occupancy
+with at least 10% PSI stalls or heavy ineffective reclaim), reopening when
+committed demand falls to 80% or severe pressure has subsided for one second.
+The demand/capacity check still applies after reopening; retained VM backing
+alone must not leave the pressure gate closed forever. These are admission heuristics, separate from the
+unchanged upstream controller, and do not guarantee no OOM. Requests that cannot
+make progress expire at the configured deadline; no oversized request is admitted
+merely because the active set is empty. `admission: "off"` bypasses this tool gate
+and does not load prediction artifacts. VM creation/restore accounting remains
+identical between paired arms; `startup_headroom_mib` defaults to 256 MiB.
+
+`experiment train` emits `clawbox_prediction_v2`: frozen ClawTune guest P50
+predictions plus a measured guest-to-host cgroup increment calibration from a
+separate validated training run. Host cgroup growth is sampled alongside guest
+measurements in every policy. RSS is reported separately. Guest values are never
+implicitly treated as host memory. Missing predictions/calibration fail explicitly;
+short duration without memory observations does not establish a zero estimate.
+Recollect training data when the artifact lacks this measurement contract.
+
+`--admission`, `--runtime-control`, and `--reclamation` filter convenience presets.
+For other supported combinations, edit the independent YAML fields directly.
 
 `--static-tool-memory-mib auto` uses the measured 90th percentile of
-extra command memory from a validated training run. The
+host cgroup execution growth from a validated training run. The
 `--model-wait-prediction-seconds auto` value comes from the current
 trace's median model-call duration, scaled by `time_scale`. Both
 values and their sources are frozen when the YAML is generated; a
@@ -53,7 +137,7 @@ formal run does not train them online.
 ## Experiment YAML fields
 
 Fields without CLI options can be edited directly. The format requires
-`schema_version: 2` and rejects unknown fields. See
+`schema_version: 3` and rejects unknown fields. See
 [spec.py](../clawbox/experiments/spec.py) for the complete schema. Use
 `describe` to inspect the effective configuration; class defaults
 do not necessarily match a given base YAML.
@@ -163,18 +247,31 @@ A record made with a lower `--qualification-concurrency` cannot
 cover a higher-concurrency experiment. The record is tied to the full
 specification, implementation revision, templates and images, nodes,
 policies, and concurrency. `launch` reruns preflight when those change;
-`--force-qualify` requests it explicitly.
+`--force-qualify` requests it explicitly. Runtime-control qualification also
+requires real kernel activation and LOW throttling probes, including measured
+guest allocation growth under the default upstream signals, plus HIGH/LOW
+placement of both VM roles and their configured snapshot restores. A host
+allocation probe does not establish guest-to-host free-page reclamation.
 
 `--detach` backgrounds the formal run after preflight has finished.
 A run ID belongs to one frozen specification. Calling `launch` again
 returns an active run's status, returns an existing successful report,
 or resumes an interrupted run. On resume, only trials with a matching
-specification, successful completion, and verified cleanup are skipped.
+specification, completed outcome, and verified cleanup are skipped. OOM,
+timeout, and admission failures remain recorded outcomes and do not stop the
+remaining trials or get retried on resume. Infrastructure and validation failures
+stop the run; repair the cause before resuming.
 Use a new run ID for changed parameters. After reboot, reapply the host
 YAML before launching the same specification and run ID. Keep ownership
 and completion records intact.
 
 ## Reading the results
+
+The runtime-control table separates HIGH and LOW completion counts and JCT.
+Check LOW completion as well as HIGH latency before claiming a benefit.
+Cross-repetition averages include successful arms with the same case mix,
+concurrency, complete policy and resource configuration; failed arms remain
+visible in the per-arm report.
 
 | Path within the run directory | Contents |
 | --- | --- |
@@ -200,10 +297,22 @@ resident memory, allocated snapshot pages, and shared-pool accounting
 are separate quantities. See [per-node result fields](supernode.md#reading-the-results).
 
 Crossing a high watermark is a controller metric, not automatically a
-failed trial or evidence of prediction error. OOMs, shared-pool capacity
-violations, failed final validation, lost telemetry, or unverified
-cleanup invalidate a comparison. `n/a` for prediction error or
+failed trial or evidence of prediction error. Policy OOMs are failure outcomes;
+`correctness.experiment_cgroup_oom_kill_events` identifies kills in the experiment
+domain even when the resulting VM error is an RPC failure. OOMs elsewhere on the
+host invalidate the trial. OOMs and timeouts may prevent final telemetry delivery:
+retain those failed outcomes, but do not impute missing measurements.
+Shared-pool capacity violations, failed final validation, unexplained telemetry
+loss, control failures, or unverified cleanup invalidate a comparison. `n/a` for prediction error or
 coverage means the observation is missing, not that error was zero.
 For a performance claim, keep workload, topology, VM identities,
 arrival pattern, and random seed comparable; use independent
 training data, multiple repetitions, and the raw failed samples.
+
+Cross-repetition performance means are conditional on successful trials; the report
+also retains all offered trials and priority completion counts. Do not discard
+policy OOMs or timeouts when comparing completion rates. P95 is computed from raw
+completed session durations, not from an average of per-trial percentiles; fewer
+than 20 samples are reported as unavailable. The bootstrap interval resamples
+whole trials and requires at least five trials. Report completion rates alongside
+conditional latency, and retain the task mix and priority rotation.

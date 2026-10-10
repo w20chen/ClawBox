@@ -96,7 +96,7 @@ def emit_overview(value: dict[str, Any]) -> None:
             f"LOCAL LOW/HIGH/HARD={admission['local_low_watermark_gib']:g}/"
             f"{admission['local_high_watermark_gib']:g}/{local_capacity:g} GiB, "
             f"shared pool={admission['shared_pool_capacity_gib']:g} GiB, "
-            f"live-borrow cap={admission['shared_live_borrow_limit_gib']:g} GiB, "
+            f"live-borrow cap={admission['shared_live_borrow_limit_gib'] or 0:g} GiB, "
             f"combined live cgroup limit={admission['combined_live_cgroup_limit_gib']:g} GiB"
         )
     else:
@@ -108,16 +108,16 @@ def emit_overview(value: dict[str, Any]) -> None:
         )
     static = admission["static"]
     print(
-        f"Admission A: fixed={static['per_command_mib']} MiB, "
+        f"Fixed admission: {static['per_command_mib']} MiB, "
         f"reservation-only ceiling={static['reservation_only_slots']} concurrent commands"
     )
     p50 = admission.get("p50")
     if p50:
         if p50.get("error"):
-            print(f"Admission A+B/C: unavailable ({p50['error']})")
+            print(f"Predicted admission: unavailable ({p50['error']})")
         else:
             print(
-                "Admission A+B/C: frozen P50 range="
+                "Predicted admission: calibrated host growth range="
                 f"{p50['min_mib']:g}..{p50['max_mib']:g} MiB "
                 f"(median={p50['median_mib']:g}, entries={p50['entry_count']}), "
                 "reservation-only ceiling at max="
@@ -304,12 +304,10 @@ def parser() -> argparse.ArgumentParser:
         "--static-tool-memory-mib", type=static_memory_value,
         help="fixed Tool admission in MiB, or auto for training-artifact P90",
     )
-    configure.add_argument("--full-tool-memory-mib", type=int)
     configure.add_argument(
         "--prediction-artifact",
-        help="frozen clawbox_p50_v1 file from a separate validated training run",
+        help="frozen clawbox_prediction_v2 file from a separate validated training run",
     )
-    configure.add_argument("--oracle-measurements")
     configure.add_argument("--arrival-schedule", choices=("burst", "fixed_stagger"))
     configure.add_argument("--stagger-seconds", type=float)
     configure.add_argument("--random-seed", type=int)
@@ -324,9 +322,6 @@ def parser() -> argparse.ArgumentParser:
         help="predicted model wait, or auto for the scaled recorded-trace median",
     )
     configure.add_argument("--model-wait-prediction-source")
-    configure.add_argument("--fixed-delay-seconds", type=float)
-    configure.add_argument("--prefetch-lead-seconds", type=float)
-    configure.add_argument("--checkpoint-break-even-seconds", type=float)
     configure.add_argument("--inference-backend", choices=("replay", "api"))
     configure.add_argument("--model")
     configure.add_argument("--base-url")
@@ -523,10 +518,8 @@ def main(argv: list[str] | None = None) -> int:
             return launch_experiment(args)
         if args.command == "baselines":
             admission_required = {
-                "tool_full": ["resources.full_tool_memory_mib"],
-                "tool_static": ["resources.static_tool_memory_mib"],
-                "tool_p50": ["resources.prediction_artifact"],
-                "tool_oracle": ["resources.oracle_measurements"],
+                'fixed': ['resources.static_tool_memory_mib'],
+                'predicted': ['resources.prediction_artifact'],
             }
             rows = []
             for name, value in BASELINES.items():
@@ -535,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
                 required_settings = list(
                     admission_required.get(value.admission_policy.value, [])
                 )
+                if "resources.local_memory_cgroup" not in required_settings:
+                    required_settings.append("resources.local_memory_cgroup")
                 if value.eviction_policy.value == "wait_aware_pressure":
                     required_settings.extend([
                         "inference.configuration.model_wait_prediction_seconds",
@@ -545,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
                 rows.append({
                     "name": name,
                     "admission": value.admission_policy.value,
+                    "runtime_control": value.runtime_control.value,
                     "reclamation": value.reclamation_policy.value,
                     "eviction": value.eviction_policy.value,
                     "restore": value.restore_policy.value,
@@ -629,6 +625,7 @@ def main(argv: list[str] | None = None) -> int:
 
             spec = configure_experiment(
                 args.base,
+                host_profile=profile or None,
                 compute_nodes=profile.get("compute_nodes"),
                 placement_policy=args.placement_policy,
                 session_compute_nodes=args.session_compute_nodes.split(",") if args.session_compute_nodes else None,
@@ -732,9 +729,7 @@ def main(argv: list[str] | None = None) -> int:
                 snapshot_mechanism=args.snapshot_mechanism,
                 snapshot_storage=args.snapshot_storage,
                 static_tool_memory_mib=args.static_tool_memory_mib,
-                full_tool_memory_mib=args.full_tool_memory_mib,
                 prediction_artifact=args.prediction_artifact,
-                oracle_measurements=args.oracle_measurements,
                 arrival_schedule=args.arrival_schedule,
                 stagger_seconds=args.stagger_seconds,
                 random_seed=args.random_seed,
@@ -746,9 +741,6 @@ def main(argv: list[str] | None = None) -> int:
                 openclaw_exec_yield_ms=args.openclaw_exec_yield_ms,
                 model_wait_prediction_seconds=args.model_wait_prediction_seconds,
                 model_wait_prediction_source=args.model_wait_prediction_source,
-                fixed_delay_seconds=args.fixed_delay_seconds,
-                prefetch_lead_seconds=args.prefetch_lead_seconds,
-                checkpoint_break_even_seconds=args.checkpoint_break_even_seconds,
                 inference_backend=args.inference_backend,
                 model=args.model,
                 base_url=args.base_url,

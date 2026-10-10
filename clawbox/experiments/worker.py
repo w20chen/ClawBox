@@ -47,11 +47,15 @@ from .openclaw_driver import (
     run_openclaw,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
+from .congestion import RuntimeMemoryControl, locate_cgroup
+from .priority import PriorityDomain
+from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
 from .topology import place_session
 from .spec_types import InferenceBackend, SnapshotTier
 from .policy_control import PolicyControlServer
-from .prediction import CommandPredictionProvider, P50PredictionProvider, PredictionUnavailable, clawtune_extra_peak
+from .prediction import P50PredictionProvider, PredictionUnavailable
+from .admission import DemandLedger
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
 from .ssh_credentials import generate_ssh_credentials
 from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
@@ -59,6 +63,19 @@ from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
     ReclamationPolicy, RestorePolicy, expand_matrix, load_experiment,
 )
+
+
+def classify_arm_failure(failure, *, domain_oom_kills=0, infrastructure_error=None):
+    """Preserve overload outcomes without hiding control or cleanup failures."""
+    if infrastructure_error is not None:
+        return FailureCategory.INFRASTRUCTURE
+    if domain_oom_kills:
+        return FailureCategory.OOM
+    if isinstance(failure, TimeoutError):
+        return FailureCategory.TIMEOUT
+    if failure is None:
+        return None
+    return failure_category_for(RunStatus.FAILED, str(failure))
 
 
 def drain_policy_futures(pending: list[Any], lock: Any, timeout_s: float | None) -> None:
@@ -102,20 +119,8 @@ def policy_operation_headroom_mib(arm: ExperimentArm) -> int:
 
 
 def policy_progress_budget_mib(arm: ExperimentArm) -> int | None:
-    """Return the live-memory domain available to already admitted sessions.
-
-    HIGH governs admission of new VM pairs.  Existing sessions must be able to
-    reach the logical LOCAL hard watermark, at which point the watermark
-    controller redirects whole VMs to the bounded shared NUMA borrow pool.
-    Charging their pending Tool reservations against LOCAL hard would stop
-    progress before the controller can observe HARD and borrow, so their
-    liveness budget is the enforced combined cgroup limit instead.
-    """
-    borrow = arm.resources.shared_memory_borrow_limit_mib
-    local = arm.resources.local_memory_capacity_mib
-    if borrow is None or local is None:
-        return None
-    return local + borrow
+    """LOCAL growth may use its hard watermark, never unfunded shared capacity."""
+    return arm.resources.local_memory_capacity_mib
 
 
 class WatermarkController:
@@ -179,7 +184,7 @@ class WatermarkController:
                 return True
             try:
                 record = lifecycle.borrow_shared()
-            except (LifecycleError, WarmCapacityError):
+            except WarmCapacityError:
                 return False
             self.borrow_count += 1
             self.borrow_service_seconds += record.service_seconds
@@ -199,11 +204,11 @@ class WatermarkController:
         projected = self.coordinator.projected_local_commitment(predicted_increment_mib)
         if projected <= self.hard:
             return False
-        if not self._record_borrow(lifecycle, reason="predicted_local_hard_guard"):
-            raise RuntimeError(
-                "predicted LOCAL hard crossing has no shared borrow capacity"
-            )
-        return True
+        if not getattr(lifecycle, 'resident', True):
+            return False
+        # Lack of shared capacity means wait on LOCAL admission, not fabricate
+        # shared headroom or invalidate an otherwise healthy execution.
+        return self._record_borrow(lifecycle, reason="predicted_local_hard_guard")
 
     def _borrow_one(self) -> bool:
         borrowed = set(self.borrower.borrowed())
@@ -551,7 +556,7 @@ def enrich_tool_execution_observations(
             if isinstance(extra, (int, float)) and math.isfinite(extra) and extra >= 0:
                 row["actual_extra_memory_mib"] = extra / 1024**2
                 if row.get("prediction_quantile") == 0.5:
-                    value = row.get("predicted_incremental_memory_mib")
+                    value = row.get("predicted_guest_extra_memory_mib")
                     if value is not None:
                         row["p50_extra_memory_error_mib"] = float(value) - extra / 1024**2
         row["memory_unavailable_reason"] = cgroup.get("memory_unavailable_reason")
@@ -568,7 +573,7 @@ def enrich_tool_execution_observations(
         predicted_host = row.get("predicted_incremental_memory_mib")
         actual_host = row.get("actual_host_execution_increment_mib")
         if (predicted_host is not None and actual_host is not None
-                and row.get("admission_prediction_target") == "host_vm_rss_execution_increment"):
+                and row.get("admission_prediction_target") == "host_cgroup_memory_current_increment"):
             host_error = float(predicted_host) - float(actual_host)
             row.update({
                 "host_increment_prediction_error_mib": host_error,
@@ -758,24 +763,10 @@ class ExperimentWorker:
     @staticmethod
     def _startup_headroom_mib(
         arm: ExperimentArm,
-        prediction_provider: CommandPredictionProvider | None,
+        prediction_provider: P50PredictionProvider | None,
     ) -> int:
-        """Leave room for one in-policy Tool call while another pair starts."""
-        if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL:
-            return 0
-        if arm.policy.admission is AdmissionPolicy.TOOL_FULL:
-            return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
-        if arm.policy.admission is AdmissionPolicy.TOOL_STATIC:
-            return int(arm.resources.static_tool_memory_mib or 1)
-        if prediction_provider is not None:
-            return max(
-                int(arm.resources.non_command_tool_memory_mib
-                    or arm.resources.static_tool_memory_mib or 1),
-                int(math.ceil(prediction_provider.max_incremental_memory_mib)),
-            )
-        # Live Runtime predictions are not frozen on the worker, so their
-        # maximum is unknown before VM creation. Preserve the capacity guard.
-        return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
+        """Identical lifecycle margin in every admission ablation arm."""
+        return arm.resources.startup_headroom_mib
 
     def run(self, *, arm_ids: set[str] | None = None,
             write_summary: bool = True) -> list[ResultEnvelope]:
@@ -856,7 +847,7 @@ class ExperimentWorker:
                 Path(arm.resources.local_memory_cgroup),
                 local_capacity_bytes=arm.resources.local_memory_capacity_mib * 1024 * 1024,
                 total_capacity_bytes=(
-                    arm.resources.local_memory_capacity_mib + shared_borrow_mib
+                    arm.resources.local_memory_capacity_mib + (shared_borrow_mib or 0)
                 ) * 1024 * 1024,
                 local_numa_node=(arm.resources.compute_nodes[0].numa_node
                                  if arm.resources.compute_nodes else arm.resources.local_numa_node),
@@ -864,7 +855,7 @@ class ExperimentWorker:
                 shared_numa_node=arm.resources.warm_numa_node,
                 interval_s=arm.execution.memory_sample_interval_seconds,
             )
-            if arm.resources.local_memory_cgroup and shared_borrow_mib is not None else
+            if arm.resources.local_memory_cgroup and (shared_borrow_mib is not None or arm.resources.compute_nodes) else
             CgroupMemorySampler(
                 Path(arm.resources.local_memory_cgroup),
                 capacity_bytes=(arm.resources.local_memory_capacity_mib or
@@ -904,38 +895,27 @@ class ExperimentWorker:
             try:
                 observation = sampler.reclaim_file_cache()
             except OSError as exc:
-                # memory.reclaim is root-owned on the host cgroup.  A worker
-                # may be intentionally unprivileged; failure to request
-                # cache reclaim must remain observable and let normal
-                # lifecycle eviction make progress instead of invalidating
-                # the arm.
                 events.write({
                     "event": "local_cache_reclaim",
-                    "status": "unavailable",
+                    "status": "failed",
                     "error": f"{type(exc).__name__}: {exc}",
                 })
-                return
+                raise RuntimeError('LOCAL cache reclamation failed') from exc
             events.write({"event": "local_cache_reclaim", **observation})
 
         prediction_provider = None
-        if (arm.agent.driver is AgentDriver.OPENCLAW
-                and arm.policy.admission is AdmissionPolicy.TOOL_ORACLE):
-            source = arm.resources.oracle_measurements
-            if not source:
-                raise ValueError(
-                    f"{arm.policy.admission.value} requires an immutable command artifact"
-                )
-            prediction_provider = CommandPredictionProvider(
-                Path(source),
-                repository=arm.case.repository or arm.case.case_id,
-                prediction_source="runtime_tool_oracle_heldout",
-            )
-        if arm.policy.admission is AdmissionPolicy.TOOL_P50 and arm.resources.prediction_artifact:
+        if arm.policy.admission is AdmissionPolicy.PREDICTED:
             prediction_provider = P50PredictionProvider(
                 Path(arm.resources.prediction_artifact),
                 repository=arm.case.repository or arm.case.case_id,
-                sandbox_identity={k: getattr(arm.sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")},
-            )
+                sandbox_identity={k: getattr(arm.sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")})
+        global_sampler = CgroupMemorySampler(Path(arm.resources.local_memory_cgroup),
+            capacity_bytes=((arm.resources.local_memory_capacity_mib or arm.resources.pool_memory_budget_mib)
+                            + (shared_borrow_mib or 0))*1024**2)
+        demand_ledger = DemandLedger(sample=global_sampler.current, capacity=global_sampler.total,
+                                    free_floor=arm.resources.emergency_free_memory_mib*1024**2,
+                                    margin=arm.resources.admission_margin_mib*1024**2,
+                                    cgroup=Path(arm.resources.local_memory_cgroup))
         snapshot_pool = WarmSnapshotPool(
             arm.resources.warm_memory_capacity_mib * 1024 * 1024,
             borrow_capacity_bytes=(shared_borrow_mib or 0) * 1024 * 1024,
@@ -955,12 +935,13 @@ class ExperimentWorker:
                 domain_sampler = NumaCgroupMemorySampler(
                     Path(arm.resources.local_memory_cgroup),
                     local_capacity_bytes=node.memory_capacity_mib * 1024 * 1024,
-                    total_capacity_bytes=(arm.resources.local_memory_capacity_mib + shared_borrow_mib) * 1024 * 1024,
+                    total_capacity_bytes=(arm.resources.local_memory_capacity_mib + (shared_borrow_mib or 0)) * 1024 * 1024,
                     local_numa_node=node.numa_node, shared_numa_node=arm.resources.warm_numa_node,
                     interval_s=arm.execution.memory_sample_interval_seconds,
                 )
             coordinator = PolicyCoordinator(
-                arm.policy, budget_mib=domain_arm.resources.pool_memory_budget_mib,
+                arm.policy, demand_ledger=demand_ledger, demand_scope=node.node_id if node else "local",
+                budget_mib=domain_arm.resources.pool_memory_budget_mib,
                 emergency_free_mib=arm.resources.emergency_free_memory_mib,
                 operation_headroom_mib=policy_operation_headroom_mib(domain_arm),
                 progress_budget_mib=policy_progress_budget_mib(domain_arm),
@@ -982,8 +963,8 @@ class ExperimentWorker:
                 if isinstance(domain_sampler, NumaCgroupMemorySampler) and numa_borrower is not None else None
             )
             domains[node.node_id if node else "local"] = SimpleNamespace(
-                arm=domain_arm, sampler=domain_sampler, coordinator=coordinator,
-                borrower=numa_borrower, controller=controller,
+                arm=domain_arm, sampler=domain_sampler, coordinator=coordinator, cpus=node.cpus if node else None,
+                borrower=numa_borrower, controller=controller, peak_bytes=0,
             )
         def session_domain(index):
             if not arm.resources.compute_nodes:
@@ -992,9 +973,11 @@ class ExperimentWorker:
             return domains[node.node_id]
         if arm.resources.local_memory_cgroup:
             def record_memory_sample(used: int, available: int) -> None:
+                for domain in domains.values():
+                    domain.peak_bytes = max(domain.peak_bytes, domain.sampler.current()[0])
                 pool = snapshot_pool.snapshot()
                 warm_physical = None
-                if arm.resources.warm_snapshot_root:
+                if arm.resources.warm_memory_capacity_mib and arm.resources.warm_snapshot_root:
                     stat = os.statvfs(arm.resources.warm_snapshot_root)
                     warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
                 events.write({
@@ -1020,12 +1003,43 @@ class ExperimentWorker:
         policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
         watermark_controller = next(iter(domains.values())).controller
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
+        self._runtime_memory = None
+        self._priority_domain = None
+        if arm.resources.local_memory_cgroup:
+            # Use the same hierarchy for OFF ablations. One physical controller
+            # spans all simulated NUMA nodes and their shared borrow allowance.
+            self._priority_domain = PriorityDomain(Path(arm.resources.local_memory_cgroup),
+                concurrency=arm.concurrency, repetition=arm.repetition,
+                journal_directory=self.output_root/'priority-domains',
+                placements={i: (session_domain(i).cpus,
+                                session_domain(i).arm.resources.local_numa_node)
+                            for i in range(arm.concurrency)})
+            try:
+                self._priority_domain.start()
+                self._runtime_memory = RuntimeMemoryControl(
+                    Path(arm.resources.local_memory_cgroup),
+                    Path(arm.resources.agentcgroup_source) if arm.resources.agentcgroup_source else None,
+                    high=self._priority_domain.high, low=self._priority_domain.low,
+                    enabled=arm.policy.runtime_control is RuntimeControl.AGENTCGROUP_CGROUP,
+                    emit=events.write,
+                )
+                self._runtime_memory.start()
+                demand_ledger.check = self._runtime_memory.check
+            except BaseException:
+                try:
+                    if self._runtime_memory is not None:
+                        self._runtime_memory.close()
+                finally:
+                    self._priority_domain.close()
+                    policy_events.close()
+                raise
         sampler.start()
         for domain in domains.values():
             if domain.controller is not None:
                 domain.controller.start()
         sessions: list[dict[str, Any]] = []
         failure: Exception | None = None
+        infrastructure_error: Exception | None = None
         interrupted = False
         arm_started_wall = time.time()
         arm_started_monotonic = time.monotonic()
@@ -1102,11 +1116,18 @@ class ExperimentWorker:
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
             policy_events.close(wait=not interrupted)
+            if self._runtime_memory is not None:
+                try:
+                    self._runtime_memory.close()
+                except Exception as exc:
+                    infrastructure_error = infrastructure_error or exc
+                    failure = failure or exc
             for domain in domains.values():
                 if domain.controller is not None:
                     try:
                         domain.controller.stop()
                     except Exception as exc:
+                        infrastructure_error = infrastructure_error or exc
                         failure = failure or exc
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
@@ -1115,6 +1136,11 @@ class ExperimentWorker:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception as exc:
                 cleanup_error = exc
+            if self._priority_domain is not None:
+                try:
+                    self._priority_domain.close()
+                except Exception as exc:
+                    cleanup_error = cleanup_error or exc
             if cleanup_error is None:
                 for domain in domains.values():
                     if domain.borrower is not None:
@@ -1126,19 +1152,23 @@ class ExperimentWorker:
                           "interval_seconds": sampler.interval_s,
                           "samples": sampler.samples()})
             if cleanup_error is not None:
+                infrastructure_error = infrastructure_error or cleanup_error
                 failure = failure or cleanup_error
+            domain_oom_kills = (self._runtime_memory.stats.get('oom_kill_events', 0)
+                                if self._runtime_memory is not None else 0)
+            if domain_oom_kills:
+                failure = failure or RuntimeError(f'experiment cgroup OOM kills: {domain_oom_kills}')
             if memory.host_oom_kill_events:
                 failure = failure or RuntimeError(
                     "host OOM kill observed during arm: "
                     f"{memory.host_oom_kill_events}"
                 )
+                if memory.host_oom_kill_events > domain_oom_kills:
+                    infrastructure_error = infrastructure_error or RuntimeError(
+                        'host OOM kills occurred outside the experiment cgroup')
             pool_budget_bytes = arm.resources.pool_memory_budget_mib * 1024 * 1024
-            if (watermark_controller is None
-                    and memory.peak_used_delta_bytes > pool_budget_bytes):
-                failure = failure or RuntimeError(
-                    "execution pool budget exceeded: "
-                    f"peak={memory.peak_used_delta_bytes} budget={pool_budget_bytes}"
-                )
+            # The admission budget is a policy threshold, not memory.max.
+            # Exceeding it is measured in every arm, including admission OFF.
         node_results = {}
         for node_id, domain in domains.items():
             c = domain.controller
@@ -1146,6 +1176,7 @@ class ExperimentWorker:
                 "resources": domain.arm.resources.model_dump(mode="json"),
                 "admission_control": domain.coordinator.admission_metrics(),
                 "peak_commitment_bytes": domain.coordinator.peak_commitment_bytes,
+                "observed_peak_bytes": domain.peak_bytes,
                 "placements": domain.borrower.placements if domain.borrower else [],
                 "watermarks": {name: getattr(c, name) for name in (
                     "low", "high", "hard", "peak_local_bytes", "high_crossings",
@@ -1163,7 +1194,7 @@ class ExperimentWorker:
                 admission_metrics=lambda: {"scope": "per_compute_node", "nodes": {
                     key: value["admission_control"] for key, value in node_results.items()
                 }})
-            controllers = [d.controller for d in domains.values()]
+            controllers = [d.controller for d in domains.values() if d.controller is not None]
             watermark_controller = SimpleNamespace(**{
                 name: sum(getattr(c, name) for c in controllers) for name in (
                     "low", "high", "hard", "high_crossings", "high_overshoot_byte_seconds",
@@ -1174,7 +1205,7 @@ class ExperimentWorker:
                 name: max(getattr(c, name) for c in controllers) for name in (
                     "peak_shared_live_bytes", "peak_combined_live_bytes", "peak_shared_total_bytes",
                 )
-            })
+            }) if controllers else None
         status = RunStatus.SUCCEEDED if failure is None else RunStatus.FAILED
         duration = time.monotonic() - started
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
@@ -1203,7 +1234,7 @@ class ExperimentWorker:
                  if item.get("execution_scope", "agent-tool") == "agent-tool"]
             )
         peak_over_budget_bytes = (
-            max(max(0, d.controller.peak_local_bytes - d.controller.high) for d in domains.values())
+            max(max(0, d.peak_bytes - d.arm.resources.pool_memory_budget_mib*1024**2) for d in domains.values())
             if arm.resources.compute_nodes else max(0, memory.peak_used_delta_bytes - pool_budget_bytes)
         )
         result = ResultEnvelope(
@@ -1211,7 +1242,8 @@ class ExperimentWorker:
             sandbox_task_uid=self.task_uid,
             experiment_id=self.spec.experiment_id, arm=arm,
             provenance=provenance, status=status,
-            failure_category=failure_category_for(status, "" if failure is None else str(failure)),
+            failure_category=classify_arm_failure(failure, domain_oom_kills=domain_oom_kills,
+                                                  infrastructure_error=infrastructure_error),
             started_at=started_at, completed_at=utcnow(),
             correctness={
                 "completed_sessions": sum(item.get("valid", False) for item in sessions),
@@ -1233,6 +1265,8 @@ class ExperimentWorker:
                     for item in sessions
                 ),
                 "failure": None if failure is None else str(failure),
+                "infrastructure_failure": str(infrastructure_error) if infrastructure_error else None,
+                "experiment_cgroup_oom_kill_events": domain_oom_kills,
                 "session_output_hashes": [item.get("output_hash") for item in sessions],
             },
             performance={
@@ -1284,8 +1318,20 @@ class ExperimentWorker:
                     watermark_controller.borrow_service_seconds
                     if watermark_controller is not None else None
                 ),
-                "blocked_admission_seconds": coordinator.blocked_seconds,
+                "blocked_admission_seconds": sum(d.coordinator.blocked_seconds for d in domains.values()),
                 "admission_control": coordinator.admission_metrics(),
+                "runtime_memory_control": ({**self._runtime_memory.provenance,
+                                            **self._runtime_memory.stats,
+                                            "priority_cpu_weights": self._priority_domain.cpu_weights}
+                                           if self._runtime_memory else None),
+                "priority_sessions": {
+                    priority: {
+                        "offered": sum(p == priority for p in self._priority_domain.priorities.values()),
+                        "completed": sum(s.get('valid', False) and s.get('priority') == priority for s in sessions),
+                        "durations_seconds": [s['agent_jct_seconds'] for s in sessions
+                            if s.get('valid', False) and s.get('priority') == priority],
+                    } for priority in ('high', 'low')
+                } if self._priority_domain else {},
                 "compute_nodes": node_results,
                 "placement_policy": arm.execution.placement_policy,
                 "tool_execution_observations": tool_execution_observations,
@@ -1296,6 +1342,7 @@ class ExperimentWorker:
                         "case_id": item.get("case_id"),
                         "trace_reference": item.get("trace_reference"),
                         "compute_node": item.get("compute_node"),
+                        "priority": item.get("priority"),
                     }
                     for item in sorted(sessions, key=lambda value: value["session_id"])
                 ],
@@ -1372,7 +1419,7 @@ class ExperimentWorker:
 
     def _run_session(self, arm: ExperimentArm, index: int, coordinator: PolicyCoordinator,
                      events: EventWriter, policy_events: PolicyEventExecutor,
-                     prediction_provider: CommandPredictionProvider | None = None,
+                     prediction_provider: P50PredictionProvider | None = None,
                      sandbox_create_gate: Semaphore | None = None,
                      physical_observation: Any = None,
                      arm_started_wall: float | None = None,
@@ -1390,6 +1437,15 @@ class ExperimentWorker:
         if arm_started_monotonic is not None:
             time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
         session_id = f"{arm.arm_id}-{index:04d}"
+        priority_domain = getattr(self, '_priority_domain', None)
+        def priority_options(role):
+            if priority_domain is None:
+                return {}
+            def verify(sandbox_id):
+                evidence = priority_domain.verify(index, role, sandbox_id)
+                events.write({'event': 'runtime_memory_placement', 'session_id': session_id, **evidence})
+            return {'cgroup_token': priority_domain.token(index, role), 'verify_cgroup': verify,
+                    'prepare_cgroup': lambda: priority_domain.prepare(index, role)}
         session_started = time.monotonic()
         session_started_wall = time.time()
         timeline: dict[str, Any] = {
@@ -1472,6 +1528,7 @@ class ExperimentWorker:
             snapshot_reservation_bytes=(arm.runtime.memory_mib + 256) * 1024 * 1024,
             numa_borrower=numa_borrower,
             configured_memory_bytes=arm.runtime.memory_mib * 1024 * 1024,
+            **priority_options('runtime'),
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {
@@ -1510,11 +1567,11 @@ class ExperimentWorker:
             snapshot_reservation_bytes=(arm.sandbox.memory_mib + 256) * 1024 * 1024,
             numa_borrower=numa_borrower,
             configured_memory_bytes=arm.sandbox.memory_mib * 1024 * 1024,
+            **priority_options('tool'),
         )
         if watermark_controller is not None:
             watermark_controller.register(session_id, lifecycle, runtime_lifecycle)
-        lifetime = (arm.runtime.memory_mib + arm.sandbox.memory_mib
-                    if arm.policy.admission is AdmissionPolicy.LIFETIME_FULL else 0)
+        lifetime = 0
         gateway_session: SessionGatewayState | None = None
         policy_session = None
         policy_drained = True
@@ -1956,6 +2013,20 @@ class ExperimentWorker:
         # occupying policy state even though the main cleanup block was never
         # entered.
         coordinator.register(session_id, lifecycle)
+        if self._priority_domain is not None:
+            def read_charge(path):
+                total = int((path/'memory.current').read_text())
+                node = arm.resources.local_numa_node
+                if node is None:
+                    return total, total
+                from .numa_borrow import read_numa_lru_bytes
+                nodes, unknown = read_numa_lru_bytes(path)
+                return total, nodes.get(node, 0) + unknown
+            tool_leaf = self._priority_domain.leaves[index, 'tool']
+            coordinator.register_memory(session_id,
+                tool=lambda: read_charge(tool_leaf),
+                lifecycle=lambda: read_charge(tool_leaf.parent))
+
         coordinator.register_runtime(
             session_id, runtime_lifecycle,
             before_pause=(
@@ -2198,37 +2269,22 @@ class ExperimentWorker:
                     )
                     managed_command = (execution_scope == "agent-tool"
                                        and request.get("operation") != "filesystem")
-                    if (managed_command and arm.policy.admission is AdmissionPolicy.TOOL_P50
-                            and prediction_provider is None):
-                        metadata = request.get("prediction")
-                        if (not isinstance(metadata, dict)
-                                or metadata.get("raw_command_sha256") != request["command_sha256"]):
-                            raise PredictionUnavailable("ClawTune prediction command identity mismatch")
-                        prediction = clawtune_extra_peak(metadata.get("call_prediction"))
-                    elif managed_command and prediction_provider is not None:
+                    prediction = None
+                    if managed_command and prediction_provider is not None:
                         prediction = prediction_provider.resolve_digest(
-                            str(request["command_sha256"]), request.get("prediction")
-                        )
-                    else:
-                        prediction = request.get("prediction")
-                    if (arm.policy.admission in {AdmissionPolicy.TOOL_P50, AdmissionPolicy.TOOL_ORACLE}
-                            and not managed_command):
-                        # File bridge operations have no shell-command KB entry.
-                        # Charge their configured static budget explicitly.
-                        filesystem_tool = request.get("operation") == "filesystem"
+                            str(request['command_sha256']), request.get('prediction'))
+                    elif arm.policy.admission is AdmissionPolicy.PREDICTED:
+                        fixed_budget = (arm.resources.non_command_tool_memory_mib
+                                        or arm.resources.static_tool_memory_mib)
+                        if fixed_budget is None:
+                            raise PredictionUnavailable('non-command operations require an explicit fixed host budget')
                         prediction = {
-                            "canonical_prediction_key": (
-                                "filesystem" if filesystem_tool else "ssh-backend-maintenance"
-                            ),
-                            "prediction_source": (
-                                "filesystem_static" if filesystem_tool else "backend_maintenance_static"
-                            ),
-                            "fallback_level": "not_applicable",
-                            "predicted_incremental_memory_mib": int(
-                                arm.resources.non_command_tool_memory_mib
-                                or arm.resources.static_tool_memory_mib or 1
-                            ),
-                        }
+                            'prediction_source': 'non_command_fixed_host_budget',
+                            'admission_prediction_target': 'host_cgroup_memory_current_increment',
+                            'predicted_incremental_memory_mib': fixed_budget}
+                    runtime_memory = getattr(self, '_runtime_memory', None)
+                    if runtime_memory is not None:
+                        runtime_memory.check()
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
                     local_amount = amount
                     admission_memory_tier = "local"
@@ -2251,7 +2307,7 @@ class ExperimentWorker:
                                 wait_lock,
                                 lambda: coordinator.begin_tool_admission(
                                     session_id, local_amount,
-                                    arm.execution.arm_timeout_seconds,
+                                    arm.execution.arm_timeout_seconds, total_mib=amount,
                                 ),
                             )
                             reservation_acquired = True
@@ -2360,7 +2416,9 @@ class ExperimentWorker:
                                 "attempts": identity_attempt,
                                 "service_seconds": time.monotonic() - identity_started,
                             })
-                            host_sampler = SandboxRSSSampler(route.sandbox_id)
+                            coordinator.bind_tool_memory(session_id)
+                            host_sampler = SandboxRSSSampler(route.sandbox_id,
+                                cgroup=locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup)))
                             host_sampler.start()
                             with reservation_lock:
                                 pending_admissions.discard(execution_id)
@@ -2398,7 +2456,8 @@ class ExperimentWorker:
                     )
                     prediction_record.setdefault("fallback_level", "not_applicable")
                     prediction_record.setdefault(
-                        "predicted_incremental_memory_mib", float(amount)
+                        "predicted_incremental_memory_mib",
+                        None if arm.policy.admission is AdmissionPolicy.OFF else float(amount)
                     )
                     prediction_record.update({
                                  "session_id": session_id,
@@ -2500,7 +2559,7 @@ class ExperimentWorker:
                             if prediction_record.get("execution_id") == execution_id:
                                 prediction_record.update(host_observation)
                                 increment = host_observation.get(
-                                    "actual_host_execution_increment_bytes"
+                                    "host_cgroup_execution_increment_bytes"
                                 )
                                 prediction_record["actual_host_execution_increment_mib"] = (
                                     float(increment) / (1024.0 * 1024.0)
@@ -2816,6 +2875,7 @@ class ExperimentWorker:
             if policy_event_errors:
                 raise RuntimeError("policy event executor failed: " + "; ".join(policy_event_errors))
             return {"session_id": session_id, "case_id": arm.case.case_id,
+                    "priority": priority_domain.priorities[index] if priority_domain else None,
                     "compute_node": numa_borrower.node_id if numa_borrower else None,
                     "trace_reference": (
                         arm.case.replay_trace_reference or arm.case.source_reference
@@ -2982,25 +3042,16 @@ class ExperimentWorker:
 
     def _tool_reservation_mib(self, arm: ExperimentArm, *,
                               prediction: dict[str, Any] | None = None) -> int:
-        policy = arm.policy.admission
-        if policy is AdmissionPolicy.LIFETIME_FULL:
+        if arm.policy.admission is AdmissionPolicy.OFF:
             return 0
-        if policy is AdmissionPolicy.TOOL_FULL:
-            return int(arm.resources.full_tool_memory_mib or arm.sandbox.memory_mib)
-        if policy is AdmissionPolicy.TOOL_STATIC:
-            return int(arm.resources.static_tool_memory_mib or 1)
-        if (policy in {AdmissionPolicy.TOOL_P50, AdmissionPolicy.TOOL_ORACLE}
-                and prediction is None
-                and arm.agent.driver is AgentDriver.OPENCLAW):
-            raise PredictionUnavailable(
-                f"managed {policy.value} cannot admit without Runtime command metadata"
-            )
-        if prediction is not None:
-            value = prediction.get("predicted_incremental_memory_mib")
-            if value is None:
-                raise PredictionUnavailable("prediction metadata has no memory reservation")
-            return max(1, int(math.ceil(float(value))))
-        raise PredictionUnavailable("command prediction metadata is required")
+        if arm.policy.admission is AdmissionPolicy.FIXED:
+            return int(arm.resources.static_tool_memory_mib)
+        if not prediction or prediction.get('admission_prediction_target') != 'host_cgroup_memory_current_increment':
+            raise PredictionUnavailable('predicted admission requires calibrated host cgroup growth')
+        value = prediction.get('predicted_incremental_memory_mib')
+        if isinstance(value, bool) or not isinstance(value, (int,float)) or not math.isfinite(value) or value < 0:
+            raise PredictionUnavailable('invalid predicted host memory increment')
+        return max(1, math.ceil(value))
 
     def _provenance(self) -> dict[str, Any]:
         def command(*args: str) -> str:

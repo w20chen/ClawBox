@@ -77,21 +77,10 @@ def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = Non
         if result["clawtune_memory_backend"] != expected_backend:
             raise PredictionUnavailable(f"{name} prediction backend mismatch")
         return {**result, "fallback_level": name, "unavailable_models": missing}
-    evidence = short_call_evidence or {}
-    count = evidence.get("count", 0)
-    maximum = evidence.get("max_duration_ms")
-    if (isinstance(count, int) and not isinstance(count, bool) and count > 0
-            and isinstance(maximum, (int, float)) and not isinstance(maximum, bool)
-            and math.isfinite(maximum) and 0 <= maximum <= 20
-            and evidence.get("reason") == "no_in_execution_memory_sample"):
-        return {"prediction_source": "short_call_assumption", "prediction_quantile": None,
-                "fallback_level": "short_call_assumption", "unavailable_models": missing,
-                "short_call_evidence": evidence, "predicted_incremental_memory_mib": 0,
-                "admission_prediction_target": "environment_memory_peak_minus_baseline"}
-    raise PredictionUnavailable(f"No P50 memory estimate or measured short-call evidence: {missing}")
+    raise PredictionUnavailable(f"No P50 memory estimate (short duration does not establish zero memory): {missing}")
 
 
-class CommandPredictionProvider:
+class FrozenPredictionProvider:
     """Load one immutable P90 artifact once and resolve exact commands."""
 
     def __init__(self, path: Path, *, repository: str | None = None,
@@ -110,29 +99,15 @@ class CommandPredictionProvider:
         self._lock = Lock()
 
     def _load_entries(self, payload: dict[str, Any]) -> None:
-        candidates: list[dict[str, Any]] = []
-        per_tool = payload.get("per_tool_memory")
-        if isinstance(per_tool, dict):
-            workloads = per_tool.get("workloads") or {}
-            if isinstance(workloads, dict):
-                for workload in workloads.values():
-                    if isinstance(workload, dict):
-                        candidates.extend(
-                            item for item in workload.get("tool_invocations", [])
-                            if isinstance(item, dict)
-                        )
-        for key in ("predictions", "tool_invocations", "commands"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                candidates.extend(item for item in value if isinstance(item, dict))
-            elif isinstance(value, dict):
-                for command, item in value.items():
-                    if isinstance(item, dict):
-                        candidates.append({"command": command, **item})
+        candidates = payload.get('commands')
+        if not isinstance(candidates, list):
+            raise ValueError('prediction artifact requires a commands list')
         for item in candidates:
+            if not isinstance(item, dict):
+                raise ValueError('prediction commands must be objects')
             command = item.get("command")
             if not isinstance(command, str) or not command.strip():
-                continue
+                raise ValueError('prediction commands require nonempty command text')
             digest = str(item.get("command_sha256") or command_sha256(command))
             metadata = self._metadata(item, command, digest)
             previous = self._by_digest.get(digest)
@@ -142,35 +117,7 @@ class CommandPredictionProvider:
 
     def _metadata(self, item: dict[str, Any], command: str,
                   digest: str) -> dict[str, Any]:
-        guest_value = item.get("predicted_command_memory_p90_mib")
-        if guest_value is None:
-            guest_value = item.get("incremental_p90_mib")
-        if guest_value is None and item.get("incremental_p90_kib") is not None:
-            guest_value = float(item["incremental_p90_kib"]) / 1024.0
-        if guest_value is None or not math.isfinite(float(guest_value)) \
-                or float(guest_value) <= 0:
-            raise ValueError(f"P90 entry for {digest} has no positive command prediction")
-        host_value = item.get("predicted_host_execution_increment_mib")
-        if host_value is None or not math.isfinite(float(host_value)) \
-                or float(host_value) <= 0:
-            raise ValueError(
-                f"P90 entry for {digest} has no calibrated positive host increment"
-            )
-        normalized = " ".join(shell_command_prefix_tokens(command))
-        return {
-            "raw_command_sha256": digest,
-            "canonical_prediction_key": normalized,
-            "prediction_source": self.prediction_source,
-            "fallback_level": item.get("key_kind") or item.get("scope") or "unknown",
-            "fallback_path": list(item.get("fallback_path") or []),
-            "predicted_guest_memory_p90_mib": float(guest_value),
-            "predicted_incremental_memory_mib": float(host_value),
-            "admission_prediction_target": "host_vm_rss_execution_increment",
-            "host_mapping_source": item.get("host_mapping_source"),
-            "host_mapping_ratio_p90": item.get("host_mapping_ratio_p90"),
-            "evidence_count": int(item.get("evidence_count") or 0),
-            "kb_generation": item.get("kb_generation") or item.get("generation"),
-        }
+        raise NotImplementedError
 
     @property
     def manifest(self) -> dict[str, dict[str, Any]]:
@@ -237,12 +184,12 @@ class CommandPredictionProvider:
         }
 
 
-class P50PredictionProvider(CommandPredictionProvider):
+class P50PredictionProvider(FrozenPredictionProvider):
     """Frozen, pre-evaluation native model predictions, keyed by exact command."""
 
     def __init__(self, path: Path, *, repository: str, sandbox_identity: dict | None = None) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("schema") != "clawbox_p50_v1" or payload.get("repository") != repository:
+        if payload.get("schema") != "clawbox_prediction_v2" or payload.get("repository") != repository:
             raise ValueError("P50 artifact schema or repository mismatch")
         if payload.get("training_validated") is not True:
             raise ValueError("P50 artifact requires a validated Cube training run")
@@ -307,7 +254,20 @@ class P50PredictionProvider(CommandPredictionProvider):
             raise ValueError("P50 artifact command digest mismatch")
         selected = select_p50(item.get("models") or {},
                               short_call_evidence=item.get("short_call_evidence"))
-        return {**selected, "model_prediction_source": selected["prediction_source"],
+        calibration = self.payload.get('host_calibration') or {}
+        if (calibration.get('target') != 'host_cgroup_memory_current_increment'
+                or calibration.get('sample_count', 0) <= 0):
+            raise PredictionUnavailable('artifact requires measured host cgroup calibration')
+        scale, offset = calibration.get('scale'), calibration.get('offset_bytes')
+        if any(isinstance(v, bool) or not isinstance(v, (int, float))
+               or not math.isfinite(v) or v < 0 for v in (scale, offset)):
+            raise PredictionUnavailable('invalid host calibration')
+        guest_mib = selected['predicted_incremental_memory_mib']
+        return {**selected, 'predicted_guest_extra_memory_mib': guest_mib,
+                'predicted_incremental_memory_mib': guest_mib * scale + offset / 1024**2,
+                'admission_prediction_target': 'host_cgroup_memory_current_increment',
+                'host_calibration': calibration,
+                "model_prediction_source": selected["prediction_source"],
                 "prediction_source": self.prediction_source,
                 "raw_command_sha256": digest, "canonical_prediction_key": digest,
                 "models": item.get("models"), "kb_sha256": self.payload.get("kb_sha256")}

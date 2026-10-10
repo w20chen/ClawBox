@@ -15,12 +15,10 @@ The parallel `scripts/lab` command-line interface is also deprecated. Its shared
 host setup and image helpers are still called by `clawbox experiment setup` and
 `clawbox experiment images`; use the public experiment commands for new runs.
 
-The experiment policy catalog also retains older research policies so old
-result files remain interpretable. Only `tool-static-resident`,
-`tool-p50-resident`, and `tool-p50-wait-reactive` are active.
-`clawbox experiment baselines --all` shows every retained policy with an explicit
-`DEPRECATED` marker. Deprecated policies are excluded from new CLI selections and
-future work does not preserve their behavior.
+The supported experiment uses schema version 3 and the current presets printed by
+`clawbox experiment baselines`. Historical policy names, schemas and prediction
+artifacts are not accepted. Deprecated verification scripts and control-plane
+workflows retain their source but do not constrain current experiment tests.
 
 This does not deprecate shared functionality still used by current commands:
 

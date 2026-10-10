@@ -67,7 +67,9 @@ snapshot directory.
 
 A new configuration uses NUMA 0 and 1 for compute and NUMA 2 for the
 shared pool. Use `host inspect` to adapt the IDs, CPU lists, and capacities
-to the actual machine. When converting a single-node profile, remove its
+to the actual machine. For ordinary NUMA deployment without a shared pool, keep
+the compute nodes and set `warm: false`; see the [host reference](supernode.md).
+When converting a single-node profile, remove its
 top-level `local_node`, `local_gib`, `low_gib`, and `high_gib` fields
 and use this structure:
 
@@ -157,7 +159,7 @@ clawbox experiment configure examples/experiments/getting-started.yaml \
   --experiment-id first-smoke --concurrency 2
 clawbox experiment validate "$HOME/clawbox-specs/smoke.yaml" --inputs
 clawbox experiment describe "$HOME/clawbox-specs/smoke.yaml"
-clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
   "$HOME/clawbox-specs/smoke.yaml" --run-id smoke-01
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment status smoke-01
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment report smoke-01
@@ -183,8 +185,8 @@ resumes an interrupted run. Add `--detach` for a long run and use
 To stop and clean up a run that you own:
 
 ```bash
-clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment abort smoke-01
-clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment destroy smoke-01
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment abort smoke-01
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment destroy smoke-01
 ```
 
 ## 4. Train a prediction file and compare policies
@@ -200,20 +202,20 @@ clawbox experiment configure examples/experiments/getting-started.yaml \
   --trace "$PWD/examples/traces/memory-smoke.jsonl" \
   --prompt 'Allocate and touch 64 MiB for three seconds, then write complete to /workspace/result.txt.' \
   --repository self-service/memory --experiment-id memory-train \
-  --baseline tool-static-resident --concurrency 2
-clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
+  --baseline fixed-resident --concurrency 2
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
   "$HOME/clawbox-specs/memory-train.yaml" --run-id memory-train-01
 clawbox experiment train "$CLAWBOX_OUTPUT_ROOT/memory-train-01" \
   --trace "$PWD/examples/traces/memory-smoke.jsonl" --repository self-service/memory \
   --output "$HOME/clawbox-specs/memory-p50.json"
 clawbox experiment configure "$HOME/clawbox-specs/memory-train.yaml" \
   "$HOME/clawbox-specs/memory-eval.yaml" --experiment-id memory-eval \
-  --baseline tool-static-resident --baseline tool-p50-resident \
-  --baseline tool-p50-wait-reactive \
+  --baseline fixed-resident --baseline predicted-resident \
+  --baseline predicted-wait-snapshot \
   --prediction-artifact "$HOME/clawbox-specs/memory-p50.json" \
   --static-tool-memory-mib auto --model-wait-prediction-seconds auto \
   --snapshot-storage warm-only
-clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
   "$HOME/clawbox-specs/memory-eval.yaml" --run-id memory-eval-01
 clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment report memory-eval-01
 ```
@@ -227,6 +229,27 @@ separate, successful run with complete measurements, use multiple
 repetitions, and retain failures. The tool VM image must contain the
 task repository, dependencies, and intended starting version; editing
 a trace does not prepare the guest environment.
+
+To isolate runtime congestion control and predictive admission, configure a
+resident-only four-policy comparison from the same training configuration:
+
+```bash
+clawbox experiment configure "$HOME/clawbox-specs/memory-train.yaml" \
+  "$HOME/clawbox-specs/control-eval.yaml" --experiment-id control-eval \
+  --baseline uncontrolled-resident --baseline runtime-resident \
+  --baseline prediction-only-resident --baseline predicted-resident \
+  --prediction-artifact "$HOME/clawbox-specs/memory-p50.json" \
+  --concurrency 2,4,8 --repetitions 8
+clawbox experiment validate "$HOME/clawbox-specs/control-eval.yaml" --inputs
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
+  "$HOME/clawbox-specs/control-eval.yaml" --run-id control-eval-01
+```
+
+This comparison works with or without a shared pool. Eight repetitions balance
+the rotating HIGH session at these concurrency levels. Use a workload and load
+sweep that actually exercise congestion for performance claims; this memory
+trace only checks the workflow. Keep failed trials when comparing completion
+rates, and interpret latency as conditional on completion.
 
 Use `clawbox experiment configure --help` for all overrides and
 `clawbox experiment baselines` for the supported policy names.

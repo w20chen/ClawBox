@@ -98,8 +98,8 @@ def _training_arm_sources(run: Path, repository: str) -> tuple[ExperimentSpec, t
             raise ValueError(f'{run}: training arm {arm_id} did not pass final validation')
         if result.correctness.get('cleanup_verified') is not True:
             raise ValueError(f'{run}: training arm {arm_id} cleanup was not verified')
-        if result.arm.policy.name != 'tool-static-resident':
-            raise ValueError(f'{run}: training accepts only tool-static-resident arms')
+        if result.arm.policy.admission.value != 'fixed':
+            raise ValueError(f'{run}: training accepts only fixed admission arms')
 
         marker = run / 'arms' / f'{arm_id}.complete'
         try:
@@ -163,6 +163,9 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
             raise ValueError('Training runs use different Tool environments')
         sandbox_identity = identity
         for source in arm_sources:
+            host_rows = {r['execution_id']: r for r in
+                         source.result.performance.get('tool_execution_observations', [])}
+            digest.update(json.dumps(host_rows, sort_keys=True, separators=(',', ':')).encode())
             validations.append({
                 'run': str(run), 'attempt_id': source.result.attempt_id,
                 'arm_id': source.result.arm.arm_id,
@@ -193,6 +196,7 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
                     evidence.append({'execution_id': item.execution_id, 'command': item.command,
                                      'duration_ms': raw.get('duration_ms'),
                                      'memory_extra_peak_bytes': memory.get('memory_extra_peak_bytes'),
+                                     'host_extra_peak_bytes': host_rows.get(item.execution_id, {}).get('host_cgroup_execution_increment_bytes'),
                                      'memory_unavailable_reason': raw.get('memory_unavailable_reason'),
                                      'observed_repository': item.repo_fingerprint, 'source': str(cgpath)})
                     if artpath.exists():
@@ -241,17 +245,28 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
         and math.isfinite(float(row['memory_extra_peak_bytes']))
         and float(row['memory_extra_peak_bytes']) >= 0
     ]
-    measured_p90_bytes = _percentile(valid_memory, .9)
+    pairs = [(r['memory_extra_peak_bytes'], r['host_extra_peak_bytes']) for r in evidence
+             if all(isinstance(r.get(k), (int, float)) and not isinstance(r[k], bool)
+                    and math.isfinite(r[k]) and r[k] >= 0
+                    for k in ('memory_extra_peak_bytes', 'host_extra_peak_bytes'))]
+    if not pairs:
+        raise ValueError('training requires paired guest and host cgroup execution measurements')
+    # A frozen empirical mapping, not an identity conversion or a hard bound.
+    ratios = [host/guest for guest, host in pairs if guest > 0]
+    scale = _percentile(ratios, .9) if ratios else 0.0
+    offset = _percentile([max(0, host-scale*guest) for guest, host in pairs], .9)
+    host_calibration = {'target': 'host_cgroup_memory_current_increment',
+                        'method': 'training_p90_ratio_plus_p90_residual',
+                        'sample_count': len(pairs), 'scale': scale, 'offset_bytes': offset}
+    measured_p90_bytes = _percentile([host for _, host in pairs], .9)
     static_calibration = {
         'source': 'separate_validated_training_run',
-        'metric': 'guest_memtotal_minus_memavailable_extra_peak',
-        'quantile': .9,
-        'sample_count': len(valid_memory),
-        'measured_bytes': measured_p90_bytes,
-        'measured_mib': measured_p90_bytes / (1024 * 1024),
-        'recommended_mib': max(1, math.ceil(measured_p90_bytes / (1024 * 1024))),
+        'metric': 'host_cgroup_memory_current_increment', 'quantile': .9,
+        'sample_count': len(pairs), 'measured_bytes': measured_p90_bytes,
+        'measured_mib': measured_p90_bytes / 1024**2,
+        'recommended_mib': max(1, math.ceil(measured_p90_bytes / 1024**2)),
     }
-    payload = {'schema': 'clawbox_p50_v1', 'repository': repository, 'quantile': .5,
+    payload = {'schema': 'clawbox_prediction_v2', 'host_calibration': host_calibration, 'repository': repository, 'quantile': .5,
                'training_validated': True, 'training_validation': validations,
                'sandbox_identity': sandbox_identity,
                'memory_measurement': 'guest_memtotal_minus_memavailable',

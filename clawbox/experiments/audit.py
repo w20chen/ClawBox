@@ -1,11 +1,11 @@
-"""Read-only audit of checked-in schema-v2 experiment matrices."""
+"""Read-only audit of checked-in experiment matrices."""
 from __future__ import annotations
 
 import math
 from pathlib import Path
 from typing import Iterable
 
-from .baselines import BASELINES
+from .baselines import BASELINES, ensure_supported_experiment
 from .spec import (
     ExperimentSpec,
     expand_matrix,
@@ -109,13 +109,7 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
                 f"{path}: wait-aware/proactive formal arm requires "
                 "model_wait_prediction_source"
             )
-    catalog_keys = _catalog_keys()
-    missing = [
-        policy.name for policy in spec.policies
-        if _policy_key(policy) not in catalog_keys
-    ]
-    if missing:
-        raise ValueError(f"{path}: policies missing from the baseline catalog: {missing}")
+    ensure_supported_experiment(spec)
     arms = expand_matrix(spec)
     case_multiplier = (
         1 if spec.workload.session_assignment.value == "round_robin"

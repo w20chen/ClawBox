@@ -28,7 +28,8 @@ def test_toolkb_fallback_keeps_measurement_contract():
 
 def test_lightweight_requires_measured_short_duration_and_sampling_reason():
     good = {'count': 2, 'max_duration_ms': 9, 'reason': 'no_in_execution_memory_sample'}
-    assert select_p50({}, short_call_evidence=good)['fallback_level'] == 'short_call_assumption'
+    with pytest.raises(PredictionUnavailable):
+        select_p50({}, short_call_evidence=good)
     for change in [{'count': 0}, {'max_duration_ms': 21}, {'reason': 'memory_sampling_gap'}, {'max_duration_ms': float('nan')}]:
         with pytest.raises(PredictionUnavailable):
             select_p50({}, short_call_evidence={**good, **change})
@@ -36,7 +37,7 @@ def test_lightweight_requires_measured_short_duration_and_sampling_reason():
 
 def test_frozen_provider_checks_repository_command_and_uses_training_prediction(tmp_path):
     path = tmp_path/'p50.json'
-    path.write_text(json.dumps({'schema': 'clawbox_p50_v1', 'repository': 'r', 'training_validated': True,
+    path.write_text(json.dumps({'host_calibration': {'target': 'host_cgroup_memory_current_increment', 'sample_count': 3, 'scale': 1, 'offset_bytes': 0}, 'schema': 'clawbox_prediction_v2', 'repository': 'r', 'training_validated': True,
         'commands': [{'command': 'pytest', 'models': {'tool': model('runtime', 2**20)}}]}))
     provider = P50PredictionProvider(path, repository='r')
     assert provider.max_incremental_memory_mib == 1
@@ -61,7 +62,7 @@ def test_frozen_provider_rejects_unvalidated_or_different_environment(tmp_path):
     path = tmp_path/'p50.json'
     identity = {'image_digest': 'sha256:training', 'vcpu': 2, 'memory_mib': 4096,
                 'architecture': 'arm64'}
-    payload = {'schema': 'clawbox_p50_v1', 'repository': 'r',
+    payload = {'host_calibration': {'target': 'host_cgroup_memory_current_increment', 'sample_count': 3, 'scale': 1, 'offset_bytes': 0}, 'schema': 'clawbox_prediction_v2', 'repository': 'r',
                'sandbox_identity': identity, 'commands': []}
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match='validated Cube'):
@@ -72,3 +73,20 @@ def test_frozen_provider_rejects_unvalidated_or_different_environment(tmp_path):
         P50PredictionProvider(path, repository='r',
                               sandbox_identity={**identity, 'memory_mib': 8192})
     P50PredictionProvider(path, repository='r', sandbox_identity=identity)
+
+
+def test_prediction_applies_host_calibration_and_rejects_missing_mapping(tmp_path):
+    path = tmp_path / 'calibrated.json'
+    payload = {'schema': 'clawbox_prediction_v2', 'repository': 'r', 'training_validated': True,
+        'host_calibration': {'target': 'host_cgroup_memory_current_increment',
+                             'sample_count': 5, 'scale': 2, 'offset_bytes': 3 * 2**20},
+        'commands': [{'command': 'pytest', 'models': {'tool': model('runtime', 7 * 2**20)}}]}
+    path.write_text(json.dumps(payload))
+    provider = P50PredictionProvider(path, repository='r')
+    value = provider.resolve('pytest', next(iter(provider.manifest.values())))
+    assert value['predicted_guest_extra_memory_mib'] == 7
+    assert value['predicted_incremental_memory_mib'] == 17
+    del payload['host_calibration']
+    path.write_text(json.dumps(payload))
+    with pytest.raises(PredictionUnavailable, match='host cgroup calibration'):
+        P50PredictionProvider(path, repository='r')

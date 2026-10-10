@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit all checked-in schema-v2 experiment matrices without starting sandboxes."""
+"""Audit all checked-in experiment matrices without starting sandboxes."""
 from __future__ import annotations
 
 import argparse

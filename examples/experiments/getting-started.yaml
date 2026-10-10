@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 experiment_id: marker-example
 workload:
   source: recorded_trace
@@ -29,6 +29,6 @@ resources:
   # Must match the COLD root configured on the CubeSandbox host before running.
   cold_snapshot_root: /data/clawbox/cold
 policies:
-  - {name: tool-static-resident, admission: tool_static, reclamation: resident, eviction: none, restore: none}
+  - {name: fixed-resident, admission: fixed, reclamation: resident, eviction: none, restore: none}
 validation: {command: "test \"$(cat /workspace/result.txt)\" = complete"}
 output: {directory: /results}

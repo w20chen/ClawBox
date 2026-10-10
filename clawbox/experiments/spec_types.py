@@ -27,11 +27,14 @@ class InferenceBackend(StrEnum):
 
 
 class AdmissionPolicy(StrEnum):
-    LIFETIME_FULL = "lifetime_full"
-    TOOL_FULL = "tool_full"
-    TOOL_STATIC = "tool_static"
-    TOOL_P50 = "tool_p50"
-    TOOL_ORACLE = "tool_oracle"
+    OFF = "off"
+    FIXED = "fixed"
+    PREDICTED = "predicted"
+
+
+class RuntimeControl(StrEnum):
+    OFF = "off"
+    AGENTCGROUP_CGROUP = "agentcgroup_cgroup"
 
 
 class ReclamationPolicy(StrEnum):

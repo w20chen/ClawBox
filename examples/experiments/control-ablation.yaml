@@ -1,0 +1,76 @@
+# Replace templates, host settings, trace and prediction artifact before launch.
+# Use a separate validated training run; the smoke trace is only a path check.
+schema_version: 3
+experiment_id: control-ablation
+workload:
+  source: recorded_trace
+  input: examples/traces/smoke.jsonl
+  repetitions: 8
+  cases:
+  - case_id: marker
+    source: recorded_trace
+    source_reference: examples/traces/smoke.jsonl
+    replay_trace_reference: examples/traces/smoke.jsonl
+    prompt: Create /workspace/result.txt containing complete.
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: example-model
+    time_scale: 1.0
+runtime:
+  template_alias: runtime-example-arm64
+  vcpu: 2
+  memory_mib: 2048
+sandbox:
+  template_alias: tool-example-arm64
+  vcpu: 2
+  memory_mib: 4096
+  workspace: /workspace
+execution:
+  concurrency_levels:
+  - 2
+  - 4
+  - 8
+  random_seed: 0
+  arm_timeout_seconds: 300
+  command_timeout_seconds: 60
+  randomized_order: true
+resources:
+  target_node: replace-with-your-cubesandbox-node
+  pool_memory_budget_mib: 16384
+  emergency_free_memory_mib: 1024
+  checkpoint_restore_headroom_mib: 1024
+  static_tool_memory_mib: 256
+  cold_snapshot_root: /data/clawbox/cold
+  prediction_artifact: /path/to/separate-training.predictions.json
+policies:
+- name: uncontrolled-resident
+  admission: 'off'
+  runtime_control: 'off'
+  reclamation: resident
+  eviction: none
+  restore: none
+- name: runtime-resident
+  admission: 'off'
+  runtime_control: agentcgroup_cgroup
+  reclamation: resident
+  eviction: none
+  restore: none
+- name: predicted-resident
+  admission: predicted
+  runtime_control: agentcgroup_cgroup
+  reclamation: resident
+  eviction: none
+  restore: none
+- name: prediction-only-resident
+  admission: predicted
+  runtime_control: 'off'
+  reclamation: resident
+  eviction: none
+  restore: none
+validation:
+  command: test "$(cat /workspace/result.txt)" = complete
+output:
+  directory: /results

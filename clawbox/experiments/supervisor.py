@@ -25,6 +25,15 @@ STATE_SCHEMA_VERSION = 1
 TERMINAL_STATES = {"succeeded", "failed", "cancelled", "destroyed"}
 
 
+def is_trial_outcome(result: ResultEnvelope) -> bool:
+    """Completed overload outcomes must not be retried until they succeed."""
+    return (result.correctness.get("cleanup_verified") is True
+            and ((result.status is RunStatus.SUCCEEDED
+                  and not result.correctness.get("native_tool_telemetry_loss_total"))
+                 or result.failure_category in {
+                     FailureCategory.OOM, FailureCategory.TIMEOUT, FailureCategory.ADMISSION}))
+
+
 def atomic_text(path: Path, value: str) -> None:
     """Replace a text artifact only after its complete contents reach the OS."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,7 +278,7 @@ class ExperimentSupervisor:
             })
         self._write_state()
 
-    def _successful_result(self, arm: ExperimentArm) -> ResultEnvelope | None:
+    def _completed_result(self, arm: ExperimentArm) -> ResultEnvelope | None:
         result_path = self.output_root / "arms" / f"{arm.arm_id}.json"
         marker_path = self.output_root / "arms" / f"{arm.arm_id}.complete"
         if not result_path.is_file() or not marker_path.is_file():
@@ -280,7 +289,7 @@ class ExperimentSupervisor:
         except (OSError, ValueError):
             return None
         if (
-            result.status is RunStatus.SUCCEEDED
+            is_trial_outcome(result)
             and result.arm.arm_id == arm.arm_id
             and result.arm.spec_digest == arm.spec_digest
             and marker == arm.spec_digest
@@ -320,11 +329,11 @@ class ExperimentSupervisor:
             return False, f"cleanup process exited with status {return_code}"
         return True, None
 
-    def _store_result(self, result: ResultEnvelope, *, successful: bool) -> None:
+    def _store_result(self, result: ResultEnvelope) -> None:
         result_path = self.output_root / "arms" / f"{result.arm.arm_id}.json"
         marker_path = self.output_root / "arms" / f"{result.arm.arm_id}.complete"
         atomic_json(result_path, result.model_dump(mode="json"))
-        if successful:
+        if is_trial_outcome(result):
             atomic_marker(marker_path, result.arm.spec_digest)
         else:
             marker_path.unlink(missing_ok=True)
@@ -376,8 +385,23 @@ class ExperimentSupervisor:
                             }
                         self._write_state()
                     time.sleep(self.poll_interval_seconds)
-            except BaseException:
+            except BaseException as exc:
                 terminate_process_tree(process.pid)
+                # A stopped worker cannot run its VM cleanup. Perform the
+                # ownership-journal cleanup before propagating cancellation.
+                self.state['phase'] = 'cleanup'
+                self._write_state()
+                verified, error = self._cleanup(
+                    task_uid=task_uid,
+                    journal=artifact_root / 'owned-sandboxes.jsonl',
+                    artifact_root=artifact_root,
+                )
+                arm_state.update(cleanup_verified=verified, cleanup_error=error,
+                    status='cancelled' if isinstance(exc, KeyboardInterrupt) else 'failed',
+                    completed_unix_s=time.time())
+                self._write_state()
+                if not verified:
+                    exc.add_note('interrupted arm cleanup failed: '+str(error))
                 raise
             return_code = process.poll()
 
@@ -452,8 +476,7 @@ class ExperimentSupervisor:
                 "correctness": {**result.correctness, "cleanup_verified": True},
             })
 
-        succeeded = result.status is RunStatus.SUCCEEDED and cleanup_verified
-        self._store_result(result, successful=succeeded)
+        self._store_result(result)
         arm_state.update({
             "status": result.status.value,
             "completed_unix_s": time.time(),
@@ -468,10 +491,10 @@ class ExperimentSupervisor:
         frozen_spec = self.output_root / "experiment.yaml"
         try:
             for arm in arms:
-                previous = self._successful_result(arm)
+                previous = self._completed_result(arm)
                 if previous is not None:
                     self.results.append(previous)
-                    self.state["arms"][arm.arm_id]["status"] = "succeeded"
+                    self.state["arms"][arm.arm_id]["status"] = previous.status.value
                     continue
                 result = self._run_arm(arm, frozen_spec)
                 self.results.append(result)
@@ -480,7 +503,7 @@ class ExperimentSupervisor:
                     attempt_id=self.attempt_id, task_uid=self.owner_id,
                     experiment_id=self.spec.experiment_id, results=self.results,
                 )
-                if result.status is not RunStatus.SUCCEEDED:
+                if not is_trial_outcome(result):
                     break
         except BaseException as exc:
             self.state.update({
@@ -499,7 +522,8 @@ class ExperimentSupervisor:
                 self.state["arms"][arm.arm_id]["status"] = "not_run"
         self.state.update({
             "state": "succeeded" if complete else "failed",
-            "failure": None if complete else "an arm failed; remaining arms were not run",
+            "failure": (None if complete else "one or more trials failed"
+                        if len(self.results) == len(arms) else "invalid trial; remaining arms were not run"),
             "phase": "terminal", "current_arm_id": None,
             "completed_unix_s": time.time(),
         })
@@ -515,6 +539,10 @@ class ExperimentSupervisor:
 def cleanup_owned_sandboxes(journal: Path, task_uid: str) -> None:
     client = CubeSandboxClient(journal=OwnedSandboxJournal(journal))
     client.kill_owned_sandboxes(task_uid)
+    from .priority import cleanup_priority_domains
+    directory=journal.parent/'priority-domains'
+    if directory.exists():
+        cleanup_priority_domains(directory)
 
 
 def cleanup_run(run_root: Path) -> dict[str, Any]:

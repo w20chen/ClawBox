@@ -119,7 +119,11 @@ bash deploy/one-click/build-release-bundle-builder.sh
 ```
 
 The preparation script pins v0.7.0 and applies the repository's endpoint,
-networking, image-provenance, and snapshot patches. Use its matching SDK.
+networking, image-provenance, snapshot, and AgentCgroup priority patches. Rebuild
+and install both Cubelet and Shim: they place each VM in its session's cgroup
+before allocating guest RAM, including cached-template creation and restore.
+Use the matching SDK. Applying a patch without installing the rebuilt services
+does not enable priority control.
 Build variables are defined in the pinned [upstream build configuration](https://github.com/TencentCloud/CubeSandbox/blob/v0.7.0/deploy/one-click/build.env.example).
 
 Select the exact archive printed by the build; do not extract a wildcard of old

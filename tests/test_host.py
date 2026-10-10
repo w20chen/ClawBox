@@ -76,3 +76,34 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert (config.local_node, config.warm_node) == (2, 3)
     assert config.shared_borrow_percent == 25
     assert config.local_gib == 24
+
+
+def test_profile_import_supports_dense_host_without_warm_memory(tmp_path):
+    import json
+    profile = tmp_path / 'dense.json'
+    profile.write_text(json.dumps({'node': 'host', 'runtime': {'template_id': 'runtime'},
+        'sandbox': {'template_id': 'tool'}, 'local_memory_capacity_mib': 16*1024,
+        'local_numa_node': 0, 'warm_capacity_mib': 0, 'warm_numa_node': None,
+        'warm_root': None, 'shared_memory_borrow_limit_mib': None}))
+    output = tmp_path / 'dense.yaml'
+    init_config(output, profile)
+    config = load_config(output)
+    assert not config.warm and config.local_gib == 16
+
+
+def test_doctor_checks_dense_compute_nodes_without_a_shared_node(tmp_path, monkeypatch):
+    from clawbox import lab
+    for name, value in {'memory.max': str(16*1024**2), 'memory.swap.max': '0',
+                        'cpuset.mems.effective': '0-1', 'cpuset.cpus.effective': '0-3'}.items():
+        (tmp_path / name).write_text(value)
+    monkeypatch.setattr(lab, 'template_record', lambda _: {'ready': True})
+    monkeypatch.setattr(lab, 'command', lambda *args, **kw: 'active' if args[0] == 'systemctl' else 'true')
+    monkeypatch.setattr(lab, 'refresh_snapshot_storage', lambda _: True)
+    failures = lab.doctor({'node': 'host', 'runtime': {'template_id': 'r'},
+        'sandbox': {'template_id': 't'}, 'local_memory_cgroup': str(tmp_path),
+        'local_memory_capacity_mib': 16, 'local_memory_high_watermark_mib': 12,
+        'shared_memory_borrow_limit_mib': None, 'warm_numa_node': None,
+        'compute_nodes': [{'node_id': 'a', 'numa_node': 0, 'cpus': '0-1'},
+                          {'node_id': 'b', 'numa_node': 1, 'cpus': '2-3'}]})
+    assert 'LOCAL/shared NUMA nodes' not in failures
+    assert 'combined live memory.max' not in failures

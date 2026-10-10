@@ -73,11 +73,9 @@ class HostConfig(BaseModel):
     @model_validator(mode="after")
     def consistent(self):
         if self.compute_nodes:
-            if not self.warm:
-                raise ValueError("compute_nodes requires warm: true for the shared pool")
             if len({n.node_id for n in self.compute_nodes}) != len(self.compute_nodes) or len({n.numa_node for n in self.compute_nodes}) != len(self.compute_nodes):
                 raise ValueError("compute node IDs and NUMA nodes must be unique")
-            if self.warm_node in {n.numa_node for n in self.compute_nodes}:
+            if self.warm and self.warm_node in {n.numa_node for n in self.compute_nodes}:
                 raise ValueError("shared pool must use a different NUMA node from every compute node")
         if self.warm and not 0 < self.low_gib < self.high_gib < self.local_gib:
             raise ValueError("require 0 < low_gib < high_gib < local_gib")
@@ -149,10 +147,12 @@ def init_config(path: Path, profile_path: Path | None = None) -> None:
                                ("high_gib", "local_memory_high_watermark_mib"),
                                ("warm_gib", "warm_capacity_mib")):
             if profile.get(source) is not None:
+                if target == "warm_gib" and profile[source] == 0:
+                    continue  # Disabled tier keeps an unused positive size default.
                 if profile[source] % 1024:
                     raise ValueError(f"{source} must be whole GiB for host setup")
                 values[target] = profile[source] // 1024
-        values["warm"] = bool(profile.get("local_memory_high_watermark_mib"))
+        values["warm"] = bool(profile.get("warm_capacity_mib"))
         capacity = profile.get("warm_capacity_mib", 0)
         borrow = profile.get("shared_memory_borrow_limit_mib", 0)
         if capacity:
@@ -232,7 +232,7 @@ def check(config: HostConfig) -> dict:
     if config.compute_nodes:
         def topology_ready():
             resolved = tuple(n.resolved() for n in config.compute_nodes)
-            validate_compute_nodes(resolved, config.warm_node)
+            validate_compute_nodes(resolved, config.warm_node if config.warm else None)
             for n in resolved:
                 if not parse_cpu_list(n.cpus) <= parse_cpu_list(nodes[n.numa_node]["cpus"]):
                     raise ValueError(f"{n.node_id}: CPUs must belong to NUMA{n.numa_node}")

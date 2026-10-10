@@ -10,6 +10,7 @@ from typing import Protocol
 
 from .spec import EvictionPolicy, PolicySpec, ReclamationPolicy, RestorePolicy
 from .spec_types import SnapshotTier
+from .admission import DemandLedger
 
 MIB = 1024 * 1024
 
@@ -72,6 +73,8 @@ class PolicyCoordinator:
                  emergency_free_mib: int, operation_headroom_mib: int,
                  progress_budget_mib: int | None = None,
                  startup_headroom_mib: int = 0,
+                 demand_ledger: DemandLedger | None = None,
+                 demand_scope: str = "local",
                  reclaim_cache: Callable[[], None] | None = None,
                  physical_sample: Callable[[], tuple[int, int]] | None = None,
                  on_pressure_pause: Callable[
@@ -96,7 +99,13 @@ class PolicyCoordinator:
         self._cache_reclaim_error: Exception | None = None
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self.on_pressure_pause = on_pressure_pause
-        self._condition = Condition()
+        self.demand_scope = demand_scope
+        self.demand = demand_ledger or DemandLedger(
+            sample=self.physical_sample, capacity=self.progress_budget_bytes,
+            free_floor=self.emergency_free_bytes)
+        self._condition = self.demand.condition
+        self._memory_samples = {}
+
         # Incremental reservations cover memory not represented by the current
         # host sample yet (VM create/restore) or memory a Tool is predicted to
         # add. Lifetime capacity claims describe an already-resident footprint
@@ -188,6 +197,10 @@ class PolicyCoordinator:
     def unregister(self, session_id: str) -> None:
         with self._condition:
             self._sessions.pop(session_id, None)
+            self._memory_samples.pop(session_id, None)
+            for key in list(self.demand.claims):
+                if key[0] == session_id:
+                    self.demand.release(key)
             self._reservations.pop(session_id, None)
             self._capacity_claims.pop(session_id, None)
             self._condition.notify_all()
@@ -207,7 +220,7 @@ class PolicyCoordinator:
             self._condition.notify_all()
 
     def begin_tool_admission(self, session_id: str, amount_mib: int,
-                             timeout_s: float) -> float:
+                             timeout_s: float, *, total_mib: int | None = None) -> float:
         """Protect a Tool before any restore or memory wait begins.
 
         A competing admission may pause only sessions marked idle.  Marking
@@ -217,7 +230,7 @@ class PolicyCoordinator:
         """
         self.set_tool_active(session_id, True)
         try:
-            return self.acquire(session_id, amount_mib, timeout_s)
+            return self.acquire(session_id, amount_mib, timeout_s, total_mib=total_mib)
         except Exception:
             self.set_tool_active(session_id, False)
             raise
@@ -232,8 +245,22 @@ class PolicyCoordinator:
             state.eviction_eligible = eligible
             state.last_used = time.monotonic()
 
+    def register_memory(self, session_id, *, tool, lifecycle):
+        """Readers return total and home-node charges for stable VM leaves."""
+        with self._condition:
+            self._memory_samples[session_id] = {'tool_admission': tool,
+                                               'create': lifecycle, 'restore': lifecycle}
+
+    def bind_tool_memory(self, session_id):
+        with self._condition:
+            claim = self.demand.claims.get((session_id, 'tool_admission'))
+            if claim:
+                claim.sample = self._memory_samples.get(session_id, {}).get('tool_admission')
+                self.demand.rebase((session_id, 'tool_admission'))
+
     def pressure(self, additional_bytes: int = 0) -> bool:
-        return bool(self._pressure_reasons(additional_bytes))
+        with self._condition:
+            return bool(self._pressure_reasons(additional_bytes))
 
     def projected_local_commitment(self, additional_mib: int = 0) -> int:
         """Return LOCAL usage plus still-unmaterialized LOCAL reservations."""
@@ -241,7 +268,7 @@ class PolicyCoordinator:
             used, _available = self.physical_sample()
             return (
                 max(used, sum(self._capacity_claims.values()))
-                + sum(self._reservations.values())
+                + self.demand.pending(self.demand_scope)
                 + additional_mib * MIB
                 + self.operation_headroom_bytes
             )
@@ -265,9 +292,10 @@ class PolicyCoordinator:
 
     def _pressure_reasons(self, additional_bytes: int = 0, *,
                           capacity_claim: bool = False,
-                          existing_progress: bool = False) -> tuple[str, ...]:
+                          existing_progress: bool = False,
+                          total_bytes: int | None = None) -> tuple[str, ...]:
         used, available = self.physical_sample()
-        incremental = sum(self._reservations.values())
+        incremental = self.demand.pending(self.demand_scope)
         capacity = sum(self._capacity_claims.values())
         if capacity_claim:
             capacity += additional_bytes
@@ -282,11 +310,14 @@ class PolicyCoordinator:
             )
             else self.budget_bytes
         )
-        if charged > effective_budget:
+        if charged > effective_budget and not (existing_progress and additional_bytes == 0):
             reasons.append("configured_memory_budget")
         if available < self.emergency_free_bytes:
             reasons.append("emergency_free_memory")
-        return tuple(reasons)
+        reasons.extend(self.demand.reasons(
+            additional_bytes if total_bytes is None else total_bytes,
+            self.operation_headroom_bytes))
+        return tuple(dict.fromkeys(reasons))
 
     def _startup_headroom_needed(self, session_id: str) -> bool:
         """A first VM pair cannot starve work because no older pair can run."""
@@ -299,10 +330,11 @@ class PolicyCoordinator:
 
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
-                capacity_claim: bool = False) -> float:
+                capacity_claim: bool = False, total_mib: int | None = None) -> float:
         started = time.monotonic()
         amount = amount_mib * MIB
-        if amount == 0:
+        total = (amount_mib if total_mib is None else total_mib) * MIB
+        if amount == 0 and total == 0:
             elapsed = time.monotonic() - started
             with self._condition:
                 self._record_wait_locked(wait_class, elapsed)
@@ -339,7 +371,11 @@ class PolicyCoordinator:
                                   and self._startup_headroom_needed(session_id) else 0),
                         capacity_claim=capacity_claim,
                         existing_progress=(wait_class == "tool_admission"),
+                        total_bytes=total + (self.startup_headroom_bytes if wait_class == "create"
+                                            and self._startup_headroom_needed(session_id) else 0),
                     ) if at_head else ()
+                    if at_head and (session_id, wait_class) in self.demand.claims:
+                        safety_reasons = (*safety_reasons, 'execution_already_inflight')
                     if (
                         at_head and wait_class == "create"
                         and self._new_session_admission_blocked
@@ -368,7 +404,7 @@ class PolicyCoordinator:
                                 self.safety_interventions_by_reason.get(reason, 0) + 1
                             )
                     victim = (self._claim_victim_locked(exclude=session_id)
-                              if at_head else None)
+                              if at_head and 'execution_already_inflight' not in safety_reasons else None)
                     if at_head and victim is not None:
                         self._condition.release()
                         tool_elapsed = None
@@ -430,6 +466,10 @@ class PolicyCoordinator:
                 self._waiters.remove(ticket)
                 self._waiter_requests.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
+                self.demand.add((session_id, wait_class), scope=self.demand_scope,
+                    amount=total, local_amount=amount,
+                    sample=(self._memory_samples.get(session_id, {}).get(wait_class)
+                            if wait_class != 'tool_admission' else None))
                 ledger = self._capacity_claims if capacity_claim else self._reservations
                 ledger[session_id] = ledger.get(session_id, 0) + amount
                 self.peak_commitment_bytes = max(
@@ -515,8 +555,10 @@ class PolicyCoordinator:
             ),
         }
 
-    def release(self, session_id: str, amount_mib: int) -> None:
-        self._release_from(self._reservations, session_id, amount_mib)
+    def release(self, session_id: str, amount_mib: int, *, wait_class='tool_admission') -> None:
+        with self._condition:
+            self._release_from(self._reservations, session_id, amount_mib)
+            self.demand.release((session_id, wait_class))
 
     def acquire_capacity(self, session_id: str, amount_mib: int,
                          timeout_s: float) -> float:
@@ -631,7 +673,7 @@ class PolicyCoordinator:
         try:
             return operation(), waited
         finally:
-            self.release(session_id, amount_mib)
+            self.release(session_id, amount_mib, wait_class='create')
 
     def restore(self, session_id: str, amount_mib: int,
                 operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:
@@ -670,7 +712,7 @@ class PolicyCoordinator:
                 self.resume_service_seconds += elapsed
                 return elapsed, waited
         finally:
-            self.release(session_id, amount_mib)
+            self.release(session_id, amount_mib, wait_class='restore')
 
     def _select_victim_locked(self, *, exclude: str) -> SessionState | None:
         if self.policy.reclamation is ReclamationPolicy.RESIDENT:

@@ -1,11 +1,20 @@
-# Two compute nodes and one shared memory pool
+# NUMA deployment and the shared memory pool
 
 Follow the [step-by-step guide](self-service.md) to initialize and apply the
 host configuration before running an experiment. By default, NUMA nodes 0 and
 1 are compute nodes with 36 GiB of local memory capacity each and low/high
 watermarks of 28/32 GiB. NUMA node 2 supplies one 128 GiB shared pool. The
-host needs at least three NUMA nodes; use `host inspect` to check its actual
+default layout needs at least three NUMA nodes; use `host inspect` to check its actual
 CPU and memory layout.
+
+For ordinary deployment without shared memory, keep the desired `compute_nodes`
+and set `warm: false` in the host YAML. The shared-pool node and capacity are then
+unused; `host apply` and `configure` produce a profile and experiment without
+shared borrowing or warm snapshots. Resident policies need no snapshot pool.
+For disk-backed snapshot experiments use `snapshot_storage: tiered` and a cold
+snapshot path matching CubeSandbox. `warm-only` requires an enabled shared pool.
+Runtime congestion control and admission support both layouts. Change architecture
+separately from policy switches when comparing their effects.
 
 ## Configuration and placement
 
@@ -29,7 +38,7 @@ clawbox experiment configure eval.yaml eval-explicit.yaml \
   --concurrency 4 --placement-policy explicit \
   --session-compute-nodes node0,node1,node1,node0
 clawbox experiment describe eval-explicit.yaml
-clawbox --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
+sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch \
   eval-explicit.yaml --run-id explicit-01
 ```
 
@@ -41,10 +50,10 @@ from other host processes. The VM template sets its vCPU count.
 
 ## Memory behavior and limits
 
-- Each compute node makes its own admission and pressure decisions using
-  local memory measurements and its low/high watermarks. Pressure on one node
-  blocks new sessions there without treating another node's free memory as
-  local capacity.
+- Admission checks each compute node's local measurements and budget as well
+  as one atomic global demand ledger. Another node's free memory is not local
+  capacity. AgentCgroup runtime control uses aggregate pressure in the physical
+  parent cgroup; it does not run a separate controller on each NUMA node.
 - Running VMs temporarily using NUMA node 2 and snapshots stored there share
   one capacity ledger. The system reserves a VM's configured memory before
   changing its memory binding. The combined live reservation is capped by
@@ -75,8 +84,9 @@ from other host processes. The VM template sets its vCPU count.
 
 ## Reading the results
 
-Before a formal run, `launch` tests the configured snapshot/restore
-mechanism and shared-memory borrowing on each compute node. The formal
+Before a formal run, `launch` tests runtime control, VM priority placement,
+and the required snapshot/restore mechanism; shared-memory borrowing is checked
+on each compute node when configured. The formal
 concurrent run then records session placement. The report includes
 per-node capacity, peak use, high-watermark crossings, and verified bindings.
 In each trial JSON file, `performance.compute_nodes` contains placement and

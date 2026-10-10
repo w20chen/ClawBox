@@ -2,12 +2,51 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 import statistics
 from typing import Any
 
 from .spec import load_experiment
+
+
+def priority_summary(results, priority):
+    """Keep unsuccessful trials in denominators and resample trial clusters."""
+    import random
+    clusters = []
+    offered = completed = 0
+    for result in results:
+        row = (result.get('performance', {}).get('priority_sessions') or {}).get(priority, {})
+        # A killed worker may not emit per-session data. Offered demand is
+        # still known from the frozen arm, and must not disappear.
+        concurrency = result.get('arm', {}).get('concurrency', 0)
+        offered += row.get('offered', min(1, concurrency) if priority == 'high' else max(0, concurrency-1))
+        samples = list(row.get('durations_seconds', []))
+        completed += row.get('completed', len(samples))
+        clusters.append(samples)
+    samples = [value for cluster in clusters for value in cluster]
+
+    def p95(values):
+        ordered = sorted(values)
+        at = (len(ordered)-1)*.95
+        lower = int(at)
+        return ordered[lower] + (ordered[min(lower+1, len(ordered)-1)]-ordered[lower])*(at-lower)
+
+    point = p95(samples) if len(samples) >= 20 else None
+    interval = (None, None)
+    if point is not None and len(clusters) >= 5:
+        rng = random.Random(0)
+        estimates = []
+        for _ in range(1000):
+            draw = [v for cluster in rng.choices(clusters, k=len(clusters)) for v in cluster]
+            if draw:
+                estimates.append(p95(draw))
+        estimates.sort()
+        if estimates:
+            interval = (estimates[int(.025*(len(estimates)-1))], estimates[int(.975*(len(estimates)-1))])
+    return {'offered': offered, 'completed': completed, 'latency_samples': len(samples),
+            'p95': point, 'p95_interval': interval}
 
 
 def _number(value: Any, digits: int = 2) -> str:
@@ -279,31 +318,42 @@ def render_run_report(run_root: Path) -> str:
             f"{correctness.get('cleanup_verified', False)} |"
         )
 
-    grouped: dict[str, list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
         result = row["result"]
-        policy = str(((result.get("arm") or {}).get("policy") or {}).get("name", "unknown"))
-        grouped.setdefault(policy, []).append(result)
+        # Failed/cancelled arms remain visible above but cannot improve a
+        # performance mean by ending early. Only repetition/identity may vary.
+        arm = result.get('arm') or {}
+        condition = {k: v for k,v in arm.items() if k not in {'arm_id','spec_digest','repetition'}}
+        encoded = json.dumps(condition, sort_keys=True, separators=(',', ':'))
+        policy = (arm.get('policy') or {}).get('name','unknown')
+        label = (f"{policy} / c={arm.get('concurrency','?')} / "
+                 f"{(arm.get('case') or {}).get('case_id','mixed')} / "
+                 f"{(arm.get('policy') or {}).get('runtime_control','unspecified')} / "
+                 f"{hashlib.sha256(encoded.encode()).hexdigest()[:8]}")
+        grouped.setdefault((label, encoded), []).append(result)
     if any(len(values) > 1 for values in grouped.values()):
         lines.extend([
             "", "## Cross-repetition summary", "",
-            "Values are arithmetic mean +/- sample SD across completed repetitions; raw "
+            "Performance means are conditional on succeeded trials; all trial outcomes are counted. Values are mean +/- sample SD; raw "
             "per-arm values remain above.", "",
-            "| Policy | n | Agents/min | JCT p95 s | Admission blocked s | "
+            "| Policy | Succeeded / offered trials | Agents/min | Mean within-trial JCT p95 s | Admission blocked s | "
             "LOCAL peak GiB | Whole-host peak delta GiB | Above HIGH s |",
             "|---|---:|---:|---:|---:|---:|---:|---:|",
         ])
-        for policy, results in grouped.items():
+        for (policy, _), results in grouped.items():
             def values(section: str, key: str, divisor: float = 1.0) -> list[float]:
                 found = []
                 for item in results:
+                    if item.get('status') != 'succeeded':
+                        continue
                     value = (item.get(section) or {}).get(key)
                     if value is not None:
                         found.append(float(value) / divisor)
                 return found
 
             lines.append(
-                f"| {policy} | {len(results)} | "
+                f"| {policy} | {sum(r.get('status') == 'succeeded' for r in results)} / {len(results)} | "
                 f"{_mean_sd_text(values('performance', 'agents_per_minute'))} | "
                 f"{_mean_sd_text(values('performance', 'jct_p95_seconds'))} | "
                 f"{_mean_sd_text(values('performance', 'blocked_admission_seconds'))} | "
@@ -311,11 +361,52 @@ def render_run_report(run_root: Path) -> str:
                 f"{_mean_sd_text(values('memory', 'host_peak_used_delta_bytes'), 1024 ** 3)} | "
                 f"{_mean_sd_text(values('performance', 'local_high_overshoot_seconds'))} |"
             )
+    lines.extend(['', '## Trial outcomes', '',
+        'Counts use all offered trials. OOM observations can overlap timeouts or other failures; '
+        'missing counters remain unknown. Infrastructure or validation failures invalidate a performance comparison.', '',
+        '| Policy | Trials | Succeeded | Timed out | Failed | Cancelled / rejected | Observed OOM / unknown |',
+        '| --- | ---: | ---: | ---: | ---: | ---: | --- |'])
+    for (policy, _), results in grouped.items():
+        counts = {status: sum(r.get('status') == status for r in results)
+                  for status in ('succeeded', 'timed_out', 'failed', 'cancelled', 'rejected')}
+        ooms = sum((r.get('memory', {}).get('host_oom_kill_events') or 0) > 0
+                   or r.get('failure_category') == 'oom' for r in results)
+        unknown = sum(r.get('memory', {}).get('host_oom_kill_events') is None
+                      and r.get('failure_category') != 'oom' for r in results)
+        lines.append(f"| {policy} | {len(results)} | {counts['succeeded']} | {counts['timed_out']} | "
+                     f"{counts['failed']} | {counts['cancelled'] + counts['rejected']} | {ooms} / {unknown} |")
+    lines.extend(['', '## All-trial priority outcomes', '',
+        'Latency is conditional on completion. P95 requires at least 20 completed samples; '
+        'its 95% bootstrap interval resamples whole trials and requires at least five trials. '
+        'Failed, timed out and interrupted trials remain in the offered denominator. '
+        'Completion counts include only verified session results; a killed worker may not report partial completions.', '',
+        '| Policy | Priority | Verified completed / offered | P95 s | 95% interval s |',
+        '| --- | --- | --- | ---: | --- |'])
+    for (policy, _), results in grouped.items():
+        for priority in ('high', 'low'):
+            summary = priority_summary(results, priority)
+            interval = summary['p95_interval']
+            lines.append(f"| {policy} | {priority} | {summary['completed']} / {summary['offered']} | "
+                         f"{_number(summary['p95'])} | "
+                         f"{_number(interval[0])}..{_number(interval[1])} |")
+    if any(row['result'].get('performance', {}).get('runtime_memory_control') for row in rows):
+        lines.extend(['', '## Runtime congestion control', '',
+            '| Arm | Backend | Activations | Max poll gap s | HIGH completed / offered | LOW completed / offered | HIGH completed samples | LOW completed samples |',
+            '| --- | --- | ---: | ---: | --- | --- | ---: | ---: |'])
+        for row in rows:
+            result=row['result']; performance=result.get('performance') or {}
+            runtime=performance.get('runtime_memory_control') or {}
+            priorities=performance.get('priority_sessions') or {}
+            high,low=priorities.get('high',{}),priorities.get('low',{})
+            lines.append(f"| {(result.get('arm') or {}).get('arm_id')} | {runtime.get('backend','off')} | "
+                f"{(runtime.get('upstream') or {}).get('activations','n/a')} | {_number(runtime.get('max_poll_gap_seconds'))} | "
+                f"{high.get('completed',0)} / {high.get('offered','?')} | {low.get('completed',0)} / {low.get('offered','?')} | "
+                f"{len(high.get('durations_seconds', []))} | {len(low.get('durations_seconds', []))} |")
     lines.extend([
         "",
         "Configured VM capacity, admission reservations, predictions, LOCAL physical "
         "use, live shared-NUMA borrowing, and WARM snapshot bytes are distinct quantities. "
-        "Crossing HIGH is an observed control event, not a failed arm. OOMs, crossing "
+        "Crossing HIGH is an observed control event, not a failed arm. Policy OOMs and timeouts are outcomes, not samples to discard. Crossing "
         "the shared-pool capacity, validation failures, telemetry loss, or unverified "
         "cleanup invalidate performance comparison. One repetition does not estimate "
         "run-to-run uncertainty.",

@@ -1,4 +1,4 @@
-"""Canonical schema-v2 experiment primitives."""
+"""Canonical standalone experiment primitives."""
 
 from .baselines import (
     ACTIVE_BASELINES, BASELINES, Baseline, ensure_supported_experiment,

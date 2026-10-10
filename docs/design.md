@@ -12,12 +12,21 @@ the mutable workspace and tool processes. The experiment worker controls
 admission and the VM lifecycle through standalone CubeSandbox. It runs
 tool commands over SSH. For each managed command, it:
 
-1. Obtains a resource estimate from ClawTune.
-2. Checks measured memory use, existing reservations, the new reservation,
-   and the configured safety margin.
+1. If tool admission is enabled, selects a fixed host-memory reservation or a
+   frozen ClawTune P50 prediction calibrated to host growth.
+2. If tool admission is enabled, checks measured memory use, unrealized growth
+   claims, the candidate reservation, and the configured safety margin.
 3. Restores the tool VM if needed and resolves its current SSH endpoint.
 4. Verifies the endpoint and executes the command once.
 5. Collects the result and telemetry, then releases the reservation.
+
+Runtime congestion control runs throughout the trial independently of admission.
+The official AgentCgroup cgroup-v2 fallback owns HIGH/LOW protection and throttling;
+a separate demand ledger owns tool and lifecycle admission. Admission OFF removes
+tool gating while retaining the same runtime control, priorities, creation rules,
+NUMA placement and shared-pool accounting. Snapshot reclamation is independent.
+Both VM roles enter stable priority leaves before creation or restore allocates RAM.
+Controller state survives tool completion, model waits and VM replacement.
 
 An execution ID links admission, SSH execution, completion, and
 measurements. A retry must not execute the same command twice. After
@@ -54,11 +63,10 @@ ClawTune repository defines the detailed PMU schema.
 
 ## Memory admission
 
-The supported policies reserve either a calibrated fixed amount of
-extra memory for each tool command, a frozen per-command P50 estimate,
-or that P50 estimate plus checkpointing while the agent waits for a
-model response. See [supported policies](guide.md#supported-comparison-policies)
-for their CLI names.
+Tool admission can be off, use a fixed host-memory reservation, or use a frozen
+per-command ClawTune P50 estimate calibrated to host memory growth. Runtime
+congestion control and snapshot reclamation are separate switches. See
+[supported policies](guide.md#supported-comparison-policies) for their CLI names.
 
 A reservation controls when work may start; it does not change the
 guest's configured RAM. Configured VM capacity, already resident
@@ -68,21 +76,18 @@ All policies use the configured host available-memory safety floor.
 Only checkpointing policies reserve additional capacity for
 checkpoint and restore operations.
 
-During creation of an agent/tool VM pair, admission reserves their
-configured capacities until host sampling observes the new residents.
-For later pairs, it also leaves room for one call from a session that
-is already runnable: the fixed policy uses its configured command
-reservation, and the predicted policies use the larger of the frozen
-prediction maximum and the fixed reservation for non-command tools.
-The first pair has no older session to protect. Applying full guest
-capacity in place of these calibrated command reservations would
-change the compared policies.
+VM creation and restore reserve configured capacity conservatively until measured
+charges reflect that growth. A common startup margin is independent of the tool
+admission switch. Tool reservations cover calibrated host growth that is not yet
+visible in the stable VM cgroup; restoration of a VM's base is accounted separately
+from its subsequent execution growth. Every compute domain shares one atomic global
+ledger and also enforces its LOCAL budget. Shared capacity is usable only after a
+successful pool reservation and rebind. Lack of shared capacity leaves predicted
+work queued against LOCAL instead of granting nominal shared headroom.
 
-ClawTune measures additional command memory relative to the
-environment immediately before the call. ClawBox rounds the selected
-P50 estimate up to MiB for admission. Prediction is not a guarantee
-that the command fits. Record fixed reservations for file operations
-separately from per-command predictions.
+ClawTune's guest environment increment and host cgroup growth are distinct targets.
+A frozen training artifact retains both the guest prediction and an explicit empirical
+host calibration. Unknown values are not zero; prediction is not a memory guarantee.
 
 ## Checkpointing and storage
 

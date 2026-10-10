@@ -18,6 +18,20 @@ from clawbox.experiments.spec import load_experiment, spec_digest
 EXAMPLE = Path("examples/experiments/getting-started.yaml")
 
 
+def test_dense_multi_numa_qualification_does_not_require_shared_memory(tmp_path):
+    from clawbox.experiments.topology import ComputeNode
+    spec = load_experiment(EXAMPLE)
+    nodes = tuple(ComputeNode(node_id=f'n{i}', numa_node=i, cpus=str(i),
+        memory_capacity_mib=1024, low_watermark_mib=512, high_watermark_mib=768)
+        for i in range(2))
+    spec = spec.model_copy(update={'resources': spec.resources.model_copy(update={
+        'compute_nodes': nodes, 'shared_memory_borrow_limit_mib': None,
+        'warm_memory_capacity_mib': 0, 'warm_numa_node': None})})
+    result = live_borrow_roundtrip_test(spec, artifact_root=tmp_path/'borrow')
+    assert result == {'required': False, 'passed': True, 'borrow_limit_bytes': 0,
+                      'shared_capacity_bytes': 0}
+
+
 def _receipt(spec, *, concurrency: int | None = None) -> dict:
     qualified = qualification_spec(spec, concurrency=concurrency)
     return {
@@ -33,6 +47,8 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "tool_image_digest": spec.sandbox.image_digest,
         "run_root": "/results/qualification-test",
         "supervision_fault_test": {"passed": True},
+        "runtime_control_test": {"passed": True, "restore_verified": True, "vm_control": {"passed": True},
+                                 "kernel_control": {"activation_verified": True, "low_throttling_verified": True}},
         "cleanup_verified": True,
         "status": "succeeded",
     }
@@ -81,7 +97,7 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
 
     spec = load_experiment(EXAMPLE)
     spec = spec.model_copy(update={
-        "policies": (BASELINES["tool-p50-wait-reactive"].as_policy(),),
+        "policies": (BASELINES["predicted-wait-snapshot"].as_policy(),),
         "resources": spec.resources.model_copy(update={
             "prediction_artifact": "/data/p50.json",
             "snapshot_storage": "warm-only",

@@ -69,7 +69,10 @@ class CubeSandboxLifecycle:
                  snapshot_reservation_bytes: int | None = None,
                  snapshot_mechanism: str = "incremental-cow", lazy_restore: bool = True,
                  snapshot_storage: str = "tiered", numa_borrower: Any = None,
-                 configured_memory_bytes: int | None = None) -> None:
+                 configured_memory_bytes: int | None = None,
+                 cgroup_token: str | None = None,
+                 verify_cgroup: Callable[[str], Any] | None = None,
+                 prepare_cgroup: Callable[[], Any] | None = None) -> None:
         if snapshot_storage not in {"tiered", "warm-only"}:
             raise ValueError("invalid snapshot storage")
         self.snapshot_storage = snapshot_storage
@@ -86,6 +89,10 @@ class CubeSandboxLifecycle:
         self.ownership = ownership
         self.allow_internet_access = allow_internet_access
         self.env_vars = dict(env_vars or {})
+        if cgroup_token:
+            self.env_vars['CLAWBOX_CGROUP_TOKEN'] = cgroup_token
+        self.verify_cgroup = verify_cgroup
+        self.prepare_cgroup = prepare_cgroup
         self.network_allow_out = list(network_allow_out or [])
         self.network_deny_out = list(network_deny_out or [])
         self.physical_observation = physical_observation
@@ -215,6 +222,8 @@ class CubeSandboxLifecycle:
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
             try:
+                if self.prepare_cgroup is not None:
+                    self.prepare_cgroup()
                 self.sandbox = self.client.create_sandbox(
                     template=self.template, node_name=self.node_name,
                     ownership=self.ownership, env_vars=self.env_vars or None,
@@ -223,6 +232,8 @@ class CubeSandboxLifecycle:
                     network_deny_out=self.network_deny_out or None,
                 )
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
+                if self.verify_cgroup is not None:
+                    self.verify_cgroup(self.sandbox_id)
                 if self.numa_borrower is not None:
                     self.numa_borrower.pin_local(self.sandbox_id)
                 self._state = SandboxState.RUNNING
@@ -439,10 +450,14 @@ class CubeSandboxLifecycle:
             resume_attempted = False
             try:
                 resume_attempted = True
+                if self.prepare_cgroup is not None:
+                    self.prepare_cgroup()
                 self.sandbox = self.client.connect_sandbox(
                     self.sandbox_id,
                     snapshot_mechanism=self.snapshot_mechanism,
                 )
+                if self.verify_cgroup is not None:
+                    self.verify_cgroup(self.sandbox_id)
                 if self.numa_borrower is not None:
                     self.numa_borrower.pin_local(self.sandbox_id)
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:

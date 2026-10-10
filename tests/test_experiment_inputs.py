@@ -104,7 +104,7 @@ def test_validation_override_replaces_case_command(tmp_path):
 
 def test_p50_admission_requires_a_frozen_training_artifact():
     with pytest.raises(ValueError, match='prediction_artifact'):
-        configure_experiment(EXAMPLE, baseline_names=['tool-p50-resident'])
+        configure_experiment(EXAMPLE, baseline_names=['predicted-resident'])
 
 
 def test_replay_rejects_unavailable_tools_before_execution(tmp_path):
@@ -149,10 +149,10 @@ def test_malformed_yaml_has_a_cli_error_not_a_traceback(tmp_path, capsys):
     assert 'cannot read experiment' in capsys.readouterr().err
 
 
-def test_dimension_filters_select_only_catalog_combinations():
+def test_dimension_filters_select_independent_mechanisms():
     from clawbox.experiments.preset_view import select_presets
-    assert set(select_presets(estimate=['fixed', 'predicted'], idle=['resident', 'immediate'])) == {
-        'tool-static-resident', 'tool-p50-resident'}
-    assert select_presets(['tool-static-resident', 'tool-p50-resident'], estimate=['fixed']) == ['tool-static-resident']
-    with pytest.raises(ValueError, match='No implemented preset'):
-        select_presets(reserve_during=['session'], estimate=['predicted'])
+    assert set(select_presets(admission=['fixed', 'predicted'], reclamation=['resident'],
+                              runtime_control=['agentcgroup_cgroup'])) == {'fixed-resident', 'predicted-resident'}
+    assert select_presets(runtime_control=['off'], admission=['predicted']) == ['prediction-only-resident']
+    with pytest.raises(ValueError):
+        select_presets(estimate=['predicted'])

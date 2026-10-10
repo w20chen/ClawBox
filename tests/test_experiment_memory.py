@@ -85,7 +85,7 @@ def test_sandbox_rss_sampler_reports_execution_increment(tmp_path: Path) -> None
     assert result["validity"] == "valid"
     assert result["host_vm_rss_baseline_bytes"] == 100 * 1024
     assert result["host_vm_rss_peak_bytes"] == 340 * 1024
-    assert result["actual_host_execution_increment_bytes"] == 240 * 1024
+    assert result["host_vm_rss_execution_increment_bytes"] == 240 * 1024
 
 
 def test_rss_sampling_does_not_rescan_host_processes(tmp_path: Path, monkeypatch) -> None:
@@ -102,3 +102,22 @@ def test_rss_sampling_does_not_rescan_host_processes(tmp_path: Path, monkeypatch
     # A reused PID must not silently become a measurement of another process.
     (process / "cmdline").write_bytes(b"unrelated\0")
     assert sandbox_process_rss_bytes("sandbox-a", process_paths=(process,)) is None
+
+
+def test_host_cgroup_increment_is_distinct_from_rss_and_missing_samples_are_unknown(tmp_path):
+    process = tmp_path / '123'; process.mkdir()
+    (process / 'cmdline').write_bytes(b'cube\0sandbox-a\0')
+    (process / 'status').write_text('VmRSS:\t100 kB\n')
+    group = tmp_path / 'group'; group.mkdir()
+    charge = group / 'memory.current'; charge.write_text('1000000')
+    sampler = SandboxRSSSampler('sandbox-a', proc_root=tmp_path, cgroup=group)
+    charge.write_text('3000000')
+    measured = sampler.stop()
+    assert measured['host_cgroup_execution_increment_bytes'] == 2000000
+    assert measured['host_vm_rss_execution_increment_bytes'] == 0  # unchanged RSS
+    assert 'actual_host_execution_increment_bytes' not in measured
+    missing = SandboxRSSSampler('sandbox-a', proc_root=tmp_path, cgroup=group)
+    charge.unlink()
+    result = missing.stop()
+    assert result['host_cgroup_execution_increment_bytes'] is None
+    assert result['host_cgroup_error']

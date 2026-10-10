@@ -44,6 +44,9 @@ clawbox-tune-server = "clawbox.tuning.server:main"
 where = ["."]
 include = ["clawbox*"]
 
+[tool.setuptools.package-data]
+"clawbox.experiments.vendor.agentcgroup" = ["LICENSE", "PROVENANCE.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

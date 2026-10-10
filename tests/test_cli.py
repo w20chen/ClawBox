@@ -194,22 +194,22 @@ def test_validate_and_plan_v2(capsys) -> None:
 def test_baseline_catalog_is_available_from_public_cli(capsys) -> None:
     assert cli.main(["experiment", "baselines"]) == 0
     output = capsys.readouterr().out
-    assert "tool-static-resident" in output
-    assert "tool-p50-resident" in output
-    assert "tool-p50-wait-reactive" in output
+    assert "fixed-resident" in output
+    assert "predicted-resident" in output
+    assert "predicted-wait-snapshot" in output
     assert "tool-full-resident" not in output
     assert "DEPRECATED" not in output
 
     assert cli.main(["experiment", "baselines", "--all"]) == 0
     all_output = capsys.readouterr().out
-    assert "tool-full-resident [DEPRECATED]" in all_output
-    assert "tool-p50-wait-proactive [DEPRECATED]" in all_output
+    assert "DEPRECATED" not in all_output
+    assert "prediction-only-resident" in all_output
 
 
-def test_public_workflow_rejects_legacy_policy_names(capsys) -> None:
+def test_public_workflow_accepts_independent_runtime_ablation(capsys) -> None:
     path = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
-    assert cli.main(["experiment", "validate", path]) == 1
-    assert "not supported by the standalone workflow" in capsys.readouterr().err
+    assert cli.main(["experiment", "validate", path]) == 0
+    assert '"valid": true' in capsys.readouterr().out
 
 
 def test_status_and_collect_read_standalone_results(tmp_path, capsys) -> None:
@@ -265,8 +265,8 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
         "--tool-image-digest", "sha256:" + "b" * 64,
         "--pool-memory-gib", "32",
         "--prediction-artifact", "/data/frozen-p50.json",
-        "--baseline", "tool-static-resident",
-        "--baseline", "tool-p50-resident",
+        "--baseline", "fixed-resident",
+        "--baseline", "predicted-resident",
     ]) == 0
     configured = yaml.safe_load(output.read_text(encoding="utf-8"))
     assert configured["experiment_id"] == "friendly"
@@ -276,7 +276,7 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
     assert configured["resources"]["pool_memory_budget_mib"] == 32768
     assert configured["resources"]["prediction_artifact"] == "/data/frozen-p50.json"
     assert [item["name"] for item in configured["policies"]] == [
-        "tool-static-resident", "tool-p50-resident",
+        "fixed-resident", "predicted-resident",
     ]
     rendered = capsys.readouterr().out
     assert "c60: 120 VMs" in rendered
@@ -296,10 +296,11 @@ def test_configure_can_use_validated_training_p90_for_static_admission(
 ) -> None:
     artifact = tmp_path / "p50.json"
     artifact.write_text(json.dumps({
-        "schema": "clawbox_p50_v1",
+        "schema": "clawbox_prediction_v2",
         "repository": "owner/repo",
         "training_validated": True,
         "static_tool_memory_calibration": {
+            "metric": "host_cgroup_memory_current_increment",
             "recommended_mib": 347,
         },
     }), encoding="utf-8")
@@ -375,7 +376,7 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
     command = [
         "experiment", "configure", base, str(output),
-        "--baseline", "tool-p50-wait-reactive",
+        "--baseline", "predicted-wait-snapshot",
     ]
     assert cli.main(command) == 1
     assert not output.exists()
@@ -399,7 +400,7 @@ def test_configure_can_freeze_scaled_trace_median_model_wait(tmp_path, capsys) -
 
     assert cli.main([
         "experiment", "configure", base, str(output),
-        "--baseline", "tool-p50-wait-reactive",
+        "--baseline", "predicted-wait-snapshot",
         "--prediction-artifact", "/data/frozen-p50.json",
         "--model-wait-prediction-seconds", "auto",
     ]) == 0

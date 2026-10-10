@@ -1,4 +1,4 @@
-"""User-facing helpers for configuring schema-v2 experiments.
+"""User-facing helpers for configuring schema-v3 experiments.
 
 This module deliberately edits only experiment data.  The generated document
 is validated by the same Pydantic schema and is executed by the existing
@@ -58,8 +58,8 @@ def calibrated_static_tool_memory(path: Path, repository: str) -> int:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read prediction artifact {path}: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != "clawbox_p50_v1":
-        raise ValueError("automatic static calibration requires a clawbox_p50_v1 artifact")
+    if not isinstance(payload, dict) or payload.get("schema") != "clawbox_prediction_v2":
+        raise ValueError("automatic static calibration requires a clawbox_prediction_v2 artifact")
     if payload.get("repository") != repository or payload.get("training_validated") is not True:
         raise ValueError("automatic static calibration requires matching validated training")
     calibration = payload.get("static_tool_memory_calibration")
@@ -67,6 +67,8 @@ def calibrated_static_tool_memory(path: Path, repository: str) -> int:
         raise ValueError(
             "prediction artifact has no static Tool-memory calibration; rerun experiment train"
         )
+    if calibration.get("metric") != "host_cgroup_memory_current_increment":
+        raise ValueError("static calibration must measure host cgroup execution growth")
     value = calibration.get("recommended_mib")
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("prediction artifact has an invalid static Tool-memory calibration")
@@ -95,6 +97,7 @@ def _set_template(
 def configure_experiment(
     base_path: Path,
     *,
+    host_profile: dict[str, Any] | None = None,
     compute_nodes: list[dict] | None = None,
     placement_policy: str | None = None,
     session_compute_nodes: list[str] | None = None,
@@ -136,9 +139,7 @@ def configure_experiment(
     snapshot_mechanism: str | None = None,
     snapshot_storage: str | None = None,
     static_tool_memory_mib: int | str | None = None,
-    full_tool_memory_mib: int | None = None,
     prediction_artifact: str | None = None,
-    oracle_measurements: str | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
     random_seed: int | None = None,
@@ -150,9 +151,6 @@ def configure_experiment(
     openclaw_exec_yield_ms: int | None = None,
     model_wait_prediction_seconds: float | str | None = None,
     model_wait_prediction_source: str | None = None,
-    fixed_delay_seconds: float | None = None,
-    prefetch_lead_seconds: float | None = None,
-    checkpoint_break_even_seconds: float | None = None,
     inference_backend: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
@@ -168,6 +166,21 @@ def configure_experiment(
     tool = _mapping(root.get("sandbox"), name="sandbox")
     execution = _mapping(root.get("execution"), name="execution")
     resources = _mapping(root.get("resources"), name="resources")
+    if host_profile is not None:
+        # A selected host replaces the topology, including explicit absence of
+        # a shared tier. None must not retain a different host's base settings.
+        for key in ("local_memory_capacity_mib", "local_memory_low_watermark_mib",
+                    "local_memory_high_watermark_mib", "shared_memory_borrow_limit_mib",
+                    "local_numa_node", "warm_numa_node", "local_memory_cgroup"):
+            resources[key] = host_profile.get(key)
+        resources["compute_nodes"] = host_profile.get("compute_nodes") or []
+        resources["warm_memory_capacity_mib"] = host_profile.get("warm_capacity_mib", 0)
+        resources["warm_snapshot_root"] = host_profile.get("warm_root")
+        resources["cold_snapshot_root"] = host_profile.get("cold_root")
+        resources["pool_memory_budget_mib"] = (
+            host_profile.get("local_memory_high_watermark_mib")
+            or host_profile["local_memory_capacity_mib"]
+        )
     if compute_nodes is not None:
         resources["compute_nodes"] = compute_nodes
         if compute_nodes:
@@ -237,32 +250,6 @@ def configure_experiment(
         _mapping(item, name=f"policies[{index}]")
         for index, item in enumerate(policies)
     ]
-    if fixed_delay_seconds is not None:
-        matching = [
-            item for item in policy_mappings if item.get("eviction") == "fixed_delay"
-        ]
-        if not matching:
-            raise ValueError("fixed delay was set but no fixed-delay baseline is selected")
-        for item in matching:
-            item["fixed_delay_seconds"] = fixed_delay_seconds
-    if prefetch_lead_seconds is not None:
-        matching = [
-            item for item in policy_mappings if item.get("restore") == "proactive"
-        ]
-        if not matching:
-            raise ValueError("prefetch lead was set but no proactive baseline is selected")
-        for item in matching:
-            item["prefetch_lead_seconds"] = prefetch_lead_seconds
-    if checkpoint_break_even_seconds is not None:
-        matching = [
-            item for item in policy_mappings if item.get("eviction") == "time_oracle"
-        ]
-        if not matching:
-            raise ValueError(
-                "checkpoint break-even was set but no time-oracle baseline is selected"
-            )
-        for item in matching:
-            item["checkpoint_break_even_seconds"] = checkpoint_break_even_seconds
 
     runtime_shape_changed = (
         (runtime_vcpu is not None and runtime_vcpu != runtime.get("vcpu"))
@@ -336,12 +323,8 @@ def configure_experiment(
     ):
         if value is not None:
             resources[key] = value
-    if full_tool_memory_mib is not None:
-        resources["full_tool_memory_mib"] = full_tool_memory_mib
     if prediction_artifact is not None:
         resources["prediction_artifact"] = prediction_artifact
-    if oracle_measurements is not None:
-        resources["oracle_measurements"] = oracle_measurements
     if static_tool_memory_mib == "auto":
         cases = workload.get("cases")
         repositories = {
@@ -462,7 +445,7 @@ def dump_experiment(spec: ExperimentSpec) -> str:
 
 
 def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
-    if not any(policy.admission.value == "tool_p50" for policy in spec.policies):
+    if not any(policy.admission.value == "predicted" for policy in spec.policies):
         return None
     artifact = spec.resources.prediction_artifact
     if artifact is None:
@@ -473,6 +456,9 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
         return {"path": str(artifact), "error": str(exc)}
     values: list[float] = []
     sources: dict[str, int] = {}
+    calibration = payload.get("host_calibration") or {}
+    if calibration.get("target") != "host_cgroup_memory_current_increment":
+        return {"path": str(artifact), "error": "missing host cgroup calibration"}
     for row in payload.get("commands") or []:
         if not isinstance(row, dict) or not isinstance(row.get("selection"), dict):
             continue
@@ -480,7 +466,8 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
         value = selection.get("predicted_incremental_memory_mib")
         if (isinstance(value, (int, float)) and not isinstance(value, bool)
                 and math.isfinite(float(value)) and float(value) >= 0):
-            values.append(float(value))
+            values.append(float(value) * float(calibration["scale"])
+                          + float(calibration["offset_bytes"]) / 1024**2)
             source = str(selection.get("fallback_level") or "unknown")
             sources[source] = sources.get(source, 0) + 1
     if not values:
@@ -551,19 +538,18 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
         ),
         "combined_live_cgroup_limit_gib": (
             (spec.resources.local_memory_capacity_mib
-             + spec.resources.shared_memory_borrow_limit_mib) / 1024
+             + (spec.resources.shared_memory_borrow_limit_mib or 0)) / 1024
             if spec.resources.local_memory_capacity_mib is not None
-            and spec.resources.shared_memory_borrow_limit_mib is not None else None
+            else None
         ),
         "available_after_headroom_gib": usable_reservation_mib / 1024,
         "reservation_capacity_excludes_measured_resident_memory": True,
         "static": {
             "per_command_mib": static_mib,
-            "reservation_only_slots": sum(budget // static_mib for budget in usable_node_reservations),
+            "reservation_only_slots": (sum(budget // static_mib for budget in usable_node_reservations)
+                                       if static_mib else None),
         },
         "p50": p50_summary,
-        "full_tool_memory_mib": spec.resources.full_tool_memory_mib,
-        "oracle_measurements": spec.resources.oracle_measurements,
     }
     if p50_summary is not None and "max_mib" in p50_summary:
         maximum = p50_summary["max_mib"]

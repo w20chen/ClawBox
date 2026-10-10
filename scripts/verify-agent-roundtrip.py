@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deprecated historical matrix; use scripts/lab with the A/A+B/A+B+C baselines."""
+"""Deprecated historical matrix; use clawbox experiment launch for current qualification."""
 import argparse
 import copy
 import json

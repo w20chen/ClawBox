@@ -1,4 +1,4 @@
-"""Strict schema-v2 experiment specification and deterministic arm planning."""
+"""Strict schema-v3 experiment specification and deterministic arm planning."""
 from __future__ import annotations
 
 import hashlib
@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .spec_types import (
     AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, InferenceBackend,
-    ReclamationPolicy, RestorePolicy, SessionAssignment, WorkloadSource,
+    ReclamationPolicy, RestorePolicy, RuntimeControl, SessionAssignment, WorkloadSource,
 )
 from .topology import ComputeNode, validate_compute_nodes
 
@@ -128,12 +128,13 @@ class ResourcesSpec(StrictFrozenModel):
     local_memory_high_watermark_mib: int | None = Field(default=None, ge=1)
     shared_memory_borrow_limit_mib: int | None = Field(default=None, ge=0)
     emergency_free_memory_mib: int = Field(ge=1)
+    startup_headroom_mib: int = Field(default=256, ge=0)
+    admission_margin_mib: int = Field(default=256, ge=0)
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
     non_command_tool_memory_mib: int | None = Field(default=None, ge=1)
-    full_tool_memory_mib: int | None = Field(default=None, ge=1)
     prediction_artifact: str | None = None
-    oracle_measurements: str | None = None
+    agentcgroup_source: str | None = None
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
     snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"
@@ -141,7 +142,7 @@ class ResourcesSpec(StrictFrozenModel):
     warm_snapshot_root: str | None = None
     cold_snapshot_root: str | None = None
     local_numa_node: int | None = Field(default=None, ge=0)
-    local_memory_cgroup: str | None = None
+    local_memory_cgroup: str | None = "/sys/fs/cgroup/cube_sandbox/sandbox"
     warm_numa_node: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
@@ -150,8 +151,8 @@ class ResourcesSpec(StrictFrozenModel):
             validate_compute_nodes(self.compute_nodes, self.warm_numa_node)
             if self.local_numa_node is not None:
                 raise ValueError("compute_nodes replaces local_numa_node; do not specify both")
-            if not self.local_memory_cgroup or self.warm_numa_node is None or self.shared_memory_borrow_limit_mib is None:
-                raise ValueError("compute_nodes requires a VM cgroup, shared NUMA node and borrow limit")
+            if not self.local_memory_cgroup:
+                raise ValueError("compute_nodes requires a VM cgroup")
             for field, node_field in (
                 ("local_memory_capacity_mib", "memory_capacity_mib"),
                 ("local_memory_low_watermark_mib", "low_watermark_mib"),
@@ -167,7 +168,7 @@ class ResourcesSpec(StrictFrozenModel):
             self.local_memory_capacity_mib,
             self.shared_memory_borrow_limit_mib,
         )
-        if any(value is not None for value in (values[0], values[1], values[3])):
+        if self.shared_memory_borrow_limit_mib is not None:
             if any(value is None for value in values):
                 raise ValueError(
                     "LOW/HIGH shared borrowing requires low, high, LOCAL hard, and borrow limit"
@@ -185,12 +186,21 @@ class ResourcesSpec(StrictFrozenModel):
                 )
             if self.pool_memory_budget_mib != high:
                 raise ValueError("pool_memory_budget_mib must equal the HIGH watermark")
+        elif self.compute_nodes:
+            if self.pool_memory_budget_mib != self.local_memory_high_watermark_mib:
+                raise ValueError("pool_memory_budget_mib must equal the sum of compute HIGH watermarks")
+        elif any(value is not None for value in values[:2]):
+            if any(value is None for value in values[:3]) or not values[0] < values[1] < values[2]:
+                raise ValueError("local watermarks require LOW < HIGH < capacity")
+        if self.local_memory_capacity_mib is not None and self.pool_memory_budget_mib > self.local_memory_capacity_mib:
+            raise ValueError("pool memory budget cannot exceed physical LOCAL capacity")
         return self
 
 
 class PolicySpec(StrictFrozenModel):
     name: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     admission: AdmissionPolicy
+    runtime_control: RuntimeControl = RuntimeControl.AGENTCGROUP_CGROUP
     reclamation: ReclamationPolicy
     eviction: EvictionPolicy
     restore: RestorePolicy
@@ -251,8 +261,8 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError("session_compute_nodes contains unknown compute node IDs")
         elif assignment:
             raise ValueError("session_compute_nodes requires placement_policy=explicit")
-        if self.schema_version != 2:
-            raise ValueError("only schema_version: 2 is supported; migrate schema v1")
+        if self.schema_version != 3:
+            raise ValueError("only schema_version: 3 is supported")
         if not self.policies:
             raise ValueError("policies must not be empty")
         if self.agent.driver is AgentDriver.OPENCLAW:
@@ -297,18 +307,12 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError("tiered oracle policies require resources." + ", resources.".join(missing))
             if self.resources.local_numa_node == self.resources.warm_numa_node:
                 raise ValueError("LOCAL and WARM must use distinct NUMA nodes")
-        if AdmissionPolicy.TOOL_ORACLE in admissions:
-            if self.inference.backend is not InferenceBackend.REPLAY:
-                raise ValueError("tool_oracle is evaluation-only and requires inference.backend=replay")
-            if not self.resources.oracle_measurements:
-                raise ValueError("tool_oracle requires resources.oracle_measurements")
-        required = {
-            AdmissionPolicy.TOOL_STATIC: (self.resources.static_tool_memory_mib, "static_tool_memory_mib"),
-            AdmissionPolicy.TOOL_FULL: (self.resources.full_tool_memory_mib, "full_tool_memory_mib"),
-        }
-        for policy, (value, field) in required.items():
-            if policy in admissions and value is None:
-                raise ValueError(f"{policy.value} requires resources.{field}")
+        if not self.resources.local_memory_cgroup:
+            raise ValueError("experiments require resources.local_memory_cgroup for physical accounting")
+        if AdmissionPolicy.FIXED in admissions and self.resources.static_tool_memory_mib is None:
+            raise ValueError("fixed admission requires resources.static_tool_memory_mib")
+        if AdmissionPolicy.PREDICTED in admissions and not self.resources.prediction_artifact:
+            raise ValueError("predicted admission requires a frozen prediction_artifact")
         return self
 
 
@@ -424,6 +428,6 @@ def load_experiment(path: Path) -> ExperimentSpec:
         raise ValueError(f"cannot read experiment {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError("experiment document must be an object")
-    if raw.get("schema_version") != 2:
-        raise ValueError("only schema_version: 2 is supported; migrate schema v1")
+    if raw.get("schema_version") != 3:
+        raise ValueError("only schema_version: 3 is supported")
     return ExperimentSpec.model_validate(raw)

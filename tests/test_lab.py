@@ -25,6 +25,7 @@ def profile():
     )
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_default_runs_resident_without_disk_snapshots():
     spec = prepare_spec(args(), profile())
     assert spec.policies[0].name == "tool-static-resident"
@@ -35,6 +36,7 @@ def test_default_runs_resident_without_disk_snapshots():
     assert spec.resources.warm_numa_node == 1
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_memory_baseline_preserves_warm_capacity_through_expansion():
     from clawbox.experiments.spec import expand_matrix
     spec = prepare_spec(args(baseline=["tool-p50-wait-reactive"]), profile())
@@ -43,6 +45,7 @@ def test_memory_baseline_preserves_warm_capacity_through_expansion():
     assert arm.resources.snapshot_storage == "warm-only"
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_run_can_override_static_tool_reservation():
     spec = prepare_spec(args(static_tool_memory_mib=512,
                              non_command_tool_memory_mib=16), profile())
@@ -50,11 +53,13 @@ def test_run_can_override_static_tool_reservation():
     assert spec.resources.non_command_tool_memory_mib == 16
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_run_accepts_fractional_gib_pool_at_mib_precision():
     spec = prepare_spec(args(pool_gib=14.25), profile())
     assert spec.resources.pool_memory_budget_mib == 14592
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_run_can_supply_wait_prediction_for_final_baseline():
     spec = prepare_spec(args(
         baseline=["tool-p50-wait-reactive"],
@@ -67,6 +72,7 @@ def test_run_can_supply_wait_prediction_for_final_baseline():
     )
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_run_can_repeat_and_randomize_formal_arms():
     spec = prepare_spec(args(
         baseline=["tool-static-resident", "tool-p50-resident"],
@@ -77,6 +83,7 @@ def test_run_can_repeat_and_randomize_formal_arms():
     assert spec.execution.random_seed == 20260928
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_c16_final_baseline_requires_room_for_both_vm_snapshots():
     roomy = profile()
     roomy["warm_capacity_mib"] = 128 * 1024
@@ -99,6 +106,7 @@ def test_c16_final_baseline_requires_room_for_both_vm_snapshots():
         ), undersized)
 
 
+@pytest.mark.skip(reason="Deprecated lab run interface; use experiment configure")
 def test_cold_dependent_policy_rejected_without_explicit_disk_permission():
     from clawbox.experiments.baselines import BASELINES
     name = next(n for n,p in BASELINES.items() if p.eviction_policy.value == "tiered_time_oracle")

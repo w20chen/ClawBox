@@ -341,13 +341,27 @@ def test_warm_only_never_falls_back_to_cold():
 
 def test_lifecycle_preserves_id_across_pause_restore_and_executor(tmp_path) -> None:
     _Sandbox.items = {}
-    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    calls=[]
+    class Routed(_Sandbox):
+        @classmethod
+        def create(cls, **kwargs):
+            calls.append('create')
+            return super().create(**kwargs)
+        @classmethod
+        def connect(cls, sandbox_id, **kwargs):
+            calls.append('connect')
+            return super().connect(sandbox_id, **kwargs)
+    client = CubeSandboxClient(sandbox_class=Routed)
     lifecycle = CubeSandboxLifecycle(
         client, template="tpl", node_name="node-a", ownership=_owner(),
         cold_snapshot_root=str(tmp_path / "cold"),
+        cgroup_token='a'*32, prepare_cgroup=lambda:calls.append('prepare'),
+        verify_cgroup=lambda sandbox_id:calls.append(('verify',sandbox_id)),
     )
     lifecycle.start()
     sandbox_id = lifecycle.sandbox_id
+    assert Routed.create_kwargs['env_vars']['CLAWBOX_CGROUP_TOKEN']=='a'*32
+    assert calls==['prepare','create',('verify',sandbox_id)]
     executor = CubeCommandExecutor(client, lambda: lifecycle.sandbox)
     assert executor.execute("printf ok", 5).stdout == "ok"
     lifecycle.checkpoint_and_evict()
@@ -356,6 +370,7 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor(tmp_path) -> N
     assert not lifecycle.resident
     assert lifecycle.checkpoint_and_evict() is None
     lifecycle.restore()
+    assert calls[-3:]==['prepare','connect',('verify',sandbox_id)]
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
@@ -584,7 +599,36 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
     monkeypatch.setattr(worker_module, "SandboxRSSSampler",
-                        lambda sandbox_id: SandboxRSSSampler(sandbox_id, proc_root=proc_root))
+                        lambda sandbox_id, **kw: SandboxRSSSampler(sandbox_id, proc_root=proc_root, **kw))
+    # Emulate only cgroup I/O; exercise the real demand ledger and independent
+    # OFF runtime controller through the complete worker lifecycle.
+    cg = tmp_path/'cg'
+    cg.mkdir()
+    def files(path):
+        path.mkdir(parents=True, exist_ok=True)
+        for key, value in {'memory.max': str(100000*1024**2), 'memory.current': '0',
+                           'memory.stat': 'anon 0\nfile 0\npgscan 0\npgsteal 0\n',
+                           'memory.low': '0', 'memory.high': 'max',
+                           'memory.events': 'high 0\noom_kill 0\n'}.items():
+            (path/key).write_text(value)
+    files(cg)
+    from clawbox.experiments.priority import PriorityDomain
+    class FakePriorityDomain(PriorityDomain):
+        def start(self):
+            for branch in (self.high, self.low):
+                files(branch)
+            for i in self.priorities:
+                for role in ('tool', 'runtime'):
+                    branch = self.high if self.priorities[i] == 'high' else self.low
+                    leaf = branch/f'session-{i}'/role
+                    files(leaf.parent); files(leaf)
+                    self.leaves[i, role] = leaf
+        def prepare(self, *args): pass
+        def verify(self, index, role, sandbox_id):
+            return {'priority': self.priorities[index], 'cgroup': str(self.leaves[index, role])}
+        def close(self): pass
+    monkeypatch.setattr(worker_module, 'PriorityDomain', FakePriorityDomain)
+    monkeypatch.setattr(worker_module, 'locate_cgroup', lambda *args: next(cg.glob('*/session-0/tool')))
     trace = tmp_path / "openclaw-snapshot.jsonl"
     write_spans(trace, llm_spans(
         [{"role": "user", "content": "hello"}],
@@ -675,7 +719,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     monkeypatch.setenv("CLAWBOX_POLICY_PORT", "0")
     monkeypatch.setenv("CLAWBOX_MODEL_GATEWAY_PORT", "0")
     spec = ExperimentSpec.model_validate({
-        "schema_version": 2, "experiment_id": "openclaw-snapshot-test",
+        "schema_version": 3, "experiment_id": "openclaw-snapshot-test",
         "workload": {"source": "recorded_trace", "input": str(trace), "cases": [{
             "case_id": "snapshot-case", "source": "recorded_trace",
             "source_reference": str(trace), "replay_trace_reference": str(trace),
@@ -692,10 +736,12 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                        "arm_timeout_seconds": 10, "command_timeout_seconds": 5,
                        "stabilization_seconds": 0},
         "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
+                       "local_memory_cgroup": str(cg),
                        "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 1,
                        "static_tool_memory_mib": 1,
                        "cold_snapshot_root": str(tmp_path / "cold")},
-        "policies": [{"name": "snapshot", "admission": "tool_static",
+        "policies": [{"name": "snapshot", "admission": "fixed",
+                      "runtime_control": "off",
                       "reclamation": "snapshot_pause", "eviction": "eager",
                       "restore": "proactive", "prefetch_lead_seconds": 0.1}],
     })

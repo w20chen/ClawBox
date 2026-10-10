@@ -47,6 +47,35 @@ def test_session_placement_is_stable_and_can_be_explicit():
     assert place_session(nodes(), 0, ("node1", "node0")).numa_node == 1
 
 
+def test_dense_multinode_deployment_does_not_require_a_shared_tier():
+    from clawbox.experiments.host import HostConfig
+    r = resources(warm_numa_node=None, warm_memory_capacity_mib=0,
+                  shared_memory_borrow_limit_mib=None)
+    assert r.local_memory_capacity_mib == 73728
+    h = HostConfig(warm=False, compute_nodes=[{'node_id': 'n', 'numa_node': 1, 'cpus': '2-3'}])
+    assert h.compute_nodes[0].numa_node == h.warm_node
+
+
+def test_selecting_dense_host_clears_shared_topology_from_supernode_base(tmp_path):
+    import yaml
+    from clawbox.experiments.configure import configure_experiment, experiment_overview
+    base = configure_experiment(Path('examples/experiments/getting-started.yaml'),
+        compute_nodes=[n.model_dump() for n in nodes()], pool_memory_gib=64,
+        warm_numa_node=2, warm_memory_capacity_mib=131072,
+        shared_memory_borrow_limit_mib=65536)
+    path = tmp_path / 'base.yaml'
+    path.write_text(yaml.safe_dump(base.model_dump(mode='json')))
+    dense = configure_experiment(path, baseline_names=['runtime-resident'], host_profile={
+        'local_memory_capacity_mib': 16384, 'local_numa_node': 0,
+        'local_memory_cgroup': '/sys/fs/cgroup/cube_sandbox/sandbox',
+        'warm_capacity_mib': 0})
+    assert not dense.resources.compute_nodes
+    assert dense.resources.shared_memory_borrow_limit_mib is None
+    assert dense.resources.warm_numa_node is None
+    assert dense.resources.pool_memory_budget_mib == 16384
+    assert experiment_overview(dense)['admission']['combined_live_cgroup_limit_gib'] == 16
+
+
 def test_configure_and_validate_explicit_mapping(tmp_path):
     from clawbox.experiments.configure import configure_experiment, experiment_overview
     from clawbox.experiments.spec import ExperimentSpec

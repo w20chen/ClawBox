@@ -17,7 +17,15 @@ TIER_ISOLATION_PATCH_FILE=$SCRIPT_DIR/tiered-memory-isolation.patch
 TIMING_PATCH_FILE=$SCRIPT_DIR/checkpoint-phase-timing.patch
 INCREMENTAL_PATCH_FILE=$SCRIPT_DIR/incremental-cow-snapshot.patch
 TEMPLATE_BASE_PATCH_FILE=$SCRIPT_DIR/template-base-lineage.patch
+PRIORITY_PATCH_FILE=$SCRIPT_DIR/agentcgroup-priority.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
+
+# The priority patch supersedes hunks in incremental/tier-isolation patches.
+if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$PRIORITY_PATCH_FILE" >/dev/null 2>&1; then
+  git -C "$SOURCE_DIR" diff --check
+  echo "standalone priority patch set already prepared: $SOURCE_DIR"
+  exit 0
+fi
 
 require() {
   command -v "$1" >/dev/null || { echo "missing command: $1" >&2; exit 1; }
@@ -48,6 +56,10 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
     git -C "$SOURCE_DIR" apply "$TEMPLATE_BASE_PATCH_FILE"
   fi
   git -C "$SOURCE_DIR" diff --check
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$PRIORITY_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$PRIORITY_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$PRIORITY_PATCH_FILE"
+  fi
   echo "standalone patch set already prepared: $SOURCE_DIR"
   exit 0
 fi
@@ -88,6 +100,7 @@ apply_once "$TIER_ISOLATION_PATCH_FILE" "physical memory tier isolation"
 apply_once "$TIMING_PATCH_FILE" "checkpoint phase timing"
 apply_once "$INCREMENTAL_PATCH_FILE" "incremental CoW RAM snapshots"
 apply_once "$TEMPLATE_BASE_PATCH_FILE" "template RAM external base lineage"
+apply_once "$PRIORITY_PATCH_FILE" "stable AgentCgroup priority domains"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$SOURCE_DIR"

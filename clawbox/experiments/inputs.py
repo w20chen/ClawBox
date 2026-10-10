@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
-from .prediction import CommandPredictionProvider, P50PredictionProvider
+from .prediction import P50PredictionProvider
 from clawbox.replay.trace import load_trace
 
 
@@ -88,19 +88,12 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             traces.append({"case_id": case.case_id, **info})
     files = []
     admissions = {policy.admission for policy in spec.policies}
-    for policy, source in (
-        (AdmissionPolicy.TOOL_ORACLE, spec.resources.oracle_measurements),
-    ):
-        if policy in admissions:
-            path = Path(str(source))
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError(f"{path}: prediction data must be a JSON object")
-            provider = CommandPredictionProvider(path)
-            if not provider.manifest:
-                raise ValueError(f"{path}: managed prediction data contains no command records")
-            files.append(str(path))
-    if AdmissionPolicy.TOOL_P50 in admissions and spec.resources.prediction_artifact:
+    if any(policy.runtime_control.value != 'off' for policy in spec.policies):
+        from .congestion import UPSTREAM_SHA256, UPSTREAM_SOURCE
+        source = Path(spec.resources.agentcgroup_source) if spec.resources.agentcgroup_source else UPSTREAM_SOURCE
+        if hashlib.sha256(source.read_bytes()).hexdigest() != UPSTREAM_SHA256:
+            raise ValueError("AgentCgroup source does not match the pinned backend")
+    if AdmissionPolicy.PREDICTED in admissions and spec.resources.prediction_artifact:
         path = Path(spec.resources.prediction_artifact)
         for case in cases:
             provider = P50PredictionProvider(path, repository=case.repository or case.case_id,

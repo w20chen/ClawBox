@@ -1,47 +1,49 @@
-# Build context / ClawTune checkout
-clawtune/
-clawtune-*/
-
-# Generated experiment data and temporary source checkouts
-.worktrees/
-.cubesandbox/
-results/
-.pytest-*/
-.tmp-*/
-*.bundle
-*.log
-deploy/rec-a-*.inspect.jsonl
-
-# Python test/runtime caches
+# Python environments, packaging and caches
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
 __pycache__/
 *.py[cod]
-.pytest-tmp-root/
-.pytest-tmp-root-*/
-.pytest-tmp-*/
 .pytest_cache/
+.pytest-*/
 .pytest_tmp*/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# Local Python environment / editable-install metadata
-.venv/
-*.egg-info/
+# Local source checkouts and build contexts
+/clawtune/
+/clawtune-*/
+/.worktrees/
+/.cubesandbox/
 
-# Local test DB state (tests use a per-PID temp DB; never commit one)
+# Generated experiments, host audits and scratch work (retain locally)
+/results/
+/research/
+/.experiment-audit/
+/.clawbox-workspaces/
+/release-evidence/
+/.artifacts/
+/.verification/
+/working_set_plan.json
+/.tmp-*/
+/deploy/rec-a-*.inspect.jsonl
+*.bundle
+*.log
+
+# Local database state
 test-clawbox.db
-
-# Local dev / migration scratch DBs (never commit)
 clawbox.db
 .tmp-migrate*.db
 
-# Local temp / debug staging (scp'd helper scripts, remote experiments)
-.tmp-remote/
-.clawbox-workspaces/
-
-# Generated release/evidence manifests (kept on object store / CI, not git)
-release-evidence/
-.artifacts/
-.verification/
-
-# Local secrets — never commit
+# Local credentials; sanitized templates remain versioned
 .env
 .env.*
+*.env
+!.env.example
+!.env.*.example
 *.key
