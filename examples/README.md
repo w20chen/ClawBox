@@ -1,0 +1,20 @@
+# Configuration and input examples
+
+Start with the [self-service workflow](../docs/self-service.md). It uses
+`clawbox experiment configure` to fill in the applied host's templates, NUMA
+layout and capacities. Save generated experiment YAMLs outside this directory.
+
+| File or directory | Use |
+| --- | --- |
+| [clawbox-machine.env.example](clawbox-machine.env.example) | Copy to `~/.config/clawbox/machine.env` and supply this host's addresses, source paths and image/template identities. |
+| [experiments/getting-started.yaml](experiments/getting-started.yaml) | Starting configuration for a small end-to-end experiment; configure its placeholders before launching. |
+| [traces/smoke.jsonl](traces/smoke.jsonl) | Minimal replay input for checking the execution path. |
+| [traces/memory-smoke.jsonl](traces/memory-smoke.jsonl) | Longer memory workload used by the training walkthrough. |
+| [experiments/control-ablation.yaml](experiments/control-ablation.yaml) | Four-policy comparison; configure the host and provide a separate validated training artifact. |
+| Other experiment YAMLs and traces | Workload or historical host examples. Check their comments, template identities, repository dependencies and paths before use. |
+| [predictions/](predictions/) | Historical prediction fixtures. Generate current artifacts with `clawbox experiment train`. |
+| [clawbox-snapshot-host.env.example](clawbox-snapshot-host.env.example) | Older single-node helper settings. New deployments use the editable host YAML in the self-service workflow. |
+
+Do not put credentials, generated predictions, local traces or experiment results
+into these checked-in examples. The command/configuration reference is in
+[docs/guide.md](../docs/guide.md).

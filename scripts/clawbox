@@ -4,6 +4,30 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 
+# Load the same machine settings in every terminal, before privilege escalation.
+# Wrapper flags precede the ordinary CLI arguments.
+MACHINE_ENV=${CLAWBOX_MACHINE_ENV:-${HOME}/.config/clawbox/machine.env}
+AS_ROOT=0
+MACHINE_ENV_EXPLICIT=0
+while (( $# )); do
+  case "$1" in
+    --machine-env)
+      (( $# >= 2 )) || { echo '--machine-env requires a path' >&2; exit 2; }
+      MACHINE_ENV=$2; MACHINE_ENV_EXPLICIT=1; shift 2 ;;
+    --sudo) AS_ROOT=1; shift ;;
+    *) break ;;
+  esac
+done
+if [[ -f "$MACHINE_ENV" ]]; then
+  export CLAWBOX_MACHINE_ENV="$MACHINE_ENV"
+  set -a
+  source "$MACHINE_ENV"
+  set +a
+elif [[ -n "${CLAWBOX_MACHINE_ENV:-}" || "$MACHINE_ENV_EXPLICIT" == 1 ]]; then
+  echo "Machine configuration not found: $MACHINE_ENV" >&2
+  exit 2
+fi
+
 # Daily commands should keep working in a new shell after the documented
 # editable install.  An explicit override still wins for remote/client use.
 if [[ -n "${CLAWBOX_PYTHON:-}" ]]; then
@@ -14,7 +38,16 @@ else
   PYTHON=python3
 fi
 export CLAWBOX_PYTHON="${PYTHON}"
+export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+if ! "$PYTHON" -c 'import clawbox.cli' >/dev/null 2>&1; then
+  echo 'Python environment is incomplete. Run bash scripts/bootstrap-python.sh (see docs/installation.md).' >&2
+  exit 1
+fi
 
 # The shell entry point follows exactly the standalone Python CLI. It must
 # never auto-detect a cluster or start a historical deployment helper.
+if (( AS_ROOT && EUID != 0 )); then
+  exec sudo -E env "HOME=$HOME" "PATH=$PATH" "PYTHONPATH=$PYTHONPATH" \
+    "CLAWBOX_MACHINE_ENV=$MACHINE_ENV" "CLAWBOX_PYTHON=$PYTHON" "$PYTHON" -m clawbox.cli "$@"
+fi
 exec "${PYTHON}" -m clawbox.cli "$@"

@@ -227,7 +227,8 @@ supports `--help` for its complete arguments.
 | Command | Purpose |
 | --- | --- |
 | `trace FILE`, `validate SPEC --inputs`, `describe SPEC`, `plan SPEC` | Inspect trace, inputs, effective resources, and planned trials without creating VMs |
-| `host inspect/init/check/apply` | Inspect topology, create host YAML, check prerequisites, apply host settings, and probe a VM |
+| `host inspect/init/check/apply` | Inspect topology, create host YAML (`init --detect` proposes settings from this host and machine.env), check prerequisites, apply host settings, and probe a VM |
+| `host clean [--apply]` | Preview or delete recognized old crash dumps; defaults: 24 hours and 100 MiB; `--root` selects dedicated crash directories |
 | `setup` | Lower-level single-compute-node setup; multi-node configuration uses the host YAML |
 | `images` | Rebuild guest integration, register templates, and update the host profile; see installation |
 | `doctor SPEC [--probe-vm]` | Check services, resources, templates, and revisions; it may refresh snapshot storage; `--probe-vm` creates, executes in, and deletes a VM |

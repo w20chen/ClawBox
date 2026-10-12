@@ -6,7 +6,11 @@ has an agent VM and a tool VM. ClawTune supplies per-command resource prediction
 and measurements. Experiments support ordinary NUMA deployment and a supernode
 configuration with a shared NUMA memory pool.
 
-Start with the [step-by-step guide](docs/self-service.md). The supported command
+Start with the [中文自助操作指南](docs/self-service.md), covering new/existing hosts,
+disk cleanup, reboot recovery, smoke runs, training, and policy comparisons.
+From the checkout, `bash scripts/clawbox` automatically loads your saved machine
+settings and Python environment; add `--sudo` for privileged experiment commands.
+The supported command
 interface is `clawbox experiment`; running it does not require a coding
 assistant or Kubernetes. Live experiments require an ARM64 Linux/KVM host,
 patched CubeSandbox, and compatible guest images and kernel files. The
@@ -31,6 +35,8 @@ Apply the same policy matrix separately to each host architecture.
 
 The [starter configuration](examples/experiments/getting-started.yaml) and
 [smoke trace](examples/traces/smoke.jsonl) are the smallest example inputs.
+The [example index](examples/README.md) distinguishes starter inputs, comparison
+templates, and historical fixtures.
 The training walkthrough uses a longer
 [memory trace](examples/traces/memory-smoke.jsonl). Other example experiment
 files contain host-specific paths or placeholder templates; configure them for

@@ -391,7 +391,7 @@ def main() -> int:
         )
         timings["runtime_create_seconds"] = time.monotonic() - started
         # Use the current launcher, just as the experiment driver does.
-        launcher = (Path(__file__).parent / "clawbox-policy-ssh.py").read_bytes()
+        launcher = (Path(__file__).parent / "clawbox-policy-ssh.py").read_text(encoding="utf-8").encode("utf-8")
         encoded_launcher = base64.b64encode(launcher).decode()
         run(runtime, f"printf %s {encoded_launcher} | base64 -d > /usr/local/bin/ssh; "
                      "chmod +x /usr/local/bin/ssh")

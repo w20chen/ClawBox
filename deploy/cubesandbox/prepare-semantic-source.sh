@@ -18,10 +18,15 @@ TIMING_PATCH_FILE=$SCRIPT_DIR/checkpoint-phase-timing.patch
 INCREMENTAL_PATCH_FILE=$SCRIPT_DIR/incremental-cow-snapshot.patch
 TEMPLATE_BASE_PATCH_FILE=$SCRIPT_DIR/template-base-lineage.patch
 PRIORITY_PATCH_FILE=$SCRIPT_DIR/agentcgroup-priority.patch
+NETWORK_PATCH_FILE=$SCRIPT_DIR/build-network.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 
 # The priority patch supersedes hunks in incremental/tier-isolation patches.
 if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$PRIORITY_PATCH_FILE" >/dev/null 2>&1; then
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$NETWORK_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$NETWORK_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$NETWORK_PATCH_FILE"
+  fi
   git -C "$SOURCE_DIR" diff --check
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
   exit 0
@@ -59,6 +64,10 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$PRIORITY_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$PRIORITY_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$PRIORITY_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$NETWORK_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$NETWORK_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$NETWORK_PATCH_FILE"
   fi
   echo "standalone patch set already prepared: $SOURCE_DIR"
   exit 0
@@ -101,6 +110,7 @@ apply_once "$TIMING_PATCH_FILE" "checkpoint phase timing"
 apply_once "$INCREMENTAL_PATCH_FILE" "incremental CoW RAM snapshots"
 apply_once "$TEMPLATE_BASE_PATCH_FILE" "template RAM external base lineage"
 apply_once "$PRIORITY_PATCH_FILE" "stable AgentCgroup priority domains"
+apply_once "$NETWORK_PATCH_FILE" "configurable Go build module proxy"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$SOURCE_DIR"

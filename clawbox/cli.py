@@ -164,6 +164,12 @@ def parser() -> argparse.ArgumentParser:
     host_init = host_actions.add_parser("init", help="write an editable host YAML; never overwrite")
     host_init.add_argument("config", type=Path)
     host_init.add_argument("--from-profile", type=Path)
+    host_init.add_argument("--detect", action="store_true", help="propose topology and machine settings from this Linux host; review before apply")
+    clean = host_actions.add_parser("clean", help="preview old kernel/systemd crash dumps; never prune VM or experiment data")
+    clean.add_argument("--apply", action="store_true", help="delete the listed matching dumps")
+    clean.add_argument("--root", type=Path, action="append", help="dedicated crash directory; default: /var/crash and /var/lib/systemd/coredump")
+    clean.add_argument("--older-than-hours", type=int, default=24)
+    clean.add_argument("--min-size-mib", type=int, default=100)
     for action in ("check", "apply"):
         host_command = host_actions.add_parser(action)
         host_command.add_argument("config", type=Path)
@@ -469,8 +475,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.host_action == "inspect":
                 emit(host.inventory())
             elif args.host_action == "init":
-                host.init_config(args.config, args.from_profile)
+                host.init_config(args.config, args.from_profile, detect=args.detect)
                 emit({"config": args.config, "next": f"Edit {args.config}, then run clawbox experiment host check {args.config}"})
+            elif args.host_action == "clean":
+                from clawbox.experiments.disk_cleanup import DEFAULT_ROOTS, clean_dumps
+                report = clean_dumps(args.root if args.root is not None else DEFAULT_ROOTS,
+                                    apply=args.apply, older_than_hours=args.older_than_hours,
+                                    min_size_mib=args.min_size_mib)
+                emit(report)
+                return 1 if report['errors'] else 0
             elif args.host_action == "check":
                 report = host.check(host.load_config(args.config))
                 emit(report)

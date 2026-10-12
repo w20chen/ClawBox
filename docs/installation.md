@@ -13,7 +13,9 @@ NUMA, capacity and disk settings in one YAML, check them, and run the first expe
 | --- | --- |
 | VM image archive | ARM64 agent VM image (Runtime) with OpenClaw, ClawTune, and the SSH launcher; tool VM image (Tool) with its workspace, dependencies, SSH service, and telemetry collectors |
 | Guest kernel | `vmlinux-bm`, `version`, and `version.json`, with the required eBPF/kprobe support |
+| ClawTune source | Complete source matching both VM images, including contracts, sidecar and seed data; exported with `--with-clawtune` |
 | Registry | A registry reachable from the new host, with permission to push the images |
+| Build network | Access to the Python package index, container registry, Git sources and GitHub release assets; a package mirror alone does not cover all of them |
 
 These guest artifacts are not published with this repository. The existing
 Dockerfiles reference private base images; cloning the repository alone cannot
@@ -21,17 +23,24 @@ rebuild them. Obtain an image/kernel bundle from an existing compatible deployme
 or supply equivalent artifacts with the same entrypoints. Task repositories live
 in the tool VM image; no particular benchmark trace is an installation dependency.
 
-On an existing deployment whose `machine.env` identifies the image digests:
+On an existing deployment, export the images identified by its applied host profile:
 
 ```bash
-bash scripts/export-machine-assets.sh /data/clawbox-transfer
+bash scripts/export-machine-assets.sh /data/clawbox-transfer \
+  --profile "$HOME/.config/clawbox/host.json" --with-clawtune
 ```
+
+Without `--profile`, the export uses image references from `machine.env`. The
+explicit profile avoids having to copy image digests by hand on an older host.
+`--with-clawtune` checks the configured source against both image revisions and
+the integration contract before exporting it. Use this matching source on the
+new host; a moving ClawTune branch can have an incompatible configuration schema.
 
 ## 1. Install host tools and Python package
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3.12 python3.12-venv python3-dev git docker.io \
+sudo apt-get install -y python3.12 python3.12-venv python3-dev git docker.io docker-buildx \
   build-essential curl jq rsync numactl e2fsprogs util-linux
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
@@ -44,36 +53,50 @@ test "$(uname -m)" = aarch64
 test -c /dev/kvm
 test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
 docker info >/dev/null
+docker buildx version
 python3.12 --version
 mkdir -p "$HOME/src"
 cd "$HOME/src"
 git clone https://github.com/w20chen/ClawBox.git
-git clone https://github.com/w20chen/ClawTune.git
 cd ClawBox
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+read -r -p 'Source SSH address (user@host): ' ASSET_HOST
+sudo install -d -o "$USER" -g "$(id -gn)" /data/clawbox-transfer
+rsync -a "$ASSET_HOST:/data/clawbox-transfer/" /data/clawbox-transfer/
+(cd /data/clawbox-transfer && sha256sum -c SHA256SUMS)
+test ! -e "$HOME/src/ClawTune"
+tar -xzf /data/clawbox-transfer/clawtune-source.tar.gz -C "$HOME/src"
+bash scripts/bootstrap-python.sh --python python3.12 --clawtune "$HOME/src/ClawTune"
 source .venv/bin/activate
 clawbox experiment --help
 ```
 
 Expected: ARM64, accessible KVM, `cgroup2fs`, a working Docker daemon, and the
 experiment command list. Use fresh checkout directories for the clone commands.
+On a host that already has the required OS packages, skip their installation and
+use its Python >= 3.12 executable with `--python`. The helper reads saved machine
+settings when present; explicit source arguments override those paths. Use
+`--direct-network` only when installation should bypass inherited HTTP/SOCKS
+proxies. `--venv PATH` installs an isolated environment; select it later through
+`CLAWBOX_PYTHON=PATH/bin/python`.
 
-### Optional: rebuild images with the current ClawTune source
+### Optional: rebuild images from a compatible ClawTune checkout
 
 Skip this subsection when installing from a supplied guest-image bundle.
 Rebuilding requires access to the private base images referenced by the
-Dockerfiles. If they are available, export the sibling ClawTune working tree
-into a new directory. This captures the current prediction and measurement
-code and records its source revision without changing the checkout:
+Dockerfiles. Select a ClawTune Git checkout compatible with this ClawBox revision
+and export it into a new directory. The bundled source is already matched to the
+supplied images; updating it is a separate operation. Check the integration
+contract before installing a replacement or building images:
 
 ```bash
-python scripts/prepare-clawtune.py --working-tree --output /data/clawtune-build-source
+read -r -p 'Absolute path of compatible ClawTune Git checkout: ' CLAWTUNE_CHECKOUT
+python scripts/prepare-clawtune.py --clawtune-root "$CLAWTUNE_CHECKOUT" --working-tree --output /data/clawtune-build-source
 export CLAWTUNE_ROOT=/data/clawtune-build-source
 export CLAWTUNE_SIDECAR_SRC="$CLAWTUNE_ROOT/services/sidecar/src"
-python -m pip install --upgrade "$CLAWTUNE_ROOT/services/sidecar"
 python scripts/validate_clawtune_integration.py --clawtune-root "$CLAWTUNE_ROOT"
-export CLAWTUNE_REVISION="$(cat "$CLAWTUNE_ROOT/CLAWTUNE_REVISION")"
+python -m pip install --upgrade "$CLAWTUNE_ROOT/services/sidecar"
+CLAWTUNE_REVISION="$(cat "$CLAWTUNE_ROOT/CLAWTUNE_REVISION")"
+export CLAWTUNE_REVISION
 docker buildx build --load --platform linux/arm64 \
   --build-context "clawtune=$CLAWTUNE_ROOT" --build-arg "CLAWTUNE_REVISION=$CLAWTUNE_REVISION" \
   -f docker/Dockerfile.runtime-cube -t clawbox/runtime-cube:main .
@@ -96,27 +119,49 @@ guest kernel and BCC headers must match.
 
 ## 2. Build and install patched CubeSandbox
 
-Copy the supplied bundle to the destination, then prepare the server from
+Using the bundle already copied in step 1, prepare the server from
 `$HOME/src/ClawBox`:
 
 ```bash
-read -r -p 'Source SSH address (user@host): ' ASSET_HOST
-sudo install -d -o "$USER" -g "$(id -gn)" /data/clawbox-transfer
-rsync -a "$ASSET_HOST:/data/clawbox-transfer/" /data/clawbox-transfer/
 (cd /data/clawbox-transfer && sha256sum -c SHA256SUMS)
 test -s /data/clawbox-transfer/guest-images.tar
 test -s /data/clawbox-transfer/kernel/vmlinux-bm
 test -s /data/clawbox-transfer/kernel/version.json
 export CUBE_SOURCE_DIR="$HOME/src/CubeSandbox"
-bash deploy/cubesandbox/prepare-semantic-source.sh
+bash scripts/build-cubesandbox-release.sh \
+  --assets /data/clawbox-transfer --source "$CUBE_SOURCE_DIR" --jobs 1
 python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
-cd "$CUBE_SOURCE_DIR"
-cp deploy/one-click/build.env.example deploy/one-click/build.env
-make builder-image
-ONE_CLICK_BUILD_JOBS=1 \
-ONE_CLICK_CUBE_KERNEL_VMLINUX=/data/clawbox-transfer/kernel/vmlinux-bm \
-bash deploy/one-click/build-release-bundle-builder.sh
 ```
+
+The build helper checks bundle hashes, prepares the patched source, preserves an
+existing `deploy/one-click/build.env`, and builds with the supplied kernel. It uses
+a user-writable Buildx activity directory at `~/.cache/clawbox/buildx`, avoiding
+permission conflicts left by earlier root Docker builds. It does not install or
+restart services. `--jobs` controls build concurrency; `CUBE_SOURCE_URL` can select
+a reachable Git mirror of the pinned upstream tag. A build failure stops here;
+keep its log and rerun after resolving the reported dependency or network error.
+The first build downloads dependencies and can take a long time. While a component
+is running, its live log is under `$CUBE_SOURCE_DIR/deploy/one-click/.work/build-logs/`;
+the terminal prints that component's output when it finishes. Keep the checkout
+and build cache to reuse successful downloads on a retry.
+Use `--mirror cn` for China APT/LLVM mirrors and the Go module proxy; the
+default is `--mirror upstream`. `--direct-network` bypasses inherited proxy
+environment variables for host-side source preparation and build commands.
+`--go-proxy URL` (or `GOPROXY`) selects another Go module proxy. The default is
+`https://proxy.golang.org,direct`, or `https://goproxy.cn,direct` with `--mirror cn`;
+module checksum verification stays enabled.
+These mirrors do not cover GitHub release assets. Before a full build,
+check that the required release asset is reachable from the build environment:
+
+```bash
+curl -IL --max-time 30 \
+  https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-aarch_64.zip
+```
+
+If this times out, configure a working network/proxy that both the host and Docker
+build containers can reach before building. A proxy on host `127.0.0.1` is not the
+same endpoint as `127.0.0.1` inside a container. Do not bypass a failed build and
+install an older archive found in the output directory.
 
 The preparation script pins v0.7.0 and applies the repository's endpoint,
 networking, image-provenance, snapshot, and AgentCgroup priority patches. Rebuild
@@ -200,31 +245,33 @@ python scripts/audit-cube-sandboxes.py --json
 
 ## 4. Register templates and verify SSH
 
-Read the installed guest-kernel component and register new aliases. The commands
-match the starting example's VM sizes; disk capacity belongs to the template:
+For the usual matched pair, use the registration helper from the ClawBox checkout:
 
 ```bash
-GUEST_KERNEL_COMPONENT=$(jq -er '.variants.bm.version' \
-  /usr/local/services/cubetoolbox/cube-kernel-scf/version.json)
-TEMPLATE_SUFFIX=$(date -u +%Y%m%d%H%M%S)
-python scripts/register-cube-template.py "$CLAWBOX_RUNTIME_IMAGE" \
-  --alias "runtime-$TEMPLATE_SUFFIX" --node "$CUBE_NODE" \
-  --cpu-millicores 2000 --memory-mib 2048 --writable-layer-size 20G \
-  --exposed-port 49983 --probe-port 49983 \
-  --command /usr/local/bin/cube-runtime-entrypoint.sh \
-  --expected-kernel-version "$GUEST_KERNEL_COMPONENT" > /data/clawbox-specs/runtime-template.json
-python scripts/register-cube-template.py "$CLAWBOX_TOOL_IMAGE" \
-  --alias "tool-$TEMPLATE_SUFFIX" --node "$CUBE_NODE" \
-  --cpu-millicores 2000 --memory-mib 4096 --writable-layer-size 40G \
-  --exposed-port 49983 --exposed-port 2222 --probe-port 49983 \
-  --command /usr/local/bin/cube-tool-entrypoint.sh \
-  --expected-kernel-version "$GUEST_KERNEL_COMPONENT" > /data/clawbox-specs/tool-template.json
-export CLAWBOX_RUNTIME_TEMPLATE=$(jq -er .template_id /data/clawbox-specs/runtime-template.json)
-export CLAWBOX_TOOL_TEMPLATE=$(jq -er .template_id /data/clawbox-specs/tool-template.json)
+bash scripts/register-machine-templates.sh --output-dir "$HOME/clawbox-templates/first" \
+  --runtime-memory-mib 2048 --tool-memory-mib 4096 \
+  --cpu-millicores 2000 --runtime-disk 20G --tool-disk 40G
+set -a
+source "$HOME/.config/clawbox/machine.env"
+set +a
 ```
 
-Save both IDs in `machine.env`. Registration waits for READY and checks kernel
-binding. If it fails ambiguously, inspect the alias inventory before resubmitting.
+It reads immutable image references and the node from `machine.env`, reads the
+installed guest-kernel component, registers both templates, waits for READY,
+checks kernel binding, and saves both IDs to `machine.env` only after both succeed.
+The output directory retains aliases, registration records, and a private backup
+of the previous settings. An existing output directory is refused. After an
+ambiguous registration failure, inspect its aliases and the CubeSandbox template
+inventory before submitting again. Use `--machine-env FILE` for another machine
+file and `--kernel-manifest FILE` for a nonstandard kernel installation.
+
+When resizing an existing deployment, choose a new output directory, then update
+the template IDs in `host.yaml`, run host check/apply, and configure new experiment
+YAMLs. CLI resource declarations do not resize an existing template.
+Add `--profile "$HOME/.config/clawbox/host.json"` to reuse the applied image
+digests and node when these are absent from an older `machine.env`. After both
+registrations succeed, the helper also saves these image references and node.
+
 Check CubeSandbox's semantic TCP endpoint, which identifies a VM and port,
 instead of guessing a guest IP:
 
@@ -259,8 +306,9 @@ python scripts/prepare-guest-kernel-headers.py \
   --image "$CLAWBOX_TOOL_IMAGE" --tag "$REGISTRY/tool:matching-headers" \
   --output /data/clawbox-specs/header-build-01
 docker push "$REGISTRY/tool:matching-headers"
-export CLAWBOX_TOOL_IMAGE=$(docker image inspect "$REGISTRY/tool:matching-headers" \
+CLAWBOX_TOOL_IMAGE=$(docker image inspect "$REGISTRY/tool:matching-headers" \
   --format '{{index .RepoDigests 0}}')
+export CLAWBOX_TOOL_IMAGE
 ```
 
 This reads `/proc/config.gz` from a temporary guest and preserves the build
@@ -268,6 +316,8 @@ log. Register a **new** tool VM template with a fresh alias and the corrected
 image digest:
 
 ```bash
+GUEST_KERNEL_COMPONENT=$(jq -er '.variants.bm.version' \
+  /usr/local/services/cubetoolbox/cube-kernel-scf/version.json)
 TEMPLATE_SUFFIX=$(date -u +%Y%m%d%H%M%S)
 python scripts/register-cube-template.py "$CLAWBOX_TOOL_IMAGE" \
   --alias "tool-headers-$TEMPLATE_SUFFIX" --node "$CUBE_NODE" \
@@ -276,8 +326,9 @@ python scripts/register-cube-template.py "$CLAWBOX_TOOL_IMAGE" \
   --command /usr/local/bin/cube-tool-entrypoint.sh \
   --expected-kernel-version "$GUEST_KERNEL_COMPONENT" \
   > /data/clawbox-specs/tool-template-headers.json
-export CLAWBOX_TOOL_TEMPLATE=$(jq -er .template_id \
+CLAWBOX_TOOL_TEMPLATE=$(jq -er .template_id \
   /data/clawbox-specs/tool-template-headers.json)
+export CLAWBOX_TOOL_TEMPLATE
 ```
 
 Save `CLAWBOX_TOOL_TEMPLATE` and `CLAWBOX_TOOL_IMAGE` in `machine.env`, then
@@ -353,6 +404,18 @@ reports `snapshot storage unavailable`. Remove confirmed obsolete crash dumps
 or unused build cache, keeping templates, recordings and experiment results.
 Allow additional space for snapshots during the run, not just enough to pass
 the initial check. Run the storage validation above again before experiments.
+
+Preview and remove old crash dumps using the maintained cleanup command:
+
+```bash
+bash scripts/clawbox --sudo experiment host clean
+bash scripts/clawbox --sudo experiment host clean --apply
+df -h /data/cubelet
+```
+
+The default retention is 24 hours and minimum size 100 MiB. For completed recent
+dumps use `--older-than-hours 1` on both commands. Only recognized dump files are
+selected; VM storage and results are retained. See [disk maintenance](self-service.md).
 
 For an interrupted run, keep its result directory and launch the same frozen
 YAML with the same run ID after restoring the host. Choose a new ID when changing

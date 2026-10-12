@@ -154,24 +154,46 @@ def guest_pressure_probe(domain, lifecycles, *, source=None):
             samples.append(int((parent/'memory.current').read_text()))
             time.sleep(.1)
         charged = max(samples)
-        cap = max(int(charged/.90), charged + 64*MIB)
-        if outer_limit != 'max' and cap > int(outer_limit):
-            raise RuntimeError('VM control probe does not fit within the configured parent budget')
-        (parent/'memory.max').write_text(str(cap))
-        cap = int((parent/'memory.max').read_text())
-        control = RuntimeMemoryControl(parent, source, high=domain.high, low=domain.low, emit=events.append)
-        control.start()
-        deadline = time.monotonic()+15
-        while time.monotonic() < deadline:
-            control.check()
-            high = control.module._read_memory_events(str(domain.low)).get('high', 0)
-            if control.stats.get('upstream', {}).get('activations', 0) and high:
+        budget_observations = []
+        for attempt in range(2):
+            cap = max(int(charged/.90), charged + 64*MIB)
+            if outer_limit != 'max' and cap > int(outer_limit):
+                raise RuntimeError('VM control probe does not fit within the configured parent budget')
+            (parent/'memory.max').write_text(str(cap))
+            cap = int((parent/'memory.max').read_text())
+            control = RuntimeMemoryControl(parent, source, high=domain.high, low=domain.low, emit=events.append)
+            closed = False
+            control.start()
+            deadline = time.monotonic()+15
+            while time.monotonic() < deadline:
+                control.check()
+                high = control.module._read_memory_events(str(domain.low)).get('high', 0)
+                if control.stats.get('upstream', {}).get('activations', 0) and high:
+                    break
+                time.sleep(.1)
+            stats = control.backend.get_stats()
+            throttled = control.module._read_memory_events(str(domain.low)).get('high', 0) > 0
+            oom = control.module._read_memory_events(str(parent)).get('oom_kill', 0)
+            current = int((parent/'memory.current').read_text())
+            budget_observations.append({'charged_bytes': charged, 'capacity_bytes': cap,
+                                        'current_bytes': current, 'activation_verified': stats['activations'] > 0,
+                                        'low_throttling_verified': throttled, 'oom_kill': oom})
+            if throttled or oom or attempt or not stats['activations'] or current >= charged * .8:
                 break
-            time.sleep(.1)
-        stats = control.backend.get_stats()
-        throttled = control.module._read_memory_events(str(domain.low)).get('high', 0) > 0
-        oom = control.module._read_memory_events(str(parent)).get('oom_kill', 0)
-        peak = max([before, charged] + [e['parent_current_bytes'] for e in events
+            # Startup/reclaimable charges can disappear after activation, so a
+            # budget derived from them no longer exercises LOW. Re-measure once
+            # with the same guest allocations alive. Only this private probe's
+            # budget changes; activation, real throttling and no OOM stay required.
+            control.close()
+            closed = True
+            (parent/'memory.max').write_text(outer_limit)
+            samples = []
+            for _ in range(10):
+                samples.append(int((parent/'memory.current').read_text()))
+                time.sleep(.1)
+            charged = max(samples)
+        peak = max([before] + [row['charged_bytes'] for row in budget_observations]
+                   + [e['parent_current_bytes'] for e in events
                                if 'parent_current_bytes' in e])
         current = int((parent/'memory.current').read_text())
         # LOW includes the VM's envd as well as its workload. Do not require an
@@ -193,6 +215,7 @@ def guest_pressure_probe(domain, lifecycles, *, source=None):
                   'parent_capacity_bytes': cap, 'baseline_bytes': before,
                   'charged_bytes_before_control': charged,
                   'budget_basis': 'measured_host_charge_after_guest_allocation',
+                  'budget_observations': budget_observations,
                   'observed_peak_bytes': peak, 'guest_allocations': guest_evidence,
                   'current_bytes': current, 'events': events,
                   'completion_checked_after_control_release': True}

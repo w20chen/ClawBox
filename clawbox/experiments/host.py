@@ -126,11 +126,32 @@ def inventory() -> dict:
             "note": "NUMA free memory excludes reclaimable cache; it is not MemAvailable or a reservation."}
 
 
-def init_config(path: Path, profile_path: Path | None = None) -> None:
+def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = False) -> None:
+    if detect and profile_path:
+        raise ValueError('choose --detect for a new host or --from-profile for an existing host')
     values = HostConfig().model_dump()
     if not profile_path:
         values.update(compute_nodes=[HostComputeNode(node_id=f"node{i}", numa_node=i).model_dump() for i in (0, 1)],
                       warm_node=2, warm_root="/mnt/clawbox-pool")
+    if detect:
+        nodes = [n for n in inventory()['numa_nodes'] if n['cpus'] and n['total_mib'] >= 16 * 1024]
+        if not nodes:
+            raise ValueError('--detect requires a Linux NUMA node with at least 16 GiB; use host init and edit capacities manually')
+        domains = []
+        for node in nodes[:2]:
+            capacity = min(36, node['total_mib'] // 4096)
+            domains.append(dict(node_id=f"node{node['node']}", numa_node=node['node'], cpus=None,
+                                memory_gib=capacity, low_gib=max(1, capacity * 7 // 9),
+                                high_gib=max(2, capacity * 8 // 9)))
+        values.update(compute_nodes=domains, warm=len(nodes) >= 3)
+        if values['warm']:
+            values.update(warm_node=nodes[2]['node'], warm_gib=min(128, nodes[2]['total_mib'] // 4096))
+        for key, env in (('runtime_template', 'CLAWBOX_RUNTIME_TEMPLATE'), ('tool_template', 'CLAWBOX_TOOL_TEMPLATE'),
+                         ('node', 'CUBE_NODE'), ('cube_source', 'CUBE_SOURCE_DIR'),
+                         ('output_root', 'CLAWBOX_OUTPUT_ROOT'), ('warm_root', 'CLAWBOX_WARM_ROOT'),
+                         ('cold_root', 'CLAWBOX_COLD_ROOT')):
+            if os.environ.get(env):
+                values[key] = os.environ[env]
     if profile_path:
         profile = json.loads(profile_path.read_text(encoding="utf-8"))
         if profile.get("compute_nodes"):
@@ -142,6 +163,9 @@ def init_config(path: Path, profile_path: Path | None = None) -> None:
                                ("warm_root", "warm_root"), ("cold_root", "cold_root")):
             if profile.get(source) is not None:
                 values[target] = profile[source]
+        for key in ('output_root', 'cubelet_data_root'):
+            if profile.get(key):
+                values[key] = profile[key]
         for target, source in (("local_gib", "local_memory_capacity_mib"),
                                ("low_gib", "local_memory_low_watermark_mib"),
                                ("high_gib", "local_memory_high_watermark_mib"),

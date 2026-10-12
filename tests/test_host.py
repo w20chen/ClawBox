@@ -91,6 +91,24 @@ def test_profile_import_supports_dense_host_without_warm_memory(tmp_path):
     assert not config.warm and config.local_gib == 16
 
 
+def test_detect_adapts_to_single_node_and_saved_settings(tmp_path, monkeypatch):
+    from clawbox.experiments import host
+    monkeypatch.setattr(host, 'inventory', lambda: {'numa_nodes': [
+        {'node': 3, 'cpus': '8-15', 'total_mib': 32 * 1024}]})
+    monkeypatch.setenv('CLAWBOX_RUNTIME_TEMPLATE', 'actual-runtime')
+    monkeypatch.setenv('CUBE_SOURCE_DIR', '/srv/cube')
+    path = tmp_path / 'detected.yaml'
+    init_config(path, detect=True)
+    config = load_config(path)
+    assert not config.warm
+    assert config.runtime_template == 'actual-runtime'
+    assert config.cube_source == '/srv/cube'
+    assert config.compute_nodes[0].numa_node == 3
+    assert config.compute_nodes[0].memory_gib == 8
+    with pytest.raises(ValueError, match='choose'):
+        init_config(path, tmp_path / 'profile.json', detect=True)
+
+
 def test_doctor_checks_dense_compute_nodes_without_a_shared_node(tmp_path, monkeypatch):
     from clawbox import lab
     for name, value in {'memory.max': str(16*1024**2), 'memory.swap.max': '0',
