@@ -34,8 +34,8 @@ EXPECTED_CONCURRENCY_LEVELS = {
 def _policy_key(policy: object) -> tuple[object, ...]:
     return (
         policy.admission, policy.reclamation, policy.eviction, policy.restore,
-        policy.fixed_delay_seconds, policy.prefetch_lead_seconds,
-        policy.checkpoint_break_even_seconds,
+        policy.runtime_control, policy.template_aware_placement,
+        policy.snapshot_aware_residency,
     )
 
 

@@ -33,6 +33,13 @@ measurements. A retry must not execute the same command twice. After
 restoration, CubeSandbox may assign a different endpoint, so the worker
 must resolve it again.
 
+For heterogeneous rollout replay, every `workload.case` may override the
+global Tool `sandbox`. Session assignment selects the case first, then creates
+a distinct Runtime VM, Tool VM, workspace, trace stream, rollout/session ID,
+and ownership record. Templates may repeat, but live VM state is never shared
+between rollouts. This is workload simulation only: ClawBox does not implement
+an RL optimizer, policy update, GPU training, or another Agent runtime.
+
 ## CPU performance counters
 
 The tool VM uses ClawTune's `perf_event_open` collector to measure
@@ -122,6 +129,26 @@ device I/O from page-cache hits. `warm-only` storage has no disk
 fallback; a capacity failure must be reported as a failure.
 The selected `full-copy` or `incremental-cow` mechanism must match
 what the run actually used.
+
+An `incremental-cow` lineage may name the immutable Cube template RAM file as
+external layer zero. This is a dependency, not proof that two VMs physically
+share DRAM. `template_base_sharing: required` therefore gates template
+affinity on a qualification probe that finds the same large file-backed
+device/inode mapping in two VMMs and observes Linux `Shared_Clean`/PSS. When
+that probe is not requested or fails, cross-VM base savings are unsupported
+and are not inferred. WARM accounting charges only owned delta files; a COLD
+migration materializes the external base and rewrites the lineage so SSD state
+has no hidden WARM/template-path dependency.
+
+Template-aware placement first enforces CPU commitment, LOCAL memory safety,
+and the ordinary pressure score. It may prefer an already-active verified
+template only among nodes within `template_balance_slack` of the best pressure,
+so affinity cannot override feasibility or create unbounded imbalance.
+Snapshot-aware residency uses the existing WARM pool and SSD relocation path.
+It ranks private generations by expected reuse times the measured WARM-versus-
+SSD restore-time saving per allocated byte; a lower-value candidate goes
+directly to SSD. Reservations, live borrowing, retained lazy-restore references,
+spill pins, and rollback stay in the same atomic pool ledger.
 
 Measured compute-node memory includes charged guest RAM, VM
 overhead, and retained cache. The configured checkpoint/restore

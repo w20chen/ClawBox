@@ -9,6 +9,9 @@ observation dataset and KB.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+
 import pytest
 
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts
@@ -91,6 +94,12 @@ def pmu_profile(execution_id: str, *, status: str = "reliable") -> dict:
             "ipc": 0.5 if supported else None,
             "llc_mpki": 1.0 if supported else None,
             "llc_miss_rate": 0.1 if supported else None,
+            "llc_read_accesses_per_cpu_second": (
+                10_000_000.0 if supported else None
+            ),
+            "llc_read_misses_per_cpu_second": (
+                1_000_000.0 if supported else None
+            ),
         },
         "coverage": {
             "status": status,
@@ -155,6 +164,38 @@ def test_cgroup_artifact_parser_valid():
     assert resource.network_tx_bytes_delta is None
     assert resource.network_source == "unavailable"
     assert resource.fallback_used is False
+
+
+def test_current_clawtune_pmu_example_is_accepted() -> None:
+    from clawbox.tuning.schema import PmuProfile
+
+    root = Path(os.getenv(
+        "CLAWTUNE_ROOT",
+        str(Path(__file__).resolve().parents[2] / "ClawTune"),
+    ))
+    example = json.loads(
+        (root / "contracts" / "examples" / "pmu-profile.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    profile = PmuProfile.model_validate(example)
+
+    assert profile.derived["llc_read_accesses_per_cpu_second"] == 10_000.0
+    assert profile.derived["llc_read_misses_per_cpu_second"] == 1_000.0
+
+
+def test_reliable_tool_timeout_pmu_is_accepted() -> None:
+    value = pmu_profile("exec-timeout")
+    value["coverage"]["reason"] = "tool_timeout"
+
+    resource = cgroup_artifact_to_resource(
+        cgroup_artifact("exec-timeout", pmu=value)
+    )
+
+    assert resource is not None
+    assert resource.pmu is not None
+    assert resource.pmu.coverage.status == "reliable"
 
 
 @pytest.mark.parametrize("eligible", [True, False])

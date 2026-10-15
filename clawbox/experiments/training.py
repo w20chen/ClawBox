@@ -98,8 +98,8 @@ def _training_arm_sources(run: Path, repository: str) -> tuple[ExperimentSpec, t
             raise ValueError(f'{run}: training arm {arm_id} did not pass final validation')
         if result.correctness.get('cleanup_verified') is not True:
             raise ValueError(f'{run}: training arm {arm_id} cleanup was not verified')
-        if result.arm.policy.admission.value != 'fixed':
-            raise ValueError(f'{run}: training accepts only fixed admission arms')
+        if result.arm.policy.admission.value not in {'off', 'fixed'}:
+            raise ValueError(f'{run}: training requires non-predicted admission arms (off or fixed)')
 
         marker = run / 'arms' / f'{arm_id}.complete'
         try:

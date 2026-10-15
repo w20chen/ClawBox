@@ -1,6 +1,64 @@
 import json
 import pytest
+import hashlib
+from types import SimpleNamespace
 from clawbox.experiments.prediction import select_p50, P50PredictionProvider, PredictionUnavailable
+
+
+def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path, monkeypatch):
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
+    from tool_time.lattice_kb import LatticeTimeKB
+    from tool_resource.runtime_kb import RuntimeToolResourceKB
+    from clawbox.experiments.prediction import RuntimePredictionProvider, command_sha256
+    from clawbox.tuning import clawtune
+    path = tmp_path / 'runtime.json'
+    kb = json.dumps({'lattice': LatticeTimeKB().to_json_obj(),
+                     'tool': RuntimeToolResourceKB().to_json_obj()}).encode()
+    path.with_suffix('.kb.json').write_bytes(kb)
+    path.write_text(json.dumps({'schema': 'clawbox_prediction_v2', 'repository': 'r',
+        'training_validated': True, 'kb_sha256': hashlib.sha256(kb).hexdigest(),
+        'host_calibration': {'target': 'host_cgroup_memory_current_increment',
+                            'sample_count': 3, 'scale': 2, 'offset_bytes': 2**20}}))
+    seen = []
+    def predict(runtime, query, **kwargs):
+        seen.append(query.command)
+        return {key: SimpleNamespace(model_dump=lambda **_: model('runtime', 3 * 2**20))
+                if key == 'tool' else SimpleNamespace(model_dump=lambda **_: {})
+                for key in ('tool', 'lattice')}
+    monkeypatch.setattr(clawtune, 'predict_native_call_load_models', predict)
+    provider = RuntimePredictionProvider(path, repository='r')
+    command = 'python unseen_task.py'
+    result = provider.resolve(command, {'raw_command_sha256': command_sha256(command)})
+    assert seen == [command]
+    assert result['predicted_guest_extra_memory_mib'] == 3
+    assert result['predicted_incremental_memory_mib'] == 7
+    assert result['prediction_source'] == 'runtime_clawtune_immutable_kb'
+    assert not provider.manifest  # No exact-command replay table is needed.
+    with pytest.raises(PredictionUnavailable, match='identity mismatch'):
+        provider.resolve(command, {'raw_command_sha256': command_sha256('different')})
+    path.with_suffix('.kb.json').write_bytes(kb + b' ')
+    with pytest.raises(ValueError, match='KB hash'):
+        RuntimePredictionProvider(path, repository='r')
+
+
+def test_reservation_scale_does_not_change_model_prediction():
+    from clawbox.experiments.spec import ExperimentSpec, expand_matrix
+    from clawbox.experiments.worker import ExperimentWorker
+    from test_experiments_v2 import raw_spec
+    raw = raw_spec()
+    raw['policies'] = [dict(name='prediction', admission='predicted', runtime_control='off',
+                            reclamation='resident', eviction='none', restore='none')]
+    raw['resources']['prediction_reservation_scale'] = .5
+    arm = expand_matrix(ExperimentSpec.model_validate(raw))[0]
+    prediction = {'admission_prediction_target': 'host_cgroup_memory_current_increment',
+                  'predicted_incremental_memory_mib': 100.5}
+    assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=prediction) == 51
+    assert prediction['predicted_incremental_memory_mib'] == 100.5
+    for invalid in (0, -1, float('inf'), float('nan')):
+        raw['resources']['prediction_reservation_scale'] = invalid
+        with pytest.raises(ValueError):
+            ExperimentSpec.model_validate(raw)
 
 
 def model(backend, value):

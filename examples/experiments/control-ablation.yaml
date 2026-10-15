@@ -1,6 +1,9 @@
 # Replace templates, host settings, trace and prediction artifact before launch.
-# Use a separate validated training run; the smoke trace is only a path check.
+# Generate with configure --suite admission --prediction-artifact FILE.
+# The fixed allowance comes from that separate validated training run.
+# The smoke trace is only a path check.
 schema_version: 3
+suite: admission
 experiment_id: control-ablation
 workload:
   source: recorded_trace
@@ -11,6 +14,7 @@ workload:
     source: recorded_trace
     source_reference: examples/traces/smoke.jsonl
     replay_trace_reference: examples/traces/smoke.jsonl
+    repository: self-service/memory
     prompt: Create /workspace/result.txt containing complete.
 agent:
   driver: openclaw
@@ -45,31 +49,6 @@ resources:
   static_tool_memory_mib: 256
   cold_snapshot_root: /data/clawbox/cold
   prediction_artifact: /path/to/separate-training.predictions.json
-policies:
-- name: uncontrolled-resident
-  admission: 'off'
-  runtime_control: 'off'
-  reclamation: resident
-  eviction: none
-  restore: none
-- name: runtime-resident
-  admission: 'off'
-  runtime_control: agentcgroup_cgroup
-  reclamation: resident
-  eviction: none
-  restore: none
-- name: predicted-resident
-  admission: predicted
-  runtime_control: agentcgroup_cgroup
-  reclamation: resident
-  eviction: none
-  restore: none
-- name: prediction-only-resident
-  admission: predicted
-  runtime_control: 'off'
-  reclamation: resident
-  eviction: none
-  restore: none
 validation:
   command: test "$(cat /workspace/result.txt)" = complete
 output:

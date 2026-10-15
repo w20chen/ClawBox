@@ -104,6 +104,10 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert command[-2] == "openclaw-sandbox"
     assert command[-1].endswith("\nprintf /run/identity\n} 2>&1")
     assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
+    assert posted[0][1]["command"] == "printf /run/identity"
+    assert posted[0][1]["command_sha256"] == hashlib.sha256(
+        posted[0][1]["command"].encode()
+    ).hexdigest()
     completion = posted[-1][1]
     assert completion["endpoint_sandbox_id"] == "tool-a"
     assert completion["endpoint_epoch"] == 9

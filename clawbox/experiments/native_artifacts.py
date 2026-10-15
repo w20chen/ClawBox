@@ -22,7 +22,9 @@ from typing import Any
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.tuning.schema import PmuProfile
 
-from .openclaw_driver import NativeSSHConfig, split_native_ssh_target
+from .openclaw_driver import (
+    NativeSSHConfig, openclaw_real_ssh_path, split_native_ssh_target,
+)
 
 
 _ARTIFACT_MARKER = "__CLAWBOX_ARTIFACT_V1__"
@@ -52,8 +54,8 @@ class NativeToolArtifactCollection:
 def _collection_command() -> str:
     """Emit a framed, base64-only stream of Tool artifacts.
 
-    The command is deliberately setup/validation-only: it uses direct
-    ``/usr/bin/ssh`` from the Runtime and is not an Agent operation.  The
+    The command is deliberately setup/validation-only: it uses the preserved
+    real OpenSSH client from the Runtime and is not an Agent operation.  The
     framing prevents JSONL contents from being confused with command output.
     """
     return (
@@ -70,11 +72,12 @@ def _collection_command() -> str:
 
 
 def _direct_ssh_command(ssh: NativeSSHConfig, identity_file: str,
-                        known_hosts_file: str, remote_command: str) -> str:
+                        known_hosts_file: str, remote_command: str, *,
+                        ssh_executable: str = "/usr/bin/ssh") -> str:
     user, host, port = split_native_ssh_target(ssh.target)
     host_argument = f"[{host}]" if ":" in host else host
     args = [
-        "/usr/bin/ssh", "-i", identity_file,
+        ssh_executable, "-i", identity_file,
         "-o", f"UserKnownHostsFile={known_hosts_file}",
         "-o", "StrictHostKeyChecking=yes",
         "-o", "UpdateHostkeys=no",
@@ -87,11 +90,15 @@ def _direct_ssh_command(ssh: NativeSSHConfig, identity_file: str,
 
 
 def _collect_large_artifact_stream(runtime_executor: Any, ssh: NativeSSHConfig,
-                                   identity_file: str, known_hosts_file: str) -> CommandResult:
+                                   identity_file: str, known_hosts_file: str, *,
+                                   ssh_executable: str = "/usr/bin/ssh") -> CommandResult:
     """Read a fixed export in chunks below the Tool bridge's stdout limit."""
     def execute(remote: str) -> CommandResult:
         result = runtime_executor.execute(
-            _direct_ssh_command(ssh, identity_file, known_hosts_file, remote), 60,
+            _direct_ssh_command(
+                ssh, identity_file, known_hosts_file, remote,
+                ssh_executable=ssh_executable,
+            ), 60,
         )
         if result.exit_code:
             raise RuntimeError(f"Tool artifact export failed: {result.stderr[-2000:]}")
@@ -599,8 +606,10 @@ def collect_and_validate_native_tool_artifacts(
     """Collect Tool artifacts over direct SSH and fail closed on any gap."""
     identity_file = f"/state/openclaw/{session_id}/ssh/id_ed25519"
     known_hosts_file = f"/state/openclaw/{session_id}/ssh/known_hosts"
+    ssh_executable = openclaw_real_ssh_path(session_id)
     command = _direct_ssh_command(
         ssh, identity_file, known_hosts_file, _collection_command(),
+        ssh_executable=ssh_executable,
     )
     result: CommandResult | None = None
     collection_attempt = 0
@@ -612,6 +621,7 @@ def collect_and_validate_native_tool_artifacts(
                     and len(candidate.stdout) >= _ARTIFACT_CHUNK_BYTES):
                 candidate = _collect_large_artifact_stream(
                     runtime_executor, ssh, identity_file, known_hosts_file,
+                    ssh_executable=ssh_executable,
                 )
         except Exception as exc:
             if collection_attempt == max_collection_attempts:

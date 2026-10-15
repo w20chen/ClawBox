@@ -411,7 +411,7 @@ new file mode 100644
 index 0000000..e839464
 --- /dev/null
 +++ b/Cubelet/services/cubebox/incremental_memory_test.go
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,138 @@
 +package cubebox
 +
 +import (
@@ -511,6 +511,43 @@ index 0000000..e839464
 +    if err := json.Unmarshal(copied, &manifest); err != nil { t.Fatal(err) }
 +    if int64(manifest["transferred_bytes"].(float64)) != transferred {
 +        t.Fatal("COLD manifest transfer count does not include closure")
++    }
++}
++
++func TestSpillMaterializesExternalTemplateBase(t *testing.T) {
++    root := t.TempDir()
++    source := filepath.Join(root, "source.mem")
++    dest := filepath.Join(root, "destination.mem")
++    layers := source + ".layers"
++    if err := os.Mkdir(layers, 0755); err != nil { t.Fatal(err) }
++    page := int64(os.Getpagesize())
++    external := filepath.Join(root, "template-base.mem")
++    if err := os.WriteFile(external, make([]byte, 8 * page), 0600); err != nil { t.Fatal(err) }
++    delta := filepath.Join(layers, "000001.mem")
++    file, err := os.Create(delta)
++    if err != nil { t.Fatal(err) }
++    if err := file.Truncate(8 * page); err != nil { t.Fatal(err) }
++    if _, err := file.WriteAt(make([]byte, page), 2 * page); err != nil { t.Fatal(err) }
++    file.Close()
++    if err := os.Link(delta, source); err != nil { t.Fatal(err) }
++    metadata := map[string]interface{}{
++        "schema_version": 1, "logical_bytes": 8 * page,
++        "layers": []map[string]interface{}{
++            {"name": "000000.mem", "external_path": external},
++            {"name": "000001.mem"},
++        },
++    }
++    data, _ := json.Marshal(metadata)
++    if err := os.WriteFile(source + ".lineage.json", data, 0600); err != nil { t.Fatal(err) }
++    transferred, err := copyLogicalSnapshot(source, dest, true)
++    if err != nil { t.Fatal(err) }
++    if transferred < 9 * page { t.Fatalf("external base was not copied: %d", transferred) }
++    copied, err := os.ReadFile(dest + ".lineage.json")
++    if err != nil { t.Fatal(err) }
++    var manifest struct { Layers []struct { ExternalPath *string `json:"external_path"` } `json:"layers"` }
++    if err := json.Unmarshal(copied, &manifest); err != nil { t.Fatal(err) }
++    for _, layer := range manifest.Layers {
++        if layer.ExternalPath != nil { t.Fatal("COLD lineage retained external WARM dependency") }
 +    }
 +}
 diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
@@ -724,7 +761,7 @@ index 69aef99..c14b19a 100644
  		// A COLD snapshot must not retain an unaccounted DRAM cache copy.
  		copyErr = unix.Fadvise(int(out.Fd()), 0, 0, unix.FADV_DONTNEED)
  	}
-@@ -135,3 +161,92 @@ func copySnapshot(source, destination string) (int64, error) {
+@@ -135,3 +161,109 @@ func copySnapshot(source, destination string) (int64, error) {
  	}
  	return written, copyErr
  }
@@ -751,12 +788,16 @@ index 69aef99..c14b19a 100644
 +	var layers []struct {
 +		Name string `json:"name"`
 +		Ranges []memoryLayerRange `json:"ranges"`
++		ExternalPath *string `json:"external_path,omitempty"`
 +	}
 +	if err := json.Unmarshal(manifest["layers"], &layers); err != nil { return 0, err }
 +	if len(layers) == 0 { return 0, fmt.Errorf("empty RAM lineage") }
 +	var logical uint64
 +	if err := json.Unmarshal(manifest["logical_bytes"], &logical); err != nil || logical == 0 {
 +		return 0, fmt.Errorf("invalid RAM logical size")
++	}
++	if layers[len(layers)-1].ExternalPath != nil {
++		return 0, fmt.Errorf("RAM head cannot be an external base")
 +	}
 +	if err := validateSnapshotLayer(source, layers[len(layers)-1].Name, logical, true); err != nil {
 +		return 0, err
@@ -765,7 +806,15 @@ index 69aef99..c14b19a 100644
 +		if layer.Name != fmt.Sprintf("%06d.mem", i) {
 +			return 0, fmt.Errorf("invalid RAM layer name")
 +		}
-+		if err := validateSnapshotLayer(source, layer.Name, logical, false); err != nil {
++		if layer.ExternalPath != nil {
++			if i != 0 || !filepath.IsAbs(*layer.ExternalPath) {
++				return 0, fmt.Errorf("invalid external RAM base")
++			}
++			info, err := os.Lstat(*layer.ExternalPath)
++			if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != logical {
++				return 0, fmt.Errorf("missing or truncated external RAM base")
++			}
++		} else if err := validateSnapshotLayer(source, layer.Name, logical, false); err != nil {
 +			return 0, err
 +		}
 +		var previousEnd uint64
@@ -781,18 +830,23 @@ index 69aef99..c14b19a 100644
 +	for i, layer := range layers {
 +		if layer.Name != fmt.Sprintf("%06d.mem", i) { return transferred, fmt.Errorf("invalid RAM layer name") }
 +		target := filepath.Join(destination + ".layers", layer.Name)
-+		count, err := copySnapshot(filepath.Join(source + ".layers", layer.Name), target)
++		layerSource := filepath.Join(source + ".layers", layer.Name)
++		if layer.ExternalPath != nil { layerSource = *layer.ExternalPath }
++		count, err := copySnapshot(layerSource, target)
 +		transferred += count
 +		if err != nil { return transferred, err }
 +		var stat unix.Stat_t
 +		if err := unix.Stat(target, &stat); err != nil { return transferred, err }
 +		allocated += stat.Blocks * 512
++		// COLD is self-contained: it must not depend on a WARM/template path.
++		layers[i].ExternalPath = nil
 +	}
 +	if err := os.Link(filepath.Join(destination + ".layers", layers[len(layers)-1].Name), destination); err != nil {
 +		return transferred, err
 +	}
 +	manifest["transferred_bytes"], _ = json.Marshal(transferred)
 +	manifest["allocated_bytes"], _ = json.Marshal(allocated)
++	manifest["layers"], _ = json.Marshal(layers)
 +	out, err := os.OpenFile(destination + ".lineage.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 +	if err != nil { return transferred, err }
 +	err = json.NewEncoder(out).Encode(manifest)

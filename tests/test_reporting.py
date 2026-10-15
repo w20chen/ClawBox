@@ -2,8 +2,31 @@ from __future__ import annotations
 
 import csv
 import json
+from types import SimpleNamespace
 
 from clawbox.experiments.reporting import render_run_report, write_run_report_artifacts
+from clawbox.experiments.reporting import _offered_capacity_text
+from clawbox.experiments.spec import SandboxSpec, WorkloadCase, WorkloadSpec
+
+
+def test_report_capacity_uses_round_robin_case_vm_shapes() -> None:
+    cases = tuple(
+        WorkloadCase(
+            case_id=name, source="recorded_trace", source_reference=f"{name}.jsonl",
+            sandbox=SandboxSpec(template_id=f"{name}-tool", memory_mib=memory_mib),
+        )
+        for name, memory_mib in (("small", 1024), ("large", 4096))
+    )
+    spec = SimpleNamespace(
+        runtime=SandboxSpec(template_id="runtime", memory_mib=2048),
+        sandbox=SandboxSpec(template_id="default", memory_mib=512),
+        workload=WorkloadSpec(
+            source="recorded_trace", input="unused.jsonl", cases=cases,
+            session_assignment="round_robin",
+        ),
+    )
+
+    assert _offered_capacity_text(spec, 3) == "12 GiB"
 
 
 def test_report_includes_policy_memory_prediction_and_warm_evidence(tmp_path) -> None:
@@ -25,7 +48,11 @@ def test_report_includes_policy_memory_prediction_and_warm_evidence(tmp_path) ->
     ]) + "\n", encoding="utf-8")
     (arms / "arm.json").write_text(json.dumps({
         "experiment_id": "experiment-1", "status": "succeeded",
-        "arm": {"concurrency": 16, "policy": {"name": "predicted-wait-snapshot"}},
+        "arm": {
+            "concurrency": 16,
+            "policy": {"name": "predicted-wait-snapshot"},
+            "resources": {"compute_nodes": [{"numa_node": 0}]},
+        },
         "correctness": {
             "completed_sessions": 16, "native_tool_exact_id_join_rate": 1.0,
             "native_tool_telemetry_loss_total": 0, "cleanup_verified": True,
@@ -54,8 +81,10 @@ def test_report_includes_policy_memory_prediction_and_warm_evidence(tmp_path) ->
     assert "predicted-wait-snapshot" in report
     assert "20.00" in report
     assert "WARM transferred GiB" in report
-    assert "| 1.00 | 2.00 |" in report
+    assert "| 1.00/0.00 | 0.00/0 | 2.00 |" in report
     assert "frozen_clawbox_p50:20" in report
+    assert "Cross-NUMA traffic bytes: unavailable" in report
+    assert "not a traffic-byte measurement" in report
 
 
 def test_report_writes_plot_ready_memory_trace_and_repetition_summary(tmp_path) -> None:
@@ -77,6 +106,9 @@ def test_report_writes_plot_ready_memory_trace_and_repetition_summary(tmp_path) 
                 "host_used_delta_bytes": (local_gib + 3) * 1024 ** 3,
                 "host_used_bytes": 100 * 1024 ** 3,
                 "host_available_bytes": 1900 * 1024 ** 3,
+                "cgroup_memory": {"current_bytes": 1024, "swap_current_bytes": 0,
+                    "stat": {"anon": 100, "file": 800, "shmem": 700, "pgscan": 3},
+                    "events": {"oom_kill": 0}, "pressure": {"some": {"total": 123}}},
             }),
             json.dumps({
                 "event": "memory_sample", "monotonic_time_ns": "1500000000",
@@ -107,6 +139,10 @@ def test_report_writes_plot_ready_memory_trace_and_repetition_summary(tmp_path) 
     assert rows[1]["elapsed_seconds"] == "0.500000"
     assert rows[0]["shared_total_gib"] == "3.000000"
     assert rows[0]["host_used_delta_gib"] == "23.000000"
+    assert rows[0]["file_bytes"] == "800" and rows[0]["shmem_bytes"] == "700"
+    assert rows[0]["swap_current_bytes"] == "0"
+    assert rows[0]["psi_some_total_us"] == "123"
+    assert rows[1]["swap_current_bytes"] == "" and rows[1]["oom_kill"] == ""
 
 
 def test_summary_does_not_mix_conditions_or_failed_arms(tmp_path):

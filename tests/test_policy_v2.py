@@ -372,7 +372,7 @@ def test_resident_policy_never_selects_or_pauses_a_victim() -> None:
 
 def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     policy = PolicySpec(name="snapshot", admission="fixed", reclamation="snapshot_pause",
-                        eviction="eager", restore="reactive")
+                        eviction="wait_aware_pressure", restore="reactive")
     coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
                                     operation_headroom_mib=0,
                                     physical_sample=lambda: (2 * 1024**2, 100 * 1024**2))
@@ -380,7 +380,7 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     coordinator.register("active", active)
     coordinator.register("idle", idle)
     coordinator.set_tool_active("active", True)
-    coordinator.set_eviction_eligible("idle", True)
+    coordinator.begin_model_wait("idle", "wait-1", 10.0)
     victim = coordinator.victim_for_restore("requester")
     assert victim is not None and victim.session_id == "idle"
     coordinator.release_victim(victim)
@@ -404,7 +404,7 @@ def test_wait_aware_policy_never_selects_an_idle_non_waiting_session() -> None:
 def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
     """A delayed admission cannot be selected for pause by another waiter."""
     policy = PolicySpec(name="snapshot", admission="fixed",
-                        reclamation="snapshot_pause", eviction="eager",
+                        reclamation="snapshot_pause", eviction="wait_aware_pressure",
                         restore="reactive")
     entered = threading.Event()
 
@@ -418,7 +418,7 @@ def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
     )
     lifecycle = Lifecycle()
     coordinator.register("tool", lifecycle)
-    coordinator.set_eviction_eligible("tool", True)
+    coordinator.begin_model_wait("tool", "wait-1", 10.0)
     result: list[BaseException] = []
 
     def delayed_admission() -> None:
@@ -442,13 +442,13 @@ def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
 
 def test_tool_activation_waits_for_an_atomic_eviction_claim() -> None:
     policy = PolicySpec(name="snapshot", admission="fixed",
-                        reclamation="snapshot_pause", eviction="eager",
+                        reclamation="snapshot_pause", eviction="wait_aware_pressure",
                         restore="reactive")
     coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=1,
                                     operation_headroom_mib=0)
     lifecycle = Lifecycle()
     coordinator.register("tool", lifecycle)
-    coordinator.set_eviction_eligible("tool", True)
+    coordinator.begin_model_wait("tool", "wait-1", 10.0)
     victim = coordinator.victim_for_restore("other")
     assert victim is not None
     assert coordinator.victim_for_restore("third") is None
@@ -544,8 +544,7 @@ def test_incremental_reservation_is_added_to_observed_host_memory() -> None:
 def test_wait_plan_uses_only_request_time_prediction() -> None:
     policy = PolicySpec(
         name="predicted", admission="fixed", reclamation="snapshot_pause",
-        eviction="wait_aware_pressure", restore="proactive",
-        prefetch_lead_seconds=0.5,
+        eviction="wait_aware_pressure", restore="reactive",
     )
     coordinator = PolicyCoordinator(
         policy, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
@@ -553,67 +552,17 @@ def test_wait_plan_uses_only_request_time_prediction() -> None:
     )
     # A missing estimate cannot be replaced with the held-out actual duration.
     assert coordinator.model_wait_plan(None) == (None, None)
-    assert coordinator.model_wait_plan(3.0) == (0.0, 0.5)
-
-    fixed = PolicySpec(
-        name="fixed", admission="fixed", reclamation="snapshot_pause",
-        eviction="fixed_delay", restore="reactive", fixed_delay_seconds=0.25,
-    )
-    fixed_coordinator = PolicyCoordinator(
-        fixed, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
-    )
-    assert fixed_coordinator.model_wait_plan(None) == (0.25, None)
+    assert coordinator.model_wait_plan(3.0) == (0.0, None)
 
 
-def test_time_oracle_wait_plan_uses_actual_replay_duration_at_break_even() -> None:
-    policy = PolicySpec(
-        name="time-oracle", admission="fixed",
-        reclamation="snapshot_pause", eviction="time_oracle",
-        restore="reactive", checkpoint_break_even_seconds=4.0,
-    )
-    coordinator = PolicyCoordinator(
-        policy, budget_mib=1, emergency_free_mib=1,
-        operation_headroom_mib=0,
-    )
-
-    assert coordinator.model_wait_plan(None, oracle_duration_s=3.999) == (
-        None, None,
-    )
-    assert coordinator.model_wait_plan(None, oracle_duration_s=4.0) == (
-        0.0, None,
-    )
+@pytest.mark.parametrize("eviction", ["eager", "fixed_delay", "time_oracle", "tiered_time_oracle", "tiered_lru_oracle"])
+def test_unsupported_evictions_fail_before_execution(eviction):
+    with pytest.raises(ValueError, match="supported eviction"):
+        PolicySpec(name="unsupported", admission="fixed", reclamation="snapshot_pause",
+                   eviction=eviction, restore="reactive")
 
 
-def test_tiered_time_oracle_uses_exact_two_and_twenty_second_boundaries() -> None:
-    policy = PolicySpec(
-        name="tiered-time", admission="predicted", reclamation="snapshot_pause",
-        eviction="tiered_time_oracle", restore="reactive",
-    )
-    coordinator = PolicyCoordinator(
-        policy, budget_mib=64, emergency_free_mib=1, operation_headroom_mib=0,
-    )
-    assert coordinator.oracle_tier(1.999) is SnapshotTier.LOCAL
-    assert coordinator.oracle_tier(2.0) is SnapshotTier.WARM
-    assert coordinator.oracle_tier(19.999) is SnapshotTier.WARM
-    assert coordinator.oracle_tier(20.0) is SnapshotTier.COLD
-    assert coordinator.model_wait_plan(None, oracle_duration_s=1.999) == (None, None)
-    assert coordinator.model_wait_plan(None, oracle_duration_s=2.0) == (0.0, None)
-
-
-def test_tiered_lru_prefers_remaining_wait_of_at_least_two_seconds() -> None:
-    policy = PolicySpec(
-        name="tiered-lru", admission="predicted", reclamation="snapshot_pause",
-        eviction="tiered_lru_oracle", restore="reactive",
-    )
-    coordinator = PolicyCoordinator(
-        policy, budget_mib=64, emergency_free_mib=1, operation_headroom_mib=0,
-    )
-    short, useful = Lifecycle(), Lifecycle()
-    coordinator.register("old-short", short)
-    coordinator.begin_model_wait("old-short", "wait-short", 1.0)
-    coordinator.register("new-useful", useful)
-    coordinator.begin_model_wait("new-useful", "wait-useful", 3.0)
-    victim = coordinator.victim_for_restore("requester")
-    assert victim is not None and victim.session_id == "new-useful"
-    assert coordinator.pressure_oracle_tier(victim) is SnapshotTier.WARM
-    coordinator.release_victim(victim)
+def test_unsupported_proactive_restore_fails_before_execution():
+    with pytest.raises(ValueError, match="supported restore"):
+        PolicySpec(name="unsupported", admission="fixed", reclamation="snapshot_pause",
+                   eviction="wait_aware_pressure", restore="proactive")

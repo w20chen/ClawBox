@@ -18,7 +18,7 @@ MIB = 1024 * 1024
 class Pausable(Protocol):
     @property
     def resident(self) -> bool: ...
-    def checkpoint_and_evict(self) -> float | None: ...
+    def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None: ...
 
 
 @dataclass(slots=True)
@@ -73,6 +73,7 @@ class PolicyCoordinator:
                  emergency_free_mib: int, operation_headroom_mib: int,
                  progress_budget_mib: int | None = None,
                  startup_headroom_mib: int = 0,
+                 os_managed_lifecycle: bool = False,
                  demand_ledger: DemandLedger | None = None,
                  demand_scope: str = "local",
                  reclaim_cache: Callable[[], None] | None = None,
@@ -82,6 +83,7 @@ class PolicyCoordinator:
                  ] | None = None,
                  ) -> None:
         self.policy = policy
+        self.os_managed_lifecycle = os_managed_lifecycle
         self.budget_bytes = budget_mib * MIB
         self.progress_budget_bytes = (
             progress_budget_mib * MIB
@@ -151,15 +153,15 @@ class PolicyCoordinator:
             self._sessions[session_id].runtime_before_pause = before_pause
 
     def begin_model_wait(self, session_id: str, wait_id: str,
-                         oracle_duration_s: float) -> None:
-        if oracle_duration_s < 0:
-            raise ValueError("oracle_duration_s must be non-negative")
+                         predicted_duration_s: float) -> None:
+        if predicted_duration_s < 0:
+            raise ValueError("predicted_duration_s must be non-negative")
         now = time.monotonic()
         with self._condition:
             state = self._sessions[session_id]
             state.wait_id = wait_id
             state.wait_started_monotonic_s = now
-            state.wait_deadline_monotonic_s = now + oracle_duration_s
+            state.wait_deadline_monotonic_s = now + predicted_duration_s
             state.response_ready = False
             state.eviction_eligible = True
             state.last_used = now
@@ -177,22 +179,6 @@ class PolicyCoordinator:
                 state.response_ready = True
                 state.eviction_eligible = False
                 self._condition.notify_all()
-
-    @staticmethod
-    def oracle_tier(duration_s: float) -> SnapshotTier:
-        if duration_s < 2.0:
-            return SnapshotTier.LOCAL
-        if duration_s < 20.0:
-            return SnapshotTier.WARM
-        return SnapshotTier.COLD
-
-    def pressure_oracle_tier(self, state: SessionState, *, now: float | None = None
-                             ) -> SnapshotTier:
-        current = time.monotonic() if now is None else now
-        deadline = state.wait_deadline_monotonic_s
-        remaining = max(0.0, deadline - current) if deadline is not None else 0.0
-        # A's documented short-wait pressure fallback always targets WARM.
-        return SnapshotTier.COLD if remaining >= 20.0 else SnapshotTier.WARM
 
     def unregister(self, session_id: str) -> None:
         with self._condition:
@@ -250,6 +236,13 @@ class PolicyCoordinator:
         with self._condition:
             self._memory_samples[session_id] = {'tool_admission': tool,
                                                'create': lifecycle, 'restore': lifecycle}
+            # Placement may reserve the pair before the session registers its
+            # empty, stable leaves. Bind that existing claim without reserving
+            # again; observed creation growth then reduces pending demand.
+            claim = self.demand.claims.get((session_id, 'create'))
+            if claim is not None:
+                claim.sample = lifecycle
+                claim.baseline = lifecycle()
 
     def bind_tool_memory(self, session_id):
         with self._condition:
@@ -334,7 +327,15 @@ class PolicyCoordinator:
         started = time.monotonic()
         amount = amount_mib * MIB
         total = (amount_mib if total_mib is None else total_mib) * MIB
-        if amount == 0 and total == 0:
+        if self.os_managed_lifecycle and wait_class == "create":
+            # No configured-capacity or measured-budget admission in the OS
+            # deployment. The explicit host emergency floor remains a guard.
+            if amount or total:
+                raise ValueError("OS-managed creation must not reserve configured memory")
+            if self.physical_sample()[1] < self.emergency_free_bytes:
+                raise AdmissionTimeout("host emergency free-memory floor reached; reduce concurrency or free host memory")
+            return 0.0
+        if amount == 0 and total == 0 and wait_class not in {"create", "restore"}:
             elapsed = time.monotonic() - started
             with self._condition:
                 self._record_wait_locked(wait_class, elapsed)
@@ -410,34 +411,18 @@ class PolicyCoordinator:
                         tool_elapsed = None
                         runtime_elapsed = None
                         try:
-                            target = (
-                                self.pressure_oracle_tier(victim)
-                                if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE
-                                else None
-                            )
-                            tool_elapsed = (
-                                victim.lifecycle.checkpoint_and_evict(tier=target)
-                                if target is not None
-                                else victim.lifecycle.checkpoint_and_evict()
-                            )
+                            tool_elapsed = victim.lifecycle.checkpoint_and_evict()
                             pause_runtime = (
                                 victim.runtime_lifecycle is not None
                                 and victim.runtime_lifecycle.resident
                                 and victim.wait_id is not None
                                 and not victim.response_ready
-                                and self.policy.eviction in {
-                                    EvictionPolicy.WAIT_AWARE_PRESSURE,
-                                    EvictionPolicy.TIERED_LRU_ORACLE,
-                                }
+                                and self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE
                             )
                             if pause_runtime:
                                 if victim.runtime_before_pause is not None:
                                     victim.runtime_before_pause()
-                                runtime_elapsed = (
-                                    victim.runtime_lifecycle.checkpoint_and_evict(tier=target)
-                                    if target is not None
-                                    else victim.runtime_lifecycle.checkpoint_and_evict()
-                                )
+                                runtime_elapsed = victim.runtime_lifecycle.checkpoint_and_evict()
                         finally:
                             self._condition.acquire()
                             victim.eviction_in_progress = False
@@ -593,7 +578,46 @@ class PolicyCoordinator:
             victim.eviction_eligible = False
             self._condition.notify_all()
 
-    def evict_one_for_watermark(self) -> bool:
+    def watermark_reclaim_candidate(self) -> dict[str, object] | None:
+        """Describe the current safe victim without claiming or pausing it.
+
+        The controller uses this only for a cost estimate.  The subsequent
+        atomic claim revalidates eligibility, so a concurrent Tool admission
+        can still remove the candidate safely.
+        """
+        with self._condition:
+            victim = self._select_victim_locked(exclude="")
+            if victim is None:
+                return None
+            lifecycles = [victim.lifecycle]
+            if (
+                victim.runtime_lifecycle is not None
+                and victim.runtime_lifecycle.resident
+                and victim.wait_id is not None
+                and not victim.response_ready
+            ):
+                lifecycles.append(victim.runtime_lifecycle)
+            configured = sum(
+                int(getattr(lifecycle, "configured_memory_bytes", 0) or 0)
+                for lifecycle in lifecycles
+            )
+            reservation = sum(
+                int(getattr(lifecycle, "snapshot_reservation_bytes", 0) or 0)
+                for lifecycle in lifecycles
+            )
+            remaining = (
+                max(0.0, victim.wait_deadline_monotonic_s - time.monotonic())
+                if victim.wait_deadline_monotonic_s is not None else None
+            )
+            return {
+                "session_id": victim.session_id,
+                "configured_bytes": configured,
+                "snapshot_reservation_bytes": reservation,
+                "vm_count": len(lifecycles),
+                "predicted_idle_seconds_remaining": remaining,
+            }
+
+    def evict_one_for_watermark(self, *, tier: SnapshotTier | None = None) -> bool:
         """Checkpoint one safe waiting session without requiring an admission waiter."""
         with self._condition:
             victim = self._claim_victim_locked(exclude="")
@@ -602,7 +626,10 @@ class PolicyCoordinator:
         tool_elapsed = None
         runtime_elapsed = None
         try:
-            tool_elapsed = victim.lifecycle.checkpoint_and_evict()
+            tool_elapsed = (
+                victim.lifecycle.checkpoint_and_evict()
+                if tier is None else victim.lifecycle.checkpoint_and_evict(tier=tier)
+            )
             if (
                 victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
@@ -611,7 +638,10 @@ class PolicyCoordinator:
             ):
                 if victim.runtime_before_pause is not None:
                     victim.runtime_before_pause()
-                runtime_elapsed = victim.runtime_lifecycle.checkpoint_and_evict()
+                runtime_elapsed = (
+                    victim.runtime_lifecycle.checkpoint_and_evict()
+                    if tier is None else victim.runtime_lifecycle.checkpoint_and_evict(tier=tier)
+                )
         finally:
             self.release_victim(victim)
         elapsed = sum(
@@ -629,40 +659,15 @@ class PolicyCoordinator:
         return bool(paused_vms)
 
     def model_wait_plan(
-        self, predicted_duration_s: float | None, *,
-        oracle_duration_s: float | None = None,
+        self, predicted_duration_s: float | None,
     ) -> tuple[float | None, float | None]:
-        """Plan a model wait; only the explicit oracle policy may see its duration."""
+        """Plan pressure reclamation using only the request-time prediction."""
         if self.policy.reclamation is ReclamationPolicy.RESIDENT:
             return None, None
-        if self.policy.eviction is EvictionPolicy.EAGER:
-            delay = 0.0
-        elif self.policy.eviction is EvictionPolicy.FIXED_DELAY:
-            delay = self.policy.fixed_delay_seconds or 0.0
-        elif self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
-            if (predicted_duration_s is None or predicted_duration_s <= 0
-                    or not self.blocked_demand_pressure()):
-                return None, None
-            delay = 0.0
-        elif self.policy.eviction is EvictionPolicy.TIME_ORACLE:
-            break_even = float(self.policy.checkpoint_break_even_seconds or 0.0)
-            if oracle_duration_s is None or oracle_duration_s < break_even:
-                return None, None
-            delay = 0.0
-        elif self.policy.eviction is EvictionPolicy.TIERED_TIME_ORACLE:
-            if oracle_duration_s is None or self.oracle_tier(
-                oracle_duration_s
-            ) is SnapshotTier.LOCAL:
-                return None, None
-            delay = 0.0
-        elif self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
+        if (predicted_duration_s is None or predicted_duration_s <= 0
+                or not self.blocked_demand_pressure()):
             return None, None
-        else:
-            return None, None
-        lead = (self.policy.prefetch_lead_seconds or 0.0) \
-            if (self.policy.restore is RestorePolicy.PROACTIVE
-                and predicted_duration_s is not None) else None
-        return delay, lead
+        return 0.0, None
 
     def materialize(self, session_id: str, amount_mib: int,
                     operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:
@@ -721,19 +726,11 @@ class PolicyCoordinator:
                       if state.session_id != exclude and state.eviction_eligible
                       and not state.eviction_in_progress and not state.tool_active
                       and state.lifecycle.resident]
-        if self.policy.eviction in {
-            EvictionPolicy.WAIT_AWARE_PRESSURE,
-            EvictionPolicy.TIERED_LRU_ORACLE,
-        }:
+        if self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
             now = time.monotonic()
             candidates = [state for state in candidates
                           if state.wait_id is not None and not state.response_ready
                           and state.wait_deadline_monotonic_s is not None]
-            if self.policy.eviction is EvictionPolicy.TIERED_LRU_ORACLE:
-                worthwhile = [state for state in candidates
-                               if state.wait_deadline_monotonic_s - now >= 2.0]
-                if worthwhile:
-                    candidates = worthwhile
         return min(candidates, key=lambda state: state.last_used, default=None)
 
     def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:

@@ -5,17 +5,46 @@ from pathlib import Path
 
 import pytest
 
+import clawbox.experiments.qualification as qualification_module
 from clawbox.experiments.baselines import BASELINES
 from clawbox.experiments.qualification import (
     QUALIFICATION_SCHEMA_VERSION, implementation_digest,
     live_borrow_roundtrip_test, qualification_spec, snapshot_roundtrip_test,
-    validate_receipt,
+    qualification_input_manifest, validate_receipt,
 )
 from clawbox.experiments.numa_borrow import NumaBorrowRecord
 from clawbox.experiments.spec import load_experiment, spec_digest
 
 
 EXAMPLE = Path("examples/experiments/getting-started.yaml")
+
+
+def test_sandbox_mapping_aggregation_does_not_double_first_process(monkeypatch):
+    identity = ("00:01", 7)
+    monkeypatch.setattr(qualification_module, "_sandbox_pids", lambda _sandbox: [11, 12])
+    monkeypatch.setattr(
+        qualification_module,
+        "_file_mappings",
+        lambda pid: {identity: {
+            "path": "/warm/base.mem", "size_kib": 100,
+            "rss_kib": pid, "pss_kib": 5, "shared_clean_kib": 4,
+        }},
+    )
+
+    result = qualification_module._sandbox_file_mappings("sandbox-a")[identity]
+
+    assert result == {
+        "path": "/warm/base.mem", "size_kib": 200,
+        "rss_kib": 23, "pss_kib": 10, "shared_clean_kib": 8,
+    }
+
+
+def test_template_sharing_evidence_excludes_shared_root_filesystems():
+    ram = {"path": "/data/cubelet/storage/xfs/objects/volumes/tpl-a-memory/tpl-a-memory"}
+    rootfs = {"path": "/var/lib/cube/images/rootfs.ext4"}
+
+    assert qualification_module._same_template_ram_mapping(ram, dict(ram))
+    assert not qualification_module._same_template_ram_mapping(rootfs, dict(rootfs))
 
 
 def test_dense_multi_numa_qualification_does_not_require_shared_memory(tmp_path):
@@ -37,6 +66,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
     return {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
+        "input_manifest": qualification_input_manifest(spec),
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": 1.0,
@@ -45,6 +75,10 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "target_node": spec.resources.target_node,
         "runtime_image_digest": spec.runtime.image_digest,
         "tool_image_digest": spec.sandbox.image_digest,
+        "tool_image_digests": sorted({
+            (case.sandbox or spec.sandbox).image_digest
+            for case in spec.workload.cases
+        }, key=lambda value: value or ""),
         "run_root": "/results/qualification-test",
         "supervision_fault_test": {"passed": True},
         "runtime_control_test": {"passed": True, "restore_verified": True, "vm_control": {"passed": True},
@@ -90,8 +124,33 @@ def test_receipt_is_bound_to_exact_spec_and_required_concurrency(tmp_path: Path)
         validate_receipt(spec, path)
 
 
+def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
+    spec = load_experiment(EXAMPLE)
+    source = Path(spec.workload.cases[0].replay_trace_reference)
+    trace = tmp_path / "trace.jsonl"
+    trace.write_bytes(source.read_bytes())
+    case = spec.workload.cases[0].model_copy(update={
+        "source_reference": str(trace),
+        "replay_trace_reference": str(trace),
+    })
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={
+            "input": str(trace),
+            "cases": (case,),
+        }),
+    })
+    receipt = tmp_path / "qualification.json"
+    receipt.write_text(json.dumps(_receipt(spec)), encoding="utf-8")
+    assert validate_receipt(spec, receipt)["status"] == "succeeded"
+
+    trace.write_text(trace.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="input_manifest"):
+        validate_receipt(spec, receipt)
+
+
+@pytest.mark.parametrize('storage,scheduling,fail_spill', [('warm-only', 'static', False), ('tiered', 'snapshot_only', False), ('tiered', 'joint', False), ('tiered', 'joint', True)])
 def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch, storage, scheduling, fail_spill,
 ) -> None:
     import clawbox.experiments.qualification as module
 
@@ -100,7 +159,10 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
         "policies": (BASELINES["predicted-wait-snapshot"].as_policy(),),
         "resources": spec.resources.model_copy(update={
             "prediction_artifact": "/data/p50.json",
-            "snapshot_storage": "warm-only",
+            "snapshot_storage": storage,
+            "memory_scheduling": scheduling,
+            "pool_transfer_concurrency": 2,
+            "pool_transfer_timeout_seconds": 17,
             "warm_snapshot_root": "/mnt/warm",
             "warm_memory_capacity_mib": 8192,
         }),
@@ -142,20 +204,40 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
     class Lifecycle:
         def __init__(self, client, **kwargs):
             assert kwargs["snapshot_mechanism"] == "incremental-cow"
-            assert kwargs["snapshot_storage"] == "warm-only"
+            assert kwargs["snapshot_storage"] == storage
+            assert kwargs['default_snapshot_tier'].value == 'warm'
+            assert kwargs['snapshot_pool'].transfer_concurrency == 2
+            assert kwargs['snapshot_pool'].transfer_timeout_seconds == 17
             self.sandbox = type(
                 "Sandbox", (), {"commands": Commands(), "files": Files()},
             )()
             self.numa_borrower = kwargs.get("numa_borrower")
             self.timings = []
             self.generation = 0
+            self.pool = kwargs['snapshot_pool']
+            self.snapshot_key = None
 
         def start(self):
             calls.append("start")
 
         def checkpoint_and_evict(self):
+            from clawbox.experiments.snapshot_pool import SnapshotKey
             calls.append("checkpoint")
             self.generation += 1
+            if self.snapshot_key is not None:
+                self.pool.remove(self.snapshot_key)
+            self.snapshot_key = SnapshotKey('qualification', 'tool', self.generation)
+            self.pool.reserve(self.snapshot_key, 128)
+            def spill(_manifest):
+                calls.append('spill')
+                if fail_spill:
+                    raise LookupError('external Base unavailable')
+            self.pool.commit(
+                self.snapshot_key, path=f'/warm/g{self.generation}.mem',
+                logical_bytes=4096, allocated_bytes=128,
+                transferred_bytes=128,
+                spiller=spill,
+            )
             self.timings.append({
                 "operation": "checkpoint", "status": "ok",
                 "snapshot_metrics": {
@@ -174,6 +256,13 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
 
     monkeypatch.setattr(module, "CubeSandboxClient", Client)
     monkeypatch.setattr(module, "CubeSandboxLifecycle", Lifecycle)
+    if fail_spill:
+        with pytest.raises(RuntimeError, match="snapshot qualification failed.*external Base unavailable"):
+            snapshot_roundtrip_test(spec, artifact_root=tmp_path / "probe")
+        receipt = json.loads((tmp_path / "probe/result.json").read_text())
+        assert receipt["passed"] is False and receipt["cleanup_errors"] == []
+        assert calls[-2] == "close" and calls[-1].startswith("cleanup:")
+        return
     result = snapshot_roundtrip_test(spec, artifact_root=tmp_path / "probe")
 
     assert result["passed"] is True
@@ -182,18 +271,24 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
         "start", "printf qualification-before", "checkpoint", "restore",
         "checkpoint",
     ]
-    assert calls[5] == "restore"
-    assert calls[6] == "close"
-    assert calls[7].startswith("cleanup:qualification-snapshot-")
+    tail = ["spill", "restore", "close"] if storage == "tiered" else ["restore", "close"]
+    assert calls[5:5 + len(tail)] == tail
+    assert calls[5 + len(tail)].startswith("cleanup:qualification-snapshot-")
+    assert result["cold_relocation_verified"] == (
+        True if storage == "tiered" else None
+    )
 
 
+@pytest.mark.parametrize('residual', [0, 1])
+@pytest.mark.parametrize('tool_mib', [512, 4096])
 def test_live_borrow_roundtrip_executes_during_and_after_rebind(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch, residual, tool_mib,
 ) -> None:
     import clawbox.experiments.qualification as module
 
     spec = load_experiment(EXAMPLE)
     spec = spec.model_copy(update={
+        "sandbox": spec.sandbox.model_copy(update={"memory_mib": tool_mib}),
         "resources": spec.resources.__class__.model_validate({
             **spec.resources.model_dump(),
             "pool_memory_budget_mib": 32768,
@@ -218,6 +313,8 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
     class Commands:
         def run(self, command, timeout):
             calls.append(command)
+            if command.startswith('free='):
+                return Result('CLAWBOX_ALLOCATION_MIB=8')
             return Result(command.removeprefix("printf "))
 
     class Client:
@@ -232,6 +329,9 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
 
     class Borrower:
         placements = []
+        shared_node = 1
+        def borrowed(self):
+            return ()
         def __init__(self, *args, shared_pool, **kwargs):
             self.shared_pool = shared_pool
 
@@ -246,6 +346,7 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
         )
 
     class Lifecycle:
+        sandbox_id = 'sandbox'
         def __init__(self, client, **kwargs):
             self.sandbox = type("Sandbox", (), {"commands": Commands()})()
             self.borrower = kwargs["numa_borrower"]
@@ -258,18 +359,54 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
             return record(0, 1, 5, 1, 0, 4)
 
         def return_local_memory(self):
-            self.borrower.shared_pool.release_borrow("sandbox")
-            return record(1, 0, 1, 5, 4, 0)
+            if not residual:
+                self.borrower.shared_pool.release_borrow("sandbox")
+            return record(1, 0, 1, 5, 4, residual)
 
         def close(self):
             calls.append("close")
+            if residual:
+                self.borrower.shared_pool.release_borrow("sandbox")
 
     monkeypatch.setattr(module, "CubeSandboxClient", Client)
     monkeypatch.setattr(module, "CubeSandboxLifecycle", Lifecycle)
     monkeypatch.setattr(module, "SandboxNumaBorrower", Borrower)
+    monkeypatch.setattr(module, '_capture_borrow_residency',
+                        lambda *args: {'resident_bytes': {0: 1, 1: 8}})
 
     result = live_borrow_roundtrip_test(spec, artifact_root=tmp_path / "borrow")
 
     assert result["passed"] is True
-    assert calls[:4] == ["start", "printf local-ready", "printf shared-alive", "printf local-again"]
+    assert calls[:3] == ["start", "printf local-ready", "printf shared-alive"]
+    assert 'df -Pm /dev/shm' in calls[3]
+    bound = min(128, tool_mib // 16)
+    assert f'count={bound};' in calls[3]
+    assert result['allocation_probe_mib'] == 8
+    assert calls[4] == 'printf local-again'
     assert calls[-2:] == ["close", "cleanup"]
+
+
+@pytest.mark.skipif(__import__('os').name == 'nt', reason='guest command requires a POSIX shell')
+@pytest.mark.parametrize('free,maximum,expected', [(256, 32, 32), (20, 128, 16), (5, 32, 1), (4, 32, None)])
+def test_borrow_probe_shell_enforces_bound_and_stops_before_dd(tmp_path, free, maximum, expected):
+    import os
+    import subprocess
+    from clawbox.experiments.qualification import _borrow_allocation_command
+
+    # Fake only the guest's df/dd; execute the actual shell control flow.
+    df = tmp_path / 'df'
+    df.write_text(f'#!/bin/sh\nprintf "header\\ntmpfs 1024 0 {free} 0 /dev/shm\\n"\n')
+    dd = tmp_path / 'dd'
+    witness = tmp_path / 'dd-args'
+    dd.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$PROBE_WITNESS"\n')
+    df.chmod(0o755)
+    dd.chmod(0o755)
+    result = subprocess.run(['sh', '-c', _borrow_allocation_command('test-probe', maximum)],
+        env={**os.environ, 'PATH': str(tmp_path) + ':' + os.environ['PATH'],
+             'PROBE_WITNESS': str(witness)}, text=True, capture_output=True)
+    if expected is None:
+        assert result.returncode != 0 and not witness.exists()
+    else:
+        assert result.returncode == 0
+        assert result.stdout.strip() == f'CLAWBOX_ALLOCATION_MIB={expected}'
+        assert f'count={expected}\n' in witness.read_text()

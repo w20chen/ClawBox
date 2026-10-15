@@ -51,6 +51,7 @@ class LifecycleTiming:
     snapshot_generation: int | None = None
     snapshot_path: str | None = None
     snapshot_metrics: dict[str, Any] | None = None
+    host_memory_effect: dict[str, dict[str, int]] | None = None
 
 
 class CubeSandboxLifecycle:
@@ -72,7 +73,11 @@ class CubeSandboxLifecycle:
                  configured_memory_bytes: int | None = None,
                  cgroup_token: str | None = None,
                  verify_cgroup: Callable[[str], Any] | None = None,
-                 prepare_cgroup: Callable[[], Any] | None = None) -> None:
+                 prepare_cgroup: Callable[[], Any] | None = None,
+                 default_snapshot_tier: SnapshotTier | None = None,
+                 snapshot_reuse_probability: float | None = None,
+                 warm_restore_seconds_per_gib: float | None = None,
+                 cold_restore_seconds_per_gib: float | None = None) -> None:
         if snapshot_storage not in {"tiered", "warm-only"}:
             raise ValueError("invalid snapshot storage")
         self.snapshot_storage = snapshot_storage
@@ -100,6 +105,10 @@ class CubeSandboxLifecycle:
         self.warm_snapshot_root = warm_snapshot_root
         self.cold_snapshot_root = cold_snapshot_root
         self.snapshot_pool = snapshot_pool
+        self.default_snapshot_tier = default_snapshot_tier
+        self.snapshot_reuse_probability = snapshot_reuse_probability
+        self.warm_restore_seconds_per_gib = warm_restore_seconds_per_gib
+        self.cold_restore_seconds_per_gib = cold_restore_seconds_per_gib
         self.snapshot_reservation_bytes = snapshot_reservation_bytes
         self.numa_borrower = numa_borrower
         self.configured_memory_bytes = configured_memory_bytes
@@ -111,6 +120,8 @@ class CubeSandboxLifecycle:
         self._tier = SnapshotTier.LOCAL
         self._generation = 0
         self._snapshot_key: SnapshotKey | None = None
+        self._pending_snapshot_keys: set[SnapshotKey] = set()
+        self._warm_paths: set[str] = set()
         self._first_tool_restore: dict[str, Any] | None = None
         self._restore_fault_sampler = None
 
@@ -190,6 +201,23 @@ class CubeSandboxLifecycle:
                     if reclaimed > 0
                     else f"not_observed_{scope}_reclamation"
                 )
+        memory_effect: dict[str, dict[str, int]] = {}
+        if host_memory_before is not None and host_memory_after is not None:
+            for key in (
+                "local_used_bytes", "shared_live_used_bytes",
+                "combined_live_used_bytes", "host_used_bytes",
+            ):
+                before_value = host_memory_before.get(key)
+                after_value = host_memory_after.get(key)
+                if (isinstance(before_value, int) and not isinstance(before_value, bool)
+                        and isinstance(after_value, int) and not isinstance(after_value, bool)):
+                    memory_effect[key] = {
+                        "before_bytes": before_value,
+                        "after_bytes": after_value,
+                        "net_change_bytes": after_value - before_value,
+                        "reclaimed_bytes": max(0, before_value - after_value),
+                        "growth_bytes": max(0, after_value - before_value),
+                    }
         self._timings.append(LifecycleTiming(
             operation, started_wall, completed_wall, started_mono,
             completed_mono, duration, before.value, after.value,
@@ -200,6 +228,7 @@ class CubeSandboxLifecycle:
             "cubesandbox_pause_snapshot_destroy" if operation == "checkpoint" else None,
             tier_from, tier_to, snapshot_generation, snapshot_path,
             dict(snapshot_metrics) if snapshot_metrics is not None else None,
+            memory_effect or None,
         ))
         return duration
 
@@ -267,6 +296,8 @@ class CubeSandboxLifecycle:
                 return None
             if self.sandbox is None or self._state is not SandboxState.RUNNING:
                 raise LifecycleError("CubeSandbox is not resident")
+            if tier is None:
+                tier = self.default_snapshot_tier
             if self.snapshot_storage == "warm-only":
                 if tier is SnapshotTier.COLD:
                     raise ValueError("COLD snapshots are disabled by warm-only storage")
@@ -296,9 +327,10 @@ class CubeSandboxLifecycle:
                     tier = SnapshotTier.COLD
                 if tier is None:
                     pause_attempted = True
-                    self.client.pause_sandbox(
-                        self.sandbox, snapshot_mechanism=self.snapshot_mechanism,
-                    )
+                    with self._transfer("checkpoint"):
+                        self.client.pause_sandbox(
+                            self.sandbox, snapshot_mechanism=self.snapshot_mechanism,
+                        )
                 else:
                     if tier is SnapshotTier.LOCAL:
                         raise ValueError("cannot checkpoint a sandbox to LOCAL")
@@ -308,12 +340,18 @@ class CubeSandboxLifecycle:
                         if self.snapshot_pool is None or self.snapshot_reservation_bytes is None:
                             raise RuntimeError("WARM snapshot accounting is not configured")
                         try:
+                            retention_value = self._retention_value_seconds(
+                                self.configured_memory_bytes
+                                or self.snapshot_reservation_bytes
+                            )
                             self.snapshot_pool.reserve_for_admission(
                                 key, self.snapshot_reservation_bytes,
-                                timeout_s=0 if predecessor is not None else 120,
+                                timeout_s=0 if predecessor is not None or self.default_snapshot_tier is not None else 120,
+                                retention_value_seconds=retention_value,
                             )
+                            self._pending_snapshot_keys.add(key)
                         except WarmCapacityError:
-                            if predecessor is None or self.snapshot_storage == "warm-only":
+                            if self.snapshot_storage == "warm-only":
                                 raise
                             tier = SnapshotTier.COLD
                     root = (self.warm_snapshot_root if tier is SnapshotTier.WARM
@@ -324,12 +362,15 @@ class CubeSandboxLifecycle:
                         f"{root.rstrip('/')}/{self.sandbox_id}/"
                         f"{self.role}-g{self._generation}.mem"
                     )
+                    if tier is SnapshotTier.WARM:
+                        self._warm_paths.add(path)
                     pause_attempted = True
-                    manifest = self.client.pause_sandbox(
-                        self.sandbox, tier=tier.value,
-                        memory_snapshot_path=path, generation=self._generation,
-                        snapshot_mechanism=self.snapshot_mechanism,
-                    )
+                    with self._transfer("checkpoint"):
+                        manifest = self.client.pause_sandbox(
+                            self.sandbox, tier=tier.value,
+                            memory_snapshot_path=path, generation=self._generation,
+                            snapshot_mechanism=self.snapshot_mechanism,
+                        )
                     if tier is SnapshotTier.WARM:
                         self.snapshot_pool.commit(
                             key, path=path,
@@ -341,8 +382,23 @@ class CubeSandboxLifecycle:
                             ),
                             spiller=(self._spill_to_cold if self.snapshot_storage != "warm-only" else None),
                             replaces=predecessor,
+                            template_id=self.template,
+                            shared_base_identity=manifest.get("external_base_identity"),
+                            shared_base_allocated_bytes=int(
+                                manifest.get("external_base_allocated_bytes") or 0
+                            ),
+                            private_delta_bytes=int(
+                                manifest.get("private_delta_bytes") or manifest["allocated_bytes"]
+                            ),
+                            dependency_count=int(manifest.get("dependency_count") or 0),
+                            expected_reuse_probability=self.snapshot_reuse_probability,
+                            retention_value_seconds=self._retention_value_seconds(
+                                int(manifest["logical_bytes"])
+                            ),
                         )
+                        self._pending_snapshot_keys.discard(key)
                     elif predecessor is not None and self.snapshot_pool is not None:
+                        self._verify_warm_files_removed()
                         self.snapshot_pool.remove(predecessor)
                     self._snapshot_key = key
                     self._snapshot_tier = tier
@@ -359,8 +415,9 @@ class CubeSandboxLifecycle:
                                     snapshot_path=manifest.get("memory_snapshot_path") if manifest else None,
                                     snapshot_metrics=manifest)
             except Exception as exc:
-                if key is not None and self.snapshot_pool is not None:
+                if key is not None and self.snapshot_pool is not None and not pause_attempted:
                     self.snapshot_pool.abort(key)
+                    self._pending_snapshot_keys.discard(key)
                 # A pause can commit remotely and then fail while returning or
                 # validating its manifest. Do not admit commands to a VM whose
                 # actual state is paused or cannot be determined.
@@ -379,6 +436,29 @@ class CubeSandboxLifecycle:
                 )
                 raise
 
+    def _retention_value_seconds(self, state_bytes: int) -> float:
+        """Expected restore-time saving for logical VM state.
+
+        WARM capacity is charged by private allocated bytes, while restore cost
+        is calibrated per GiB of logical guest state. Keeping those quantities
+        separate lets value density reward a small Delta that avoids restoring
+        a much larger self-contained COLD Base.
+        """
+        if (
+            self.snapshot_reuse_probability is None
+            or self.warm_restore_seconds_per_gib is None
+            or self.cold_restore_seconds_per_gib is None
+        ):
+            return 0.0
+        saved_per_gib = max(
+            0.0,
+            self.cold_restore_seconds_per_gib - self.warm_restore_seconds_per_gib,
+        )
+        return (
+            self.snapshot_reuse_probability * saved_per_gib
+            * state_bytes / 1024**3
+        )
+
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
         with self._lock:
             if (self._state is not SandboxState.SWAPPED or self.sandbox is None or
@@ -396,11 +476,13 @@ class CubeSandboxLifecycle:
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
             try:
-                self.client.relocate_snapshot(
-                    self.sandbox, tier=SnapshotTier.COLD.value,
-                    memory_snapshot_path=destination,
-                    generation=manifest.key.generation,
-                )
+                with self._transfer("spill"):
+                    self.client.relocate_snapshot(
+                        self.sandbox, tier=SnapshotTier.COLD.value,
+                        memory_snapshot_path=destination,
+                        generation=manifest.key.generation,
+                    )
+                self._verify_warm_files_removed()
                 self._tier = SnapshotTier.COLD
                 self._snapshot_tier = SnapshotTier.COLD
                 self._record(
@@ -452,10 +534,11 @@ class CubeSandboxLifecycle:
                 resume_attempted = True
                 if self.prepare_cgroup is not None:
                     self.prepare_cgroup()
-                self.sandbox = self.client.connect_sandbox(
-                    self.sandbox_id,
-                    snapshot_mechanism=self.snapshot_mechanism,
-                )
+                with self._transfer("restore"):
+                    self.sandbox = self.client.connect_sandbox(
+                        self.sandbox_id,
+                        snapshot_mechanism=self.snapshot_mechanism,
+                    )
                 if self.verify_cgroup is not None:
                     self.verify_cgroup(self.sandbox_id)
                 if self.numa_borrower is not None:
@@ -466,6 +549,7 @@ class CubeSandboxLifecycle:
                     if self.lazy_restore:
                         self.snapshot_pool.retain_for_vm(self._snapshot_key)
                     else:
+                        self._verify_warm_files_removed()
                         self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
                 if not self.lazy_restore:
                     self._snapshot_key = None
@@ -509,8 +593,35 @@ class CubeSandboxLifecycle:
                 )
                 raise
 
+    def _transfer(self, operation):
+        return self.snapshot_pool.transfer(operation) if self.snapshot_pool is not None else nullcontext()
+
+    def _verify_warm_files_removed(self):
+        """Do not credit released capacity while an owned WARM file remains."""
+        from pathlib import Path
+        remaining = [str(file) for path in self._warm_paths
+                     for file in (Path(path), Path(path+'.lineage.json'), Path(path+'.metrics.json'),
+                                  *Path(path+'.layers').glob('*')) if file.exists()]
+        if remaining:
+            raise LifecycleError('WARM capacity retained: snapshot files remain after reclamation: '
+                                 + ', '.join(remaining) + '; inspect Cube cleanup and retry')
+        self._warm_paths.clear()
+
+    def observe_borrow_candidate(self):
+        """Keep checkpoint/cleanup from removing the VM during residency reads."""
+        with self._lock:
+            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:
+                return None
+            if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
+                raise LifecycleError("only a running sandbox has borrow-candidate residency")
+            if self.numa_borrower is None:
+                raise LifecycleError("shared NUMA borrowing is not configured")
+            return self.numa_borrower.observe_resident(self.sandbox_id)
+
     def borrow_shared(self):
         with self._lock:
+            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:
+                return None  # a checkpoint/cleanup won the lifecycle lock
             if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
                 raise LifecycleError("only a running sandbox can borrow shared memory")
             if self.numa_borrower is None or self.configured_memory_bytes is None:
@@ -521,6 +632,8 @@ class CubeSandboxLifecycle:
 
     def return_local_memory(self):
         with self._lock:
+            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:
+                return None  # checkpoint/cleanup released the live borrower
             if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
                 raise LifecycleError("only a running sandbox can return LOCAL memory")
             if self.numa_borrower is None:
@@ -579,10 +692,15 @@ class CubeSandboxLifecycle:
                     self.client.kill_sandbox(self.sandbox_id)
                     if self.numa_borrower is not None:
                         self.numa_borrower.release_destroyed(self.sandbox_id)
+                self._verify_warm_files_removed()
                 if (self._snapshot_key is not None and
                         self._snapshot_tier is SnapshotTier.WARM and
                         self.snapshot_pool is not None):
                     self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
+                if self.snapshot_pool is not None:
+                    for key in self._pending_snapshot_keys:
+                        self.snapshot_pool.abort(key)
+                    self._pending_snapshot_keys.clear()
                 self._snapshot_key = None
                 self.sandbox = None
                 self.sandbox_id = None

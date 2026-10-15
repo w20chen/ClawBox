@@ -257,6 +257,7 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
         "--concurrency", "1,5,60",
         "--runtime-memory-gib", "1",
         "--tool-memory-gib", "2",
+        "--tool-workspace", "/testbed",
         "--runtime-template-id", "runtime-1g",
         "--runtime-image-reference", "registry/runtime-1g",
         "--runtime-image-digest", "sha256:" + "a" * 64,
@@ -273,6 +274,7 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
     assert configured["execution"]["concurrency_levels"] == [1, 5, 60]
     assert configured["runtime"]["memory_mib"] == 1024
     assert configured["sandbox"]["memory_mib"] == 2048
+    assert configured["sandbox"]["workspace"] == "/testbed"
     assert configured["resources"]["pool_memory_budget_mib"] == 32768
     assert configured["resources"]["prediction_artifact"] == "/data/frozen-p50.json"
     assert [item["name"] for item in configured["policies"]] == [
@@ -280,12 +282,12 @@ def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys)
     ]
     rendered = capsys.readouterr().out
     assert "c60: 120 VMs" in rendered
-    assert "5.625x (overcommit)" in rendered
+    assert "5.625x (offered configured capacity exceeds policy budget)" in rendered
 
     assert cli.main(["experiment", "describe", str(output), "--json"]) == 0
     overview = json.loads(capsys.readouterr().out)
     assert overview["pair_memory_gib"] == 3
-    assert overview["concurrency"][-1]["memory_overcommit"] is True
+    assert overview["concurrency"][-1]["offered_provisioned_capacity_exceeds_policy_budget"] is True
     assert overview["arm_count"] == 6
     assert overview["admission"]["policy_budget_gib"] == 32
     assert overview["admission"]["static"]["per_command_mib"] == 256

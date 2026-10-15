@@ -4,7 +4,8 @@ from threading import Event
 import pytest
 
 from clawbox.experiments.snapshot_pool import (
-    SnapshotKey, WarmCapacityError, WarmSnapshotPool, WarmSnapshotTooLarge,
+    SnapshotKey, WarmAdmissionRejected, WarmCapacityError, WarmSnapshotPool,
+    WarmSnapshotTooLarge,
 )
 
 
@@ -16,6 +17,35 @@ def commit(pool: WarmSnapshotPool, index: int, size: int) -> None:
     pool.reserve(key(index), size)
     pool.commit(key(index), path=f"/warm/{index}", logical_bytes=size,
                 allocated_bytes=size, transferred_bytes=size)
+
+
+def test_snapshot_aware_rejects_lower_value_candidate_without_spilling():
+    pool = WarmSnapshotPool(100, snapshot_aware=True)
+    pool.reserve(key(1), 100)
+    pool.commit(key(1), path="/warm/1", logical_bytes=100,
+                allocated_bytes=100, transferred_bytes=100,
+                retention_value_seconds=10)
+    with pytest.raises(WarmAdmissionRejected):
+        pool.reserve_for_admission(
+            key(2), 100, timeout_s=.01, retention_value_seconds=5,
+        )
+    assert pool.manifest(key(1)).path == "/warm/1"
+
+
+def test_snapshot_aware_spills_lower_value_state_and_reports_base_refs():
+    pool = WarmSnapshotPool(100, snapshot_aware=True)
+    pool.reserve(key(1), 100)
+    spilled=[]
+    pool.commit(key(1), path="/warm/1", logical_bytes=150,
+                allocated_bytes=100, transferred_bytes=100,
+                retention_value_seconds=2, template_id="tpl-a",
+                shared_base_identity="base-a", private_delta_bytes=100,
+                dependency_count=1, spiller=spilled.append)
+    pool.reserve_for_admission(
+        key(2), 100, timeout_s=.01, retention_value_seconds=8,
+    )
+    assert [item.key for item in spilled] == [key(1)]
+    assert pool.snapshot()["shared_base_references"] == {}
 
 
 def test_reservation_and_commit_never_double_count() -> None:

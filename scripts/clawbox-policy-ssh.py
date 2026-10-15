@@ -30,6 +30,26 @@ DEFERRED_TIMEOUT_PREFIX = "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS="
 _HOST_KEY_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
+def _audit(stage: str, **fields: Any) -> None:
+    """Append a bounded, credential-free lifecycle record for this SSH call."""
+    target = os.environ.get("CLAWBOX_POLICY_AUDIT_FILE")
+    if not target:
+        return
+    record = {
+        "stage": stage, "pid": os.getpid(), "unix_s": time.time(), **fields,
+    }
+    try:
+        encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(descriptor, encoded)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        # Audit evidence must never change policy or command semantics.
+        pass
+
+
 def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
@@ -354,15 +374,18 @@ def main() -> int:
         or os.environ.get("CLAWBOX_POLICY_CONTROL_TOKEN")
     )
     session_id = os.environ.get("CLAWBOX_POLICY_SESSION_ID")
+    _audit("invoked", argument_count=len(ssh_argv), envelope=parsed is not None)
     if parsed is None:
         if os.environ.get("CLAWBOX_POLICY_REQUIRE_ENVELOPE") == "1":
             parsed = _openclaw_unenveloped(ssh_argv)
             if parsed is None:
+                _audit("rejected_unenveloped")
                 print("ClawBox policy rejected SSH command without an execution envelope", file=sys.stderr)
                 return 125
         else:
             return subprocess.call([real_ssh, *ssh_argv])
     if not policy_url or not policy_token or not session_id:
+        _audit("rejected_unconfigured")
         print("ClawBox policy control is not configured", file=sys.stderr)
         return 125
 
@@ -370,6 +393,7 @@ def main() -> int:
     try:
         tool_timeout_seconds = _tool_timeout_seconds(metadata)
     except ValueError as exc:
+        _audit("rejected_timeout", error=str(exc))
         print(f"ClawBox Tool timeout is invalid: {exc}", file=sys.stderr)
         return 125
     execution_id = str(metadata["execution_id"])
@@ -382,17 +406,20 @@ def main() -> int:
         "execution_scope": str(metadata.get("execution_scope") or "agent-tool"),
         "runtime_trace_expected": bool(metadata.get("runtime_trace_expected", True)),
         "command_sha256": command_sha256,
+        "command": profile_command,
         "effective_command_sha256": effective_command_sha256,
         "prediction": _prediction(command_sha256) or (
             {"call_prediction": metadata.get("call_prediction"),
              "raw_command_sha256": command_sha256}
             if isinstance(metadata.get("call_prediction"), dict)
-            else _prediction(command_sha256)
+            else {"raw_command_sha256": command_sha256}
         ),
         "runtime_request_at": time.time(),
         "tool_timeout_seconds": tool_timeout_seconds,
     }
     try:
+        _audit("admission_requested", execution_id=execution_id,
+               operation=request["operation"], execution_scope=request["execution_scope"])
         admission = _post("/v1/tool/admit", request, attempts=3)
         if admission.get("decision") != "ADMIT":
             raise RuntimeError(f"unexpected policy decision: {admission.get('decision')!r}")
@@ -406,7 +433,11 @@ def main() -> int:
                 "duplicate policy admission cannot launch a second SSH subprocess"
             )
         route = _admission_route(admission)
+        _audit("admitted", execution_id=execution_id,
+               endpoint_epoch=route["epoch"], endpoint_port=route["port"])
     except Exception as exc:
+        _audit("admission_failed", execution_id=execution_id,
+               error_type=type(exc).__name__, error=str(exc))
         print(f"ClawBox policy admission failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 125
 
@@ -417,6 +448,7 @@ def main() -> int:
             timeout_seconds=tool_timeout_seconds,
         )
     except OSError as exc:
+        _audit("ssh_start_failed", execution_id=execution_id, error=str(exc))
         print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)
         return_code = 127
     ssh_reaped_at = time.time()
@@ -434,9 +466,12 @@ def main() -> int:
     }
     try:
         _post("/v1/tool/complete", completion, attempts=3)
+        _audit("completed", execution_id=execution_id, exit_code=return_code)
     except Exception as exc:
         # The command has already run. Never retry it to repair a missing
         # completion; fail the caller and let exact-ID acceptance reject the run.
+        _audit("completion_failed", execution_id=execution_id,
+               exit_code=return_code, error_type=type(exc).__name__, error=str(exc))
         print(f"ClawBox policy completion failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 125
     return return_code

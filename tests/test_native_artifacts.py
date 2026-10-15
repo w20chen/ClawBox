@@ -484,6 +484,9 @@ def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path
     assert collection.validation["runtime_trace_execution_count"] == 1
     assert (collection.root / "tool-bridge.jsonl").read_bytes() == files["tool-bridge.jsonl"]
     assert (collection.root / "validation.json").is_file()
+    assert executor.commands[0].startswith(
+        "/state/openclaw/session-a/bin/ssh.real "
+    )
     assert "-p 2222" in executor.commands[0]
     assert "__CBX_EXEC_1__" not in executor.commands[0]
 

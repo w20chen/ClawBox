@@ -14,7 +14,7 @@ from clawbox.experiments import (
     BASELINES, ensure_supported_experiment, expand_matrix, load_experiment,
     spec_digest,
 )
-from clawbox.experiments.preset_view import DIMENSIONS, dimensions, select_presets
+from clawbox.experiments.preset_view import DIMENSIONS, dimensions
 from clawbox.experiments.spec import PolicySpec
 
 
@@ -52,14 +52,19 @@ def emit_overview(value: dict[str, Any]) -> None:
     tool = value["tool"]
     print(f"Experiment: {value['experiment_id']}")
     print(f"Driver/model: {value['agent_driver']} / {value['inference_backend']}")
-    print(
-        "Per Agent: "
-        f"Runtime={runtime['vcpu']} vCPU/{runtime['memory_gib']:g} GiB, "
-        f"Tool={tool['vcpu']} vCPU/{tool['memory_gib']:g} GiB, "
-        f"pair={value['pair_memory_gib']:g} GiB"
-    )
+    if value.get("suite"):
+        print(f"Suite: {value['suite']}; ablations={value['suite_ablations']}")
+    if value.get("heterogeneous_tool_shapes"):
+        print("Per Agent: case-specific Tool shape; see assigned totals below")
+    else:
+        print(f"Per Agent: Runtime={runtime['vcpu']} vCPU/{runtime['memory_gib']:g} GiB, "
+              f"Tool={tool['vcpu']} vCPU/{tool['memory_gib']:g} GiB, "
+              f"pair={value['pair_memory_gib']:g} GiB")
+    for warning in value.get("warnings", []):
+        print(f"Warning: {warning}")
     if value.get("compute_nodes"):
         print(f"Compute placement: {value['placement_policy']} (Runtime + Tool stay together)")
+        print(f"Memory scheduling: {value['memory_scheduling']}; shared transfer concurrency: {value['pool_transfer_concurrency']}")
         for node in value["compute_nodes"]:
             print(f"  {node['node_id']}: NUMA {node['numa_node']}, CPUs {node['cpus']}, "
                   f"LOW/HIGH/HARD={node['low_watermark_mib']/1024:g}/"
@@ -67,6 +72,7 @@ def emit_overview(value: dict[str, Any]) -> None:
         if value.get("session_compute_nodes"):
             print("  Session node IDs: " + ", ".join(value["session_compute_nodes"]))
         print("  Aggregate capacities below are sums; admission is independent on each compute node.")
+    print(f"Lifecycle admission: {value['lifecycle_admission']}; proactive cache reclaim: {value['proactive_cache_reclaim']}")
     print("Concurrency:")
     for row in value["concurrency"]:
         print(
@@ -75,7 +81,7 @@ def emit_overview(value: dict[str, Any]) -> None:
             f"{row['offered_pair_memory_gib']:g} GiB offered / "
             f"{row['pool_memory_gib']:g} GiB pool = "
             f"{row['offered_to_pool_ratio']:.3f}x"
-            + (" (overcommit)" if row["memory_overcommit"] else "")
+            + (" (offered configured capacity exceeds policy budget)" if row["offered_provisioned_capacity_exceeds_policy_budget"] else "")
         )
     execution = value["execution"]
     safety = value["safety"]
@@ -115,6 +121,8 @@ def emit_overview(value: dict[str, Any]) -> None:
     if p50:
         if p50.get("error"):
             print(f"Predicted admission: unavailable ({p50['error']})")
+        elif p50.get("mode") == "runtime":
+            print(f"Predicted admission: runtime ClawTune KB={p50['kb_path']}, reservation scale={p50['reservation_scale']:g}")
         else:
             print(
                 "Predicted admission: calibrated host growth range="
@@ -133,6 +141,8 @@ def emit_overview(value: dict[str, Any]) -> None:
     for name, resources in value["effective_policy_resources"].items():
         print(f"  {name}: execution pool={resources['pool_memory_gib']:g} GiB, "
               f"shared pool={resources['shared_pool_gib']:g} GiB, "
+              f"placement={resources['placement_policy']}, lifecycle={resources['lifecycle_admission']}, "
+              f"runtime_control={resources['runtime_control']}, "
               f"snapshot migration={'enabled' if resources['snapshot_enabled'] else 'disabled'}")
 
 
@@ -214,6 +224,14 @@ def parser() -> argparse.ArgumentParser:
     importer.add_argument("source", type=Path)
     importer.add_argument("--output", required=True, type=Path)
     importer.add_argument("--python", default="python3")
+    importer.add_argument(
+        "--source-workspace", default="/testbed",
+        help="absolute workspace path recorded by the source trace (default: /testbed)",
+    )
+    importer.add_argument(
+        "--target-workspace", default="/workspace",
+        help="OpenClaw workspace path exposed to replayed tools (default: /workspace)",
+    )
     trainer = sub.add_parser("train", help="fit frozen P50 LatticeKB/ToolKB predictions from Cube runs")
     trainer.add_argument("runs", nargs="+", type=Path)
     trainer.add_argument("--trace", required=True, type=Path)
@@ -248,9 +266,9 @@ def parser() -> argparse.ArgumentParser:
     baselines.add_argument("--all", action="store_true", help="include deprecated policies")
     baselines.add_argument("--json", action="store_true", dest="as_json")
     configure = sub.add_parser(
-        "configure", help="create a validated experiment YAML from a checked-in example",
+        "configure", help="create a validated schema-v3 experiment YAML from a checked-in example",
     )
-    configure.add_argument("base", type=Path, help="complete schema-v2 YAML to use as a base")
+    configure.add_argument("base", type=Path, help="complete schema-v3 YAML to use as a base")
     configure.add_argument("output", type=Path, help="new experiment YAML")
     configure.add_argument(
         "--profile", type=Path,
@@ -259,9 +277,18 @@ def parser() -> argparse.ArgumentParser:
     )
     configure.add_argument("--force", action="store_true", help="replace the output file")
     configure.add_argument("--experiment-id")
-    for name, choices in DIMENSIONS.items():
-        configure.add_argument("--" + name.replace("_", "-"), choices=choices, action="append",
-                               help="filter existing presets; repeat for alternatives in this dimension")
+    configure.add_argument("--suite", choices=("admission", "numa-snapshot"),
+                           help="generate a matched two-arm comparison")
+    configure.add_argument("--ablations", action=argparse.BooleanOptionalAction, default=None,
+                           help="include intermediate arms for the selected suite")
+    configure.add_argument("--runtime-control", choices=("off", "agentcgroup_cgroup"),
+                           help="optional AgentCgroup control; suite deployment baseline stays off")
+    configure.add_argument("--prediction-mode", choices=("runtime", "frozen"),
+                           help="query trained ClawTune KB per command, or replay frozen command predictions")
+    configure.add_argument("--prediction-reservation-scale", type=float,
+                           help="positive multiplier on calibrated host growth; default 1")
+    configure.add_argument("--admission-margin-mib", type=int,
+                           help="global safety margin in MiB; default 256")
     configure.add_argument("--trace")
     configure.add_argument("--case-id")
     configure.add_argument("--prompt")
@@ -291,8 +318,13 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--tool-vcpu", type=int)
     configure.add_argument("--runtime-memory-gib", type=float)
     configure.add_argument("--tool-memory-gib", type=float)
+    configure.add_argument(
+        "--tool-workspace",
+        help="absolute repository directory inside the Tool VM image",
+    )
     configure.add_argument("--target-node")
-    configure.add_argument("--placement-policy", choices=("round_robin", "explicit"))
+    configure.add_argument("--placement-policy", choices=("os_default", "round_robin", "load_aware", "explicit"))
+    configure.add_argument("--memory-scheduling", choices=("static", "local_only", "snapshot_only", "joint"))
     configure.add_argument("--session-compute-nodes", help="comma-separated compute node IDs for explicit placement")
     configure.add_argument("--pool-memory-gib", type=float)
     configure.add_argument("--emergency-free-memory-gib", type=float)
@@ -319,10 +351,7 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--random-seed", type=int)
     configure.add_argument("--arm-timeout-seconds", type=int)
     configure.add_argument("--command-timeout-seconds", type=int)
-    configure.add_argument("--memory-sample-interval-seconds", type=float)
-    configure.add_argument("--stabilization-seconds", type=float)
     configure.add_argument("--time-scale", type=float)
-    configure.add_argument("--openclaw-exec-yield-ms", type=int)
     configure.add_argument(
         "--model-wait-prediction-seconds", type=positive_float_or_auto,
         help="predicted model wait, or auto for the scaled recorded-trace median",
@@ -442,7 +471,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "import-trace":
             from clawbox.replay.import_trace import import_trace
 
-            emit(import_trace(args.source, args.output, python=args.python))
+            emit(import_trace(
+                args.source, args.output, python=args.python,
+                source_workspace=args.source_workspace,
+                target_workspace=args.target_workspace,
+            ))
             return 0
         if args.command == "train":
             from clawbox.experiments.training import train_p50
@@ -638,6 +671,12 @@ def main(argv: list[str] | None = None) -> int:
 
             spec = configure_experiment(
                 args.base,
+                suite=args.suite,
+                suite_ablations=args.ablations,
+                runtime_control=args.runtime_control,
+                prediction_mode=args.prediction_mode,
+                prediction_reservation_scale=args.prediction_reservation_scale,
+                admission_margin_mib=args.admission_margin_mib,
                 host_profile=profile or None,
                 compute_nodes=profile.get("compute_nodes"),
                 placement_policy=args.placement_policy,
@@ -652,8 +691,7 @@ def main(argv: list[str] | None = None) -> int:
                 repetitions=args.repetitions,
                 session_assignment=args.session_assignment,
                 concurrency=args.concurrency,
-                baseline_names=select_presets(args.baselines or (), **{
-                    name: getattr(args, name) for name in DIMENSIONS}),
+                baseline_names=args.baselines or (),
                 runtime_template_id=(
                     runtime_profile.get("template_id") if use_runtime_profile
                     else args.runtime_template_id
@@ -708,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
                     else tool_profile.get("memory_mib", 0) / 1024
                     if use_tool_profile else None
                 ),
+                tool_workspace=args.tool_workspace,
                 target_node=(
                     args.target_node or profile.get("node") or os.getenv("CUBE_NODE")
                 ),
@@ -741,6 +780,7 @@ def main(argv: list[str] | None = None) -> int:
                 warm_numa_node=profile.get("warm_numa_node"),
                 snapshot_mechanism=args.snapshot_mechanism,
                 snapshot_storage=args.snapshot_storage,
+                memory_scheduling=args.memory_scheduling,
                 static_tool_memory_mib=args.static_tool_memory_mib,
                 prediction_artifact=args.prediction_artifact,
                 arrival_schedule=args.arrival_schedule,
@@ -748,10 +788,7 @@ def main(argv: list[str] | None = None) -> int:
                 random_seed=args.random_seed,
                 arm_timeout_seconds=args.arm_timeout_seconds,
                 command_timeout_seconds=args.command_timeout_seconds,
-                memory_sample_interval_seconds=args.memory_sample_interval_seconds,
-                stabilization_seconds=args.stabilization_seconds,
                 time_scale=args.time_scale,
-                openclaw_exec_yield_ms=args.openclaw_exec_yield_ms,
                 model_wait_prediction_seconds=args.model_wait_prediction_seconds,
                 model_wait_prediction_source=args.model_wait_prediction_source,
                 inference_backend=args.inference_backend,
@@ -761,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             overview = experiment_overview(spec)
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(dump_experiment(spec), encoding="utf-8")
+            args.output.write_text(dump_experiment(spec, compact=True), encoding="utf-8")
             emit_overview(overview)
             print(f"Wrote: {args.output}")
             if args.launch:

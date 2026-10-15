@@ -30,6 +30,7 @@ class PriorityDomain:
         self.parent = parent.resolve()
         self.registry = registry
         self.placements = placements or {}
+        self.observations = []
         self.lock_file = None
         self.prefix = 'clawbox-' + uuid.uuid4().hex
         self.high = self.parent / (self.prefix + '-high')
@@ -131,12 +132,40 @@ class PriorityDomain:
 
     def verify(self, index: int, role: str, sandbox_id: str) -> dict:
         from .congestion import locate_cgroup
+        from .topology import parse_cpu_list
+        from .numa_borrow import read_numa_lru_bytes
         expected = self.leaves[index, role]
         actual = locate_cgroup(sandbox_id, self.parent)
         if actual != expected:
             raise RuntimeError(f'Cube preallocation cgroup routing failed: {actual} != {expected}')
-        return {'priority': self.priorities[index], 'cgroup': str(actual),
-                'sandbox_id': sandbox_id, 'role': role}
+        cpus = (actual/'cpuset.cpus.effective').read_text().strip()
+        mems = (actual/'cpuset.mems.effective').read_text().strip()
+        configured_cpus, configured_node = self.placements.get(index, (None, None))
+        required_cpus = configured_cpus or (self.parent/'cpuset.cpus.effective').read_text().strip()
+        required_mems = (str(configured_node) if configured_node is not None else
+                         (self.parent/'cpuset.mems.effective').read_text().strip())
+        if parse_cpu_list(cpus) != parse_cpu_list(required_cpus) or parse_cpu_list(mems) != parse_cpu_list(required_mems):
+            raise RuntimeError(f'VM effective cpuset mismatch at {actual}: CPUs={cpus}, memory={mems}')
+        threads = []
+        for tid in (actual/'cgroup.threads').read_text().split():
+            try:
+                status = dict(line.split(':', 1) for line in Path(f'/proc/{tid}/status').read_text().splitlines() if ':' in line)
+            except FileNotFoundError:
+                continue  # auxiliary I/O threads may exit during observation
+            allowed = status['Cpus_allowed_list'].strip()
+            if not parse_cpu_list(allowed) <= parse_cpu_list(cpus):
+                raise RuntimeError(f'VM thread {tid} escaped compute cpuset')
+            threads.append({'tid':int(tid), 'name':status['Name'].strip(), 'cpus_allowed':allowed})
+        if not any(t['name'].startswith('vcpu') for t in threads):
+            raise RuntimeError(f'no vCPU threads observed in VM cgroup {actual}')
+        resident, unattributed = read_numa_lru_bytes(actual)
+        evidence = {'priority': self.priorities[index], 'cgroup': str(actual),
+                'sandbox_id': sandbox_id, 'role': role, 'compute_numa':configured_node,
+                'effective_cpus':cpus, 'memory_nodes':sorted(parse_cpu_list(mems)),
+                'actual_residency_bytes':resident, 'unattributed_bytes':unattributed,
+                'threads':threads, 'enforcement':'preallocation_cgroup'}
+        self.observations.append(evidence)
+        return evidence
 
     def close(self):
         # Revoke capabilities first; never recursively delete an arbitrary path.

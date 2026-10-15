@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from threading import Condition, Lock, RLock
+from threading import BoundedSemaphore, Condition, Lock, RLock
 
 from .spec_types import SnapshotTier
 
@@ -16,6 +16,10 @@ class WarmCapacityError(RuntimeError):
 
 class WarmSnapshotTooLarge(WarmCapacityError):
     """One generation is larger than the complete WARM pool."""
+
+
+class WarmAdmissionRejected(WarmCapacityError):
+    """A lower-value candidate should be written directly to the SSD tier."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +41,13 @@ class SnapshotManifest:
     committed_monotonic_s: float
     pinned: int = 0
     retained_by_vm: bool = False
+    template_id: str | None = None
+    shared_base_identity: str | None = None
+    shared_base_allocated_bytes: int = 0
+    private_delta_bytes: int = 0
+    dependency_count: int = 0
+    expected_reuse_probability: float | None = None
+    retention_value_seconds: float = 0.0
 
 
 class WarmSnapshotPool:
@@ -49,6 +60,9 @@ class WarmSnapshotPool:
 
     def __init__(self, capacity_bytes: int, *,
                  borrow_capacity_bytes: int = 0,
+                 transfer_concurrency: int = 1,
+                 transfer_timeout_seconds: float = 120,
+                 snapshot_aware: bool = False,
                  clock: Callable[[], float] = time.monotonic) -> None:
         if capacity_bytes < 0:
             raise ValueError("capacity_bytes must be non-negative")
@@ -56,6 +70,13 @@ class WarmSnapshotPool:
             raise ValueError("borrow_capacity_bytes must be between zero and capacity")
         self.capacity_bytes = capacity_bytes
         self.borrow_capacity_bytes = borrow_capacity_bytes
+        if transfer_concurrency < 1 or transfer_timeout_seconds <= 0:
+            raise ValueError("transfer concurrency and timeout must be positive")
+        self.transfer_concurrency = transfer_concurrency
+        self.transfer_timeout_seconds = transfer_timeout_seconds
+        self.snapshot_aware = snapshot_aware
+        self._transfer_slots = BoundedSemaphore(transfer_concurrency)
+        self._transfers: dict[str, int] = {}
         self._clock = clock
         self._lock = RLock()
         self._changed = Condition(self._lock)
@@ -64,6 +85,27 @@ class WarmSnapshotPool:
         self._borrow_reservations: dict[str, int] = {}
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
+        self._warm_admissions = 0
+        self._value_rejections = 0
+        self._spill_count = 0
+
+    @contextmanager
+    def transfer(self, operation: str):
+        """Bound concurrent I/O/rebind calls; this is not a bandwidth meter.
+
+        Call only around VMM I/O, after capacity/spill/pin decisions, so a
+        waiter never holds a transfer slot while waiting for another transfer.
+        """
+        if not self._transfer_slots.acquire(timeout=self.transfer_timeout_seconds):
+            raise TimeoutError(f"shared-pool {operation} transfer timed out; inspect active transfers or increase resources.pool_transfer_timeout_seconds")
+        with self._lock:
+            self._transfers[operation] = self._transfers.get(operation, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._transfers[operation] -= 1
+            self._transfer_slots.release()
 
     @property
     def reserved_bytes(self) -> int:
@@ -130,7 +172,14 @@ class WarmSnapshotPool:
     def commit(self, key: SnapshotKey, *, path: str, logical_bytes: int,
                allocated_bytes: int, transferred_bytes: int | None,
                spiller: Callable[[SnapshotManifest], None] | None = None,
-               replaces: SnapshotKey | None = None) -> SnapshotManifest:
+               replaces: SnapshotKey | None = None,
+               template_id: str | None = None,
+               shared_base_identity: str | None = None,
+               shared_base_allocated_bytes: int = 0,
+               private_delta_bytes: int = 0,
+               dependency_count: int = 0,
+               expected_reuse_probability: float | None = None,
+               retention_value_seconds: float = 0.0) -> SnapshotManifest:
         if logical_bytes < 0 or allocated_bytes < 0 or (
             transferred_bytes is not None and transferred_bytes < 0
         ):
@@ -158,6 +207,13 @@ class WarmSnapshotPool:
                 logical_bytes=logical_bytes, allocated_bytes=allocated_bytes,
                 transferred_bytes=transferred_bytes,
                 last_used_monotonic_s=now, committed_monotonic_s=now,
+                template_id=template_id,
+                shared_base_identity=shared_base_identity,
+                shared_base_allocated_bytes=shared_base_allocated_bytes,
+                private_delta_bytes=private_delta_bytes,
+                dependency_count=dependency_count,
+                expected_reuse_probability=expected_reuse_probability,
+                retention_value_seconds=retention_value_seconds,
             )
             self._manifests[key] = manifest
             if predecessor is not None:
@@ -170,7 +226,8 @@ class WarmSnapshotPool:
             return manifest
 
     def reserve_for_admission(self, key: SnapshotKey, upper_bound_bytes: int,
-                              *, timeout_s: float = 120) -> None:
+                              *, timeout_s: float = 120,
+                              retention_value_seconds: float = 0.0) -> None:
         """Keep spill-and-reserve atomic against other admissions.
 
         Writers commit without the admission lock. If capacity is temporarily
@@ -181,9 +238,18 @@ class WarmSnapshotPool:
         while True:
             try:
                 with self._admission_lock:
-                    self.spill_for_admission(upper_bound_bytes, exclude={key})
+                    self.spill_for_admission(
+                        upper_bound_bytes, exclude={key},
+                        candidate_retention_value_seconds=retention_value_seconds,
+                    )
                     self.reserve(key, upper_bound_bytes)
+                    with self._lock:
+                        self._warm_admissions += 1
                 return
+            except WarmAdmissionRejected:
+                with self._lock:
+                    self._value_rejections += 1
+                raise
             except WarmSnapshotTooLarge:
                 raise
             except WarmCapacityError:
@@ -194,10 +260,14 @@ class WarmSnapshotPool:
                     self._changed.wait(timeout=min(remaining, 0.2))
 
     def spill_for_admission(self, required_bytes: int, *,
-                            exclude: set[SnapshotKey] | None = None
+                            exclude: set[SnapshotKey] | None = None,
+                            candidate_retention_value_seconds: float = 0.0,
                             ) -> tuple[SnapshotManifest, ...]:
         """Relocate and retire the deterministic pinned LRU prefix."""
-        victims = self.lru_victims(required_bytes, exclude=exclude)
+        victims = self.lru_victims(
+            required_bytes, exclude=exclude,
+            candidate_retention_value_seconds=candidate_retention_value_seconds,
+        )
         completed: list[SnapshotManifest] = []
         try:
             for item in victims:
@@ -213,6 +283,7 @@ class WarmSnapshotPool:
                     self._manifests.pop(item.key)
                     self._spillers.pop(item.key, None)
                     completed.append(item)
+                    self._spill_count += 1
                     self._assert_capacity_locked()
                     self._changed.notify_all()
             return tuple(completed)
@@ -288,9 +359,15 @@ class WarmSnapshotPool:
             self._changed.notify_all()
             return removed
 
-    def lru_victims(self, required_bytes: int, *, exclude: set[SnapshotKey] | None = None
+    def lru_victims(self, required_bytes: int, *, exclude: set[SnapshotKey] | None = None,
+                    candidate_retention_value_seconds: float = 0.0,
                     ) -> tuple[SnapshotManifest, ...]:
-        """Return and pin the deterministic LRU prefix needed for admission."""
+        """Return and pin deterministic victims needed for admission.
+
+        Legacy mode is strict LRU. Snapshot-aware mode evicts the lowest
+        expected restore-time saving per allocated byte and rejects a lower
+        value candidate so its lifecycle can write it directly to SSD.
+        """
         if required_bytes <= 0:
             return ()
         if required_bytes > self.capacity_bytes:
@@ -303,13 +380,19 @@ class WarmSnapshotPool:
             deficit = max(0, self._usage_locked() + required_bytes - self.capacity_bytes)
             if deficit == 0:
                 return ()
+            def victim_order(item: SnapshotManifest):
+                stable = (
+                    item.last_used_monotonic_s,
+                    item.key.session_id, item.key.role, item.key.generation,
+                )
+                if not self.snapshot_aware:
+                    return stable
+                density = item.retention_value_seconds / max(1, item.allocated_bytes)
+                return (density, *stable)
             candidates = sorted(
                 (item for key, item in self._manifests.items()
                  if key not in excluded and item.pinned == 0 and not item.retained_by_vm),
-                key=lambda item: (
-                    item.last_used_monotonic_s,
-                    item.key.session_id, item.key.role, item.key.generation,
-                ),
+                key=victim_order,
             )
             victims: list[SnapshotManifest] = []
             reclaimed = 0
@@ -323,12 +406,27 @@ class WarmSnapshotPool:
                 for item in victims:
                     item.pinned -= 1
                 raise WarmCapacityError("WARM capacity has no spillable LRU prefix")
+            if self.snapshot_aware and candidate_retention_value_seconds <= sum(
+                item.retention_value_seconds for item in victims
+            ):
+                for item in victims:
+                    item.pinned -= 1
+                raise WarmAdmissionRejected(
+                    "candidate has no greater expected restore saving than WARM victims"
+                )
             return tuple(victims)
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
                 "capacity_bytes": self.capacity_bytes,
+                "transfer_concurrency": self.transfer_concurrency,
+                "active_transfers": dict(self._transfers),
+                "bandwidth_measurement": "unavailable",
+                "residency_policy": "value_aware" if self.snapshot_aware else "lru",
+                "warm_admissions": self._warm_admissions,
+                "value_rejections_to_cold": self._value_rejections,
+                "spill_count": self._spill_count,
                 "reserved_bytes": sum(self._reservations.values()),
                 "committed_bytes": sum(
                     item.allocated_bytes for item in self._manifests.values()
@@ -348,6 +446,16 @@ class WarmSnapshotPool:
                         ),
                     )
                 ],
+                "shared_base_references": {
+                    identity: sum(
+                        item.shared_base_identity == identity
+                        for item in self._manifests.values()
+                    )
+                    for identity in sorted({
+                        item.shared_base_identity for item in self._manifests.values()
+                        if item.shared_base_identity is not None
+                    })
+                },
             }
 
     def _usage_locked(self) -> int:

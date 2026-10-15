@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -81,7 +82,7 @@ def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = Non
 
 
 class FrozenPredictionProvider:
-    """Load one immutable P90 artifact once and resolve exact commands."""
+    """Load one immutable prediction artifact once and resolve exact commands."""
 
     def __init__(self, path: Path, *, repository: str | None = None,
                  prediction_source: str = "runtime_clawtune_immutable_kb") -> None:
@@ -271,3 +272,64 @@ class P50PredictionProvider(FrozenPredictionProvider):
                 "prediction_source": self.prediction_source,
                 "raw_command_sha256": digest, "canonical_prediction_key": digest,
                 "models": item.get("models"), "kb_sha256": self.payload.get("kb_sha256")}
+
+
+class RuntimePredictionProvider(P50PredictionProvider):
+    """Query a validated, immutable training KB for the actual incoming command.
+
+    Model state is frozen for comparable trials, but commands need not occur in
+    the training artifact's replay list. Evaluation observations never train it.
+    """
+
+    def __init__(self, path: Path, **kwargs):
+        super().__init__(path, **kwargs)
+        self.prediction_source = "runtime_clawtune_immutable_kb"
+        self.kb_path = path.with_suffix(".kb.json")
+        try:
+            data = self.kb_path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"runtime prediction requires {self.kb_path}; copy both experiment train outputs") from exc
+        if hashlib.sha256(data).hexdigest() != self.payload.get("kb_sha256"):
+            raise ValueError("runtime prediction KB hash differs from training artifact; copy the matching .kb.json")
+        from clawbox.clawtune_integration import use_clawtune
+        use_clawtune()
+        from tool_time.lattice_kb import LatticeTimeKB
+        from tool_resource.runtime_kb import RuntimeToolResourceKB
+        snapshot = json.loads(data)
+        try:
+            self.lattice = LatticeTimeKB.from_json_obj(snapshot["lattice"])
+            self.runtime = RuntimeToolResourceKB.from_json_obj(snapshot["tool"])
+        except (KeyError, ValueError) as exc:
+            raise ValueError("training KB cannot be loaded by the selected ClawTune; use the matching ClawTune environment or retrain: " + str(exc)) from exc
+        self._query_lock = Lock()
+
+    def _load_entries(self, payload):
+        # Do not use or require a precomputed exact-command table in live mode.
+        pass
+
+    @property
+    def manifest(self):
+        return {}
+
+    def resolve(self, command, runtime_metadata):
+        if not isinstance(command, str) or not command.strip():
+            raise PredictionUnavailable("runtime prediction requires the actual Tool command")
+        digest = command_sha256(command)
+        if not isinstance(runtime_metadata, dict) or runtime_metadata.get("raw_command_sha256") != digest:
+            raise PredictionUnavailable("Runtime prediction command identity mismatch")
+        from tool_resource.runtime_kb import ToolCallQuery
+        from clawbox.tuning.clawtune import predict_native_call_load_models
+        query = ToolCallQuery(repo=self.repository, tool_name="exec", command=command,
+                             ts_start=time.time(), memory_measurement="guest_memtotal_minus_memavailable")
+        with self._query_lock:
+            result = predict_native_call_load_models(self.runtime, query, lattice=self.lattice)
+            models = {key: result[key].model_dump(mode="json") for key in ("lattice", "tool")}
+            prediction = self._metadata({"models": models}, command, digest)
+        return {**prediction, "session_runtime_metadata": dict(runtime_metadata)}
+
+    def resolve_digest(self, digest, runtime_metadata):
+        raise PredictionUnavailable("runtime prediction requires command text, not a frozen digest lookup")
+
+
+def prediction_provider_type(mode: str):
+    return RuntimePredictionProvider if mode == "runtime" else P50PredictionProvider

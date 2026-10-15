@@ -87,9 +87,31 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         memory_measurement=observation.memory_measurement,
         memory_environment_id=observation.memory_environment_id,
         memory_eligible=observation.memory_eligible,
+        pmu_cycles=(
+            pmu.events["cycles"].raw_count if pmu_eligible else None
+        ),
+        pmu_instructions=(
+            pmu.events["instructions"].raw_count if pmu_eligible else None
+        ),
+        pmu_llc_read_accesses=(
+            pmu.events["llc_read_accesses"].raw_count
+            if pmu_eligible else None
+        ),
+        pmu_llc_read_misses=(
+            pmu.events["llc_read_misses"].raw_count
+            if pmu_eligible else None
+        ),
         pmu_ipc=pmu.derived["ipc"] if pmu_eligible else None,
         pmu_llc_mpki=pmu.derived["llc_mpki"] if pmu_eligible else None,
         pmu_llc_miss_rate=pmu.derived["llc_miss_rate"] if pmu_eligible else None,
+        pmu_llc_read_accesses_per_cpu_second=(
+            pmu.derived.get("llc_read_accesses_per_cpu_second")
+            if pmu_eligible else None
+        ),
+        pmu_llc_read_misses_per_cpu_second=(
+            pmu.derived.get("llc_read_misses_per_cpu_second")
+            if pmu_eligible else None
+        ),
         pmu_eligible=pmu_eligible,
     )
 

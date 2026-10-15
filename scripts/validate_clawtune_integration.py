@@ -105,11 +105,13 @@ def main() -> None:
     sys.path.insert(0, str(sidecar_dir / "src"))
     from clawtune_kb import validate_seed
     from clawtune_sidecar.trace import AgentTestBenchTraceWriter
+    from command_parser import ParseContext, default_service
     from tool_resource.sdk import DockerCommandObserver, DockerExecutionContext
     from clawtune_sidecar.predictors.call_load import predict_call_load
     from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB
     sys.path.insert(0, str(project_root))
     from clawbox.experiments.prediction import clawtune_extra_peak
+    from clawbox.tuning.schema import PmuProfile
 
     example = json.loads((root / "contracts" / "examples" / "call-load.json").read_text(encoding="utf-8"))
     # The public example uses ClawTune's Docker/cgroup measurement. Cube keeps
@@ -120,6 +122,39 @@ def main() -> None:
         clawtune_extra_peak(example)
     except Exception as exc:
         fail(f"call_load.v2 extra memory target is incompatible: {exc}")
+    pmu_example = json.loads(
+        (root / "contracts" / "examples" / "pmu-profile.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    try:
+        profile = PmuProfile.model_validate(pmu_example)
+    except Exception as exc:
+        fail(f"pmu_profile_v1 is incompatible: {exc}")
+    expected_derived = {
+        "ipc", "llc_mpki", "llc_miss_rate",
+        "llc_read_accesses_per_cpu_second",
+        "llc_read_misses_per_cpu_second",
+    }
+    if set(profile.derived) != expected_derived:
+        fail("current PMU derived metrics are not all accepted")
+    timeout_profile = profile.model_copy(
+        update={"coverage": profile.coverage.model_copy(
+            update={"reason": "tool_timeout"}
+        )}
+    )
+    PmuProfile.model_validate(timeout_profile.model_dump(by_alias=True))
+    features = default_service().argv(
+        ("pytest", "-q", "tests/test_example.py"),
+        ParseContext(repo="clawbox/integration-check"),
+    )
+    if (
+        features.tool != "pytest"
+        or features.status != "complete"
+        or "tool=pytest" not in features.core
+        or not any("--quiet" in item for item in features.features)
+    ):
+        fail("current command parser did not project the expected pytest features")
     envelope_source = (plugin_dir / "src" / "exec-instrumentation.ts").read_text(encoding="utf-8")
     if not all(marker in envelope_source for marker in (
         'model === "lattice" ? decision?.prediction.lattice',

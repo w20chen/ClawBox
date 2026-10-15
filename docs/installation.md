@@ -169,6 +169,12 @@ and install both Cubelet and Shim: they place each VM in its session's cgroup
 before allocating guest RAM, including cached-template creation and restore.
 Use the matching SDK. Applying a patch without installing the rebuilt services
 does not enable priority control.
+The prepared source records a digest of every patch in
+`.clawbox-patchset.sha256`. Repeating the command with the same patch set reuses
+the checkout. If ClawBox changes any overlapping patch, preparation fails before
+modifying the old checkout; preserve it and pass `--source` with a new empty
+directory. An interrupted first preparation is resumable only when its
+`.clawbox-patchset.pending` digest matches the current repository.
 Build variables are defined in the pinned [upstream build configuration](https://github.com/TencentCloud/CubeSandbox/blob/v0.7.0/deploy/one-click/build.env.example).
 
 Select the exact archive printed by the build; do not extract a wildcard of old

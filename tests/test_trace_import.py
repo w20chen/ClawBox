@@ -21,11 +21,14 @@ def test_edit_mapping_preserves_text_and_source():
     target = adapt_call(source)
     assert source == before
     assert target['function']['name'] == 'edit'
-    assert json.loads(target['function']['arguments']) == {'path': '/testbed/x', 'oldText': 'a\nb', 'newText': 'c\nd'}
+    assert json.loads(target['function']['arguments']) == {'path': '/workspace/x', 'oldText': 'a\nb', 'newText': 'c\nd'}
     with pytest.raises(ValueError, match='replace_all'):
         adapt_call(call('edit_file', path='x', old_text='a', new_text='b', replace_all=True))
-    with pytest.raises(ValueError, match='Unsupported tool arguments'):
-        adapt_call(call('read_file', path='x', offset=50))
+    target = adapt_call(call('read_file', path='x', offset=50, limit=20))
+    assert target['function']['name'] == 'read'
+    assert json.loads(target['function']['arguments']) == {'path': 'x', 'offset': 50, 'limit': 20}
+    with pytest.raises(ValueError, match='offset'):
+        adapt_call(call('read_file', path='x', offset=0))
     with pytest.raises(ValueError, match='Unsupported replay tool'):
         adapt_call(call('unknown'))
 
@@ -57,7 +60,9 @@ def test_import_roundtrip_keeps_timing_and_provenance(tmp_path):
     report = import_trace(source, output)
     action, = load_trace(output)
     assert action.duration_s == 2
-    assert json.loads(action.output['tool_calls'][0]['function']['arguments'])['workdir'] == '/testbed'
+    args = json.loads(action.output['tool_calls'][0]['function']['arguments'])
+    assert args['workdir'] == '/workspace'
+    assert report['workspace_mapping'] == {'source': '/testbed', 'target': '/workspace'}
     assert source.read_bytes() == original and report['model_calls'] == 1
     assert output.with_suffix('.import.json').exists()
     with pytest.raises(ValueError, match='already exists'):
@@ -71,3 +76,43 @@ def test_failed_import_does_not_publish_partial_trace(tmp_path):
     with pytest.raises(ValueError, match='schema-5'):
         import_trace(source, output)
     assert not output.exists()
+
+
+def test_workspace_mapping_covers_commands_and_structured_paths():
+    target = adapt_call(call(
+        'exec',
+        command=(
+            'cd /testbed && cat /testbed2 /testbed/a '
+            '/opt/conda/envs/testbed/bin/python'
+        ),
+        working_dir='/testbed/subdir',
+    ))
+    args = json.loads(target['function']['arguments'])
+    assert args == {
+        'command': (
+            'cd /workspace && cat /testbed2 /workspace/a '
+            '/opt/conda/envs/testbed/bin/python'
+        ),
+        'workdir': '/workspace/subdir',
+    }
+
+
+def test_import_maps_historical_tool_calls_in_model_inputs(tmp_path):
+    source = tmp_path / 'source.jsonl'
+    previous = call('exec', command='cat /testbed/a', working_dir='/testbed')
+    rows = [
+        {'type': 'trace_metadata', 'trace_format_version': 5,
+         'benchmark': 'swe-rebench', 'scaffold': 'openclaw',
+         'model': 'recorded-model', 'instance_id': 'case'},
+        {'type': 'action', 'action_type': 'llm_call', 'action_id': 'llm-0',
+         'instance_id': 'case', 'ts_start': 1, 'ts_end': 2,
+         'data': {'messages_in': [
+             {'role': 'assistant', 'tool_calls': [previous]},
+         ], 'raw_response': {'choices': [{'message': {'role': 'assistant'}}]}}},
+    ]
+    source.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    output = tmp_path / 'output.jsonl'
+    import_trace(source, output)
+    start = json.loads(output.read_text().splitlines()[1])
+    args = json.loads(start['input']['messages'][0]['tool_calls'][0]['function']['arguments'])
+    assert args == {'command': 'cat /workspace/a', 'workdir': '/workspace'}

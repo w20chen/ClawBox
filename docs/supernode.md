@@ -48,6 +48,13 @@ sessions are not moved or rebalanced while running. A CPU list restricts
 where a VM may execute. It does not set a vCPU quota or reserve those CPUs
 from other host processes. The VM template sets its vCPU count.
 
+`template_aware_placement` is an opt-in refinement of the same placement
+coordinator. It never bypasses CPU commitment, memory admission, or node HIGH
+watermarks. With `template_base_sharing: required`, qualification must first
+prove a common large file-backed RAM mapping with `Shared_Clean` pages for every
+Tool template. The default is disabled; logical lineage is not physical sharing
+evidence.
+
 ## Memory behavior and limits
 
 - Admission checks each compute node's local measurements and budget as well
@@ -58,6 +65,18 @@ from other host processes. The VM template sets its vCPU count.
   one capacity ledger. The system reserves a VM's configured memory before
   changing its memory binding. The combined live reservation is capped by
   `shared_borrow_percent`.
+- Snapshot-aware residency uses measured WARM/SSD restore cost, per-case reuse
+  probability, owned delta allocation and pool pressure to order the existing
+  WARM-to-SSD path. External template Base bytes are a reported dependency and
+  are not double-counted as WARM allocation. COLD relocation materializes that
+  Base before releasing WARM. Live borrow and snapshot reservations still use
+  one atomic capacity ledger.
+- Joint scheduling uses LOCAL HIGH/LOW hysteresis. Under pressure it compares
+  a safe WARM checkpoint with a live borrow only when explicit empirical
+  `memory_action_costs` and provenance are configured; otherwise it keeps the
+  deterministic reclaim-then-borrow order. Below LOW and without blocked
+  demand, it returns at most one VM whose observed shared residency still fits
+  below LOCAL HIGH. Residual shared pages keep their full reservation.
 - After VM creation or restoration, the worker verifies its cgroup CPU and
   memory bindings before sending more work. Using the shared pool changes
   memory placement, not CPU placement. Restoration returns the VM to its
@@ -66,10 +85,10 @@ from other host processes. The VM template sets its vCPU count.
   kernel memory limit for each NUMA node. The parent VM cgroup's
   `memory.max` covers the sum of local capacities plus the global shared
   borrowing limit.
-- A newly created or restored VM may run briefly before its individual
-  binding is applied. The parent cgroup permits the configured compute
-  CPUs and the compute and shared NUMA memory nodes during that interval.
-  Changing `cpuset.mems` does not guarantee migration of existing pages.
+- The supported worker prepares each priority leaf's CPU and memory set before
+  creation or restore. Cube routes the VMM into that leaf before RAM allocation;
+  the worker verifies vCPU affinity and physical residency afterward.
+  Changing `cpuset.mems` does not guarantee migration of all existing pages.
   Physical residency comes from
   `memory.numa_stat`. Memory charges that cannot be attributed to a NUMA
   node are counted conservatively for each node's admission decision but
@@ -88,7 +107,8 @@ Before a formal run, `launch` tests runtime control, VM priority placement,
 and the required snapshot/restore mechanism; shared-memory borrowing is checked
 on each compute node when configured. The formal
 concurrent run then records session placement. The report includes
-per-node capacity, peak use, high-watermark crossings, and verified bindings.
+per-node capacity, peak use, high-watermark crossings, borrow/return counts,
+released reservations, action service time, and verified bindings.
 In each trial JSON file, `performance.compute_nodes` contains placement and
 per-node admission data; `session_trace_assignment[].compute_node` identifies the
 node assigned to each session.
@@ -100,3 +120,9 @@ multi-node summaries, time above a watermark is summed across nodes; it is
 not whole-host elapsed time. Node peaks may occur at different times, so
 their sum is not a simultaneous peak. For CPU scheduling studies, retain
 session mappings, CPU lists, NUMA residency over time, and raw PMU records.
+Each arm also records kernel `node*/numastat` deltas in
+`memory.numa_allocation_event_deltas`; their unit is allocation-event pages.
+They are not interconnect traffic bytes. Until a platform-specific host
+uncore PMU event is qualified, `memory.cross_numa_traffic_bytes` remains
+`null` with an explicit reason rather than being inferred from residency,
+allocation counters, or guest generic cache events.

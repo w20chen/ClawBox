@@ -1,0 +1,141 @@
+# Host-specific, executable 2026-10-16 Kunpeng fixture. Re-run qualification
+# after changing any template, trace, cost calibration, capacity or policy.
+schema_version: 3
+suite: numa-snapshot
+suite_ablations: true
+experiment_id: agent-rl-heterogeneous-ablation-kunpeng
+workload:
+  source: recorded_trace
+  input: examples/traces/15five-scim2-agent-rl-replay.jsonl
+  repetitions: 3
+  session_assignment: round_robin
+  cases:
+    - case_id: sqlglot-4528
+      source: recorded_trace
+      source_reference: examples/traces/sqlglot-4528-replay.jsonl
+      replay_trace_reference: examples/traces/sqlglot-4528-replay.jsonl
+      repository: tobymao/sqlglot
+      base_commit: bc68289d4d368b29241e56b8f0aefc36db65ad47
+      prompt: Fix ClickHouse Map literal parsing and run the original tests.
+      validation: cd /testbed && /opt/conda/envs/testbed/bin/python -m pytest -q tests/dialects/test_clickhouse.py -k map_literals
+      snapshot_reuse_probability: 0.80
+      sandbox:
+        template_id: tpl-2fc904576f874d90b63452b8
+        source_image_reference: 127.0.0.1:5000/clawbox/lab-sandbox@sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98
+        image_digest: sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98
+        architecture: arm64
+        vcpu: 2
+        memory_mib: 4096
+        workspace: /testbed
+        preflight_command: cd /testbed && test "$(git rev-parse HEAD)" = bc68289d4d368b29241e56b8f0aefc36db65ad47
+        allow_internet_access: false
+    - case_id: 15five-scim2-filter-parser-13
+      source: recorded_trace
+      source_reference: examples/traces/15five-scim2-agent-rl-replay.jsonl
+      replay_trace_reference: examples/traces/15five-scim2-agent-rl-replay.jsonl
+      repository: 15five/scim2-filter-parser
+      base_commit: 7ddc216f8c3dd1cdb2152944187e8f7f5ee07be2
+      prompt: Return a NamedTuple from the SCIM SQL attribute path API and run the original tests.
+      validation: cd /testbed && python3 -m pytest -q
+      snapshot_reuse_probability: 0.55
+      metadata:
+        template_parent: tpl-2fc904576f874d90b63452b8
+        template_build_evidence: /home/weitianc/clawbox-agent-rl-20261015/template-src/scim2-filter-parser
+      sandbox:
+        template_id: snap-d2bb09ab90664aeb983e087d
+        architecture: arm64
+        vcpu: 2
+        memory_mib: 4096
+        workspace: /testbed
+        preflight_command: cd /testbed && test "$(git rev-parse HEAD)" = 7ddc216f8c3dd1cdb2152944187e8f7f5ee07be2 && python3 -m pytest --version
+        allow_internet_access: false
+    - case_id: click-memory-workset
+      source: recorded_trace
+      source_reference: examples/traces/memory-smoke.jsonl
+      replay_trace_reference: examples/traces/memory-smoke.jsonl
+      repository: pallets/click
+      base_commit: 874ca2bc1c30d93a4ac6e36a15ed685eafe89097
+      prompt: Exercise the Python environment memory working set and write the marker.
+      validation: test "$(cat /workspace/result.txt)" = complete
+      snapshot_reuse_probability: 0.20
+      metadata:
+        template_parent: tpl-2fc904576f874d90b63452b8
+        template_build_evidence: /home/weitianc/clawbox-agent-rl-20261015/template-src/click
+      sandbox:
+        template_id: snap-5eedbee8bbdc48d4a27b3539
+        architecture: arm64
+        vcpu: 2
+        memory_mib: 4096
+        workspace: /workspace
+        preflight_command: cd /testbed && test "$(git rev-parse HEAD)" = 874ca2bc1c30d93a4ac6e36a15ed685eafe89097 && python3 -m pytest --version
+        allow_internet_access: false
+agent: {driver: openclaw}
+inference:
+  backend: replay
+  configuration:
+    model: recorded-agent-rl-model
+    time_scale: 1.0
+    openclaw_exec_yield_ms: 120000
+    model_wait_prediction_seconds: 1.0
+    model_wait_prediction_source: controlled-ablation-constant-not-a-measured-result
+runtime:
+  template_id: tpl-bba239bc4d324efe8e4a7a22
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+  image_digest: sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 2048
+  workspace: /workspace
+  allow_internet_access: false
+sandbox:
+  template_id: tpl-2fc904576f874d90b63452b8
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-sandbox@sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98
+  image_digest: sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 4096
+  workspace: /testbed
+  allow_internet_access: false
+execution:
+  placement_cpu_overcommit: 8.0
+  template_balance_slack: 0.10
+  concurrency_levels: [3, 6, 10]
+  randomized_order: true
+  random_seed: 20261016
+  arm_timeout_seconds: 7200
+  command_timeout_seconds: 900
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1.0
+  arrival_schedule: burst
+  stagger_interval_seconds: 0.0
+resources:
+  compute_nodes:
+    - {node_id: node0, numa_node: 0, cpus: 0-79, memory_capacity_mib: 36864, low_watermark_mib: 28672, high_watermark_mib: 32768}
+    - {node_id: node1, numa_node: 1, cpus: 80-159, memory_capacity_mib: 36864, low_watermark_mib: 28672, high_watermark_mib: 32768}
+  target_node: 193.124.7.2
+  pool_memory_budget_mib: 65536
+  local_memory_capacity_mib: 73728
+  local_memory_low_watermark_mib: 57344
+  local_memory_high_watermark_mib: 65536
+  emergency_free_memory_mib: 1024
+  startup_headroom_mib: 256
+  admission_margin_mib: 256
+  checkpoint_restore_headroom_mib: 1024
+  static_tool_memory_mib: 256
+  shared_memory_borrow_limit_mib: 16384
+  warm_memory_capacity_mib: 32768
+  warm_numa_node: 2
+  local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+  warm_snapshot_root: /mnt/clawbox-pool
+  cold_snapshot_root: /data/clawbox-cold
+  snapshot_mechanism: incremental-cow
+  snapshot_storage: tiered
+  pool_transfer_concurrency: 1
+  pool_transfer_timeout_seconds: 120
+  template_base_sharing: required
+  snapshot_residency_costs:
+    provenance: /home/weitianc/clawbox-agent-rl-20261015/evidence/restore-cost-a634cc24/result.json; 3 repeats; configured 4 GiB Tool VM; current page-cache state
+    warm_restore_seconds_per_gib: 0.06460686
+    cold_restore_seconds_per_gib: 0.06392617
+validation: {command: null}
+output: {directory: /data/clawbox-results}

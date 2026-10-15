@@ -1,6 +1,73 @@
 import time
 from pathlib import Path
 
+import pytest
+
+from clawbox.experiments.worker import CgroupCpuSampler
+
+from clawbox.experiments.memory import (
+    numa_allocation_counter_deltas,
+    read_numa_allocation_counters,
+)
+
+
+def test_cgroup_cpu_sampler_reports_actual_cores_and_throttling(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    (tmp_path / "cpuset.cpus.effective").write_text("0-3,8-11", encoding="ascii")
+    stat = tmp_path / "cpu.stat"
+    stat.write_text(
+        "usage_usec 1000000\nuser_usec 700000\nsystem_usec 300000\n"
+        "nr_throttled 2\nthrottled_usec 10000\n",
+        encoding="ascii",
+    )
+    clock = iter((10.0, 11.0, 12.0))
+    monkeypatch.setattr("clawbox.experiments.worker.time.monotonic", lambda: next(clock))
+    sampler = CgroupCpuSampler(tmp_path)
+    stat.write_text(
+        "usage_usec 5000000\nuser_usec 3500000\nsystem_usec 1500000\n"
+        "nr_throttled 5\nthrottled_usec 40000\n",
+        encoding="ascii",
+    )
+    sample = sampler.sample()
+    assert sample["capacity_cores"] == 8
+    assert sample["average_cores"] == pytest.approx(4.0)
+    assert sample["utilization_fraction"] == pytest.approx(0.5)
+    stat.write_text(
+        "usage_usec 7000000\nuser_usec 4900000\nsystem_usec 2100000\n"
+        "nr_throttled 7\nthrottled_usec 55000\n",
+        encoding="ascii",
+    )
+    summary = sampler.summary()
+    assert summary["mean_cores"] == pytest.approx(3.0)
+    assert summary["peak_interval_cores"] == pytest.approx(4.0)
+    assert summary["mean_utilization_fraction"] == pytest.approx(3 / 8)
+    assert summary["usage_usec_delta"] == 6_000_000
+    assert summary["nr_throttled_delta"] == 5
+    assert summary["throttled_usec_delta"] == 45_000
+
+
+def test_numa_allocation_counters_remain_page_events_not_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "nodes"
+    for node, values in {
+        "node0": "numa_hit 10\nnuma_miss 2\nother_node 1\n",
+        "node1": "numa_hit 20\nnuma_miss 3\nother_node 4\n",
+    }.items():
+        path = root / node / "numastat"
+        path.parent.mkdir(parents=True)
+        path.write_text(values, encoding="ascii")
+    before = read_numa_allocation_counters(root)
+    (root / "node0" / "numastat").write_text(
+        "numa_hit 15\nnuma_miss 4\nother_node 2\n", encoding="ascii"
+    )
+    after = read_numa_allocation_counters(root)
+
+    assert numa_allocation_counter_deltas(before, after) == {
+        "node0": {"numa_hit": 5, "numa_miss": 2, "other_node": 1},
+        "node1": {"numa_hit": 0, "numa_miss": 0, "other_node": 0},
+    }
+    assert numa_allocation_counter_deltas(after, before) is None
+
 from clawbox.experiments.memory import (
     NodeMemorySampler, SandboxRSSSampler, read_vmstat_counter,
     sandbox_process_rss_bytes,

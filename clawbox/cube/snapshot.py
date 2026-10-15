@@ -60,6 +60,9 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
     # WARM snapshot pool.
     owned_files = [sidecar, memory]
     layer_files = []
+    external_base_identity = None
+    external_base_allocated_bytes = 0
+    private_delta_bytes = 0
     for index, layer in enumerate(layers):
         name = layer.get("name")
         if name != f"{index:06d}.mem":
@@ -77,6 +80,10 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         layer_files.append(file)
         if external_path is None:
             owned_files.append(file)
+            private_delta_bytes += _allocated_bytes(file, stat)
+        else:
+            external_base_identity = f"{stat.st_dev}:{stat.st_ino}"
+            external_base_allocated_bytes = _allocated_bytes(file, stat)
     if not os.path.samefile(memory, layer_files[-1]):
         raise RuntimeError("native RAM manifest does not identify the current delta")
     unique = {}
@@ -93,4 +100,8 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         "lineage_layers": len(layers),
         "lineage_manifest_path": str(sidecar),
         "external_base_path": layers[0].get("external_path"),
+        "external_base_identity": external_base_identity,
+        "external_base_allocated_bytes": external_base_allocated_bytes,
+        "private_delta_bytes": private_delta_bytes,
+        "dependency_count": max(0, len(layers) - 1) + int(external_base_identity is not None),
     }

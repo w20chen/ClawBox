@@ -8,6 +8,44 @@ from threading import Event, Lock, Thread
 from collections.abc import Callable
 
 
+def cgroup_memory_evidence(root: Path) -> dict:
+    """Raw kernel counters; absent optional interfaces are unknown, never zero.
+
+    file includes shmem. RSS and memory.current are not interchangeable, and
+    PSI totals are cumulative microseconds, not bytes or utilization samples.
+    """
+    def scalar(name):
+        path = root / name
+        if not path.exists():
+            return None
+        raw = path.read_text().strip()
+        return raw if raw == "max" else int(raw)
+
+    def counters(name):
+        path = root / name
+        if not path.exists():
+            return None
+        return {key: int(value) for key, value in
+                (line.split() for line in path.read_text().splitlines())}
+
+    pressure = root / "memory.pressure"
+    psi = None
+    if pressure.exists():
+        psi = {}
+        for line in pressure.read_text().splitlines():
+            kind, *values = line.split()
+            psi[kind] = {k: int(v) if k == "total" else float(v)
+                         for k, v in (item.split("=") for item in values)}
+    return {"scope": str(root), "current_bytes": scalar("memory.current"),
+            "peak_bytes": scalar("memory.peak"),
+            "peak_scope": "cgroup lifetime; not reset by the experiment",
+            "max_bytes": scalar("memory.max"), "high_bytes": scalar("memory.high"),
+            "swap_current_bytes": scalar("memory.swap.current"),
+            "swap_max_bytes": scalar("memory.swap.max"),
+            "stat": counters("memory.stat"), "events": counters("memory.events"),
+            "pressure": psi}
+
+
 def read_meminfo(path: Path) -> tuple[int, int]:
     if not path.exists():
         import psutil
@@ -42,6 +80,56 @@ def read_numa_meminfo(path: Path) -> tuple[int, int]:
     return values["MemTotal"], values["MemFree"]
 
 
+def read_numa_allocation_counters(
+    root: Path = Path("/host/sys/devices/system/node"),
+) -> dict[str, dict[str, int]] | None:
+    """Read kernel NUMA allocation counters without calling them traffic.
+
+    ``node*/numastat`` counts allocation decisions in pages.  In particular,
+    ``numa_miss``/``numa_foreign``/``other_node`` are useful diagnostics, but
+    they do not measure cache-line or memory-controller interconnect bytes.
+    Missing or partially unreadable sysfs data is reported as unavailable.
+    """
+    if not root.exists():
+        fallback = Path("/sys/devices/system/node")
+        root = fallback if fallback.exists() else root
+    result: dict[str, dict[str, int]] = {}
+    try:
+        paths = sorted(root.glob("node[0-9]*/numastat"))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            values = {}
+            for line in path.read_text(encoding="ascii").splitlines():
+                name, raw = line.split(None, 1)
+                values[name] = int(raw)
+        except (OSError, ValueError):
+            return None
+        result[path.parent.name] = values
+    return result or None
+
+
+def numa_allocation_counter_deltas(
+    before: dict[str, dict[str, int]] | None,
+    after: dict[str, dict[str, int]] | None,
+) -> dict[str, dict[str, int]] | None:
+    """Return monotonic per-node page-event deltas, or unavailable."""
+    if before is None or after is None or before.keys() != after.keys():
+        return None
+    result: dict[str, dict[str, int]] = {}
+    for node in before:
+        if before[node].keys() != after[node].keys():
+            return None
+        if any(after[node][name] < value for name, value in before[node].items()):
+            return None
+        result[node] = {
+            name: after[node][name] - before[node][name]
+            for name in before[node]
+        }
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class MemorySummary:
     mem_total_bytes: int
@@ -57,6 +145,7 @@ class MemorySummary:
     host_peak_used_delta_bytes: int | None
     host_min_used_delta_bytes: int | None
     host_memory_time_integral_byte_seconds: float | None
+    numa_allocation_event_deltas: dict[str, dict[str, int]] | None
 
 
 class NodeMemorySampler:
@@ -80,6 +169,10 @@ class NodeMemorySampler:
         self.baseline_used = total - available
         self.storage_used_before = self._storage_used()
         self.oom_kill_before = read_vmstat_counter(self.vmstat, "oom_kill")
+        self.numa_allocation_root = Path("/host/sys/devices/system/node")
+        self.numa_allocation_before = read_numa_allocation_counters(
+            self.numa_allocation_root
+        )
 
     def current(self) -> tuple[int, int]:
         total, available = read_meminfo(self.meminfo)
@@ -103,6 +196,7 @@ class NodeMemorySampler:
         }
 
     def start(self) -> None:
+        self._sampling_error = None
         delta, available = self.current()
         with self._lock:
             self._samples.append((time.monotonic(), delta, available))
@@ -113,6 +207,8 @@ class NodeMemorySampler:
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
+        if getattr(self, "_sampling_error", None) is not None:
+            raise RuntimeError("memory evidence sampling failed") from self._sampling_error
         delta, available = self.current()
         with self._lock:
             self._samples.append((time.monotonic(), delta, available))
@@ -152,6 +248,10 @@ class NodeMemorySampler:
             max(host_deltas) if host_deltas is not None else None,
             min(host_deltas) if host_deltas is not None else None,
             host_integral,
+            numa_allocation_counter_deltas(
+                self.numa_allocation_before,
+                read_numa_allocation_counters(self.numa_allocation_root),
+            ),
         )
 
     def samples(self) -> list[dict[str, int | float]]:
@@ -161,12 +261,15 @@ class NodeMemorySampler:
                     for stamp, used, available in self._samples]
 
     def _run(self) -> None:
-        while not self._stop.wait(self.interval_s):
-            delta, available = self.current()
-            with self._lock:
-                self._samples.append((time.monotonic(), delta, available))
-            if self.sample_hook is not None:
-                self.sample_hook(delta, available)
+        try:
+            while not self._stop.wait(self.interval_s):
+                delta, available = self.current()
+                with self._lock:
+                    self._samples.append((time.monotonic(), delta, available))
+                if self.sample_hook is not None:
+                    self.sample_hook(delta, available)
+        except Exception as exc:
+            self._sampling_error = exc
 
     def _storage_used(self) -> int:
         try:
@@ -205,6 +308,10 @@ class NumaNodeMemorySampler(NodeMemorySampler):
         self.baseline_used = total - free
         self.storage_used_before = self._storage_used()
         self.oom_kill_before = read_vmstat_counter(self.vmstat, "oom_kill")
+        self.numa_allocation_root = sys_root / "devices/system/node"
+        self.numa_allocation_before = read_numa_allocation_counters(
+            self.numa_allocation_root
+        )
 
     def current(self) -> tuple[int, int]:
         total, free = read_numa_meminfo(self.numa_meminfo)
@@ -251,8 +358,9 @@ class CgroupMemorySampler(NodeMemorySampler):
     def reclaim_file_cache(self, maximum_bytes: int = 8 * 1024**3) -> dict[str, int | str]:
         """Ask the kernel to reclaim charged cache; never discount it on paper.
 
-        LOCAL has swap disabled. WARM is in a separate cgroup; shmem is excluded
-        from the request. EAGAIN means partial reclamation, not a failed run.
+        Size the request from file minus shmem; memory.reclaim itself does not
+        select particular pages. EAGAIN means partial reclamation, not a failed
+        run. Effective swap policy is recorded separately, not assumed here.
         """
         import errno
         stats = dict(line.split() for line in (self.cgroup / "memory.stat").read_text().splitlines())
@@ -283,6 +391,7 @@ class CgroupMemorySampler(NodeMemorySampler):
             "local_memory_events": (self.cgroup / "memory.events").read_text().strip()
             if (self.cgroup / "memory.events").exists() else "unavailable",
             "experiment_used_delta_bytes": used,
+            "cgroup_memory": cgroup_memory_evidence(self.cgroup),
         })
         return observation
 
@@ -346,6 +455,7 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
             "local_used_bytes": local,
             "shared_live_used_bytes": shared,
             "combined_live_used_bytes": total,
+            "cgroup_memory": cgroup_memory_evidence(self.cgroup),
             "experiment_used_delta_bytes": local,
             "local_memory_events": (self.cgroup / "memory.events").read_text().strip(),
         })

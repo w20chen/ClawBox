@@ -41,6 +41,15 @@ class _Files:
         self.content[path] = data
 
 
+def test_snapshot_retention_value_uses_logical_state_not_private_delta() -> None:
+    lifecycle = object.__new__(CubeSandboxLifecycle)
+    lifecycle.snapshot_reuse_probability = 0.5
+    lifecycle.warm_restore_seconds_per_gib = 0.1
+    lifecycle.cold_restore_seconds_per_gib = 0.7
+
+    assert lifecycle._retention_value_seconds(4 * 1024**3) == pytest.approx(1.2)
+
+
 class _Commands:
     def __init__(self, owner) -> None:
         self.owner = owner
@@ -424,6 +433,54 @@ def test_restore_failure_after_remote_resume_does_not_mark_vm_swapped(tmp_path) 
     assert not _Sandbox.items
 
 
+def test_failed_warm_manifest_retains_inflight_capacity_until_destroy():
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(2048)
+    lifecycle = CubeSandboxLifecycle(client, template='tpl', node_name='node-a',
+        ownership=_owner(), warm_snapshot_root='/warm', cold_snapshot_root='/cold',
+        snapshot_pool=pool, snapshot_reservation_bytes=1024)
+    lifecycle.start()
+    def lost_manifest(sandbox, **kwargs):
+        sandbox.state = 'paused'
+        raise RuntimeError('manifest lost after writing')
+    client.pause_sandbox = lost_manifest
+    with pytest.raises(RuntimeError, match='manifest lost'):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert pool.reserved_bytes == 1024
+    assert lifecycle.state.value == 'unknown'
+    lifecycle.close()
+    assert pool.reserved_bytes == pool.committed_bytes == 0
+
+
+def test_failed_warm_cleanup_keeps_capacity_until_files_are_removed(tmp_path):
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(2048)
+    lifecycle = CubeSandboxLifecycle(client, template='tpl', node_name='node-a',
+        ownership=_owner(), warm_snapshot_root=str(tmp_path), cold_snapshot_root='/cold',
+        snapshot_pool=pool, snapshot_reservation_bytes=1024)
+    lifecycle.start()
+    written = []
+    def lost_manifest(sandbox, **kwargs):
+        path = Path(kwargs['memory_snapshot_path'])
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'owned snapshot')
+        written.append(path)
+        sandbox.state = 'paused'
+        raise RuntimeError('manifest lost after writing')
+    client.pause_sandbox = lost_manifest
+    with pytest.raises(RuntimeError, match='manifest lost'):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    with pytest.raises(Exception, match='snapshot files remain'):
+        lifecycle.close()
+    assert pool.reserved_bytes == 1024
+    assert not _Sandbox.items
+    written[0].unlink()
+    lifecycle.close()
+    assert pool.reserved_bytes == pool.committed_bytes == 0
+
+
 @pytest.mark.parametrize("capacity", [0, 512])
 def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
     _Sandbox.items = {}
@@ -540,9 +597,28 @@ def test_lifecycle_consumption_waits_for_selected_spill(operation: str) -> None:
     assert not _Sandbox.items
 
 
+@pytest.mark.parametrize("fail_runtime_create", [False, True])
 def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_runtime_create: bool,
 ) -> None:
+    coordinators = []
+    create_claims_at_cleanup = []
+    real_coordinator = worker_module.PolicyCoordinator
+
+    class ObservedCoordinator(real_coordinator):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            coordinators.append(self)
+
+        def blocked_demand_pressure(self):
+            return True  # exercise supported wait-aware eviction under pressure
+
+        def unregister(self, session_id):
+            create_claims_at_cleanup.append((session_id, "create") in self.demand.claims)
+            super().unregister(session_id)
+
+    monkeypatch.setattr(worker_module, "PolicyCoordinator", ObservedCoordinator)
+
     class SnapshotCommands(_Commands):
         def run(self, command: str, **kwargs):
             self.owner.command_calls.append((command, kwargs))
@@ -568,6 +644,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
 
         @classmethod
         def create(cls, **kwargs):
+            if fail_runtime_create and kwargs["template"] == "runtime-tpl":
+                raise RuntimeError("injected Runtime creation failure")
             cls.sequence += 1
             item = cls({
                 "sandboxID": f"snapshot-{cls.sequence}",
@@ -656,6 +734,11 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
                           resident_poll=None, checkpoint_relay=False):
+        # Pair creation must release its own claim before the Agent runs,
+        # even when demand-backed Guest RAM uses less than configured capacity.
+        # Otherwise the unused footprint remains pending until session teardown.
+        assert coordinators
+        assert all((session_id, "create") not in c.demand.claims for c in coordinators)
         assert resident_poll is not None
         assert checkpoint_relay is True
         assert model_gateway.gateway.timeout_s == 120
@@ -670,7 +753,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         }
         status, _content_type, _body, request_id = model_gateway.gateway.complete_http(payload)
         assert status == 200
-        # Proactive response preparation restores only Runtime. Tool remains
+        # Response preparation restores only Runtime. Tool remains
         # swapped until the following Tool admission reserves memory for it.
         assert SnapshotSandbox.created[0].resume_calls == 0
         model_gateway.mark_delivery(request_id, delivered=True)
@@ -742,8 +825,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                        "cold_snapshot_root": str(tmp_path / "cold")},
         "policies": [{"name": "snapshot", "admission": "fixed",
                       "runtime_control": "off",
-                      "reclamation": "snapshot_pause", "eviction": "eager",
-                      "restore": "proactive", "prefetch_lead_seconds": 0.1}],
+                      "reclamation": "snapshot_pause", "eviction": "wait_aware_pressure",
+                      "restore": "reactive"}],
     })
     result = ExperimentWorker(
         spec, run_id="openclaw-snapshot", attempt_id="attempt", task_uid="task",
@@ -751,6 +834,13 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         client=CubeSandboxClient(sandbox_class=SnapshotSandbox),
     ).run()[0]
 
+    assert create_claims_at_cleanup and not any(create_claims_at_cleanup)
+    if fail_runtime_create:
+        assert result.status.value == "failed"
+        assert len(SnapshotSandbox.created) == 1
+        assert SnapshotSandbox.items == {}
+        assert all(not c.demand.claims for c in coordinators)
+        return
     assert result.status.value == "succeeded", result.model_dump()
     assert result.provenance["evidence_class"] == "deterministic-managed-replay"
     assert result.provenance["configured_trace_sha256"] == hashlib.sha256(
@@ -858,6 +948,10 @@ def test_lifecycle_records_host_physical_memory_reclamation() -> None:
     assert checkpoint["host_observed_net_change_bytes"] == -50
     assert checkpoint["host_reclamation_evidence"] == "observed_whole_host_reclamation"
     assert checkpoint["lifecycle_mechanism"] == "cubesandbox_pause_snapshot_destroy"
+    assert checkpoint["host_memory_effect"]["host_used_bytes"] == {
+        "before_bytes": 120, "after_bytes": 70, "net_change_bytes": -50,
+        "reclaimed_bytes": 50, "growth_bytes": 0,
+    }
 
 
 def test_observed_command_preserves_execution_id_and_reads_cgroup_artifact() -> None:

@@ -25,6 +25,7 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # as Tool-sandbox operations.
 TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
+OPENCLAW_SSH_RUNTIME_ROOT = "/var/lib/clawbox/openclaw-ssh"
 
 
 def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
@@ -41,12 +42,44 @@ def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
     return f"{workspace_root.rstrip('/')}/openclaw-ssh-shared-{value:x}"
 
 
+def openclaw_shared_ssh_workspace_directory(workspace_root: str) -> str:
+    """Return the remote directory OpenClaw presents as `/workspace`."""
+    return openclaw_shared_ssh_runtime_directory(workspace_root) + "/workspace"
+
+
+def native_tool_workspace_setup_command(tool_workspace: str) -> str:
+    """Expose the image-owned repository at OpenClaw's canonical workspace."""
+    source = str(tool_workspace or "").strip()
+    if not source.startswith("/"):
+        raise ValueError("Tool workspace must be an absolute POSIX path")
+    # OpenClaw presents the SSH backend's repository at this fixed path.  Its
+    # workspaceRoot setting stores backend metadata; it is not the remote cwd.
+    target = "/workspace"
+    if source == target:
+        return f"set -eu; test -d {shlex.quote(source)}"
+    return (
+        "set -eu; "
+        f"test -d {shlex.quote(source)}; "
+        f"if test -L {shlex.quote(target)}; then rm -- {shlex.quote(target)}; "
+        f"elif test -d {shlex.quote(target)}; then rmdir -- {shlex.quote(target)}; "
+        f"else test ! -e {shlex.quote(target)}; fi; "
+        f"ln -s -- {shlex.quote(source)} {shlex.quote(target)}; "
+        f"test \"$(readlink -f -- {shlex.quote(target)})\" = "
+        f"\"$(readlink -f -- {shlex.quote(source)})\""
+    )
+
+
+def openclaw_real_ssh_path(session_id: str) -> str:
+    """Path of OpenSSH preserved before the Runtime installs its policy shim."""
+    return f"/state/openclaw/{session_id}/bin/ssh.real"
+
+
 @dataclass(frozen=True, slots=True)
 class NativeSSHConfig:
     target: str
     identity_private_key: str
     host_public_key: str
-    workspace_root: str = "/workspace"
+    workspace_root: str = OPENCLAW_SSH_RUNTIME_ROOT
     sandbox_id: str = ""
     host_key_alias: str = "openclaw-sandbox"
 
@@ -290,10 +323,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     known_hosts_file = f"{ssh_dir}/known_hosts"
     launcher_dir = f"{home}/bin"
     ssh_launcher = f"{launcher_dir}/ssh"
+    real_ssh = openclaw_real_ssh_path(session_id)
     agent_pid_file = f"{home}/agent.pid"
     agent_stdout_file = f"{home}/logs/agent.stdout"
     agent_stderr_file = f"{home}/logs/agent.stderr"
     agent_exit_file = f"{home}/agent.exit"
+    policy_audit_file = f"{home}/logs/policy-ssh.jsonl"
     relay_script_file = f"{launcher_dir}/model-relay.py"
     relay_pid_file = f"{home}/model-relay.pid"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
@@ -310,7 +345,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_CONTROL_AUTH={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
+        f"CLAWBOX_POLICY_AUDIT_FILE={shlex.quote(policy_audit_file)} "
         f"CLAWBOX_TOOL_TIMEOUT_SECONDS={tool_timeout_seconds} "
+        f"CLAWBOX_REAL_SSH={shlex.quote(real_ssh)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
         f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
@@ -394,12 +431,18 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
-    launcher_b64 = base64.b64encode(
-        b"#!/bin/sh\n"
-        b"export CLAWBOX_POLICY_CONTROL_TOKEN="
-        b"${CLAWBOX_POLICY_CONTROL_AUTH:-${CLAWBOX_POLICY_CONTROL_TOKEN:-}}\n"
-        b"exec /usr/local/bin/ssh \"$@\"\n"
-    ).decode()
+    # Ship the policy shim used by this worker. Runtime images are reusable;
+    # their baked /usr/local/bin/ssh may implement an older request schema.
+    policy_ssh_source = (
+        Path(__file__).resolve().parents[2] / "scripts" / "clawbox-policy-ssh.py"
+    )
+    # This repository may be checked out with CRLF on the control host. The
+    # launcher runs through its shebang in a Linux Runtime VM, so normalize
+    # the per-session copy while packaging it.
+    launcher_source = policy_ssh_source.read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    ).encode()
+    launcher_b64 = base64.b64encode(launcher_source).decode()
     relay_b64 = base64.b64encode(RUNTIME_MODEL_RELAY_SCRIPT.encode()).decode()
     relay_setup = ""
     sidecar_upstream_url = upstream_url
@@ -449,6 +492,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"printf %s {shlex.quote(private_b64)} | base64 -d > {shlex.quote(identity_file)}; "
         + f"printf %s {shlex.quote(known_b64)} | base64 -d > {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher)}; "
+        # OpenClaw uses two SSH paths: backend preparation resolves
+        # /usr/local/bin/ssh, while Agent exec calls resolve /usr/bin/ssh.
+        # Preserve the real client under this session before replacing both
+        # entry points. Otherwise only the first call reaches admission and a
+        # concurrent/full replay silently bypasses the policy controller.
+        + f"install -m 0755 /usr/bin/ssh {shlex.quote(real_ssh)}; "
+        + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/local/bin/ssh; "
+        + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/bin/ssh; "
         + f"printf %s {shlex.quote(init_state_b64)} | base64 -d > {shlex.quote(init_state_file)}; "
         + f"mkdir -p {shlex.quote(kb_extra_dir)}; tar -xzf {shlex.quote(kb_archive_file)} -C {shlex.quote(kb_extra_dir)}; "
         + relay_setup
@@ -615,13 +666,48 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             max(0.0, time.monotonic() - agent_started),
         )
         if result.exit_code:
-            raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
+            # Preserve the complete Agent streams before the owning VM is
+            # destroyed.  Tail-only errors routinely hide the first fatal
+            # line behind verbose ClawTune prediction diagnostics.
+            failure_home = output_dir / "openclaw" / session_id
+            failure_home.mkdir(parents=True, exist_ok=True)
+            (failure_home / "agent.stdout.log").write_text(
+                result.stdout, encoding="utf-8",
+            )
+            (failure_home / "agent.stderr.log").write_text(
+                result.stderr, encoding="utf-8",
+            )
+            for local_name, remote_path in {
+                "policy-ssh.jsonl": policy_audit_file,
+                "sidecar.log": home + "/logs/sidecar.log",
+            }.items():
+                diagnostic = runtime_executor.execute(
+                    prefix + f"cat {shlex.quote(remote_path)}", 30,
+                )
+                if diagnostic.exit_code == 0:
+                    (failure_home / local_name).write_text(
+                        diagnostic.stdout, encoding="utf-8",
+                    )
+            (failure_home / "policy-control.json").write_text(
+                json.dumps(policy_control.records(), indent=2), encoding="utf-8",
+            )
+            excerpt = result.stderr[:2000]
+            if len(result.stderr) > 4000:
+                excerpt += "\n...[stderr middle omitted; full log preserved]...\n"
+            if len(result.stderr) > 2000:
+                excerpt += result.stderr[-2000:]
+            raise RuntimeError(
+                "OpenClaw Runtime VM command failed "
+                f"(exit {result.exit_code}; full log {failure_home / 'agent.stderr.log'}): "
+                + excerpt
+            )
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
     runtime_logs = {
         "agent.stderr.log": agent_stderr_file,
         "sidecar.log": home + "/logs/sidecar.log",
+        "policy-ssh.jsonl": policy_audit_file,
     }
     if checkpoint_relay:
         runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"

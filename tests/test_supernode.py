@@ -142,6 +142,9 @@ def test_two_nodes_share_borrow_capacity_and_keep_cpu_placement(tmp_path):
     for i in (0, 1):
         leaf = group / str(i)
         leaf.mkdir()
+        (leaf/'memory.current').write_text('0')
+        (leaf/'memory.numa_stat').write_text('active_anon N0=0 N1=0 N2=0\n')
+        (leaf/'cgroup.events').write_text('populated 0\n')
         def write(path, value):
             path.write_text(value)
             path.with_name(path.name + ".effective").write_text(value)

@@ -12,11 +12,20 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{_test_database.as_posix()}")
 os.environ.setdefault("CONTROLLER_BACKEND", "subprocess")
 os.environ.setdefault("NUMA_CAPACITY", "0:64")
 
-# Native tuning tests intentionally exercise the real main-branch sibling
-# ClawTune implementation instead of ClawBox's legacy compatibility builder.
-_clawtune_src = Path(__file__).resolve().parents[2] / "ClawTune" / "services" / "sidecar" / "src"
+# Native tuning tests intentionally exercise the explicitly selected ClawTune
+# implementation when one is configured, then the main-branch sibling used by
+# a developer checkout.  This must match the source selected by ClawBox itself;
+# otherwise one process can mix an older checkout with a newer installed wheel.
+_configured_clawtune_src = os.getenv("CLAWTUNE_SIDECAR_SRC")
+_clawtune_src = (
+    Path(_configured_clawtune_src).expanduser()
+    if _configured_clawtune_src
+    else Path(__file__).resolve().parents[2] / "ClawTune" / "services" / "sidecar" / "src"
+)
+if _configured_clawtune_src and not _clawtune_src.is_dir():
+    raise RuntimeError(f"CLAWTUNE_SIDECAR_SRC does not exist: {_clawtune_src}")
 if _clawtune_src.is_dir():
-    sys.path.insert(0, str(_clawtune_src))
+    sys.path.insert(0, str(_clawtune_src.resolve()))
 
 
 @pytest.fixture(scope="session")

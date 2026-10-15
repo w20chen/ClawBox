@@ -13,6 +13,10 @@ from clawbox.experiments.openclaw_driver import (
     RUNTIME_LOCAL_TOOLS,
     TOOL_VM_TOOLS,
     native_ssh_host_key_alias,
+    openclaw_real_ssh_path,
+    OPENCLAW_SSH_RUNTIME_ROOT,
+    openclaw_shared_ssh_workspace_directory,
+    native_tool_workspace_setup_command,
     native_ssh_route,
     native_ssh_target,
     native_tool_bridge_setup_command,
@@ -27,6 +31,19 @@ from clawbox.experiments.runtime_model_relay import RUNTIME_MODEL_RELAY_SCRIPT
 def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
     assert openclaw_shared_ssh_runtime_directory("/workspace/") == (
         "/workspace/openclaw-ssh-shared-8198076c"
+    )
+    assert openclaw_shared_ssh_workspace_directory(OPENCLAW_SSH_RUNTIME_ROOT) == (
+        "/var/lib/clawbox/openclaw-ssh/openclaw-ssh-shared-8198076c/workspace"
+    )
+    workspace_setup = native_tool_workspace_setup_command('/testbed')
+    assert 'rmdir -- /workspace' in workspace_setup
+    assert 'ln -s -- /testbed /workspace' in workspace_setup
+    assert 'readlink -f -- /workspace' in workspace_setup
+    assert native_tool_workspace_setup_command('/workspace') == (
+        'set -eu; test -d /workspace'
+    )
+    assert openclaw_real_ssh_path("session-a") == (
+        "/state/openclaw/session-a/bin/ssh.real"
     )
 
 
@@ -114,6 +131,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     sandbox = config["agents"]["defaults"]["sandbox"]
     assert sandbox["backend"] == "ssh"
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
+    assert sandbox["ssh"]["workspaceRoot"] == OPENCLAW_SSH_RUNTIME_ROOT
     assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
     assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
     assert config["tools"]["exec"]["backgroundMs"] == 120000
@@ -131,11 +149,15 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "CLAWBOX_TOOL_TIMEOUT_SECONDS=300" in "\n".join(commands)
+    assert "CLAWBOX_REAL_SSH=/state/openclaw/session-a/bin/ssh.real" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "XDG_CACHE_HOME=/opt/clawtune/cache" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL=test-model" in "\n".join(commands)
     assert "/bin/ssh" in "\n".join(commands)
+    assert "install -m 0755 /usr/bin/ssh /state/openclaw/session-a/bin/ssh.real" in "\n".join(commands)
+    assert "install -m 0755 /state/openclaw/session-a/bin/ssh /usr/local/bin/ssh" in "\n".join(commands)
+    assert "install -m 0755 /state/openclaw/session-a/bin/ssh /usr/bin/ssh" in "\n".join(commands)
     assert "command" not in sandbox["ssh"]
     assert config["agents"]["defaults"]["workspace"] == "/workspace"
     assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
@@ -143,9 +165,17 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
                for command in commands)
     assert any("config set models.providers.vllm.timeoutSeconds 120" in command
                for command in commands)
-    assert any(b"exec /usr/local/bin/ssh" in base64.b64decode(encoded)
+    assert any(b'"command": profile_command' in base64.b64decode(encoded)
                for command in commands
                for encoded in re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", command))
+    launcher_payloads = [
+        base64.b64decode(encoded)
+        for command in commands
+        for encoded in re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", command)
+        if base64.b64decode(encoded).startswith(b"#!/usr/bin/env python3")
+    ]
+    assert launcher_payloads
+    assert all(b"\r\n" not in payload for payload in launcher_payloads)
     agent_command = next(command for command in commands if " agent " in command)
     assert "--model vllm/test-model" in agent_command
     assert "CLAWTUNE_RUNTIME_ID=session-a" in agent_command
@@ -203,6 +233,45 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
     assert "agent.pid" in launch
     assert f"--timeout {timeout_seconds if timeout_seconds is not None else 0}" in launch
     assert result["stdout"] == '{"ok":true}\n'
+
+
+def test_openclaw_failure_preserves_complete_agent_streams(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    class RuntimeExecutor:
+        def execute(self, _command, _timeout):
+            return CommandResult(0, "", "", 0.01)
+
+    stderr = "fatal-first-line\n" + ("diagnostic\n" * 500) + "fatal-last-line\n"
+
+    def resident_poll(command: str, _timeout: float) -> CommandResult:
+        if "cat /state/openclaw/session-a/agent.exit" in command:
+            return CommandResult(0, "7\n", "", 0.01)
+        if "cat /state/openclaw/session-a/logs/agent.stdout" in command:
+            return CommandResult(0, "partial stdout\n", "", 0.01)
+        if "cat /state/openclaw/session-a/logs/agent.stderr" in command:
+            return CommandResult(0, stderr, "", 0.01)
+        return CommandResult(0, "", "", 0.01)
+
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    with pytest.raises(RuntimeError, match=r"exit 7.*full log") as error:
+        run_openclaw(
+            prompt="test", session_id="session-a",
+            configuration={"base_url": "http://model.test/v1", "model": "test-model"},
+            ssh=NativeSSHConfig(
+                target="executor@192.0.2.20:2222",
+                identity_private_key="PRIVATE KEY\n",
+                host_public_key="ssh-ed25519 AAAATEST",
+                sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
+            ),
+            policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+            output_dir=tmp_path, timeout_seconds=60,
+            resident_poll=resident_poll,
+        )
+    assert "fatal-first-line" in str(error.value)
+    assert "fatal-last-line" in str(error.value)
+    assert (tmp_path / "openclaw/session-a/agent.stdout.log").read_text() == "partial stdout\n"
+    assert (tmp_path / "openclaw/session-a/agent.stderr.log").read_text() == stderr
 
 
 def test_checkpoint_relay_keeps_clawtune_in_model_path(tmp_path: Path) -> None:

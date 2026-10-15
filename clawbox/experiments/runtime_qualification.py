@@ -257,7 +257,9 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     cleanup = []
     vm_control = None
     snapshots = any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in spec.policies)
-    pool = WarmSnapshotPool(spec.resources.warm_memory_capacity_mib*MIB) if spec.resources.warm_memory_capacity_mib else None
+    pool = WarmSnapshotPool(spec.resources.warm_memory_capacity_mib*MIB,
+        transfer_concurrency=spec.resources.pool_transfer_concurrency,
+        transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds) if spec.resources.warm_memory_capacity_mib else None
     try:
         PriorityDomain._enable(parent)
         probe_root.mkdir()
@@ -280,6 +282,7 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     cold_snapshot_root=spec.resources.cold_snapshot_root,
                     snapshot_mechanism=spec.resources.snapshot_mechanism,
                     snapshot_storage=spec.resources.snapshot_storage, snapshot_pool=pool,
+                    default_snapshot_tier=spec.resources.default_snapshot_tier,
                     snapshot_reservation_bytes=(vm.memory_mib+256)*MIB)
                 lifecycles.append(lifecycle)
                 lifecycle.start()

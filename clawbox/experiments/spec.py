@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .spec_types import (
     AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, InferenceBackend,
-    ReclamationPolicy, RestorePolicy, RuntimeControl, SessionAssignment, WorkloadSource,
+    ReclamationPolicy, RestorePolicy, RuntimeControl, SessionAssignment, SnapshotTier, WorkloadSource,
 )
 from .topology import ComputeNode, validate_compute_nodes
 
@@ -20,6 +20,43 @@ from .topology import ComputeNode, validate_compute_nodes
 class StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+
+class MemoryActionCostSpec(StrictFrozenModel):
+    """Empirical costs used to compare live borrowing with WARM eviction.
+
+    The rates are workload- and host-specific measurements over configured VM
+    GiB.  They intentionally do not derive an application slowdown from a raw
+    NUMA latency or bandwidth number.
+    """
+
+    provenance: str = Field(min_length=1)
+    live_borrow_service_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
+    live_borrow_runtime_penalty_seconds_per_gib: float = Field(
+        ge=0, allow_inf_nan=False,
+    )
+    warm_checkpoint_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
+    warm_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
+    cold_checkpoint_seconds_per_gib: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+    )
+    cold_restore_seconds_per_gib: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+    )
+    expected_restore_probability: float = Field(ge=0, le=1, allow_inf_nan=False)
+    remote_access_latency_ns: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+    )
+    remote_stream_bandwidth_mib_per_second: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+    )
+
+
+class SnapshotResidencyCostSpec(StrictFrozenModel):
+    """Measured restore costs used by the WARM/SSD residency policy."""
+
+    provenance: str = Field(min_length=1)
+    warm_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
+    cold_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
 
 class WorkloadCase(StrictFrozenModel):
     case_id: str = Field(min_length=1)
@@ -30,6 +67,10 @@ class WorkloadCase(StrictFrozenModel):
     base_commit: str | None = None
     replay_trace_reference: str | None = None
     validation: str | dict[str, Any] | None = None
+    sandbox: "SandboxSpec | None" = None
+    snapshot_reuse_probability: float | None = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False,
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -81,8 +122,16 @@ class SandboxSpec(StrictFrozenModel):
         return self.template_id or self.template_alias or ""
 
 
+# Resolve the per-case Tool VM override after SandboxSpec exists.  WorkloadCase
+# intentionally appears first in the public YAML model so existing documents
+# retain their field order.
+WorkloadCase.model_rebuild()
+
+
 class ExecutionSpec(StrictFrozenModel):
-    placement_policy: Literal["round_robin", "explicit"] = "round_robin"
+    placement_policy: Literal["os_default", "round_robin", "load_aware", "explicit"] = "round_robin"
+    placement_cpu_overcommit: float = Field(default=8.0, ge=1, allow_inf_nan=False)
+    template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
     session_compute_nodes: tuple[str, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
     randomized_order: bool = True
@@ -121,6 +170,8 @@ class ExecutionSpec(StrictFrozenModel):
 
 
 class ResourcesSpec(StrictFrozenModel):
+    lifecycle_admission: Literal["configured-capacity", "os-managed"] = "configured-capacity"
+    proactive_cache_reclaim: bool = True
     compute_nodes: tuple[ComputeNode, ...] = ()
     target_node: str = Field(min_length=1)
     pool_memory_budget_mib: int = Field(ge=1)
@@ -134,6 +185,9 @@ class ResourcesSpec(StrictFrozenModel):
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
     non_command_tool_memory_mib: int | None = Field(default=None, ge=1)
     prediction_artifact: str | None = None
+    prediction_mode: Literal["runtime", "frozen"] = "frozen"
+    observe_predictions: bool = False
+    prediction_reservation_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     agentcgroup_source: str | None = None
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
@@ -144,9 +198,39 @@ class ResourcesSpec(StrictFrozenModel):
     local_numa_node: int | None = Field(default=None, ge=0)
     local_memory_cgroup: str | None = "/sys/fs/cgroup/cube_sandbox/sandbox"
     warm_numa_node: int | None = Field(default=None, ge=0)
+    memory_scheduling: Literal["static", "local_only", "snapshot_only", "joint"] = "static"
+    pool_transfer_concurrency: int = Field(default=1, ge=1)
+    pool_transfer_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
+    borrow_cooldown_seconds: float = Field(default=5, ge=0, allow_inf_nan=False)
+    return_cooldown_seconds: float = Field(default=5, ge=0, allow_inf_nan=False)
+    memory_action_costs: MemoryActionCostSpec | None = None
+    snapshot_residency_costs: SnapshotResidencyCostSpec | None = None
+    template_base_sharing: Literal["disabled", "required"] = "disabled"
+
+    def lifecycle_reservation_mib(self, configured_mib: int) -> int:
+        """A scheduling promise, never a measurement of resident RAM."""
+        return configured_mib if self.lifecycle_admission == "configured-capacity" else 0
+
+    @property
+    def default_snapshot_tier(self) -> SnapshotTier | None:
+        """Common destination for worker and qualification lifecycle calls.
+
+        Explicit calibrated action destinations take precedence at the call site.
+        """
+        if self.snapshot_storage == "warm-only" or (
+            self.memory_scheduling in {"snapshot_only", "joint"}
+            and self.warm_memory_capacity_mib > 0
+        ):
+            return SnapshotTier.WARM
+        return None
 
     @model_validator(mode="after")
     def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        if self.lifecycle_admission == "os-managed":
+            if self.proactive_cache_reclaim:
+                raise ValueError("os-managed requires proactive_cache_reclaim=false; the kernel owns cache reclaim")
+            if self.shared_memory_borrow_limit_mib or self.memory_scheduling in {"joint", "snapshot_only"}:
+                raise ValueError("os-managed requires resident local memory without shared borrowing or snapshot scheduling")
         if self.compute_nodes:
             validate_compute_nodes(self.compute_nodes, self.warm_numa_node)
             if self.local_numa_node is not None:
@@ -194,36 +278,52 @@ class ResourcesSpec(StrictFrozenModel):
                 raise ValueError("local watermarks require LOW < HIGH < capacity")
         if self.local_memory_capacity_mib is not None and self.pool_memory_budget_mib > self.local_memory_capacity_mib:
             raise ValueError("pool memory budget cannot exceed physical LOCAL capacity")
+        if self.memory_action_costs is not None and self.memory_scheduling != "joint":
+            raise ValueError("memory_action_costs is supported only for memory_scheduling=joint")
+        if (self.memory_action_costs is not None and self.snapshot_storage == "tiered"
+                and (self.memory_action_costs.cold_checkpoint_seconds_per_gib is None
+                     or self.memory_action_costs.cold_restore_seconds_per_gib is None)):
+            raise ValueError(
+                "tiered memory_action_costs requires COLD checkpoint and restore costs"
+            )
         return self
 
 
 class PolicySpec(StrictFrozenModel):
     name: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    deployment: Literal["managed", "os-default"] = "managed"
     admission: AdmissionPolicy
     runtime_control: RuntimeControl = RuntimeControl.AGENTCGROUP_CGROUP
     reclamation: ReclamationPolicy
     eviction: EvictionPolicy
     restore: RestorePolicy
-    fixed_delay_seconds: float | None = Field(default=None, ge=0)
-    prefetch_lead_seconds: float | None = Field(default=None, ge=0)
-    checkpoint_break_even_seconds: float | None = Field(default=None, gt=0)
+    template_aware_placement: bool = False
+    snapshot_aware_residency: bool = False
 
     @model_validator(mode="after")
     def valid_tuple(self) -> "PolicySpec":
+        if self.deployment == "os-default" and (
+            self.admission is not AdmissionPolicy.OFF
+            or self.runtime_control is not RuntimeControl.OFF
+            or self.reclamation is not ReclamationPolicy.RESIDENT
+            or self.template_aware_placement or self.snapshot_aware_residency
+        ):
+            raise ValueError("os-default deployment requires resident VMs with admission and runtime control off")
+        if self.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE}:
+            raise ValueError("supported eviction policies: none, wait_aware_pressure")
+        if self.restore not in {RestorePolicy.NONE, RestorePolicy.REACTIVE}:
+            raise ValueError("supported restore policies: none, reactive")
         if self.reclamation is ReclamationPolicy.RESIDENT:
             if self.eviction is not EvictionPolicy.NONE or self.restore is not RestorePolicy.NONE:
                 raise ValueError("resident requires eviction=none and restore=none")
         elif self.eviction is EvictionPolicy.NONE or self.restore is RestorePolicy.NONE:
             raise ValueError("snapshot_pause requires an eviction and restore policy")
-        if (self.eviction is EvictionPolicy.FIXED_DELAY) != (self.fixed_delay_seconds is not None):
-            raise ValueError("fixed_delay_seconds is required only for eviction=fixed_delay")
-        if (self.restore is RestorePolicy.PROACTIVE) != (self.prefetch_lead_seconds is not None):
-            raise ValueError("prefetch_lead_seconds is required only for restore=proactive")
-        if (self.eviction is EvictionPolicy.TIME_ORACLE) != (
-            self.checkpoint_break_even_seconds is not None
+        if self.snapshot_aware_residency and (
+            self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
+            or self.eviction is EvictionPolicy.NONE
         ):
             raise ValueError(
-                "checkpoint_break_even_seconds is required only for eviction=time_oracle"
+                "snapshot_aware_residency requires snapshot_pause with an eviction policy"
             )
         return self
 
@@ -238,6 +338,9 @@ class OutputSpec(StrictFrozenModel):
 
 class ExperimentSpec(StrictFrozenModel):
     schema_version: int
+    suite: Literal["admission", "numa-snapshot"] | None = None
+    suite_ablations: bool = False
+    suite_runtime_control: Literal["off", "agentcgroup_cgroup"] = "off"
     experiment_id: str = Field(default="experiment", min_length=1)
     workload: WorkloadSpec
     agent: AgentSpec = Field(default_factory=AgentSpec)
@@ -250,8 +353,66 @@ class ExperimentSpec(StrictFrozenModel):
     validation: ValidationSpec = Field(default_factory=ValidationSpec)
     output: OutputSpec = Field(default_factory=OutputSpec)
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_suite(cls, raw):
+        from .suites import expand_suite
+        return expand_suite(raw) if isinstance(raw, dict) else raw
+
     @model_validator(mode="after")
     def validate_v2(self) -> "ExperimentSpec":
+        if self.resources.lifecycle_admission == "os-managed" and any(
+            policy.reclamation is not ReclamationPolicy.RESIDENT for policy in self.policies
+        ):
+            raise ValueError("os-managed lifecycle admission requires resident policies")
+        scheduling = self.resources.memory_scheduling
+        cases = self.workload.cases
+        if len({case.case_id for case in cases}) != len(cases):
+            raise ValueError("workload.cases case_id values must be unique")
+        if any(policy.template_aware_placement for policy in self.policies):
+            if not self.resources.compute_nodes:
+                raise ValueError("template_aware_placement requires resources.compute_nodes")
+            if self.execution.placement_policy != "load_aware":
+                raise ValueError(
+                    "template_aware_placement requires load_aware placement for matched comparisons"
+                )
+            if self.resources.template_base_sharing != "required":
+                raise ValueError("template_aware_placement requires template_base_sharing=required")
+        if any(policy.snapshot_aware_residency for policy in self.policies):
+            if not cases:
+                raise ValueError("snapshot_aware_residency requires explicit workload.cases with reuse probabilities")
+            if self.resources.snapshot_storage != "tiered":
+                raise ValueError("snapshot_aware_residency requires tiered snapshot storage")
+            if self.resources.snapshot_residency_costs is None:
+                raise ValueError(
+                    "snapshot_aware_residency requires measured resources.snapshot_residency_costs"
+                )
+            missing_reuse = [
+                case.case_id for case in cases
+                if case.snapshot_reuse_probability is None
+            ]
+            if missing_reuse:
+                raise ValueError(
+                    "snapshot_aware_residency requires snapshot_reuse_probability for "
+                    + ", ".join(missing_reuse)
+                )
+        if scheduling in {"snapshot_only", "joint"} and any(
+            p.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE for p in self.policies
+            if p.deployment != "os-default"
+        ):
+            raise ValueError("snapshot_only/joint memory scheduling requires snapshot_pause policies")
+        if scheduling == "local_only" and any(
+            p.reclamation is not ReclamationPolicy.RESIDENT for p in self.policies
+        ):
+            raise ValueError("local_only memory scheduling requires resident policies")
+        if scheduling == "joint" and not self.resources.shared_memory_borrow_limit_mib:
+            raise ValueError("joint memory scheduling requires a positive shared_memory_borrow_limit_mib")
+        if scheduling in {"snapshot_only", "joint"} and self.resources.warm_memory_capacity_mib:
+            if not (self.resources.warm_snapshot_root or "").strip():
+                raise ValueError("snapshot_only/joint WARM snapshots require resources.warm_snapshot_root")
+            if (self.resources.snapshot_storage == "tiered"
+                    and not (self.resources.cold_snapshot_root or "").strip()):
+                raise ValueError("tiered snapshot_only/joint requires resources.cold_snapshot_root for capacity fallback")
         assignment = self.execution.session_compute_nodes
         nodes = self.resources.compute_nodes
         if self.execution.placement_policy == "explicit":
@@ -261,10 +422,55 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError("session_compute_nodes contains unknown compute node IDs")
         elif assignment:
             raise ValueError("session_compute_nodes requires placement_policy=explicit")
+        if self.execution.placement_policy == "load_aware" and not nodes:
+            raise ValueError("load_aware placement requires resources.compute_nodes")
+        if self.execution.placement_policy == "os_default" and self.resources.shared_memory_borrow_limit_mib is not None:
+            raise ValueError("os_default requires a local-only host profile: unbound allocation cannot enforce a separate shared-NUMA live-borrow limit")
         if self.schema_version != 3:
             raise ValueError("only schema_version: 3 is supported")
         if not self.policies:
             raise ValueError("policies must not be empty")
+        if nodes and self.execution.placement_policy != "os_default" and self.suite != "admission" and any(p.deployment != "os-default" for p in self.policies):
+            tool_shapes = tuple(
+                case.sandbox or self.sandbox for case in cases
+            ) or (self.sandbox,)
+            pair_mib = self.resources.lifecycle_reservation_mib(self.runtime.memory_mib + max(
+                sandbox.memory_mib for sandbox in tool_shapes
+            ))
+            operation_headroom_mib = (
+                self.resources.checkpoint_restore_headroom_mib
+                if any(
+                    policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+                    for policy in self.policies
+                )
+                else 0
+            )
+            required_mib = pair_mib + operation_headroom_mib
+            by_id = {node.node_id: node for node in nodes}
+            maximum_concurrency = max(self.execution.concurrency_levels)
+            if self.execution.placement_policy == "explicit":
+                eligible = tuple(
+                    by_id[node_id]
+                    for node_id in dict.fromkeys(assignment[:maximum_concurrency])
+                )
+            elif self.execution.placement_policy == "round_robin":
+                eligible = nodes[:min(len(nodes), maximum_concurrency)]
+            else:  # load_aware may select any configured compute node.
+                eligible = nodes
+            fits = tuple(
+                node for node in eligible
+                if required_mib <= node.high_watermark_mib
+            )
+            if (
+                self.execution.placement_policy == "load_aware" and not fits
+            ) or (
+                self.execution.placement_policy != "load_aware"
+                and len(fits) != len(eligible)
+            ):
+                raise ValueError(
+                    "a VM pair plus policy operation headroom does not fit the "
+                    "HIGH watermark of every eligible compute node"
+                )
         if self.agent.driver is AgentDriver.OPENCLAW:
             if self.inference.backend not in {InferenceBackend.API, InferenceBackend.REPLAY}:
                 raise ValueError("agent.driver=openclaw requires inference.backend=api or replay")
@@ -283,36 +489,14 @@ class ExperimentSpec(StrictFrozenModel):
         if self.resources.snapshot_storage == "warm-only":
             if not self.resources.warm_snapshot_root or self.resources.warm_memory_capacity_mib <= 0:
                 raise ValueError("warm-only requires warm_snapshot_root and positive warm_memory_capacity_mib")
-            if any(p.eviction in {EvictionPolicy.TIERED_TIME_ORACLE, EvictionPolicy.TIERED_LRU_ORACLE}
-                   for p in self.policies):
-                raise ValueError("tiered policies require COLD storage; choose a non-tiered policy for warm-only")
-        if any(policy.eviction is EvictionPolicy.TIME_ORACLE for policy in self.policies):
-            if self.inference.backend is not InferenceBackend.REPLAY:
-                raise ValueError("time_oracle is evaluation-only and requires inference.backend=replay")
-        if any(policy.eviction in {
-            EvictionPolicy.TIERED_LRU_ORACLE,
-            EvictionPolicy.TIERED_TIME_ORACLE,
-        } for policy in self.policies):
-            if self.inference.backend is not InferenceBackend.REPLAY:
-                raise ValueError("tiered oracle policies require inference.backend=replay")
-            required_tier_fields = {
-                "local_memory_capacity_mib": self.resources.local_memory_capacity_mib,
-                "warm_snapshot_root": self.resources.warm_snapshot_root,
-                "cold_snapshot_root": self.resources.cold_snapshot_root,
-                "local_numa_node": self.resources.local_numa_node,
-                "warm_numa_node": self.resources.warm_numa_node,
-            }
-            missing = [name for name, value in required_tier_fields.items() if value is None]
-            if missing:
-                raise ValueError("tiered oracle policies require resources." + ", resources.".join(missing))
-            if self.resources.local_numa_node == self.resources.warm_numa_node:
-                raise ValueError("LOCAL and WARM must use distinct NUMA nodes")
         if not self.resources.local_memory_cgroup:
             raise ValueError("experiments require resources.local_memory_cgroup for physical accounting")
         if AdmissionPolicy.FIXED in admissions and self.resources.static_tool_memory_mib is None:
             raise ValueError("fixed admission requires resources.static_tool_memory_mib")
         if AdmissionPolicy.PREDICTED in admissions and not self.resources.prediction_artifact:
-            raise ValueError("predicted admission requires a frozen prediction_artifact")
+            raise ValueError("predicted admission requires a validated prediction_artifact")
+        if self.resources.observe_predictions and not self.resources.prediction_artifact:
+            raise ValueError("observe_predictions requires prediction_artifact from experiment train")
         return self
 
 
@@ -357,10 +541,26 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
             for concurrency in spec.execution.concurrency_levels:
                 for policy in spec.policies:
                     resources = spec.resources
-                    if resources.snapshot_storage != "warm-only" and policy.eviction not in {
-                        EvictionPolicy.TIERED_LRU_ORACLE,
-                        EvictionPolicy.TIERED_TIME_ORACLE,
-                    } and resources.shared_memory_borrow_limit_mib is None:
+                    execution = spec.execution
+                    if policy.deployment == "os-default" or spec.suite == "admission":
+                        # Inherit the same host VM domain and combined live limit.
+                        # WARM capacity is not an additional live-memory allowance.
+                        capacity = (resources.local_memory_capacity_mib or resources.pool_memory_budget_mib) + (resources.shared_memory_borrow_limit_mib or 0)
+                        resources = ResourcesSpec.model_validate({**resources.model_dump(),
+                            "lifecycle_admission": "os-managed", "proactive_cache_reclaim": False,
+                            "compute_nodes": (), "local_numa_node": None,
+                            "local_memory_capacity_mib": capacity, "pool_memory_budget_mib": capacity,
+                            "local_memory_low_watermark_mib": None, "local_memory_high_watermark_mib": None,
+                            "shared_memory_borrow_limit_mib": None, "warm_memory_capacity_mib": 0,
+                            "warm_numa_node": None, "memory_scheduling": "local_only",
+                            "snapshot_storage": "tiered", "memory_action_costs": None,
+                            "snapshot_residency_costs": None, "template_base_sharing": "disabled",
+                            "prediction_artifact": resources.prediction_artifact,
+                            "observe_predictions": resources.observe_predictions})
+                        execution = execution.model_copy(update={"placement_policy": "os_default", "session_compute_nodes": ()})
+                    if resources.snapshot_storage != "warm-only" and resources.shared_memory_borrow_limit_mib is None and resources.memory_scheduling not in {
+                        "snapshot_only", "joint",
+                    }:
                         resources = resources.model_copy(update={"warm_memory_capacity_mib": 0})
                     identity = {"spec_digest": digest,
                                 "case_ids": [item.case_id for item in session_cases],
@@ -375,7 +575,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                         repetition=repetition, concurrency=concurrency, policy=policy,
                         agent=spec.agent, inference=spec.inference, runtime=spec.runtime,
                         sandbox=spec.sandbox,
-                        execution=spec.execution, resources=resources,
+                        execution=execution, resources=resources,
                         validation=spec.validation,
                     ))
     if spec.execution.randomized_order:

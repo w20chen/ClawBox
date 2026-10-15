@@ -41,6 +41,9 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
     assert "apply --check" in helper
     assert "refusing to overwrite" in helper
+    assert ".clawbox-patchset.sha256" in helper
+    assert "different or unrecorded ClawBox patch set" in helper
+    assert "pointing to a new empty directory" in helper
     assert "/sandboxes/{sandboxID}/ports/{containerPort}" in patch
     assert "SandboxTcpEndpoint" in patch
     assert "get_tcp_endpoint" in patch

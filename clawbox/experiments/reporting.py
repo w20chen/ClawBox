@@ -8,7 +8,25 @@ from pathlib import Path
 import statistics
 from typing import Any
 
-from .spec import load_experiment
+from .spec import load_experiment, load_workload_cases
+
+
+def _offered_capacity_text(spec: Any, concurrency: int) -> str:
+    """Describe configured VM capacity for the actual session assignment."""
+    cases = load_workload_cases(spec.workload)
+    runtime_mib = spec.runtime.memory_mib
+    if spec.workload.session_assignment.value == "round_robin":
+        offered_mib = sum(
+            runtime_mib + (cases[index % len(cases)].sandbox or spec.sandbox).memory_mib
+            for index in range(concurrency)
+        )
+        return f"{offered_mib / 1024:g} GiB"
+    offered = [
+        concurrency * (runtime_mib + (case.sandbox or spec.sandbox).memory_mib)
+        for case in cases
+    ]
+    low, high = min(offered) / 1024, max(offered) / 1024
+    return f"{low:g} GiB" if low == high else f"{low:g}-{high:g} GiB"
 
 
 def priority_summary(results, priority):
@@ -66,9 +84,13 @@ def _distribution(value: Any) -> str:
 def _warm_metrics(events_path: str | None) -> dict[str, int]:
     metrics = {
         "transferred_bytes": 0,
+        "private_delta_bytes": 0,
+        "unique_base_backing_bytes": 0,
+        "base_reference_count": 0,
         "peak_allocated_bytes": 0,
         "peak_committed_bytes": 0,
     }
+    bases: dict[str, int] = {}
     if not events_path:
         return metrics
     try:
@@ -93,6 +115,15 @@ def _warm_metrics(events_path: str | None) -> dict[str, int]:
             timing = row.get("lifecycle_timing") or {}
             snapshot = timing.get("snapshot_metrics") or {}
             metrics["transferred_bytes"] += int(snapshot.get("transferred_bytes") or 0)
+            metrics["private_delta_bytes"] += int(snapshot.get("private_delta_bytes") or 0)
+            identity = snapshot.get("external_base_identity")
+            if identity:
+                metrics["base_reference_count"] += 1
+                bases[str(identity)] = max(
+                    bases.get(str(identity), 0),
+                    int(snapshot.get("external_base_allocated_bytes") or 0),
+                )
+    metrics["unique_base_backing_bytes"] = sum(bases.values())
     return metrics
 
 
@@ -150,6 +181,11 @@ def write_memory_timeseries(run_root: Path) -> Path:
         "local_used_gib", "shared_live_used_gib", "combined_live_used_gib",
         "warm_allocated_gib", "warm_committed_gib", "shared_total_gib",
         "host_used_delta_gib", "host_used_gib", "host_available_gib",
+        "cgroup_current_bytes", "anon_bytes", "file_bytes", "shmem_bytes",
+        "swap_current_bytes", "pgscan", "pgsteal", "oom", "oom_kill",
+        "psi_some_total_us", "psi_full_total_us",
+        "cpu_average_cores", "cpu_utilization_fraction", "cpu_nr_throttled",
+        "cpu_throttled_usec",
     ]
     fields += [f"numa_{node}_resident_gib" for node in numa_nodes] + ["unattributed_gib"]
     with temporary.open("w", newline="", encoding="utf-8") as stream:
@@ -177,7 +213,23 @@ def write_memory_timeseries(run_root: Path) -> Path:
                     gib = 1024 ** 3
                     residency = row.get("numa_residency") or {}
                     by_node = residency.get("resident_bytes_by_numa", {})
+                    evidence = row.get("cgroup_memory") or {}
+                    stat = evidence.get("stat") or {}
+                    event_counts = evidence.get("events") or {}
+                    pressure = evidence.get("pressure") or {}
+                    cpu = row.get("cgroup_cpu") or {}
                     writer.writerow({
+                        "cgroup_current_bytes": evidence.get("current_bytes"),
+                        "swap_current_bytes": evidence.get("swap_current_bytes"),
+                        **{f"{key}_bytes": stat.get(key) for key in ("anon", "file", "shmem")},
+                        **{key: stat.get(key) for key in ("pgscan", "pgsteal")},
+                        **{key: event_counts.get(key) for key in ("oom", "oom_kill")},
+                        **{f"psi_{kind}_total_us": (pressure.get(kind) or {}).get("total")
+                           for kind in ("some", "full")},
+                        "cpu_average_cores": cpu.get("average_cores"),
+                        "cpu_utilization_fraction": cpu.get("utilization_fraction"),
+                        "cpu_nr_throttled": cpu.get("nr_throttled"),
+                        "cpu_throttled_usec": cpu.get("throttled_usec"),
                         **{f"numa_{node}_resident_gib": (
                             f"{by_node[str(node)] / gib:.6f}" if str(node) in by_node else ""
                         ) for node in numa_nodes},
@@ -234,9 +286,7 @@ def render_run_report(run_root: Path) -> str:
     if spec_path.is_file():
         spec = load_experiment(spec_path)
         concurrency = max(spec.execution.concurrency_levels)
-        offered = concurrency * (
-            spec.runtime.memory_mib + spec.sandbox.memory_mib
-        ) / 1024
+        offered = _offered_capacity_text(spec, concurrency)
         resources = spec.resources
         local = resources.local_memory_capacity_mib
         local_text = "unknown" if local is None else f"{local / 1024:g}"
@@ -250,18 +300,23 @@ def render_run_report(run_root: Path) -> str:
         )
         lines.extend([
             f"Resource scope: c{concurrency}, {concurrency * 2} VMs, "
-            f"{offered:g} GiB configured capacity; "
+            f"{offered} configured capacity; "
             f"{watermark_text}; "
             f"{resources.warm_memory_capacity_mib / 1024:g} GiB shared pool; "
             f"{(borrow or 0) / 1024:g} GiB maximum live borrow.",
             "",
+            f"Lifecycle admission: `{resources.lifecycle_admission}`; "
+            f"proactive cache reclaim: `{resources.proactive_cache_reclaim}`. "
+            "Configured capacity is offered demand, not measured physical pressure.",
+            "",
         ])
     lines.extend([
         "| Policy | c | Status | Sessions | Agents/min | JCT p50/p95 s | "
+        "CPU mean/peak cores | CPU throttled s | "
         "Admission blocked s | LOCAL peak GiB | Whole-host peak delta GiB | "
         "HIGH crossings | Above HIGH s/GiB-s | "
         "OOM kills |",
-        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in rows:
         result = row["result"]
@@ -269,6 +324,7 @@ def render_run_report(run_root: Path) -> str:
         performance = result.get("performance") or {}
         memory = result.get("memory") or {}
         correctness = result.get("correctness") or {}
+        cpu = performance.get("experiment_cpu") or {}
         lines.append(
             f"| {(arm.get('policy') or {}).get('name', 'unknown')} | "
             f"{arm.get('concurrency', 'n/a')} | {result.get('status', 'unknown')} | "
@@ -276,6 +332,8 @@ def render_run_report(run_root: Path) -> str:
             f"{_number(performance.get('agents_per_minute'))} | "
             f"{_number(performance.get('jct_p50_seconds'))}/"
             f"{_number(performance.get('jct_p95_seconds'))} | "
+            f"{_number(cpu.get('mean_cores'))}/{_number(cpu.get('peak_interval_cores'))} | "
+            f"{_number((cpu.get('throttled_usec_delta') or 0) / 1_000_000)} | "
             f"{_number(performance.get('blocked_admission_seconds'))} | "
             f"{_gib(memory.get('peak_local_tier_bytes', memory.get('peak_used_delta_bytes')))} | "
             f"{_gib(memory.get('host_peak_used_delta_bytes'))} | "
@@ -285,12 +343,29 @@ def render_run_report(run_root: Path) -> str:
             f"{memory.get('host_oom_kill_events', 'n/a')} |"
         )
 
+    lines.extend(["", "| Arm | Placement | Memory scheduling | Observed Tool peak/mean | Measured intervals | Offered-to-completion P50/P95 s | Placement wait total s |",
+                  "| --- | --- | --- | ---: | ---: | ---: | ---: |"])
+    for row in rows:
+        result = row['result']
+        arm = result.get('arm') or {}
+        concurrency = result.get('performance', {}).get('observed_tool_concurrency', {})
+        lines.append(f"| {arm.get('arm_id', 'n/a')} | {(arm.get('execution') or {}).get('placement_policy', 'round_robin')} | "
+                     f"{(arm.get('resources') or {}).get('memory_scheduling', 'static')} | "
+                     f"{_number(concurrency.get('peak'))}/{_number(concurrency.get('mean_over_tool_window'))} | "
+                     f"{concurrency.get('interval_count', 'n/a')} | "
+                     f"{_number(result.get('performance', {}).get('offered_to_completion_p50_seconds'))}/"
+                     f"{_number(result.get('performance', {}).get('offered_to_completion_p95_seconds'))} | "
+                     f"{_number(result.get('performance', {}).get('placement_wait_total_seconds'))} |")
+    lines.extend(["", "Tool overlap includes admitted backend maintenance and uses completed operation intervals; "
+                  "`performance.observed_agent_tool_concurrency` separately measures Agent Tool operations. "
+                  "Cross-VM overlap requires synchronized Runtime VM clocks. "
+                  "Incomplete failed sessions are not evidence of zero Tool concurrency."])
     lines.extend([
-        "", "| Policy | Pause/restore count | Pause/restore s | Borrow count/s | "
-        "Shared live/total peak GiB | WARM transferred GiB | WARM peak committed GiB | "
+        "", "| Policy | Pause/restore count | Pause/restore s | Borrow count/s | Return/released count/s | "
+        "Shared live/total peak GiB | WARM transferred GiB / private Delta GiB | Unique Base backing GiB/refs | WARM peak committed GiB | "
         "Prediction coverage | Prediction sources | "
         "Prediction error p90 MiB | ID join | Lost events | Cleanup |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|",
     ])
     for row in rows:
         result = row["result"]
@@ -306,9 +381,13 @@ def render_run_report(run_root: Path) -> str:
             f"{_number(performance.get('resume_service_seconds'))} | "
             f"{performance.get('shared_memory_borrow_count', 'n/a')}/"
             f"{_number(performance.get('shared_memory_borrow_service_seconds'))} | "
+            f"{performance.get('shared_memory_return_count', 'n/a')}/"
+            f"{performance.get('shared_memory_return_release_count', 'n/a')}/"
+            f"{_number(performance.get('shared_memory_return_service_seconds'))} | "
             f"{_gib(memory.get('peak_shared_live_bytes'))}/"
             f"{_gib(memory.get('peak_shared_total_bytes'))} | "
-            f"{_gib(warm['transferred_bytes'])} | "
+            f"{_gib(warm['transferred_bytes'])}/{_gib(warm['private_delta_bytes'])} | "
+            f"{_gib(warm['unique_base_backing_bytes'])}/{warm['base_reference_count']} | "
             f"{_gib(warm['peak_committed_bytes'])} | "
             f"{_number(performance.get('prediction_coverage_fraction'))} | "
             f"{_distribution(performance.get('prediction_source_distribution'))} | "
@@ -412,6 +491,21 @@ def render_run_report(run_root: Path) -> str:
         "run-to-run uncertainty.",
     ])
     if any(row["result"].get("arm", {}).get("resources", {}).get("compute_nodes") for row in rows):
+        traffic_available = any(
+            (row["result"].get("memory") or {}).get("cross_numa_traffic_bytes")
+            is not None for row in rows
+        )
+        lines.extend([
+            "",
+            "Cross-NUMA traffic bytes: " + (
+                "measured in at least one arm."
+                if traffic_available else
+                "unavailable; no qualified platform-specific host uncore PMU event "
+                "was configured. `numa_allocation_event_deltas` counts kernel "
+                "allocation events in pages and is not a traffic-byte measurement."
+            ),
+        ])
+    if any(row["result"].get("arm", {}).get("resources", {}).get("compute_nodes") for row in rows):
         lines.extend(["", "## Compute nodes", "",
             "Each node has independent admission and LOW/HIGH/HARD. Overshoot seconds in the aggregate table sum node-seconds. "
             "Node peaks include conservatively charged unattributed bytes; they must not be summed as a simultaneous physical peak.", "",
@@ -429,7 +523,8 @@ def render_run_report(run_root: Path) -> str:
                     f"{_gib(w.get('peak_local_bytes'))} | {w.get('high_crossings', 'n/a')} | "
                     f"{w.get('borrow_count', 'n/a')} | {len(placements)} |")
         lines.extend(["", "CPU/memory bindings are verified after VM creation and restore, before further worker dispatch. "
-            "Boot and autonomous guest resume may execute before binding. "
+            "The supported priority-domain path prepares the cpuset before VMM allocation; "
+            "check runtime_memory_placement events for preallocation enforcement and vCPU affinity. "
             "They do not prove that existing pages migrated. Per-NUMA physical samples are in memory-timeseries.csv; "
             "session placement and cgroup evidence are in each arm's JSON.", ""])
     return "\n".join(lines) + "\n"

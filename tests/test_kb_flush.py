@@ -114,7 +114,13 @@ def reliable_pmu(execution_id: str) -> dict:
         "started_at": 1.0, "ended_at": 2.0, "architecture": "aarch64",
         "pmu_devices": ["armv8_pmuv3_0"], "llc_semantics": "LL read",
         "llc_semantics_confirmed": True, "events": events,
-        "derived": {"ipc": 0.5, "llc_mpki": 1.0, "llc_miss_rate": 0.1},
+        "derived": {
+            "ipc": 0.5,
+            "llc_mpki": 1.0,
+            "llc_miss_rate": 0.1,
+            "llc_read_accesses_per_cpu_second": 10_000_000.0,
+            "llc_read_misses_per_cpu_second": 1_000_000.0,
+        },
         "coverage": {
             "status": "reliable", "reason": "execution_exited",
             "running_ratio": 1.0, "multiplexed": False,
@@ -329,7 +335,18 @@ def test_reliable_pmu_reaches_native_clawtune_snapshot():
     observation = span_end_to_observation(record)
     snapshot = build_clawtune_kb_snapshot([observation], "github.com/acme/foo")
     assert snapshot["schema"] == "runtime_tool_resource_kb_v4"
-    for target, expected in {"pmu_ipc": 0.5, "pmu_llc_mpki": 1.0, "pmu_llc_miss_rate": 0.1}.items():
+    expected_targets = {
+        "pmu_cycles": 2_000_000.0,
+        "pmu_instructions": 1_000_000.0,
+        "pmu_llc_read_accesses": 10_000.0,
+        "pmu_llc_read_misses": 1_000.0,
+        "pmu_ipc": 0.5,
+        "pmu_llc_mpki": 1.0,
+        "pmu_llc_miss_rate": 0.1,
+        "pmu_llc_read_accesses_per_cpu_second": 10_000_000.0,
+        "pmu_llc_read_misses_per_cpu_second": 1_000_000.0,
+    }
+    for target, expected in expected_targets.items():
         nodes = snapshot["public"][target]
         assert nodes and all(values == [expected] for _, _, values in nodes)
     observation.pmu_eligible_for_kb = False

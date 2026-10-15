@@ -12,6 +12,7 @@ class Baseline:
     eviction_policy: EvictionPolicy = EvictionPolicy.NONE
     restore_policy: RestorePolicy = RestorePolicy.NONE
     runtime_control: RuntimeControl = RuntimeControl.AGENTCGROUP_CGROUP
+    deployment: str = "managed"
 
     @property
     def implementation_status(self):
@@ -20,9 +21,12 @@ class Baseline:
     def as_policy(self, *, name=None):
         return PolicySpec(name=name or self.name, admission=self.admission_policy,
                           runtime_control=self.runtime_control, reclamation=self.reclamation_policy,
-                          eviction=self.eviction_policy, restore=self.restore_policy)
+                          eviction=self.eviction_policy, restore=self.restore_policy,
+                          deployment=self.deployment)
 
 BASELINES = MappingProxyType({b.name: b for b in (
+    Baseline('default-resident', AdmissionPolicy.OFF, runtime_control=RuntimeControl.OFF,
+             deployment='os-default'),
     Baseline('uncontrolled-resident', AdmissionPolicy.OFF, runtime_control=RuntimeControl.OFF),
     Baseline('runtime-resident', AdmissionPolicy.OFF),
     Baseline('fixed-resident', AdmissionPolicy.FIXED),

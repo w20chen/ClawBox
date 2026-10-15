@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
-from .prediction import P50PredictionProvider
+from .prediction import prediction_provider_type
 from clawbox.replay.trace import load_trace
 
 
@@ -93,19 +93,26 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
         source = Path(spec.resources.agentcgroup_source) if spec.resources.agentcgroup_source else UPSTREAM_SOURCE
         if hashlib.sha256(source.read_bytes()).hexdigest() != UPSTREAM_SHA256:
             raise ValueError("AgentCgroup source does not match the pinned backend")
-    if AdmissionPolicy.PREDICTED in admissions and spec.resources.prediction_artifact:
+    if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions):
         path = Path(spec.resources.prediction_artifact)
         for case in cases:
-            provider = P50PredictionProvider(path, repository=case.repository or case.case_id,
-                sandbox_identity={k: getattr(spec.sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")})
-            if not provider.manifest:
+            tool_sandbox = case.sandbox or spec.sandbox
+            provider = prediction_provider_type(spec.resources.prediction_mode)(path, repository=case.repository or case.case_id,
+                sandbox_identity={k: getattr(tool_sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")})
+            if spec.resources.prediction_mode == "frozen" and not provider.manifest:
                 raise ValueError("P50 artifact contains no commands")
             if spec.inference.backend is InferenceBackend.REPLAY:
                 from .training import trace_commands
                 from .prediction import command_sha256
-                missing = [c for c in trace_commands(Path(case.replay_trace_reference or case.source_reference))
-                           if command_sha256(c) not in provider.manifest]
-                if missing:
-                    raise ValueError(f"P50 artifact missing {len(missing)} replay commands")
+                commands = trace_commands(Path(case.replay_trace_reference or case.source_reference))
+                if spec.resources.prediction_mode == "runtime":
+                    for command in commands:
+                        provider.resolve(command, {"raw_command_sha256": command_sha256(command)})
+                else:
+                    missing = [c for c in commands if command_sha256(c) not in provider.manifest]
+                    if missing:
+                        raise ValueError(f"P50 artifact missing {len(missing)} replay commands")
         files.append(str(path))
+        if spec.resources.prediction_mode == "runtime":
+            files.append(str(path.with_suffix(".kb.json")))
     return {"traces": traces, "prediction_files": files}

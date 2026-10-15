@@ -18,7 +18,7 @@ import yaml
 
 from clawbox.replay.trace import load_trace
 from .baselines import ensure_supported_experiment, resolve_baseline
-from .spec import ExperimentSpec, ReclamationPolicy, expand_matrix
+from .spec import ExperimentSpec, ReclamationPolicy, expand_matrix, load_workload_cases
 
 
 def parse_concurrency(value: str) -> list[int]:
@@ -97,9 +97,19 @@ def _set_template(
 def configure_experiment(
     base_path: Path,
     *,
+    suite: str | None = None,
+    suite_ablations: bool | None = None,
+    runtime_control: str | None = None,
     host_profile: dict[str, Any] | None = None,
     compute_nodes: list[dict] | None = None,
     placement_policy: str | None = None,
+    template_balance_slack: float | None = None,
+    template_aware_placement: bool | None = None,
+    snapshot_aware_residency: bool | None = None,
+    template_base_sharing: str | None = None,
+    warm_restore_seconds_per_gib: float | None = None,
+    cold_restore_seconds_per_gib: float | None = None,
+    snapshot_cost_provenance: str | None = None,
     session_compute_nodes: list[str] | None = None,
     experiment_id: str | None = None,
     trace: str | None = None,
@@ -122,6 +132,7 @@ def configure_experiment(
     tool_vcpu: int | None = None,
     runtime_memory_gib: float | None = None,
     tool_memory_gib: float | None = None,
+    tool_workspace: str | None = None,
     target_node: str | None = None,
     pool_memory_gib: float | None = None,
     emergency_free_memory_gib: float | None = None,
@@ -138,8 +149,12 @@ def configure_experiment(
     warm_numa_node: int | None = None,
     snapshot_mechanism: str | None = None,
     snapshot_storage: str | None = None,
+    memory_scheduling: str | None = None,
     static_tool_memory_mib: int | str | None = None,
     prediction_artifact: str | None = None,
+    prediction_mode: str | None = None,
+    prediction_reservation_scale: float | None = None,
+    admission_margin_mib: int | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
     random_seed: int | None = None,
@@ -162,6 +177,26 @@ def configure_experiment(
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot read base experiment {base_path}: {exc}") from exc
     root = _mapping(raw, name="experiment")
+    if suite is not None:
+        root["suite"] = suite
+        root["suite_ablations"] = False
+    if suite_ablations is not None:
+        root["suite_ablations"] = suite_ablations
+    selected_suite = root.get("suite")
+    if selected_suite and runtime_control is not None:
+        root["suite_runtime_control"] = runtime_control
+    if selected_suite and baseline_names:
+        raise ValueError("choose --suite or diagnostic --baseline, not both")
+    if selected_suite and any(value is not None for value in (
+        placement_policy, session_compute_nodes, memory_scheduling,
+        template_aware_placement, snapshot_aware_residency, template_base_sharing,
+        snapshot_storage,
+    )):
+        raise ValueError("the suite owns placement, memory scheduling and snapshot policy; remove mechanism overrides")
+    if selected_suite == "numa-snapshot" and prediction_artifact is not None:
+        raise ValueError("numa-snapshot uses runtime feedback in every arm; a prediction artifact belongs to the admission suite")
+    if selected_suite == "admission" and root.get("suite_ablations") and static_tool_memory_mib is None:
+        static_tool_memory_mib = "auto"
     runtime = _mapping(root.get("runtime"), name="runtime")
     tool = _mapping(root.get("sandbox"), name="sandbox")
     execution = _mapping(root.get("execution"), name="execution")
@@ -187,8 +222,10 @@ def configure_experiment(
             resources["local_numa_node"] = None
     if placement_policy is not None:
         execution["placement_policy"] = placement_policy
-        if placement_policy == "round_robin" and session_compute_nodes is None:
+        if placement_policy != "explicit" and session_compute_nodes is None:
             execution["session_compute_nodes"] = []
+    if template_balance_slack is not None:
+        execution["template_balance_slack"] = template_balance_slack
     if session_compute_nodes is not None:
         execution["session_compute_nodes"] = session_compute_nodes
     inference = _mapping(root.get("inference"), name="inference")
@@ -243,13 +280,18 @@ def configure_experiment(
             resolve_baseline(name).as_policy().model_dump(mode="json")
             for name in selected
         ]
-    policies = root.get("policies")
+    policies = root.get("policies", [] if selected_suite else None)
     if not isinstance(policies, list):
         raise ValueError("policies must be a YAML list")
     policy_mappings = [
         _mapping(item, name=f"policies[{index}]")
         for index, item in enumerate(policies)
     ]
+    for policy in policy_mappings:
+        if template_aware_placement is not None:
+            policy["template_aware_placement"] = template_aware_placement
+        if snapshot_aware_residency is not None:
+            policy["snapshot_aware_residency"] = snapshot_aware_residency
 
     runtime_shape_changed = (
         (runtime_vcpu is not None and runtime_vcpu != runtime.get("vcpu"))
@@ -288,6 +330,10 @@ def configure_experiment(
         runtime["memory_mib"] = gib_to_mib(runtime_memory_gib, name="runtime memory")
     if tool_memory_gib is not None:
         tool["memory_mib"] = gib_to_mib(tool_memory_gib, name="tool memory")
+    if tool_workspace is not None:
+        if not tool_workspace.startswith('/'):
+            raise ValueError('Tool workspace must be an absolute POSIX path')
+        tool["workspace"] = tool_workspace
 
     if target_node is not None:
         resources["target_node"] = target_node
@@ -320,11 +366,33 @@ def configure_experiment(
         ("cold_snapshot_root", cold_snapshot_root),
         ("snapshot_mechanism", snapshot_mechanism),
         ("snapshot_storage", snapshot_storage),
+        ("memory_scheduling", memory_scheduling),
+        ("template_base_sharing", template_base_sharing),
     ):
         if value is not None:
             resources[key] = value
+    cost_values = (
+        warm_restore_seconds_per_gib,
+        cold_restore_seconds_per_gib,
+        snapshot_cost_provenance,
+    )
+    if any(value is not None for value in cost_values):
+        if not all(value is not None for value in cost_values):
+            raise ValueError(
+                "snapshot residency costs require warm, cold and provenance together"
+            )
+        resources["snapshot_residency_costs"] = {
+            "provenance": snapshot_cost_provenance,
+            "warm_restore_seconds_per_gib": warm_restore_seconds_per_gib,
+            "cold_restore_seconds_per_gib": cold_restore_seconds_per_gib,
+        }
     if prediction_artifact is not None:
         resources["prediction_artifact"] = prediction_artifact
+    for key, value in (("prediction_mode", prediction_mode),
+                       ("prediction_reservation_scale", prediction_reservation_scale),
+                       ("admission_margin_mib", admission_margin_mib)):
+        if value is not None:
+            resources[key] = value
     if static_tool_memory_mib == "auto":
         cases = workload.get("cases")
         repositories = {
@@ -415,6 +483,21 @@ def configure_experiment(
     elif model_wait_prediction_source is not None:
         configuration["model_wait_prediction_source"] = model_wait_prediction_source
 
+    if selected_suite and resources.get("compute_nodes"):
+        aggregate = sum(n["high_watermark_mib"] for n in resources["compute_nodes"])
+        if pool_memory_gib is not None and gib_to_mib(pool_memory_gib, name="pool memory") != aggregate:
+            raise ValueError("suite pool budget is derived from compute-node HIGH watermarks; edit the host budget and apply it")
+        resources["pool_memory_budget_mib"] = aggregate
+        resources["local_memory_capacity_mib"] = sum(n["memory_capacity_mib"] for n in resources["compute_nodes"])
+        resources["local_memory_low_watermark_mib"] = sum(n["low_watermark_mib"] for n in resources["compute_nodes"])
+        resources["local_memory_high_watermark_mib"] = resources["pool_memory_budget_mib"]
+    if selected_suite:
+        from .suites import expand_suite
+        root = expand_suite(root, replace=True)
+        policy_mappings = root["policies"]
+    elif runtime_control is not None:
+        for policy in policy_mappings:
+            policy["runtime_control"] = runtime_control
     if any(item.get("eviction") == "wait_aware_pressure" for item in policy_mappings):
         predicted_wait = configuration.get("model_wait_prediction_seconds")
         prediction_source = str(
@@ -438,9 +521,27 @@ def configure_experiment(
     return spec
 
 
-def dump_experiment(spec: ExperimentSpec) -> str:
+def dump_experiment(spec: ExperimentSpec, *, compact: bool = False) -> str:
+    # Omit defaults from the editable recipe. Frozen runs still serialize the
+    # full resolved model, so every effective setting remains auditable.
+    raw = spec.model_dump(mode="json", exclude_defaults=compact and bool(spec.suite))
+    if compact and spec.suite:
+        # An explicit frozen mode must survive compact serialization even though
+        # it is the custom-recipe default; the admission suite defaults to runtime.
+        raw["resources"]["prediction_mode"] = spec.resources.prediction_mode
+        raw.pop("policies", None)
+        # These are suite rules or aggregates, not independent user choices.
+        for key in ("placement_policy", "session_compute_nodes"):
+            raw.get("execution", {}).pop(key, None)
+        for key in ("memory_scheduling", "template_base_sharing", "memory_action_costs",
+                    "lifecycle_admission", "proactive_cache_reclaim"):
+            raw["resources"].pop(key, None)
+        if spec.resources.compute_nodes:
+            for key in ("pool_memory_budget_mib", "local_memory_capacity_mib",
+                        "local_memory_low_watermark_mib", "local_memory_high_watermark_mib"):
+                raw["resources"].pop(key, None)
     return yaml.safe_dump(
-        spec.model_dump(mode="json"), sort_keys=False, allow_unicode=True,
+        raw, sort_keys=False, allow_unicode=True,
     )
 
 
@@ -450,6 +551,10 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
     artifact = spec.resources.prediction_artifact
     if artifact is None:
         return {"error": "prediction artifact is not configured"}
+    if spec.resources.prediction_mode == "runtime":
+        return {"path": str(artifact), "mode": "runtime",
+                "kb_path": str(Path(artifact).with_suffix(".kb.json")),
+                "reservation_scale": spec.resources.prediction_reservation_scale}
     try:
         payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -487,22 +592,36 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
     tool_mib = spec.sandbox.memory_mib
     pair_mib = runtime_mib + tool_mib
     pool_mib = spec.resources.pool_memory_budget_mib
+    cases = load_workload_cases(spec.workload)
+    shapes = {case.case_id: case.sandbox or spec.sandbox for case in cases}
+    heterogeneous = len({(shape.vcpu, shape.memory_mib) for shape in shapes.values()}) > 1
     concurrency = []
     for level in spec.execution.concurrency_levels:
-        offered_mib = level * pair_mib
-        concurrency.append({
-            "agents": level,
-            "vm_count": level * 2,
-            "offered_vcpu": level * (spec.runtime.vcpu + spec.sandbox.vcpu),
-            "runtime_memory_gib": level * runtime_mib / 1024,
-            "tool_memory_gib": level * tool_mib / 1024,
-            "offered_pair_memory_gib": offered_mib / 1024,
-            "pool_memory_gib": pool_mib / 1024,
-            "offered_to_pool_ratio": offered_mib / pool_mib,
-            "memory_overcommit": offered_mib > pool_mib,
-        })
+        groups = ([tuple(cases[i % len(cases)] for i in range(level))]
+                  if spec.workload.session_assignment.value == "round_robin"
+                  else [(case,) * level for case in cases])
+        for assigned in groups:
+            tools = [shapes[case.case_id] for case in assigned]
+            offered_mib = level * runtime_mib + sum(t.memory_mib for t in tools)
+            concurrency.append({
+                "case_ids": list(dict.fromkeys(case.case_id for case in assigned)),
+                "agents": level,
+                "vm_count": level * 2,
+                "offered_vcpu": level * spec.runtime.vcpu + sum(t.vcpu for t in tools),
+                "runtime_memory_gib": level * runtime_mib / 1024,
+                "tool_memory_gib": sum(t.memory_mib for t in tools) / 1024,
+                "offered_pair_memory_gib": offered_mib / 1024,
+                "pool_memory_gib": pool_mib / 1024,
+                "offered_to_pool_ratio": offered_mib / pool_mib,
+                "offered_provisioned_capacity_exceeds_policy_budget": offered_mib > pool_mib,
+            })
     effective_resources = {
         arm.policy.name: {
+            "placement_policy": arm.execution.placement_policy,
+            "lifecycle_admission": arm.resources.lifecycle_admission,
+            "proactive_cache_reclaim": arm.resources.proactive_cache_reclaim,
+            "runtime_control": arm.policy.runtime_control.value,
+            "physical_memory_gib": (arm.resources.local_memory_capacity_mib or arm.resources.pool_memory_budget_mib) / 1024,
             "pool_memory_gib": arm.resources.pool_memory_budget_mib / 1024,
             "shared_pool_gib": arm.resources.warm_memory_capacity_mib / 1024,
             "snapshot_enabled": (
@@ -518,6 +637,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
     p50_summary = _p50_admission_summary(spec)
     static_mib = spec.resources.static_tool_memory_mib
     admission: dict[str, Any] = {
+        "prediction_mode": spec.resources.prediction_mode,
+        "prediction_reservation_scale": spec.resources.prediction_reservation_scale,
+        "margin_mib": spec.resources.admission_margin_mib,
         "physical_local_capacity_gib": (
             spec.resources.local_memory_capacity_mib / 1024
             if spec.resources.local_memory_capacity_mib is not None else None
@@ -557,9 +679,25 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             sum(math.floor(budget / maximum) for budget in usable_node_reservations) if maximum else None
         )
     return {
+        "lifecycle_admission": spec.resources.lifecycle_admission,
+        "proactive_cache_reclaim": spec.resources.proactive_cache_reclaim,
         "effective_policy_resources": effective_resources,
         "compute_nodes": [node.model_dump(mode="json") for node in spec.resources.compute_nodes],
         "placement_policy": spec.execution.placement_policy,
+        "template_balance_slack": spec.execution.template_balance_slack,
+        "template_base_sharing": spec.resources.template_base_sharing,
+        "snapshot_residency_costs": (
+            spec.resources.snapshot_residency_costs.model_dump(mode="json")
+            if spec.resources.snapshot_residency_costs else None
+        ),
+        "memory_scheduling": spec.resources.memory_scheduling,
+        "pool_transfer_concurrency": spec.resources.pool_transfer_concurrency,
+        "borrow_cooldown_seconds": spec.resources.borrow_cooldown_seconds,
+        "return_cooldown_seconds": spec.resources.return_cooldown_seconds,
+        "memory_action_costs": (
+            spec.resources.memory_action_costs.model_dump(mode="json")
+            if spec.resources.memory_action_costs is not None else None
+        ),
         "session_compute_nodes": list(spec.execution.session_compute_nodes),
         "experiment_id": spec.experiment_id,
         "agent_driver": spec.agent.driver.value,
@@ -579,7 +717,14 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             "vcpu": spec.sandbox.vcpu,
             "memory_gib": tool_mib / 1024,
         },
-        "pair_memory_gib": pair_mib / 1024,
+        "pair_memory_gib": None if heterogeneous else (runtime_mib + next(iter(shapes.values())).memory_mib) / 1024,
+        "heterogeneous_tool_shapes": heterogeneous,
+        "suite": spec.suite,
+        "suite_ablations": spec.suite_ablations,
+        "warnings": (["Measured COLD restore is no slower than WARM; all snapshot retention values are zero. This is a negative-result condition, not evidence of a WARM benefit."]
+                     if spec.resources.snapshot_residency_costs and
+                     spec.resources.snapshot_residency_costs.cold_restore_seconds_per_gib <= spec.resources.snapshot_residency_costs.warm_restore_seconds_per_gib
+                     and any(p.snapshot_aware_residency for p in spec.policies) else []),
         "concurrency": concurrency,
         "policies": [policy.model_dump(mode="json") for policy in spec.policies],
         "arm_count": len(expand_matrix(spec)),

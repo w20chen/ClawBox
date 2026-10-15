@@ -143,7 +143,11 @@ class PmuProfile(StrictModel):
     events: dict[Literal[
         "cycles", "instructions", "llc_read_misses", "llc_read_accesses"
     ], PmuEvent]
-    derived: dict[Literal["ipc", "llc_mpki", "llc_miss_rate"], float | None]
+    derived: dict[Literal[
+        "ipc", "llc_mpki", "llc_miss_rate",
+        "llc_read_accesses_per_cpu_second",
+        "llc_read_misses_per_cpu_second",
+    ], float | None]
     coverage: PmuCoverage
     collector_errors: list[str] = Field(default_factory=list)
 
@@ -160,8 +164,13 @@ class PmuProfile(StrictModel):
         }
         if any(self.events[name].semantics != value for name, value in semantics.items()):
             raise ValueError("PMU event semantics do not match the public contract")
-        if set(self.derived) != {"ipc", "llc_mpki", "llc_miss_rate"}:
-            raise ValueError("PMU profile requires all derived metrics")
+        required_derived = {"ipc", "llc_mpki", "llc_miss_rate"}
+        allowed_derived = required_derived | {
+            "llc_read_accesses_per_cpu_second",
+            "llc_read_misses_per_cpu_second",
+        }
+        if not required_derived <= set(self.derived) <= allowed_derived:
+            raise ValueError("PMU profile has an invalid derived metric set")
         reliable = self.coverage.status == "reliable"
         if self.coverage.eligible_for_kb != reliable:
             raise ValueError("PMU KB eligibility must exactly match reliable coverage")
@@ -188,6 +197,9 @@ class PmuProfile(StrictModel):
         if any(value is not None and (not math.isfinite(value) or value < 0)
                for value in self.derived.values()):
             raise ValueError("PMU derived metrics must be finite and nonnegative")
+        miss_rate = self.derived.get("llc_miss_rate")
+        if miss_rate is not None and miss_rate > 1:
+            raise ValueError("PMU LLC miss rate cannot exceed one")
         if self.coverage.status == "multiplexed" and not self.coverage.multiplexed:
             raise ValueError("multiplexed PMU coverage requires multiplexed=true")
         return self

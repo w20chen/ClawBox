@@ -138,7 +138,7 @@ def test_watermark_controller_rejects_shared_live_plus_snapshots_over_pool() -> 
         interval_s=0.01,
         tier_usage=lambda: (10 * gib, 60 * gib, 70 * gib),
     )
-    borrower = SimpleNamespace(shared_pool=pool, borrowed=lambda: ())
+    borrower = SimpleNamespace(shared_pool=pool, borrowed=lambda: (), node_id=None)
     arm = SimpleNamespace(
         resources=SimpleNamespace(
             local_memory_low_watermark_mib=28 * 1024,
@@ -162,6 +162,9 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
     class Borrower:
         node_id = "node0"
         shared_pool = pool
+
+        def allocates_shared(self, sandbox_id):
+            return sandbox_id in borrowed
 
         def borrowed(self):
             return tuple(borrowed)
@@ -276,8 +279,7 @@ def raw_spec() -> dict:
             {"name": "resident", "admission": "off", "reclamation": "resident",
              "eviction": "none", "restore": "none"},
             {"name": "proposed", "admission": "predicted", "reclamation": "snapshot_pause",
-             "eviction": "wait_aware_pressure", "restore": "proactive",
-             "prefetch_lead_seconds": 0.5},
+             "eviction": "wait_aware_pressure", "restore": "reactive"},
         ],
     }
 
@@ -308,13 +310,8 @@ def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
                             pool_memory_budget_mib=65536,
                             warm_snapshot_root="/warm", cold_snapshot_root="/cold",
                             local_numa_node=0, warm_numa_node=1)
-    raw["policies"].append({"name": "tiered", "admission": "predicted",
-                            "reclamation": "snapshot_pause", "restore": "reactive",
-                            "eviction": "tiered_time_oracle"})
     arms = expand_matrix(ExperimentSpec.model_validate(raw))
-    for arm in arms:
-        assert arm.resources.warm_memory_capacity_mib == (
-            65536 if arm.policy.name == "tiered" else 0)
+    assert all(arm.resources.warm_memory_capacity_mib == 0 for arm in arms)
 
 
 def test_shared_pool_capacity_remains_for_live_borrow_in_resident_arms() -> None:
@@ -357,11 +354,67 @@ def test_round_robin_workload_builds_one_arm_and_stable_session_mix() -> None:
     ]
 
 
+def test_round_robin_cases_keep_complete_tool_templates_and_reuse_inputs() -> None:
+    raw = raw_spec()
+    raw["workload"].update(
+        repetitions=1,
+        session_assignment="round_robin",
+        cases=[
+            {
+                "case_id": "case-a", "source": "recorded_trace",
+                "source_reference": "a.jsonl", "replay_trace_reference": "a.jsonl",
+                "snapshot_reuse_probability": 0.75,
+                "sandbox": {
+                    "template_id": "tpl-a", "architecture": "arm64",
+                    "vcpu": 2, "memory_mib": 3072, "workspace": "/a",
+                },
+            },
+            {
+                "case_id": "case-b", "source": "recorded_trace",
+                "source_reference": "b.jsonl", "replay_trace_reference": "b.jsonl",
+                "snapshot_reuse_probability": 0.25,
+                "sandbox": {
+                    "template_id": "tpl-b", "architecture": "arm64",
+                    "vcpu": 4, "memory_mib": 5120, "workspace": "/b",
+                },
+            },
+        ],
+    )
+    spec = ExperimentSpec.model_validate(raw)
+    arm = expand_matrix(spec)[0]
+
+    selected = [session_case_for(arm, index) for index in range(4)]
+    assert [case.sandbox.template for case in selected] == ["tpl-a", "tpl-b"] * 2
+    assert [case.sandbox.workspace for case in selected] == ["/a", "/b"] * 2
+    assert [case.snapshot_reuse_probability for case in selected] == [0.75, 0.25] * 2
+
+
 def test_round_robin_requires_multiple_explicit_cases() -> None:
     raw = raw_spec()
     raw["workload"]["session_assignment"] = "round_robin"
     with pytest.raises(ValidationError, match="at least two cases"):
         ExperimentSpec.model_validate(raw)
+
+
+def test_snapshot_aware_policy_requires_measured_costs_and_case_reuse() -> None:
+    raw = raw_spec()
+    raw["resources"].update(
+        snapshot_storage="tiered", warm_snapshot_root="/warm",
+        warm_memory_capacity_mib=8192,
+    )
+    raw["policies"][1]["snapshot_aware_residency"] = True
+    with pytest.raises(ValidationError, match="snapshot_residency_costs"):
+        ExperimentSpec.model_validate(raw)
+    raw["resources"]["snapshot_residency_costs"] = {
+        "provenance": "three measured repetitions",
+        "warm_restore_seconds_per_gib": 0.2,
+        "cold_restore_seconds_per_gib": 0.1,
+    }
+    with pytest.raises(ValidationError, match="snapshot_reuse_probability"):
+        ExperimentSpec.model_validate(raw)
+    raw["workload"]["cases"][0]["snapshot_reuse_probability"] = 0.5
+    spec = ExperimentSpec.model_validate(raw)
+    assert spec.resources.snapshot_residency_costs.cold_restore_seconds_per_gib == 0.1
 
 
 def test_arrival_schedule_is_explicit_and_validated() -> None:
@@ -464,7 +517,30 @@ def test_arm_provenance_records_clawbox_memory_overcommit() -> None:
     assert scope["pair_memory_mib_per_agent"] == 6144
     assert scope["offered_provisioned_memory_mib"] == 368640
     assert scope["offered_to_policy_pool_ratio"] == 22.5
-    assert scope["clawbox_memory_overcommit_enabled"] is True
+    assert scope["offered_provisioned_capacity_exceeds_policy_budget"] is True
+
+
+def test_arm_provenance_uses_each_assigned_case_vm_shape() -> None:
+    raw = raw_spec()
+    raw["workload"]["session_assignment"] = "round_robin"
+    raw["workload"]["cases"] = [
+        {"case_id": "small", "source": "recorded_trace", "source_reference": "small",
+         "sandbox": {"template_id": "small-tool", "vcpu": 1, "memory_mib": 1024}},
+        {"case_id": "large", "source": "recorded_trace", "source_reference": "large",
+         "sandbox": {"template_id": "large-tool", "vcpu": 2, "memory_mib": 4096}},
+    ]
+    raw["execution"]["concurrency_levels"] = [3]
+    raw["runtime"]["memory_mib"] = 2048
+    spec = ExperimentSpec.model_validate(raw)
+    arm = expand_matrix(spec)[0]
+
+    scope = ExperimentWorker._arm_provenance(arm)["resource_scope"]
+
+    assert scope["session_tool_memory_mib"] == [1024, 4096, 1024]
+    assert scope["session_pair_memory_mib"] == [3072, 6144, 3072]
+    assert scope["offered_provisioned_memory_mib"] == 12288
+    assert scope["tool_memory_mib_per_agent"] is None
+    assert scope["pair_memory_mib_per_agent"] is None
 
 
 def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
@@ -553,7 +629,7 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
 
 def test_baseline_catalog_and_independent_policy_names():
     from clawbox.experiments.baselines import ACTIVE_BASELINES, ensure_supported_experiment
-    assert len(ACTIVE_BASELINES) == 6
+    assert len(ACTIVE_BASELINES) == 7
     assert all(BASELINES[n].implementation_status == 'implemented' for n in ACTIVE_BASELINES)
     raw = raw_spec()
     raw['policies'] = [resolve_baseline('runtime-resident').as_policy(name='custom-label').model_dump(mode='json')]
@@ -567,23 +643,10 @@ def test_baseline_catalog_and_independent_policy_names():
         ExperimentSpec.model_validate(raw)
 
 
-def test_time_oracle_is_replay_only_and_requires_break_even() -> None:
+def test_unsupported_oracle_is_rejected_at_schema_boundary() -> None:
     raw = raw_spec()
-    raw["policies"] = [{
-        "name": "time-oracle", "admission": "fixed",
-        "reclamation": "snapshot_pause", "eviction": "time_oracle",
-        "restore": "reactive", "checkpoint_break_even_seconds": 4.0,
-    }]
-    raw["resources"]["static_tool_memory_mib"] = 256
-    assert ExperimentSpec.model_validate(raw).policies[0].eviction.value == "time_oracle"
-
-    raw["inference"]["backend"] = "api"
-    with pytest.raises(ValidationError, match="time_oracle.*replay"):
-        ExperimentSpec.model_validate(raw)
-
-    raw["inference"]["backend"] = "replay"
-    del raw["policies"][0]["checkpoint_break_even_seconds"]
-    with pytest.raises(ValidationError, match="checkpoint_break_even_seconds"):
+    raw["policies"][1]["eviction"] = "time_oracle"
+    with pytest.raises(ValidationError, match="supported eviction"):
         ExperimentSpec.model_validate(raw)
 
 
@@ -631,7 +694,7 @@ def test_v2_rejects_backend_transport_and_invalid_policy() -> None:
         ExperimentSpec.model_validate(raw)
     raw = raw_spec()
     raw["policies"][0]["eviction"] = "eager"
-    with pytest.raises(ValidationError, match="resident requires"):
+    with pytest.raises(ValidationError, match="supported eviction"):
         ExperimentSpec.model_validate(raw)
 
 

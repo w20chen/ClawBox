@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 import shlex
 import tempfile
 from pathlib import Path
@@ -43,13 +44,44 @@ def _fields(args, allowed, required):
         raise ValueError(f'Unsupported tool arguments: expected {allowed}, required {required}')
 
 
-def adapt_call(call: dict, *, python: str = 'python3') -> dict:
+def _map_workspace_value(value: str, source_workspace: str,
+                         target_workspace: str) -> str:
+    """Map one absolute research-runtime workspace into OpenClaw's workspace.
+
+    SWE-ReBench records `/testbed`, while OpenClaw deliberately exposes the
+    selected Tool VM workspace as `/workspace`.  Commands can contain several
+    absolute paths, so map path tokens as well as structured path fields.
+    """
+    source = source_workspace.rstrip('/') or '/'
+    target = target_workspace.rstrip('/') or '/'
+    if source == target:
+        return value
+    if source == '/':
+        raise ValueError('source_workspace cannot be / when remapping a trace')
+    return re.sub(
+        r'(?<![A-Za-z0-9_./-])' + re.escape(source)
+        + r'(?=$|/|[\s\'";:),\]}])',
+        lambda _match: target,
+        value,
+    )
+
+
+def adapt_call(call: dict, *, python: str = 'python3',
+               source_workspace: str = '/testbed',
+               target_workspace: str = '/workspace') -> dict:
     result = copy.deepcopy(call)
     function = result['function']
     name = function['name']
     args = function.get('arguments', {})
     if isinstance(args, str):
         args = json.loads(args)
+    if not source_workspace.startswith('/') or not target_workspace.startswith('/'):
+        raise ValueError('workspace mappings must be absolute POSIX paths')
+    for key in ('path', 'working_dir', 'workdir', 'command'):
+        if key in args and isinstance(args[key], str):
+            args[key] = _map_workspace_value(
+                args[key], source_workspace, target_workspace,
+            )
     if name == 'edit_file':
         _fields(args, ('path', 'old_text', 'new_text', 'replace_all'), ('path', 'old_text', 'new_text'))
         if args.get('replace_all', False) is not False:
@@ -57,7 +89,11 @@ def adapt_call(call: dict, *, python: str = 'python3') -> dict:
         name = 'edit'
         args = {'path': args['path'], 'oldText': args['old_text'], 'newText': args['new_text']}
     elif name == 'read_file':
-        _fields(args, ('path',), ('path',))
+        _fields(args, ('path', 'offset', 'limit'), ('path',))
+        if 'offset' in args and (type(args['offset']) is not int or args['offset'] < 1):
+            raise ValueError('read_file offset must be a positive integer')
+        if 'limit' in args and (type(args['limit']) is not int or args['limit'] < 1):
+            raise ValueError('read_file limit must be a positive integer')
         name = 'read'
     elif name == 'write_file':
         _fields(args, ('path', 'content'), ('path', 'content'))
@@ -81,7 +117,21 @@ def adapt_call(call: dict, *, python: str = 'python3') -> dict:
     return result
 
 
-def import_trace(source: Path, output: Path, *, python: str = 'python3') -> dict:
+def _adapt_message_tool_calls(message: dict, *, python: str,
+                              source_workspace: str,
+                              target_workspace: str) -> dict:
+    result = copy.deepcopy(message)
+    for index, call in enumerate(result.get('tool_calls', [])):
+        result['tool_calls'][index] = adapt_call(
+            call, python=python, source_workspace=source_workspace,
+            target_workspace=target_workspace,
+        )
+    return result
+
+
+def import_trace(source: Path, output: Path, *, python: str = 'python3',
+                 source_workspace: str = '/testbed',
+                 target_workspace: str = '/workspace') -> dict:
     if output.exists() or output.with_suffix('.import.json').exists():
         raise ValueError('Import output already exists; choose a new output path')
     rows = _read_jsonl(source)
@@ -105,9 +155,13 @@ def import_trace(source: Path, output: Path, *, python: str = 'python3') -> dict
         response = data['raw_response']['choices']
         if len(response) != 1:
             raise ValueError('Expected one recorded model choice')
-        message = copy.deepcopy(response[0]['message'])
+        message = _adapt_message_tool_calls(
+            response[0]['message'], python=python,
+            source_workspace=source_workspace,
+            target_workspace=target_workspace,
+        )
         for i, call in enumerate(message.get('tool_calls', [])):
-            adapted = adapt_call(call, python=python)
+            adapted = message['tool_calls'][i]
             if adapted != call:
                 changes.append({'call_id': call['id'], 'source': call['function'], 'target': adapted['function']})
             message['tool_calls'][i] = adapted
@@ -116,8 +170,15 @@ def import_trace(source: Path, output: Path, *, python: str = 'python3') -> dict
             raise ValueError('Invalid model timestamps')
         common = {'schema_version': 6, 'trace_id': source_hash, 'span_id': span['action_id'],
                   'kind': 'llm', 'name': meta.get('model', ''), 'sequence_no': index}
+        input_messages = [
+            _adapt_message_tool_calls(
+                item, python=python, source_workspace=source_workspace,
+                target_workspace=target_workspace,
+            )
+            for item in data['messages_in']
+        ]
         converted.append({**common, 'record_type': 'span_start', 'wall_time_ns': str(round(start*1e9)),
-                          'input': {'messages': data['messages_in']}})
+                          'input': {'messages': input_messages}})
         converted.append({**common, 'record_type': 'span_end', 'duration_ns': str(round((end-start)*1e9)),
                           'status': {'code': 'ok'}, 'output': {'content': message}})
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +195,7 @@ def import_trace(source: Path, output: Path, *, python: str = 'python3') -> dict
               'source_sha256': source_hash, 'output_sha256': hashlib.sha256(output.read_bytes()).hexdigest(),
               'model': meta.get('model'), 'instance_id': meta.get('instance_id'),
               'source_runtime': meta.get('prompt_runtime_label'), 'model_calls': len(spans),
+              'workspace_mapping': {'source': source_workspace, 'target': target_workspace},
               'changes': changes,
               'limitations': ['Directory listing is sorted, bounded, and does not follow directory symlinks.',
                               'Tool output text and architecture are not guaranteed identical to the source.',
