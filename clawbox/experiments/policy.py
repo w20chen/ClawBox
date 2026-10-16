@@ -532,6 +532,7 @@ class PolicyCoordinator:
                             tool_elapsed = victim.lifecycle.checkpoint_and_evict()
                             pause_runtime = (
                                 self.release_options is None
+                                and self.policy.runtime_snapshot
                                 and victim.runtime_lifecycle is not None
                                 and victim.runtime_lifecycle.resident
                                 and victim.wait_id is not None
@@ -719,6 +720,7 @@ class PolicyCoordinator:
             lifecycles = [victim.lifecycle]
             if (
                 self.release_options is None
+                and self.policy.runtime_snapshot
                 and victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
                 and victim.wait_id is not None
@@ -760,6 +762,7 @@ class PolicyCoordinator:
             )
             if (
                 self.release_options is None
+                and self.policy.runtime_snapshot
                 and victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
                 and victim.wait_id is not None

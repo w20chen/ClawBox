@@ -1,5 +1,11 @@
 # Pressure and progress control
 
+New experiments use independent `mechanisms.runtime.memory_protection`,
+`cpu_release_boost`, and `mechanisms.idle_reclaim.policy` fields. Use
+`--recipe runtime` for the five runtime arms, or `--recipe idle-reclaim` for
+the four lifecycle arms. See [the six-dimension guide](experiments.md).
+The mode names below describe the backend and schema-3 records.
+
 Select resource control independently through `policies[].runtime_control`, or
 `configure --runtime-control`. New custom policies default to `off`. Existing
 named admission/snapshot presets keep their mechanism selections. The alias
@@ -102,28 +108,20 @@ preallocation routing, and snapshot support when selected. Missing required
 files fail the run; missing PSI disables the corresponding optimization and is
 reported in controller provenance.
 
-Start from a complete, validated custom experiment YAML and its matching host
-profile (do not use a suite-owned recipe to override its fixed mechanisms):
+Start from a configured schema-4 workload:
 
 ```sh
-clawbox experiment configure base.yaml pressure.yaml --profile host.json \
-  --baseline no_control --baseline agentcgroup_legacy \
-  --baseline phase_memcg --baseline release_cpu \
-  --baseline pressure_lifecycle --baseline adaptive_joint \
-  --memory-scheduling static --time-scale 1 --repetitions 3
+clawbox experiment configure base.yaml pressure.yaml --recipe runtime \
+  --time-scale 1 --repetitions 3
 clawbox experiment describe pressure.yaml
 clawbox --output-root ./results experiment launch pressure.yaml --run-id pressure-01
 ```
 
-Review generated policies, saved template identities, snapshot paths/capacities,
-LOCAL budgets and CPU lists before launch. `static` allows explicit mixed
-resident/snapshot policies without enabling shared borrowing; set shared live
-borrowing to zero/null in this comparison. Keep arrival schedule, trace, VM
-shape, placement, and memory boundaries identical between arms. Run separate
-configurations for low pressure, LOCAL admission saturation, and combined CPU
-and memory contention. Establish each regime from measured deficits/PSI; offered
-concurrency alone does not establish contention. Preserve recorded waits with
-`time_scale: 1`. Do not replace commands with sleeps.
+Keep other dimensions, arrival schedule, templates and physical limits fixed.
+For lifecycle comparisons use `--recipe idle-reclaim` and supply independent wait
+and checkpoint-cost evidence. Compare low pressure, LOCAL saturation and combined
+CPU/memory contention using measured deficits and PSI. Preserve real commands and
+recorded waits. Zero actions do not establish an optimization benefit.
 
 Use normal launch/status/resume/abort commands for interruption recovery. The
 supervisor removes only journaled leaves after their VMs exit. A live populated

@@ -15,10 +15,13 @@ The parallel `scripts/lab` command-line interface is also deprecated. Its shared
 host setup and image helpers are still called by `clawbox experiment setup` and
 `clawbox experiment images`; use the public experiment commands for new runs.
 
-The supported experiment uses schema version 3 and the current presets printed by
-`clawbox experiment baselines`. Historical policy names, schemas and prediction
-artifacts are not accepted. Deprecated verification scripts and control-plane
-workflows retain their source but do not constrain current experiment tests.
+New experiments use schema version 4 and the six-dimensional recipes printed by
+`clawbox experiment recipes`; see the [experiment guide](experiments.md).
+Use `configure --recipe` to create explicit comparison arms. Schema-3 inputs
+remain usable by the existing worker and as inputs to this configuration command;
+their suite/baseline selectors must not be mixed with schema-4 recipes.
+Deprecated verification scripts and control-plane workflows retain their source
+but do not constrain current experiment tests.
 
 This does not deprecate shared functionality still used by current commands:
 

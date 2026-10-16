@@ -97,6 +97,9 @@ def _set_template(
 def configure_experiment(
     base_path: Path,
     *,
+    recipe: str | None = None,
+    checkpoint_axis: str | None = None,
+    mechanism_settings: Iterable[str] = (),
     suite: str | None = None,
     suite_ablations: bool | None = None,
     runtime_control: str | None = None,
@@ -181,6 +184,11 @@ def configure_experiment(
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot read base experiment {base_path}: {exc}") from exc
     root = _mapping(raw, name="experiment")
+    if recipe is not None or root.get('schema_version') == 4:
+        from .design import configure_design
+        return configure_design(root, dict(locals()))
+    if mechanism_settings or checkpoint_axis is not None:
+        raise ValueError('--set/--checkpoint-axis require a schema-4 design or explicit --recipe')
     if suite is not None:
         root["suite"] = suite
         root["suite_ablations"] = False
@@ -530,6 +538,9 @@ def configure_experiment(
 
 
 def dump_experiment(spec: ExperimentSpec, *, compact: bool = False) -> str:
+    if spec.schema_version == 4:
+        from .design import export_design
+        return yaml.safe_dump(export_design(spec), sort_keys=False, allow_unicode=True)
     # Omit defaults from the editable recipe. Frozen runs still serialize the
     # full resolved model, so every effective setting remains auditable.
     raw = spec.model_dump(mode="json", exclude_defaults=compact and bool(spec.suite))
@@ -596,6 +607,9 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
 
 
 def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
+    if spec.schema_version == 4:
+        from .design import design_overview
+        return design_overview(spec)
     runtime_mib = spec.runtime.memory_mib
     tool_mib = spec.sandbox.memory_mib
     pair_mib = runtime_mib + tool_mib

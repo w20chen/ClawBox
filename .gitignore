@@ -11,6 +11,8 @@ __pycache__/
 .pytest_tmp*/
 .ruff_cache/
 .mypy_cache/
+.hypothesis/
+.tox/
 .coverage
 .coverage.*
 htmlcov/
@@ -29,6 +31,10 @@ htmlcov/
 /release-evidence/
 /.artifacts/
 /.verification/
+/traces/
+/.local/
+/coverage.xml
+/junit.xml
 /working_set_plan.json
 /.tmp-*/
 /deploy/rec-a-*.inspect.jsonl

@@ -338,12 +338,15 @@ class CgroupMemorySampler(NodeMemorySampler):
     """
 
     def __init__(self, cgroup: Path, *, capacity_bytes: int,
-                 numa_node: int | None = None, **kwargs) -> None:
+                 numa_node: int | None = None, physical_limit_bytes: int | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.cgroup = cgroup
         limit = (cgroup / "memory.max").read_text().strip()
-        if limit != str(capacity_bytes):
-            raise ValueError(f"LOCAL memory.max {limit} does not match {capacity_bytes}")
+        expected_limit = physical_limit_bytes if physical_limit_bytes is not None else capacity_bytes
+        if capacity_bytes > expected_limit:
+            raise ValueError('logical memory budget exceeds physical cgroup limit')
+        if limit != str(expected_limit):
+            raise ValueError(f"LOCAL memory.max {limit} does not match {expected_limit}")
         if numa_node is not None:
             nodes = (cgroup / "cpuset.mems.effective").read_text().strip()
             if nodes != str(numa_node):

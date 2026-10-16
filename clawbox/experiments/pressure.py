@@ -65,9 +65,12 @@ def psi(path: Path) -> int | None:
 
 
 class PressureControl:
-    def __init__(self, parent, *, mode, options, interval=.5, emit=lambda _: None):
+    def __init__(self, parent, *, mode, options, interval=.5, emit=lambda _: None,
+                 memory_protection=False, cpu_release_boost=False):
         self.parent = Path(parent)
         self.mode = RuntimeControl(mode)
+        self.memory_protection = memory_protection if self.mode is RuntimeControl.EXPLICIT else self.mode in {RuntimeControl.PHASE_MEMCG, RuntimeControl.ADAPTIVE_JOINT}
+        self.cpu_release_boost = cpu_release_boost if self.mode is RuntimeControl.EXPLICIT else self.mode in {RuntimeControl.RELEASE_CPU, RuntimeControl.ADAPTIVE_JOINT}
         self.options = options
         self.interval = interval
         self.emit = emit
@@ -80,6 +83,8 @@ class PressureControl:
         self.stats = {'polls': 0, 'poll_seconds': 0., 'cpu_boosts': 0,
                       'memory_protections': 0, 'rollbacks': 0, 'oom_kill_events': 0}
         self.provenance = {'backend': self.mode.value, 'mapping': 'stable_flat_per_vm',
+                           'memory_protection_enabled': self.memory_protection,
+                           'cpu_release_boost_enabled': self.cpu_release_boost,
                            'memory_high': 'disabled_no_safe_growth_control_evidence',
                            'cpu_release_evidence': 'required',
                            'memory_psi_available': (self.parent/'memory.pressure').exists(),
@@ -285,7 +290,7 @@ class PressureControl:
                     self._restore(vm)
                     continue
                 low = 0
-                if (self.mode in {RuntimeControl.PHASE_MEMCG, RuntimeControl.ADAPTIVE_JOINT}
+                if (self.memory_protection
                         and sample['reclaim'] and not vm.ineffective_memory):
                     low = min(sample['working_set'], protection_left)
                     protection_left -= low
@@ -293,7 +298,7 @@ class PressureControl:
                 if (blocked and boosts_left and sample['cpu_contended']
                         and vm.node is not None
                         and (vm.group / 'cpuset.mems.effective').read_text().strip() == str(vm.node)
-                        and self.mode in {RuntimeControl.RELEASE_CPU, RuntimeControl.ADAPTIVE_JOINT}):
+                        and self.cpu_release_boost):
                     forecasts = [self.release_forecasts.get((vm.session, eid), {}) for eid in vm.active]
                     valid = [f for f in forecasts if f.get('generation') == vm.generation
                              and f.get('expires_at', 0) > began

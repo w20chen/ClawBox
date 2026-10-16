@@ -237,10 +237,12 @@ def test_wait_aware_pressure_includes_a_blocked_create_request() -> None:
     assert created.is_set()
 
 
-def test_high_watermark_proactively_evicts_a_safe_waiting_pair() -> None:
+@pytest.mark.parametrize('include_runtime', [True, False])
+def test_high_watermark_proactively_evicts_a_safe_waiting_pair(include_runtime) -> None:
     policy = PolicySpec(
         name="final", admission="predicted", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
+        runtime_snapshot=include_runtime,
     )
     coordinator = PolicyCoordinator(
         policy, budget_mib=32, emergency_free_mib=0,
@@ -255,9 +257,9 @@ def test_high_watermark_proactively_evicts_a_safe_waiting_pair() -> None:
     coordinator.begin_model_wait("waiting", "wait-1", 10.0)
 
     assert coordinator.evict_one_for_watermark() is True
-    assert (tool.pauses, runtime.pauses) == (1, 1)
-    assert runtime_pauses == [True]
-    assert coordinator.pause_count == 2
+    assert (tool.pauses, runtime.pauses) == (1, int(include_runtime))
+    assert runtime_pauses == ([True] if include_runtime else [])
+    assert coordinator.pause_count == 1 + int(include_runtime)
     assert coordinator.evict_one_for_watermark() is False
 
 

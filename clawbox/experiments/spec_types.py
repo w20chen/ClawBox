@@ -41,6 +41,7 @@ class RuntimeControl(StrEnum):
     RELEASE_CPU = "release_cpu"
     PRESSURE_LIFECYCLE = "pressure_lifecycle"
     ADAPTIVE_JOINT = "adaptive_joint"
+    EXPLICIT = "explicit"
 
     @property
     def legacy(self):
@@ -48,7 +49,7 @@ class RuntimeControl(StrEnum):
 
     @property
     def adaptive(self):
-        return self in {self.PHASE_MEMCG, self.RELEASE_CPU,
+        return self in {self.EXPLICIT, self.PHASE_MEMCG, self.RELEASE_CPU,
                         self.PRESSURE_LIFECYCLE, self.ADAPTIVE_JOINT}
 
     @property

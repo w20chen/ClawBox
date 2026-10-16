@@ -29,9 +29,9 @@ def sample(group, tick=0):
         (group/name).write_text(value)
 
 
-def control(tmp_path, mode='adaptive_joint'):
+def control(tmp_path, mode='adaptive_joint', **flags):
     sample(tmp_path)
-    controller = PressureControl(tmp_path, mode=mode, options=PressureControlSpec(cooldown_seconds=.01))
+    controller = PressureControl(tmp_path, mode=mode, options=PressureControlSpec(cooldown_seconds=.01), **flags)
     domain = Feedback()
     for role in ('runtime', 'tool'):
         leaf = tmp_path/role
@@ -108,6 +108,24 @@ def train_release(c):
             'host_cgroup_peak_bytes': 256*MIB,
             'host_cgroup_final_bytes': 128*MIB,
         }, 10., True)
+
+
+@pytest.mark.parametrize('memory,cpu', [(False, False), (True, False), (False, True), (True, True)])
+def test_explicit_controls_are_independent(tmp_path, monkeypatch, memory, cpu):
+    c, _ = control(tmp_path, 'explicit', memory_protection=memory, cpu_release_boost=cpu)
+    monkeypatch.setattr('clawbox.experiments.pressure.time.monotonic', lambda: 100.)
+    train_release(c)
+    c.execution_ready('s', 'new', ('template', 'command'))
+    c.execution_admitted('s', 'new', 0)
+    c.event('s', 'start', 'new')
+    advance(c, tmp_path, monkeypatch, 0)
+    advance(c, tmp_path, monkeypatch, 1)
+    assert int((tmp_path/'tool'/'memory.low').read_text()) == (128*MIB if memory else 0)
+    assert int((tmp_path/'tool'/'cpu.weight').read_text()) == (200 if cpu else 100)
+    assert (tmp_path/'tool'/'memory.high').read_text() == 'max'
+    c.event('s', 'complete', 'new')
+    assert (tmp_path/'tool'/'memory.low').read_text() == '0'
+    assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
 
 
 def test_cpu_requires_measured_release_cpu_pressure_and_local_blocking(tmp_path, monkeypatch):

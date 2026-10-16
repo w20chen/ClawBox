@@ -241,6 +241,9 @@ def guest_pressure_probe(domain, lifecycles, *, source=None, control_options=Non
 
 def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     """Verify both VM roles, priorities and configured snapshot restores."""
+    if spec.schema_version == 4:
+        from .qualification import design_probes
+        return design_probes(spec, runtime_roundtrip_test, artifact_root=artifact_root)
     from clawbox.cube import CubeSandboxClient, CubeSandboxLifecycle, OwnedSandboxJournal, Ownership
     from .snapshot_pool import WarmSnapshotPool
     from .spec_types import ReclamationPolicy
@@ -298,6 +301,7 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     warm_snapshot_root=spec.resources.warm_snapshot_root,
                     cold_snapshot_root=spec.resources.cold_snapshot_root,
                     snapshot_mechanism=spec.resources.snapshot_mechanism,
+                    lazy_restore=spec.resources.lazy_restore,
                     snapshot_storage=spec.resources.snapshot_storage, snapshot_pool=pool,
                     default_snapshot_tier=spec.resources.default_snapshot_tier,
                     snapshot_reservation_bytes=(vm.memory_mib+256)*MIB)

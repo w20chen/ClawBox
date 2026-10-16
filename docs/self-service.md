@@ -136,7 +136,7 @@ check 不修改主机，成功为 `ready_for_apply: true`，失败逐项给出 r
 
 ```bash
 mkdir -p "$HOME/clawbox-specs"
-bash scripts/clawbox experiment configure examples/experiments/getting-started.yaml \
+bash scripts/clawbox experiment configure examples/experiments/six-dimension.yaml \
   "$HOME/clawbox-specs/smoke.yaml" --trace "$PWD/examples/traces/smoke.jsonl" \
   --experiment-id first-smoke --concurrency 2
 bash scripts/clawbox experiment validate "$HOME/clawbox-specs/smoke.yaml" --inputs
@@ -161,19 +161,20 @@ launch 自动检查输入、主机和真实预检，然后运行负载。
 结果在 `CLAWBOX_OUTPUT_ROOT/RUN_ID`。临时换目录时所有相关命令都加
 `bash scripts/clawbox --output-root /absolute/results experiment ...`。
 
-## 训练与策略对比
+## 训练与六维策略对比
 
-短 smoke 不保证采到内存峰值；下面的训练任务触碰 64 MiB 并保持三秒：
+先运行 `bash scripts/clawbox experiment recipes` 查看实验配方。短 smoke 只验证链路。
+下面的独立训练任务触碰 64 MiB 并保持三秒：
 
 ```bash
-bash scripts/clawbox experiment configure examples/experiments/getting-started.yaml \
+bash scripts/clawbox experiment configure examples/experiments/six-dimension.yaml \
   "$HOME/clawbox-specs/memory-train.yaml" --trace "$PWD/examples/traces/memory-smoke.jsonl" \
   --prompt 'Allocate and touch 64 MiB for three seconds, then write complete to /workspace/result.txt.' \
-  --repository self-service/memory --experiment-id memory-train --baseline default-resident --concurrency 2
+  --repository self-service/memory --experiment-id memory-train --concurrency 2
 bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/memory-train.yaml" --run-id memory-train-01
 ```
 
-train 的输入是实际结果目录；RESULTS 填写 machine.env 中的结果根目录：
+RESULTS 填写 machine.env 中保存的结果根目录：
 
 ```bash
 RESULTS=/data/clawbox-results
@@ -181,76 +182,37 @@ bash scripts/clawbox experiment train "$RESULTS/memory-train-01" \
   --trace "$PWD/examples/traces/memory-smoke.jsonl" --repository self-service/memory \
   --output "$HOME/clawbox-specs/memory-p50.json"
 bash scripts/clawbox experiment configure "$HOME/clawbox-specs/memory-train.yaml" \
-  "$HOME/clawbox-specs/control-eval.yaml" --experiment-id control-eval \
-  --suite admission \
+  "$HOME/clawbox-specs/admission.yaml" --recipe admission \
   --prediction-artifact "$HOME/clawbox-specs/memory-p50.json" \
   --concurrency 2 --repetitions 1
-bash scripts/clawbox experiment validate "$HOME/clawbox-specs/control-eval.yaml" --inputs
-bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/control-eval.yaml" --run-id control-eval-01
-bash scripts/clawbox --sudo experiment report control-eval-01
+bash scripts/clawbox experiment describe "$HOME/clawbox-specs/admission.yaml"
+bash scripts/clawbox experiment validate "$HOME/clawbox-specs/admission.yaml" --inputs
+bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/admission.yaml" --run-id admission-01
+bash scripts/clawbox --sudo experiment report admission-01
 ```
 
-训练接受成功完成的无准入或固定准入运行，要求完整观测、任务验证和清理证明；缺失观测不能填零。
-准入套件默认比较无准入部署与 ClawTune 预测准入，两组使用 OS 放置和常驻 VM。
-默认关闭资源控制。新的 `phase_memcg`、`release_cpu`、`pressure_lifecycle` 和
-`adaptive_joint` 模式、配置字段及对比运行命令见 [压力控制说明](pressure-control.md)。
-它们使用每 VM 的稳定 cgroup；不会自动开启 NUMA 借用。生命周期模式需要显式配置
-快照机制及历史成本；仅 cgroup 的两组不启用快照。所有参数变更使用新 run ID。
-`--runtime-control agentcgroup_cgroup` 为方案组开启旧版 HIGH/LOW 控制，
-`--runtime-control off` 关闭。加 `--ablations` 后另有固定准入和仅 AgentCgroup 两组。
-AgentCgroup 默认每 0.5 秒采样，1 次 `memory.high` 事件或 85% 父 cgroup
-使用率可触发 1 秒保护窗口。若训练运行显示控制过于频繁，可用
-`--agentcgroup-poll-interval-seconds`、`--agentcgroup-event-threshold`、
-`--agentcgroup-pressure-ratio` 和 `--agentcgroup-protection-window-seconds`
-调节。修改后使用新 run ID，无需重新 apply 主机或重建镜像。
-固定准入默认读取训练产物的实测 Host 增量 P90，也可用 `--static-tool-memory-mib` 调整。
-运行时预测需要同时保留 train 生成的 `memory-p50.json` 和 `memory-p50.kb.json`。
-`--prediction-mode runtime` 每次查询实际命令，包括预计算列表中没有的命令；
-`--prediction-mode frozen` 使用冻结的逐命令预测。KB 在评估期间不学习测试样本。
-可用 `--prediction-reservation-scale 0.8 --admission-margin-mib 128` 减少保守预留；
-这里是调参示例，不是推荐最优值。默认分别为 1 和 256 MiB，应同时检查排队、完成率和内存压力。
-这些变更使用新 run ID，无需重建镜像或重新 apply 主机；更换预测环境需要重新训练。
-一次重复只验证流程，正式研究换真实负载并与校准数据分开，例如
-`--concurrency 2,4,8 --repetitions 8`，保留失败样本和完成率。
+生成无工具准入、固定额度、预测准入三组，其余五维保持公共配置。固定额度默认取独立训练
+产物的 host 增长 P90。保留同时生成的 JSON 和 `.kb.json`；评估不更新 KB。正式研究替换真实任务，
+训练与评估数据分开，并保留失败样本、完成率与多次重复。
 
-NUMA/快照使用独立套件。先在 host YAML 配置 compute_nodes、WARM 与 COLD 路径，
-执行 check/apply。准备包含真实任务模板和 trace 的 BASE YAML；每个 case 填写有依据的
-`snapshot_reuse_probability`，resources 填写实测 `snapshot_residency_costs`
-（warm_restore_seconds_per_gib、cold_restore_seconds_per_gib、provenance）。
-这些工作负载参数不能从主机物理容量推断。可参考
-`examples/experiments/agent-rl-heterogeneous-ablation-kunpeng.yaml` 的格式；
-其中模板身份和测量来源仅属于原主机，不能直接复用到新主机。
+运行时控制使用 `--recipe runtime`，放置使用 `--recipe placement`，回收使用
+`--recipe idle-reclaim`，共享内存使用 `--recipe shared-memory`。
+检查点使用 `--recipe checkpoint --checkpoint-axis encoding|storage|residency`，每次只研究一个子方向。
+完整方案先明确公共机制，再用 `--recipe integrated`；不会自动打开全部技术。
+各配方依赖、默认值、配置样例见[六维实验指南](experiments.md)。
 
-```bash
-BASE="$HOME/clawbox-specs/numa-workload.yaml"
-bash scripts/clawbox experiment configure "$BASE" \
-  "$HOME/clawbox-specs/snapshot-eval.yaml" --experiment-id snapshot-eval \
-  --suite numa-snapshot --concurrency 2 --repetitions 1
-bash scripts/clawbox experiment validate "$HOME/clawbox-specs/snapshot-eval.yaml" --inputs
-bash scripts/clawbox experiment describe "$HOME/clawbox-specs/snapshot-eval.yaml"
-bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/snapshot-eval.yaml" --run-id snapshot-eval-01
-bash scripts/clawbox --sudo experiment report snapshot-eval-01
-```
+生成配置后先运行 `experiment describe CONFIG`：resident 组的快照编码、存储与驻留参数会标为不生效。
+CPU 释放加速要求主机提供 `compute_nodes` 或 `local_numa_node`，且不能使用 OS 默认放置。
+选择 checkpoint 配方前显式设置 `--set idle_reclaim.policy=wait`（或 release_cost），并提供独立等待证据。
+配方与继承设置冲突时，修改对应字段后重新 configure；不要绕过 validate。配置改变使用新 run ID。
 
-BASE 还须提供独立来源的模型等待预测及其来源。NUMA 套件不需要 ClawTune 预测文件：
-主基线为 OS 默认放置、VM 常驻、无 Tool 准入和 AgentCgroup；方案组使用负载感知放置、
-安全空闲回收、模板亲和与快照价值排序。主机允许共享借用时方案组使用先回收后借用规则。
-加 `--ablations` 后增加 load-aware-lru、template-aware-only、snapshot-aware-only，合计五组。
-主比较衡量整个管理方案；三个受控对照用于拆分机制贡献，不能把 LRU 对照称为默认部署。
-`--runtime-control` 可独立控制方案和受控对照的 AgentCgroup，主基线始终关闭。
-OS 基线继承相同宿主 cgroup 边界，使用 LOCAL 加 live-borrow 额度对应的共同硬限制；不会把全部 WARM 容量算成额外可用内存。
-物理共享验证由套件自动要求。
-实测 COLD 不慢于 WARM 时会提示保留收益为零；保留该负结果。
-轻负载可能不触及回收水位；预检执行快照和恢复，不等于正式负载有性能收益。
-
-生成的套件 YAML 省略默认值和重复策略列表；`describe` 展示生效参数，运行目录保存
-完整配置。修改实验规模或套件需使用新 run ID；修改主机预算、拓扑或存储需重新 apply。
-不改变模板或预测测量环境时无需重建镜像或重新训练。
+准备快照/共享池实验时，先配置并 apply 对应主机拓扑、容量与路径。填写独立等待预测、实测成本，
+价值驻留还需每 case 复用概率。缺失证据不会填零；资格验证通过也不代表性能收益。
 
 ## 修改参数或工作负载
 
 ```bash
-bash scripts/clawbox experiment baselines
+bash scripts/clawbox experiment recipes
 bash scripts/clawbox experiment configure --help
 bash scripts/clawbox experiment configure "$HOME/clawbox-specs/memory-train.yaml" \
   "$HOME/clawbox-specs/custom.yaml" --experiment-id custom \
@@ -266,7 +228,7 @@ bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/custom.yaml" 
 | 并发/重复/随机种子 | `--concurrency 1,2,4 --repetitions 3 --random-seed 0` |
 | admission 总预算/安全余量 | `--pool-memory-gib`、`--checkpoint-headroom-gib`、`--emergency-free-memory-gib`，单位 GiB |
 | 快照实现/存储 | `--snapshot-mechanism full-copy` 或 incremental-cow；`--snapshot-storage warm-only` 或 tiered |
-| 采样/等待/超时 | 采样间隔编辑 YAML 的 execution.memory_sample_interval_seconds；等待/超时用 `--time-scale`、`--command-timeout-seconds`、`--arm-timeout-seconds` |
+| 采样/等待/超时 | 采样间隔编辑 YAML 的 measurement.memory_sample_interval_seconds；等待/超时用 `--time-scale`、`--command-timeout-seconds`、`--arm-timeout-seconds` |
 | VM CPU/RAM/可写盘 | [注册新模板](installation.md#4-register-templates-and-verify-ssh)，更新 host YAML、apply、configure |
 | NUMA/CPU 集合/本地容量/共享池 | 改 host YAML，check、apply 后重新 configure |
 | ClawTune/镜像 | 用相同版本更新主机与两个镜像，apply、configure；新运行重新训练 |
@@ -287,116 +249,15 @@ OpenClaw + replay。配置容量、预测预留、实际内存和快照字节数
 随后重新 qualify，并为快照比较使用新 run ID。仅此主机端修复无需重建 guest 镜像或
 重新训练 ClawTune；镜像或测量语义另有变化时仍须遵守对应重建、重训要求。
 
-### 比较 NUMA 放置策略
+### 组合或消融机制
 
-先复制已有 host YAML，在副本中设置 `warm: false`，保留相同的 compute nodes、
-CPU 集合和本地内存预算。不要在有运行中的 VM 时切换主机配置。下面假设副本为
-`$HOME/.config/clawbox/host-local.yaml`；原配置保留用于之后恢复共享池。
+使用 `--set dimension.field=value` 修改公共机制，或编辑 `comparison.arms[].override` 改单臂。
+例如 `--set runtime.memory_protection=true` 只启用工作集保护，不开启快照或借用。
+`--set idle_reclaim.policy=wait` 需要 evidence 中的独立等待估计和有效快照路径。
 
-```bash
-bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host-local.yaml"
-bash scripts/clawbox experiment host apply "$HOME/.config/clawbox/host-local.yaml" \
-  --profile "$HOME/.config/clawbox/host-local.json"
-for placement in os_default round_robin load_aware; do
-  bash scripts/clawbox experiment configure "$HOME/clawbox-specs/smoke.yaml" \
-    "$HOME/clawbox-specs/$placement.yaml" \
-    --profile "$HOME/.config/clawbox/host-local.json" \
-    --experiment-id "$placement" --placement-policy "$placement" \
-    --baseline fixed-resident --concurrency 2 --repetitions 3
-  bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/$placement.yaml" \
-    --run-id "$placement-01"
-  bash scripts/clawbox --sudo experiment report "$placement-01"
-done
-```
-
-`os_default` 不缩窄单个 VM 的 NUMA 绑定；`round_robin` 按顺序分配计算节点；
-`load_aware` 在满足 CPU 和内存准入条件的节点中选择压力较低者。后二者将同一
-会话的 Runtime 和 Tool 放在同一计算节点，恢复时保持原节点。YAML 中
-`execution.placement_cpu_overcommit` 默认 8，单位为每个计算 CPU 可准入的
-vCPU 数；它不是实际利用率。调整策略或该比值后使用新 run ID，无需重建镜像。
-比较正式任务时替换为已验证的真实 trace、仓库和任务环境；smoke 只验证机制。
-
-### 比较共享池调度
-
-先在没有运行中 VM 时恢复原共享池配置，并生成基准配置：
-
-```bash
-bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
-bash scripts/clawbox --sudo experiment host apply "$HOME/.config/clawbox/host.yaml"
-bash scripts/clawbox experiment configure "$HOME/clawbox-specs/smoke.yaml" \
-  "$HOME/clawbox-specs/pool-base.yaml" --baseline fixed-resident \
-  --placement-policy round_robin --concurrency 16,32,64,128,256 --repetitions 3 \
-  --model-wait-prediction-seconds auto
-```
-
-复制 `pool-base.yaml` 为四份，保持 trace、模板、种子、到达模式及资源预算一致。
-仅按下表编辑 `resources.memory_scheduling` 和 `policies`：
-
-| 比较项 | memory_scheduling | reclamation | eviction | restore |
-| --- | --- | --- | --- | --- |
-| Local-only | `local_only` | `resident` | `none` | `none` |
-| Static Borrowing | `static` | `resident` | `none` | `none` |
-| Snapshot-only | `snapshot_only` | `snapshot_pause` | `wait_aware_pressure` | `reactive` |
-| Joint Scheduling | `joint` | `snapshot_pause` | `wait_aware_pressure` | `reactive` |
-
-`policies[].name` 分别设为 `local-only`、`static-borrowing`、`snapshot-only`、`joint`；
-`admission: fixed` 和 `runtime_control` 保持一致。快照策略使用原有空闲/模型等待
-生命周期，活跃 Tool 不能作为回收对象。配置字段与限制见[调度参考](guide.md#numa-memory-scheduling)。
-`auto` 从输入 replay trace 计算固定的模型等待估计并保存来源；它不是独立预测模型，
-不能用于宣称等待预测的泛化能力。自备预测时同时填写估计秒数和来源。
-
-Snapshot-only 不依赖 live borrowing 开关：保留 WARM 容量和目录即可使用共享池快照，
-NUMA HIGH/LOW 控制也会独立运行。正 WARM 容量必须配置 `warm_snapshot_root`，
-`tiered` 还必须配置 `cold_snapshot_root`，以便容量不足时回退。上述四组比较应保留
-相同主机配置，仅由调度模式禁止借用；若更改主机借用额度，仍需重新 `host apply`。
-修改策略后使用新 run ID 并重新预检，无需重建镜像或重新训练。
-
-Joint 默认在安全空闲 VM 中先尝试 WARM 回收，再尝试 live borrowing。完成一轮
-独立校准后，可以在 Joint YAML 中加入下面的可选配置，让控制器按候选 VM 的配置
-容量比较实测动作代价：
-
-```yaml
-resources:
-  return_cooldown_seconds: 5
-  memory_action_costs:
-    provenance: <CALIBRATION_ARTIFACT_OR_EXPERIMENT_ID>
-    live_borrow_service_seconds_per_gib: <MEASURED_POSITIVE_VALUE>
-    live_borrow_runtime_penalty_seconds_per_gib: <MEASURED_NONNEGATIVE_VALUE>
-    warm_checkpoint_seconds_per_gib: <MEASURED_POSITIVE_VALUE>
-    warm_restore_seconds_per_gib: <MEASURED_POSITIVE_VALUE>
-    cold_checkpoint_seconds_per_gib: <MEASURED_POSITIVE_VALUE>
-    cold_restore_seconds_per_gib: <MEASURED_POSITIVE_VALUE>
-    expected_restore_probability: <VALUE_FROM_0_TO_1>
-    remote_access_latency_ns: <OPTIONAL_MEASURED_POSITIVE_VALUE>
-    remote_stream_bandwidth_mib_per_second: <OPTIONAL_MEASURED_POSITIVE_VALUE>
-```
-
-尖括号是必须替换的占位符，不能直接运行；没有延迟或带宽测量时删除最后两个可选字段。
-六项动作代价的单位都是“秒/配置 VM GiB”；使用 `tiered` 时 COLD 两项必填，
-`warm-only` 可以删除它们。
-`provenance` 必须指向实际校准产物或实验 ID。`expected_restore_probability` 是显式的
-实验假设，不是测量出的硬件属性。原始 NUMA 带宽和延迟不能直接替代这些端到端
-动作代价。删除 `memory_action_costs` 即恢复确定性回退。修改这些字段或冷却时间需要
-新 run ID 和重新预检，不需要 host apply、镜像重建或 ClawTune 重训练。Joint 在
-LOCAL 低于 LOW 且没有阻塞需求时尝试归还一个 VM；只有该 VM 当前实测的 shared
-驻留量回迁后仍不超过 LOCAL HIGH 才执行。若仍有远端页，借用额度继续保留。
-
-分别保存为同名 YAML 后运行：
-
-```bash
-for policy in local-only static-borrowing snapshot-only joint; do
-  bash scripts/clawbox experiment validate "$HOME/clawbox-specs/$policy.yaml" --inputs
-  bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/$policy.yaml" \
-    --run-id "pool-$policy-01"
-  bash scripts/clawbox --sudo experiment report "pool-$policy-01"
-done
-```
-
-先用已验证的真实任务配置替换 smoke，检查任务仓库、起始版本、依赖与 trace 一致。
-不能将 smoke、裁剪任务或未确认起始状态的 trace 当作 SWE-ReBench/TerminalBench
-正式结果。先验证容量受限组，再测试更高并发；Agent 并发不是实际 Tool 并发。
-对 `round_robin` 和 `load_aware` 重复同一内存策略，使用新的 run ID。每组至少三次；
-报告保留失败、OOM、排队超时及清理结果，不能只比较成功样本。
+`describe --json` 列出六维参数、各臂差异、有效资源和依赖；`plan` 展开最终 trial。
+共享池账本、原始 PMU 和状态迁移证据仍由原执行链记录。运行前核对实验矩阵，避免把多个
+方向同时变化的比较解释成单机制贡献。
 
 ## 后台运行与恢复
 
@@ -438,7 +299,7 @@ host reclamation. The ordinary experiment workflow still owns all VMs:
 ```bash
 mkdir -p "$HOME/clawbox-specs"
 python3 scripts/make-memory-reclaim-trace.py "$HOME/clawbox-specs/reclaim-64.jsonl" --allocation-mib 64 --hold-seconds 3 --settle-seconds 5
-bash scripts/clawbox experiment configure examples/experiments/getting-started.yaml "$HOME/clawbox-specs/reclaim.yaml" --trace "$HOME/clawbox-specs/reclaim-64.jsonl" --baseline uncontrolled-resident --concurrency 1 --repetitions 1
+bash scripts/clawbox experiment configure examples/experiments/six-dimension.yaml "$HOME/clawbox-specs/reclaim.yaml" --trace "$HOME/clawbox-specs/reclaim-64.jsonl" --recipe custom --concurrency 1 --repetitions 1
 bash scripts/clawbox experiment validate "$HOME/clawbox-specs/reclaim.yaml" --inputs
 bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/reclaim.yaml" --run-id reclaim-01
 bash scripts/clawbox --sudo experiment report reclaim-01

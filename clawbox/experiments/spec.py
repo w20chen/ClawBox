@@ -58,6 +58,14 @@ class SnapshotResidencyCostSpec(StrictFrozenModel):
     warm_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
     cold_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
 
+
+class IdleReclaimCostSpec(StrictFrozenModel):
+    provenance: str = Field(min_length=1)
+    warm_checkpoint_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
+    warm_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
+    cold_checkpoint_seconds_per_gib: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    cold_restore_seconds_per_gib: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
 class WorkloadCase(StrictFrozenModel):
     case_id: str = Field(min_length=1)
     prompt: str = ""
@@ -189,6 +197,7 @@ class ResourcesSpec(StrictFrozenModel):
     compute_nodes: tuple[ComputeNode, ...] = ()
     target_node: str = Field(min_length=1)
     pool_memory_budget_mib: int = Field(ge=1)
+    physical_live_limit_mib: int | None = Field(default=None, ge=1)
     local_memory_low_watermark_mib: int | None = Field(default=None, ge=1)
     local_memory_high_watermark_mib: int | None = Field(default=None, ge=1)
     shared_memory_borrow_limit_mib: int | None = Field(default=None, ge=0)
@@ -211,6 +220,8 @@ class ResourcesSpec(StrictFrozenModel):
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
     snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"
     snapshot_storage: Literal["tiered", "warm-only"] = "tiered"
+    snapshot_destination: Literal["auto", "cold", "warm"] = "auto"
+    lazy_restore: bool = True
     warm_snapshot_root: str | None = None
     cold_snapshot_root: str | None = None
     local_numa_node: int | None = Field(default=None, ge=0)
@@ -223,6 +234,7 @@ class ResourcesSpec(StrictFrozenModel):
     return_cooldown_seconds: float = Field(default=5, ge=0, allow_inf_nan=False)
     memory_action_costs: MemoryActionCostSpec | None = None
     snapshot_residency_costs: SnapshotResidencyCostSpec | None = None
+    idle_reclaim_costs: IdleReclaimCostSpec | None = None
     template_base_sharing: Literal["disabled", "required"] = "disabled"
 
     def lifecycle_reservation_mib(self, configured_mib: int) -> int:
@@ -235,6 +247,10 @@ class ResourcesSpec(StrictFrozenModel):
 
         Explicit calibrated action destinations take precedence at the call site.
         """
+        if self.snapshot_destination == "cold":
+            return SnapshotTier.COLD
+        if self.snapshot_destination == "warm":
+            return SnapshotTier.WARM
         if self.snapshot_storage == "warm-only" or (
             self.memory_scheduling in {"snapshot_only", "joint"}
             and self.warm_memory_capacity_mib > 0
@@ -244,6 +260,8 @@ class ResourcesSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        if self.snapshot_mechanism == 'incremental-cow' and not self.lazy_restore:
+            raise ValueError('incremental-cow requires lazy_restore=true')
         if self.lifecycle_admission == "os-managed":
             if self.proactive_cache_reclaim:
                 raise ValueError("os-managed requires proactive_cache_reclaim=false; the kernel owns cache reclaim")
@@ -317,6 +335,17 @@ class PolicySpec(StrictFrozenModel):
     restore: RestorePolicy
     template_aware_placement: bool = False
     snapshot_aware_residency: bool = False
+    memory_protection: bool = False
+    cpu_release_boost: bool = False
+    idle_release_ranking: bool = False
+    runtime_snapshot: bool = True
+    resource_overrides: dict[str, Any] = Field(default_factory=dict)
+    execution_overrides: dict[str, Any] = Field(default_factory=dict)
+    mechanisms: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def coordinates_release(self):
+        return self.idle_release_ranking or self.runtime_control.coordinates_release
 
     @model_validator(mode="after")
     def valid_tuple(self) -> "PolicySpec":
@@ -359,6 +388,7 @@ class OutputSpec(StrictFrozenModel):
 
 class ExperimentSpec(StrictFrozenModel):
     schema_version: int
+    design: dict[str, Any] | None = None
     suite: Literal["admission", "numa-snapshot"] | None = None
     suite_ablations: bool = False
     suite_runtime_control: RuntimeControl = RuntimeControl.OFF
@@ -377,11 +407,22 @@ class ExperimentSpec(StrictFrozenModel):
     @model_validator(mode="before")
     @classmethod
     def resolve_suite(cls, raw):
+        if isinstance(raw, dict) and raw.get('schema_version') == 4 and 'environment' in raw:
+            from .design import compile_design
+            return compile_design(raw)
         from .suites import expand_suite
         return expand_suite(raw) if isinstance(raw, dict) else raw
 
     @model_validator(mode="after")
     def validate_v2(self) -> "ExperimentSpec":
+        if self.schema_version == 4:
+            if not self.design or self.suite is not None:
+                raise ValueError('schema 4 requires a six-dimension design, not a legacy suite')
+            if not self.policies or len({p.name for p in self.policies}) != len(self.policies):
+                raise ValueError('comparison requires nonempty, uniquely named arms')
+            for policy in self.policies:
+                effective_spec(self, policy)
+            return self
         if (any(p.runtime_control.adaptive for p in self.policies)
                 and not self.resources.local_memory_cgroup):
             raise ValueError('pressure control requires resources.local_memory_cgroup and verified preallocation VM routing')
@@ -420,7 +461,7 @@ class ExperimentSpec(StrictFrozenModel):
                     "snapshot_aware_residency requires snapshot_reuse_probability for "
                     + ", ".join(missing_reuse)
                 )
-        if scheduling in {"snapshot_only", "joint"} and any(
+        if scheduling == "snapshot_only" and any(
             p.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE for p in self.policies
             if p.deployment != "os-default"
         ):
@@ -431,7 +472,8 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("local_only memory scheduling requires resident policies")
         if scheduling == "joint" and not self.resources.shared_memory_borrow_limit_mib:
             raise ValueError("joint memory scheduling requires a positive shared_memory_borrow_limit_mib")
-        if scheduling in {"snapshot_only", "joint"} and self.resources.warm_memory_capacity_mib:
+        if (scheduling in {"snapshot_only", "joint"} and self.resources.warm_memory_capacity_mib
+                and any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in self.policies)):
             if not (self.resources.warm_snapshot_root or "").strip():
                 raise ValueError("snapshot_only/joint WARM snapshots require resources.warm_snapshot_root")
             if (self.resources.snapshot_storage == "tiered"
@@ -542,12 +584,26 @@ class ExperimentArm(StrictFrozenModel):
     validation: ValidationSpec
 
 
+def effective_spec(spec: ExperimentSpec, policy: PolicySpec) -> ExperimentSpec:
+    """Validate one fully resolved arm through the same worker schema."""
+    raw = spec.model_dump(mode='json')
+    raw.update(schema_version=3, design=None, suite=None, suite_ablations=False)
+    raw['resources'].update(policy.resource_overrides)
+    raw['execution'].update(policy.execution_overrides)
+    raw['policies'] = [policy.model_dump(mode='json')]
+    raw['policies'][0].update(resource_overrides={}, execution_overrides={})
+    return ExperimentSpec.model_validate(raw)
+
+
 def canonical_json(value: BaseModel | dict[str, Any]) -> str:
     raw = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
     return json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def spec_digest(spec: ExperimentSpec) -> str:
+    if spec.schema_version == 4:
+        from .design import export_design
+        return hashlib.sha256(canonical_json(export_design(spec)).encode()).hexdigest()
     return hashlib.sha256(canonical_json(spec).encode()).hexdigest()
 
 
@@ -566,7 +622,10 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                 for policy in spec.policies:
                     resources = spec.resources
                     execution = spec.execution
-                    if policy.deployment == "os-default" or spec.suite == "admission":
+                    if spec.schema_version == 4:
+                        resolved = effective_spec(spec, policy)
+                        resources, execution = resolved.resources, resolved.execution
+                    elif policy.deployment == "os-default" or spec.suite == "admission":
                         # Inherit the same host VM domain and combined live limit.
                         # WARM capacity is not an additional live-memory allowance.
                         capacity = (resources.local_memory_capacity_mib or resources.pool_memory_budget_mib) + (resources.shared_memory_borrow_limit_mib or 0)
@@ -652,6 +711,6 @@ def load_experiment(path: Path) -> ExperimentSpec:
         raise ValueError(f"cannot read experiment {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError("experiment document must be an object")
-    if raw.get("schema_version") != 3:
-        raise ValueError("only schema_version: 3 is supported")
+    if raw.get("schema_version") not in {3, 4}:
+        raise ValueError("use schema_version: 4 for six-dimension experiments")
     return ExperimentSpec.model_validate(raw)

@@ -288,6 +288,23 @@ def render_run_report(run_root: Path) -> str:
         concurrency = max(spec.execution.concurrency_levels)
         offered = _offered_capacity_text(spec, concurrency)
         resources = spec.resources
+        if spec.schema_version == 4:
+            from .spec import effective_spec
+            lines.extend(['Mechanisms are explicit per arm; a configured mechanism can have zero actions.', '',
+                          '| Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint |',
+                          '|---|---|---|---|---|---|---|'])
+            for policy in spec.policies:
+                m = policy.mechanisms
+                lines.append('| ' + ' | '.join((policy.name,
+                    m['admission']['tool'] + '/' + m['admission']['lifecycle_admission'],
+                    m['runtime']['backend'] + f" memory={m['runtime']['memory_protection']} cpu={m['runtime']['cpu_release_boost']} cache={m['runtime']['proactive_cache_reclaim']}",
+                    m['placement']['policy'] + f" affinity={m['placement']['template_affinity']}",
+                    m['idle_reclaim']['policy'] + '/' + m['idle_reclaim']['scope'],
+                    m['shared_memory']['borrow'] + '/' + m['shared_memory']['action_selection'],
+                    '/'.join(m['checkpoint'][key] for key in ('mechanism','storage','residency')))) + ' |')
+            lines.append('')
+            from types import SimpleNamespace
+            resources = SimpleNamespace(**spec.design['environment']['resources'])
         local = resources.local_memory_capacity_mib
         local_text = "unknown" if local is None else f"{local / 1024:g}"
         low = resources.local_memory_low_watermark_mib
@@ -305,9 +322,9 @@ def render_run_report(run_root: Path) -> str:
             f"{resources.warm_memory_capacity_mib / 1024:g} GiB shared pool; "
             f"{(borrow or 0) / 1024:g} GiB maximum live borrow.",
             "",
-            f"Lifecycle admission: `{resources.lifecycle_admission}`; "
-            f"proactive cache reclaim: `{resources.proactive_cache_reclaim}`. "
-            "Configured capacity is offered demand, not measured physical pressure.",
+            ("Lifecycle and cache-reclaim settings are listed per arm. " if spec.schema_version == 4 else
+             f"Lifecycle admission: `{resources.lifecycle_admission}`; proactive cache reclaim: `{resources.proactive_cache_reclaim}`. ")
+            + "Configured capacity is offered demand, not measured physical pressure.",
             "",
         ])
     lines.extend([

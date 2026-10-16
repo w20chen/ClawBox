@@ -23,6 +23,19 @@ The installation helpers support `--help`. Complete command sequences are in
 the installation guide. Keep generated bundles, registration records and logs
 outside this directory; store machine settings under `~/.config/clawbox/`.
 
+Keep local verification outputs in `.verification/`, generated experiment outputs
+in `results/`, and collected traces in the root `traces/` directory. These paths
+are ignored by Git and excluded from Docker build contexts; example traces under
+`examples/traces/` remain versioned. Ignoring a directory does not make its data
+disposable: preserve measurements and logs needed to audit results.
+
+After tests/builds have stopped, Python caches, `build/`, `*.egg-info/`, and old
+`.pytest-tmp*` directories can be regenerated and removed. Do not use blanket
+`git clean -fdx`: ignored directories also contain environments, results and source
+checkouts with local changes. Keep deprecated source as described in
+[project scope](../docs/deprecated.md). For host crash dumps, use the documented
+`experiment host` cleanup preview/apply commands instead of deleting storage by size.
+
 The other scripts support
 installation, image preparation, integration checks, or analysis; they are not
 alternate experiment launch interfaces. The old `scripts/lab` and

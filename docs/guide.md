@@ -29,182 +29,37 @@ absolute paths for trace, prediction, and result files when possible.
 selects the CLI's result directory, independently of
 `output.directory` in the experiment YAML.
 
-## Experiment suites
+## Six-dimension experiments
 
-Use `configure BASE OUTPUT --suite admission` or `--suite numa-snapshot`.
-The default is a two-arm matched comparison. `--ablations` adds intermediate
-arms; `--no-ablations` restores the main comparison. The base supplies workload,
-model and template settings; the applied host profile supplies topology and
-budgets. Reusing a generated YAML preserves its suite. Select a new suite to
-change the research question, then use a new run ID.
+New experiments use schema 4. See [the experiment guide](experiments.md) for the
+six dimensions, recipes, prerequisites, units, defaults and command examples.
+Use `experiment recipes`, `configure --recipe`, `configure --set`, `describe`
+and `experiment schema`. Existing launch/qualify/train/resume/report commands
+execute the resolved design through the same worker.
 
-| Suite | Main baseline | Proposed arm | Extra arms with `--ablations` |
-| --- | --- | --- | --- |
-| `admission` | OS-managed resident VMs, no Tool admission or AgentCgroup | ClawTune prediction + command admission | Fixed allowance and AgentCgroup-only |
-| `numa-snapshot` | OS placement and resident VMs, no ClawBox memory scheduling | Load-aware placement, idle snapshot reclaim, template affinity and snapshot value ranking | Load-aware + LRU, template-only, snapshot-only |
+`comparison.arms[].override` accepts dotted mechanism paths only; environment and
+workload remain common. Recipes generate explicit arms; their labels never change
+execution. `describe --json` includes effective resources and requirements per arm.
+Snapshot/borrow qualification covers each distinct effective configuration.
 
-The baseline is a deployment reference, not a hand-selected admission policy.
-Admission arms use the same OS placement, resident VMs and OS-managed creation.
-The NUMA default baseline inherits the host VM domain's CPU/memory placement and
-uses the same combined live cgroup limit (LOCAL plus configured live-borrow allowance); it has no
-ClawBox borrowing limit, proactive cache reclaim or snapshot scheduling. It
-retains the host's cgroup limits, emergency free-memory guard and CubeSandbox
-checks. WARM snapshot capacity is not added to that live limit. The managed NUMA arms partition LOCAL and WARM,
-using reclaim-then-borrow when a borrow budget exists, otherwise snapshot-only.
-Thus the main NUMA comparison evaluates the complete scheduling design; compare
-its managed ablations to isolate affinity and snapshot ranking individually.
+The sections below describe worker fields and measurement semantics also used
+by existing schema-3 results. In schema 4, physical resource fields live under
+`environment.resources`; decision parameters belong to six `mechanisms` objects;
+prediction and empirical costs belong to `evidence`; sampling and final validation
+belong to `measurement`. The public JSON Schema is the field catalog.
+Old suites and baseline names are not mixed with schema-4 recipes.
 
-Resource control is optional: `--runtime-control off` (suite default),
-`agentcgroup_legacy` (alias `agentcgroup_cgroup`), `phase_memcg`, `release_cpu`,
-`pressure_lifecycle`, or `adaptive_joint`, saved as `suite_runtime_control`.
-See [pressure control](pressure-control.md) for the six comparison arms,
-mechanism prerequisites, YAML options, and reproducible commands.
-The deployment baseline stays off. In the admission suite, enabling it adds
-AgentCgroup to the proposed arm; `--ablations` also includes AgentCgroup without
-admission. Custom recipes can set each `policies[].runtime_control` independently.
-The CLI option applies to all policies in a custom recipe.
-AgentCgroup's public tuning knobs are the polling interval, `memory.high`
-event threshold, parent usage ratio, and protection-window duration. Their
-legacy defaults are 0.5 seconds, 1 event, 0.85, and 1 second. A less aggressive
-follow-up can increase the threshold/ratio or shorten the window. Use a new
-run ID; these changes need neither host apply nor an image rebuild.
+The common environment is validated before arm overrides, including NUMA sums,
+watermarks and shared-pool borrow limits. Every arm uses the same physical live
+boundary. CPU release boost requires managed placement and a LOCAL NUMA node.
+With idle reclaim off, checkpoint encoding, lazy restore, storage and residency
+are inactive, as reported by `describe`. Borrowing alone needs no snapshot paths.
+Selecting the checkpoint recipe requires idle reclaim to be enabled explicitly.
 
-The optional fixed comparator defaults to measured host-growth P90 from the
-validated training artifact; `--static-tool-memory-mib` can tune it. It is not
-the default-deployment baseline. Freeze calibration independently of evaluation.
-One prediction artifact currently covers one repository and Tool environment;
-run separate admission suites for different environments.
-
-The admission suite defaults to `--prediction-mode runtime`: before each Tool
-command, the host queries the trained ClawTune Lattice/Tool KB, then maps the
-guest prediction to host growth using measured calibration. New commands need
-not appear in a precomputed replay list. Keep the matching `NAME.json` and
-`NAME.kb.json` from `experiment train` together; the KB hash is verified. Model
-state remains frozen during evaluation. `--prediction-mode frozen` retains
-exact-command replay predictions. Neither mode invents a zero for missing data;
-unavailable predicted admission fails with the model's reason.
-
-Tune `--prediction-reservation-scale` (positive multiplier, default 1) and
-`--admission-margin-mib` (MiB, default 256). Reservation is
-`ceil(calibrated_host_growth_mib * scale)`, at least 1 MiB. Lower values reduce
-conservatism but can increase pressure/OOM; compare completion rate, memory
-pressure and queue time together. The physical budget and measured outstanding
-growth checks still apply. These edits need a new run ID, not host apply, image
-rebuild or retraining. YAML `resources.observe_predictions: true` collects
-predictions even with admission off; supply the artifact and prediction mode.
-
-The NUMA suite requires compute nodes, positive WARM capacity, a COLD path,
-measured `resources.snapshot_residency_costs` and each case's explicit
-`snapshot_reuse_probability`. Those measurements and probabilities remain
-editable YAML inputs: the system does not invent them. Template sharing is
-qualified automatically. If measured COLD restore is no slower than WARM,
-`configure`/`describe` warns that all retention values are zero; retain this as
-a negative result rather than claiming a WARM advantage.
-
-If qualification fails during external-Base WARM-to-COLD relocation, inspect
-the reported probe `result.json` and `cleanup_errors`. Verify storage capacity
-and install the matching Cubelet/Shim/SDK patch set following
-[installation](installation.md), then rerun `experiment qualify`. Updating
-the Python package does not update the snapshot backend. Do not switch snapshot
-mechanisms or bypass qualification to make a failed comparison run.
-
-Suite YAML can omit `policies`; the suite generates them. `describe` and `plan`
-show the resolved comparison, and the run freezes the **full** effective
-configuration. Conflicting policy edits fail validation. `configure` replaces
-the base's policy recipe with the selected suite and prints the result for
-review; explicit conflicting mechanism options fail. Multi-node total budgets
-are derived from the applied per-node budgets.
-
-For training, smoke tests or a specific diagnostic, use `--baseline` without a
-suite. Available recipes are `default-resident`, `fixed-resident`, `runtime-resident`,
-`predicted-resident`, `uncontrolled-resident`, `prediction-only-resident`, and
-`predicted-wait-snapshot`. Use `default-resident` for ordinary deployment and
-training; the other recipes are useful controlled references. Independent custom policy fields remain
-available in YAML without `suite`; supported eviction is `none` or
-`wait_aware_pressure`, and restore is `none` or `reactive`. Oracle, fixed-delay
-and proactive-restore policies are rejected at schema validation.
-
-The unmodified upstream `memcg_controller.py` from commit
-`551ca1689b7d2d30db6b8a8613414750103cc68b` is bundled and hash-checked.
-Its [provenance and license](../clawbox/experiments/vendor/agentcgroup/PROVENANCE.md)
-are included with the source and Python package.
-`resources.agentcgroup_source` optionally selects an external copy with that
-same hash. This selects the official **cgroup v2 fallback** explicitly.
-`agentcgroup_bpf` is rejected until a patched kernel and descendant fault
-accounting have been qualified; it never silently selects the fallback.
-The upstream sched_ext CPU scheduler is not enabled. HIGH/LOW CPU weights
-are proportional to offered session counts and identical across policies,
-avoiding an accidental 50/50 CPU split between one HIGH session and all LOW
-sessions. These are group shares, not CPU reservations; nested groups and
-disjoint CPU masks can still differ from a flat CPU scheduler under contention.
-
-Apply the host budget before launch: `resources.local_memory_cgroup` defaults
-to `/sys/fs/cgroup/cube_sandbox/sandbox` and must have finite `memory.max` and
-delegated memory, CPU and cpuset controllers. Install the Cubelet/Shim builds
-from the complete `prepare-semantic-source.sh` patch set. Run launch, qualify,
-abort and destroy as root, preserving the configured environment, for example
-`sudo -E "$(command -v clawbox)" --output-root "$CLAWBOX_OUTPUT_ROOT" experiment launch ...`.
-The worker writes root-only cgroup capabilities under `/run/clawbox/cgroups`.
-Concurrent experiments in the same physical cgroup are rejected.
-
-Each repetition assigns exactly one HIGH session, rotating through session
-indices across repetitions. The assignment is identical across policies at
-the same concurrency; use a multiple of the concurrency as the repetition
-count for balanced priorities. The remaining sessions share one LOW group,
-matching the upstream daemon's aggregate LOW layout. Both agent and tool VMs
-keep their session's priority during commands, model waits and restore.
-Creation and restore enter the leaf before guest RAM allocation. Per-node
-CPU/NUMA placement, shared borrowing and snapshot storage remain separate;
-the controller uses one physical budget spanning all simulated compute nodes.
-
-The fallback runs every 100 ms, including periods with no active tools. Its
-upstream triggers are HIGH `memory.events.high`, parent PSI, or parent usage
-at least 85% of `memory.max`. Protection lasts one second: HIGH `memory.low`
-becomes 80% of the parent budget and aggregate LOW `memory.high` becomes 50%.
-Normal values are 0 and `max`. Tool completion never resets this state.
-On kernels without PSI the other two upstream signals remain active and
-results report `psi_available: false`. Required control-file failures fail
-the arm. These controls throttle growth and influence reclaim; they do not
-guarantee host RAM release when a guest frees memory or guarantee no OOM.
-
-Predicted and fixed admission use the same physical-demand ledger. Admission
-checks measured charges plus growth not yet observed, the candidate, and
-`resources.admission_margin_mib` (default 256 MiB) against the global budget.
-It also checks the home-node budget. A shared allocation is credited only after
-the live-borrow pool has granted it. Completed calls release pending demand;
-retained resident pages remain in the next measurement.
-
-A request that fits proceeds immediately. Excess predicted demand queues before
-execution; observed sustained congestion also closes the gate (90% occupancy
-with at least 10% PSI stalls or heavy ineffective reclaim), reopening when
-committed demand falls to 80% or severe pressure has subsided for one second.
-The demand/capacity check still applies after reopening; retained VM backing
-alone must not leave the pressure gate closed forever. These are admission heuristics, separate from the
-unchanged upstream controller, and do not guarantee no OOM. Requests that cannot
-make progress expire at the configured deadline; no oversized request is admitted
-merely because the active set is empty. `admission: "off"` bypasses this tool gate
-and does not load prediction artifacts unless `observe_predictions` is enabled.
-`startup_headroom_mib` defaults to 256 MiB in configured-capacity lifecycle mode;
-OS-managed creation has no capacity reservation or measured-budget queue.
-
-`experiment train` emits `clawbox_prediction_v2`: frozen ClawTune guest P50
-predictions plus a measured guest-to-host cgroup increment calibration from a
-separate validated training run. Host cgroup growth is sampled alongside guest
-measurements in every policy. RSS is reported separately. Guest values are never
-implicitly treated as host memory. Missing predictions/calibration fail explicitly;
-short duration without memory observations does not establish a zero estimate.
-Recollect training data when the artifact lacks this measurement contract.
-
-Choose a suite or explicit diagnostic recipes. `--runtime-control` switches
-AgentCgroup independently; admission and reclamation mechanisms are selected by
-the recipe, with additional tuning available in YAML.
-
-`--static-tool-memory-mib auto` uses the measured 90th percentile of
-host cgroup execution growth from a validated training run. The
-`--model-wait-prediction-seconds auto` value comes from the current
-trace's median model-call duration, scaled by `time_scale`. Both
-values and their sources are frozen when the YAML is generated; a
-formal run does not train them online.
+Dimensions have dependencies: `runtime.pressure_control` also supplies release
+ranking thresholds, and `checkpoint.pool_transfer_*` also governs shared-memory
+transfers. Hold these parameters fixed in comparisons of the affected mechanisms.
+Recipes reject incompatible inherited settings rather than changing other dimensions.
 
 ## Experiment YAML fields
 

@@ -58,6 +58,8 @@ def expand_suite(raw: dict, *, replace: bool = False) -> dict:
             eviction="wait_aware_pressure" if snapshots else "none",
             restore="reactive" if snapshots else "none",
             template_aware_placement=template, snapshot_aware_residency=snapshot,
+            memory_protection=False, cpu_release_boost=False, idle_release_ranking=False,
+            runtime_snapshot=True, resource_overrides={}, execution_overrides={}, mechanisms={},
         ))
 
     if suite == "admission":

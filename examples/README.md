@@ -7,6 +7,7 @@ layout and capacities. Save generated experiment YAMLs outside this directory.
 | File or directory | Use |
 | --- | --- |
 | [clawbox-machine.env.example](clawbox-machine.env.example) | Copy to `~/.config/clawbox/machine.env` and supply this host's addresses, source paths and image/template identities. |
+| [experiments/six-dimension.yaml](experiments/six-dimension.yaml) | Schema-4 starter; use `configure --recipe` and review the six-dimension matrix. |
 | [experiments/getting-started.yaml](experiments/getting-started.yaml) | Starting configuration for a small end-to-end experiment; configure its placeholders before launching. |
 | [traces/smoke.jsonl](traces/smoke.jsonl) | Minimal replay input for checking the execution path. |
 | [traces/memory-smoke.jsonl](traces/memory-smoke.jsonl) | Longer memory workload used by the training walkthrough. |

@@ -47,6 +47,24 @@ def positive_float_or_auto(value: str) -> float | str:
 
 
 def emit_overview(value: dict[str, Any]) -> None:
+    if 'dimensions' in value:
+        print(f"Experiment: {value['experiment_id']} | recipe: {value['recipe']} | trials: {value['arm_count']}")
+        print('Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint')
+        for arm in value['arms']:
+            m = arm['mechanisms']
+            print(' | '.join((arm['name'],
+                m['admission']['tool'] + '/' + m['admission']['lifecycle_admission'],
+                m['runtime']['backend'] + f" mem={m['runtime']['memory_protection']} cpu={m['runtime']['cpu_release_boost']} cache={m['runtime']['proactive_cache_reclaim']}",
+                m['placement']['policy'] + f" affinity={m['placement']['template_affinity']}",
+                m['idle_reclaim']['policy'] + '/' + m['idle_reclaim']['scope'],
+                m['shared_memory']['borrow'] + '/' + m['shared_memory']['action_selection'],
+                '/'.join(m['checkpoint'][k] for k in ('mechanism', 'storage', 'residency')))))
+            for key, item in arm['differences'].items():
+                print(f'  {key} = {item}')
+            for warning in arm['warnings']:
+                print(f'  Warning: {warning}')
+        print('Use describe --json for full effective resources and evidence; launch verifies prerequisites.')
+        return
     """Render the pre-run resource shape for a human at the terminal."""
     runtime = value["runtime"]
     tool = value["tool"]
@@ -153,6 +171,9 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="group", required=True)
     experiment = commands.add_parser("experiment")
     sub = experiment.add_subparsers(dest="command", required=True)
+    catalog = sub.add_parser('recipes', help='list six-dimension experiment recipes')
+    catalog.add_argument('--json', action='store_true', dest='as_json')
+    sub.add_parser('schema', help='print the complete editable schema-4 JSON Schema')
     for name in ("validate", "plan", "run"):
         command = sub.add_parser(name)
         command.add_argument("spec", type=Path)
@@ -261,14 +282,14 @@ def parser() -> argparse.ArgumentParser:
     describe.add_argument("spec", type=Path)
     describe.add_argument("--json", action="store_true", dest="as_json")
     baselines = sub.add_parser(
-        "baselines", help="list complete baseline tuples accepted by configure",
+        "baselines", help="list older schema-3 presets; use recipes for new experiments",
     )
     baselines.add_argument("--all", action="store_true", help="include deprecated policies")
     baselines.add_argument("--json", action="store_true", dest="as_json")
     configure = sub.add_parser(
-        "configure", help="create a validated schema-v3 experiment YAML from a checked-in example",
+        "configure", help="create an editable experiment and explicit comparison matrix",
     )
-    configure.add_argument("base", type=Path, help="complete schema-v3 YAML to use as a base")
+    configure.add_argument("base", type=Path, help="six-dimension YAML, or an existing input with --recipe")
     configure.add_argument("output", type=Path, help="new experiment YAML")
     configure.add_argument(
         "--profile", type=Path,
@@ -277,6 +298,12 @@ def parser() -> argparse.ArgumentParser:
     )
     configure.add_argument("--force", action="store_true", help="replace the output file")
     configure.add_argument("--experiment-id")
+    from clawbox.experiments.design import RECIPES
+    configure.add_argument('--recipe', choices=RECIPES,
+                           help='generate explicit six-dimension comparison arms (schema 4)')
+    configure.add_argument('--checkpoint-axis', choices=('encoding', 'storage', 'residency'))
+    configure.add_argument('--set', action='append', default=[], dest='mechanism_settings',
+                           metavar='DIMENSION.FIELD=VALUE', help='edit a common mechanism field using a YAML value')
     configure.add_argument("--suite", choices=("admission", "numa-snapshot"),
                            help="generate a matched two-arm comparison")
     configure.add_argument("--ablations", action=argparse.BooleanOptionalAction, default=None,
@@ -572,6 +599,24 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "launch":
             return launch_experiment(args)
+        if args.command == 'schema':
+            from clawbox.experiments.design import Design
+            emit(Design.model_json_schema())
+            return 0
+        if args.command == 'recipes':
+            from clawbox.experiments.design import RECIPES, recipe_arms
+            rows = []
+            for recipe in RECIPES:
+                for axis in (('encoding', 'storage', 'residency') if recipe == 'checkpoint' else (None,)):
+                    rows.append(dict(recipe=recipe, checkpoint_axis=axis,
+                                     arms=recipe_arms(recipe, checkpoint_axis=axis)))
+            if args.as_json:
+                emit(rows)
+            else:
+                for row in rows:
+                    print(row['recipe'] + (('/'+row['checkpoint_axis']) if row['checkpoint_axis'] else '')
+                          + ': ' + ', '.join(a['name'] for a in row['arms']))
+            return 0
         if args.command == "baselines":
             admission_required = {
                 'fixed': ['resources.static_tool_memory_mib'],
@@ -681,6 +726,9 @@ def main(argv: list[str] | None = None) -> int:
 
             spec = configure_experiment(
                 args.base,
+                recipe=args.recipe,
+                checkpoint_axis=args.checkpoint_axis,
+                mechanism_settings=args.mechanism_settings,
                 suite=args.suite,
                 suite_ablations=args.ablations,
                 runtime_control=args.runtime_control,

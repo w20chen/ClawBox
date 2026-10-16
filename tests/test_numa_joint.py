@@ -235,7 +235,7 @@ def test_joint_uses_calibrated_order_and_records_candidate_costs():
         local_memory_high_watermark_mib=32*1024,
         local_memory_capacity_mib=36*1024,
         memory_scheduling='joint', borrow_cooldown_seconds=0,
-        return_cooldown_seconds=0, memory_action_costs=costs),
+        return_cooldown_seconds=0, memory_action_costs=costs, snapshot_destination='auto'),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     c = WatermarkController(
         arm, coordinator, SimpleNamespace(), Borrower(),
@@ -252,7 +252,8 @@ def test_joint_uses_calibrated_order_and_records_candidate_costs():
         decision['cost_estimates']['reclaim']['estimated_seconds']
 
 
-def test_calibrated_joint_plans_cold_when_warm_capacity_is_reserved():
+@pytest.mark.parametrize('forced_cold', [False, True])
+def test_calibrated_joint_plans_cold_when_warm_capacity_is_reserved(forced_cold):
     gib = 1024**3
     costs = MemoryActionCostSpec(
         provenance='/results/calibration.json',
@@ -265,7 +266,8 @@ def test_calibrated_joint_plans_cold_when_warm_capacity_is_reserved():
         expected_restore_probability=1,
     )
     pool = WarmSnapshotPool(8*gib, borrow_capacity_bytes=8*gib)
-    pool.reserve_borrow('existing-vm', 8*gib)
+    if not forced_cold:
+        pool.reserve_borrow('existing-vm', 8*gib)
     events, tiers = [], []
     coordinator = SimpleNamespace(
         evict_one_for_watermark=lambda **kwargs: tiers.append(kwargs['tier']) or True,
@@ -281,7 +283,8 @@ def test_calibrated_joint_plans_cold_when_warm_capacity_is_reserved():
         local_memory_capacity_mib=36*1024,
         memory_scheduling='joint', borrow_cooldown_seconds=0,
         return_cooldown_seconds=0, memory_action_costs=costs,
-        snapshot_storage='tiered', cold_snapshot_root='/cold'),
+        snapshot_storage='tiered', cold_snapshot_root='/cold',
+        snapshot_destination='cold' if forced_cold else 'auto'),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     borrower = SimpleNamespace(
         node_id='node0', shared_pool=pool, borrowed=lambda: ('existing-vm',),

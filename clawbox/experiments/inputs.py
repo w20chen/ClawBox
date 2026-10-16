@@ -42,6 +42,11 @@ def inspect_trace(path: Path) -> dict:
 
 
 def validate_inputs(spec: ExperimentSpec) -> dict:
+    if spec.schema_version == 4:
+        from .spec import effective_spec
+        results = [validate_inputs(effective_spec(spec, p)) for p in spec.policies]
+        return {'traces': results[0]['traces'],
+                'prediction_files': sorted({path for result in results for path in result['prediction_files']})}
     limit = spec.inference.configuration.get("max_model_steps")
     if limit is not None and (
         spec.inference.backend is not InferenceBackend.REPLAY

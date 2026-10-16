@@ -16,13 +16,12 @@ assistant or Kubernetes. Live experiments require an ARM64 Linux/KVM host,
 patched CubeSandbox, and compatible guest images and kernel files. The
 repository does not include ready-to-run guest images.
 
-Experiment YAML uses schema version 3. Runtime control, admission, and snapshot
-reclamation are independent settings. The runtime controller uses the unmodified,
-pinned AgentCgroup **cgroup v2 fallback**, adapted to stable VM priority groups;
-it does not enable upstream BPF or CPU scheduling. Compare `runtime-resident`
-with `predicted-resident` to measure the contribution of predictive admission,
-or use the [four-policy ablation](examples/experiments/control-ablation.yaml).
-Apply the same policy matrix separately to each host architecture.
+New experiments use schema version 4 with six explicit mechanism dimensions:
+admission, runtime resource allocation, placement, idle reclamation, shared-memory
+borrowing, and checkpoint storage. Use `experiment recipes` to select a research
+question, `configure --recipe ...` to generate editable arms, and `describe` to
+review their effective mechanisms. Recipe and arm names never select execution
+behavior. See the [six-dimension experiment guide](docs/experiments.md).
 
 | Task | Documentation |
 | --- | --- |
@@ -33,7 +32,7 @@ Apply the same policy matrix separately to each host architecture.
 | Understand congestion control, admission, snapshots, memory accounting, and PMU limits | [Execution and measurement](docs/design.md) |
 | Analyze a separate four-call CPU placement study | [Placement analysis](docs/placement.md) |
 
-The [starter configuration](examples/experiments/getting-started.yaml) and
+The [starter configuration](examples/experiments/six-dimension.yaml) and
 [smoke trace](examples/traces/smoke.jsonl) are the smallest example inputs.
 The [example index](examples/README.md) distinguishes starter inputs, comparison
 templates, and historical fixtures.
@@ -45,7 +44,7 @@ fixtures, not current prediction artifacts. Generate a new frozen prediction
 file with `clawbox experiment train` from separate, validated training runs.
 
 Use `clawbox experiment --help` and each subcommand's `--help` for current
-options. Experiment fields are defined in [spec.py](clawbox/experiments/spec.py).
+options. Use `clawbox experiment schema` for every public field and default; the design is defined in [design.py](clawbox/experiments/design.py).
 Developers can run `python -m pytest`; update the relevant reference page
 when changing a public option, and keep the full command sequence in the
 step-by-step guide.

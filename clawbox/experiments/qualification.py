@@ -110,6 +110,12 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
 
 
 def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> None:
+    if spec.schema_version == 4:
+        from .spec import ResourcesSpec
+        # Host configuration is common, regardless of an arm disabling borrowing.
+        physical = ResourcesSpec.model_validate({**spec.resources.model_dump(mode='json'),
+                                                **spec.design['environment']['resources']})
+        spec = spec.model_copy(update={'schema_version': 3, 'resources': physical})
     profile = host_profile_for(spec)
     apply_environment(profile)
     sibling_clawtune = Path(__file__).resolve().parents[3] / "ClawTune"
@@ -155,6 +161,8 @@ def _node_spec(spec, node):
 
 def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=None,
                             _template: str | None = None) -> dict[str, Any]:
+    if spec.schema_version == 4:
+        return design_probes(spec, snapshot_roundtrip_test, artifact_root=artifact_root)
     """Exercise checkpoint/restore and placement on every compute node."""
     if _template is None:
         sandboxes = {}
@@ -242,7 +250,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         snapshot_reservation_bytes=(spec.sandbox.memory_mib + 256) * 1024 * 1024,
         snapshot_mechanism=spec.resources.snapshot_mechanism,
         snapshot_storage=spec.resources.snapshot_storage,
-        lazy_restore=True,
+        lazy_restore=spec.resources.lazy_restore,
         numa_borrower=SandboxNumaBorrower(
             Path(spec.resources.local_memory_cgroup), local_node=spec.resources.local_numa_node,
             shared_node=spec.resources.warm_numa_node, shared_pool=pool,
@@ -267,6 +275,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 generation == generations
                 and spec.resources.snapshot_storage == "tiered"
                 and pool is not None
+                and spec.resources.snapshot_destination != 'cold'
             ):
                 committed = int(pool.snapshot()["committed_bytes"])
                 if committed <= 0 or committed > pool.capacity_bytes:
@@ -399,6 +408,8 @@ def _borrow_allocation_command(probe_id: str, maximum_mib: int) -> str:
 def live_borrow_roundtrip_test(
     spec: ExperimentSpec, *, artifact_root: Path, _node=None,
 ) -> dict[str, Any]:
+    if spec.schema_version == 4:
+        return design_probes(spec, live_borrow_roundtrip_test, artifact_root=artifact_root)
     """Prove a VM on each compute node can borrow and return without interruption."""
     limit_mib = spec.resources.shared_memory_borrow_limit_mib
     if not limit_mib:
@@ -661,6 +672,8 @@ def _same_template_ram_mapping(left: dict[str, Any], right: dict[str, Any]) -> b
 
 
 def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> dict[str, Any]:
+    if spec.schema_version == 4:
+        return design_probes(spec, template_base_sharing_test, artifact_root=artifact_root)
     """Prove two VMs physically share a large file-backed template mapping."""
     required = spec.resources.template_base_sharing == "required"
     if not required:
@@ -831,6 +844,33 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     mismatches = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
+    if receipt.get("concurrency", 0) < max(spec.execution.concurrency_levels):
+        mismatches.append("concurrency")
+    if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
+        mismatches.append("policy_names")
+    if spec.schema_version == 4:
+        from .spec import effective_spec
+        for policy in spec.policies:
+            child = effective_spec(spec, policy)
+            evidence = {}
+            for key in ('runtime_control_test', 'snapshot_roundtrip_test',
+                        'live_borrow_roundtrip_test', 'template_base_sharing_test'):
+                group = receipt.get(key, {})
+                probe_id = group.get('by_policy', {}).get(policy.name)
+                evidence[key] = group.get('probes', {}).get(probe_id, {})
+            mismatches.extend(policy.name + ':' + key for key in _probe_mismatches(child, evidence))
+    else:
+        mismatches.extend(_probe_mismatches(spec, receipt))
+    if mismatches:
+        raise ValueError(
+            "qualification receipt does not cover this experiment: "
+            + ", ".join(dict.fromkeys(mismatches))
+        )
+    return receipt
+
+
+def _probe_mismatches(spec, receipt):
+    mismatches = []
     if spec.resources.local_memory_cgroup and not (
         isinstance(receipt.get('runtime_control_test'), dict)
         and receipt['runtime_control_test'].get('passed') is True
@@ -841,10 +881,6 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
              or receipt['runtime_control_test'].get('restore_verified') is True)
     ):
         mismatches.append('runtime_control_test')
-    if receipt.get("concurrency", 0) < max(spec.execution.concurrency_levels):
-        mismatches.append("concurrency")
-    if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
-        mismatches.append("policy_names")
     if spec.resources.template_base_sharing == "required" and not (
         isinstance(receipt.get("template_base_sharing_test"), dict)
         and receipt["template_base_sharing_test"].get("passed") is True
@@ -870,6 +906,7 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         and (
             spec.resources.snapshot_storage != "tiered"
             or spec.resources.warm_memory_capacity_mib <= 0
+            or spec.resources.snapshot_destination == 'cold'
             or receipt["snapshot_roundtrip_test"].get(
                 "cold_relocation_verified"
             ) is True
@@ -885,9 +922,32 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         == spec.resources.warm_memory_capacity_mib * 1024 * 1024
     ):
         mismatches.append("live_borrow_roundtrip_test")
-    if mismatches:
-        raise ValueError(
-            "qualification receipt does not cover this experiment: "
-            + ", ".join(dict.fromkeys(mismatches))
-        )
-    return receipt
+    return mismatches
+
+
+def design_probes(spec, probe, *, artifact_root):
+    """Qualify every distinct effective mechanism, reusing identical probes."""
+    from .spec import effective_spec, canonical_json
+    groups, policies = {}, {}
+    for policy in spec.policies:
+        child = effective_spec(spec, policy)
+        resources = child.resources.model_dump(mode='json')
+        # Prediction amounts and controller tuning do not alter snapshot/borrow
+        # semantics. Hash only the settings consumed by these probes.
+        keys = ('compute_nodes', 'target_node', 'local_memory_cgroup', 'local_numa_node',
+                'warm_numa_node', 'warm_memory_capacity_mib', 'warm_snapshot_root',
+                'cold_snapshot_root', 'snapshot_mechanism', 'snapshot_storage',
+                'snapshot_destination', 'lazy_restore', 'shared_memory_borrow_limit_mib',
+                'pool_transfer_concurrency', 'pool_transfer_timeout_seconds',
+                'template_base_sharing', 'agentcgroup_source',
+                'agentcgroup_poll_interval_seconds', 'agentcgroup_event_threshold',
+                'agentcgroup_pressure_ratio', 'agentcgroup_protection_window_seconds')
+        identity = {key: resources[key] for key in keys}
+        identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'
+        digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:16]
+        policies[policy.name] = digest
+        if digest not in groups:
+            groups[digest] = probe(child, artifact_root=artifact_root / digest)
+    return {'required': any(p.get('required', True) for p in groups.values()),
+            'passed': all(p.get('passed') is True for p in groups.values()),
+            'by_policy': policies, 'probes': groups}

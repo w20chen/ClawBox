@@ -1,0 +1,43 @@
+# Configure with the applied host profile before launching.
+schema_version: 4
+experiment_id: six-dimension-smoke
+environment:
+  runtime: {template_alias: runtime-example-arm64, vcpu: 2, memory_mib: 2048}
+  sandbox: {template_alias: tool-example-arm64, vcpu: 2, memory_mib: 4096, workspace: /workspace}
+  resources:
+    target_node: replace-with-your-cubesandbox-node
+    pool_memory_budget_mib: 16384
+    emergency_free_memory_mib: 1024
+    cold_snapshot_root: /data/clawbox/cold
+workload:
+  source: recorded_trace
+  input: examples/traces/smoke.jsonl
+  repetitions: 1
+  cases:
+    - case_id: marker
+      source: recorded_trace
+      source_reference: examples/traces/smoke.jsonl
+      replay_trace_reference: examples/traces/smoke.jsonl
+      prompt: Create /workspace/result.txt containing complete.
+agent: {driver: openclaw}
+inference: {backend: replay, configuration: {model: example-model, time_scale: 1.0}}
+evidence: {}
+measurement:
+  validation: {command: 'test "$(cat /workspace/result.txt)" = complete'}
+  output: {directory: /results}
+mechanisms:
+  admission: {tool: 'off', lifecycle_admission: configured-capacity}
+  runtime: {backend: neutral, memory_protection: false, cpu_release_boost: false, proactive_cache_reclaim: false}
+  placement: {policy: round_robin, template_affinity: false}
+  idle_reclaim: {policy: 'off', scope: tool}
+  shared_memory: {borrow: 'off', action_selection: reclaim_first}
+  checkpoint: {mechanism: incremental-cow, lazy_restore: true, storage: disk, residency: lru}
+comparison:
+  recipe: custom
+  arms:
+    - {name: managed-neutral}
+execution:
+  concurrency_levels: [1]
+  random_seed: 0
+  arm_timeout_seconds: 300
+  command_timeout_seconds: 60

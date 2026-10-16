@@ -405,8 +405,8 @@ class WatermarkController:
         reclaim_candidate = (
             reclaim_candidate_fn() if reclaim_candidate_fn is not None else None
         )
-        reclaim_tier = 'warm'
-        if reclaim_candidate is not None:
+        reclaim_tier = 'cold' if self.arm.resources.snapshot_destination == 'cold' else 'warm'
+        if reclaim_candidate is not None and reclaim_tier == 'warm':
             pool = self.shared_pool.snapshot()
             warm_usage = (
                 int(pool['borrowed_bytes']) + int(pool['reserved_bytes'])
@@ -1220,9 +1220,9 @@ class ExperimentWorker:
             NumaCgroupMemorySampler(
                 Path(arm.resources.local_memory_cgroup),
                 local_capacity_bytes=arm.resources.local_memory_capacity_mib * 1024 * 1024,
-                total_capacity_bytes=(
+                total_capacity_bytes=(arm.resources.physical_live_limit_mib or (
                     arm.resources.local_memory_capacity_mib + (shared_borrow_mib or 0)
-                ) * 1024 * 1024,
+                )) * 1024 * 1024,
                 local_numa_node=(arm.resources.compute_nodes[0].numa_node
                                  if arm.resources.compute_nodes else arm.resources.local_numa_node),
                 local_numa_nodes=tuple(n.numa_node for n in arm.resources.compute_nodes),
@@ -1236,6 +1236,7 @@ class ExperimentWorker:
                 capacity_bytes=(arm.resources.local_memory_capacity_mib or
                                 arm.resources.pool_memory_budget_mib) * 1024 * 1024,
                 numa_node=arm.resources.local_numa_node,
+                physical_limit_bytes=(arm.resources.physical_live_limit_mib * 1024**2 if arm.resources.physical_live_limit_mib else None),
                 interval_s=arm.execution.memory_sample_interval_seconds,
             )
             if arm.resources.local_memory_cgroup else
@@ -1294,6 +1295,7 @@ class ExperimentWorker:
                 )
         prediction_provider = next(iter(prediction_providers.values()), None)
         global_sampler = CgroupMemorySampler(Path(arm.resources.local_memory_cgroup),
+            physical_limit_bytes=(arm.resources.physical_live_limit_mib * 1024**2 if arm.resources.physical_live_limit_mib else None),
             capacity_bytes=((arm.resources.local_memory_capacity_mib or arm.resources.pool_memory_budget_mib)
                             + (shared_borrow_mib or 0))*1024**2)
         demand_ledger = DemandLedger(sample=global_sampler.current, capacity=global_sampler.total,
@@ -1323,7 +1325,7 @@ class ExperimentWorker:
                 domain_sampler = NumaCgroupMemorySampler(
                     Path(arm.resources.local_memory_cgroup),
                     local_capacity_bytes=node.memory_capacity_mib * 1024 * 1024,
-                    total_capacity_bytes=(arm.resources.local_memory_capacity_mib + (shared_borrow_mib or 0)) * 1024 * 1024,
+                    total_capacity_bytes=(arm.resources.physical_live_limit_mib or (arm.resources.local_memory_capacity_mib + (shared_borrow_mib or 0))) * 1024 * 1024,
                     local_numa_node=node.numa_node, shared_numa_node=arm.resources.warm_numa_node,
                     interval_s=arm.execution.memory_sample_interval_seconds,
                 )
@@ -1340,9 +1342,9 @@ class ExperimentWorker:
                                and arm.resources.proactive_cache_reclaim else None),
                 on_pressure_pause=record_pressure_pause,
             )
-            if arm.policy.runtime_control.coordinates_release:
+            if arm.policy.coordinates_release:
                 coordinator.release_options = arm.resources.pressure_control
-                coordinator.release_costs = arm.resources.memory_action_costs
+                coordinator.release_costs = arm.resources.idle_reclaim_costs or arm.resources.memory_action_costs
             numa_borrower = (
                 SandboxNumaBorrower(
                     Path(arm.resources.local_memory_cgroup),
@@ -1450,6 +1452,8 @@ class ExperimentWorker:
                 ) if arm.policy.runtime_control.legacy else PressureControl(
                     Path(arm.resources.local_memory_cgroup), mode=arm.policy.runtime_control,
                     options=arm.resources.pressure_control,
+                    memory_protection=arm.policy.memory_protection,
+                    cpu_release_boost=arm.policy.cpu_release_boost,
                     interval=arm.resources.agentcgroup_poll_interval_seconds, emit=events.write)
                 self._runtime_memory.start()
                 demand_ledger.check = self._runtime_memory.check
@@ -2093,7 +2097,7 @@ class ExperimentWorker:
             warm_snapshot_root=arm.resources.warm_snapshot_root,
             snapshot_mechanism=arm.resources.snapshot_mechanism,
             snapshot_storage=arm.resources.snapshot_storage,
-            lazy_restore=True,
+            lazy_restore=arm.resources.lazy_restore,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             default_snapshot_tier=arm.resources.default_snapshot_tier,
@@ -2142,7 +2146,7 @@ class ExperimentWorker:
             warm_snapshot_root=arm.resources.warm_snapshot_root,
             snapshot_mechanism=arm.resources.snapshot_mechanism,
             snapshot_storage=arm.resources.snapshot_storage,
-            lazy_restore=True,
+            lazy_restore=arm.resources.lazy_restore,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             default_snapshot_tier=arm.resources.default_snapshot_tier,
@@ -2199,7 +2203,8 @@ class ExperimentWorker:
             # next SSH admission.
             runtime_snapshot_enabled = (
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
-                and not arm.policy.runtime_control.coordinates_release
+                and not arm.policy.coordinates_release
+                and arm.policy.runtime_snapshot
             )
             prediction_wait = inference_configuration.get("model_wait_prediction_seconds")
             prediction_source = inference_configuration.get(
@@ -2394,7 +2399,7 @@ class ExperimentWorker:
                         session_id, request_id, prediction_wait,
                     )
                 if (arm.policy.reclamation is ReclamationPolicy.RESIDENT
-                        or arm.policy.runtime_control.coordinates_release):
+                        or arm.policy.coordinates_release):
                     return
                 target_tier = None
                 delay = 0.0 if coordinator.blocked_demand_pressure() else None

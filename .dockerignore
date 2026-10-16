@@ -1,6 +1,12 @@
 .git
 .artifacts
 .verification
+.local
+traces
+.hypothesis
+.tox
+coverage.xml
+junit.xml
 .experiment-audit
 .clawbox-workspaces
 .tmp-*
