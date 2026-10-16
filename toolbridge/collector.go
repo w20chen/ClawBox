@@ -555,7 +555,11 @@ func readSettledCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, me
 	if !ok || cpuUsageUs > 0 || pids > 0 || memPeak <= 0 {
 		return
 	}
-	deadline := time.Now().Add(50 * time.Millisecond)
+	// Under high VM concurrency, the kernel can publish the final cpu.stat
+	// charge noticeably later than memory.peak.  Keep the strict cgroup-v2
+	// requirement, but give that asynchronous accounting a bounded chance to
+	// settle before truthfully falling back to process-tree telemetry.
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 		cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes, pids, ok = readCgroupCounters(path)

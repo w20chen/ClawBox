@@ -1,3 +1,5 @@
+You've already spent a lot of time fixing issues. But this is just a paper project to test the effectiveness of our ideas, not an industry product. So you don't need to make it overly robust. As long as the bugs/errors/issues don't affect the results for our ideas, it's fine to keep the results or even ignore some issues. You don't have to rerun or rebuild again and again and waste my time.
+
 # Project scope
 
 - The supported product is the standalone `clawbox experiment` workflow,

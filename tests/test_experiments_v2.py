@@ -14,8 +14,9 @@ from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
     EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
-    WatermarkController, policy_operation_headroom_mib, policy_progress_budget_mib,
-    session_case_for,
+    WatermarkController, policy_event_workers, policy_operation_headroom_mib,
+    policy_progress_budget_mib,
+    read_priority_memory_charge, session_case_for,
 )
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.numa_borrow import NumaBorrowRecord
@@ -28,6 +29,23 @@ def test_explicit_null_disables_arm_deadline() -> None:
     with pytest.raises(ValueError):
         ExecutionSpec(arm_timeout_seconds=None)
     assert ExecutionSpec().arm_timeout_seconds == 1800
+
+
+def test_priority_memory_charge_treats_a_cleaned_cgroup_as_zero(tmp_path: Path) -> None:
+    removed = tmp_path / "session-0001"
+    assert read_priority_memory_charge(removed, None) == (0, 0)
+
+    live = tmp_path / "session-0002"
+    live.mkdir()
+    with pytest.raises(FileNotFoundError):
+        read_priority_memory_charge(live, None)
+
+
+def test_policy_event_workers_honors_snapshot_transfer_concurrency() -> None:
+    arm = SimpleNamespace(
+        resources=SimpleNamespace(pool_transfer_concurrency=7),
+    )
+    assert policy_event_workers(arm) == 7
 
 
 def test_incremental_snapshot_is_default() -> None:

@@ -334,7 +334,7 @@ new file mode 100644
 index 0000000..baa77e1
 --- /dev/null
 +++ b/Cubelet/services/cubebox/incremental_memory.go
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,82 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package cubebox
 +
@@ -353,6 +353,17 @@ index 0000000..baa77e1
 +	GPA uint64 `json:"gpa"`
 +	Offset uint64 `json:"offset"`
 +	Length uint64 `json:"length"`
++}
++
++var warmFallocate = unix.Fallocate
++
++func allocateWarmRange(fd int, offset, length int64) error {
++	for {
++		err := warmFallocate(fd, 0, offset, length)
++		if err != unix.EINTR {
++			return err
++		}
++	}
 +}
 +
 +// Allocation executes in Cubelet's storage cgroup. The frozen VMM supplies
@@ -387,7 +398,7 @@ index 0000000..baa77e1
 +				err = fmt.Errorf("invalid dirty allocation range")
 +				break
 +			}
-+			err = unix.Fallocate(int(file.Fd()), 0, int64(r.Offset), int64(r.Length))
++			err = allocateWarmRange(int(file.Fd()), int64(r.Offset), int64(r.Length))
 +			previousEnd = r.Offset + r.Length
 +		}
 +		response := map[string]interface{}{"ok": err == nil}
@@ -411,7 +422,7 @@ new file mode 100644
 index 0000000..e839464
 --- /dev/null
 +++ b/Cubelet/services/cubebox/incremental_memory_test.go
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,154 @@
 +package cubebox
 +
 +import (
@@ -424,6 +435,22 @@ index 0000000..e839464
 +    cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 +    "golang.org/x/sys/unix"
 +)
++
++func TestAllocateWarmRangeRetriesEINTR(t *testing.T) {
++    original := warmFallocate
++    defer func() { warmFallocate = original }()
++    calls := 0
++    warmFallocate = func(fd int, mode uint32, off int64, length int64) error {
++        calls++
++        if calls == 1 {
++            return unix.EINTR
++        }
++        return nil
++    }
++    if err := allocateWarmRange(1, 2, 3); err != nil || calls != 2 {
++        t.Fatalf("EINTR was not retried exactly once: calls=%d err=%v", calls, err)
++    }
++}
 +
 +func TestDirectPauseMemoryPathAcceptsConfiguredWarmRoot(t *testing.T) {
 +    t.Setenv("CLAWBOX_WARM_SNAPSHOT_ROOT", "/mnt/clawbox-warm")

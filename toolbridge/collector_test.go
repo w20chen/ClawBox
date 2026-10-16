@@ -159,7 +159,9 @@ func TestReadSettledCgroupCountersWaitsForDelayedCPUCharge(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		time.Sleep(5 * time.Millisecond)
+		// This must exceed the former 50 ms deadline: the regression only
+		// appeared under high concurrency when kernel accounting lagged.
+		time.Sleep(75 * time.Millisecond)
 		done <- os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(
 			"usage_usec 20695\nuser_usec 0\nsystem_usec 0\n"), 0600)
 	}()

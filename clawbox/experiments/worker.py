@@ -205,6 +205,25 @@ def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     return cases[session_index % len(cases)]
 
 
+def read_priority_memory_charge(path: Path, local_numa_node: int | None) -> tuple[int, int]:
+    """Read one session's charge without failing if cleanup wins the race."""
+    try:
+        total = int((path / "memory.current").read_text())
+        if local_numa_node is None:
+            return total, total
+        from .numa_borrow import read_numa_lru_bytes
+        nodes, unknown = read_numa_lru_bytes(path)
+        return total, nodes.get(local_numa_node, 0) + unknown
+    except FileNotFoundError:
+        # Cube may remove an emptied session cgroup immediately after its VMs
+        # are destroyed but just before coordinator.unregister() drops the
+        # corresponding demand callback.  Its remaining charge is then zero.
+        # Preserve errors for a missing controller file on a live cgroup.
+        if not path.exists():
+            return 0, 0
+        raise
+
+
 def policy_operation_headroom_mib(arm: ExperimentArm) -> int:
     """Charge checkpoint/restore workspace only to policies that use it."""
     if arm.policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
@@ -215,6 +234,11 @@ def policy_operation_headroom_mib(arm: ExperimentArm) -> int:
 def policy_progress_budget_mib(arm: ExperimentArm) -> int | None:
     """LOCAL growth may use its hard watermark, never unfunded shared capacity."""
     return arm.resources.local_memory_capacity_mib
+
+
+def policy_event_workers(arm: ExperimentArm) -> int:
+    """Apply the documented snapshot-transfer limit to pause/restore RPCs."""
+    return arm.resources.pool_transfer_concurrency
 
 
 class WatermarkController:
@@ -1388,7 +1412,7 @@ class ExperimentWorker:
                     },
                 })
             sampler.sample_hook = record_memory_sample
-        policy_events = PolicyEventExecutor(workers=max(4, arm.concurrency * 2))
+        policy_events = PolicyEventExecutor(workers=policy_event_workers(arm))
         watermark_controller = next(iter(domains.values())).controller
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
         self._runtime_memory = None
@@ -2507,18 +2531,12 @@ class ExperimentWorker:
         # entered.
         coordinator.register(session_id, lifecycle)
         if self._priority_domain is not None:
-            def read_charge(path):
-                total = int((path/'memory.current').read_text())
-                node = arm.resources.local_numa_node
-                if node is None:
-                    return total, total
-                from .numa_borrow import read_numa_lru_bytes
-                nodes, unknown = read_numa_lru_bytes(path)
-                return total, nodes.get(node, 0) + unknown
             tool_leaf = self._priority_domain.leaves[index, 'tool']
             coordinator.register_memory(session_id,
-                tool=lambda: read_charge(tool_leaf),
-                lifecycle=lambda: read_charge(tool_leaf.parent))
+                tool=lambda: read_priority_memory_charge(
+                    tool_leaf, arm.resources.local_numa_node),
+                lifecycle=lambda: read_priority_memory_charge(
+                    tool_leaf.parent, arm.resources.local_numa_node))
 
         coordinator.register_runtime(
             session_id, runtime_lifecycle,
