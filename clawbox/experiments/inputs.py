@@ -98,7 +98,9 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
         for case in cases:
             tool_sandbox = case.sandbox or spec.sandbox
             provider = prediction_provider_type(spec.resources.prediction_mode)(path, repository=case.repository or case.case_id,
-                sandbox_identity={k: getattr(tool_sandbox, k) for k in ("image_digest", "vcpu", "memory_mib", "architecture")})
+                sandbox_identity={k: getattr(tool_sandbox, k) for k in (
+                    "template_id", "image_digest", "vcpu", "memory_mib", "architecture",
+                )})
             if spec.resources.prediction_mode == "frozen" and not provider.manifest:
                 raise ValueError("P50 artifact contains no commands")
             if spec.inference.backend is InferenceBackend.REPLAY:

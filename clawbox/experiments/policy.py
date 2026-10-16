@@ -205,6 +205,20 @@ class PolicyCoordinator:
             state.last_used = time.monotonic()
             self._condition.notify_all()
 
+    def set_tool_active_if_registered(self, session_id: str, active: bool) -> bool:
+        """Update a late cleanup callback without reviving a closed session."""
+        with self._condition:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return False
+            while active and state.eviction_in_progress:
+                self._condition.wait()
+            state.tool_active = active
+            state.eviction_eligible = not active
+            state.last_used = time.monotonic()
+            self._condition.notify_all()
+            return True
+
     def begin_tool_admission(self, session_id: str, amount_mib: int,
                              timeout_s: float, *, total_mib: int | None = None) -> float:
         """Protect a Tool before any restore or memory wait begins.

@@ -386,6 +386,18 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     coordinator.release_victim(victim)
 
 
+def test_late_cleanup_activation_ignores_an_unregistered_session() -> None:
+    policy = PolicySpec(name="resident", admission="off", reclamation="resident",
+                        eviction="none", restore="none")
+    coordinator = PolicyCoordinator(policy, budget_mib=1, emergency_free_mib=0,
+                                    operation_headroom_mib=0)
+    coordinator.register("finished", Lifecycle())
+    coordinator.unregister("finished")
+    assert coordinator.set_tool_active_if_registered("finished", False) is False
+    with pytest.raises(KeyError):
+        coordinator.set_tool_active("finished", False)
+
+
 def test_wait_aware_policy_never_selects_an_idle_non_waiting_session() -> None:
     policy = PolicySpec(
         name="final", admission="predicted", reclamation="snapshot_pause",

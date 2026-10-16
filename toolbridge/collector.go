@@ -497,12 +497,12 @@ func sanitizeCgroupLeaf(value string) string {
 }
 
 // readCgroupCounters reads cpu.stat / memory.peak / io.stat from a per-exec
-// cgroup.  Returns (cpuUserMicro, cpuSysMicro, memPeakBytes, readBytes,
-// writeBytes, pids, ok).
-func readCgroupCounters(path string) (cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes int64, pids int, ok bool) {
+// cgroup.  Returns (cpuUsageMicro, cpuUserMicro, cpuSysMicro, memPeakBytes,
+// readBytes, writeBytes, pids, ok).
+func readCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes int64, pids int, ok bool) {
 	cpuData, err := os.ReadFile(filepath.Join(path, "cpu.stat"))
 	if err != nil {
-		return 0, 0, 0, 0, 0, 0, false
+		return 0, 0, 0, 0, 0, 0, 0, false
 	}
 	for _, line := range strings.Split(string(cpuData), "\n") {
 		fields := strings.Fields(line)
@@ -511,7 +511,7 @@ func readCgroupCounters(path string) (cpuUserUs, cpuSysUs, memPeak, readBytes, w
 		}
 		switch fields[0] {
 		case "usage_usec":
-			cpuUserUs, _ = strconv.ParseInt(fields[1], 10, 64)
+			cpuUsageUs, _ = strconv.ParseInt(fields[1], 10, 64)
 		case "user_usec":
 			cpuUserUs, _ = strconv.ParseInt(fields[1], 10, 64)
 		case "system_usec":
@@ -542,6 +542,27 @@ func readCgroupCounters(path string) (cpuUserUs, cpuSysUs, memPeak, readBytes, w
 		pids, _ = strconv.Atoi(strings.TrimSpace(string(pidData)))
 	}
 	ok = true
+	return
+}
+
+// readSettledCgroupCounters accounts for the short delay observed on Kata
+// between the last process exiting and cpu.stat publishing its final charge.
+// A positive memory.peak proves that this exclusive cgroup observed the
+// execution, so retrying cannot accidentally accept a created-but-unused
+// cgroup. Truly empty cgroups and read failures still return immediately.
+func readSettledCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes int64, pids int, ok bool) {
+	cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes, pids, ok = readCgroupCounters(path)
+	if !ok || cpuUsageUs > 0 || pids > 0 || memPeak <= 0 {
+		return
+	}
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes, pids, ok = readCgroupCounters(path)
+		if !ok || cpuUsageUs > 0 || pids > 0 {
+			return
+		}
+	}
 	return
 }
 
@@ -647,11 +668,15 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 	stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
 
 	if c.cgroupOK && c.cgroupPath != "" {
-		if userUs, sysUs, memPeak, rBytes, wBytes, pids, ok := readCgroupCounters(c.cgroupPath); ok {
+		if usageUs, userUs, sysUs, memPeak, rBytes, wBytes, pids, ok := readSettledCgroupCounters(c.cgroupPath); ok {
 			// Only trust the cgroup view when it actually observed the
 			// execution (a created-but-empty cgroup reports zeros and must
-			// not override the process-tree sampler).
-			if userUs+sysUs > 0 || pids > 0 {
+			// not override the process-tree sampler). usage_usec is the
+			// authoritative total.  Keep it separate from user_usec: the old
+			// parser overwrote usage_usec with user_usec, which intermittently
+			// made completed short executions look like empty cgroups after
+			// pids.current had returned to zero.
+			if usageUs > 0 || pids > 0 {
 				stats.Source = "cgroup-v2"
 				stats.MonitorSource = "cgroup-v2"
 				stats.SamplingQuality = "valid"
@@ -659,7 +684,7 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 				stats.DiskSource = "cgroup-v2-io.stat"
 				stats.CPUUserSeconds = float64(userUs) / 1e6
 				stats.CPUSystemSeconds = float64(sysUs) / 1e6
-				stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
+				stats.CPUTimeSeconds = float64(usageUs) / 1e6
 				if memPeak > 0 { // memory.peak may be absent on older guest kernels
 					stats.RSSPeakBytes = memPeak
 					stats.MemorySource = "cgroup-v2-memory.peak"

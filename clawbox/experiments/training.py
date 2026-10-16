@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +15,7 @@ from clawbox.tuning.__main__ import find_run_datasets
 from clawbox.tuning.dataset import build_joined_dataset
 from clawbox.tuning.native import native_clause_observations
 from clawbox.tuning.clawtune import observation_to_completed_call, predict_native_call_load_models
-from clawbox.clawtune_integration import use_clawtune
+from clawbox.clawtune_integration import source_revision, use_clawtune
 from .prediction import command_sha256, select_p50, PredictionUnavailable
 from .results import ResultEnvelope, RunStatus
 from .spec import ExperimentSpec, load_experiment, spec_digest
@@ -24,6 +26,40 @@ class TrainingArmSource:
     run_root: Path
     artifact_root: Path
     result: ResultEnvelope
+
+
+COLLECTOR_SEMANTICS = {
+    'resource_schema': 'cgroup_resource_v1',
+    'resource_source': 'cgroup-v2',
+    'cpu_total_counter': (
+        'cpu.stat usage_usec authoritative total retained separately from '
+        'user_usec and system_usec'
+    ),
+    'memory_measurement': 'guest_memtotal_minus_memavailable',
+    'memory_scope': 'isolated writable CubeSandbox Tool VM environment',
+    'clause_telemetry_schema': 'clause_telemetry_v2',
+    'join': 'exact execution_id',
+    'required_pmu_events': [
+        'cycles', 'instructions', 'llc_read_accesses', 'llc_read_misses',
+    ],
+    'required_pmu_running_ratio': 1.0,
+    'required_telemetry_loss_total': 0,
+}
+
+
+def _clawtune_revision() -> str:
+    root = Path(os.environ.get(
+        'CLAWTUNE_ROOT', str(Path(__file__).resolve().parents[2] / 'ClawTune'),
+    ))
+    revision = source_revision(root)
+    configured = os.environ.get('CLAWTUNE_REVISION')
+    if not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise ValueError('training requires an exact ClawTune source revision')
+    if configured and configured != revision:
+        raise ValueError(
+            f'configured ClawTune revision {configured} differs from source {revision}'
+        )
+    return revision
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -156,7 +192,9 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
     validations = []
     for run in dict.fromkeys(p.resolve() for p in runs):
         spec, arm_sources = _training_arm_sources(run, repository)
-        identity = {k: getattr(spec.sandbox, k) for k in ('image_digest', 'vcpu', 'memory_mib', 'architecture')}
+        identity = {k: getattr(spec.sandbox, k) for k in (
+            'template_id', 'image_digest', 'vcpu', 'memory_mib', 'architecture',
+        )}
         if not identity['image_digest']:
             raise ValueError(f'{run}: missing immutable Tool image digest')
         if sandbox_identity is not None and identity != sandbox_identity:
@@ -280,6 +318,8 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
     payload = {'schema': 'clawbox_prediction_v2', 'host_calibration': host_calibration, 'repository': repository, 'quantile': .5,
                'training_validated': True, 'training_validation': validations,
                'sandbox_identity': sandbox_identity,
+               'clawtune_revision': _clawtune_revision(),
+               'collector_semantics': COLLECTOR_SEMANTICS,
                'memory_measurement': 'guest_memtotal_minus_memavailable',
                'training_runs': [str(p.resolve()) for p in runs], 'source_sha256': digest.hexdigest(),
                'kb_sha256': hashlib.sha256(kb_bytes).hexdigest(),

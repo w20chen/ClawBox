@@ -129,7 +129,8 @@ def test_frozen_provider_checks_repository_command_and_uses_training_prediction(
 
 def test_frozen_provider_rejects_unvalidated_or_different_environment(tmp_path):
     path = tmp_path/'p50.json'
-    identity = {'image_digest': 'sha256:training', 'vcpu': 2, 'memory_mib': 4096,
+    identity = {'template_id': 'tpl-training', 'image_digest': 'sha256:training',
+                'vcpu': 2, 'memory_mib': 4096,
                 'architecture': 'arm64'}
     payload = {'host_calibration': {'target': 'host_cgroup_memory_current_increment', 'sample_count': 3, 'scale': 1, 'offset_bytes': 0}, 'schema': 'clawbox_prediction_v2', 'repository': 'r',
                'sandbox_identity': identity, 'commands': []}

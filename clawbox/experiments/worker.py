@@ -1262,7 +1262,9 @@ class ExperimentWorker:
                     repository=case.repository or case.case_id,
                     sandbox_identity={
                         k: getattr(tool_sandbox, k)
-                        for k in ("image_digest", "vcpu", "memory_mib", "architecture")
+                        for k in (
+                            "template_id", "image_digest", "vcpu", "memory_mib", "architecture",
+                        )
                     },
                 )
         prediction_provider = next(iter(prediction_providers.values()), None)
@@ -3128,7 +3130,7 @@ class ExperimentWorker:
                         )
                         coordinator.release(session_id, amount)
                     with wait_lock, reservation_lock:
-                        coordinator.set_tool_active(
+                        coordinator.set_tool_active_if_registered(
                             session_id,
                             bool(active_reservations or pending_admissions),
                         )

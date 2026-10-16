@@ -9,11 +9,27 @@ from clawbox.experiments.configure import dump_experiment
 from clawbox.experiments.qualification import qualification_spec
 from clawbox.experiments.results import ResultEnvelope, RunStatus, utcnow
 from clawbox.experiments.spec import expand_matrix, load_experiment
-from clawbox.experiments.training import _percentile, _training_arm_sources
+from clawbox.experiments.training import (
+    COLLECTOR_SEMANTICS, _clawtune_revision, _percentile, _training_arm_sources,
+)
 
 
 def test_training_static_calibration_uses_linear_empirical_p90() -> None:
     assert _percentile([0.0, 100.0, 200.0], .9) == pytest.approx(180.0)
+
+
+def test_training_provenance_records_exact_clawtune_and_collector_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = '1bdb4c64ea4e9f71231cdd749eb085fbc617f67e'
+    (tmp_path / 'CLAWTUNE_REVISION').write_text(revision, encoding='ascii')
+    monkeypatch.setenv('CLAWTUNE_ROOT', str(tmp_path))
+    monkeypatch.setenv('CLAWTUNE_REVISION', revision)
+
+    assert _clawtune_revision() == revision
+    assert COLLECTOR_SEMANTICS['resource_source'] == 'cgroup-v2'
+    assert 'usage_usec' in COLLECTOR_SEMANTICS['cpu_total_counter']
+    assert COLLECTOR_SEMANTICS['required_pmu_running_ratio'] == 1.0
 
 
 def _write_run(

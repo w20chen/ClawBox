@@ -253,9 +253,14 @@ class ManagedModelGateway:
             tokens = list(self._sessions)
             self._started = False
         failures: list[str] = []
+        # Use one shutdown deadline for the gateway, not one full timeout per
+        # unresolved session after a high-concurrency arm failure.
+        deadline = time.monotonic() + 30
         for token in tokens:
             try:
-                if not self.unregister(token, timeout=30):
+                if not self.unregister(
+                    token, timeout=max(0.0, deadline - time.monotonic())
+                ):
                     failures.append(f"session {token[:8]} did not drain")
             except Exception as drain_error:
                 failures.append(

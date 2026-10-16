@@ -127,9 +127,48 @@ func TestGuestEnvironmentMemoryLabelAndOverlapGate(t *testing.T) {
 // = false) when the per-exec cgroup does not exist, so the collector falls
 // back to process-tree instead of emitting garbage.
 func TestReadCgroupCountersMissing(t *testing.T) {
-	_, _, _, _, _, _, ok := readCgroupCounters("/sys/fs/cgroup/clawbox/definitely-not-here")
+	_, _, _, _, _, _, _, ok := readCgroupCounters("/sys/fs/cgroup/clawbox/definitely-not-here")
 	if ok {
 		t.Fatal("expected ok=false for missing cgroup")
+	}
+}
+
+func TestReadCgroupCountersKeepsUsageSeparateFromUser(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(
+		"usage_usec 49123\nuser_usec 0\nsystem_usec 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	usage, user, system, _, _, _, _, ok := readCgroupCounters(dir)
+	if !ok {
+		t.Fatal("expected readable cgroup counters")
+	}
+	if usage != 49123 || user != 0 || system != 0 {
+		t.Fatalf("unexpected CPU counters: usage=%d user=%d system=%d", usage, user, system)
+	}
+}
+
+func TestReadSettledCgroupCountersWaitsForDelayedCPUCharge(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(
+		"usage_usec 0\nuser_usec 0\nsystem_usec 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "memory.peak"), []byte("749568\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		done <- os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(
+			"usage_usec 20695\nuser_usec 0\nsystem_usec 0\n"), 0600)
+	}()
+	usage, _, _, peak, _, _, _, ok := readSettledCgroupCounters(dir)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !ok || usage != 20695 || peak != 749568 {
+		t.Fatalf("delayed cgroup counters were not retained: ok=%v usage=%d peak=%d", ok, usage, peak)
 	}
 }
 
