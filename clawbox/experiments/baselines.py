@@ -25,6 +25,16 @@ class Baseline:
                           deployment=self.deployment)
 
 BASELINES = MappingProxyType({b.name: b for b in (
+    Baseline('no_control', AdmissionPolicy.OFF, runtime_control=RuntimeControl.NO_CONTROL),
+    Baseline('agentcgroup_legacy', AdmissionPolicy.OFF, runtime_control=RuntimeControl.AGENTCGROUP_LEGACY),
+    Baseline('phase_memcg', AdmissionPolicy.OFF, runtime_control=RuntimeControl.PHASE_MEMCG),
+    Baseline('release_cpu', AdmissionPolicy.OFF, runtime_control=RuntimeControl.RELEASE_CPU),
+    Baseline('pressure_lifecycle', AdmissionPolicy.OFF,
+             ReclamationPolicy.SNAPSHOT_PAUSE, EvictionPolicy.WAIT_AWARE_PRESSURE,
+             RestorePolicy.REACTIVE, RuntimeControl.PRESSURE_LIFECYCLE),
+    Baseline('adaptive_joint', AdmissionPolicy.OFF,
+             ReclamationPolicy.SNAPSHOT_PAUSE, EvictionPolicy.WAIT_AWARE_PRESSURE,
+             RestorePolicy.REACTIVE, RuntimeControl.ADAPTIVE_JOINT),
     Baseline('default-resident', AdmissionPolicy.OFF, runtime_control=RuntimeControl.OFF,
              deployment='os-default'),
     Baseline('uncontrolled-resident', AdmissionPolicy.OFF, runtime_control=RuntimeControl.OFF),

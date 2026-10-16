@@ -35,6 +35,7 @@ class SessionState:
     wait_started_monotonic_s: float | None = None
     wait_deadline_monotonic_s: float | None = None
     response_ready: bool = False
+    release_before: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +134,11 @@ class PolicyCoordinator:
         self.safety_intervention_count = 0
         self.safety_interventions_by_reason: dict[str, int] = {}
         self._new_session_admission_blocked = False
+        self.release_options = None
+        self.release_costs = None
+        self.release_after = {}
+        self.release_disabled = set()
+        self.release_observations = []
 
     def set_new_session_admission_blocked(self, blocked: bool) -> None:
         """Latch only new VM-pair admission; existing sessions must make progress."""
@@ -297,6 +303,77 @@ class PolicyCoordinator:
                 existing_progress=(request.wait_class == "tool_admission"),
             ))
 
+    def resource_feedback(self) -> dict:
+        """Read the existing LOCAL admission ledger; never add a second queue."""
+        with self._condition:
+            if not self._waiters:
+                return {'memory_blocked': False, 'scope': self.demand_scope, 'waiters': 0}
+            used, available = self.physical_sample()
+            head = next((t for t in self._waiters if t in self._progress_waiters), self._waiters[0])
+            request = self._waiter_requests[head]
+            reasons = self._pressure_reasons(request.amount_bytes,
+                capacity_claim=request.capacity_claim,
+                existing_progress=request.wait_class == 'tool_admission')
+            memory_reasons = set(reasons) - {'execution_already_inflight'}
+            return {'memory_blocked': bool(memory_reasons), 'scope': self.demand_scope,
+                    'waiters': len(self._waiters), 'reasons': list(reasons),
+                    'local_used_bytes': used, 'local_available_bytes': available,
+                    'deficit_bytes': max(0, used + self.demand.pending(self.demand_scope)
+                                         + request.amount_bytes + self.operation_headroom_bytes
+                                         - self.budget_bytes)}
+
+    def _release_rank(self, state, now):
+        """Measured LOCAL bytes / measured round-trip cost, with idle amortization."""
+        options = self.release_options
+        if (state.session_id in self.release_disabled
+                or now < self.release_after.get(state.session_id, 0)
+                or state.wait_deadline_monotonic_s is None):
+            return None
+        reader = self._memory_samples.get(state.session_id, {}).get('tool_admission')
+        if reader is None:
+            return None
+        local = reader()[1]
+        if local < options.min_release_mib * MIB:
+            return None
+        timings = getattr(state.lifecycle, 'timings', [])
+        costs = []
+        for operation in ('checkpoint', 'restore'):
+            values = [float(t['service_seconds']) for t in timings
+                      if t.get('operation') == operation and t.get('status') == 'ok'
+                      and t.get('service_seconds') is not None]
+            if not values:
+                break
+            costs.append(max(values[-3:]))
+        if len(costs) != 2:
+            if self.release_costs is None:
+                return None
+            # Account for either tier; tier choice still belongs to lifecycle.
+            rates = self.release_costs
+            checkpoint = max(rates.warm_checkpoint_seconds_per_gib,
+                             rates.cold_checkpoint_seconds_per_gib or 0)
+            restore = max(rates.warm_restore_seconds_per_gib,
+                          rates.cold_restore_seconds_per_gib or 0)
+            costs = [(checkpoint + restore) * state.lifecycle.configured_memory_bytes / 1024**3]
+        overhead = max(.001, sum(costs))
+        remaining = state.wait_deadline_monotonic_s - now
+        if remaining < options.amortization_factor * overhead:
+            return None
+        return local / overhead
+
+    def _observe_release(self, victim, before):
+        if self.release_options is None or before is None:
+            return
+        reader = self._memory_samples.get(victim.session_id, {}).get('tool_admission')
+        if reader is None:
+            return
+        released = max(0, before - reader()[1])
+        self.release_after[victim.session_id] = time.monotonic() + self.release_options.cooldown_seconds
+        if released < self.release_options.min_release_mib * MIB:
+            self.release_disabled.add(victim.session_id)
+        self.release_observations.append({'session_id': victim.session_id,
+                                          'local_released_bytes': released})
+        self._condition.notify_all()
+
     def _pressure_reasons(self, additional_bytes: int = 0, *,
                           capacity_claim: bool = False,
                           existing_progress: bool = False,
@@ -454,7 +531,8 @@ class PolicyCoordinator:
                         try:
                             tool_elapsed = victim.lifecycle.checkpoint_and_evict()
                             pause_runtime = (
-                                victim.runtime_lifecycle is not None
+                                self.release_options is None
+                                and victim.runtime_lifecycle is not None
                                 and victim.runtime_lifecycle.resident
                                 and victim.wait_id is not None
                                 and not victim.response_ready
@@ -468,6 +546,7 @@ class PolicyCoordinator:
                             self._condition.acquire()
                             victim.eviction_in_progress = False
                             victim.eviction_eligible = False
+                            self._observe_release(victim, victim.release_before)
                             self._condition.notify_all()
                         elapsed = sum(
                             value for value in (tool_elapsed, runtime_elapsed)
@@ -621,7 +700,10 @@ class PolicyCoordinator:
         with self._condition:
             victim.eviction_in_progress = False
             victim.eviction_eligible = False
-            self._condition.notify_all()
+            try:
+                self._observe_release(victim, victim.release_before)
+            finally:
+                self._condition.notify_all()
 
     def watermark_reclaim_candidate(self) -> dict[str, object] | None:
         """Describe the current safe victim without claiming or pausing it.
@@ -636,7 +718,8 @@ class PolicyCoordinator:
                 return None
             lifecycles = [victim.lifecycle]
             if (
-                victim.runtime_lifecycle is not None
+                self.release_options is None
+                and victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
                 and victim.wait_id is not None
                 and not victim.response_ready
@@ -676,7 +759,8 @@ class PolicyCoordinator:
                 if tier is None else victim.lifecycle.checkpoint_and_evict(tier=tier)
             )
             if (
-                victim.runtime_lifecycle is not None
+                self.release_options is None
+                and victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
                 and victim.wait_id is not None
                 and not victim.response_ready
@@ -776,10 +860,20 @@ class PolicyCoordinator:
             candidates = [state for state in candidates
                           if state.wait_id is not None and not state.response_ready
                           and state.wait_deadline_monotonic_s is not None]
+        if self.release_options is not None:
+            if not self.resource_feedback()['memory_blocked']:
+                return None
+            now = time.monotonic()
+            ranked = [(self._release_rank(state, now), state) for state in candidates]
+            return max((item for item in ranked if item[0] is not None),
+                       key=lambda item: (item[0], -item[1].last_used),
+                       default=(None, None))[1]
         return min(candidates, key=lambda state: state.last_used, default=None)
 
     def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:
         victim = self._select_victim_locked(exclude=exclude)
         if victim is not None:
             victim.eviction_in_progress = True
+            reader = self._memory_samples.get(victim.session_id, {}).get('tool_admission')
+            victim.release_before = reader()[1] if self.release_options is not None and reader else None
         return victim

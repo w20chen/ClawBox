@@ -442,12 +442,31 @@ def main() -> int:
         return 125
 
     execution_started_at = time.time()
+    if admission.get('notify_execution_start'):
+        progress = {'url': policy_url, 'token': policy_token, 'request': {
+            'session_id': session_id, 'execution_id': execution_id,
+            'command_sha256': command_sha256, 'endpoint_sandbox_id': route['sandbox_id'],
+            'endpoint_epoch': route['epoch'],
+        }}
+        for index, argument in enumerate(ssh_argv):
+            marker = argument.find(PREFIX + 'b64:')
+            if marker < 0:
+                continue
+            start = marker + len(PREFIX + 'b64:')
+            end = argument.index('\n', start)
+            header = json.loads(_b64url_decode(argument[start:end]))
+            header['progress_control'] = progress
+            encoded = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
+            ssh_argv[index] = argument[:start] + encoded + argument[end:]
+            break
+        else:
+            raise RuntimeError('progress control requires a Tool execution envelope')
     try:
         return_code = _wait_for_ssh(
             [real_ssh, *_ssh_args_for_route(ssh_argv, route)], execution_id,
             timeout_seconds=tool_timeout_seconds,
         )
-    except OSError as exc:
+    except Exception as exc:
         _audit("ssh_start_failed", execution_id=execution_id, error=str(exc))
         print(f"ClawBox real SSH could not start: {exc}", file=sys.stderr)
         return_code = 127

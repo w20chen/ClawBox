@@ -52,6 +52,7 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .congestion import RuntimeMemoryControl, locate_cgroup
+from .pressure import PressureControl
 from .priority import PriorityDomain
 from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
@@ -1339,6 +1340,9 @@ class ExperimentWorker:
                                and arm.resources.proactive_cache_reclaim else None),
                 on_pressure_pause=record_pressure_pause,
             )
+            if arm.policy.runtime_control.coordinates_release:
+                coordinator.release_options = arm.resources.pressure_control
+                coordinator.release_costs = arm.resources.memory_action_costs
             numa_borrower = (
                 SandboxNumaBorrower(
                     Path(arm.resources.local_memory_cgroup),
@@ -1418,10 +1422,11 @@ class ExperimentWorker:
         self._runtime_memory = None
         self._priority_domain = None
         if arm.resources.local_memory_cgroup:
-            # Use the same hierarchy for OFF ablations. One physical controller
-            # spans all simulated NUMA nodes and their shared borrow allowance.
+            # New policies and OFF use neutral leaves. Only the historical QoS
+            # baseline retains static HIGH/LOW grouping.
             self._priority_domain = PriorityDomain(Path(arm.resources.local_memory_cgroup),
                 concurrency=arm.concurrency, repetition=arm.repetition,
+                legacy=arm.policy.runtime_control.legacy,
                 journal_directory=self.output_root/'priority-domains',
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)
@@ -1434,7 +1439,7 @@ class ExperimentWorker:
                     Path(arm.resources.local_memory_cgroup),
                     Path(arm.resources.agentcgroup_source) if arm.resources.agentcgroup_source else None,
                     high=self._priority_domain.high, low=self._priority_domain.low,
-                    enabled=arm.policy.runtime_control is RuntimeControl.AGENTCGROUP_CGROUP,
+                    enabled=arm.policy.runtime_control.legacy,
                     interval=arm.resources.agentcgroup_poll_interval_seconds,
                     event_threshold=arm.resources.agentcgroup_event_threshold,
                     pressure_ratio=arm.resources.agentcgroup_pressure_ratio,
@@ -1442,7 +1447,10 @@ class ExperimentWorker:
                         arm.resources.agentcgroup_protection_window_seconds
                     ),
                     emit=events.write,
-                )
+                ) if arm.policy.runtime_control.legacy else PressureControl(
+                    Path(arm.resources.local_memory_cgroup), mode=arm.policy.runtime_control,
+                    options=arm.resources.pressure_control,
+                    interval=arm.resources.agentcgroup_poll_interval_seconds, emit=events.write)
                 self._runtime_memory.start()
                 demand_ledger.check = self._runtime_memory.check
             except BaseException:
@@ -1653,6 +1661,7 @@ class ExperimentWorker:
             node_results[node_id] = {
                 "resources": domain.arm.resources.model_dump(mode="json"),
                 "admission_control": domain.coordinator.admission_metrics(),
+                "pressure_release_observations": list(domain.coordinator.release_observations),
                 "peak_commitment_bytes": domain.coordinator.peak_commitment_bytes,
                 "observed_peak_bytes": domain.peak_bytes,
                 "placements": [row for row in self._priority_domain.observations
@@ -1983,14 +1992,31 @@ class ExperimentWorker:
             time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
         session_id = f"{arm.arm_id}-{index:04d}"
         priority_domain = getattr(self, '_priority_domain', None)
+        progress_control = (self._runtime_memory
+                            if isinstance(self._runtime_memory, PressureControl) else None)
+        if progress_control and priority_domain:
+            for role in ('runtime', 'tool'):
+                progress_control.register(session_id, role, priority_domain.leaves[index, role],
+                                          arm.resources.local_numa_node, coordinator)
+        def progress_event(kind, identifier):
+            if progress_control:
+                progress_control.event(session_id, kind, identifier)
         def priority_options(role):
             if priority_domain is None:
                 return {}
             def verify(sandbox_id):
                 evidence = priority_domain.verify(index, role, sandbox_id)
+                if progress_control:
+                    progress_control.generation(session_id, role, sandbox_id)
+                    coordinator.release_after[session_id] = (
+                        time.monotonic() + arm.resources.pressure_control.cooldown_seconds)
                 events.write({'event': 'runtime_memory_placement', 'session_id': session_id, **evidence})
+            def prepare():
+                if progress_control:
+                    progress_control.transition(session_id, role)
+                priority_domain.prepare(index, role)
             return {'cgroup_token': priority_domain.token(index, role), 'verify_cgroup': verify,
-                    'prepare_cgroup': lambda: priority_domain.prepare(index, role)}
+                    'prepare_cgroup': prepare}
         session_started = time.monotonic()
         session_started_wall = time.time()
         timeline: dict[str, Any] = {
@@ -2173,6 +2199,7 @@ class ExperimentWorker:
             # next SSH admission.
             runtime_snapshot_enabled = (
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+                and not arm.policy.runtime_control.coordinates_release
             )
             prediction_wait = inference_configuration.get("model_wait_prediction_seconds")
             prediction_source = inference_configuration.get(
@@ -2341,6 +2368,7 @@ class ExperimentWorker:
 
             def on_model_request_started(event: dict[str, Any]) -> None:
                 """Enqueue lifecycle work; never checkpoint in the gateway callback."""
+                progress_event('model_start', str(event.get('request_id')))
                 submit_policy_event(handle_model_request_started, event)
 
             def handle_model_request_started(event: dict[str, Any]) -> None:
@@ -2365,7 +2393,8 @@ class ExperimentWorker:
                     coordinator.begin_model_wait(
                         session_id, request_id, prediction_wait,
                     )
-                if arm.policy.reclamation is ReclamationPolicy.RESIDENT:
+                if (arm.policy.reclamation is ReclamationPolicy.RESIDENT
+                        or arm.policy.runtime_control.coordinates_release):
                     return
                 target_tier = None
                 delay = 0.0 if coordinator.blocked_demand_pressure() else None
@@ -2402,6 +2431,7 @@ class ExperimentWorker:
                                             event: dict[str, Any]) -> dict[str, Any]:
                 nonlocal wait_timer, restore_timer
                 request_id = str(event.get("request_id"))
+                progress_event('model_end', request_id)
                 coordinator.complete_model_wait(session_id, request_id)
                 # Publish generation before waiting for lifecycle serialization.
                 # A queued eager-pause callback must not start checkpointing a
@@ -2535,8 +2565,10 @@ class ExperimentWorker:
             coordinator.register_memory(session_id,
                 tool=lambda: read_priority_memory_charge(
                     tool_leaf, arm.resources.local_numa_node),
-                lifecycle=lambda: read_priority_memory_charge(
-                    tool_leaf.parent, arm.resources.local_numa_node))
+                lifecycle=lambda: tuple(sum(values) for values in zip(
+                    read_priority_memory_charge(tool_leaf, arm.resources.local_numa_node),
+                    read_priority_memory_charge(self._priority_domain.leaves[index, 'runtime'],
+                                                arm.resources.local_numa_node))))
 
         coordinator.register_runtime(
             session_id, runtime_lifecycle,
@@ -2776,6 +2808,9 @@ class ExperimentWorker:
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     execution_id = str(request["execution_id"])
+                    if progress_control:
+                        progress_control.execution_ready(session_id, execution_id,
+                            (arm.sandbox.template_id, request['command_sha256']))
                     execution_scope = str(
                         request.get("execution_scope") or "agent-tool"
                     )
@@ -2850,6 +2885,7 @@ class ExperimentWorker:
                                         # remain an idempotent recovery path.
                                         candidate = executor.execute(
                                             native_tool_bridge_setup_command(
+                                                require_progress_events=arm.policy.runtime_control.adaptive,
                                                 restart=bridge_attempt in (2, 10, 20),
                                                 command_timeout_seconds=(
                                                     arm.execution.command_timeout_seconds
@@ -2915,19 +2951,29 @@ class ExperimentWorker:
                             identity_started = time.monotonic()
                             identity_result = None
                             identity_error: Exception | None = None
-                            for identity_attempt in range(1, 31):
+                            # Under hundreds of simultaneous VM lifecycle operations,
+                            # CubeProxy can keep the previous port mapping reachable
+                            # beyond the former 15-second window.  The identity check
+                            # remains authoritative; allow the already-configured
+                            # command timeout (at least 60 seconds here) to absorb
+                            # publication lag instead of accepting the wrong Tool.
+                            identity_attempt_limit = max(
+                                30,
+                                min(120, int(arm.execution.command_timeout_seconds * 2)),
+                            )
+                            for identity_attempt in range(1, identity_attempt_limit + 1):
                                 try:
                                     candidate = runtime_executor.execute(identity_command, 30)
                                 except Exception as exc:
                                     identity_error = exc
-                                    if identity_attempt < 30:
+                                    if identity_attempt < identity_attempt_limit:
                                         time.sleep(0.5)
                                     continue
                                 if (candidate.exit_code == 0
                                         and candidate.stdout.strip() == session_id):
                                     identity_result = candidate
                                     break
-                                if identity_attempt < 30:
+                                if identity_attempt < identity_attempt_limit:
                                     time.sleep(0.5)
                             if identity_result is None:
                                 raise RuntimeError(
@@ -2947,6 +2993,9 @@ class ExperimentWorker:
                             host_sampler = SandboxRSSSampler(route.sandbox_id,
                                 cgroup=locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup)))
                             host_sampler.start()
+                            if progress_control:
+                                progress_control.execution_admitted(session_id, execution_id,
+                                                                    host_sampler.charge_baseline)
                             with reservation_lock:
                                 pending_admissions.discard(execution_id)
                                 active_reservations[execution_id] = local_amount
@@ -2955,6 +3004,7 @@ class ExperimentWorker:
                                 if execution_scope == "agent-tool":
                                     lifecycle.claim_first_tool_after_restore(execution_id)
                         except Exception as exc:
+                            progress_event('complete', execution_id)
                             with reservation_lock:
                                 pending_admissions.discard(execution_id)
                             events.write({
@@ -3021,6 +3071,7 @@ class ExperimentWorker:
                     })
                     return {
                         "decision": "ADMIT", "admitted_memory_mib": amount,
+                        "notify_execution_start": bool(progress_control and arm.policy.runtime_control.adaptive),
                         "local_admitted_memory_mib": local_amount,
                         "admission_memory_tier": admission_memory_tier,
                         "admission_blocked_seconds": admission_wait,
@@ -3095,6 +3146,10 @@ class ExperimentWorker:
                                 )
                                 break
                         coordinator.release(session_id, amount)
+                        if progress_control:
+                            progress_control.execution_complete(session_id, execution_id, host_observation,
+                                timestamps['execution_completed_at'] - timestamps['execution_started_at'],
+                                int(request.get('exit_code', 1)) == 0)
                         _record_time_span(
                             timeline, "tool.operation",
                             timestamps["execution_started_at"],
@@ -3132,6 +3187,7 @@ class ExperimentWorker:
                     request: dict[str, Any], _admission: dict[str, Any],
                 ) -> None:
                     """Release an admission whose HTTP response was not delivered."""
+                    progress_event('complete', str(request['execution_id']))
                     execution_id = str(request["execution_id"])
                     with reservation_lock:
                         amount = active_reservations.pop(execution_id, None)
@@ -3171,6 +3227,9 @@ class ExperimentWorker:
                     session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
                     abandon=abandon_openclaw_tool,
+                    start=lambda request: progress_event(
+                        'complete' if request.get('phase') == 'end' else 'start',
+                        str(request['execution_id'])),
                 )
                 # The Tool VM is authoritative for mutable state. Mark the
                 # installed shared SSH runtime as initialized so OpenClaw does
@@ -3184,6 +3243,7 @@ class ExperimentWorker:
                         + workspace_result.stderr[-1000:]
                     )
                 tool_bridge_result = executor.execute(native_tool_bridge_setup_command(
+                    require_progress_events=arm.policy.runtime_control.adaptive,
                     command_timeout_seconds=arm.execution.command_timeout_seconds,
                 ), 60)
                 if tool_bridge_result.exit_code != 0:
@@ -3553,6 +3613,8 @@ class ExperimentWorker:
                     lambda: coordinator.release_capacity(session_id, lifetime),
                 )
             cleanup_step("coordinator session", lambda: coordinator.unregister(session_id))
+            if progress_control:
+                cleanup_step('pressure session', lambda: progress_control.unregister(session_id))
             if watermark_controller is not None:
                 cleanup_step(
                     "watermark session", lambda: watermark_controller.unregister(session_id),

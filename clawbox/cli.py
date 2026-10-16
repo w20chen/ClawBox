@@ -281,7 +281,9 @@ def parser() -> argparse.ArgumentParser:
                            help="generate a matched two-arm comparison")
     configure.add_argument("--ablations", action=argparse.BooleanOptionalAction, default=None,
                            help="include intermediate arms for the selected suite")
-    configure.add_argument("--runtime-control", choices=("off", "agentcgroup_cgroup"),
+    configure.add_argument("--runtime-control", choices=("off", "agentcgroup_cgroup", "no_control",
+                           "agentcgroup_legacy", "phase_memcg", "release_cpu",
+                           "pressure_lifecycle", "adaptive_joint"),
                            help="optional AgentCgroup control; suite deployment baseline stays off")
     configure.add_argument("--prediction-mode", choices=("runtime", "frozen"),
                            help="query trained ClawTune KB per command, or replay frozen command predictions")

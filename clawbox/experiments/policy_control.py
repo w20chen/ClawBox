@@ -37,6 +37,8 @@ class _Execution:
     completion: dict[str, Any] | None = None
     admitting: bool = False
     completing: bool = False
+    started: bool = False
+    guest_finished: bool = False
     admission_started_monotonic_s: float | None = None
     admission_completed_monotonic_s: float | None = None
     completion_started_monotonic_s: float | None = None
@@ -50,6 +52,7 @@ class _Session:
     admit: Callable[[dict[str, Any]], dict[str, Any]]
     complete: Callable[[dict[str, Any]], dict[str, Any]]
     abandon: Callable[[dict[str, Any], dict[str, Any]], None] | None = None
+    start: Callable[[dict[str, Any]], None] | None = None
     lifecycle: SessionLifecycle = SessionLifecycle.ACTIVE
     executions: dict[str, _Execution] = field(default_factory=dict)
     condition: threading.Condition = field(default_factory=threading.Condition)
@@ -98,6 +101,28 @@ class _Session:
                 self.condition.notify_all()
                 return dict(response), False
         raise AssertionError("unreachable")
+
+    def execution_start(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        with self.condition:
+            execution = self.executions.get(request['execution_id'])
+            if execution is None or execution.admission is None:
+                raise ValueError('start has no admitted execution')
+            if execution.request['command_sha256'] != request['command_sha256']:
+                raise ValueError('start command does not match admission')
+            for key, route_key in (('endpoint_epoch', 'epoch'), ('endpoint_sandbox_id', 'sandbox_id')):
+                if request.get(key) != execution.admission.get(route_key):
+                    raise ValueError('start endpoint does not match admission')
+            phase = request.get('phase', 'start')
+            if phase not in {'start', 'end'}:
+                raise ValueError('invalid guest execution phase')
+            duplicate = (execution.guest_finished or execution.completion is not None
+                         or execution.completing or (execution.started and phase == 'start'))
+            if not duplicate:
+                if self.start is not None:
+                    self.start(dict(request))
+                execution.started = True
+                execution.guest_finished = phase == 'end'
+            return {'status': 'STARTED'}, duplicate
 
     def completion(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         execution_id = request["execution_id"]
@@ -254,7 +279,7 @@ class PolicyControlServer:
                 record: dict[str, Any] = {"path": self.path, "request_start": started}
                 state: _Session | None = None
                 try:
-                    if self.path not in {"/v1/tool/admit", "/v1/tool/complete"}:
+                    if self.path not in {"/v1/tool/admit", "/v1/tool/complete", "/v1/tool/start"}:
                         self.send_error(HTTPStatus.NOT_FOUND)
                         return
                     token = self.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -271,6 +296,8 @@ class PolicyControlServer:
                                   execution_id=body["execution_id"])
                     if self.path.endswith("/admit"):
                         response, duplicate = state.admission(body)
+                    elif self.path.endswith('/start'):
+                        response, duplicate = state.execution_start(body)
                     else:
                         response, duplicate = state.completion(body)
                     response["session_id"] = state.session_id
@@ -361,11 +388,12 @@ class PolicyControlServer:
                  admit: Callable[[dict[str, Any]], dict[str, Any]],
                  complete: Callable[[dict[str, Any]], dict[str, Any]],
                  abandon: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+                 start: Callable[[dict[str, Any]], None] | None = None,
                  ) -> PolicyControlSession:
         if not _IDENTITY.fullmatch(session_id):
             raise ValueError("invalid session_id")
         token = secrets.token_urlsafe(32)
-        state = _Session(session_id, token, admit, complete, abandon)
+        state = _Session(session_id, token, admit, complete, abandon, start)
         with self._lock:
             if not self._started:
                 raise RuntimeError("PolicyControlServer is not started")

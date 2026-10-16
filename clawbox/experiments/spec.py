@@ -169,7 +169,21 @@ class ExecutionSpec(StrictFrozenModel):
         return self
 
 
+class PressureControlSpec(StrictFrozenModel):
+    release_history_samples: int = Field(default=3, ge=3, le=8)
+    psi_ratio: float = Field(default=.10, gt=0, le=1, allow_inf_nan=False)
+    exit_hysteresis_seconds: float = Field(default=1., gt=0, allow_inf_nan=False)
+    cooldown_seconds: float = Field(default=10., gt=0, allow_inf_nan=False)
+    action_window_seconds: float = Field(default=2., gt=0, allow_inf_nan=False)
+    protection_budget_mib: int = Field(default=256, ge=0)
+    max_boosted_vms: int = Field(default=1, ge=0, le=4)
+    boost_cpu_weight: int = Field(default=200, ge=100, le=400)
+    min_release_mib: int = Field(default=64, ge=1)
+    amortization_factor: float = Field(default=2., ge=1, allow_inf_nan=False)
+
+
 class ResourcesSpec(StrictFrozenModel):
+    pressure_control: PressureControlSpec = Field(default_factory=PressureControlSpec)
     lifecycle_admission: Literal["configured-capacity", "os-managed"] = "configured-capacity"
     proactive_cache_reclaim: bool = True
     compute_nodes: tuple[ComputeNode, ...] = ()
@@ -294,10 +308,10 @@ class ResourcesSpec(StrictFrozenModel):
 
 
 class PolicySpec(StrictFrozenModel):
-    name: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    name: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     deployment: Literal["managed", "os-default"] = "managed"
     admission: AdmissionPolicy
-    runtime_control: RuntimeControl = RuntimeControl.AGENTCGROUP_CGROUP
+    runtime_control: RuntimeControl = RuntimeControl.OFF
     reclamation: ReclamationPolicy
     eviction: EvictionPolicy
     restore: RestorePolicy
@@ -306,9 +320,12 @@ class PolicySpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_tuple(self) -> "PolicySpec":
+        if (self.runtime_control is RuntimeControl.PRESSURE_LIFECYCLE
+                and self.reclamation is ReclamationPolicy.RESIDENT):
+            raise ValueError('pressure_lifecycle requires explicit snapshot_pause, wait_aware_pressure and reactive restore')
         if self.deployment == "os-default" and (
             self.admission is not AdmissionPolicy.OFF
-            or self.runtime_control is not RuntimeControl.OFF
+            or self.runtime_control not in {RuntimeControl.OFF, RuntimeControl.NO_CONTROL}
             or self.reclamation is not ReclamationPolicy.RESIDENT
             or self.template_aware_placement or self.snapshot_aware_residency
         ):
@@ -344,7 +361,7 @@ class ExperimentSpec(StrictFrozenModel):
     schema_version: int
     suite: Literal["admission", "numa-snapshot"] | None = None
     suite_ablations: bool = False
-    suite_runtime_control: Literal["off", "agentcgroup_cgroup"] = "off"
+    suite_runtime_control: RuntimeControl = RuntimeControl.OFF
     experiment_id: str = Field(default="experiment", min_length=1)
     workload: WorkloadSpec
     agent: AgentSpec = Field(default_factory=AgentSpec)
@@ -365,6 +382,9 @@ class ExperimentSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_v2(self) -> "ExperimentSpec":
+        if (any(p.runtime_control.adaptive for p in self.policies)
+                and not self.resources.local_memory_cgroup):
+            raise ValueError('pressure control requires resources.local_memory_cgroup and verified preallocation VM routing')
         if self.resources.lifecycle_admission == "os-managed" and any(
             policy.reclamation is not ReclamationPolicy.RESIDENT for policy in self.policies
         ):

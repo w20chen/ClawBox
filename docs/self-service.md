@@ -192,7 +192,11 @@ bash scripts/clawbox --sudo experiment report control-eval-01
 
 训练接受成功完成的无准入或固定准入运行，要求完整观测、任务验证和清理证明；缺失观测不能填零。
 准入套件默认比较无准入部署与 ClawTune 预测准入，两组使用 OS 放置和常驻 VM。
-默认关闭 AgentCgroup；`--runtime-control agentcgroup_cgroup` 为方案组开启它，
+默认关闭资源控制。新的 `phase_memcg`、`release_cpu`、`pressure_lifecycle` 和
+`adaptive_joint` 模式、配置字段及对比运行命令见 [压力控制说明](pressure-control.md)。
+它们使用每 VM 的稳定 cgroup；不会自动开启 NUMA 借用。生命周期模式需要显式配置
+快照机制及历史成本；仅 cgroup 的两组不启用快照。所有参数变更使用新 run ID。
+`--runtime-control agentcgroup_cgroup` 为方案组开启旧版 HIGH/LOW 控制，
 `--runtime-control off` 关闭。加 `--ablations` 后另有固定准入和仅 AgentCgroup 两组。
 AgentCgroup 默认每 0.5 秒采样，1 次 `memory.high` 事件或 85% 父 cgroup
 使用率可触发 1 秒保护窗口。若训练运行显示控制过于频繁，可用

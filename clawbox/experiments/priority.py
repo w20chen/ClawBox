@@ -26,8 +26,9 @@ def session_priority(index: int, concurrency: int, repetition: int) -> str:
 class PriorityDomain:
     def __init__(self, parent: Path, *, concurrency: int, repetition: int,
                  registry: Path = REGISTRY, placements: dict | None = None,
-                 journal_directory: Path | None = None):
+                 journal_directory: Path | None = None, legacy: bool = True):
         self.parent = parent.resolve()
+        self.legacy = legacy
         self.registry = registry
         self.placements = placements or {}
         self.observations = []
@@ -37,7 +38,7 @@ class PriorityDomain:
         self.low = self.parent / (self.prefix + '-low')
         self.paths: list[Path] = []
         self.leaves: dict[tuple[int, str], Path] = {}
-        self.priorities = {i: session_priority(i, concurrency, repetition)
+        self.priorities = {i: session_priority(i, concurrency, repetition) if legacy else 'neutral'
                            for i in range(concurrency)}
         # Equal sibling defaults would accidentally give one HIGH session half
         # of the CPU shares. Normalize by offered sessions in every arm,
@@ -54,7 +55,8 @@ class PriorityDomain:
         with self.journal.open('x', encoding='utf-8') as stream:
             os.chmod(self.journal, 0o600)
             json.dump({'parent':str(self.parent),'prefix':self.prefix,
-                       'priorities':self.priorities,'tokens':list(self.tokens.values())},stream)
+                       'priorities':self.priorities,'tokens':list(self.tokens.values()),
+                       'flat': not self.legacy},stream)
             stream.flush()
             os.fsync(stream.fileno())
 
@@ -97,6 +99,18 @@ class PriorityDomain:
             if events.get('populated') != '0':
                 raise RuntimeError('physical VM domain is not empty before the arm')
             self._journal()
+            if not self.legacy:
+                for index in self.priorities:
+                    for role in ('runtime', 'tool'):
+                        leaf = self.parent / f'{self.prefix}-vm-{index:04d}-{role}'
+                        self._create(leaf, branch=False)
+                        self.leaves[index, role] = leaf
+                        self.prepare(index, role)
+                        with (self.registry / self.tokens[index, role]).open('x', encoding='utf-8') as stream:
+                            os.chmod(stream.name, 0o600)
+                            json.dump({'path': '/' + leaf.relative_to('/sys/fs/cgroup').as_posix()}, stream)
+                self.cpu_weights = {'default': 100}
+                return
             self._create(self.high, branch=True)
             self._create(self.low, branch=True)
             (self.high/'cpu.weight').write_text(str(self.cpu_weights['high']))
@@ -216,11 +230,16 @@ def cleanup_priority_domains(directory: Path):
                 (REGISTRY/token).unlink(missing_ok=True)
             paths=[]
             for index,priority in record['priorities'].items():
-                if not index.isdecimal() or priority not in ('high','low'):
+                if not index.isdecimal() or priority not in ('high','low','neutral'):
                     raise ValueError('invalid priority cleanup session')
+                if record.get('flat'):
+                    paths.extend(parent / f'{prefix}-vm-{int(index):04d}-{role}'
+                                 for role in ('runtime', 'tool'))
+                    continue
                 session=parent/(prefix+'-'+priority)/f'session-{int(index):04d}'
                 paths.extend([session/'runtime',session/'tool',session])
-            paths.extend([parent/(prefix+'-high'),parent/(prefix+'-low')])
+            if not record.get('flat'):
+                paths.extend([parent/(prefix+'-high'),parent/(prefix+'-low')])
             for path in paths:
                 try:
                     path.rmdir()

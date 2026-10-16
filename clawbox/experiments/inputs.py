@@ -88,7 +88,7 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             traces.append({"case_id": case.case_id, **info})
     files = []
     admissions = {policy.admission for policy in spec.policies}
-    if any(policy.runtime_control.value != 'off' for policy in spec.policies):
+    if any(policy.runtime_control.legacy for policy in spec.policies):
         from .congestion import UPSTREAM_SHA256, UPSTREAM_SOURCE
         source = Path(spec.resources.agentcgroup_source) if spec.resources.agentcgroup_source else UPSTREAM_SOURCE
         if hashlib.sha256(source.read_bytes()).hexdigest() != UPSTREAM_SHA256:

@@ -63,6 +63,42 @@ def test_real_kernel_upstream_activation_and_low_throttling(parent):
     assert result['oom_kill']==0
 
 
+def test_flat_vm_defaults_and_recovery(parent, tmp_path):
+    from clawbox.experiments.priority import PriorityDomain, cleanup_priority_domains
+    domain = PriorityDomain(parent, concurrency=2, repetition=0,
+                            journal_directory=tmp_path, legacy=False)
+    domain.start()
+    try:
+        assert set(domain.priorities.values()) == {'neutral'}
+        for leaf in domain.leaves.values():
+            assert leaf.parent == parent
+            assert (leaf/'cpu.weight').read_text().strip() == '100'
+            assert (leaf/'memory.low').read_text().strip() == '0'
+            assert (leaf/'memory.high').read_text().strip() == 'max'
+        from clawbox.experiments.pressure import PressureControl
+        from clawbox.experiments.spec import PressureControlSpec
+        control = PressureControl(parent, mode='phase_memcg', options=PressureControlSpec())
+        leaf = domain.leaves[0, 'tool']
+        control.register('test', 'tool', leaf, None, None)
+        vm = control.vms['test', 'tool']
+        vm.modified.update(('cpu.weight', 'memory.low'))
+        (leaf/'cpu.weight').write_text('200')
+        (leaf/'memory.low').write_text(str(32*1024**2))
+        control.close()
+        assert (leaf/'cpu.weight').read_text().strip() == '100'
+        assert (leaf/'memory.low').read_text().strip() == '0'
+    finally:
+        domain.close()
+    # Simulate supervisor cleanup after process death, with no live VM owners.
+    domain = PriorityDomain(parent, concurrency=1, repetition=0,
+                            journal_directory=tmp_path, legacy=False)
+    domain.start()
+    domain.lock_file.close()
+    domain.lock_file = None
+    cleanup_priority_domains(tmp_path)
+    assert not list(parent.glob('clawbox-*'))
+
+
 def test_cgroup_oom_is_counted_even_with_runtime_control_off(parent):
     from clawbox.experiments.congestion import RuntimeMemoryControl
     from clawbox.experiments.priority import PriorityDomain

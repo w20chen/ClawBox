@@ -209,6 +209,7 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
 
 
 def native_tool_bridge_setup_command(*, restart: bool = False,
+                                     require_progress_events: bool = False,
                                      command_timeout_seconds: int = 300) -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
@@ -227,9 +228,14 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
             "/run/clawtune/guest-collector.token "
             "/var/log/clawtune-guest-collector.unavailable; "
         )
+    progress_check = (
+        "/usr/local/bin/tool-bridge --self-test | grep -q '\"progress_events\":true' || "
+        "{ echo 'Toolbridge lacks execution progress events; rebuild the Tool image with clawbox experiment images' >&2; exit 1; }; "
+    ) if require_progress_events else ""
     return (
         "set -eu; "
-        "mkdir -p /etc/profile.d; "
+        + progress_check
+        + "mkdir -p /etc/profile.d; "
         "printf 'export PYTHONHASHSEED=0\\n' > /etc/profile.d/clawbox-experiment.sh; "
         "mkdir -p /run/clawbox-ssh; "
         "printf '%s' \"$CLAWBOX_TOOL_HOST_KEY_B64\" | base64 -d > /run/clawbox-ssh/host_key; "

@@ -54,15 +54,18 @@ using reclaim-then-borrow when a borrow budget exists, otherwise snapshot-only.
 Thus the main NUMA comparison evaluates the complete scheduling design; compare
 its managed ablations to isolate affinity and snapshot ranking individually.
 
-AgentCgroup is optional: `--runtime-control off` (suite default) or
-`--runtime-control agentcgroup_cgroup`, saved as `suite_runtime_control`.
+Resource control is optional: `--runtime-control off` (suite default),
+`agentcgroup_legacy` (alias `agentcgroup_cgroup`), `phase_memcg`, `release_cpu`,
+`pressure_lifecycle`, or `adaptive_joint`, saved as `suite_runtime_control`.
+See [pressure control](pressure-control.md) for the six comparison arms,
+mechanism prerequisites, YAML options, and reproducible commands.
 The deployment baseline stays off. In the admission suite, enabling it adds
 AgentCgroup to the proposed arm; `--ablations` also includes AgentCgroup without
 admission. Custom recipes can set each `policies[].runtime_control` independently.
 The CLI option applies to all policies in a custom recipe.
 AgentCgroup's public tuning knobs are the polling interval, `memory.high`
 event threshold, parent usage ratio, and protection-window duration. Their
-defaults are 0.1 seconds, 1 event, 0.85, and 1 second. A less aggressive
+legacy defaults are 0.5 seconds, 1 event, 0.85, and 1 second. A less aggressive
 follow-up can increase the threshold/ratio or shorten the window. Use a new
 run ID; these changes need neither host apply nor an image rebuild.
 
@@ -237,7 +240,8 @@ do not necessarily match a given base YAML.
 | `resources.observe_predictions` | YAML boolean, default false; query predictions without using them for admission |
 | `resources.prediction_reservation_scale` | `--prediction-reservation-scale`; positive host-growth multiplier, default 1 |
 | `resources.admission_margin_mib` | `--admission-margin-mib`; nonnegative global reserve, default 256 MiB |
-| `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|agentcgroup_cgroup`; suites default off; custom policy fields are independent |
+| `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|no_control\|agentcgroup_cgroup\|agentcgroup_legacy\|phase_memcg\|release_cpu\|pressure_lifecycle\|adaptive_joint`; suites default off; custom policy fields are independent |
+| `resources.pressure_control` | Editable [pressure policy fields and units](pressure-control.md); requires a new run ID |
 | `resources.agentcgroup_poll_interval_seconds` | `--agentcgroup-poll-interval-seconds`; positive seconds, default 0.5 |
 | `resources.agentcgroup_event_threshold` | `--agentcgroup-event-threshold`; positive `memory.high` event count, default 1 |
 | `resources.agentcgroup_pressure_ratio` | `--agentcgroup-pressure-ratio`; parent current/max ratio in (0,1), default 0.85 |

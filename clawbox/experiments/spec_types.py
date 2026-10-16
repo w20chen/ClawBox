@@ -35,6 +35,25 @@ class AdmissionPolicy(StrEnum):
 class RuntimeControl(StrEnum):
     OFF = "off"
     AGENTCGROUP_CGROUP = "agentcgroup_cgroup"
+    NO_CONTROL = "no_control"
+    AGENTCGROUP_LEGACY = "agentcgroup_legacy"
+    PHASE_MEMCG = "phase_memcg"
+    RELEASE_CPU = "release_cpu"
+    PRESSURE_LIFECYCLE = "pressure_lifecycle"
+    ADAPTIVE_JOINT = "adaptive_joint"
+
+    @property
+    def legacy(self):
+        return self in {self.AGENTCGROUP_CGROUP, self.AGENTCGROUP_LEGACY}
+
+    @property
+    def adaptive(self):
+        return self in {self.PHASE_MEMCG, self.RELEASE_CPU,
+                        self.PRESSURE_LIFECYCLE, self.ADAPTIVE_JOINT}
+
+    @property
+    def coordinates_release(self):
+        return self in {self.PRESSURE_LIFECYCLE, self.ADAPTIVE_JOINT}
 
 
 class ReclamationPolicy(StrEnum):

@@ -105,6 +105,7 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_en
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
         active_reservations={'exec': 512}, admitted_routes={'exec': route},
         pending_admissions=set(),
+        progress_control=None,
         host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})}, prediction_records=[],
         lifecycle=SimpleNamespace(complete_first_tool_after_restore=lambda *args, **kwargs: None),
         coordinator=SimpleNamespace(release=lambda *args: released.set(),

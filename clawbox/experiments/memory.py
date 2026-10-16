@@ -549,6 +549,7 @@ class SandboxRSSSampler:
         self.cgroup = cgroup
         self.charge_baseline = int((cgroup/'memory.current').read_text()) if cgroup else None
         self.charge_peak = self.charge_baseline
+        self.charge_last = self.charge_baseline
         self.charge_samples = 0
         self.charge_error = None
         self.proc_root = proc_root
@@ -600,6 +601,7 @@ class SandboxRSSSampler:
             "host_cgroup_metric": "host_cgroup_memory_current_increment",
             "host_cgroup_baseline_bytes": self.charge_baseline,
             "host_cgroup_peak_bytes": self.charge_peak,
+            "host_cgroup_final_bytes": self.charge_last,
             "host_cgroup_sample_count": self.charge_samples,
             "host_cgroup_error": self.charge_error,
             "host_cgroup_execution_increment_bytes": (
@@ -625,6 +627,7 @@ class SandboxRSSSampler:
         if self.cgroup is not None:
             try:
                 charge = int((self.cgroup/'memory.current').read_text())
+                self.charge_last = charge
                 self.charge_peak = max(self.charge_peak, charge)
                 self.charge_samples += 1
             except (OSError, ValueError) as exc:

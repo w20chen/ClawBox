@@ -647,7 +647,7 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
 
 def test_baseline_catalog_and_independent_policy_names():
     from clawbox.experiments.baselines import ACTIVE_BASELINES, ensure_supported_experiment
-    assert len(ACTIVE_BASELINES) == 7
+    assert len(ACTIVE_BASELINES) == 13
     assert all(BASELINES[n].implementation_status == 'implemented' for n in ACTIVE_BASELINES)
     raw = raw_spec()
     raw['policies'] = [resolve_baseline('runtime-resident').as_policy(name='custom-label').model_dump(mode='json')]

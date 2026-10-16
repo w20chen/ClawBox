@@ -1,7 +1,8 @@
 ﻿"""Select convenience presets using independent mechanism dimensions."""
 from .baselines import BASELINES
+from .spec_types import RuntimeControl
 DIMENSIONS = {'admission': ('off', 'fixed', 'predicted'),
-              'runtime_control': ('off', 'agentcgroup_cgroup'),
+              'runtime_control': tuple(p.value for p in RuntimeControl),
               'reclamation': ('resident', 'snapshot_pause')}
 
 def dimensions(policy):

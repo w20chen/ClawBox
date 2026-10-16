@@ -289,6 +289,8 @@ func commandExitCode(err error, timedOut bool) int {
 func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Duration, outputLimit int64) executionLog {
 	started := time.Now()
 	command, envelopeExecutionID, profileCommand, enveloped := parseExecEnvelope(rawCommand)
+	progress := parseProgressControl(rawCommand)
+	progressError := ""
 	executionID := envelopeExecutionID
 	if !enveloped || executionID == "" {
 		executionID = randomID()
@@ -453,6 +455,10 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		_ = gateWrite.Close()
+		if progressErr := progress.report("start"); progressErr != nil {
+			progressError = progressErr.Error()
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		timer := time.NewTimer(timeout)
@@ -480,6 +486,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			record.ExitCode = 130
 		}
 		executionEnded = time.Now()
+		if progressErr := progress.report("end"); progressErr != nil {
+			progressError = progressErr.Error()
+		}
 		// Read counting FDs immediately at the authoritative process exit. This
 		// is independent of the eBPF drain below; its local RPC is bounded and
 		// failure never changes the tool result.
@@ -537,6 +546,10 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	record.StdoutBytes = stdout.total
 	record.StderrBytes = stderr.total
 	record.OutputTruncated = stdout.truncated || stderr.truncated
+	if progressError != "" {
+		record.TelemetryError = progressError
+		record.ExitCode = 125
+	}
 	if cmd.Process == nil {
 		record.ExitCode = commandExitCode(err, record.TimedOut)
 	}
@@ -703,7 +716,7 @@ func handleConnection(raw net.Conn, config *ssh.ServerConfig, workdir string, ti
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--self-test" {
-		fmt.Printf("{\"name\":\"clawbox-tool-bridge\",\"version\":%q,\"arch\":%q}\n", version, runtime.GOARCH)
+		fmt.Printf("{\"name\":\"clawbox-tool-bridge\",\"version\":%q,\"arch\":%q,\"progress_events\":true}\n", version, runtime.GOARCH)
 		if runtime.GOARCH != "arm64" {
 			os.Exit(1)
 		}

@@ -322,8 +322,9 @@ def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
     assert launched_remote.endswith("\n" + logical + "'\n} 2>&1")
 
 
+@pytest.mark.parametrize('progress', [False, True])
 def test_deferred_timeout_is_removed_from_profile_and_begins_after_admission(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, progress,
 ) -> None:
     monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
     monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
@@ -349,12 +350,20 @@ def test_deferred_timeout_is_removed_from_profile_and_begins_after_admission(
             return {
                 "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 1,
                 "container_port": 2222, "host": "192.0.2.20", "port": 20020,
+                "notify_execution_start": progress,
             }
         return {"status": "COMPLETED"}
 
     def wait(_argv: list[str], _execution_id: str,
              timeout_seconds: float | None = None) -> int:
         waited.append(timeout_seconds or 0)
+        encoded = _argv[-1].split(policy_ssh.PREFIX + 'b64:', 1)[1].split('\n', 1)[0]
+        header = json.loads(policy_ssh._b64url_decode(encoded))
+        assert ('progress_control' in header) == progress
+        if progress:
+            witness = header['progress_control']
+            assert witness['request']['endpoint_epoch'] == 1
+            assert witness['request']['command_sha256'] == hashlib.sha256(logical.encode()).hexdigest()
         return 0
 
     monkeypatch.setattr(policy_ssh, "_post", post)
