@@ -63,6 +63,7 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
     external_base_identity = None
     external_base_allocated_bytes = 0
     private_delta_bytes = 0
+    layer_allocations = []
     for index, layer in enumerate(layers):
         name = layer.get("name")
         if name != f"{index:06d}.mem":
@@ -78,9 +79,16 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         if file.is_symlink() or stat.st_size != logical:
             raise RuntimeError("missing or truncated native RAM layer")
         layer_files.append(file)
+        layer_allocations.append({
+            "layer_index": index,
+            "identity": f"{stat.st_dev}:{stat.st_ino}",
+            "allocated_bytes": _allocated_bytes(file, stat),
+            "external": external_path is not None,
+        })
         if external_path is None:
             owned_files.append(file)
-            private_delta_bytes += _allocated_bytes(file, stat)
+            if not (index == 0 and manifest.get("reused_base_allocated_bytes", 0) > 0):
+                private_delta_bytes += _allocated_bytes(file, stat)
         else:
             external_base_identity = f"{stat.st_dev}:{stat.st_ino}"
             external_base_allocated_bytes = _allocated_bytes(file, stat)
@@ -103,5 +111,9 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         "external_base_identity": external_base_identity,
         "external_base_allocated_bytes": external_base_allocated_bytes,
         "private_delta_bytes": private_delta_bytes,
+        # A COLD lineage owns names, not necessarily exclusive data blocks.
+        # Deduplicate identities across lineages when summing physical storage.
+        "layer_allocations": layer_allocations,
+        "reused_base_allocated_bytes": manifest.get("reused_base_allocated_bytes", 0),
         "dependency_count": max(0, len(layers) - 1) + int(external_base_identity is not None),
     }

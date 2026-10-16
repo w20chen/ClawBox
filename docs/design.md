@@ -137,8 +137,21 @@ affinity on a qualification probe that finds the same large file-backed
 device/inode mapping in two VMMs and observes Linux `Shared_Clean`/PSS. When
 that probe is not requested or fails, cross-VM base savings are unsupported
 and are not inferred. WARM accounting charges only owned delta files; a COLD
-migration materializes the external base and rewrites the lineage so SSD state
-has no hidden WARM/template-path dependency.
+migration gives the destination an owned reference to the immutable external
+base: a hardlink when the base and COLD directory are on the same filesystem,
+otherwise a sparse copy. Its lineage uses destination-local names, so removing
+the original template pathname or another snapshot cannot break recovery.
+Private WARM layers are copied before releasing their WARM names. This reuses
+base data without a shared cache or a separate garbage-collection registry.
+Cross-filesystem transfers still copy the base for each lineage; this path
+does not deduplicate separate files by content.
+
+`transferred_bytes` reports bytes copied, excluding hardlinked base data.
+`reused_base_allocated_bytes` reports the base allocation reused at migration.
+The metadata reader exposes `layer_allocations` with device/inode identities;
+deduplicate these identities when summing physical RAM-snapshot storage across
+lineages. Per-lineage `allocated_bytes` is the referenced allocation and must
+not be summed as exclusive ownership when bases are shared.
 
 Template-aware placement first enforces CPU commitment, LOCAL memory safety,
 and the ordinary pressure score. It may prefer an already-active verified

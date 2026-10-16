@@ -271,6 +271,18 @@ bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/custom.yaml" 
 不会安装 guest 依赖；工具镜像须包含任务仓库、起始版本和依赖。完整 launch 路径使用
 OpenClaw + replay。配置容量、预测预留、实际内存和快照字节数分别解释。
 
+使用 `incremental-cow` 与 `tiered` 时，冷迁移会复用同一文件系统上的不可变 RAM base，
+为每个快照建立独立硬链接；删除原模板路径或其他快照不会使该引用失效。跨文件系统仍需
+复制 base，私有增量层仍需迁移。比较各组时保持相同的镜像和文件系统布局。
+检查元数据中的 `transferred_bytes`（实际复制字节）、`reused_base_allocated_bytes`
+（复用的 base 分配字节），并按 `layer_allocations` 的 device/inode 去重统计总存储。
+不要把每个快照引用的共享 base 重复相加。
+
+升级此修复时，按[安装流程](installation.md#2-build-and-install-patched-cubesandbox)
+在新的源码目录构建；保留旧目录，在确认没有其他实验使用服务的维护窗口安装 Cubelet。
+随后重新 qualify，并为快照比较使用新 run ID。仅此主机端修复无需重建 guest 镜像或
+重新训练 ClawTune；镜像或测量语义另有变化时仍须遵守对应重建、重训要求。
+
 ### 比较 NUMA 放置策略
 
 先复制已有 host YAML，在副本中设置 `warm: false`，保留相同的 compute nodes、

@@ -1,0 +1,948 @@
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+--- a/Cubelet/services/cubebox/relocate_snapshot.go
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -79,11 +79,17 @@
+ 	copied, err := copyLogicalSnapshot(source, tmp, entry.MemorySnapshotMechanism == "incremental-cow")
+ 	if err == nil {
+ 		if _, statErr := os.Stat(tmp + ".lineage.json"); statErr == nil {
+-			err = os.Rename(tmp + ".layers", destination + ".layers")
+-			if err == nil { err = os.Rename(tmp + ".lineage.json", destination + ".lineage.json") }
+-		}
+-		if err == nil { err = os.Rename(tmp, destination) }
+-		if err == nil { err = syncSnapshotDirectory(filepath.Dir(destination)) }
++			err = os.Rename(tmp+".layers", destination+".layers")
++			if err == nil {
++				err = os.Rename(tmp+".lineage.json", destination+".lineage.json")
++			}
++		}
++		if err == nil {
++			err = os.Rename(tmp, destination)
++		}
++		if err == nil {
++			err = syncSnapshotDirectory(filepath.Dir(destination))
++		}
+ 	}
+ 	if err != nil {
+ 		cleanupDirectMemorySnapshot(tmp)
+@@ -133,14 +139,29 @@
+ 	var written int64
+ 	for offset := int64(0); copyErr == nil && offset < info.Size(); {
+ 		data, seekErr := unix.Seek(int(in.Fd()), offset, unix.SEEK_DATA)
+-		if errors.Is(seekErr, unix.ENXIO) { break }
+-		if seekErr != nil { copyErr = seekErr; break }
++		if errors.Is(seekErr, unix.ENXIO) {
++			break
++		}
++		if seekErr != nil {
++			copyErr = seekErr
++			break
++		}
+ 		hole, seekErr := unix.Seek(int(in.Fd()), data, unix.SEEK_HOLE)
+-		if seekErr != nil { copyErr = seekErr; break }
+-		if hole > info.Size() { hole = info.Size() }
+-		if hole <= data { copyErr = fmt.Errorf("invalid sparse snapshot extent"); break }
++		if seekErr != nil {
++			copyErr = seekErr
++			break
++		}
++		if hole > info.Size() {
++			hole = info.Size()
++		}
++		if hole <= data {
++			copyErr = fmt.Errorf("invalid sparse snapshot extent")
++			break
++		}
+ 		_, copyErr = in.Seek(data, io.SeekStart)
+-		if copyErr == nil { _, copyErr = out.Seek(data, io.SeekStart) }
++		if copyErr == nil {
++			_, copyErr = out.Seek(data, io.SeekStart)
++		}
+ 		if copyErr == nil {
+ 			var count int64
+ 			count, copyErr = io.CopyN(out, in, hole-data)
+@@ -164,7 +185,9 @@
+ 
+ func syncSnapshotDirectory(path string) error {
+ 	file, err := os.Open(path)
+-	if err != nil { return err }
++	if err != nil {
++		return err
++	}
+ 	defer file.Close()
+ 	return file.Sync()
+ }
+@@ -175,19 +198,29 @@
+ func copyLogicalSnapshot(source, destination string, requireLineage bool) (int64, error) {
+ 	data, err := os.ReadFile(source + ".lineage.json")
+ 	if os.IsNotExist(err) {
+-		if requireLineage { return 0, fmt.Errorf("missing committed RAM lineage") }
++		if requireLineage {
++			return 0, fmt.Errorf("missing committed RAM lineage")
++		}
+ 		return copySnapshot(source, destination)
+ 	}
+-	if err != nil { return 0, err }
++	if err != nil {
++		return 0, err
++	}
+ 	var manifest map[string]json.RawMessage
+-	if err := json.Unmarshal(data, &manifest); err != nil { return 0, err }
++	if err := json.Unmarshal(data, &manifest); err != nil {
++		return 0, err
++	}
+ 	var layers []struct {
+-		Name string `json:"name"`
+-		Ranges []memoryLayerRange `json:"ranges"`
+-		ExternalPath *string `json:"external_path,omitempty"`
+-	}
+-	if err := json.Unmarshal(manifest["layers"], &layers); err != nil { return 0, err }
+-	if len(layers) == 0 { return 0, fmt.Errorf("empty RAM lineage") }
++		Name         string             `json:"name"`
++		Ranges       []memoryLayerRange `json:"ranges"`
++		ExternalPath *string            `json:"external_path,omitempty"`
++	}
++	if err := json.Unmarshal(manifest["layers"], &layers); err != nil {
++		return 0, err
++	}
++	if len(layers) == 0 {
++		return 0, fmt.Errorf("empty RAM lineage")
++	}
+ 	var logical uint64
+ 	if err := json.Unmarshal(manifest["logical_bytes"], &logical); err != nil || logical == 0 {
+ 		return 0, fmt.Errorf("invalid RAM logical size")
+@@ -221,49 +254,111 @@
+ 			previousEnd = r.Offset + r.Length
+ 		}
+ 	}
+-	if err := os.Mkdir(destination + ".layers", 0755); err != nil { return 0, err }
+-	var transferred, allocated int64
++	if err := os.Mkdir(destination+".layers", 0755); err != nil {
++		return 0, err
++	}
++	var transferred, allocated, reusedBaseAllocated int64
+ 	for i, layer := range layers {
+-		if layer.Name != fmt.Sprintf("%06d.mem", i) { return transferred, fmt.Errorf("invalid RAM layer name") }
+-		target := filepath.Join(destination + ".layers", layer.Name)
+-		layerSource := filepath.Join(source + ".layers", layer.Name)
+-		if layer.ExternalPath != nil { layerSource = *layer.ExternalPath }
+-		count, err := copySnapshot(layerSource, target)
++		if layer.Name != fmt.Sprintf("%06d.mem", i) {
++			return transferred, fmt.Errorf("invalid RAM layer name")
++		}
++		target := filepath.Join(destination+".layers", layer.Name)
++		layerSource := filepath.Join(source+".layers", layer.Name)
++		if layer.ExternalPath != nil {
++			layerSource = *layer.ExternalPath
++		}
++		var count int64
++		var err error
++		reused := false
++		if layer.ExternalPath != nil {
++			// The template RAM base is immutable. An owned hardlink keeps it
++			// alive even if the template or another snapshot is deleted, without
++			// copying its data or depending on the original pathname.
++			reused, err = linkSnapshotBase(layerSource, target)
++		}
++		if err == nil && !reused {
++			count, err = copySnapshot(layerSource, target)
++		}
+ 		transferred += count
+-		if err != nil { return transferred, err }
++		if err != nil {
++			return transferred, err
++		}
+ 		var stat unix.Stat_t
+-		if err := unix.Stat(target, &stat); err != nil { return transferred, err }
++		if err := unix.Stat(target, &stat); err != nil {
++			return transferred, err
++		}
+ 		allocated += stat.Blocks * 512
+-		// COLD is self-contained: it must not depend on a WARM/template path.
++		if reused {
++			reusedBaseAllocated = stat.Blocks * 512
++		}
+ 		layers[i].ExternalPath = nil
+ 	}
+-	if err := os.Link(filepath.Join(destination + ".layers", layers[len(layers)-1].Name), destination); err != nil {
++	if err := os.Link(filepath.Join(destination+".layers", layers[len(layers)-1].Name), destination); err != nil {
+ 		return transferred, err
+ 	}
+ 	manifest["transferred_bytes"], _ = json.Marshal(transferred)
+ 	manifest["allocated_bytes"], _ = json.Marshal(allocated)
++	manifest["reused_base_allocated_bytes"], _ = json.Marshal(reusedBaseAllocated)
+ 	manifest["layers"], _ = json.Marshal(layers)
+-	out, err := os.OpenFile(destination + ".lineage.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+-	if err != nil { return transferred, err }
++	out, err := os.OpenFile(destination+".lineage.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
++	if err != nil {
++		return transferred, err
++	}
+ 	err = json.NewEncoder(out).Encode(manifest)
+-	if err == nil { err = out.Sync() }
++	if err == nil {
++		err = out.Sync()
++	}
+ 	closeErr := out.Close()
+-	if err == nil { err = closeErr }
+-	if err == nil { err = syncSnapshotDirectory(destination + ".layers") }
++	if err == nil {
++		err = closeErr
++	}
++	if err == nil {
++		err = syncSnapshotDirectory(destination + ".layers")
++	}
+ 	return transferred, err
+ }
+ 
++// Only EXDEV permits copying instead of linking: permission, collision and
++// filesystem errors must remain actionable failures, not hidden extra I/O.
++func linkSnapshotBase(source, destination string) (bool, error) {
++	before, err := os.Lstat(source)
++	if err != nil {
++		return false, err
++	}
++	if !before.Mode().IsRegular() {
++		return false, fmt.Errorf("template RAM base is not a regular file")
++	}
++	if err := os.Link(source, destination); err != nil {
++		if errors.Is(err, unix.EXDEV) {
++			return false, nil
++		}
++		return false, err
++	}
++	after, err := os.Lstat(destination)
++	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
++		_ = os.Remove(destination)
++		return false, fmt.Errorf("template RAM base changed while linking: %v", err)
++	}
++	return true, nil
++}
++
+ func validateSnapshotLayer(source, name string, logical uint64, checkHead bool) error {
+-	path := filepath.Join(source + ".layers", name)
++	path := filepath.Join(source+".layers", name)
+ 	info, err := os.Lstat(path)
+-	if err != nil { return err }
++	if err != nil {
++		return err
++	}
+ 	if !info.Mode().IsRegular() || uint64(info.Size()) != logical {
+ 		return fmt.Errorf("missing or truncated RAM layer %s", name)
+ 	}
+ 	if checkHead {
+ 		head, err := os.Lstat(source)
+-		if err != nil { return err }
+-		if !os.SameFile(head, info) { return fmt.Errorf("RAM head is not the latest layer") }
++		if err != nil {
++			return err
++		}
++		if !os.SameFile(head, info) {
++			return fmt.Errorf("RAM head is not the latest layer")
++		}
+ 	}
+ 	return nil
+ }
+diff --git a/Cubelet/services/cubebox/incremental_memory_test.go b/Cubelet/services/cubebox/incremental_memory_test.go
+--- a/Cubelet/services/cubebox/incremental_memory_test.go
++++ b/Cubelet/services/cubebox/incremental_memory_test.go
+@@ -1,138 +1,220 @@
+ package cubebox
+ 
+ import (
+-    "encoding/json"
+-    "net"
+-    "os"
+-    "path/filepath"
+-    "testing"
+-
+-    cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+-    "golang.org/x/sys/unix"
++	"encoding/json"
++	"net"
++	"os"
++	"path/filepath"
++	"testing"
++
++	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++	"golang.org/x/sys/unix"
+ )
+ 
+ func TestDirectPauseMemoryPathAcceptsConfiguredWarmRoot(t *testing.T) {
+-    t.Setenv("CLAWBOX_WARM_SNAPSHOT_ROOT", "/mnt/clawbox-warm")
+-    t.Setenv("CLAWBOX_COLD_SNAPSHOT_ROOT", "/data/clawbox-incremental-cold-20260913")
+-    req := &cubebox.UpdateCubeSandboxRequest{Annotations: map[string]string{
+-        "clawbox.snapshot.tier": "warm",
+-        "clawbox.snapshot.memory.path": "/mnt/clawbox-warm/test/g1.mem",
+-    }}
+-    path, direct, err := directPauseMemoryPath(req)
+-    if err != nil || !direct || path != "/mnt/clawbox-warm/test/g1.mem" {
+-        t.Fatalf("configured warm path rejected: %q %v %v", path, direct, err)
+-    }
++	t.Setenv("CLAWBOX_WARM_SNAPSHOT_ROOT", "/mnt/clawbox-warm")
++	t.Setenv("CLAWBOX_COLD_SNAPSHOT_ROOT", "/data/clawbox-incremental-cold-20260913")
++	req := &cubebox.UpdateCubeSandboxRequest{Annotations: map[string]string{
++		"clawbox.snapshot.tier":        "warm",
++		"clawbox.snapshot.memory.path": "/mnt/clawbox-warm/test/g1.mem",
++	}}
++	path, direct, err := directPauseMemoryPath(req)
++	if err != nil || !direct || path != "/mnt/clawbox-warm/test/g1.mem" {
++		t.Fatalf("configured warm path rejected: %q %v %v", path, direct, err)
++	}
+ }
+ 
+ func TestWarmAllocationOnlyChargesDirtyRanges(t *testing.T) {
+-    path := filepath.Join(t.TempDir(), "ram.mem")
+-    page := int64(os.Getpagesize())
+-    file, err := os.Create(path)
+-    if err != nil { t.Fatal(err) }
+-    if err := file.Truncate(16 * page); err != nil { t.Fatal(err) }
+-    file.Close()
+-    stop, err := serveWarmAllocation(path, uint64(16 * page))
+-    if err != nil { t.Fatal(err) }
+-    defer stop()
+-    conn, err := net.Dial("unix", path + ".allocate.sock")
+-    if err != nil { t.Fatal(err) }
+-    ranges := []memoryLayerRange{{GPA: 0, Offset: uint64(page), Length: uint64(page)}}
+-    if err := json.NewEncoder(conn).Encode(ranges); err != nil { t.Fatal(err) }
+-    conn.(*net.UnixConn).CloseWrite()
+-    var response struct { OK bool `json:"ok"` }
+-    if err := json.NewDecoder(conn).Decode(&response); err != nil { t.Fatal(err) }
+-    conn.Close()
+-    if !response.OK { t.Fatal("valid dirty allocation rejected") }
+-    var stat unix.Stat_t
+-    if err := unix.Stat(path, &stat); err != nil { t.Fatal(err) }
+-    if stat.Blocks * 512 < page || stat.Blocks * 512 >= 16 * page {
+-        t.Fatalf("expected only dirty pages allocated: %d", stat.Blocks * 512)
+-    }
++	path := filepath.Join(t.TempDir(), "ram.mem")
++	page := int64(os.Getpagesize())
++	file, err := os.Create(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := file.Truncate(16 * page); err != nil {
++		t.Fatal(err)
++	}
++	file.Close()
++	stop, err := serveWarmAllocation(path, uint64(16*page))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stop()
++	conn, err := net.Dial("unix", path+".allocate.sock")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ranges := []memoryLayerRange{{GPA: 0, Offset: uint64(page), Length: uint64(page)}}
++	if err := json.NewEncoder(conn).Encode(ranges); err != nil {
++		t.Fatal(err)
++	}
++	conn.(*net.UnixConn).CloseWrite()
++	var response struct {
++		OK bool `json:"ok"`
++	}
++	if err := json.NewDecoder(conn).Decode(&response); err != nil {
++		t.Fatal(err)
++	}
++	conn.Close()
++	if !response.OK {
++		t.Fatal("valid dirty allocation rejected")
++	}
++	var stat unix.Stat_t
++	if err := unix.Stat(path, &stat); err != nil {
++		t.Fatal(err)
++	}
++	if stat.Blocks*512 < page || stat.Blocks*512 >= 16*page {
++		t.Fatalf("expected only dirty pages allocated: %d", stat.Blocks*512)
++	}
+ }
+ 
+ func TestMissingRequiredLineageCannotSpillOnlyLatestDelta(t *testing.T) {
+-    root := t.TempDir()
+-    source := filepath.Join(root, "source.mem")
+-    dest := filepath.Join(root, "destination.mem")
+-    if err := os.WriteFile(source, []byte("delta"), 0600); err != nil { t.Fatal(err) }
+-    transferred, err := copyLogicalSnapshot(source, dest, true)
+-    if err == nil || transferred != 0 { t.Fatalf("missing lineage accepted: %d %v", transferred, err) }
+-    if _, err := os.Stat(dest); !os.IsNotExist(err) { t.Fatalf("partial COLD file: %v", err) }
++	root := t.TempDir()
++	source := filepath.Join(root, "source.mem")
++	dest := filepath.Join(root, "destination.mem")
++	if err := os.WriteFile(source, []byte("delta"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	transferred, err := copyLogicalSnapshot(source, dest, true)
++	if err == nil || transferred != 0 {
++		t.Fatalf("missing lineage accepted: %d %v", transferred, err)
++	}
++	if _, err := os.Stat(dest); !os.IsNotExist(err) {
++		t.Fatalf("partial COLD file: %v", err)
++	}
+ }
+ 
+ func TestSpillCopiesEntireSparseRamLineage(t *testing.T) {
+-    root := t.TempDir()
+-    source := filepath.Join(root, "source.mem")
+-    dest := filepath.Join(root, "destination.mem")
+-    layers := source + ".layers"
+-    if err := os.Mkdir(layers, 0755); err != nil { t.Fatal(err) }
+-    page := int64(os.Getpagesize())
+-    base := filepath.Join(layers, "000000.mem")
+-    delta := filepath.Join(layers, "000001.mem")
+-    if err := os.WriteFile(base, make([]byte, 8 * page), 0600); err != nil { t.Fatal(err) }
+-    f, err := os.Create(delta)
+-    if err != nil { t.Fatal(err) }
+-    if err := f.Truncate(8 * page); err != nil { t.Fatal(err) }
+-    if _, err := f.WriteAt(make([]byte, page), 3 * page); err != nil { t.Fatal(err) }
+-    f.Close()
+-    if err := os.Link(delta, source); err != nil { t.Fatal(err) }
+-    metadata := map[string]interface{}{
+-        "schema_version": 1, "logical_bytes": 8 * page,
+-        "layers": []map[string]interface{}{{"name": "000000.mem"}, {"name": "000001.mem"}},
+-    }
+-    data, _ := json.Marshal(metadata)
+-    if err := os.WriteFile(source + ".lineage.json", data, 0600); err != nil { t.Fatal(err) }
+-    transferred, err := copyLogicalSnapshot(source, dest, true)
+-    if err != nil { t.Fatal(err) }
+-    if transferred < 9 * page || transferred >= 16 * page {
+-        t.Fatalf("expected base plus sparse delta: %d", transferred)
+-    }
+-    for _, name := range []string{"000000.mem", "000001.mem"} {
+-        info, err := os.Stat(filepath.Join(dest + ".layers", name))
+-        if err != nil || info.Size() != 8 * page { t.Fatalf("missing complete layer %s: %v", name, err) }
+-    }
+-    copied, err := os.ReadFile(dest + ".lineage.json")
+-    if err != nil { t.Fatal(err) }
+-    var manifest map[string]interface{}
+-    if err := json.Unmarshal(copied, &manifest); err != nil { t.Fatal(err) }
+-    if int64(manifest["transferred_bytes"].(float64)) != transferred {
+-        t.Fatal("COLD manifest transfer count does not include closure")
+-    }
+-}
+-
+-func TestSpillMaterializesExternalTemplateBase(t *testing.T) {
+-    root := t.TempDir()
+-    source := filepath.Join(root, "source.mem")
+-    dest := filepath.Join(root, "destination.mem")
+-    layers := source + ".layers"
+-    if err := os.Mkdir(layers, 0755); err != nil { t.Fatal(err) }
+-    page := int64(os.Getpagesize())
+-    external := filepath.Join(root, "template-base.mem")
+-    if err := os.WriteFile(external, make([]byte, 8 * page), 0600); err != nil { t.Fatal(err) }
+-    delta := filepath.Join(layers, "000001.mem")
+-    file, err := os.Create(delta)
+-    if err != nil { t.Fatal(err) }
+-    if err := file.Truncate(8 * page); err != nil { t.Fatal(err) }
+-    if _, err := file.WriteAt(make([]byte, page), 2 * page); err != nil { t.Fatal(err) }
+-    file.Close()
+-    if err := os.Link(delta, source); err != nil { t.Fatal(err) }
+-    metadata := map[string]interface{}{
+-        "schema_version": 1, "logical_bytes": 8 * page,
+-        "layers": []map[string]interface{}{
+-            {"name": "000000.mem", "external_path": external},
+-            {"name": "000001.mem"},
+-        },
+-    }
+-    data, _ := json.Marshal(metadata)
+-    if err := os.WriteFile(source + ".lineage.json", data, 0600); err != nil { t.Fatal(err) }
+-    transferred, err := copyLogicalSnapshot(source, dest, true)
+-    if err != nil { t.Fatal(err) }
+-    if transferred < 9 * page { t.Fatalf("external base was not copied: %d", transferred) }
+-    copied, err := os.ReadFile(dest + ".lineage.json")
+-    if err != nil { t.Fatal(err) }
+-    var manifest struct { Layers []struct { ExternalPath *string `json:"external_path"` } `json:"layers"` }
+-    if err := json.Unmarshal(copied, &manifest); err != nil { t.Fatal(err) }
+-    for _, layer := range manifest.Layers {
+-        if layer.ExternalPath != nil { t.Fatal("COLD lineage retained external WARM dependency") }
+-    }
+-}
++	root := t.TempDir()
++	source := filepath.Join(root, "source.mem")
++	dest := filepath.Join(root, "destination.mem")
++	layers := source + ".layers"
++	if err := os.Mkdir(layers, 0755); err != nil {
++		t.Fatal(err)
++	}
++	page := int64(os.Getpagesize())
++	base := filepath.Join(layers, "000000.mem")
++	delta := filepath.Join(layers, "000001.mem")
++	if err := os.WriteFile(base, make([]byte, 8*page), 0600); err != nil {
++		t.Fatal(err)
++	}
++	f, err := os.Create(delta)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := f.Truncate(8 * page); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := f.WriteAt(make([]byte, page), 3*page); err != nil {
++		t.Fatal(err)
++	}
++	f.Close()
++	if err := os.Link(delta, source); err != nil {
++		t.Fatal(err)
++	}
++	metadata := map[string]interface{}{
++		"schema_version": 1, "logical_bytes": 8 * page,
++		"layers": []map[string]interface{}{{"name": "000000.mem"}, {"name": "000001.mem"}},
++	}
++	data, _ := json.Marshal(metadata)
++	if err := os.WriteFile(source+".lineage.json", data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	transferred, err := copyLogicalSnapshot(source, dest, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if transferred < 9*page || transferred >= 16*page {
++		t.Fatalf("expected base plus sparse delta: %d", transferred)
++	}
++	for _, name := range []string{"000000.mem", "000001.mem"} {
++		info, err := os.Stat(filepath.Join(dest+".layers", name))
++		if err != nil || info.Size() != 8*page {
++			t.Fatalf("missing complete layer %s: %v", name, err)
++		}
++	}
++	copied, err := os.ReadFile(dest + ".lineage.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var manifest map[string]interface{}
++	if err := json.Unmarshal(copied, &manifest); err != nil {
++		t.Fatal(err)
++	}
++	if int64(manifest["transferred_bytes"].(float64)) != transferred {
++		t.Fatal("COLD manifest transfer count does not include closure")
++	}
++}
++
++func TestSpillOwnsExternalTemplateBaseWithoutCopying(t *testing.T) {
++	root := t.TempDir()
++	source := filepath.Join(root, "source.mem")
++	dest := filepath.Join(root, "destination.mem")
++	layers := source + ".layers"
++	if err := os.Mkdir(layers, 0755); err != nil {
++		t.Fatal(err)
++	}
++	page := int64(os.Getpagesize())
++	external := filepath.Join(root, "template-base.mem")
++	if err := os.WriteFile(external, make([]byte, 8*page), 0600); err != nil {
++		t.Fatal(err)
++	}
++	delta := filepath.Join(layers, "000001.mem")
++	file, err := os.Create(delta)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := file.Truncate(8 * page); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := file.WriteAt(make([]byte, page), 2*page); err != nil {
++		t.Fatal(err)
++	}
++	file.Close()
++	if err := os.Link(delta, source); err != nil {
++		t.Fatal(err)
++	}
++	metadata := map[string]interface{}{
++		"schema_version": 1, "logical_bytes": 8 * page,
++		"layers": []map[string]interface{}{
++			{"name": "000000.mem", "external_path": external},
++			{"name": "000001.mem"},
++		},
++	}
++	data, _ := json.Marshal(metadata)
++	if err := os.WriteFile(source+".lineage.json", data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	transferred, err := copyLogicalSnapshot(source, dest, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if transferred != page {
++		t.Fatalf("expected only the dirty delta to be copied: %d", transferred)
++	}
++	original, err := os.Stat(external)
++	if err != nil {
++		t.Fatal(err)
++	}
++	owned, err := os.Stat(filepath.Join(dest+".layers", "000000.mem"))
++	if err != nil || !os.SameFile(original, owned) {
++		t.Fatalf("base was not retained by an owned hardlink: %v", err)
++	}
++	copied, err := os.ReadFile(dest + ".lineage.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var manifest struct {
++		Layers []struct {
++			ExternalPath *string `json:"external_path"`
++		} `json:"layers"`
++	}
++	if err := json.Unmarshal(copied, &manifest); err != nil {
++		t.Fatal(err)
++	}
++	for _, layer := range manifest.Layers {
++		if layer.ExternalPath != nil {
++			t.Fatal("COLD lineage retained external WARM dependency")
++		}
++	}
++}
+diff --git a/Cubelet/services/cubebox/base_reuse_test.go b/Cubelet/services/cubebox/base_reuse_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/base_reuse_test.go
+@@ -0,0 +1,352 @@
++package cubebox
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++func baseReuseFixture(t *testing.T, root, base string) string {
++	t.Helper()
++	source := filepath.Join(root, "source.mem")
++	if err := os.MkdirAll(source+".layers", 0755); err != nil {
++		t.Fatal(err)
++	}
++	data := bytes.Repeat([]byte("D"), os.Getpagesize()*4)
++	delta := filepath.Join(source+".layers", "000001.mem")
++	if err := os.WriteFile(delta, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Link(delta, source); err != nil {
++		t.Fatal(err)
++	}
++	manifest := map[string]interface{}{
++		"schema_version": 1, "logical_bytes": len(data), "full_base": false,
++		"layers": []map[string]interface{}{
++			{"name": "000000.mem", "external_path": base},
++			{"name": "000001.mem", "ranges": []memoryLayerRange{{Offset: uint64(os.Getpagesize()), Length: uint64(os.Getpagesize())}}},
++		},
++	}
++	encoded, err := json.Marshal(manifest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(source+".lineage.json", encoded, 0600); err != nil {
++		t.Fatal(err)
++	}
++	return source
++}
++
++func TestColdBaseReusePrivateRestoreWritesDoNotChangePeer(t *testing.T) {
++	root := t.TempDir()
++	base := reuseBase(t, root, "base.mem", 'A')
++	source := baseReuseFixture(t, root, base)
++	for _, name := range []string{"first", "second"} {
++		if _, err := copyLogicalSnapshot(source, filepath.Join(root, name), true); err != nil {
++			t.Fatal(err)
++		}
++	}
++	// The VMM restores immutable lineage files with writable MAP_PRIVATE maps.
++	file, err := os.Open(filepath.Join(root, "first.layers", "000000.mem"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer file.Close()
++	mapping, err := unix.Mmap(int(file.Fd()), 0, 4*os.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Munmap(mapping)
++	mapping[0] = 'Z'
++	if mapping[0] != 'Z' {
++		t.Fatal("private mapping was not writable")
++	}
++	verifyReuseState(t, filepath.Join(root, "second"), 'A')
++	data, err := os.ReadFile(base)
++	if err != nil || data[0] != 'A' {
++		t.Fatal("private restore write modified shared base")
++	}
++}
++
++func reuseBase(t *testing.T, root, name string, value byte) string {
++	t.Helper()
++	path := filepath.Join(root, name)
++	if err := os.WriteFile(path, bytes.Repeat([]byte{value}, 4*os.Getpagesize()), 0600); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++func verifyReuseState(t *testing.T, destination string, baseValue byte) {
++	t.Helper()
++	base, err := os.ReadFile(filepath.Join(destination+".layers", "000000.mem"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	delta, err := os.ReadFile(filepath.Join(destination+".layers", "000001.mem"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Resolve the declared ranges as a restore does: base except for the dirty page.
++	page := os.Getpagesize()
++	copy(base[page:2*page], delta[page:2*page])
++	expected := bytes.Repeat([]byte{baseValue}, 4*page)
++	copy(expected[page:2*page], bytes.Repeat([]byte("D"), page))
++	if !bytes.Equal(base, expected) {
++		t.Fatal("restored layer contents differ")
++	}
++	head, err := os.Stat(destination)
++	if err != nil {
++		t.Fatal(err)
++	}
++	last, err := os.Stat(filepath.Join(destination+".layers", "000001.mem"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !os.SameFile(head, last) {
++		t.Fatal("head no longer points to the last layer")
++	}
++	raw, err := os.ReadFile(destination + ".lineage.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if bytes.Contains(raw, []byte("external_path")) {
++		t.Fatal("destination retains a source pathname dependency")
++	}
++}
++
++func TestColdBaseReuseAndIndependentLifetime(t *testing.T) {
++	root := t.TempDir()
++	base := reuseBase(t, root, "base.mem", 'A')
++	source := baseReuseFixture(t, root, base)
++	original, _ := os.Stat(base)
++	for _, name := range []string{"first", "second"} {
++		dest := filepath.Join(root, name)
++		moved, err := copyLogicalSnapshot(source, dest, true)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if moved != int64(4*os.Getpagesize()) {
++			t.Fatalf("base copied unnecessarily: moved=%d", moved)
++		}
++		target, err := os.Stat(filepath.Join(dest+".layers", "000000.mem"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !os.SameFile(original, target) {
++			t.Fatal("base must share storage")
++		}
++		verifyReuseState(t, dest, 'A')
++	}
++	cleanupDirectMemorySnapshot(source)
++	if err := os.Remove(base); err != nil {
++		t.Fatal(err)
++	}
++	cleanupDirectMemorySnapshot(filepath.Join(root, "first"))
++	verifyReuseState(t, filepath.Join(root, "second"), 'A')
++	cleanupDirectMemorySnapshot(filepath.Join(root, "second"))
++	entries, err := os.ReadDir(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(entries) != 0 {
++		t.Fatalf("last reference cleanup leaked files: %v", entries)
++	}
++}
++
++func TestColdBaseReuseConcurrentAndDistinctBases(t *testing.T) {
++	root := t.TempDir()
++	sources := make([]string, 2)
++	for i := range sources {
++		base := reuseBase(t, root, fmt.Sprintf("base%d.mem", i), byte('A'+i))
++		sources[i] = baseReuseFixture(t, filepath.Join(root, fmt.Sprintf("source%d", i)), base)
++	}
++	var wg sync.WaitGroup
++	errors := make(chan error, 24)
++	for i := 0; i < 24; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			dest := filepath.Join(root, fmt.Sprintf("dest%d", i))
++			moved, err := copyLogicalSnapshot(sources[i%2], dest, true)
++			if err != nil {
++				errors <- err
++				return
++			}
++			if moved != int64(4*os.Getpagesize()) {
++				errors <- fmt.Errorf("copied base: %d", moved)
++			}
++		}(i)
++	}
++	wg.Wait()
++	close(errors)
++	for err := range errors {
++		t.Error(err)
++	}
++	for i := 0; i < 24; i++ {
++		verifyReuseState(t, filepath.Join(root, fmt.Sprintf("dest%d", i)), byte('A'+i%2))
++	}
++	a, _ := os.Stat(filepath.Join(root, "dest0.layers/000000.mem"))
++	b, _ := os.Stat(filepath.Join(root, "dest1.layers/000000.mem"))
++	c, _ := os.Stat(filepath.Join(root, "dest2.layers/000000.mem"))
++	if a == nil || b == nil || c == nil || os.SameFile(a, b) || !os.SameFile(a, c) {
++		t.Fatal("base identities conflated or not reused")
++	}
++}
++
++func TestColdBaseReuseCrossFilesystemCopies(t *testing.T) {
++	root := t.TempDir()
++	other, err := os.MkdirTemp("/dev/shm", "clawbox-base-test-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer os.RemoveAll(other)
++	base := reuseBase(t, other, "base.mem", 'X')
++	if err := os.Link(base, filepath.Join(root, "probe")); err == nil {
++		t.Fatal("test requires different filesystems")
++	}
++	source := baseReuseFixture(t, root, base)
++	dest := filepath.Join(root, "cold")
++	moved, err := copyLogicalSnapshot(source, dest, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if moved != int64(8*os.Getpagesize()) {
++		t.Fatalf("missing required cross-filesystem transfer: %d", moved)
++	}
++	cleanupDirectMemorySnapshot(source)
++	if err := os.Remove(base); err != nil {
++		t.Fatal(err)
++	}
++	verifyReuseState(t, dest, 'X')
++}
++
++func TestColdBaseReuseInvalidSourcePreservesInput(t *testing.T) {
++	for _, mode := range []string{"missing", "truncated", "symlink"} {
++		t.Run(mode, func(t *testing.T) {
++			root := t.TempDir()
++			base := reuseBase(t, root, "base.mem", 'A')
++			source := baseReuseFixture(t, root, base)
++			switch mode {
++			case "missing":
++				if err := os.Remove(base); err != nil {
++					t.Fatal(err)
++				}
++			case "truncated":
++				if err := os.Truncate(base, 1); err != nil {
++					t.Fatal(err)
++				}
++			case "symlink":
++				if err := os.Rename(base, base+".real"); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.Symlink(base+".real", base); err != nil {
++					t.Fatal(err)
++				}
++			}
++			dest := filepath.Join(root, "cold")
++			if _, err := copyLogicalSnapshot(source, dest, true); err == nil {
++				t.Fatal("invalid base accepted")
++			}
++			if _, err := os.Stat(source); err != nil {
++				t.Fatal("source lost on failure", err)
++			}
++			if _, err := os.Stat(dest + ".layers"); !os.IsNotExist(err) {
++				t.Fatal("partial destination created", err)
++			}
++		})
++	}
++}
++
++func TestColdBaseReuseFailureReleasesOnlyNewReferences(t *testing.T) {
++	root := t.TempDir()
++	base := reuseBase(t, root, "base.mem", 'A')
++	source := baseReuseFixture(t, root, base)
++	good := filepath.Join(root, "good")
++	if _, err := copyLogicalSnapshot(source, good, true); err != nil {
++		t.Fatal(err)
++	}
++	bad := filepath.Join(root, "bad")
++	// Fail after the base reference and private delta have been created.
++	if err := os.WriteFile(bad, []byte("occupied"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := copyLogicalSnapshot(source, bad, true); err == nil {
++		t.Fatal("occupied destination accepted")
++	}
++	// Production rollback removes only artifacts belonging to this attempt.
++	if err := os.RemoveAll(bad + ".layers"); err != nil {
++		t.Fatal(err)
++	}
++	raw, err := os.ReadFile(bad)
++	if err != nil || string(raw) != "occupied" {
++		t.Fatal("preexisting target changed")
++	}
++	verifyReuseState(t, good, 'A')
++	original, _ := os.ReadFile(base)
++	if len(original) != 4*os.Getpagesize() || original[0] != 'A' {
++		t.Fatal("source base changed")
++	}
++}
++
++func TestColdBaseReuseLinkCollisionFailsWithoutCopying(t *testing.T) {
++	root := t.TempDir()
++	base := reuseBase(t, root, "base.mem", 'A')
++	target := reuseBase(t, root, "occupied.mem", 'B')
++	if reused, err := linkSnapshotBase(base, target); err == nil || reused {
++		t.Fatal("collision silently accepted")
++	}
++	data, err := os.ReadFile(target)
++	if err != nil || data[0] != 'B' {
++		t.Fatal("existing target modified")
++	}
++}
++
++func TestColdBaseReuseSparseBaseCountsOnlyTransferredDelta(t *testing.T) {
++	root := t.TempDir()
++	base := filepath.Join(root, "base.mem")
++	f, err := os.Create(base)
++	if err != nil {
++		t.Fatal(err)
++	}
++	size := 4 * os.Getpagesize()
++	if err := f.Truncate(int64(size)); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := f.WriteAt([]byte("base-marker"), 0); err != nil {
++		t.Fatal(err)
++	}
++	if err := f.Close(); err != nil {
++		t.Fatal(err)
++	}
++	source := baseReuseFixture(t, root, base)
++	dest := filepath.Join(root, "cold")
++	moved, err := copyLogicalSnapshot(source, dest, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if moved != int64(size) {
++		t.Fatal("sparse base incorrectly charged as transfer", moved)
++	}
++	raw, err := os.ReadFile(dest + ".lineage.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var m struct {
++		Reused int64 `json:"reused_base_allocated_bytes"`
++	}
++	if err := json.Unmarshal(raw, &m); err != nil {
++		t.Fatal(err)
++	}
++	before, _ := os.Stat(base)
++	after, _ := os.Stat(filepath.Join(dest+".layers", "000000.mem"))
++	if !os.SameFile(before, after) || m.Reused <= 0 || m.Reused >= int64(size) {
++		t.Fatalf("invalid sparse sharing accounting: %+v", m)
++	}
++}
