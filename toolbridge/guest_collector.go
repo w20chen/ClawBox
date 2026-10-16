@@ -22,6 +22,11 @@ import (
 const guestCollectorProtocolVersion = 1
 const pmuCollectorRequestTimeout = 100 * time.Millisecond
 
+func guestCollectorRequestTimeout() time.Duration {
+	seconds := envInt("CLAWTUNE_GUEST_COLLECTOR_TIMEOUT_SECONDS", 120)
+	return time.Duration(seconds) * time.Second
+}
+
 type guestCollectorResponse struct {
 	OK                 bool           `json:"ok"`
 	Version            int            `json:"v"`
@@ -218,9 +223,11 @@ func startGuestCollectorProcess() (*guestCollectorProcess, error) {
 		return nil, err
 	}
 	process := &guestCollectorProcess{
-		client: &guestCollectorClient{socket: socket, token: token, timeout: 15 * time.Second},
-		cmd:    cmd,
-		done:   make(chan error, 1),
+		client: &guestCollectorClient{
+			socket: socket, token: token, timeout: guestCollectorRequestTimeout(),
+		},
+		cmd:  cmd,
+		done: make(chan error, 1),
 	}
 	go func() { process.done <- cmd.Wait() }()
 	deadline := time.Now().Add(time.Duration(envInt("CLAWTUNE_GUEST_STARTUP_TIMEOUT_SECONDS", 30)) * time.Second)

@@ -46,17 +46,28 @@ class DemandLedger:
         self.previous = None
         self.check = lambda: None
         self.claims: dict[tuple[str, str], Claim] = {}
+        self.pending_upper_bound_fast_path_count = 0
+        self.pending_exact_count = 0
+
+    def pending_upper_bound(self, scope=None):
+        """Return the safe nominal bound without sampling every live claim."""
+        return sum(c.amount if scope is None else c.local_amount
+                   for c in self.claims.values()
+                   if scope is None or c.scope == scope)
 
     def pending(self, scope=None):
         # Callers hold the shared condition throughout sample/check/commit.
+        self.pending_exact_count += 1
         return sum(c.remaining()[0 if scope is None else 1]
                    for c in self.claims.values() if scope is None or c.scope == scope)
 
-    def reasons(self, additional: int, margin: int = 0):
+    def reasons(self, additional: int, margin: int = 0, *,
+                pending: int | None = None,
+                sampled: tuple[int, int] | None = None):
         self.check()
-        used, available = self.sample()
+        used, available = sampled if sampled is not None else self.sample()
         reasons = []
-        committed = used + self.pending() + self.margin + margin
+        committed = used + (self.pending() if pending is None else pending) + self.margin + margin
         if committed + additional > self.capacity:
             reasons.append('global_memory_budget')
         severe = self._severe(used)

@@ -346,6 +346,66 @@ def _validate_cgroup(payload: dict[str, Any], execution_id: str) -> None:
         raise ValueError(f"{execution_id}: cgroup peak RSS is not positive")
 
 
+def _validate_backend_maintenance_cgroup(
+    payload: dict[str, Any], execution_id: str,
+) -> bool:
+    """Validate maintenance telemetry, returning whether it used a fallback.
+
+    Very short SSH-backend probes can finish before the guest cgroup sampler
+    obtains its first reading. These calls are outside the measured agent-tool
+    workload and never train either KB, so an explicitly ineligible
+    process-tree artifact is acceptable. Agent-tool executions continue to use
+    the strict cgroup-v2 validator above.
+    """
+    if payload.get("source") == "cgroup-v2":
+        _validate_cgroup(payload, execution_id)
+        return False
+    if payload.get("schema") != "cgroup_resource_v1":
+        raise ValueError(f"{execution_id}: unsupported cgroup artifact schema")
+    if payload.get("execution_id") != execution_id:
+        raise ValueError(f"{execution_id}: cgroup artifact identity mismatch")
+    if payload.get("source") != "process-tree":
+        raise ValueError(f"{execution_id}: unsupported maintenance cgroup fallback")
+    if payload.get("fallback_used") is not True:
+        raise ValueError(f"{execution_id}: maintenance cgroup fallback is not declared")
+    if payload.get("sampling_quality") != "degraded":
+        raise ValueError(f"{execution_id}: maintenance cgroup fallback is not degraded")
+    memory_eligible = payload.get("memory_eligible")
+    if memory_eligible is False:
+        if not str(payload.get("memory_unavailable_reason") or "").strip():
+            raise ValueError(f"{execution_id}: maintenance cgroup fallback has no reason")
+    elif memory_eligible is True:
+        if payload.get("memory_measurement") != "guest_memtotal_minus_memavailable":
+            raise ValueError(f"{execution_id}: maintenance fallback has unknown memory measurement")
+        if not str(payload.get("memory_environment_id") or "").strip():
+            raise ValueError(f"{execution_id}: maintenance fallback has no memory environment")
+        if payload.get("memory_unavailable_reason") is not None:
+            raise ValueError(f"{execution_id}: eligible maintenance memory is marked unavailable")
+        for key in (
+            "memory_baseline_bytes", "memory_extra_peak_bytes", "memory_total_peak_bytes",
+        ):
+            value = payload.get(key)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value)) or value < 0):
+                raise ValueError(f"{execution_id}: maintenance fallback has invalid {key}")
+        if payload["memory_total_peak_bytes"] < payload["memory_baseline_bytes"]:
+            raise ValueError(f"{execution_id}: maintenance memory peak precedes baseline")
+    else:
+        raise ValueError(f"{execution_id}: maintenance fallback has no memory eligibility")
+    if payload.get("cgroup_setup_error") or payload.get("cgroup_read_error"):
+        raise ValueError(f"{execution_id}: cgroup artifact reports a read/setup error")
+    if payload.get("collector_errors"):
+        raise ValueError(f"{execution_id}: cgroup artifact reports collector errors")
+    for key in ("ts_start", "ts_end", "cpu_utilization_avg_cores", "memory_rss_peak_bytes"):
+        value = payload.get(key)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value)) or value < 0):
+            raise ValueError(f"{execution_id}: cgroup artifact has invalid {key}")
+    if payload["ts_end"] < payload["ts_start"]:
+        raise ValueError(f"{execution_id}: cgroup artifact end precedes start")
+    return True
+
+
 def _validate_clause(payload: dict[str, Any], execution_id: str) -> None:
     if payload.get("version") != 2:
         raise ValueError(f"{execution_id}: unsupported clause telemetry version")
@@ -516,6 +576,7 @@ def validate_native_tool_join(
         extra = sorted(set(by_id) - set(expected))
         raise ValueError(f"native Tool bridge identity mismatch; missing={missing}, extra={extra}")
 
+    maintenance_fallbacks: list[str] = []
     for execution_id, request in expected.items():
         records = by_id[execution_id]
         if len(records) != 1:
@@ -543,7 +604,14 @@ def validate_native_tool_join(
                 raise ValueError(f"{execution_id}: policy and Runtime command digests differ")
         if bridge.get("telemetry_state") != "complete":
             raise ValueError(f"{execution_id}: Tool telemetry is not complete")
-        _validate_cgroup(cgroup_artifacts.get(execution_id, {}), execution_id)
+        backend_maintenance = request.get("execution_scope") == "backend-maintenance"
+        if backend_maintenance:
+            if _validate_backend_maintenance_cgroup(
+                cgroup_artifacts.get(execution_id, {}), execution_id,
+            ):
+                maintenance_fallbacks.append(execution_id)
+        else:
+            _validate_cgroup(cgroup_artifacts.get(execution_id, {}), execution_id)
         clause = clause_artifacts.get(execution_id, {})
         # Structured OpenClaw file operations execute a bridge helper rather
         # than an Agent shell command. They use a fixed reservation and never
@@ -554,7 +622,7 @@ def validate_native_tool_join(
             request.get("operation") == "filesystem"
             and request.get("runtime_trace_expected") is False
         )
-        if filesystem_non_kb:
+        if filesystem_non_kb or backend_maintenance:
             _validate_non_kb_clause(clause, execution_id)
         else:
             _validate_clause(clause, execution_id)
@@ -593,6 +661,12 @@ def validate_native_tool_join(
             execution_id for execution_id, request in expected.items()
             if request.get("operation") == "filesystem"
             and request.get("runtime_trace_expected") is False
+        ),
+        "backend_maintenance_cgroup_fallback_execution_ids": sorted(
+            maintenance_fallbacks
+        ),
+        "backend_maintenance_cgroup_fallback_execution_count": len(
+            maintenance_fallbacks
         ),
         "wrong_session_routing": 0,
     }

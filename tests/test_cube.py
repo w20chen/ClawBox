@@ -782,6 +782,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         return {
             "agent_pid_file": f"/state/openclaw/{session_id}/agent.pid",
             "tool_latencies": [0.01], "runtime_traces": [],
+            "agent_replay_invalid": True, "agent_tool_failures": 0,
             "policy_control_records": policy_control.records(),
         }
 

@@ -194,6 +194,11 @@ bash scripts/clawbox --sudo experiment report control-eval-01
 准入套件默认比较无准入部署与 ClawTune 预测准入，两组使用 OS 放置和常驻 VM。
 默认关闭 AgentCgroup；`--runtime-control agentcgroup_cgroup` 为方案组开启它，
 `--runtime-control off` 关闭。加 `--ablations` 后另有固定准入和仅 AgentCgroup 两组。
+AgentCgroup 默认每 0.5 秒采样，1 次 `memory.high` 事件或 85% 父 cgroup
+使用率可触发 1 秒保护窗口。若训练运行显示控制过于频繁，可用
+`--agentcgroup-poll-interval-seconds`、`--agentcgroup-event-threshold`、
+`--agentcgroup-pressure-ratio` 和 `--agentcgroup-protection-window-seconds`
+调节。修改后使用新 run ID，无需重新 apply 主机或重建镜像。
 固定准入默认读取训练产物的实测 Host 增量 P90，也可用 `--static-tool-memory-mib` 调整。
 运行时预测需要同时保留 train 生成的 `memory-p50.json` 和 `memory-p50.kb.json`。
 `--prediction-mode runtime` 每次查询实际命令，包括预计算列表中没有的命令；

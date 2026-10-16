@@ -30,7 +30,7 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
     provider = RuntimePredictionProvider(path, repository='r')
     command = 'python unseen_task.py'
     result = provider.resolve(command, {'raw_command_sha256': command_sha256(command)})
-    assert seen == [command]
+    assert seen == [command, None]
     assert result['predicted_guest_extra_memory_mib'] == 3
     assert result['predicted_incremental_memory_mib'] == 7
     assert result['prediction_source'] == 'runtime_clawtune_immutable_kb'
@@ -82,6 +82,17 @@ def test_toolkb_fallback_keeps_measurement_contract():
     tool['memory_measurement'] = 'cgroup_v2_memory_current'
     with pytest.raises(PredictionUnavailable):
         select_p50({'tool': tool})
+
+
+def test_tool_class_is_last_measured_fallback():
+    coarse = model('runtime', 3 * 2**20)
+    result = select_p50({'tool_class': coarse})
+    assert result['predicted_incremental_memory_mib'] == 3
+    assert result['fallback_level'] == 'tool_class'
+    assert set(result['unavailable_models']) == {'lattice', 'tool'}
+
+    direct = model('runtime', 2 * 2**20)
+    assert select_p50({'tool': direct, 'tool_class': coarse})['fallback_level'] == 'tool'
 
 
 def test_lightweight_requires_measured_short_duration_and_sampling_reason():

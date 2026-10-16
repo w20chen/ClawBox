@@ -189,6 +189,10 @@ class ResourcesSpec(StrictFrozenModel):
     observe_predictions: bool = False
     prediction_reservation_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     agentcgroup_source: str | None = None
+    agentcgroup_poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    agentcgroup_event_threshold: int = Field(default=1, ge=1)
+    agentcgroup_pressure_ratio: float = Field(default=0.85, gt=0, lt=1, allow_inf_nan=False)
+    agentcgroup_protection_window_seconds: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
     snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"

@@ -68,7 +68,12 @@ def command_sha256(command: str) -> str:
 def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = None) -> dict:
     """ClawBox's admission policy; never change ClawTune's model outputs."""
     missing = {}
-    for name in ("lattice", "tool"):
+    # ``tool_class`` is a separately queried native ToolKB prediction with
+    # ``command=None``.  It uses measured calls from the same outer tool
+    # (``exec``) when a compound command has no transferable binary identity.
+    # Keep it after command-aware models so coarse evidence never masks a
+    # clause or single-binary prediction.
+    for name in ("lattice", "tool", "tool_class"):
         try:
             result = clawtune_extra_peak(models.get(name))
         except PredictionUnavailable as exc:
@@ -324,6 +329,15 @@ class RuntimePredictionProvider(P50PredictionProvider):
         with self._query_lock:
             result = predict_native_call_load_models(self.runtime, query, lattice=self.lattice)
             models = {key: result[key].model_dump(mode="json") for key in ("lattice", "tool")}
+            tool_class_query = ToolCallQuery(
+                repo=self.repository, tool_name="exec", command=None,
+                ts_start=query.ts_start,
+                memory_measurement="guest_memtotal_minus_memavailable",
+            )
+            tool_class = predict_native_call_load_models(
+                self.runtime, tool_class_query, lattice=self.lattice,
+            )["tool"]
+            models["tool_class"] = tool_class.model_dump(mode="json")
             prediction = self._metadata({"models": models}, command, digest)
         return {**prediction, "session_runtime_metadata": dict(runtime_metadata)}
 

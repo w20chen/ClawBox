@@ -59,6 +59,26 @@ def test_runtime_off_does_not_enforce_even_under_pressure(control):
         rt.close()
 
 
+def test_runtime_tuning_is_applied_and_recorded(control):
+    original, _ = control
+    rt = c.RuntimeMemoryControl(
+        original.parent, high=original.high, low=original.low,
+        interval=.25, event_threshold=7, pressure_ratio=.93,
+        protection_window_seconds=.4,
+    )
+    try:
+        assert rt.module.CgroupMemcgController.PRESSURE_RATIO == .93
+        assert rt.provenance['interval_seconds'] == .25
+        assert rt.provenance['threshold'] == 7
+        assert rt.provenance['pressure_ratio'] == .93
+        assert rt.provenance['protection_window_seconds'] == .4
+        rt.start()
+        assert rt.backend._config.threshold == 7
+        assert rt.backend._config.protection_window_s == .4
+    finally:
+        rt.close()
+
+
 def test_tool_membership_does_not_reset_upstream_window(control, monkeypatch):
     rt,group=control
     now=[10.]

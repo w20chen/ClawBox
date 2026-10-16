@@ -25,7 +25,7 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # as Tool-sandbox operations.
 TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
-OPENCLAW_SSH_RUNTIME_ROOT = "/var/lib/clawbox/openclaw-ssh"
+OPENCLAW_SSH_RUNTIME_ROOT = "/workspace"
 
 
 def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
@@ -42,30 +42,33 @@ def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
     return f"{workspace_root.rstrip('/')}/openclaw-ssh-shared-{value:x}"
 
 
-def openclaw_shared_ssh_workspace_directory(workspace_root: str) -> str:
-    """Return the remote directory OpenClaw presents as `/workspace`."""
-    return openclaw_shared_ssh_runtime_directory(workspace_root) + "/workspace"
-
-
 def native_tool_workspace_setup_command(tool_workspace: str) -> str:
     """Expose the image-owned repository at OpenClaw's canonical workspace."""
     source = str(tool_workspace or "").strip()
     if not source.startswith("/"):
         raise ValueError("Tool workspace must be an absolute POSIX path")
-    # OpenClaw presents the SSH backend's repository at this fixed path.  Its
-    # workspaceRoot setting stores backend metadata; it is not the remote cwd.
-    target = "/workspace"
+    # The SSH backend executes directly in workspaceRoot.  Its per-scope
+    # runtime directory is only an initialization marker: when it already
+    # exists, OpenClaw deliberately skips copying the Runtime VM's local
+    # workspace over the Tool-owned repository.
+    runtime_dir = openclaw_shared_ssh_runtime_directory(OPENCLAW_SSH_RUNTIME_ROOT)
+    target = OPENCLAW_SSH_RUNTIME_ROOT
     if source == target:
-        return f"set -eu; test -d {shlex.quote(source)}"
+        return (
+            f"set -eu; test -d {shlex.quote(target)}; "
+            f"mkdir -p -- {shlex.quote(runtime_dir)}"
+        )
+    if source.startswith(target.rstrip("/") + "/"):
+        raise ValueError("Tool workspace source cannot be inside /workspace")
     return (
         "set -eu; "
         f"test -d {shlex.quote(source)}; "
         f"if test -L {shlex.quote(target)}; then rm -- {shlex.quote(target)}; "
-        f"elif test -d {shlex.quote(target)}; then rmdir -- {shlex.quote(target)}; "
-        f"else test ! -e {shlex.quote(target)}; fi; "
-        f"ln -s -- {shlex.quote(source)} {shlex.quote(target)}; "
-        f"test \"$(readlink -f -- {shlex.quote(target)})\" = "
-        f"\"$(readlink -f -- {shlex.quote(source)})\""
+        f"elif test -e {shlex.quote(target)}; then rm -rf -- {shlex.quote(target)}; fi; "
+        f"mkdir -p -- {shlex.quote(target)}; "
+        f"cp -a --reflink=auto -- {shlex.quote(source)}/. {shlex.quote(target)}/; "
+        f"mkdir -p -- {shlex.quote(runtime_dir)}; "
+        f"test ! -L {shlex.quote(target)}; test -d {shlex.quote(runtime_dir)}"
     )
 
 
@@ -704,6 +707,15 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
+    try:
+        final_payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        final_payload = {}
+    final_meta = final_payload.get("meta") or {}
+    replay_invalid = final_meta.get("replayInvalid") is True
+    tool_failures = (final_meta.get("toolSummary") or {}).get("failures")
+    if isinstance(tool_failures, bool) or not isinstance(tool_failures, int):
+        tool_failures = None
     runtime_logs = {
         "agent.stderr.log": agent_stderr_file,
         "sidecar.log": home + "/logs/sidecar.log",
@@ -768,4 +780,6 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "checkpoint_model_relay": checkpoint_relay,
             "runtime_traces": copied, "policy_control_records": control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],
-            "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None}
+            "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None,
+            "agent_replay_invalid": replay_invalid,
+            "agent_tool_failures": tool_failures}

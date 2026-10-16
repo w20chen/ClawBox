@@ -288,14 +288,9 @@ class PolicyCoordinator:
                           existing_progress: bool = False,
                           total_bytes: int | None = None) -> tuple[str, ...]:
         used, available = self.physical_sample()
-        incremental = self.demand.pending(self.demand_scope)
         capacity = sum(self._capacity_claims.values())
         if capacity_claim:
             capacity += additional_bytes
-        else:
-            incremental += additional_bytes
-        charged = max(used, capacity) + incremental + self.operation_headroom_bytes
-        reasons = []
         effective_budget = (
             self.progress_budget_bytes
             if existing_progress and (
@@ -303,13 +298,45 @@ class PolicyCoordinator:
             )
             else self.budget_bytes
         )
+        global_used, global_available = self.demand.sample()
+        global_additional = additional_bytes if total_bytes is None else total_bytes
+        local_upper = self.demand.pending_upper_bound(self.demand_scope)
+        global_upper = self.demand.pending_upper_bound()
+        local_charge_upper = (
+            max(used, capacity)
+            + local_upper
+            + (0 if capacity_claim else additional_bytes)
+            + self.operation_headroom_bytes
+        )
+        global_charge_upper = (
+            global_used + global_upper + self.demand.margin
+            + global_additional + self.operation_headroom_bytes
+        )
+        # The nominal reservations are an upper bound on unmaterialized demand.
+        # If that conservative bound fits both the local policy budget and the
+        # shared physical budget, per-claim cgroup reads cannot change the
+        # decision. Avoid serializing O(active claims) filesystem reads under
+        # the global admission lock in this common, low-pressure case.
+        if (local_charge_upper <= effective_budget
+                and global_charge_upper <= self.demand.capacity):
+            incremental = local_upper
+            global_pending = global_upper
+            self.demand.pending_upper_bound_fast_path_count += 1
+        else:
+            incremental = self.demand.pending(self.demand_scope)
+            global_pending = self.demand.pending()
+        if not capacity_claim:
+            incremental += additional_bytes
+        charged = max(used, capacity) + incremental + self.operation_headroom_bytes
+        reasons = []
         if charged > effective_budget and not (existing_progress and additional_bytes == 0):
             reasons.append("configured_memory_budget")
         if available < self.emergency_free_bytes:
             reasons.append("emergency_free_memory")
         reasons.extend(self.demand.reasons(
             additional_bytes if total_bytes is None else total_bytes,
-            self.operation_headroom_bytes))
+            self.operation_headroom_bytes, pending=global_pending,
+            sampled=(global_used, global_available)))
         return tuple(dict.fromkeys(reasons))
 
     def _startup_headroom_needed(self, session_id: str) -> bool:
@@ -532,6 +559,10 @@ class PolicyCoordinator:
             "safety_interventions_by_reason": dict(
                 self.safety_interventions_by_reason
             ),
+            "demand_pending_upper_bound_fast_path_count": (
+                self.demand.pending_upper_bound_fast_path_count
+            ),
+            "demand_pending_exact_count": self.demand.pending_exact_count,
             "lifecycle_create_reservation_wait_seconds": sum(
                 lifecycle_samples["create"]
             ),

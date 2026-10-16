@@ -60,6 +60,11 @@ The deployment baseline stays off. In the admission suite, enabling it adds
 AgentCgroup to the proposed arm; `--ablations` also includes AgentCgroup without
 admission. Custom recipes can set each `policies[].runtime_control` independently.
 The CLI option applies to all policies in a custom recipe.
+AgentCgroup's public tuning knobs are the polling interval, `memory.high`
+event threshold, parent usage ratio, and protection-window duration. Their
+defaults are 0.1 seconds, 1 event, 0.85, and 1 second. A less aggressive
+follow-up can increase the threshold/ratio or shorten the window. Use a new
+run ID; these changes need neither host apply nor an image rebuild.
 
 The optional fixed comparator defaults to measured host-growth P90 from the
 validated training artifact; `--static-tool-memory-mib` can tune it. It is not
@@ -233,6 +238,10 @@ do not necessarily match a given base YAML.
 | `resources.prediction_reservation_scale` | `--prediction-reservation-scale`; positive host-growth multiplier, default 1 |
 | `resources.admission_margin_mib` | `--admission-margin-mib`; nonnegative global reserve, default 256 MiB |
 | `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|agentcgroup_cgroup`; suites default off; custom policy fields are independent |
+| `resources.agentcgroup_poll_interval_seconds` | `--agentcgroup-poll-interval-seconds`; positive seconds, default 0.5 |
+| `resources.agentcgroup_event_threshold` | `--agentcgroup-event-threshold`; positive `memory.high` event count, default 1 |
+| `resources.agentcgroup_pressure_ratio` | `--agentcgroup-pressure-ratio`; parent current/max ratio in (0,1), default 0.85 |
+| `resources.agentcgroup_protection_window_seconds` | `--agentcgroup-protection-window-seconds`; positive seconds, default 1 |
 | `policies[].deployment` | `managed` (default) or `os-default`; the latter resolves to OS placement, resident VMs, no admission/controller/cache reclaim, using the applied VM domain |
 | `resources.snapshot_mechanism` | `--snapshot-mechanism incremental-cow` or `full-copy` |
 | `resources.snapshot_storage` | `--snapshot-storage warm-only` or `tiered`; the latter may use disk, whose path must match the service setting |

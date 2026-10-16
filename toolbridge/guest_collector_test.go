@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+func TestGuestCollectorRequestTimeout(t *testing.T) {
+	t.Setenv("CLAWTUNE_GUEST_COLLECTOR_TIMEOUT_SECONDS", "")
+	if got := guestCollectorRequestTimeout(); got != 120*time.Second {
+		t.Fatalf("default timeout=%s", got)
+	}
+	t.Setenv("CLAWTUNE_GUEST_COLLECTOR_TIMEOUT_SECONDS", "45")
+	if got := guestCollectorRequestTimeout(); got != 45*time.Second {
+		t.Fatalf("configured timeout=%s", got)
+	}
+}
+
 func TestGuestCollectorClientAuthenticatedLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sockets are a guest-only contract")

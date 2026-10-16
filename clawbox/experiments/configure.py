@@ -155,6 +155,10 @@ def configure_experiment(
     prediction_mode: str | None = None,
     prediction_reservation_scale: float | None = None,
     admission_margin_mib: int | None = None,
+    agentcgroup_poll_interval_seconds: float | None = None,
+    agentcgroup_event_threshold: int | None = None,
+    agentcgroup_pressure_ratio: float | None = None,
+    agentcgroup_protection_window_seconds: float | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
     random_seed: int | None = None,
@@ -390,7 +394,11 @@ def configure_experiment(
         resources["prediction_artifact"] = prediction_artifact
     for key, value in (("prediction_mode", prediction_mode),
                        ("prediction_reservation_scale", prediction_reservation_scale),
-                       ("admission_margin_mib", admission_margin_mib)):
+                       ("admission_margin_mib", admission_margin_mib),
+                       ("agentcgroup_poll_interval_seconds", agentcgroup_poll_interval_seconds),
+                       ("agentcgroup_event_threshold", agentcgroup_event_threshold),
+                       ("agentcgroup_pressure_ratio", agentcgroup_pressure_ratio),
+                       ("agentcgroup_protection_window_seconds", agentcgroup_protection_window_seconds)):
         if value is not None:
             resources[key] = value
     if static_tool_memory_mib == "auto":
@@ -691,6 +699,14 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             if spec.resources.snapshot_residency_costs else None
         ),
         "memory_scheduling": spec.resources.memory_scheduling,
+        "agentcgroup": {
+            "poll_interval_seconds": spec.resources.agentcgroup_poll_interval_seconds,
+            "event_threshold": spec.resources.agentcgroup_event_threshold,
+            "pressure_ratio": spec.resources.agentcgroup_pressure_ratio,
+            "protection_window_seconds": (
+                spec.resources.agentcgroup_protection_window_seconds
+            ),
+        },
         "pool_transfer_concurrency": spec.resources.pool_transfer_concurrency,
         "borrow_cooldown_seconds": spec.resources.borrow_cooldown_seconds,
         "return_cooldown_seconds": spec.resources.return_cooldown_seconds,

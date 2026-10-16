@@ -289,6 +289,14 @@ def parser() -> argparse.ArgumentParser:
                            help="positive multiplier on calibrated host growth; default 1")
     configure.add_argument("--admission-margin-mib", type=int,
                            help="global safety margin in MiB; default 256")
+    configure.add_argument("--agentcgroup-poll-interval-seconds", type=float,
+                           help="AgentCgroup sampling interval; default 0.5")
+    configure.add_argument("--agentcgroup-event-threshold", type=int,
+                           help="memory.high events required to activate; default 1")
+    configure.add_argument("--agentcgroup-pressure-ratio", type=float,
+                           help="memory.current / memory.max activation ratio; default 0.85")
+    configure.add_argument("--agentcgroup-protection-window-seconds", type=float,
+                           help="duration of each protection action; default 1")
     configure.add_argument("--trace")
     configure.add_argument("--case-id")
     configure.add_argument("--prompt")
@@ -677,6 +685,12 @@ def main(argv: list[str] | None = None) -> int:
                 prediction_mode=args.prediction_mode,
                 prediction_reservation_scale=args.prediction_reservation_scale,
                 admission_margin_mib=args.admission_margin_mib,
+                agentcgroup_poll_interval_seconds=args.agentcgroup_poll_interval_seconds,
+                agentcgroup_event_threshold=args.agentcgroup_event_threshold,
+                agentcgroup_pressure_ratio=args.agentcgroup_pressure_ratio,
+                agentcgroup_protection_window_seconds=(
+                    args.agentcgroup_protection_window_seconds
+                ),
                 host_profile=profile or None,
                 compute_nodes=profile.get("compute_nodes"),
                 placement_policy=args.placement_policy,

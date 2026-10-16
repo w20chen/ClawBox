@@ -437,6 +437,10 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			if beginErr != nil {
 				record.TelemetryState = "failed"
 				record.TelemetryError = "begin: " + beginErr.Error()
+				// A timed-out request can still complete inside the guest collector
+				// after the client is gone. Abort by identity so late completion
+				// cannot strand the collector's active slot.
+				go func() { _ = guestCollector.Abort(executionID) }()
 			} else {
 				telemetryBegun = true
 				record.TelemetryState = "observing"
@@ -587,7 +591,8 @@ func connectExistingGuestCollector() guestCollectorAPI {
 		token, err := os.ReadFile(tokenPath)
 		if err == nil && strings.TrimSpace(string(token)) != "" {
 			client := &guestCollectorClient{
-				socket: socket, token: strings.TrimSpace(string(token)), timeout: 15 * time.Second,
+				socket: socket, token: strings.TrimSpace(string(token)),
+				timeout: guestCollectorRequestTimeout(),
 			}
 			response, healthErr := client.request(map[string]any{"op": "health"})
 			if healthErr == nil && response.State == "ready" {

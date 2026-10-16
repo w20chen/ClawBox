@@ -27,6 +27,49 @@ def test_realized_growth_is_not_reserved_twice_and_retained_pages_still_count():
         assert ledger.reasons(601)
 
 
+def test_policy_skips_per_claim_samples_when_nominal_upper_bound_fits():
+    calls = [0]
+    def claim_sample():
+        calls[0] += 1
+        return 0, 0
+    ledger = DemandLedger(sample=lambda: (0, 1000*MIB), capacity=1000*MIB)
+    coordinator = PolicyCoordinator(
+        resolve_baseline('predicted-resident').as_policy(), budget_mib=1000,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        demand_ledger=ledger,
+    )
+    with ledger.condition:
+        for index in range(160):
+            ledger.add((str(index), 'tool_admission'), scope='local',
+                       amount=MIB, local_amount=MIB, sample=claim_sample)
+        assert coordinator._pressure_reasons(MIB) == ()
+    assert calls[0] == 160  # add() establishes each claim baseline once.
+    assert ledger.pending_upper_bound_fast_path_count == 1
+    assert ledger.pending_exact_count == 0
+
+
+def test_policy_uses_exact_claim_growth_when_upper_bound_nears_capacity():
+    calls = [0]
+    group = [0, 0]
+    def claim_sample():
+        calls[0] += 1
+        return tuple(group)
+    ledger = DemandLedger(sample=lambda: (5*MIB, 1000*MIB), capacity=10*MIB)
+    coordinator = PolicyCoordinator(
+        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        demand_ledger=ledger,
+    )
+    with ledger.condition:
+        ledger.add(('a', 'tool_admission'), scope='local',
+                   amount=6*MIB, local_amount=6*MIB, sample=claim_sample)
+        group[:] = [6*MIB, 6*MIB]
+        assert coordinator._pressure_reasons(4*MIB) == ()
+    assert calls[0] == 3  # baseline plus local/global exact checks.
+    assert ledger.pending_upper_bound_fast_path_count == 0
+    assert ledger.pending_exact_count == 2
+
+
 def test_global_claims_are_shared_but_local_claims_do_not_spend_other_nodes():
     ledger = DemandLedger(sample=lambda: (200, 10000), capacity=1000)
     with ledger.condition:

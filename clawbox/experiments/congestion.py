@@ -52,11 +52,19 @@ class RuntimeMemoryControl:
     NUMA placement/borrowing remains owned by the existing watermark controller.
     """
 
-    def __init__(self, parent: Path, source: Path | None = None, *, high: Path, low: Path, enabled: bool = True,
-                 interval: float = .1, emit: Callable[[dict], None] = lambda _: None):
+    def __init__(self, parent: Path, source: Path | None = None, *, high: Path, low: Path,
+                 enabled: bool = True, interval: float = .5, event_threshold: int = 1,
+                 pressure_ratio: float = .85, protection_window_seconds: float = 1.,
+                 emit: Callable[[dict], None] = lambda _: None):
         self.parent = parent.resolve()
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError('runtime control interval must be positive and finite')
+        if isinstance(event_threshold, bool) or not isinstance(event_threshold, int) or event_threshold < 1:
+            raise ValueError('AgentCgroup event threshold must be a positive integer')
+        if not math.isfinite(pressure_ratio) or not 0 < pressure_ratio < 1:
+            raise ValueError('AgentCgroup pressure ratio must be between zero and one')
+        if not math.isfinite(protection_window_seconds) or protection_window_seconds <= 0:
+            raise ValueError('AgentCgroup protection window must be positive and finite')
         limit = (parent/'memory.max').read_text().strip()
         if limit == 'max' or int(limit) <= 0:
             raise ValueError('AgentCgroup requires a finite positive physical memory.max; apply the host budget first')
@@ -91,9 +99,13 @@ class RuntimeMemoryControl:
         self.high, self.low = high.resolve(), low.resolve()
         if self.high.parent != self.parent or self.low.parent != self.parent or self.high == self.low:
             raise ValueError('HIGH and LOW must be distinct children of the physical domain')
+        if enabled:
+            module.CgroupMemcgController.PRESSURE_RATIO = pressure_ratio
         self.backend = module.CgroupMemcgController() if enabled else None
         self.attached = False
         self.interval = interval
+        self.event_threshold = event_threshold
+        self.protection_window_seconds = protection_window_seconds
         self.emit = emit
         self.saved = {p: ((p/'memory.low').read_text().strip(), (p/'memory.high').read_text().strip())
                       for p in (self.high, self.low)}
@@ -106,7 +118,9 @@ class RuntimeMemoryControl:
                            'source_sha256': digest,
                            'capacity_bytes': self.capacity, 'mapping': 'fixed_session_high_low_aggregate',
                            'high_cgroup': str(self.high), 'low_cgroup': str(self.low),
-                           'interval_seconds': interval, 'threshold': 1, 'protection_window_seconds': 1.0,
+                           'interval_seconds': interval, 'threshold': event_threshold,
+                           'pressure_ratio': pressure_ratio,
+                           'protection_window_seconds': protection_window_seconds,
                            'psi_available': (parent/'memory.pressure').exists(),
                            'adaptations': ['strict_cgroup_io', 'independent_poll_clock', 'vm_session_descendants']}
 
@@ -144,7 +158,9 @@ class RuntimeMemoryControl:
             # never reset the pressure baselines or active protection window.
             self.attached = True
             if not self.backend.attach(self.module.MemcgConfig(
-                    high_cgroup=str(self.high), low_cgroups=[str(self.low)])):
+                    high_cgroup=str(self.high), low_cgroups=[str(self.low)],
+                    threshold=self.event_threshold,
+                    protection_window_s=self.protection_window_seconds)):
                 raise RuntimeError('AgentCgroup attach failed')
         self.emit({'event': 'runtime_memory_started', **self.provenance})
         def run():

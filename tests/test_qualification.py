@@ -90,11 +90,15 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
 
 def test_qualification_uses_all_policies_at_target_concurrency() -> None:
     spec = load_experiment(EXAMPLE)
+    spec = spec.model_copy(update={
+        "execution": spec.execution.model_copy(update={"arm_timeout_seconds": 1800}),
+    })
     qualified = qualification_spec(spec, concurrency=3)
 
     assert qualified.inference.configuration["max_model_steps"] == 1
     assert qualified.execution.concurrency_levels == (3,)
     assert qualified.execution.randomized_order is False
+    assert qualified.execution.arm_timeout_seconds == 1800
     assert qualified.workload.repetitions == 1
     assert qualified.validation.command == "true"
     assert [item.name for item in qualified.policies] == [

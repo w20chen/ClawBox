@@ -1409,6 +1409,12 @@ class ExperimentWorker:
                     Path(arm.resources.agentcgroup_source) if arm.resources.agentcgroup_source else None,
                     high=self._priority_domain.high, low=self._priority_domain.low,
                     enabled=arm.policy.runtime_control is RuntimeControl.AGENTCGROUP_CGROUP,
+                    interval=arm.resources.agentcgroup_poll_interval_seconds,
+                    event_threshold=arm.resources.agentcgroup_event_threshold,
+                    pressure_ratio=arm.resources.agentcgroup_pressure_ratio,
+                    protection_window_seconds=(
+                        arm.resources.agentcgroup_protection_window_seconds
+                    ),
                     emit=events.write,
                 )
                 self._runtime_memory.start()
@@ -3271,6 +3277,16 @@ class ExperimentWorker:
                     raise RuntimeError(
                         "managed ModelGateway session incomplete: "
                         + json.dumps(completeness, sort_keys=True)
+                    )
+                # OpenClaw marks a run replayInvalid after any potentially
+                # mutating exec/edit, even when every Tool call succeeded.
+                # The explicit Tool summary is the failure signal; task
+                # correctness remains enforced by the Tool-VM validation.
+                agent_tool_failures = outcome.get("agent_tool_failures")
+                if agent_tool_failures is not None and agent_tool_failures > 0:
+                    raise RuntimeError(
+                        f"OpenClaw reported {agent_tool_failures} failed Tool result(s); "
+                        "inspect final-answer.json and agent.stderr.log"
                     )
                 if not tool_latencies:
                     raise RuntimeError(

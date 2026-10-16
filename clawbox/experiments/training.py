@@ -220,6 +220,17 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
                              ts_start=query_ts, memory_measurement='guest_memtotal_minus_memavailable')
         results = predict_native_call_load_models(runtime, query, lattice=lattice)
         models = {k: results[k].model_dump(mode='json') for k in ('lattice', 'tool')}
+        # Compound commands intentionally have no single binary identity in
+        # ClawTune. Query the same native ToolKB at outer-tool granularity as
+        # the final measured fallback instead of inventing a fixed estimate.
+        tool_class_query = ToolCallQuery(
+            repo=repository, tool_name='exec', command=None,
+            ts_start=query_ts,
+            memory_measurement='guest_memtotal_minus_memavailable',
+        )
+        models['tool_class'] = predict_native_call_load_models(
+            runtime, tool_class_query, lattice=lattice,
+        )['tool'].model_dump(mode='json')
         samples = short[command]
         short_evidence = None
         if samples and all(r.get('memory_unavailable_reason') == 'no_in_execution_memory_sample'

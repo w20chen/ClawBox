@@ -130,6 +130,24 @@ def test_runtime_control_switch_keeps_deployment_baseline_off(tmp_path):
     assert all(p.runtime_control.value == "off" for p in disabled.policies)
 
 
+def test_runtime_control_tuning_is_public_configuration(tmp_path):
+    original = admission(tmp_path)
+    assert original.resources.agentcgroup_poll_interval_seconds == .5
+    path = tmp_path / "base.yaml"
+    path.write_text(dump_experiment(original, compact=True))
+    tuned = configure_experiment(
+        path,
+        agentcgroup_poll_interval_seconds=.2,
+        agentcgroup_event_threshold=8,
+        agentcgroup_pressure_ratio=.92,
+        agentcgroup_protection_window_seconds=.5,
+    )
+    assert tuned.resources.agentcgroup_poll_interval_seconds == .2
+    assert tuned.resources.agentcgroup_event_threshold == 8
+    assert tuned.resources.agentcgroup_pressure_ratio == .92
+    assert tuned.resources.agentcgroup_protection_window_seconds == .5
+
+
 def test_zero_snapshot_value_is_visible():
     assert "zero" in experiment_overview(numa())["warnings"][0]
 

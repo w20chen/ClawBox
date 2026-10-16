@@ -579,7 +579,6 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
     execution = spec.execution.model_copy(update={
         "concurrency_levels": (max(level, len(cases)),),
         "randomized_order": False,
-        "arm_timeout_seconds": min(spec.execution.arm_timeout_seconds, 600),
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
     })
     validation = spec.validation.model_copy(update={"command": "true"})

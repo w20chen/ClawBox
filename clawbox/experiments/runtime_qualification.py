@@ -13,7 +13,8 @@ from .congestion import MIB, RuntimeMemoryControl
 from .priority import PriorityDomain
 
 
-def kernel_control_probe(parent: Path, *, source: Path | None = None) -> dict:
+def kernel_control_probe(parent: Path, *, source: Path | None = None,
+                         control_options: dict | None = None) -> dict:
     """Exercise upstream activation and LOW throttling in an isolated 384 MiB domain.
 
     These are host allocation processes, not guest allocations. This proves
@@ -34,8 +35,10 @@ def kernel_control_probe(parent: Path, *, source: Path | None = None) -> dict:
         (root/'memory.max').write_text(str(384*MIB))
         (root/'memory.swap.max').write_text('0')
         domain.start()
+        options = dict(control_options or {})
+        options.setdefault('interval', .02)
         control = RuntimeMemoryControl(root, source, high=domain.high, low=domain.low,
-                                       interval=.02, emit=events.append)
+                                       emit=events.append, **options)
         control.start()
         # Upstream signal 1: charge HIGH above its soft limit. Hard limits stay
         # unchanged, and total requested allocation remains below the probe cap.
@@ -96,7 +99,7 @@ while time.monotonic()<deadline:
     return result
 
 
-def guest_pressure_probe(domain, lifecycles, *, source=None):
+def guest_pressure_probe(domain, lifecycles, *, source=None, control_options=None):
     """Exercise default upstream signals using real guest allocation growth.
 
     Only this probe's private parent budget is changed. No artificial HIGH
@@ -161,7 +164,10 @@ def guest_pressure_probe(domain, lifecycles, *, source=None):
                 raise RuntimeError('VM control probe does not fit within the configured parent budget')
             (parent/'memory.max').write_text(str(cap))
             cap = int((parent/'memory.max').read_text())
-            control = RuntimeMemoryControl(parent, source, high=domain.high, low=domain.low, emit=events.append)
+            control = RuntimeMemoryControl(
+                parent, source, high=domain.high, low=domain.low,
+                emit=events.append, **dict(control_options or {}),
+            )
             closed = False
             control.start()
             deadline = time.monotonic()+15
@@ -243,7 +249,18 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
         return {'required': False, 'passed': True}
     artifact_root.mkdir(parents=True, exist_ok=False)
     source = Path(spec.resources.agentcgroup_source) if spec.resources.agentcgroup_source else None
-    kernel = kernel_control_probe(Path(spec.resources.local_memory_cgroup), source=source)
+    control_options = {
+        'interval': spec.resources.agentcgroup_poll_interval_seconds,
+        'event_threshold': spec.resources.agentcgroup_event_threshold,
+        'pressure_ratio': spec.resources.agentcgroup_pressure_ratio,
+        'protection_window_seconds': (
+            spec.resources.agentcgroup_protection_window_seconds
+        ),
+    }
+    kernel = kernel_control_probe(
+        Path(spec.resources.local_memory_cgroup), source=source,
+        control_options=control_options,
+    )
     (artifact_root/'kernel-control.json').write_text(json.dumps(kernel, indent=2))
     probe_id = 'qualification-priority-' + uuid.uuid4().hex[:12]
     client = CubeSandboxClient(journal=OwnedSandboxJournal(artifact_root/'owned-sandboxes.jsonl'))
@@ -296,7 +313,9 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     lifecycle.restore()
                     if lifecycle.sandbox.files.read('/tmp/clawbox-priority-marker')!=probe_id:
                         raise RuntimeError('priority probe lost guest state across restore')
-        vm_control = guest_pressure_probe(domain, lifecycles, source=source)
+        vm_control = guest_pressure_probe(
+            domain, lifecycles, source=source, control_options=control_options,
+        )
         (artifact_root/'vm-control.json').write_text(json.dumps(vm_control, indent=2))
         if not vm_control['passed']:
             raise RuntimeError('default AgentCgroup control was not verified on guest allocations')

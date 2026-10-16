@@ -188,6 +188,99 @@ def test_filesystem_call_allows_non_kb_clause_but_keeps_integrity_checks():
         )
 
 
+def test_backend_maintenance_allows_declared_ineligible_cgroup_fallback():
+    execution_id, digest = "maintenance-1", "b" * 64
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    policy = _policy(execution_id, digest)
+    policy[0]["request"].update(
+        operation="ssh_backend_maintenance",
+        execution_scope="backend-maintenance",
+        runtime_trace_expected=False,
+    )
+    cgroup.update(
+        source="process-tree",
+        fallback_used=True,
+        sampling_quality="degraded",
+        cpu_utilization_avg_cores=0.0,
+        memory_rss_peak_bytes=0,
+        memory_eligible=False,
+        memory_unavailable_reason="no_in_execution_memory_sample",
+        cgroup_setup_error=None,
+        cgroup_read_error=None,
+        collector_errors=[],
+    )
+
+    report = validate_native_tool_join(
+        bridge_records=bridge,
+        cgroup_artifacts={execution_id: cgroup},
+        clause_artifacts={execution_id: clause},
+        policy_records=policy,
+        expected_session_id="session-a",
+    )
+
+    assert report["backend_maintenance_cgroup_fallback_execution_ids"] == [
+        execution_id
+    ]
+    assert report["backend_maintenance_cgroup_fallback_execution_count"] == 1
+
+
+def test_backend_maintenance_allows_declared_eligible_process_tree_memory():
+    execution_id, digest = "maintenance-eligible", "d" * 64
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    policy = _policy(execution_id, digest)
+    policy[0]["request"].update(
+        operation="ssh_backend_maintenance",
+        execution_scope="backend-maintenance",
+        runtime_trace_expected=False,
+    )
+    cgroup.update(
+        source="process-tree",
+        fallback_used=True,
+        sampling_quality="degraded",
+        memory_eligible=True,
+        memory_measurement="guest_memtotal_minus_memavailable",
+        memory_environment_id="cube:session-a:sandbox-a",
+        memory_baseline_bytes=1024,
+        memory_extra_peak_bytes=256,
+        memory_total_peak_bytes=1280,
+        memory_unavailable_reason=None,
+        cgroup_setup_error=None,
+        cgroup_read_error=None,
+        collector_errors=[],
+    )
+
+    report = validate_native_tool_join(
+        bridge_records=bridge,
+        cgroup_artifacts={execution_id: cgroup},
+        clause_artifacts={execution_id: clause},
+        policy_records=policy,
+        expected_session_id="session-a",
+    )
+
+    assert report["backend_maintenance_cgroup_fallback_execution_ids"] == [
+        execution_id
+    ]
+
+
+def test_agent_tool_rejects_cgroup_process_tree_fallback():
+    execution_id, digest = "exec-1", "c" * 64
+    bridge, cgroup, clause = _artifacts(execution_id, digest)
+    cgroup.update(
+        source="process-tree",
+        fallback_used=True,
+        sampling_quality="degraded",
+        memory_eligible=False,
+        memory_unavailable_reason="no_in_execution_memory_sample",
+    )
+
+    with pytest.raises(ValueError, match="not cgroup-v2"):
+        validate_native_tool_join(
+            bridge_records=bridge,
+            cgroup_artifacts={execution_id: cgroup},
+            clause_artifacts={execution_id: clause},
+            policy_records=_policy(execution_id, digest),
+        )
+
 def test_shell_exec_still_rejects_non_kb_clause():
     execution_id, digest = "exec-invalid", "b" * 64
     bridge, cgroup, clause = _artifacts(execution_id, digest)

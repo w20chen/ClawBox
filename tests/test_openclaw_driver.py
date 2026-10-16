@@ -15,7 +15,6 @@ from clawbox.experiments.openclaw_driver import (
     native_ssh_host_key_alias,
     openclaw_real_ssh_path,
     OPENCLAW_SSH_RUNTIME_ROOT,
-    openclaw_shared_ssh_workspace_directory,
     native_tool_workspace_setup_command,
     native_ssh_route,
     native_ssh_target,
@@ -32,16 +31,18 @@ def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
     assert openclaw_shared_ssh_runtime_directory("/workspace/") == (
         "/workspace/openclaw-ssh-shared-8198076c"
     )
-    assert openclaw_shared_ssh_workspace_directory(OPENCLAW_SSH_RUNTIME_ROOT) == (
-        "/var/lib/clawbox/openclaw-ssh/openclaw-ssh-shared-8198076c/workspace"
-    )
+    assert OPENCLAW_SSH_RUNTIME_ROOT == "/workspace"
     workspace_setup = native_tool_workspace_setup_command('/testbed')
-    assert 'rmdir -- /workspace' in workspace_setup
-    assert 'ln -s -- /testbed /workspace' in workspace_setup
-    assert 'readlink -f -- /workspace' in workspace_setup
+    assert 'rm -rf -- /workspace' in workspace_setup
+    assert 'cp -a --reflink=auto -- /testbed/. /workspace/' in workspace_setup
+    assert 'mkdir -p -- /workspace/openclaw-ssh-shared-8198076c' in workspace_setup
+    assert 'ln -s' not in workspace_setup
     assert native_tool_workspace_setup_command('/workspace') == (
-        'set -eu; test -d /workspace'
+        'set -eu; test -d /workspace; '
+        'mkdir -p -- /workspace/openclaw-ssh-shared-8198076c'
     )
+    with pytest.raises(ValueError, match="inside /workspace"):
+        native_tool_workspace_setup_command('/workspace/repository')
     assert openclaw_real_ssh_path("session-a") == (
         "/state/openclaw/session-a/bin/ssh.real"
     )
@@ -105,7 +106,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         def execute(self, command, _timeout):
             commands.append(command)
             if " agent " in command:
-                return CommandResult(0, '{"ok":true}\n', "", 0.1)
+                return CommandResult(
+                    0, '{"meta":{"toolSummary":{"failures":0}}}\n', "", 0.1,
+                )
             if "cat /state/openclaw/session-a/logs/sidecar.log" in command:
                 return CommandResult(0, "sidecar evidence\n", "", 0.01)
             return CommandResult(0, "", "", 0.01)
@@ -187,6 +190,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "exec " in agent_command
     assert result["tool_calls"] == 1
     assert result["tool_latencies"] == [0.25]
+    assert result["agent_tool_failures"] == 0
     assert (tmp_path / "openclaw/session-a/sidecar.log").read_text() == (
         "sidecar evidence\n"
     )
