@@ -77,7 +77,8 @@ def test_flat_vm_defaults_and_recovery(parent, tmp_path):
             assert (leaf/'memory.high').read_text().strip() == 'max'
         from clawbox.experiments.pressure import PressureControl
         from clawbox.experiments.spec import PressureControlSpec
-        control = PressureControl(parent, mode='phase_memcg', options=PressureControlSpec())
+        # This test exercises manual writes/restoration, not PSI activation.
+        control = PressureControl(parent, mode='no_control', options=PressureControlSpec())
         leaf = domain.leaves[0, 'tool']
         control.register('test', 'tool', leaf, None, None)
         vm = control.vms['test', 'tool']

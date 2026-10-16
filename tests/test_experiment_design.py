@@ -91,6 +91,26 @@ def test_runtime_controls_do_not_enable_reclaim():
     assert p.runtime_control.value == 'explicit'
 
 
+def test_runtime_forecast_ttl_roundtrips_to_every_arm():
+    raw = export_design(design('runtime'))
+    raw['mechanisms']['runtime']['pressure_control']['release_forecast_ttl_factor'] = 4.
+    spec = ExperimentSpec.model_validate(raw)
+    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
+    assert all(a.resources.pressure_control.release_forecast_ttl_factor == 4.
+               for a in expand_matrix(loaded))
+
+
+def test_runtime_missing_psi_fails_before_host_or_vm_setup(tmp_path, monkeypatch):
+    from clawbox.experiments import qualification
+    raw = export_design(design('runtime'))
+    raw['environment']['resources']['local_memory_cgroup'] = str(tmp_path)
+    spec = ExperimentSpec.model_validate(raw)
+    monkeypatch.setattr(qualification, 'host_profile_for',
+                        lambda *_: pytest.fail('host setup before PSI validation'))
+    with pytest.raises(RuntimeError, match='PSI.*psi=1'):
+        qualification.require_host_ready(spec)
+
+
 def test_runtime_recipe_pins_proactive_reclaim_off():
     raw = export_design(design('runtime'))
     raw['mechanisms']['runtime']['proactive_memory_reclaim'] = True

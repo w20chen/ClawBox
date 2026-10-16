@@ -81,9 +81,19 @@ CPU/内存控制不自动启用借用、回收或模板亲和。运行内存借�
 
 `runtime.pressure_control` 的默认值为：psi_ratio=0.10，exit_hysteresis_seconds=1，
 cooldown_seconds=10，action_window_seconds=2，protection_budget_mib=256，max_boosted_vms=1，
-boost_cpu_weight=200，min_release_mib=64，amortization_factor=2，release_history_samples=3。
+boost_cpu_weight=200，min_release_mib=64，amortization_factor=2，release_history_samples=3，
+release_forecast_ttl_factor=3（大于 1 的有限倍数）。CPU 释放预测从执行开始起最多有效
+“历史最长耗时 × 该倍数”，预计完成时间另用历史耗时中位数；超过预计耗时不立即失去加速资格。
+每轮仍检查 CPU 争用、准入阻塞、执行身份和实际内存增长。修改该参数需要新 run ID，
+不需要 host apply、镜像重建或重新训练。保护窗口结束后进入冷却，冷却后可重新保护；
+仍有回收压力不等于保护无效。
 保护总量受预算约束，正常 CPU 权重为 100；执行结束、超时或压力消失时复位。
 共享内存或跨节点页面不作为释放感知 CPU 提升的证据。
+启用内存保护或 CPU 加速时，对应宿主 cgroup PSI 文件缺失会在 VM 预检前报错，
+不会静默降级；关闭两项机制的基线不要求 PSI。内核已编译 PSI 但默认关闭时，
+需在启动配置中启用 `psi=1` 并重启，再检查接口。CPU 释放历史只记录本次运行的宿主
+内存下降；guest 命令结束不代表宿主释放页面。内存保护针对宿主 VM cgroup 回收，
+不直接保护 guest 进程工作集。具体适用条件见 [压力控制说明](pressure-control.md)。
 
 ## 证据输入
 

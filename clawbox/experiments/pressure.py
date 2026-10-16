@@ -10,6 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 from threading import Event, RLock, Thread
 import math
+import statistics
 import time
 
 from .spec_types import RuntimeControl
@@ -46,7 +47,6 @@ class VMState:
     action_since: float | None = None
     cooldown_until: float = 0
     modified: set[str] = field(default_factory=set)
-    ineffective_memory: bool = False
 
     def refresh(self):
         self.phase = (Phase.TOOL_ACTIVE if self.active else Phase.READY if self.pending
@@ -98,6 +98,18 @@ class PressureControl:
         self.release_history = {}
         self.parent_previous = None
 
+    def _psi(self, group, resource):
+        path = group / f'{resource}.pressure'
+        value = psi(path)
+        required = self.memory_protection if resource == 'memory' else self.cpu_release_boost
+        if required and value is None:
+            raise RuntimeError(
+                f'{resource} PSI is required by the enabled runtime control: missing {path}. '
+                'Enable PSI on the host (CONFIG_PSI=y; boot with psi=1 if disabled by default), '
+                'reboot and verify the cgroup pressure files, or explicitly disable the '
+                'corresponding runtime mechanism in the experiment configuration.')
+        return value
+
     def execution_ready(self, session, execution, command_key):
         with self.lock:
             self.execution_records[session, execution] = {'key': command_key}
@@ -128,6 +140,9 @@ class PressureControl:
     def register(self, session, role, group, node, coordinator):
         with self.lock:
             vm = VMState(session, role, Path(group), node)
+            if role == 'tool':
+                self._psi(vm.group, 'memory')
+                self._psi(vm.group, 'cpu')
             for name in ('cpu.weight', 'memory.low', 'memory.high'):
                 vm.saved[name] = (vm.group / name).read_text().strip()
             if vm.saved != {'cpu.weight': '100', 'memory.low': '0', 'memory.high': 'max'}:
@@ -172,7 +187,6 @@ class PressureControl:
                     elif kind == 'start' and identifier in vm.pending and identifier not in vm.finished:
                         vm.pending.discard(identifier)
                         vm.active.add(identifier)
-                        vm.ineffective_memory = False
                         record = self.execution_records.get((session, identifier), {})
                         history = self.release_history.get(record.get('key'), [])
                         if len(history) >= self.options.release_history_samples:
@@ -182,9 +196,9 @@ class PressureControl:
                                 now = time.monotonic()
                                 self.release_forecasts[session, identifier] = {
                                     'generation': vm.generation,
-                                    'expires_at': now + min(durations),
+                                    'expires_at': now + max(durations) * self.options.release_forecast_ttl_factor,
+                                    'expected_complete_at': now + statistics.median(durations),
                                     'releasable_bytes': release,
-                                    'remaining_seconds': min(durations),
                                     'baseline_bytes': record.get('baseline_bytes'),
                                     'release_overhead_seconds': 0.,
                                     'source': 'same_template_command_measured_transient_release'}
@@ -223,8 +237,8 @@ class PressureControl:
         stat = counters(vm.group / 'memory.stat')
         current = int((vm.group / 'memory.current').read_text())
         events = counters(vm.group / 'memory.events.local')
-        sample = {'at': now, 'memory_psi': psi(vm.group / 'memory.pressure'),
-                  'cpu_psi': psi(vm.group / 'cpu.pressure'),
+        sample = {'at': now, 'memory_psi': self._psi(vm.group, 'memory'),
+                  'cpu_psi': self._psi(vm.group, 'cpu'),
                   'cpu': counters(vm.group / 'cpu.stat').get('usage_usec', 0),
                   'scan': stat.get('pgscan', 0), 'oom': events.get('oom_kill', 0)}
         previous = vm.previous
@@ -243,7 +257,7 @@ class PressureControl:
 
     def poll(self):
         began = time.monotonic()
-        parent_sample = (began, psi(self.parent / 'memory.pressure'),
+        parent_sample = (began, self._psi(self.parent, 'memory'),
                          counters(self.parent / 'memory.stat').get('pgscan', 0))
         previous = self.parent_previous
         self.parent_previous = parent_sample
@@ -260,9 +274,13 @@ class PressureControl:
             boosts_left = self.options.max_boosted_vms
             def score(vm):
                 forecasts = [self.release_forecasts.get((vm.session, eid), {}) for eid in vm.active]
+                # A late execution is not evidence of imminent completion. Bound
+                # its score by one action window instead of the TTL deadline.
                 return max((f.get('releasable_bytes', 0) /
-                            max(.1, f.get('expires_at', 0) - began + f.get('release_overhead_seconds', 0))
-                            for f in forecasts if f.get('expires_at', 0) > began), default=0)
+                            max(self.options.action_window_seconds,
+                                f['expected_complete_at'] - began + f.get('release_overhead_seconds', 0))
+                            for f in forecasts if f.get('expires_at', 0) > began
+                            and f.get('generation') == vm.generation), default=0)
             for vm in sorted(self.vms.values(), key=score, reverse=True):
                 domain = domains.get(vm.session)
                 signal = feedback.get(domain, {})
@@ -284,14 +302,11 @@ class PressureControl:
                         or (vm.action_since is not None
                             and began - vm.action_since >= self.options.action_window_seconds)):
                     if vm.action_since is not None:
-                        if 'memory.low' in vm.modified and sample['reclaim']:
-                            vm.ineffective_memory = True
                         vm.cooldown_until = began + self.options.cooldown_seconds
                     self._restore(vm)
                     continue
                 low = 0
-                if (self.memory_protection
-                        and sample['reclaim'] and not vm.ineffective_memory):
+                if self.memory_protection and sample['reclaim']:
                     low = min(sample['working_set'], protection_left)
                     protection_left -= low
                 weight = 100
@@ -303,7 +318,6 @@ class PressureControl:
                     valid = [f for f in forecasts if f.get('generation') == vm.generation
                              and f.get('expires_at', 0) > began
                              and f.get('releasable_bytes', 0) >= self.options.min_release_mib * MIB
-                             and f.get('remaining_seconds', 0) > 0
                              and isinstance(f.get('baseline_bytes'), int)
                              and sample['current_bytes'] - f['baseline_bytes'] >= self.options.min_release_mib * MIB
                              and f.get('release_overhead_seconds', -1) >= 0]
@@ -335,7 +349,12 @@ class PressureControl:
         if self.stop_event.is_set():
             raise RuntimeError('pressure controller stopped')
 
+    def check_prerequisites(self):
+        self._psi(self.parent, 'memory')
+        self._psi(self.parent, 'cpu')
+
     def start(self):
+        self.check_prerequisites()
         self.emit({'event': 'runtime_memory_started', **self.provenance})
         if not self.mode.adaptive:
             return

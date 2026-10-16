@@ -88,6 +88,15 @@ new run IDs; these configuration changes do not require host apply or image rebu
 The common environment is validated before arm overrides, including NUMA sums,
 watermarks and shared-pool borrow limits. Every arm uses the same physical live
 boundary. CPU release boost requires managed placement and a LOCAL NUMA node.
+Runtime memory protection and CPU boost require the corresponding host cgroup
+PSI files; missing required PSI fails host readiness before VM probes. With a
+PSI-capable kernel disabled by default, enable `psi=1` in the boot configuration
+and reboot before launch. Baselines with both mechanisms off need no PSI.
+Set `mechanisms.runtime.pressure_control.release_forecast_ttl_factor` (default 3,
+finite multiplier >1) to bound CPU forecast validity by the longest historical
+duration. This YAML change requires a new run ID, not host apply, image rebuild
+or retraining. See [runtime prerequisites and tuning](pressure-control.md) for
+host-charge release evidence and memory-protection scope.
 With idle reclaim off, checkpoint encoding, lazy restore, storage and residency
 are inactive, as reported by `describe`. Borrowing alone needs no snapshot paths.
 Selecting the checkpoint recipe requires idle reclaim to be enabled explicitly.

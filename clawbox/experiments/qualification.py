@@ -110,6 +110,16 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
 
 
 def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> None:
+    from .pressure import PressureControl
+    # Check all requested arms before any VM qualification probes or trial runs.
+    for policy in spec.policies:
+        if policy.runtime_control.adaptive:
+            PressureControl(
+                spec.resources.local_memory_cgroup, mode=policy.runtime_control,
+                options=spec.resources.pressure_control,
+                memory_protection=policy.memory_protection,
+                cpu_release_boost=policy.cpu_release_boost,
+            ).check_prerequisites()
     if spec.schema_version == 4:
         from .spec import ResourcesSpec
         # Host configuration is common, regardless of an arm disabling borrowing.

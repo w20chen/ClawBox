@@ -180,6 +180,7 @@ class ExecutionSpec(StrictFrozenModel):
 
 class PressureControlSpec(StrictFrozenModel):
     release_history_samples: int = Field(default=3, ge=3, le=8)
+    release_forecast_ttl_factor: float = Field(default=3., gt=1, allow_inf_nan=False)
     psi_ratio: float = Field(default=.10, gt=0, le=1, allow_inf_nan=False)
     exit_hysteresis_seconds: float = Field(default=1., gt=0, allow_inf_nan=False)
     cooldown_seconds: float = Field(default=10., gt=0, allow_inf_nan=False)

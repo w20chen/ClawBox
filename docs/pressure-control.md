@@ -67,25 +67,41 @@ PSI selects an active Tool whose same-template, same-command history repeatedly
 released transient host charge; a temporary weight increase can shorten the
 resource-blocking interval. At least three successful observations are required.
 The estimate is the minimum observed transient release, excluding persistent VM
-baseline; durations must agree within a factor of two. Estimates expire at the
-shortest observed duration, and candidates rank by bytes / remaining seconds.
+baseline; durations must agree within a factor of two. History is collected
+within each arm run; it is not loaded from other runs. The estimated completion
+time uses the median historical duration. Forecasts remain eligible for
+`release_forecast_ttl_factor` times the longest historical duration from execution
+start (default 3), so a CPU-delayed execution can still receive help. Candidates
+rank by release bytes / estimated remaining seconds, with the denominator floored
+at one action window. The validity deadline is not a predicted completion time.
+Each poll rechecks CPU contention, blocked admission, VM generation, LOCAL placement
+and current growth of at least `min_release_mib` above the admission baseline.
 Borrowed/multi-node memory is excluded from this CPU heuristic. ClawTune's peak
 memory prediction alone cannot establish release; unavailable evidence retains
 weight 100. Measured release is observational, not proof of throughput benefit:
 compare action counts, blocking time and completed Agents/s across repetitions.
+Guest process exit or guest free memory is not evidence of host charge release.
+If the VM retains the pages, this heuristic does not treat them as released.
 
 Memory protection follows this chain: measured memory PSI plus reclaim scans in
 an active Tool selects a bounded resident working-set protection; less reclaim
 may reduce stalled execution. The sum of leaf `memory.low` settings is bounded
 by the configured budget. Protection is relative within the live-VM parent;
-it is not a host-wide memory reservation. Continuing reclaim at the end of the
-action window disables further protection for that execution. CPU and memory
+it is not a host-wide memory reservation or protection of a guest process's
+working set. The estimate is `min(memory.current, anon + active_file)` from the
+host VM cgroup. Benefit requires host-reclaimable pages and host reclaim stalls;
+guest-only memory pressure is not a trigger. LOCAL disables swap, so anonymous
+guest RAM is not ordinary swappable host capacity. At the end of each action
+window, protection resets and enters cooldown. After cooldown it may be applied
+again if reclaim pressure persists; residual pressure alone does not prove that
+protection was ineffective. CPU and memory
 controls reset on completion, loss of relevant pressure, timeout, shutdown and
 controller error. No `memory.high`, `memory.reclaim`, freezing, or hard-limit
 adjustment is used by the new controller: safe avoidable-growth evidence is
 not presently available. Existing cache reclamation remains a separate policy.
 
-Configuration under `resources.pressure_control` is editable YAML:
+Configuration under `mechanisms.runtime.pressure_control` is editable YAML
+(`resources.pressure_control` in backend/schema-3 specifications):
 
 | Field | Default | Meaning |
 |---|---:|---|
@@ -99,6 +115,7 @@ Configuration under `resources.pressure_control` is editable YAML:
 | `min_release_mib` | 64 | Minimum observed/expected LOCAL or transient release |
 | `amortization_factor` | 2 | Predicted idle / checkpoint-plus-restore cost minimum |
 | `release_history_samples` | 3 | Successful observations required, 3–8 |
+| `release_forecast_ttl_factor` | 3 | Finite multiplier >1 of the longest historical duration; forecast validity from execution start |
 
 The control clock uses `resources.runtime_poll_interval_seconds` (default
 0.5 seconds). These settings require a new run ID, no host apply, retraining or image rebuild. Initial
@@ -108,15 +125,23 @@ workload-specific build recipe). Bootstrap checks this capability explicitly;
 older bridges cannot silently run an optimized arm. The updated SSH wrapper is
 installed by the existing run bootstrap. Existing host
 prerequisites remain: cgroup v2 CPU/memory/cpuset delegation, verified Cube
-preallocation routing, and snapshot support when selected. Missing required
-files fail the run; missing PSI disables the corresponding optimization and is
-reported in controller provenance.
+preallocation routing, and snapshot support when selected. An enabled memory
+protection / CPU boost mechanism requires readable `memory.pressure` /
+`cpu.pressure` in the parent and Tool cgroups, respectively. Missing PSI fails
+host readiness before VM probes and is checked again at controller start and
+Tool registration; it never silently disables a selected mechanism. Baselines
+with both controls off do not require PSI. On a kernel built with `CONFIG_PSI=y`
+and `CONFIG_PSI_DEFAULT_DISABLED=y`, enable `psi=1` through the host bootloader
+configuration, reboot, and verify the cgroup files before launching. This host
+change requires a reboot, not an image rebuild or retraining.
 
 Start from a configured schema-4 workload:
 
 ```sh
 clawbox experiment configure base.yaml pressure.yaml --recipe runtime \
   --time-scale 1 --repetitions 3
+# Optional: edit mechanisms.runtime.pressure_control.release_forecast_ttl_factor
+# in pressure.yaml; keep the same value across compared arms.
 clawbox experiment describe pressure.yaml
 clawbox --output-root ./results experiment launch pressure.yaml --run-id pressure-01
 ```
@@ -125,7 +150,10 @@ Keep other dimensions, arrival schedule, templates and physical limits fixed.
 For lifecycle comparisons use `--recipe idle-reclaim` and supply independent wait
 and checkpoint-cost evidence. Compare low pressure, LOCAL saturation and combined
 CPU/memory contention using measured deficits and PSI. Preserve real commands and
-recorded waits. Zero actions do not establish an optimization benefit.
+recorded waits. CPU boost needs repeated commands with observed host charge
+release as well as CPU contention and admission blocking; memory protection
+needs host reclaim stalls. PSI availability alone does not establish these
+conditions. Zero actions do not establish an optimization benefit.
 
 Use normal launch/status/resume/abort commands for interruption recovery. The
 supervisor removes only journaled leaves after their VMs exit. A live populated

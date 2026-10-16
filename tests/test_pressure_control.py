@@ -30,9 +30,9 @@ def sample(group, tick=0):
         (group/name).write_text(value)
 
 
-def control(tmp_path, mode='adaptive_joint', **flags):
+def control(tmp_path, mode='adaptive_joint', *, options=None, **flags):
     sample(tmp_path)
-    controller = PressureControl(tmp_path, mode=mode, options=PressureControlSpec(cooldown_seconds=.01), **flags)
+    controller = PressureControl(tmp_path, mode=mode, options=options or PressureControlSpec(cooldown_seconds=.01), **flags)
     domain = Feedback()
     for role in ('runtime', 'tool'):
         leaf = tmp_path/role
@@ -84,8 +84,8 @@ def test_low_pressure_no_leaf_scan(tmp_path, monkeypatch):
     assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
 
 
-def test_memory_reclaim_budget_timeout_and_rollback(tmp_path, monkeypatch):
-    c, d = control(tmp_path, 'phase_memcg')
+def test_memory_reclaim_retries_after_cooldown_despite_residual_pressure(tmp_path, monkeypatch):
+    c, d = control(tmp_path, 'phase_memcg', options=PressureControlSpec(cooldown_seconds=2))
     c.event('s', 'ready', 'e')
     c.event('s', 'start', 'e')
     advance(c, tmp_path, monkeypatch, 0)
@@ -95,8 +95,11 @@ def test_memory_reclaim_budget_timeout_and_rollback(tmp_path, monkeypatch):
     assert (tmp_path/'tool'/'memory.high').read_text() == 'max'
     advance(c, tmp_path, monkeypatch, 4)
     assert (tmp_path/'tool'/'memory.low').read_text() == '0'
-    assert c.vms['s', 'tool'].ineffective_memory
     advance(c, tmp_path, monkeypatch, 5)
+    assert (tmp_path/'tool'/'memory.low').read_text() == '0'
+    advance(c, tmp_path, monkeypatch, 6)
+    assert int((tmp_path/'tool'/'memory.low').read_text()) == 128*MIB
+    c.event('s', 'complete', 'e')
     assert (tmp_path/'tool'/'memory.low').read_text() == '0'
 
 
@@ -154,6 +157,111 @@ def test_missing_release_evidence_does_not_boost(tmp_path, monkeypatch):
     advance(c, tmp_path, monkeypatch, 0)
     advance(c, tmp_path, monkeypatch, 1)
     assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
+
+
+@pytest.mark.parametrize('factor', [2., 3.])
+def test_slow_execution_can_boost_after_expected_finish_but_not_ttl(tmp_path, monkeypatch, factor):
+    c, _ = control(tmp_path, 'release_cpu', options=PressureControlSpec(
+        cooldown_seconds=.01, release_forecast_ttl_factor=factor))
+    monkeypatch.setattr('clawbox.experiments.pressure.time.monotonic', lambda: 100.)
+    train_release(c)
+    c.execution_ready('s', 'slow', ('template', 'command'))
+    c.execution_admitted('s', 'slow', 0)
+    c.event('s', 'start', 'slow')
+    # CPU contention becomes observable after the historical 10-second duration.
+    advance(c, tmp_path, monkeypatch, 11)
+    advance(c, tmp_path, monkeypatch, 12)
+    assert (tmp_path/'tool'/'cpu.weight').read_text() == '200'
+    advance(c, tmp_path, monkeypatch, 14)  # bounded action still times out
+    assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
+    advance(c, tmp_path, monkeypatch, 15)
+    assert (tmp_path/'tool'/'cpu.weight').read_text() == '200'
+    advance(c, tmp_path, monkeypatch, int(10*factor))
+    advance(c, tmp_path, monkeypatch, int(10*factor)+1)
+    assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
+
+
+def test_guest_completion_without_host_charge_release_does_not_boost(tmp_path, monkeypatch):
+    c, _ = control(tmp_path, 'release_cpu')
+    monkeypatch.setattr('clawbox.experiments.pressure.time.monotonic', lambda: 100.)
+    for i in range(3):
+        c.execution_ready('s', str(i), ('template', 'command'))
+        c.execution_complete('s', str(i), {
+            'host_cgroup_baseline_bytes': 0,
+            'host_cgroup_peak_bytes': 128*MIB,
+            'host_cgroup_final_bytes': 128*MIB,
+        }, 10., True)
+    c.execution_ready('s', 'new', ('template', 'command'))
+    c.execution_admitted('s', 'new', 0)
+    c.event('s', 'start', 'new')
+    advance(c, tmp_path, monkeypatch, 0)
+    advance(c, tmp_path, monkeypatch, 1)
+    assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
+
+
+@pytest.mark.parametrize('value', [0, 1, float('inf'), float('nan')])
+def test_forecast_ttl_factor_must_be_finite_and_allow_slowdown(value):
+    with pytest.raises(ValueError):
+        PressureControlSpec(release_forecast_ttl_factor=value)
+
+
+@pytest.mark.parametrize('resource', ['memory', 'cpu'])
+def test_enabled_control_rejects_missing_parent_psi_before_start(tmp_path, resource):
+    c, _ = control(tmp_path, 'explicit', **{
+        'memory_protection': resource == 'memory', 'cpu_release_boost': resource == 'cpu'})
+    (tmp_path/f'{resource}.pressure').unlink()
+    events = []
+    c.emit = events.append
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match=rf'{resource} PSI.*psi=1'):
+            c.start()
+    assert c.thread is None
+    assert not events
+
+
+@pytest.mark.parametrize('resource', ['memory', 'cpu'])
+def test_missing_tool_psi_rejects_registration(tmp_path, resource):
+    c, _ = control(tmp_path)
+    c.unregister('s')
+    (tmp_path/'tool'/f'{resource}.pressure').unlink()
+    with pytest.raises(RuntimeError, match=rf'{resource} PSI'):
+        c.register('s', 'tool', tmp_path/'tool', 0, Feedback())
+    assert ('s', 'tool') not in c.vms
+
+
+@pytest.mark.parametrize('mode,memory,cpu,missing', [
+    ('no_control', False, False, ['memory', 'cpu']),
+    ('pressure_lifecycle', False, False, ['memory', 'cpu']),
+    ('explicit', False, False, ['memory', 'cpu']),
+    ('explicit', True, False, ['cpu']),
+    ('explicit', False, True, ['memory']),
+])
+def test_unused_psi_is_not_required(tmp_path, mode, memory, cpu, missing):
+    c, _ = control(tmp_path, mode, memory_protection=memory, cpu_release_boost=cpu)
+    for resource in missing:
+        (tmp_path/f'{resource}.pressure').unlink()
+        (tmp_path/'tool'/f'{resource}.pressure').unlink()
+    c.start()
+    c.close()
+
+
+def test_lost_required_leaf_psi_restores_active_controls(tmp_path, monkeypatch):
+    c, _ = control(tmp_path, 'phase_memcg')
+    c.event('s', 'ready', 'e')
+    c.event('s', 'start', 'e')
+    advance(c, tmp_path, monkeypatch, 0)
+    advance(c, tmp_path, monkeypatch, 1)
+    assert int((tmp_path/'tool'/'memory.low').read_text()) > 0
+    (tmp_path/'tool'/'memory.pressure').unlink()
+    c.interval = .001
+    c.start()
+    c.thread.join(2)
+    assert not c.thread.is_alive()
+    assert (tmp_path/'tool'/'memory.low').read_text() == '0'
+    with pytest.raises(RuntimeError, match='failed'):
+        c.check()
+    with pytest.raises(RuntimeError, match='failed'):
+        c.close()
 
 
 def test_failure_restores_modified_controls(tmp_path):
