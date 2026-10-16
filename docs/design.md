@@ -21,8 +21,7 @@ tool commands over SSH. For each managed command, it:
 5. Collects the result and telemetry, then releases the reservation.
 
 Runtime congestion control runs throughout the trial independently of admission.
-The legacy AgentCgroup fallback owns HIGH/LOW protection and throttling. The
-[pressure/progress modes](pressure-control.md) use neutral per-VM cgroups and
+The [pressure/progress modes](pressure-control.md) use neutral per-VM cgroups and
 bounded controls driven by measured contention and release evidence. A separate
 demand ledger owns tool and lifecycle admission. Admission OFF removes
 tool gating while retaining the same runtime control, priorities, creation rules,

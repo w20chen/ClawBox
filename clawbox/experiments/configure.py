@@ -98,6 +98,7 @@ def configure_experiment(
     base_path: Path,
     *,
     recipe: str | None = None,
+    fixed_methods: bool = False,
     checkpoint_axis: str | None = None,
     mechanism_settings: Iterable[str] = (),
     suite: str | None = None,
@@ -158,10 +159,7 @@ def configure_experiment(
     prediction_mode: str | None = None,
     prediction_reservation_scale: float | None = None,
     admission_margin_mib: int | None = None,
-    agentcgroup_poll_interval_seconds: float | None = None,
-    agentcgroup_event_threshold: int | None = None,
-    agentcgroup_pressure_ratio: float | None = None,
-    agentcgroup_protection_window_seconds: float | None = None,
+    runtime_poll_interval_seconds: float | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
     random_seed: int | None = None,
@@ -187,6 +185,8 @@ def configure_experiment(
     if recipe is not None or root.get('schema_version') == 4:
         from .design import configure_design
         return configure_design(root, dict(locals()))
+    if fixed_methods:
+        raise ValueError('--fixed-methods requires --recipe')
     if mechanism_settings or checkpoint_axis is not None:
         raise ValueError('--set/--checkpoint-axis require a schema-4 design or explicit --recipe')
     if suite is not None:
@@ -288,9 +288,18 @@ def configure_experiment(
         execution["concurrency_levels"] = parse_concurrency(concurrency)
     selected = list(baseline_names)
     if selected:
+        selected_baselines = [resolve_baseline(name) for name in selected]
+        common_groups = set(selected_baselines[0].comparison_groups)
+        for baseline in selected_baselines[1:]:
+            common_groups.intersection_update(baseline.comparison_groups)
+        if len(selected_baselines) > 1 and not common_groups:
+            raise ValueError(
+                "selected legacy baselines do not share a comparison family; "
+                "use one schema-4 recipe or an explicit custom design"
+            )
         root["policies"] = [
-            resolve_baseline(name).as_policy().model_dump(mode="json")
-            for name in selected
+            baseline.as_policy().model_dump(mode="json")
+            for baseline in selected_baselines
         ]
     policies = root.get("policies", [] if selected_suite else None)
     if not isinstance(policies, list):
@@ -403,10 +412,7 @@ def configure_experiment(
     for key, value in (("prediction_mode", prediction_mode),
                        ("prediction_reservation_scale", prediction_reservation_scale),
                        ("admission_margin_mib", admission_margin_mib),
-                       ("agentcgroup_poll_interval_seconds", agentcgroup_poll_interval_seconds),
-                       ("agentcgroup_event_threshold", agentcgroup_event_threshold),
-                       ("agentcgroup_pressure_ratio", agentcgroup_pressure_ratio),
-                       ("agentcgroup_protection_window_seconds", agentcgroup_protection_window_seconds)):
+                       ("runtime_poll_interval_seconds", runtime_poll_interval_seconds)):
         if value is not None:
             resources[key] = value
     if static_tool_memory_mib == "auto":
@@ -530,6 +536,26 @@ def configure_experiment(
         if not prediction_source:
             raise ValueError(
                 "wait-aware baselines require --model-wait-prediction-source"
+            )
+    coordinates_release = any(
+        item.get("idle_release_ranking")
+        or item.get("runtime_control") in {"pressure_lifecycle", "adaptive_joint"}
+        for item in policy_mappings
+    )
+    if coordinates_release:
+        prediction_source = str(
+            configuration.get("model_wait_prediction_source") or ""
+        )
+        if prediction_source.startswith("recorded-trace-median-scaled:"):
+            raise ValueError(
+                "release-cost baselines require an independent model-wait "
+                "prediction; do not use --model-wait-prediction-seconds auto"
+            )
+        if not (resources.get("idle_reclaim_costs")
+                or resources.get("memory_action_costs")):
+            raise ValueError(
+                "release-cost baselines require measured "
+                "resources.idle_reclaim_costs in the input YAML"
             )
 
     spec = ExperimentSpec.model_validate(root)
@@ -713,14 +739,7 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             if spec.resources.snapshot_residency_costs else None
         ),
         "memory_scheduling": spec.resources.memory_scheduling,
-        "agentcgroup": {
-            "poll_interval_seconds": spec.resources.agentcgroup_poll_interval_seconds,
-            "event_threshold": spec.resources.agentcgroup_event_threshold,
-            "pressure_ratio": spec.resources.agentcgroup_pressure_ratio,
-            "protection_window_seconds": (
-                spec.resources.agentcgroup_protection_window_seconds
-            ),
-        },
+        "runtime_poll_interval_seconds": spec.resources.runtime_poll_interval_seconds,
         "pool_transfer_concurrency": spec.resources.pool_transfer_concurrency,
         "borrow_cooldown_seconds": spec.resources.borrow_cooldown_seconds,
         "return_cooldown_seconds": spec.resources.return_cooldown_seconds,

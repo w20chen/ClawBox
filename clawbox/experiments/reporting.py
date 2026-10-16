@@ -291,17 +291,19 @@ def render_run_report(run_root: Path) -> str:
         if spec.schema_version == 4:
             from .spec import effective_spec
             lines.extend(['Mechanisms are explicit per arm; a configured mechanism can have zero actions.', '',
-                          '| Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint |',
-                          '|---|---|---|---|---|---|---|'])
+                          'Fixed conditions: `' + json.dumps(spec.design['conditions'], sort_keys=True) + '`.', '',
+                          '| Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint | Deployment | Coordination |',
+                          '|---|---|---|---|---|---|---|---|---|'])
             for policy in spec.policies:
                 m = policy.mechanisms
                 lines.append('| ' + ' | '.join((policy.name,
-                    m['admission']['tool'] + '/' + m['admission']['lifecycle_admission'],
-                    m['runtime']['backend'] + f" memory={m['runtime']['memory_protection']} cpu={m['runtime']['cpu_release_boost']} cache={m['runtime']['proactive_cache_reclaim']}",
+                    m['admission']['tool'],
+                    f"memory={m['runtime']['memory_protection']} cpu={m['runtime']['cpu_release_boost']} reclaim={m['runtime']['proactive_memory_reclaim']}",
                     m['placement']['policy'] + f" affinity={m['placement']['template_affinity']}",
                     m['idle_reclaim']['policy'] + '/' + m['idle_reclaim']['scope'],
-                    m['shared_memory']['borrow'] + '/' + m['shared_memory']['action_selection'],
-                    '/'.join(m['checkpoint'][key] for key in ('mechanism','storage','residency')))) + ' |')
+                    m['shared_memory']['borrow'],
+                    '/'.join(m['checkpoint'][key] for key in ('mechanism','storage','residency')),
+                    m['deployment']['mode'], m['coordination']['action_selection'])) + ' |')
             lines.append('')
             from types import SimpleNamespace
             resources = SimpleNamespace(**spec.design['environment']['resources'])
@@ -322,7 +324,7 @@ def render_run_report(run_root: Path) -> str:
             f"{resources.warm_memory_capacity_mib / 1024:g} GiB shared pool; "
             f"{(borrow or 0) / 1024:g} GiB maximum live borrow.",
             "",
-            ("Lifecycle and cache-reclaim settings are listed per arm. " if spec.schema_version == 4 else
+            ("Deployment and proactive memory-reclaim settings are listed per arm. " if spec.schema_version == 4 else
              f"Lifecycle admission: `{resources.lifecycle_admission}`; proactive cache reclaim: `{resources.proactive_cache_reclaim}`. ")
             + "Configured capacity is offered demand, not measured physical pressure.",
             "",

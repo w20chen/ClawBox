@@ -152,7 +152,7 @@ def test_malformed_yaml_has_a_cli_error_not_a_traceback(tmp_path, capsys):
 def test_dimension_filters_select_independent_mechanisms():
     from clawbox.experiments.preset_view import select_presets
     assert set(select_presets(admission=['fixed', 'predicted'], reclamation=['resident'],
-                              runtime_control=['agentcgroup_cgroup'])) == {'fixed-resident', 'predicted-resident'}
-    assert select_presets(runtime_control=['off'], admission=['predicted']) == ['prediction-only-resident']
+                              runtime_control=['off'])) == {'fixed-resident', 'predicted-resident'}
+    assert select_presets(runtime_control=['off'], admission=['predicted']) == ['predicted-resident', 'predicted-wait-snapshot']
     with pytest.raises(ValueError):
         select_presets(estimate=['predicted'])

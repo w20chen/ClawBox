@@ -49,16 +49,18 @@ def positive_float_or_auto(value: str) -> float | str:
 def emit_overview(value: dict[str, Any]) -> None:
     if 'dimensions' in value:
         print(f"Experiment: {value['experiment_id']} | recipe: {value['recipe']} | trials: {value['arm_count']}")
-        print('Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint')
+        print('Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint | Deployment | Coordination')
+        print('Fixed conditions: ' + json.dumps(value['conditions'], sort_keys=True))
         for arm in value['arms']:
             m = arm['mechanisms']
             print(' | '.join((arm['name'],
-                m['admission']['tool'] + '/' + m['admission']['lifecycle_admission'],
-                m['runtime']['backend'] + f" mem={m['runtime']['memory_protection']} cpu={m['runtime']['cpu_release_boost']} cache={m['runtime']['proactive_cache_reclaim']}",
+                m['admission']['tool'],
+                f"memory={m['runtime']['memory_protection']} cpu={m['runtime']['cpu_release_boost']} reclaim={m['runtime']['proactive_memory_reclaim']}",
                 m['placement']['policy'] + f" affinity={m['placement']['template_affinity']}",
                 m['idle_reclaim']['policy'] + '/' + m['idle_reclaim']['scope'],
-                m['shared_memory']['borrow'] + '/' + m['shared_memory']['action_selection'],
-                '/'.join(m['checkpoint'][k] for k in ('mechanism', 'storage', 'residency')))))
+                m['shared_memory']['borrow'],
+                '/'.join(m['checkpoint'][k] for k in ('mechanism', 'storage', 'residency')),
+                m['deployment']['mode'], m['coordination']['action_selection'])))
             for key, item in arm['differences'].items():
                 print(f'  {key} = {item}')
             for warning in arm['warnings']:
@@ -282,7 +284,7 @@ def parser() -> argparse.ArgumentParser:
     describe.add_argument("spec", type=Path)
     describe.add_argument("--json", action="store_true", dest="as_json")
     baselines = sub.add_parser(
-        "baselines", help="list older schema-3 presets; use recipes for new experiments",
+        "baselines", help="list legacy schema-3 presets by comparison family; use recipes for new experiments",
     )
     baselines.add_argument("--all", action="store_true", help="include deprecated policies")
     baselines.add_argument("--json", action="store_true", dest="as_json")
@@ -302,30 +304,26 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument('--recipe', choices=RECIPES,
                            help='generate explicit six-dimension comparison arms (schema 4)')
     configure.add_argument('--checkpoint-axis', choices=('encoding', 'storage', 'residency'))
+    configure.add_argument('--fixed-methods', action='store_true',
+                           help='freeze a controlled single-family study, resetting unrelated policy switches')
     configure.add_argument('--set', action='append', default=[], dest='mechanism_settings',
-                           metavar='DIMENSION.FIELD=VALUE', help='edit a common mechanism field using a YAML value')
+                           metavar='GROUP.FIELD=VALUE', help='edit a common mechanism or conditions.field using a YAML value')
     configure.add_argument("--suite", choices=("admission", "numa-snapshot"),
                            help="generate a matched two-arm comparison")
     configure.add_argument("--ablations", action=argparse.BooleanOptionalAction, default=None,
                            help="include intermediate arms for the selected suite")
-    configure.add_argument("--runtime-control", choices=("off", "agentcgroup_cgroup", "no_control",
-                           "agentcgroup_legacy", "phase_memcg", "release_cpu",
+    configure.add_argument("--runtime-control", choices=("off", "no_control",
+                           "phase_memcg", "release_cpu",
                            "pressure_lifecycle", "adaptive_joint"),
-                           help="optional AgentCgroup control; suite deployment baseline stays off")
+                           help="optional pressure/progress control; suite deployment baseline stays off")
     configure.add_argument("--prediction-mode", choices=("runtime", "frozen"),
                            help="query trained ClawTune KB per command, or replay frozen command predictions")
     configure.add_argument("--prediction-reservation-scale", type=float,
                            help="positive multiplier on calibrated host growth; default 1")
     configure.add_argument("--admission-margin-mib", type=int,
                            help="global safety margin in MiB; default 256")
-    configure.add_argument("--agentcgroup-poll-interval-seconds", type=float,
-                           help="AgentCgroup sampling interval; default 0.5")
-    configure.add_argument("--agentcgroup-event-threshold", type=int,
-                           help="memory.high events required to activate; default 1")
-    configure.add_argument("--agentcgroup-pressure-ratio", type=float,
-                           help="memory.current / memory.max activation ratio; default 0.85")
-    configure.add_argument("--agentcgroup-protection-window-seconds", type=float,
-                           help="duration of each protection action; default 1")
+    configure.add_argument("--runtime-poll-interval-seconds", type=float,
+                           help="Runtime control sampling interval; default 0.5")
     configure.add_argument("--trace")
     configure.add_argument("--case-id")
     configure.add_argument("--prompt")
@@ -636,6 +634,8 @@ def main(argv: list[str] | None = None) -> int:
                         "inference.configuration.model_wait_prediction_seconds",
                         "inference.configuration.model_wait_prediction_source",
                     ])
+                if value.as_policy().coordinates_release:
+                    required_settings.append("resources.idle_reclaim_costs")
                 if value.eviction_policy.value == "time_oracle":
                     required_settings.append("inference.backend=replay")
                 rows.append({
@@ -645,22 +645,35 @@ def main(argv: list[str] | None = None) -> int:
                     "reclamation": value.reclamation_policy.value,
                     "eviction": value.eviction_policy.value,
                     "restore": value.restore_policy.value,
+                    "idle_release_ranking": value.as_policy().coordinates_release,
+                    "snapshot_scope": (
+                        "none" if value.reclamation_policy.value == "resident"
+                        else "agent_and_tool" if value.runtime_snapshot else "tool"
+                    ),
+                    "comparison_groups": list(value.comparison_groups),
                     "required_settings": required_settings,
                     "status": value.implementation_status,
                 })
             if args.as_json:
                 emit(rows)
             else:
-                print("Available baselines:")
+                print("Legacy schema-3 presets (compare only within a listed family; use schema-4 recipes for new studies):")
                 for row in rows:
                     labels = dimensions(BASELINES[row['name']].as_policy())
+                    if row["snapshot_scope"] != "none":
+                        labels["snapshot_scope"] = row["snapshot_scope"]
+                        labels["release_ranking"] = (
+                            "measured_cost" if row["idle_release_ranking"]
+                            else "lru"
+                        )
+                    groups = ",".join(row["comparison_groups"]) or "standalone"
                     requirement = (
                         f", requires {', '.join(row['required_settings'])}"
                         if row["required_settings"] else ""
                     )
                     status = "" if row["status"] == "implemented" else " [DEPRECATED]"
                     print(
-                        f"  {row['name']}{status}: "
+                        f"  {row['name']}{status} [{groups}]: "
                         + ", ".join(f"{key}={item}" for key, item in labels.items())
                         + requirement
                     )
@@ -728,6 +741,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.base,
                 recipe=args.recipe,
                 checkpoint_axis=args.checkpoint_axis,
+                fixed_methods=args.fixed_methods,
                 mechanism_settings=args.mechanism_settings,
                 suite=args.suite,
                 suite_ablations=args.ablations,
@@ -735,12 +749,7 @@ def main(argv: list[str] | None = None) -> int:
                 prediction_mode=args.prediction_mode,
                 prediction_reservation_scale=args.prediction_reservation_scale,
                 admission_margin_mib=args.admission_margin_mib,
-                agentcgroup_poll_interval_seconds=args.agentcgroup_poll_interval_seconds,
-                agentcgroup_event_threshold=args.agentcgroup_event_threshold,
-                agentcgroup_pressure_ratio=args.agentcgroup_pressure_ratio,
-                agentcgroup_protection_window_seconds=(
-                    args.agentcgroup_protection_window_seconds
-                ),
+                runtime_poll_interval_seconds=args.runtime_poll_interval_seconds,
                 host_profile=profile or None,
                 compute_nodes=profile.get("compute_nodes"),
                 placement_policy=args.placement_policy,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 from pathlib import Path
 from typing import Literal, Any
@@ -211,11 +212,7 @@ class ResourcesSpec(StrictFrozenModel):
     prediction_mode: Literal["runtime", "frozen"] = "frozen"
     observe_predictions: bool = False
     prediction_reservation_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
-    agentcgroup_source: str | None = None
-    agentcgroup_poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)
-    agentcgroup_event_threshold: int = Field(default=1, ge=1)
-    agentcgroup_pressure_ratio: float = Field(default=0.85, gt=0, lt=1, allow_inf_nan=False)
-    agentcgroup_protection_window_seconds: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    runtime_poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
     snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"
@@ -345,13 +342,21 @@ class PolicySpec(StrictFrozenModel):
 
     @property
     def coordinates_release(self):
-        return self.idle_release_ranking or self.runtime_control.coordinates_release
+        return self.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE and (
+            self.idle_release_ranking or self.runtime_control.coordinates_release
+        )
 
     @model_validator(mode="after")
     def valid_tuple(self) -> "PolicySpec":
         if (self.runtime_control is RuntimeControl.PRESSURE_LIFECYCLE
                 and self.reclamation is ReclamationPolicy.RESIDENT):
             raise ValueError('pressure_lifecycle requires explicit snapshot_pause, wait_aware_pressure and reactive restore')
+        if (self.idle_release_ranking
+                and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE):
+            raise ValueError(
+                'idle_release_ranking requires snapshot_pause, '
+                'wait_aware_pressure and reactive restore'
+            )
         if self.deployment == "os-default" and (
             self.admission is not AdmissionPolicy.OFF
             or self.runtime_control not in {RuntimeControl.OFF, RuntimeControl.NO_CONTROL}
@@ -368,6 +373,11 @@ class PolicySpec(StrictFrozenModel):
                 raise ValueError("resident requires eviction=none and restore=none")
         elif self.eviction is EvictionPolicy.NONE or self.restore is RestorePolicy.NONE:
             raise ValueError("snapshot_pause requires an eviction and restore policy")
+        if self.coordinates_release and self.runtime_snapshot:
+            raise ValueError(
+                "release-cost coordination supports Tool eviction only; "
+                "set runtime_snapshot=false"
+            )
         if self.snapshot_aware_residency and (
             self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
             or self.eviction is EvictionPolicy.NONE
@@ -546,6 +556,36 @@ class ExperimentSpec(StrictFrozenModel):
         if len(names) != len(set(names)):
             raise ValueError("policy names must be unique")
         admissions = {policy.admission for policy in self.policies}
+        wait_aware = any(
+            policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE
+            for policy in self.policies
+        )
+        if wait_aware:
+            wait = self.inference.configuration.get(
+                "model_wait_prediction_seconds"
+            )
+            source = str(self.inference.configuration.get(
+                "model_wait_prediction_source"
+            ) or "").strip()
+            if (isinstance(wait, bool) or not isinstance(wait, (int, float))
+                    or not math.isfinite(wait) or wait <= 0):
+                raise ValueError(
+                    "wait-aware policies require a positive finite "
+                    "inference.configuration.model_wait_prediction_seconds"
+                )
+            if not source:
+                raise ValueError(
+                    "wait-aware policies require "
+                    "inference.configuration.model_wait_prediction_source"
+                )
+            if any(policy.coordinates_release for policy in self.policies) and (
+                source == "trace_median"
+                or source.startswith("recorded-trace-median-scaled:")
+            ):
+                raise ValueError(
+                    "release-cost coordination requires an independent "
+                    "model-wait prediction, not the evaluation trace"
+                )
         if (self.resources.snapshot_mechanism == "incremental-cow"
                 and self.resources.snapshot_storage != "warm-only"
                 and any(policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
@@ -561,6 +601,24 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("fixed admission requires resources.static_tool_memory_mib")
         if AdmissionPolicy.PREDICTED in admissions and not self.resources.prediction_artifact:
             raise ValueError("predicted admission requires a validated prediction_artifact")
+        if any(policy.coordinates_release for policy in self.policies):
+            release_costs = (
+                self.resources.idle_reclaim_costs
+                or self.resources.memory_action_costs
+            )
+            if release_costs is None:
+                raise ValueError(
+                    "release-cost coordination requires measured "
+                    "resources.idle_reclaim_costs"
+                )
+            if self.resources.snapshot_storage != "warm-only" and (
+                release_costs.cold_checkpoint_seconds_per_gib is None
+                or release_costs.cold_restore_seconds_per_gib is None
+            ):
+                raise ValueError(
+                    "tiered release-cost coordination requires measured cold "
+                    "checkpoint and restore costs"
+                )
         if self.resources.observe_predictions and not self.resources.prediction_artifact:
             raise ValueError("observe_predictions requires prediction_artifact from experiment train")
         return self

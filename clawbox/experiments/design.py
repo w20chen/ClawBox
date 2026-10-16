@@ -16,19 +16,18 @@ from .spec import (StrictFrozenModel, ResourcesSpec, ExecutionSpec, SandboxSpec,
                    WorkloadSpec, AgentSpec, InferenceSpec, ValidationSpec, OutputSpec)
 
 DIMENSIONS = ('admission', 'runtime', 'placement', 'idle_reclaim', 'shared_memory', 'checkpoint')
-RECIPES = ('admission', 'runtime', 'placement', 'idle-reclaim', 'shared-memory',
+GROUPS = DIMENSIONS + ('deployment', 'coordination')
+RECIPES = ('admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination',
            'checkpoint', 'integrated', 'custom')
 
 # Every existing parameter has one public owner. Physical limits stay in the
 # environment; decision parameters can vary by arm. No arbitrary resource patch
 # is accepted from the public format.
 RESOURCE_FIELDS = {
-    'admission': ('lifecycle_admission', 'startup_headroom_mib', 'admission_margin_mib',
+    'admission': ('startup_headroom_mib', 'admission_margin_mib',
                   'static_tool_memory_mib', 'non_command_tool_memory_mib',
-                  'prediction_mode', 'prediction_reservation_scale'),
-    'runtime': ('proactive_cache_reclaim', 'pressure_control', 'agentcgroup_source',
-                'agentcgroup_poll_interval_seconds', 'agentcgroup_event_threshold',
-                'agentcgroup_pressure_ratio', 'agentcgroup_protection_window_seconds'),
+                  'prediction_reservation_scale'),
+    'runtime': ('pressure_control', 'runtime_poll_interval_seconds'),
     'placement': (),
     'idle_reclaim': ('checkpoint_restore_headroom_mib',),
     'shared_memory': ('borrow_cooldown_seconds', 'return_cooldown_seconds'),
@@ -36,7 +35,8 @@ RESOURCE_FIELDS = {
 }
 EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs', 'idle_reclaim_costs')
 DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
-                  'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib')
+                  'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
+                  'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim')
 PLACEMENT_FIELDS = ('placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes')
 MEASUREMENT_FIELDS = ('memory_sample_interval_seconds', 'stabilization_seconds')
 
@@ -49,28 +49,34 @@ def subset(name, source, fields, **extra):
 
 
 Admission = subset('Admission', ResourcesSpec, RESOURCE_FIELDS['admission'],
-                   prediction_mode=(Literal['runtime', 'frozen'], 'runtime'),
                    tool=(Literal['off', 'fixed', 'predicted'], 'off'))
 Runtime = subset('Runtime', ResourcesSpec, RESOURCE_FIELDS['runtime'],
-                 proactive_cache_reclaim=(bool, False),
-                 backend=(Literal['neutral', 'agentcgroup'], 'neutral'),
+                 proactive_memory_reclaim=(bool, False),
                  memory_protection=(bool, False), cpu_release_boost=(bool, False))
 Placement = subset('Placement', ExecutionSpec, PLACEMENT_FIELDS,
                    policy=(Literal['os_default', 'round_robin', 'explicit', 'load_aware'], 'round_robin'),
-                   template_affinity=(bool, False),
-                   template_base_sharing=(Literal['disabled', 'required'], 'disabled'))
+                   template_affinity=(bool, False))
 IdleReclaim = subset('IdleReclaim', ResourcesSpec, RESOURCE_FIELDS['idle_reclaim'],
                      policy=(Literal['off', 'wait', 'release_cost'], 'off'),
-                     scope=(Literal['tool', 'agent_and_tool'], 'tool'),
-                     restore=(Literal['reactive'], 'reactive'))
+                     scope=(Literal['tool', 'agent_and_tool'], 'tool'))
 SharedMemory = subset('SharedMemory', ResourcesSpec, RESOURCE_FIELDS['shared_memory'],
-                      borrow=(Literal['off', 'hard', 'pressure'], 'off'),
-                      action_selection=(Literal['reclaim_first', 'measured_cost'], 'reclaim_first'))
+                      borrow=(Literal['off', 'hard', 'pressure'], 'off'))
 Checkpoint = subset('Checkpoint', ResourcesSpec, RESOURCE_FIELDS['checkpoint'],
-                    lazy_restore=(bool, True),
                     mechanism=(Literal['full-copy', 'incremental-cow'], 'incremental-cow'),
                     storage=(Literal['disk', 'warm-only', 'tiered'], 'disk'),
                     residency=(Literal['lru', 'value'], 'lru'))
+
+
+class Deployment(StrictFrozenModel):
+    mode: Literal['managed', 'os-default'] = 'managed'
+
+
+class Coordination(StrictFrozenModel):
+    action_selection: Literal['reclaim_first', 'measured_cost'] = 'reclaim_first'
+
+
+class Conditions(StrictFrozenModel):
+    prediction_source: Literal['kb', 'command-table'] = 'kb'
 
 
 class Mechanisms(StrictFrozenModel):
@@ -80,6 +86,8 @@ class Mechanisms(StrictFrozenModel):
     idle_reclaim: IdleReclaim = Field(default_factory=IdleReclaim)
     shared_memory: SharedMemory = Field(default_factory=SharedMemory)
     checkpoint: Checkpoint = Field(default_factory=Checkpoint)
+    deployment: Deployment = Field(default_factory=Deployment)
+    coordination: Coordination = Field(default_factory=Coordination)
 
 
 owned = {key for fields in RESOURCE_FIELDS.values() for key in fields}
@@ -108,7 +116,7 @@ class DesignArm(StrictFrozenModel):
 
 
 class Comparison(StrictFrozenModel):
-    recipe: Literal['admission', 'runtime', 'placement', 'idle-reclaim', 'shared-memory', 'checkpoint', 'integrated', 'custom'] = 'custom'
+    recipe: Literal['admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination', 'checkpoint', 'integrated', 'custom'] = 'custom'
     arms: tuple[DesignArm, ...] = Field(min_length=1)
 
 
@@ -122,6 +130,7 @@ class Design(StrictFrozenModel):
     evidence: Evidence = Field(default_factory=Evidence)
     measurement: Measurement = Field(default_factory=Measurement)
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
+    conditions: Conditions = Field(default_factory=Conditions)
     comparison: Comparison
     execution: DesignExecution = Field(default_factory=DesignExecution)
 
@@ -130,7 +139,7 @@ def override_mechanisms(common, overrides):
     raw = deepcopy(common)
     for path, value in overrides.items():
         fields = path.split('.')
-        if len(fields) < 2 or fields[0] not in DIMENSIONS:
+        if len(fields) < 2 or fields[0] not in GROUPS:
             raise ValueError(f'arm override must name a mechanism field: {path}')
         target = raw
         for field in fields[:-1]:
@@ -157,22 +166,30 @@ def lower_arm(design, name, m):
     x['placement_policy'] = m['placement']['policy']
     a, rt, pl, idle, shared, ck = (m[key] for key in DIMENSIONS)
     snapshots = idle['policy'] != 'off'
+    coordination = m['coordination']
+    os_deployment = m['deployment']['mode'] == 'os-default'
+    if os_deployment and (pl['policy'] != 'os_default' or a['tool'] != 'off'
+            or snapshots or shared['borrow'] != 'off' or pl['template_affinity']
+            or rt['memory_protection'] or rt['cpu_release_boost'] or rt['proactive_memory_reclaim']):
+        raise ValueError(f'{name}: os-default deployment requires OS placement, no tool admission, resident VMs and all runtime controls/borrowing/affinity off')
+    r['lifecycle_admission'] = 'os-managed' if os_deployment else 'configured-capacity'
+    r['prediction_mode'] = 'runtime' if design.conditions.prediction_source == 'kb' else 'frozen'
+    r['proactive_cache_reclaim'] = rt['proactive_memory_reclaim']
     if rt['cpu_release_boost'] and (pl['policy'] == 'os_default' or
             (not r['compute_nodes'] and r['local_numa_node'] is None)):
         raise ValueError(f'{name}: cpu_release_boost requires fixed LOCAL NUMA placement; configure compute_nodes or local_numa_node and use managed placement')
-    if rt['backend'] == 'agentcgroup' and (rt['memory_protection'] or rt['cpu_release_boost']):
-        raise ValueError(f'{name}: AgentCgroup cannot be combined with flat per-VM controls')
-    if rt['backend'] == 'agentcgroup' and idle['policy'] == 'release_cost':
-        raise ValueError(f'{name}: release-cost tracking requires neutral per-VM control, not the AgentCgroup hierarchy')
     if idle['policy'] == 'release_cost' and idle['scope'] != 'tool':
         raise ValueError(f'{name}: release-cost ranking currently supports Tool eviction only')
     if snapshots and (e['model_wait_prediction_seconds'] is None or not e['model_wait_prediction_source']):
         raise ValueError(f'{name}: idle reclaim requires independently measured model-wait evidence')
+    if idle['policy'] == 'release_cost' and not e['idle_reclaim_costs']:
+        raise ValueError(
+            f'{name}: release-cost reclamation requires independently measured '
+            'evidence.idle_reclaim_costs'
+        )
     if idle['policy'] == 'release_cost' and e['model_wait_prediction_source'] == 'trace_median':
         raise ValueError(f'{name}: release-cost reclamation cannot use evaluation-trace wait estimates')
-    if pl['template_affinity'] and pl['template_base_sharing'] != 'required':
-        raise ValueError(f'{name}: template affinity requires verified template_base_sharing=required')
-    if shared['action_selection'] == 'measured_cost' and (
+    if coordination['action_selection'] == 'measured_cost' and (
             shared['borrow'] != 'pressure' or not snapshots or not e['memory_action_costs']):
         raise ValueError(f'{name}: measured-cost selection needs pressure borrowing, reclaim and empirical memory_action_costs')
     if shared['borrow'] != 'off' and not r['shared_memory_borrow_limit_mib']:
@@ -188,13 +205,14 @@ def lower_arm(design, name, m):
         raise ValueError(f'{name}: disk/tiered release ranking requires COLD checkpoint and restore costs')
     if shared['borrow'] == 'off':
         r['shared_memory_borrow_limit_mib'] = None
-    r['memory_action_costs'] = e['memory_action_costs'] if shared['action_selection'] == 'measured_cost' else None
+    r['memory_action_costs'] = e['memory_action_costs'] if coordination['action_selection'] == 'measured_cost' else None
     r['memory_scheduling'] = ('joint' if shared['borrow'] == 'pressure' else
                               'static' if shared['borrow'] == 'hard' else
                               'snapshot_only' if snapshots else 'local_only')
-    r['template_base_sharing'] = pl['template_base_sharing']
+    r['template_base_sharing'] = 'required' if pl['template_affinity'] else 'disabled'
     r['snapshot_mechanism'] = ck['mechanism']
-    r['lazy_restore'] = ck['lazy_restore']
+    # This internal flag retains WARM accounting; it is not a backend loading switch.
+    r['lazy_restore'] = True
     r['snapshot_storage'] = 'warm-only' if ck['storage'] == 'warm-only' else 'tiered'
     r['snapshot_destination'] = 'cold' if ck['storage'] == 'disk' else 'warm'
     if not snapshots:
@@ -213,9 +231,9 @@ def lower_arm(design, name, m):
         r.update(compute_nodes=[], local_numa_node=None, local_memory_capacity_mib=capacity,
                  pool_memory_budget_mib=capacity, local_memory_low_watermark_mib=None,
                  local_memory_high_watermark_mib=None)
-    adaptive = rt['memory_protection'] or rt['cpu_release_boost'] or idle['policy'] == 'release_cost'
-    p = dict(name=name, deployment='managed', admission=a['tool'],
-             runtime_control='agentcgroup_legacy' if rt['backend'] == 'agentcgroup' else 'explicit' if adaptive else 'off',
+    adaptive = rt['memory_protection'] or rt['cpu_release_boost']
+    p = dict(name=name, deployment=m['deployment']['mode'], admission=a['tool'],
+             runtime_control='explicit' if adaptive else 'off',
              memory_protection=rt['memory_protection'], cpu_release_boost=rt['cpu_release_boost'],
              idle_release_ranking=idle['policy'] == 'release_cost', runtime_snapshot=idle['scope'] == 'agent_and_tool',
              reclamation='snapshot_pause' if snapshots else 'resident',
@@ -253,8 +271,10 @@ def compile_design(raw):
             inference['configuration'][key] = getattr(d.evidence, key)
     frozen = d.model_dump(mode='json')
     frozen['comparison']['arms'] = [dict(name=p['name'], override={
-        f'{dimension}.{key}': value for dimension in DIMENSIONS
-        for key, value in p['mechanisms'][dimension].items() if common[dimension][key] != value}) for p in policies]
+        f'{dimension}.{key}': value for dimension in GROUPS
+        for key, value in p['mechanisms'][dimension].items()
+        if common[dimension][key] != value or f'{dimension}.{key}' in arm.override})
+        for p, arm in zip(policies, d.comparison.arms)]
     return dict(schema_version=4, design=frozen, experiment_id=d.experiment_id,
                 workload=d.workload.model_dump(mode='json'), agent=d.agent.model_dump(mode='json'),
                 inference=inference, runtime=d.environment.runtime.model_dump(mode='json'),
@@ -277,10 +297,11 @@ def export_design(spec):
     raw['measurement']['validation'] = spec.validation.model_dump(mode='json')
     raw['measurement']['output'] = spec.output.model_dump(mode='json')
     common = raw['mechanisms']
+    declared = {arm['name']: arm.get('override', {}) for arm in raw['comparison']['arms']}
     raw['comparison']['arms'] = [dict(name=p.name, override={
-        f'{dimension}.{key}': value for dimension in DIMENSIONS
+        f'{dimension}.{key}': value for dimension in GROUPS
         for key, value in p.mechanisms[dimension].items()
-        if common[dimension][key] != value}) for p in spec.policies]
+        if common[dimension][key] != value or f'{dimension}.{key}' in declared.get(p.name, {})}) for p in spec.policies]
     return Design.model_validate(raw).model_dump(mode='json')
 
 
@@ -290,26 +311,29 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
     if recipe == 'admission':
         return [arm('admission-'+mode, admission__tool=mode) for mode in ('off', 'fixed', 'predicted')]
     if recipe == 'runtime':
-        return [arm('neutral', runtime__backend='neutral', runtime__memory_protection=False, runtime__cpu_release_boost=False),
-                arm('agentcgroup', runtime__backend='agentcgroup', runtime__memory_protection=False, runtime__cpu_release_boost=False),
-                arm('memory-protection', runtime__backend='neutral', runtime__memory_protection=True, runtime__cpu_release_boost=False),
-                arm('release-cpu', runtime__backend='neutral', runtime__memory_protection=False, runtime__cpu_release_boost=True),
-                arm('memory-and-cpu', runtime__backend='neutral', runtime__memory_protection=True, runtime__cpu_release_boost=True)]
+        return [arm('memory-off-cpu-off', runtime__memory_protection=False, runtime__cpu_release_boost=False, runtime__proactive_memory_reclaim=False),
+                arm('memory-protection', runtime__memory_protection=True, runtime__cpu_release_boost=False, runtime__proactive_memory_reclaim=False),
+                arm('release-cpu', runtime__memory_protection=False, runtime__cpu_release_boost=True, runtime__proactive_memory_reclaim=False),
+                arm('memory-and-cpu', runtime__memory_protection=True, runtime__cpu_release_boost=True, runtime__proactive_memory_reclaim=False)]
+    if recipe == 'memory-reclaim':
+        return [arm('memory-reclaim-'+mode, runtime__proactive_memory_reclaim=enabled)
+                for mode, enabled in (('off', False), ('on', True))]
     if recipe == 'placement':
         return [arm('round-robin', placement__policy='round_robin', placement__template_affinity=False),
                 arm('load-aware', placement__policy='load_aware', placement__template_affinity=False),
-                arm('template-aware', placement__policy='load_aware', placement__template_affinity=True,
-                    placement__template_base_sharing='required')]
+                arm('load-aware-template-affinity', placement__policy='load_aware', placement__template_affinity=True)]
     if recipe == 'idle-reclaim':
         return [arm('resident', idle_reclaim__policy='off'),
                 arm('wait-tool', idle_reclaim__policy='wait', idle_reclaim__scope='tool'),
                 arm('wait-pair', idle_reclaim__policy='wait', idle_reclaim__scope='agent_and_tool'),
                 arm('release-cost-tool', idle_reclaim__policy='release_cost', idle_reclaim__scope='tool')]
     if recipe == 'shared-memory':
-        return [arm('local', shared_memory__borrow='off', shared_memory__action_selection='reclaim_first'),
-                arm('hard-borrow', shared_memory__borrow='hard', shared_memory__action_selection='reclaim_first'),
-                arm('pressure-borrow', shared_memory__borrow='pressure', shared_memory__action_selection='reclaim_first'),
-                arm('cost-selection', shared_memory__borrow='pressure', shared_memory__action_selection='measured_cost')]
+        return [arm('local', shared_memory__borrow='off', coordination__action_selection='reclaim_first'),
+                arm('hard-borrow', shared_memory__borrow='hard', coordination__action_selection='reclaim_first'),
+                arm('pressure-borrow', shared_memory__borrow='pressure', coordination__action_selection='reclaim_first')]
+    if recipe == 'coordination':
+        return [arm('action-'+mode, coordination__action_selection=mode)
+                for mode in ('reclaim_first', 'measured_cost')]
     if recipe == 'checkpoint':
         if checkpoint_axis not in {'encoding', 'storage', 'residency'}:
             raise ValueError('checkpoint recipe requires --checkpoint-axis encoding|storage|residency')
@@ -318,16 +342,48 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
                          'residency': ('residency', ('lru', 'value'))}[checkpoint_axis]
         return [arm('checkpoint-'+value, **{'checkpoint__'+field: value}) for value in values]
     if recipe == 'integrated':
-        neutral = {'admission__tool': 'off', 'runtime__backend': 'neutral',
+        neutral = {'admission__tool': 'off',
                    'runtime__memory_protection': False, 'runtime__cpu_release_boost': False,
-                   'runtime__proactive_cache_reclaim': False, 'placement__template_affinity': False,
-                   'placement__template_base_sharing': 'disabled', 'idle_reclaim__policy': 'off',
-                   'shared_memory__borrow': 'off', 'shared_memory__action_selection': 'reclaim_first',
+                   'runtime__proactive_memory_reclaim': False, 'placement__template_affinity': False,
+                   'idle_reclaim__policy': 'off',
+                   'shared_memory__borrow': 'off', 'coordination__action_selection': 'reclaim_first',
                    'checkpoint__residency': 'lru'}
-        return [arm('os-default', **neutral, placement__policy='os_default', admission__lifecycle_admission='os-managed'),
-                arm('managed-neutral', **neutral, admission__lifecycle_admission='configured-capacity'),
+        return [arm('os-default', **neutral, placement__policy='os_default', deployment__mode='os-default', placement__session_compute_nodes=[]),
+                arm('managed-neutral', **neutral, deployment__mode='managed', placement__policy='round_robin', placement__session_compute_nodes=[]),
                 arm('configured-design')]
     return [arm('configured-design')]
+
+
+def fixed_recipe_arms(recipe, *, common, checkpoint_axis=None):
+    """Materialize controlled studies; retain common tuning, reset policy switches."""
+    if recipe in {'custom', 'integrated'}:
+        raise ValueError('--fixed-methods requires a single-family recipe; custom/integrated inherit user choices')
+    switches = {
+        'deployment.mode': 'managed', 'coordination.action_selection': 'reclaim_first',
+        'admission.tool': 'off', 'runtime.memory_protection': False,
+        'runtime.cpu_release_boost': False, 'runtime.proactive_memory_reclaim': False,
+        'placement.policy': 'round_robin', 'placement.template_affinity': False,
+        'placement.session_compute_nodes': [], 'idle_reclaim.policy': 'off',
+        'idle_reclaim.scope': 'tool', 'shared_memory.borrow': 'off',
+        'checkpoint.mechanism': 'full-copy', 'checkpoint.storage': 'disk',
+        'checkpoint.residency': 'lru',
+    }
+    if recipe in {'runtime', 'memory-reclaim'}:
+        switches['admission.tool'] = 'fixed'
+    if recipe in {'checkpoint', 'coordination'}:
+        switches['idle_reclaim.policy'] = 'wait'
+    if recipe == 'coordination':
+        switches.update({'shared_memory.borrow': 'pressure', 'checkpoint.storage': 'tiered'})
+    if recipe == 'checkpoint' and checkpoint_axis == 'residency':
+        switches['checkpoint.storage'] = 'tiered'
+    neutral = override_mechanisms(common, switches)
+    result = []
+    for arm in recipe_arms(recipe, checkpoint_axis=checkpoint_axis):
+        resolved = override_mechanisms(neutral, arm['override'])
+        result.append(dict(name=arm['name'], override={
+            f'{group}.{field}': value for group in GROUPS
+            for field, value in resolved[group].items()}))
+    return result
 
 
 def design_overview(spec):
@@ -338,28 +394,31 @@ def design_overview(spec):
         resolved = effective_spec(spec, p)
         requirements = ['cgroup v2 delegation and verified preallocation routing']
         warnings = []
+        if spec.design['conditions']['prediction_source'] == 'command-table':
+            warnings.append('Diagnostic command-table prediction source; not the KB prediction experiment.')
         if p.reclamation.value == 'resident':
-            warnings.append('Checkpoint encoding, lazy restore, storage and residency are inactive while idle_reclaim.policy=off; pool transfer limits still apply to live borrowing.')
+            warnings.append('Checkpoint encoding, storage and residency are inactive while idle_reclaim.policy=off; pool transfer limits still apply to live borrowing.')
         if p.admission.value == 'predicted':
             requirements.append('validated independent prediction artifact matching the Tool environment')
         if p.runtime_control.adaptive:
             requirements.append('progress-enabled Toolbridge; relevant PSI and measured release history for CPU boost')
         if p.reclamation.value == 'snapshot_pause':
             requirements.append('snapshot/restore qualification and independent model-wait evidence')
+        if p.coordinates_release:
+            requirements.append('independently measured idle-reclaim checkpoint and restore costs')
         if p.template_aware_placement:
             requirements.append('physical template-base sharing qualification')
-        if p.coordinates_release and not resolved.resources.idle_reclaim_costs:
-            warnings.append('No seeded idle-reclaim costs: release ranking abstains until successful lifecycle timings exist.')
         costs = resolved.resources.snapshot_residency_costs
         if p.snapshot_aware_residency and costs and costs.cold_restore_seconds_per_gib <= costs.warm_restore_seconds_per_gib:
             warnings.append('Measured COLD restore is no slower than WARM: retention value is zero.')
         rows.append(dict(name=p.name, mechanisms=p.mechanisms, requirements=requirements, warnings=warnings,
-                         differences={f'{d}.{k}': v for d in DIMENSIONS for k, v in p.mechanisms[d].items()
+                         differences={f'{d}.{k}': v for d in GROUPS for k, v in p.mechanisms[d].items()
                                       if common[d][k] != v},
                          effective_resources=resolved.resources.model_dump(mode='json'),
                          effective_placement=resolved.execution.placement_policy))
     return dict(experiment_id=spec.experiment_id, recipe=spec.design['comparison']['recipe'],
-                dimensions=list(DIMENSIONS), arms=rows, arm_count=len(expand_matrix(spec)),
+                dimensions=list(DIMENSIONS), control_groups=['deployment', 'coordination'],
+                conditions=spec.design['conditions'], arms=rows, arm_count=len(expand_matrix(spec)),
                 environment=spec.design['environment'], evidence=spec.design['evidence'],
                 execution=spec.design['execution'])
 
@@ -411,6 +470,11 @@ def configure_design(raw, options):
     evidence = raw.setdefault('evidence', {})
     execution = raw.setdefault('execution', {})
     measurement = raw.setdefault('measurement', {})
+    conditions = raw.setdefault('conditions', {})
+    if options.get('prediction_mode') is not None:
+        conditions['prediction_source'] = {'runtime': 'kb', 'frozen': 'command-table'}[options['prediction_mode']]
+    if options.get('template_base_sharing') is not None:
+        raise ValueError('schema 4 derives template sharing qualification from placement.template_affinity; remove --template-base-sharing')
     # Existing ergonomic scalar options retain their units; all mechanism
     # parameters are also accessible through --set or editable YAML.
     for key in EnvironmentResources.model_fields:
@@ -447,7 +511,7 @@ def configure_design(raw, options):
         m['idle_reclaim']['checkpoint_restore_headroom_mib'] = gib_to_mib(options['checkpoint_headroom_gib'], name='checkpoint headroom', allow_zero=True)
     for option, field in (('placement_policy', 'policy'), ('session_compute_nodes', 'session_compute_nodes'),
                           ('template_balance_slack', 'template_balance_slack'),
-                          ('template_aware_placement', 'template_affinity'), ('template_base_sharing', 'template_base_sharing')):
+                          ('template_aware_placement', 'template_affinity')):
         if options.get(option) is not None:
             m['placement'][field] = options[option]
     if options.get('memory_scheduling') is not None:
@@ -507,11 +571,15 @@ def configure_design(raw, options):
         key, sep, value = setting.partition('=')
         if not sep:
             raise ValueError('--set requires dimension.field=YAML_VALUE')
-        changes[key] = value if value in {'off', 'on'} else yaml.safe_load(value)
+        parsed = value if value in {'off', 'on'} else yaml.safe_load(value)
+        if key.startswith('conditions.'):
+            conditions[key.removeprefix('conditions.')] = parsed
+        else:
+            changes[key] = parsed
     # Resolve measured fixed allowance before strict mechanism validation.
     if 'admission.static_tool_memory_mib' in changes:
         m['admission']['static_tool_memory_mib'] = changes['admission.static_tool_memory_mib']
-    if recipe == 'admission' and m['admission']['static_tool_memory_mib'] is None:
+    if (recipe == 'admission' or (options.get('fixed_methods') and recipe in {'runtime', 'memory-reclaim'})) and m['admission']['static_tool_memory_mib'] is None:
         m['admission']['static_tool_memory_mib'] = 'auto'
     if m['admission']['static_tool_memory_mib'] == 'auto':
         if not evidence.get('prediction_artifact'):
@@ -522,10 +590,20 @@ def configure_design(raw, options):
             raise ValueError('fixed auto allowance requires one repository')
         m['admission']['static_tool_memory_mib'] = calibrated_static_tool_memory(Path(evidence['prediction_artifact']), repo)
     raw['mechanisms'] = override_mechanisms(m, changes)
+    if options.get('fixed_methods') and not recipe:
+        raise ValueError('--fixed-methods requires --recipe')
     if recipe:
-        if recipe == 'checkpoint' and raw['mechanisms']['idle_reclaim']['policy'] == 'off':
+        if recipe == 'checkpoint' and not options.get('fixed_methods') and raw['mechanisms']['idle_reclaim']['policy'] == 'off':
             raise ValueError('checkpoint comparison requires idle reclaim; set idle_reclaim.policy=wait or release_cost before selecting this recipe')
-        raw['comparison'] = dict(recipe=recipe, arms=recipe_arms(recipe, checkpoint_axis=options.get('checkpoint_axis')))
+        if options.get('fixed_methods'):
+            if conditions.get('prediction_source', 'kb') != 'kb':
+                raise ValueError('fixed methods require conditions.prediction_source=kb; command-table is diagnostic')
+            if recipe == 'idle-reclaim' and not evidence.get('idle_reclaim_costs'):
+                raise ValueError('fixed idle-reclaim requires independently measured evidence.idle_reclaim_costs')
+            arms = fixed_recipe_arms(recipe, common=raw['mechanisms'], checkpoint_axis=options.get('checkpoint_axis'))
+        else:
+            arms = recipe_arms(recipe, checkpoint_axis=options.get('checkpoint_axis'))
+        raw['comparison'] = dict(recipe=recipe, arms=arms)
     if options.get('checkpoint_axis') and recipe != 'checkpoint':
         raise ValueError('--checkpoint-axis requires --recipe checkpoint')
     return ExperimentSpec.model_validate(raw)

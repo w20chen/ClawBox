@@ -862,7 +862,8 @@ class PolicyCoordinator:
             now = time.monotonic()
             candidates = [state for state in candidates
                           if state.wait_id is not None and not state.response_ready
-                          and state.wait_deadline_monotonic_s is not None]
+                          and state.wait_deadline_monotonic_s is not None
+                          and state.wait_deadline_monotonic_s > now]
         if self.release_options is not None:
             if not self.resource_feedback()['memory_blocked']:
                 return None

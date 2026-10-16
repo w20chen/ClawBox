@@ -164,7 +164,7 @@ same endpoint as `127.0.0.1` inside a container. Do not bypass a failed build an
 install an older archive found in the output directory.
 
 The preparation script pins v0.7.0 and applies the repository's endpoint,
-networking, image-provenance, snapshot, and AgentCgroup priority patches. Rebuild
+networking, image-provenance, snapshot, and VM cgroup routing patches. Rebuild
 and install both Cubelet and Shim: they place each VM in its session's cgroup
 before allocating guest RAM, including cached-template creation and restore.
 Use the matching SDK. Applying a patch without installing the rebuilt services

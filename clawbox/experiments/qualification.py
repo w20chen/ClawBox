@@ -874,9 +874,7 @@ def _probe_mismatches(spec, receipt):
     if spec.resources.local_memory_cgroup and not (
         isinstance(receipt.get('runtime_control_test'), dict)
         and receipt['runtime_control_test'].get('passed') is True
-        and receipt['runtime_control_test'].get('kernel_control', {}).get('activation_verified') is True
-        and receipt['runtime_control_test'].get('kernel_control', {}).get('low_throttling_verified') is True
-        and receipt['runtime_control_test'].get('vm_control', {}).get('passed') is True
+        and receipt['runtime_control_test'].get('neutral_placement_verified') is True
         and (not any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in spec.policies)
              or receipt['runtime_control_test'].get('restore_verified') is True)
     ):
@@ -939,9 +937,7 @@ def design_probes(spec, probe, *, artifact_root):
                 'cold_snapshot_root', 'snapshot_mechanism', 'snapshot_storage',
                 'snapshot_destination', 'lazy_restore', 'shared_memory_borrow_limit_mib',
                 'pool_transfer_concurrency', 'pool_transfer_timeout_seconds',
-                'template_base_sharing', 'agentcgroup_source',
-                'agentcgroup_poll_interval_seconds', 'agentcgroup_event_threshold',
-                'agentcgroup_pressure_ratio', 'agentcgroup_protection_window_seconds')
+                'template_base_sharing', 'runtime_poll_interval_seconds')
         identity = {key: resources[key] for key in keys}
         identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'
         digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:16]

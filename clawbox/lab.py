@@ -528,7 +528,7 @@ def prepare_spec(args, profile: dict):
     names = select_presets(args.baseline or (), **{key: getattr(args, key) for key in
                             ("reserve_during", "estimate", "idle", "resume")})
     if not names:
-        names = (ACTIVE_BASELINES[0],)
+        names = ("uncontrolled-resident",)
     raw["policies"] = [BASELINES[n].as_policy().model_dump(mode="json") for n in names]
     if getattr(args, "repetitions", None) is not None:
         raw.setdefault("workload", {})["repetitions"] = args.repetitions
@@ -711,7 +711,7 @@ def main(argv=None) -> int:
     setup_parser.add_argument("--local-memory-cgroup", default=DEFAULT_LOCAL_CGROUP)
     sub.add_parser("doctor", help="Check services, disk, KVM and templates")
     baseline_parser = sub.add_parser(
-        "baselines", help="List the three active A/A+B/A+B+C policies",
+        "baselines", help="List legacy schema-3 presets by comparison family",
     )
     baseline_parser.add_argument("--all", action="store_true", help="include deprecated policies")
     importer = sub.add_parser("import-trace", help="Import a SWE-rebench research schema-5 trace for current OpenClaw")

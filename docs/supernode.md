@@ -59,8 +59,7 @@ evidence.
 
 - Admission checks each compute node's local measurements and budget as well
   as one atomic global demand ledger. Another node's free memory is not local
-  capacity. AgentCgroup runtime control uses aggregate pressure in the physical
-  parent cgroup; it does not run a separate controller on each NUMA node.
+  capacity. Runtime control uses neutral per-VM cgroups and measured contention.
 - Running VMs temporarily using NUMA node 2 and snapshots stored there share
   one capacity ledger. The system reserves a VM's configured memory before
   changing its memory binding. The combined live reservation is capped by

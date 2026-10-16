@@ -65,7 +65,7 @@ def test_selecting_dense_host_clears_shared_topology_from_supernode_base(tmp_pat
         shared_memory_borrow_limit_mib=65536)
     path = tmp_path / 'base.yaml'
     path.write_text(yaml.safe_dump(base.model_dump(mode='json')))
-    dense = configure_experiment(path, baseline_names=['runtime-resident'], host_profile={
+    dense = configure_experiment(path, baseline_names=['uncontrolled-resident'], host_profile={
         'local_memory_capacity_mib': 16384, 'local_numa_node': 0,
         'local_memory_cgroup': '/sys/fs/cgroup/cube_sandbox/sandbox',
         'warm_capacity_mib': 0})

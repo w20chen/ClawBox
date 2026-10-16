@@ -81,8 +81,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         }, key=lambda value: value or ""),
         "run_root": "/results/qualification-test",
         "supervision_fault_test": {"passed": True},
-        "runtime_control_test": {"passed": True, "restore_verified": True, "vm_control": {"passed": True},
-                                 "kernel_control": {"activation_verified": True, "low_throttling_verified": True}},
+        "runtime_control_test": {"neutral_placement_verified": True, "passed": True, "restore_verified": True},
         "cleanup_verified": True,
         "status": "succeeded",
     }

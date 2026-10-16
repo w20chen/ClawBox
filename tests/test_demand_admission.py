@@ -82,7 +82,7 @@ def test_global_claims_are_shared_but_local_claims_do_not_spend_other_nodes():
 
 
 def test_off_bypasses_tool_gate_but_not_lifecycle_accounting():
-    c = PolicyCoordinator(resolve_baseline('runtime-resident').as_policy(), budget_mib=10,
+    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(), budget_mib=10,
                           emergency_free_mib=0, operation_headroom_mib=0,
                           physical_sample=lambda: (10*MIB, 100*MIB))
     c.acquire('off', 0, .01)

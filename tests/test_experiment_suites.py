@@ -35,7 +35,7 @@ def numa(*, ablations=False):
     return ExperimentSpec.model_validate(raw)
 
 
-@pytest.mark.parametrize("ablations,count", [(False, 2), (True, 4)])
+@pytest.mark.parametrize("ablations,count", [(False, 2), (True, 3)])
 def test_admission_suite_defaults_to_no_admission(tmp_path, ablations, count):
     spec = admission(tmp_path, ablations=ablations)
     assert len(spec.policies) == count
@@ -105,7 +105,7 @@ def test_frozen_suite_rejects_confounding_overrides(section, key, value):
 
 def test_suite_rejects_hand_modified_policy():
     raw = numa().model_dump(mode="json")
-    raw["policies"][0]["runtime_control"] = "agentcgroup_cgroup"
+    raw["policies"][0]["runtime_control"] = "phase_memcg"
     with pytest.raises(ValueError, match="suite policies are generated"):
         ExperimentSpec.model_validate(raw)
 
@@ -123,29 +123,23 @@ def test_runtime_control_switch_keeps_deployment_baseline_off(tmp_path):
     spec = admission(tmp_path)
     path = tmp_path / "base.yaml"
     path.write_text(dump_experiment(spec, compact=True))
-    enabled = configure_experiment(path, runtime_control="agentcgroup_cgroup")
+    enabled = configure_experiment(path, runtime_control="phase_memcg")
     assert enabled.policies[0].runtime_control.value == "off"
-    assert enabled.policies[1].runtime_control.value == "agentcgroup_cgroup"
+    assert enabled.policies[1].runtime_control.value == "phase_memcg"
     disabled = configure_experiment(path, runtime_control="off")
     assert all(p.runtime_control.value == "off" for p in disabled.policies)
 
 
 def test_runtime_control_tuning_is_public_configuration(tmp_path):
     original = admission(tmp_path)
-    assert original.resources.agentcgroup_poll_interval_seconds == .5
+    assert original.resources.runtime_poll_interval_seconds == .5
     path = tmp_path / "base.yaml"
     path.write_text(dump_experiment(original, compact=True))
     tuned = configure_experiment(
         path,
-        agentcgroup_poll_interval_seconds=.2,
-        agentcgroup_event_threshold=8,
-        agentcgroup_pressure_ratio=.92,
-        agentcgroup_protection_window_seconds=.5,
+        runtime_poll_interval_seconds=.2,
     )
-    assert tuned.resources.agentcgroup_poll_interval_seconds == .2
-    assert tuned.resources.agentcgroup_event_threshold == 8
-    assert tuned.resources.agentcgroup_pressure_ratio == .92
-    assert tuned.resources.agentcgroup_protection_window_seconds == .5
+    assert tuned.resources.runtime_poll_interval_seconds == .2
 
 
 def test_zero_snapshot_value_is_visible():

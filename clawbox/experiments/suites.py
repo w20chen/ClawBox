@@ -74,7 +74,6 @@ def expand_suite(raw: dict, *, replace: bool = False) -> dict:
         policy("predicted-resident", "predicted")
         if root.get("suite_ablations"):
             policy("fixed-resident", "fixed", runtime="off")
-            policy("runtime-resident", "off", runtime="agentcgroup_cgroup")
     else:
         if not resources.get("compute_nodes"):
             raise ValueError("numa-snapshot suite requires an applied host profile with compute_nodes")

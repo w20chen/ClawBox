@@ -686,7 +686,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         path.mkdir(parents=True, exist_ok=True)
         for key, value in {'memory.max': str(100000*1024**2), 'memory.current': '0',
                            'memory.stat': 'anon 0\nfile 0\npgscan 0\npgsteal 0\n',
-                           'memory.low': '0', 'memory.high': 'max',
+                           'memory.low': '0', 'memory.high': 'max', 'cpu.weight': '100',
                            'memory.events': 'high 0\noom_kill 0\n'}.items():
             (path/key).write_text(value)
     files(cg)
@@ -835,7 +835,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         client=CubeSandboxClient(sandbox_class=SnapshotSandbox),
     ).run()[0]
 
-    assert create_claims_at_cleanup and not any(create_claims_at_cleanup)
+    assert create_claims_at_cleanup and not any(create_claims_at_cleanup), result.correctness
     if fail_runtime_create:
         assert result.status.value == "failed"
         assert len(SnapshotSandbox.created) == 1

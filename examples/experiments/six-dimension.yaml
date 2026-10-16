@@ -25,13 +25,16 @@ evidence: {}
 measurement:
   validation: {command: 'test "$(cat /workspace/result.txt)" = complete'}
   output: {directory: /results}
+conditions: {prediction_source: kb}
 mechanisms:
-  admission: {tool: 'off', lifecycle_admission: configured-capacity}
-  runtime: {backend: neutral, memory_protection: false, cpu_release_boost: false, proactive_cache_reclaim: false}
+  deployment: {mode: managed}
+  coordination: {action_selection: reclaim_first}
+  admission: {tool: 'off'}
+  runtime: {memory_protection: false, cpu_release_boost: false, proactive_memory_reclaim: false}
   placement: {policy: round_robin, template_affinity: false}
   idle_reclaim: {policy: 'off', scope: tool}
-  shared_memory: {borrow: 'off', action_selection: reclaim_first}
-  checkpoint: {mechanism: incremental-cow, lazy_restore: true, storage: disk, residency: lru}
+  shared_memory: {borrow: 'off'}
+  checkpoint: {mechanism: incremental-cow, storage: disk, residency: lru}
 comparison:
   recipe: custom
   arms:

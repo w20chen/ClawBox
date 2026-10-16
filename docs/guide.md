@@ -4,6 +4,17 @@ Use the [step-by-step guide](self-service.md) for the full command sequence
 and [host configuration](supernode.md) for NUMA and shared-memory settings.
 This page explains the experiment YAML, command options, and result files.
 
+`experiment configure --fixed-methods --recipe FAMILY` freezes a controlled study
+and resets unrelated policy switches, including switch values supplied with `--set`.
+Default: disabled. Supported families: admission, runtime, memory-reclaim, placement,
+idle-reclaim, shared-memory, coordination, checkpoint (also requires `--checkpoint-axis`).
+It retains numeric tuning, host settings, workload and measurement settings.
+See the [fixed method table](experiments.md#配方与受控比较) for exact backgrounds and prerequisites.
+Runtime and memory-reclaim require a fixed Tool allowance in MiB or an independent training
+artifact for calibration. Idle-reclaim requires independently measured idle reclaim costs.
+Missing prerequisites fail validation; fixed methods do not support diagnostic command-table
+predictions or integrated/custom recipes. Inspect `describe` before running with a new run ID.
+
 ## Configuration files and units
 
 | File | Purpose | How to change it |
@@ -48,6 +59,31 @@ by existing schema-3 results. In schema 4, physical resource fields live under
 prediction and empirical costs belong to `evidence`; sampling and final validation
 belong to `measurement`. The public JSON Schema is the field catalog.
 Old suites and baseline names are not mixed with schema-4 recipes.
+The legacy `experiment baselines` output labels each preset with its comparison
+family. Compare presets only within a shared family; the flat catalog is not a
+single controlled study. The duplicate `no_control` preset was removed;
+`uncontrolled-resident` is the common neutral managed control. Coordinated
+release presets require measured `resources.idle_reclaim_costs` before a run.
+Selecting multiple legacy `--baseline` values with no common family is rejected;
+use a schema-4 recipe or an explicit custom design for a multi-axis study.
+
+Schema 4 separates deployment (`mechanisms.deployment.mode`, managed by default)
+from tool admission. The os-default deployment requires OS placement and all
+managed optimization controls off. `mechanisms.coordination.action_selection`
+chooses between reclaim-first and measured-cost borrowing/reclamation; the
+`coordination` recipe compares these with common pressure borrowing and idle reclaim.
+`conditions.prediction_source=kb` is common to all arms; `command-table` is for
+diagnostics and cannot be varied by arm override. Set it using
+`--set conditions.prediction_source=command-table` for a separate diagnostic run.
+
+Template affinity automatically requires sharing qualification. There is no
+schema-4 sharing-enable switch or restore-timing selector: restore is reactive.
+There is also no independent eager/lazy loading switch; the backend snapshot
+mechanism controls loading, and WARM accounting remains retained conservatively.
+Use `runtime.proactive_memory_reclaim` for cgroup memory.reclaim requests, which
+do not guarantee selection of cache pages. The runtime recipe fixes this off;
+the memory-reclaim recipe compares off/on separately. Changed configurations need
+new run IDs; these configuration changes do not require host apply or image rebuild.
 
 The common environment is validated before arm overrides, including NUMA sums,
 watermarks and shared-pool borrow limits. Every arm uses the same physical live
@@ -95,12 +131,9 @@ do not necessarily match a given base YAML.
 | `resources.observe_predictions` | YAML boolean, default false; query predictions without using them for admission |
 | `resources.prediction_reservation_scale` | `--prediction-reservation-scale`; positive host-growth multiplier, default 1 |
 | `resources.admission_margin_mib` | `--admission-margin-mib`; nonnegative global reserve, default 256 MiB |
-| `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|no_control\|agentcgroup_cgroup\|agentcgroup_legacy\|phase_memcg\|release_cpu\|pressure_lifecycle\|adaptive_joint`; suites default off; custom policy fields are independent |
+| `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|no_control\|phase_memcg\|release_cpu\|pressure_lifecycle\|adaptive_joint`; suites default off; custom policy fields are independent |
 | `resources.pressure_control` | Editable [pressure policy fields and units](pressure-control.md); requires a new run ID |
-| `resources.agentcgroup_poll_interval_seconds` | `--agentcgroup-poll-interval-seconds`; positive seconds, default 0.5 |
-| `resources.agentcgroup_event_threshold` | `--agentcgroup-event-threshold`; positive `memory.high` event count, default 1 |
-| `resources.agentcgroup_pressure_ratio` | `--agentcgroup-pressure-ratio`; parent current/max ratio in (0,1), default 0.85 |
-| `resources.agentcgroup_protection_window_seconds` | `--agentcgroup-protection-window-seconds`; positive seconds, default 1 |
+| `resources.runtime_poll_interval_seconds` | `--runtime-poll-interval-seconds`; positive seconds, default 0.5 |
 | `policies[].deployment` | `managed` (default) or `os-default`; the latter resolves to OS placement, resident VMs, no admission/controller/cache reclaim, using the applied VM domain |
 | `resources.snapshot_mechanism` | `--snapshot-mechanism incremental-cow` or `full-copy` |
 | `resources.snapshot_storage` | `--snapshot-storage warm-only` or `tiered`; the latter may use disk, whose path must match the service setting |
@@ -148,7 +181,7 @@ the scheduler still uses CPU utilization and commitments. Samples and
 Changing placement policy or CPU overcommit needs a new run ID, but no image
 rebuild, host apply, or prediction retraining when host resources are unchanged.
 `template_aware_placement` requires `load_aware` placement; it never switches
-the base placement algorithm implicitly. It preserves admission, AgentCgroup, CPU weights and
+the base placement algorithm implicitly. It preserves admission, runtime controls, CPU weights and
 post-restore placement. A reported template cache hit means a verified
 same-template peer existed; it is not an inferred byte saving.
 
@@ -449,13 +482,13 @@ substitute cgroup residency, `numa_miss`, or guest LLC counters for traffic byte
 
 ## OS memory control and lifecycle admission
 
-`resources.lifecycle_admission` defaults to `configured-capacity`: creation
+In schema 4, `mechanisms.deployment.mode=managed` uses configured-capacity admission: creation
 reserves the configured Runtime+Tool capacity until both VMs are ready; restore
 reserves the restored VM capacity. These are outstanding demand promises, not
 resident RAM. Observed growth is deducted from a promise before it is released.
 
-Set `resources.lifecycle_admission: os-managed` and
-`resources.proactive_cache_reclaim: false` for the guarded OS baseline. This
+Select `mechanisms.deployment.mode=os-default`, `placement.policy=os_default`
+and disable tool admission, runtime controls, idle reclaim and borrowing for the guarded OS baseline. This
 removes the configured-capacity creation reservation, including NUMA placement,
 and disables ClawBox's proactive `memory.reclaim`. It requires resident policies
 and no live shared-memory borrowing. `deployment: os-default` resolves these
@@ -466,14 +499,14 @@ baseline, not an unconstrained host; CubeSandbox may impose an additional capaci
 check that this setting does not bypass. The NUMA suite compares ordinary OS
 placement against the complete managed design, with matched managed ablations.
 
-`proactive_cache_reclaim` defaults to `true` in configured-capacity mode. The
+`mechanisms.runtime.proactive_memory_reclaim` defaults to `false`. The
 request size is `file - shmem`; the kernel chooses the pages reclaimed.
 `memory.max` can lead to OOM and is not a successful-completion guarantee.
 Swap policy is read from the host cgroup, not enabled by this setting. A swap
 comparison requires a separately configured and verified host condition for all
 arms. No claim about guest free-page reporting is inferred from guest `free`.
 
-Both settings are editable YAML fields and require a new run ID, but no image
+These settings are editable YAML fields and require a new run ID, but no image
 rebuild or retraining. Changing host limits or NUMA layout requires `host apply`;
 changing templates or the measured prediction environment requires retraining.
 Do not substitute a startup percentile for a capacity guarantee without separate

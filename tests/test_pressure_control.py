@@ -6,6 +6,7 @@ import pytest
 
 from clawbox.experiments.pressure import PressureControl, Phase, MIB
 from clawbox.experiments.spec import PressureControlSpec
+from clawbox.experiments.spec_types import RuntimeControl
 from clawbox.experiments.baselines import resolve_baseline
 from clawbox.experiments.policy import PolicyCoordinator, AdmissionRequest
 from clawbox.experiments.policy_control import _Session
@@ -259,9 +260,22 @@ def test_start_endpoint_rejects_stale_generation_and_late_start():
     assert seen == ['e', 'e']
 
 
-def test_six_modes_are_explicit_and_cgroup_ablations_resident():
-    for name in ('no_control', 'agentcgroup_legacy', 'phase_memcg', 'release_cpu',
+def test_supported_modes_are_explicit_and_cgroup_ablations_resident():
+    assert not RuntimeControl.NO_CONTROL.adaptive
+    for name in ('phase_memcg', 'release_cpu',
                  'pressure_lifecycle', 'adaptive_joint'):
         p = resolve_baseline(name).as_policy()
         assert p.runtime_control.value == name
         assert (p.reclamation.value == 'snapshot_pause') == p.runtime_control.coordinates_release
+
+
+def test_wait_aware_selection_rejects_expired_prediction():
+    c = coordinator()
+    vm = VM()
+    c.register('s', vm)
+    c.register_memory('s', tool=lambda: (256*MIB, 256*MIB), lifecycle=lambda: (0, 0))
+    c.begin_model_wait('s', 'm', 0)
+    ticket = object()
+    c._waiters.append(ticket)
+    c._waiter_requests[ticket] = AdmissionRequest('new', 128*MIB, 'create', False)
+    assert c._select_victim_locked(exclude='') is None

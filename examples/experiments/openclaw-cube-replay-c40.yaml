@@ -56,7 +56,6 @@ resources:
   checkpoint_restore_headroom_mib: 8192
   static_tool_memory_mib: 256
 policies:
-  - {name: runtime-resident, admission: "off", runtime_control: agentcgroup_cgroup, reclamation: resident, eviction: none, restore: none}
   - {name: uncontrolled-resident, admission: "off", runtime_control: "off", reclamation: resident, eviction: none, restore: none}
 validation: {command: "test \"$(cat /workspace/result.txt)\" = openclaw-cube-replay-ok"}
 output: {directory: /results}

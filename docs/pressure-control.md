@@ -2,32 +2,37 @@
 
 New experiments use independent `mechanisms.runtime.memory_protection`,
 `cpu_release_boost`, and `mechanisms.idle_reclaim.policy` fields. Use
-`--recipe runtime` for the five runtime arms, or `--recipe idle-reclaim` for
-the four lifecycle arms. See [the six-dimension guide](experiments.md).
+`--recipe runtime` for the four runtime arms, or `--recipe idle-reclaim` for
+the four lifecycle arms. The runtime recipe pins proactive memory reclaim off;
+use `--recipe memory-reclaim` to compare that control separately. Other mechanism
+groups remain common across these comparisons. See [the six-dimension guide](experiments.md).
 The mode names below describe the backend and schema-3 records.
 
 Select resource control independently through `policies[].runtime_control`, or
 `configure --runtime-control`. New custom policies default to `off`. Existing
-named admission/snapshot presets keep their mechanism selections. The alias
-`agentcgroup_cgroup` selects the original pinned HIGH/LOW controller.
+named admission/snapshot presets use neutral per-VM groups.
 
-| Preset / mode | CPU | Memory | Checkpoint coordination |
+| Mode | CPU | Memory | Checkpoint coordination |
 |---|---|---|---|
 | `no_control` | Default 100 | Default low=0, high=max | None |
-| `agentcgroup_legacy` | Original grouped shares | Original static HIGH/LOW | None |
 | `phase_memcg` | Default | Bounded protection during reclaim | None |
 | `release_cpu` | Temporary release-aware weight | Default | None |
 | `pressure_lifecycle` | Default | Default | Safe Tool eviction ranking |
 | `adaptive_joint` | Release-aware | Bounded protection | Safe Tool eviction ranking |
 
-The six named presets use Tool admission off; lifecycle admission remains the
-existing configured policy. For a prediction-admission comparison, explicitly
-set the same `admission: predicted` and artifact in each compared policy.
+The modes use Tool admission off in their legacy presets; `no_control` remains
+an explicit runtime mode but is not a second public baseline because its execution
+is identical to `uncontrolled-resident`. Lifecycle admission remains the existing
+configured policy. For a prediction-admission comparison, explicitly set the same
+`admission: predicted` and artifact in each compared policy.
 The last two presets explicitly select `snapshot_pause`, `wait_aware_pressure`,
 and reactive restore. Selecting a runtime-control mode alone never enables
 snapshots, borrowing, migration, or a different placement algorithm.
 `pressure_lifecycle` rejects resident-only configuration. `adaptive_joint` can
 be used with resident VMs, in which case its lifecycle mechanism is inactive.
+When either mode coordinates eviction, measured `resources.idle_reclaim_costs`
+are required. They seed the first decision; without them no prior checkpoint and
+restore pair exists from which the round-trip cost could be learned.
 
 All new modes use flat, stable per-VM leaves prepared before guest allocation.
 Runtime and Tool keep separate leaves through restore. The controller leaves
@@ -95,9 +100,8 @@ Configuration under `resources.pressure_control` is editable YAML:
 | `amortization_factor` | 2 | Predicted idle / checkpoint-plus-restore cost minimum |
 | `release_history_samples` | 3 | Successful observations required, 3–8 |
 
-The control clock uses `resources.agentcgroup_poll_interval_seconds` (default
-0.5 seconds). The other `agentcgroup_*` thresholds affect legacy only. These
-settings require a new run ID, no host apply, retraining or image rebuild. Initial
+The control clock uses `resources.runtime_poll_interval_seconds` (default
+0.5 seconds). These settings require a new run ID, no host apply, retraining or image rebuild. Initial
 adoption requires a Tool image built with the progress-enabled Toolbridge
 (`clawbox experiment images --profile host.json --role sandbox`, preserving the
 workload-specific build recipe). Bootstrap checks this capability explicitly;

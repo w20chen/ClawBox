@@ -136,7 +136,7 @@ def test_spec_rejects_vm_pair_that_cannot_fit_compute_high_watermark():
     with pytest.raises(ValueError, match='VM pair plus policy operation headroom'):
         configure_experiment(
             Path('examples/experiments/getting-started.yaml'),
-            baseline_names=['runtime-resident'],
+            baseline_names=['uncontrolled-resident'],
             compute_nodes=[node.model_dump() for node in constrained],
             pool_memory_gib=10,
         )

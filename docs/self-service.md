@@ -195,11 +195,31 @@ bash scripts/clawbox --sudo experiment report admission-01
 产物的 host 增长 P90。保留同时生成的 JSON 和 `.kb.json`；评估不更新 KB。正式研究替换真实任务，
 训练与评估数据分开，并保留失败样本、完成率与多次重复。
 
+做固定消融时，在单族配方后加 `--fixed-methods`。例如复用已配置和校准的 admission 文件：
+
+```bash
+bash scripts/clawbox experiment configure "$HOME/clawbox-specs/admission.yaml" \
+  "$HOME/clawbox-specs/runtime-fixed.yaml" --recipe runtime --fixed-methods
+bash scripts/clawbox experiment describe "$HOME/clawbox-specs/runtime-fixed.yaml"
+bash scripts/clawbox experiment validate "$HOME/clawbox-specs/runtime-fixed.yaml" --inputs
+bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/runtime-fixed.yaml" --run-id runtime-fixed-01
+```
+
+固定 runtime/memory-reclaim 共用固定工具准入额度；idle-reclaim 还需独立实测回收成本。
+参见 [固定方法表](experiments.md#配方与受控比较)。每次更换配置使用新 run ID。
+不带此选项时，其他机制仍继承公共配置。
+
 运行时控制使用 `--recipe runtime`，放置使用 `--recipe placement`，回收使用
 `--recipe idle-reclaim`，共享内存使用 `--recipe shared-memory`。
 检查点使用 `--recipe checkpoint --checkpoint-axis encoding|storage|residency`，每次只研究一个子方向。
 完整方案先明确公共机制，再用 `--recipe integrated`；不会自动打开全部技术。
 各配方依赖、默认值、配置样例见[六维实验指南](experiments.md)。
+
+`--recipe runtime` 生成内存保护/CPU 都关闭、仅内存保护、仅 CPU 加速、两者开启四组，并在四组中固定关闭主动内存回收。
+`--recipe memory-reclaim` 单独比较主动内存回收；`--recipe shared-memory` 仅比较借用策略。
+比较借用与回收的动作成本选择，使用 `--recipe coordination`；公共配置必须已启用 pressure 借用、空闲回收并填写实测动作成本。
+模板亲和自动要求共享验证，不需要设置共享开关；预测实验默认统一查询 KB。
+采样周期使用 `--runtime-poll-interval-seconds`，或 `--set runtime.runtime_poll_interval_seconds=0.5`，单位为秒。
 
 生成配置后先运行 `experiment describe CONFIG`：resident 组的快照编码、存储与驻留参数会标为不生效。
 CPU 释放加速要求主机提供 `compute_nodes` 或 `local_numa_node`，且不能使用 OS 默认放置。
@@ -281,7 +301,6 @@ bash scripts/clawbox --sudo experiment destroy smoke-01
 | --- | --- |
 | host check 失败 | 按 remedy 修复并重跑；磁盘先用 host clean 预览 |
 | VM pool busy | status 查看任务，等待或 abort/destroy 自己的 run ID |
-| default AgentCgroup control was not verified | 查看结果根目录 `.qualification-probes/` 最新探测的 `runtime-control/vm-control.json`；它区分控制激活、LOW 节流和 OOM。确认主机空闲后重试；持续失败须修复控制环境，不要绕过预检 |
 | 模板无 READY 副本 | 检查 ID、注册节点、注册日志，不盲目重复提交 |
 | no more resource | 检查磁盘使用率和 S3lvol socket/backend |
 | ClawTune revision 不匹配 | 同源更新主机和两个镜像，再 apply/configure |
@@ -311,14 +330,16 @@ compare guest phase timestamps in `tool-artifacts/memory-reclaim-phases.json`
 with host `memory_sample` charges, swap and PSI. Guest unmap alone is not proof
 of host reclamation.
 
-For a separate guarded OS diagnostic, use a local-only applied host profile,
-resident policies, and these YAML resource settings:
+For a separate guarded OS diagnostic, start with the schema-4 example and set:
 
 ```yaml
-lifecycle_admission: os-managed
-proactive_cache_reclaim: false
-memory_scheduling: local_only
-shared_memory_borrow_limit_mib: null
+mechanisms:
+  deployment: {mode: os-default}
+  placement: {policy: os_default, template_affinity: false}
+  admission: {tool: 'off'}
+  runtime: {memory_protection: false, cpu_release_boost: false, proactive_memory_reclaim: false}
+  idle_reclaim: {policy: 'off'}
+  shared_memory: {borrow: 'off'}
 ```
 
 Run `validate --inputs` and `describe`, then use a new run ID. Apply exactly the

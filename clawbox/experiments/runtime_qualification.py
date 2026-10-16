@@ -251,31 +251,16 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     if not spec.resources.local_memory_cgroup:
         return {'required': False, 'passed': True}
     artifact_root.mkdir(parents=True, exist_ok=False)
-    source = Path(spec.resources.agentcgroup_source) if spec.resources.agentcgroup_source else None
-    control_options = {
-        'interval': spec.resources.agentcgroup_poll_interval_seconds,
-        'event_threshold': spec.resources.agentcgroup_event_threshold,
-        'pressure_ratio': spec.resources.agentcgroup_pressure_ratio,
-        'protection_window_seconds': (
-            spec.resources.agentcgroup_protection_window_seconds
-        ),
-    }
-    kernel = kernel_control_probe(
-        Path(spec.resources.local_memory_cgroup), source=source,
-        control_options=control_options,
-    )
-    (artifact_root/'kernel-control.json').write_text(json.dumps(kernel, indent=2))
     probe_id = 'qualification-priority-' + uuid.uuid4().hex[:12]
     client = CubeSandboxClient(journal=OwnedSandboxJournal(artifact_root/'owned-sandboxes.jsonl'))
     parent = Path(spec.resources.local_memory_cgroup)
     probe_root = parent / ('clawbox-vm-probe-' + uuid.uuid4().hex)
-    domain = PriorityDomain(probe_root, concurrency=2, repetition=0)
+    domain = PriorityDomain(probe_root, concurrency=2, repetition=0, legacy=False)
     lifecycles = []
     placements = []
     observations = []
     primary = None
     cleanup = []
-    vm_control = None
     snapshots = any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in spec.policies)
     pool = WarmSnapshotPool(spec.resources.warm_memory_capacity_mib*MIB,
         transfer_concurrency=spec.resources.pool_transfer_concurrency,
@@ -317,12 +302,6 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     lifecycle.restore()
                     if lifecycle.sandbox.files.read('/tmp/clawbox-priority-marker')!=probe_id:
                         raise RuntimeError('priority probe lost guest state across restore')
-        vm_control = guest_pressure_probe(
-            domain, lifecycles, source=source, control_options=control_options,
-        )
-        (artifact_root/'vm-control.json').write_text(json.dumps(vm_control, indent=2))
-        if not vm_control['passed']:
-            raise RuntimeError('default AgentCgroup control was not verified on guest allocations')
     except BaseException as exc:
         primary=exc
     finally:
@@ -343,8 +322,7 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
         except Exception as exc:
             cleanup.append(str(exc))
     result={'required':True,'passed':primary is None and not cleanup,
-            'kernel_control': {k:v for k,v in kernel.items() if k!='events'},
-            'vm_control': {k:v for k,v in (vm_control or {}).items() if k!='events'},
+            'neutral_placement_verified': primary is None and len(placements) >= 4,
             'placements':placements,'host_memory_observations':observations,
             'restore_verified':snapshots and primary is None,
             'snapshot_mechanism':spec.resources.snapshot_mechanism,

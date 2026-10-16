@@ -9,6 +9,22 @@ import yaml
 from clawbox import cli
 
 
+def legacy_base_with_idle_reclaim_costs(tmp_path: Path) -> Path:
+    raw = yaml.safe_load(Path(
+        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+    ).read_text(encoding="utf-8"))
+    raw["resources"]["idle_reclaim_costs"] = {
+        "provenance": "independent-checkpoint-benchmark-v1",
+        "warm_checkpoint_seconds_per_gib": 0.5,
+        "warm_restore_seconds_per_gib": 0.5,
+        "cold_checkpoint_seconds_per_gib": 1.0,
+        "cold_restore_seconds_per_gib": 1.0,
+    }
+    path = tmp_path / "legacy-with-idle-costs.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
+
+
 def test_images_subprocess_can_import_repository_package(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
@@ -199,11 +215,15 @@ def test_baseline_catalog_is_available_from_public_cli(capsys) -> None:
     assert "predicted-wait-snapshot" in output
     assert "tool-full-resident" not in output
     assert "DEPRECATED" not in output
+    assert "compare only within a listed family" in output
+    assert "no_control" not in output
+    assert "snapshot_scope=tool" in output
+    assert "release_ranking=measured_cost" in output
 
     assert cli.main(["experiment", "baselines", "--all"]) == 0
     all_output = capsys.readouterr().out
     assert "DEPRECATED" not in all_output
-    assert "prediction-only-resident" in all_output
+    assert "prediction-only-resident" not in all_output
 
 
 def test_public_workflow_accepts_independent_runtime_ablation(capsys) -> None:
@@ -375,7 +395,7 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     tmp_path, capsys,
 ) -> None:
     output = tmp_path / "wait-aware.yaml"
-    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+    base = str(legacy_base_with_idle_reclaim_costs(tmp_path))
     command = [
         "experiment", "configure", base, str(output),
         "--baseline", "predicted-wait-snapshot",
@@ -396,24 +416,54 @@ def test_configure_requires_wait_prediction_for_wait_aware_policy(
     ] == "separate-recording-v1"
 
 
-def test_configure_can_freeze_scaled_trace_median_model_wait(tmp_path, capsys) -> None:
+def test_release_cost_baseline_requires_seeded_idle_costs(tmp_path, capsys) -> None:
+    output = tmp_path / "missing-costs.yaml"
+    assert cli.main([
+        "experiment", "configure",
+        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
+        str(output), "--baseline", "predicted-wait-snapshot",
+        "--prediction-artifact", "/data/frozen-p50.json",
+        "--model-wait-prediction-seconds", "3",
+        "--model-wait-prediction-source", "separate-recording-v1",
+    ]) == 1
+    assert not output.exists()
+    assert "resources.idle_reclaim_costs" in capsys.readouterr().err
+
+
+def test_release_cost_rejects_evaluation_trace_wait_prediction(tmp_path, capsys) -> None:
     output = tmp_path / "auto-wait.yaml"
-    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+    base = str(legacy_base_with_idle_reclaim_costs(tmp_path))
 
     assert cli.main([
         "experiment", "configure", base, str(output),
         "--baseline", "predicted-wait-snapshot",
         "--prediction-artifact", "/data/frozen-p50.json",
         "--model-wait-prediction-seconds", "auto",
+    ]) == 1
+    assert not output.exists()
+    assert "independent model-wait prediction" in capsys.readouterr().err
+
+
+def test_legacy_baseline_selection_requires_one_comparison_family(
+    tmp_path, capsys,
+) -> None:
+    output = tmp_path / "cross-family.yaml"
+    assert cli.main([
+        "experiment", "configure",
+        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
+        str(output), "--baseline", "default-resident",
+        "--baseline", "predicted-resident",
+    ]) == 1
+    assert not output.exists()
+    assert "do not share a comparison family" in capsys.readouterr().err
+
+    assert cli.main([
+        "experiment", "configure",
+        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
+        str(output), "--baseline", "uncontrolled-resident",
+        "--baseline", "predicted-resident",
+        "--prediction-artifact", "/data/frozen-p50.json",
     ]) == 0
-    capsys.readouterr()
-    configuration = yaml.safe_load(output.read_text(encoding="utf-8"))[
-        "inference"
-    ]["configuration"]
-    assert configuration["model_wait_prediction_seconds"] > 0
-    assert configuration["model_wait_prediction_source"].startswith(
-        "recorded-trace-median-scaled:"
-    )
 
 
 def test_configure_rejects_vm_shape_change_without_new_template(

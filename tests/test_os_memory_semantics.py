@@ -39,10 +39,10 @@ def test_zero_lifecycle_claim_still_checks_safety_and_releases():
     assert not c.demand.claims
 
 
-def test_os_managed_is_shared_by_all_four_arms_and_rejects_snapshot():
+def test_os_managed_is_shared_by_resident_arms_and_rejects_snapshot():
     raw = raw_spec()
     raw['policies'] = [resolve_baseline(n).as_policy().model_dump(mode='json')
-        for n in ('uncontrolled-resident', 'runtime-resident', 'fixed-resident', 'predicted-resident')]
+        for n in ('uncontrolled-resident', 'fixed-resident', 'predicted-resident')]
     raw['resources'].update(lifecycle_admission='os-managed', proactive_cache_reclaim=False, static_tool_memory_mib=256)
     spec = ExperimentSpec.model_validate(raw)
     assert all(a.resources.lifecycle_reservation_mib(8192) == 0 for a in expand_matrix(spec))

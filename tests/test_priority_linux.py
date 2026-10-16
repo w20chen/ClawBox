@@ -178,7 +178,7 @@ while True:
         assert 'sustained_memory_congestion' in reasons
         coordinators = [PolicyCoordinator(resolve_baseline(name).as_policy(), budget_mib=384,
             emergency_free_mib=0, operation_headroom_mib=0, demand_ledger=ledger)
-            for name in ('runtime-resident', 'predicted-resident')]
+            for name in ('uncontrolled-resident', 'predicted-resident')]
         coordinators[0].acquire('off', 0, .05)
         with pytest.raises(AdmissionTimeout):
             coordinators[1].acquire('predicted', 0, .05)

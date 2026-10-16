@@ -183,6 +183,6 @@ def test_failure_report_distinguishes_unobserved_oom_from_zero(tmp_path):
     ]):
         (arms / f'{i}.json').write_text(json.dumps({**row, 'arm': {
             'arm_id': str(i), 'repetition': i, 'concurrency': 2,
-            'policy': {'name': 'runtime-resident'}}}))
+            'policy': {'name': 'uncontrolled-resident'}}}))
     report = render_run_report(tmp_path).split('## Trial outcomes')[1]
     assert '| 3 | 1 | 1 | 1 | 0 | 1 / 1 |' in report

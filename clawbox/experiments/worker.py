@@ -51,7 +51,7 @@ from .openclaw_driver import (
     run_openclaw,
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
-from .congestion import RuntimeMemoryControl, locate_cgroup
+from .congestion import locate_cgroup
 from .pressure import PressureControl
 from .priority import PriorityDomain
 from .spec_types import RuntimeControl
@@ -1424,11 +1424,10 @@ class ExperimentWorker:
         self._runtime_memory = None
         self._priority_domain = None
         if arm.resources.local_memory_cgroup:
-            # New policies and OFF use neutral leaves. Only the historical QoS
-            # baseline retains static HIGH/LOW grouping.
+            # All supported policies use neutral per-VM leaves.
             self._priority_domain = PriorityDomain(Path(arm.resources.local_memory_cgroup),
                 concurrency=arm.concurrency, repetition=arm.repetition,
-                legacy=arm.policy.runtime_control.legacy,
+                legacy=False,
                 journal_directory=self.output_root/'priority-domains',
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)
@@ -1437,24 +1436,12 @@ class ExperimentWorker:
                     and not arm.policy.template_aware_placement else {})
             try:
                 self._priority_domain.start()
-                self._runtime_memory = RuntimeMemoryControl(
-                    Path(arm.resources.local_memory_cgroup),
-                    Path(arm.resources.agentcgroup_source) if arm.resources.agentcgroup_source else None,
-                    high=self._priority_domain.high, low=self._priority_domain.low,
-                    enabled=arm.policy.runtime_control.legacy,
-                    interval=arm.resources.agentcgroup_poll_interval_seconds,
-                    event_threshold=arm.resources.agentcgroup_event_threshold,
-                    pressure_ratio=arm.resources.agentcgroup_pressure_ratio,
-                    protection_window_seconds=(
-                        arm.resources.agentcgroup_protection_window_seconds
-                    ),
-                    emit=events.write,
-                ) if arm.policy.runtime_control.legacy else PressureControl(
+                self._runtime_memory = PressureControl(
                     Path(arm.resources.local_memory_cgroup), mode=arm.policy.runtime_control,
                     options=arm.resources.pressure_control,
                     memory_protection=arm.policy.memory_protection,
                     cpu_release_boost=arm.policy.cpu_release_boost,
-                    interval=arm.resources.agentcgroup_poll_interval_seconds, emit=events.write)
+                    interval=arm.resources.runtime_poll_interval_seconds, emit=events.write)
                 self._runtime_memory.start()
                 demand_ledger.check = self._runtime_memory.check
             except BaseException:

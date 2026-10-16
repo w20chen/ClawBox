@@ -598,7 +598,7 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
     actions = load_trace(Path("examples/traces/openclaw-cube-replay.jsonl"))
     assert spec.agent.driver.value == "openclaw"
     assert spec.execution.concurrency_levels == (40,)
-    assert [policy.name for policy in spec.policies] == ["runtime-resident", "uncontrolled-resident"]
+    assert [policy.name for policy in spec.policies] == ["uncontrolled-resident"]
     assert actions[0].output["tool_calls"][0]["function"]["name"] == "exec"
     assert json.loads(actions[0].output["tool_calls"][0]["function"]["arguments"])[
         "command"
@@ -626,7 +626,11 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
     raw = raw_spec()
     raw["agent"] = {"driver": "openclaw"}
     raw["inference"] = {
-        "backend": "replay", "configuration": {"model": "recorded-model"},
+        "backend": "replay", "configuration": {
+            "model": "recorded-model",
+            "model_wait_prediction_seconds": 1,
+            "model_wait_prediction_source": "independent-test-recording",
+        },
     }
     path = tmp_path / "openclaw.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
@@ -647,10 +651,29 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
 
 def test_baseline_catalog_and_independent_policy_names():
     from clawbox.experiments.baselines import ACTIVE_BASELINES, ensure_supported_experiment
-    assert len(ACTIVE_BASELINES) == 13
+    assert len(ACTIVE_BASELINES) == 9
+    assert 'no_control' not in ACTIVE_BASELINES
     assert all(BASELINES[n].implementation_status == 'implemented' for n in ACTIVE_BASELINES)
+    normalized = [
+        BASELINES[name].as_policy(name='normalized').model_dump(mode='json')
+        for name in ACTIVE_BASELINES
+    ]
+    assert len({json.dumps(policy, sort_keys=True) for policy in normalized}) == len(normalized)
+    wait_snapshot = BASELINES['predicted-wait-snapshot'].as_policy()
+    assert wait_snapshot.coordinates_release
+    assert not wait_snapshot.runtime_snapshot
+    groups = {
+        group: {name for name, baseline in BASELINES.items()
+                if group in baseline.comparison_groups}
+        for group in {group for baseline in BASELINES.values()
+                      for group in baseline.comparison_groups}
+    }
+    assert all(len(names) >= 2 for names in groups.values())
+    assert groups['integrated'] == {
+        'predicted-resident', 'predicted-wait-snapshot',
+    }
     raw = raw_spec()
-    raw['policies'] = [resolve_baseline('runtime-resident').as_policy(name='custom-label').model_dump(mode='json')]
+    raw['policies'] = [resolve_baseline('uncontrolled-resident').as_policy(name='custom-label').model_dump(mode='json')]
     spec = ExperimentSpec.model_validate(raw)
     ensure_supported_experiment(spec)
     arm = expand_matrix(spec)[0]
@@ -659,6 +682,31 @@ def test_baseline_catalog_and_independent_policy_names():
     raw['policies'][0]['admission'] = 'tool_congestion'
     with pytest.raises(ValidationError):
         ExperimentSpec.model_validate(raw)
+
+
+def test_release_cost_baseline_requires_complete_independent_evidence():
+    raw = raw_spec()
+    raw['policies'] = [
+        resolve_baseline('predicted-wait-snapshot').as_policy().model_dump(mode='json')
+    ]
+    raw['resources']['idle_reclaim_costs'] = {
+        'provenance': 'independent-unit-test',
+        'warm_checkpoint_seconds_per_gib': 1,
+        'warm_restore_seconds_per_gib': 1,
+    }
+    with pytest.raises(ValueError, match='cold checkpoint and restore costs'):
+        ExperimentSpec.model_validate(raw)
+    raw['resources']['idle_reclaim_costs'].update(
+        cold_checkpoint_seconds_per_gib=2,
+        cold_restore_seconds_per_gib=2,
+    )
+    raw['inference']['configuration']['model_wait_prediction_source'] = 'trace_median'
+    with pytest.raises(ValueError, match='independent model-wait prediction'):
+        ExperimentSpec.model_validate(raw)
+    raw['inference']['configuration'][
+        'model_wait_prediction_source'
+    ] = 'independent-unit-test'
+    assert ExperimentSpec.model_validate(raw).policies[0].coordinates_release
 
 
 def test_unsupported_oracle_is_rejected_at_schema_boundary() -> None:
@@ -731,7 +779,7 @@ def test_yaml_loader_and_v1_error(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(raw_spec()), encoding="utf-8")
     assert load_experiment(path).schema_version == 3
     path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="only schema_version: 3"):
+    with pytest.raises(ValueError, match="schema_version: 4"):
         load_experiment(path)
 
 
