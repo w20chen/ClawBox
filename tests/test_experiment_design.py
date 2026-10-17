@@ -142,6 +142,32 @@ def test_runtime_missing_psi_fails_before_host_or_vm_setup(tmp_path, monkeypatch
         qualification.require_host_ready(spec)
 
 
+def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
+    from clawbox.experiments import qualification
+    raw = base()
+    raw['mechanisms'].update(
+        deployment={'mode': 'os-default'},
+        coordination={'action_selection': 'reclaim_first'},
+        admission={**raw['mechanisms']['admission'], 'tool': 'off'},
+        runtime={**raw['mechanisms']['runtime'], 'memory_protection': False,
+                 'cpu_release_boost': False, 'proactive_memory_reclaim': False},
+        placement={**raw['mechanisms']['placement'], 'policy': 'os_default',
+                   'template_affinity': False},
+        idle_reclaim={**raw['mechanisms']['idle_reclaim'], 'policy': 'off'},
+        shared_memory={**raw['mechanisms']['shared_memory'], 'borrow': 'off'},
+    )
+    raw['comparison']['arms'] = [{'name': 'os-default-no-admission'}]
+    spec = ExperimentSpec.model_validate(raw)
+    profiles = []
+    monkeypatch.setattr(qualification, 'apply_environment', profiles.append)
+    monkeypatch.setattr(qualification, 'doctor', lambda *_args, **_kwargs: [])
+
+    qualification.require_host_ready(spec)
+
+    assert profiles[0]['shared_memory_borrow_limit_mib'] == \
+        raw['environment']['resources']['shared_memory_borrow_limit_mib']
+
+
 def test_runtime_recipe_pins_proactive_reclaim_off():
     raw = export_design(design('runtime'))
     raw['mechanisms']['runtime']['proactive_memory_reclaim'] = True

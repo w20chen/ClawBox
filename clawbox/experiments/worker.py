@@ -573,12 +573,13 @@ class WatermarkController:
             }
         candidates = []
         for sandbox_id, lifecycle in lifecycles.items():
-            try:
-                observation = self.borrower.residency(sandbox_id)
-            except RuntimeError:
-                if sandbox_id not in set(self.borrower.borrowed()):
-                    continue  # checkpoint/cleanup won the race
-                raise
+            # Observe through the lifecycle lock.  A session can finish and
+            # remove its cgroup after the registry snapshot above; in that
+            # case it is no longer a return candidate, not a controller-wide
+            # failure.
+            observation = lifecycle.observe_borrow_candidate()
+            if observation is None:
+                continue
             # A residual shared page keeps the capacity reservation alive, but
             # a VM already rebound to LOCAL is not another return candidate.
             if observation.effective_mems != str(self.borrower.shared_node):
@@ -616,6 +617,15 @@ class WatermarkController:
                 above_high = self._sample_once(elapsed, above_high)
         except Exception as exc:
             self._error = exc
+            try:
+                self.events.write({
+                    'event': 'memory_watermark_controller_failed',
+                    'compute_node': self.node_id,
+                    'error_type': type(exc).__name__,
+                    'error': str(exc),
+                })
+            except Exception:
+                pass
 
     def _sample_once(self, elapsed: float, above_high: bool) -> bool:
         """Apply one deterministic watermark decision; split out for audit tests."""

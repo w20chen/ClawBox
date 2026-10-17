@@ -123,8 +123,14 @@ def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> 
     if spec.schema_version == 4:
         from .spec import ResourcesSpec
         # Host configuration is common, regardless of an arm disabling borrowing.
-        physical = ResourcesSpec.model_validate({**spec.resources.model_dump(mode='json'),
-                                                **spec.design['environment']['resources']})
+        # Do not carry an OS-only arm's derived lifecycle policy into this
+        # physical profile: the common environment can still define a shared
+        # NUMA pool even though that arm never borrows from it.
+        physical = ResourcesSpec.model_validate({
+            **spec.resources.model_dump(mode='json'),
+            'lifecycle_admission': 'configured-capacity',
+            **spec.design['environment']['resources'],
+        })
         spec = spec.model_copy(update={'schema_version': 3, 'resources': physical})
     profile = host_profile_for(spec)
     apply_environment(profile)

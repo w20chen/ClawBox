@@ -238,6 +238,20 @@ as a ClawBox benefit.
   `CLAWBOX_NOFILE_LIMIT=65536`; the supported wrapper validates it against the
   host hard limit and applies it on every invocation. This changes no policy,
   workload, memory budget, image, or prediction data.
+- `c1280-screen-c320-05` subsequently ran the predicted arm for 2,123.09 s and
+  completed 8,732 Tool operations before a shared-memory controller lifecycle
+  race invalidated the arm. It had only two isolated Agent failures, no OOM,
+  and no LOCAL high-watermark violation. The controller now observes return
+  candidates through the lifecycle lock and records its underlying exception.
+- `c1280-screen-c320-os-06` is the replacement OS/no-admission single-arm run.
+  It uses the same frozen c320 workload and a 3,600 s arm timeout. Qualification
+  passed, both supervisor and worker inherited a 65,536 soft file limit, and
+  the detached formal worker is running. It created 531 of 640 requested VMs
+  within roughly 95 seconds with an empty worker stderr log.
+- `c1280-screen-c320-predicted-06` is prepared with the same 3,600 s timeout.
+  `continue-c320-primary.sh` launches it only after the OS run reaches a
+  terminal state with verified cleanup; it stops instead of continuing after
+  incomplete cleanup.
 - Completion requirement: terminal result for both selected arms, verified cleanup, no
   arm-wide interruption caused by an ordinary Agent failure, and auditable
   started/resident/active counts.
@@ -354,18 +368,15 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
 
 ## Current next actions
 
-1. Preserve c320-01/02/03 as excluded infrastructure pilots; all are cleaned.
-2. Wait until the unrelated `/root/agent-test-bench` workload no longer uses
-   CPUs 0--159, then launch and report `c1280-screen-c320-04` using the v3
-   trace and creation concurrency 16. Report the OS/no-admission versus
-   predicted comparison first. Do not run a performance arm while this
-   external load remains.
-3. If the replacement c320 infrastructure gate passes, launch c640 using the
+1. Let `c1280-screen-c320-os-06` finish, then let the verified sequential
+   launcher qualify and detach `c1280-screen-c320-predicted-06` after cleanup.
+   Report the OS/no-admission versus predicted comparison first.
+2. If the replacement c320 infrastructure gate passes, launch c640 using the
    v4 trace, which repeats only the same trained commands to sustain enough
    simultaneous residency for a real memory-capacity boundary.
-4. Decide c1280 eligibility from c640 actual CPU, memory, PSI, queue and progress
+3. Decide c1280 eligibility from c640 actual CPU, memory, PSI, queue and progress
    evidence; do not decide from configured capacity alone.
-5. After the admission boundary is established, freeze one real-trace F/B point,
+4. After the admission boundary is established, freeze one real-trace F/B point,
    then run only the P1 comparisons whose mechanisms activated.
 
 ## Locations

@@ -325,6 +325,8 @@ def test_low_watermark_returns_only_shared_residency_that_fits_below_high():
         role = 'tool'
         resident = True
         configured_memory_bytes = 16*mib
+        def observe_borrow_candidate(self):
+            return observation
         def return_local_memory(self):
             return NumaBorrowRecord(
                 self.sandbox_id, '/cg/tool-1', 16*mib, 2, 0,
@@ -378,6 +380,14 @@ def test_low_watermark_does_not_return_an_already_local_residual_again():
         role = 'tool'
         resident = True
         configured_memory_bytes = 16*mib
+        def observe_borrow_candidate(self):
+            return NumaResidencyObservation(
+                sandbox_id=self.sandbox_id, cgroup='/cg/tool-1',
+                effective_mems='0', local_bytes=12*mib,
+                shared_bytes=1, other_numa_bytes=0,
+                unattributed_bytes=0, charged_bytes=12*mib,
+                reserved_bytes=16*mib, observed_unix_s=1,
+            )
         def return_local_memory(self):
             raise AssertionError('an already-LOCAL VM must not be returned again')
 
@@ -398,6 +408,44 @@ def test_low_watermark_does_not_return_an_already_local_residual_again():
 
     assert controller._return_one(20*mib) is False
     assert controller.return_count == 0
+
+
+def test_low_watermark_ignores_lifecycle_removed_after_registry_snapshot():
+    """Normal session cleanup must not kill the shared policy controller."""
+    mib = 1024**2
+    pool = WarmSnapshotPool(128*mib, borrow_capacity_bytes=64*mib)
+
+    class Lifecycle:
+        sandbox_id = 'tool-1'
+        role = 'tool'
+        resident = True
+        configured_memory_bytes = 16*mib
+        def observe_borrow_candidate(self):
+            return None
+        def return_local_memory(self):
+            raise AssertionError('a removed lifecycle cannot be returned')
+
+    borrower = SimpleNamespace(
+        node_id='node0', shared_node=2, shared_pool=pool,
+        borrowed=lambda: ('tool-1',),
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=20,
+        local_memory_high_watermark_mib=32,
+        local_memory_capacity_mib=36,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, SimpleNamespace(), SimpleNamespace(), borrower,
+        SimpleNamespace(write=lambda event: None),
+    )
+    controller.register('session-1', Lifecycle(), SimpleNamespace(
+        sandbox_id='runtime-1', resident=False,
+    ))
+
+    assert controller._return_one(20*mib) is False
+    assert controller._error is None
 
 
 def test_snapshot_policies_cannot_be_labeled_local_only():
