@@ -58,8 +58,13 @@ def test_report_includes_policy_memory_prediction_and_warm_evidence(tmp_path) ->
             "native_tool_telemetry_loss_total": 0, "cleanup_verified": True,
         },
         "performance": {
-            "agents_per_minute": 2.0, "jct_p50_seconds": 30,
-            "jct_p95_seconds": 35, "blocked_admission_seconds": 4,
+            "agents_per_minute": 2.0, "success_rate": 1.0,
+            "jct_p50_seconds": 30, "jct_p95_seconds": 35,
+            "jct_p99_seconds": 40,
+            "offered_to_completion_p50_seconds": 31,
+            "offered_to_completion_p95_seconds": 36,
+            "offered_to_completion_p99_seconds": 41,
+            "blocked_admission_seconds": 4,
             "pause_count": 2, "resume_count": 2,
             "pause_service_seconds": 1, "resume_service_seconds": .5,
             "prediction_coverage_fraction": .9,
@@ -79,6 +84,8 @@ def test_report_includes_policy_memory_prediction_and_warm_evidence(tmp_path) ->
     report = render_run_report(run)
 
     assert "predicted-wait-snapshot" in report
+    assert "30.00/35.00/40.00" in report
+    assert "31.00/36.00/41.00" in report
     assert "20.00" in report
     assert "WARM transferred GiB" in report
     assert "| 1.00/0.00 | 0.00/0 | 2.00 |" in report

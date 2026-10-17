@@ -25,8 +25,10 @@ making an application-level claim.
 | VM supply | c320-01/02/03 and c1280-priority-2h-01 | EXCLUDED, CLEANED | Identified creation-path scaling defect and unsafe gate 64 |
 | VM supply repair | create-path-smoke-c32-01 | COMPLETE, CLEANED | 64 VMs in 28.45 s; provisioning bottleneck removed |
 | P0.1 | c1280-screen-c320-04 | INVALID, CLEANED | c320 VM supply passed, but FD exhaustion invalidated memory evidence |
-| P0.1 | c1280-screen-c320-05, OS default vs predicted | READY | Two primary arms only; saved FD limit fixes the measured infrastructure defect |
-| P0.2 | c640, OS default vs predicted | PENDING P0.1 | Primary memory-contention point |
+| P0.1 | c1280-screen-c320-05 | INVALID, CLEANED | Predicted arm exposed the shared-return lifecycle race after 8,732 Tool operations |
+| P0.1 | c1280-screen-c320-os-06 | COMPLETE, VALID TIMEOUT BOUNDARY, CLEANED | 0/320 Agents in 3,600 s; 9,152 Tool completions; no OOM; peak measured VM-cgroup delta about 1,051 GiB |
+| P0.1 | c1280-screen-c320-predicted-06 | COMPLETE, CLEANED | 320/320 Agents in 992.83 s, 19.47 Agents/min, offered P99 959.80 s, no OOM |
+| P0.2 | c1280-primary-c640-07 | RUNNING, DETACHED | Four-phase comparison; predicted arm first, then OS/no-admission automatically |
 | P0.3 | c1280, OS default vs predicted | PENDING P0.2 | Overload boundary only if c640 progresses cleanly |
 | P0.4/P1/P2 | real trace and activated mechanisms | PENDING P0 | Run only the selected point/activated mechanisms |
 
@@ -61,10 +63,10 @@ cannot consume the controller CPUs `160-319`.
 
 - Preserve every completed or already-excluded run; do not rerun it merely to
   apply the rules below. These rules apply only to trials that have not begun.
-- Do not use `nohup`. Run one arm at a time through an observed CLI process,
-  retain its process handle, and inspect the first 10/50/100 VM creations. Stop
-  immediately on creation failures or sustained creation latency outside the
-  calibrated range.
+- Use the supported CLI `--detach` path only after validation and a clean
+  predecessor gate. Keep the run-state file, launcher log and process IDs, and
+  inspect early VM creation, stderr and policy events. Do not use a raw `nohup`
+  command that bypasses these checks.
 - One ClawBox Agent owns two VMs (one 4 GiB Tool and one 2 GiB Runtime).
   Therefore c320/c640/c1280 require 640/1,280/2,560 live sandboxes when the
   complete population is resident. Size host pools and report density in VMs,
@@ -243,15 +245,25 @@ as a ClawBox benefit.
   race invalidated the arm. It had only two isolated Agent failures, no OOM,
   and no LOCAL high-watermark violation. The controller now observes return
   candidates through the lifecycle lock and records its underlying exception.
-- `c1280-screen-c320-os-06` is the replacement OS/no-admission single-arm run.
-  It uses the same frozen c320 workload and a 3,600 s arm timeout. Qualification
-  passed, both supervisor and worker inherited a 65,536 soft file limit, and
-  the detached formal worker is running. It created 531 of 640 requested VMs
-  within roughly 95 seconds with an empty worker stderr log.
-- `c1280-screen-c320-predicted-06` is prepared with the same 3,600 s timeout.
-  `continue-c320-primary.sh` launches it only after the OS run reaches a
-  terminal state with verified cleanup; it stops instead of continuing after
-  incomplete cleanup.
+- `c1280-screen-c320-os-06` is the completed replacement OS/no-admission
+  single-arm run. It used the frozen ten-phase c320 workload and reached the
+  configured 3,600 s timeout with 0/320 completed Agents, 9,152 successful Tool
+  operations, no OOM kill and no infrastructure failure. All 640 VMs were
+  destroyed and cleanup was verified. The measured VM-cgroup peak delta was
+  1,128,836,882,432 bytes (about 1,051 GiB). This is retained as the natural
+  no-admission timeout boundary, not rerun as a successful workload.
+- `c1280-screen-c320-predicted-06` completed all 320 Agents in 992.83 s
+  (19.47 Agents/min) with no failed session, OOM or infrastructure failure and
+  verified cleanup. Offered-to-completion P95/P99 were 947.61/959.80 s. Its
+  measured VM-cgroup peak delta was 644,140,638,208 bytes (about 600 GiB),
+  versus about 1,051 GiB for OS/no-admission. The shared-borrow mechanism did
+  not activate, so this result supports the integrated prediction/admission
+  path but is not evidence for shared borrowing.
+- `continue-c640-after-c320.sh` waits for both c320 single-arm results and uses
+  the supervisor's trial-outcome predicate. It starts `c1280-primary-c640-07`
+  only when both results validate, contain no infrastructure failure, and have
+  verified cleanup. OOM, timeout and isolated Agent failures remain valid
+  outcomes rather than being retried until successful.
 - Completion requirement: terminal result for both selected arms, verified cleanup, no
   arm-wide interruption caused by an ordinary Agent failure, and auditable
   started/resident/active counts.
@@ -259,7 +271,11 @@ as a ClawBox benefit.
 #### P0.2 Controlled c640 primary contention point
 
 - Config: `.experiment-audit/c1280-design-20261017/c640.yaml`
-- Status: PENDING c320 infrastructure review.
+- Status: `c1280-primary-c640-07` is running through the supported detached
+  supervisor. The predicted arm is first; an early checkpoint had 237/640
+  completed Agents, 4,929 completed Tool calls and no Tool admission or
+  controller failure. The same supervisor starts OS/no-admission only after
+  cleanup of the first arm.
 - Arms: `predicted-shared` and `os-default-no-admission` only.
 - Purpose: main positive-gain candidate. The prior c24/48 GiB boundary scales
   to roughly c464 at 928 GiB, so c640 should enter the useful contention regime.
@@ -368,12 +384,15 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
 
 ## Current next actions
 
-1. Let `c1280-screen-c320-os-06` finish, then let the verified sequential
-   launcher qualify and detach `c1280-screen-c320-predicted-06` after cleanup.
-   Report the OS/no-admission versus predicted comparison first.
-2. If the replacement c320 infrastructure gate passes, launch c640 using the
-   v4 trace, which repeats only the same trained commands to sustain enough
-   simultaneous residency for a real memory-capacity boundary.
+1. Preserve the completed c320 boundary: predicted completed 320/320 while
+   OS/no-admission completed 0/320 before timeout. Treat it as a catastrophic
+   contention boundary rather than quoting an undefined finite speedup.
+2. Let the detached c640 supervisor finish both arms using the four-phase v5
+   trace. It reuses trained commands and retains two overlapping
+   2 GiB phases, while allowing successful Agents to finish inside the fixed
+   window. The 50-phase v4 trace is retained only as an excluded duration
+   stress input because observed SSH/Tool cycle time makes completion
+   throughput unmeasurable at high concurrency.
 3. Decide c1280 eligibility from c640 actual CPU, memory, PSI, queue and progress
    evidence; do not decide from configured capacity alone.
 4. After the admission boundary is established, freeze one real-trace F/B point,

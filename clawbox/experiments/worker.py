@@ -1847,11 +1847,14 @@ class ExperimentWorker:
                     [s['offered_to_completion_seconds'] for s in sessions if 'offered_to_completion_seconds' in s], .5),
                 "offered_to_completion_p95_seconds": percentile(
                     [s['offered_to_completion_seconds'] for s in sessions if 'offered_to_completion_seconds' in s], .95),
+                "offered_to_completion_p99_seconds": percentile(
+                    [s['offered_to_completion_seconds'] for s in sessions if 'offered_to_completion_seconds' in s], .99),
                 "placement_wait_total_seconds": sum(s.get('placement_wait_seconds', 0.) for s in sessions),
                 "duration_seconds": duration,
                 "infrastructure_inclusive_duration_seconds": duration,
                 "workload_window_seconds": workload_window,
                 "agents_per_minute": len(sessions) / max(workload_window or duration, 1e-9) * 60,
+                "success_rate": sum(item.get("valid", False) for item in sessions) / arm.concurrency,
                 "steps_per_minute": (tool_steps + model_steps) / max(workload_window or duration, 1e-9) * 60,
                 "experiment_cpu": cpu_summary,
                 "tool_steps": tool_steps, "model_steps": model_steps,
@@ -1859,10 +1862,12 @@ class ExperimentWorker:
                 "jct_p50_seconds": percentile(session_durations, 0.50),
                 "jct_p90_seconds": percentile(session_durations, 0.90),
                 "jct_p95_seconds": percentile(session_durations, 0.95),
+                "jct_p99_seconds": percentile(session_durations, 0.99),
                 "tool_latency_mean_seconds": statistics.fmean(tool_latencies) if tool_latencies else None,
                 "tool_latency_p50_seconds": percentile(tool_latencies, 0.50),
                 "tool_latency_p90_seconds": percentile(tool_latencies, 0.90),
                 "tool_latency_p95_seconds": percentile(tool_latencies, 0.95),
+                "tool_latency_p99_seconds": percentile(tool_latencies, 0.99),
                 "sandbox_create_mean_seconds": statistics.fmean(
                     [float(item["create_seconds"]) for item in sessions]) if sessions else None,
                 "pause_count": coordinator.pause_count,

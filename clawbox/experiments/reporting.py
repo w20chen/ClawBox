@@ -330,12 +330,12 @@ def render_run_report(run_root: Path) -> str:
             "",
         ])
     lines.extend([
-        "| Policy | c | Status | Sessions | Agents/min | JCT p50/p95 s | "
+        "| Policy | c | Status | Sessions | Success | Agents/min | JCT p50/p95/p99 s | "
         "CPU mean/peak cores | CPU throttled s | "
         "Admission blocked s | LOCAL peak GiB | Whole-host peak delta GiB | "
         "HIGH crossings | Above HIGH s/GiB-s | "
         "OOM kills |",
-        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in rows:
         result = row["result"]
@@ -348,9 +348,11 @@ def render_run_report(run_root: Path) -> str:
             f"| {(arm.get('policy') or {}).get('name', 'unknown')} | "
             f"{arm.get('concurrency', 'n/a')} | {result.get('status', 'unknown')} | "
             f"{correctness.get('completed_sessions', 0)}/{arm.get('concurrency', 'n/a')} | "
+            f"{_number(performance.get('success_rate'))} | "
             f"{_number(performance.get('agents_per_minute'))} | "
             f"{_number(performance.get('jct_p50_seconds'))}/"
-            f"{_number(performance.get('jct_p95_seconds'))} | "
+            f"{_number(performance.get('jct_p95_seconds'))}/"
+            f"{_number(performance.get('jct_p99_seconds'))} | "
             f"{_number(cpu.get('mean_cores'))}/{_number(cpu.get('peak_interval_cores'))} | "
             f"{_number((cpu.get('throttled_usec_delta') or 0) / 1_000_000)} | "
             f"{_number(performance.get('blocked_admission_seconds'))} | "
@@ -362,7 +364,7 @@ def render_run_report(run_root: Path) -> str:
             f"{memory.get('host_oom_kill_events', 'n/a')} |"
         )
 
-    lines.extend(["", "| Arm | Placement | Memory scheduling | Observed Tool peak/mean | Measured intervals | Offered-to-completion P50/P95 s | Placement wait total s |",
+    lines.extend(["", "| Arm | Placement | Memory scheduling | Observed Tool peak/mean | Measured intervals | Offered-to-completion P50/P95/P99 s | Placement wait total s |",
                   "| --- | --- | --- | ---: | ---: | ---: | ---: |"])
     for row in rows:
         result = row['result']
@@ -373,7 +375,8 @@ def render_run_report(run_root: Path) -> str:
                      f"{_number(concurrency.get('peak'))}/{_number(concurrency.get('mean_over_tool_window'))} | "
                      f"{concurrency.get('interval_count', 'n/a')} | "
                      f"{_number(result.get('performance', {}).get('offered_to_completion_p50_seconds'))}/"
-                     f"{_number(result.get('performance', {}).get('offered_to_completion_p95_seconds'))} | "
+                     f"{_number(result.get('performance', {}).get('offered_to_completion_p95_seconds'))}/"
+                     f"{_number(result.get('performance', {}).get('offered_to_completion_p99_seconds'))} | "
                      f"{_number(result.get('performance', {}).get('placement_wait_total_seconds'))} |")
     lines.extend(["", "Tool overlap includes admitted backend maintenance and uses completed operation intervals; "
                   "`performance.observed_agent_tool_concurrency` separately measures Agent Tool operations. "
