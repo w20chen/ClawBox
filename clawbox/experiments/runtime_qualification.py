@@ -275,7 +275,9 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
             for role in ('runtime','tool'):
                 vm = spec.runtime if role=='runtime' else spec.sandbox
                 def verify(sandbox_id, index=index, role=role):
-                    placements.append(domain.verify(index,role,sandbox_id))
+                    evidence = domain.verify(index,role,sandbox_id)
+                    placements.append(evidence)
+                    return evidence
                 lifecycle = CubeSandboxLifecycle(client, template=vm.template,
                     node_name=spec.resources.target_node,
                     ownership=Ownership(probe_id,'runtime-roundtrip',probe_id,spec.experiment_id,

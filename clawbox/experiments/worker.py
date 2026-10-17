@@ -2068,6 +2068,7 @@ class ExperimentWorker:
                     coordinator.release_after[session_id] = (
                         time.monotonic() + arm.resources.pressure_control.cooldown_seconds)
                 events.write({'event': 'runtime_memory_placement', 'session_id': session_id, **evidence})
+                return evidence
             def prepare():
                 if progress_control:
                     progress_control.transition(session_id, role)

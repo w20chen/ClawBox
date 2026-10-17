@@ -53,6 +53,33 @@ def test_verified_vm_lookup_does_not_rescan_all_processes(tmp_path, monkeypatch)
     assert borrower._leaf_for('sandbox-abc') == leaf
 
 
+def test_preallocated_leaf_avoids_initial_process_scan_and_is_reused(tmp_path, monkeypatch):
+    root, leaf, proc = make_tree(tmp_path)
+    borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup')
+    original = Path.iterdir
+    def forbidden_scan(path):
+        if path == proc:
+            raise AssertionError('preallocated VM lookup scanned /proc')
+        return original(path)
+    monkeypatch.setattr(Path, 'iterdir', forbidden_scan)
+    borrower.pin_local('sandbox-abc', verified_cgroup=leaf)
+    assert borrower._leaf_for('sandbox-abc') == leaf
+
+
+def test_preallocated_leaf_must_be_inside_borrower_domain(tmp_path):
+    root, _leaf, proc = make_tree(tmp_path)
+    outside = tmp_path/'outside'
+    outside.mkdir()
+    (outside/'cpuset.mems').write_text('0')
+    borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup')
+    with pytest.raises(RuntimeError, match='outside the configured domain'):
+        borrower.pin_local('sandbox-abc', verified_cgroup=outside)
+
+
 def test_cached_vm_lookup_rechecks_pid_identity_and_cgroup(tmp_path):
     root, leaf, proc = make_tree(tmp_path)
     borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,

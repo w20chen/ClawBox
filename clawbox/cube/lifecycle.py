@@ -261,10 +261,15 @@ class CubeSandboxLifecycle:
                     network_deny_out=self.network_deny_out or None,
                 )
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
-                if self.verify_cgroup is not None:
-                    self.verify_cgroup(self.sandbox_id)
+                verified = self.verify_cgroup(self.sandbox_id) if self.verify_cgroup is not None else None
                 if self.numa_borrower is not None:
-                    self.numa_borrower.pin_local(self.sandbox_id)
+                    verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
+                    if verified_cgroup is None:
+                        self.numa_borrower.pin_local(self.sandbox_id)
+                    else:
+                        self.numa_borrower.pin_local(
+                            self.sandbox_id, verified_cgroup=verified_cgroup,
+                        )
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
                                     started_wall, started_mono,
@@ -539,10 +544,15 @@ class CubeSandboxLifecycle:
                         self.sandbox_id,
                         snapshot_mechanism=self.snapshot_mechanism,
                     )
-                if self.verify_cgroup is not None:
-                    self.verify_cgroup(self.sandbox_id)
+                verified = self.verify_cgroup(self.sandbox_id) if self.verify_cgroup is not None else None
                 if self.numa_borrower is not None:
-                    self.numa_borrower.pin_local(self.sandbox_id)
+                    verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
+                    if verified_cgroup is None:
+                        self.numa_borrower.pin_local(self.sandbox_id)
+                    else:
+                        self.numa_borrower.pin_local(
+                            self.sandbox_id, verified_cgroup=verified_cgroup,
+                        )
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
                         raise RuntimeError("WARM snapshot accounting disappeared before restore")

@@ -137,6 +137,11 @@ class PriorityDomain:
 
     def prepare(self, index: int, role: str):
         leaf = self.leaves[index, role]
+        # Cube's pause/destroy response can precede the final VMM thread leaving
+        # its preallocated leaf. Restore may immediately reuse that same leaf.
+        deadline = time.monotonic() + 5
+        while (leaf/'cgroup.procs').read_text().strip() and time.monotonic() < deadline:
+            time.sleep(.05)
         if (leaf/'cgroup.procs').read_text().strip():
             raise RuntimeError(f'priority VM leaf is already populated: {leaf}')
         cpus, node = self.placements.get(index, (None, None))
@@ -146,13 +151,16 @@ class PriorityDomain:
             (leaf/'cpuset.mems').write_text(str(node))
 
     def verify(self, index: int, role: str, sandbox_id: str) -> dict:
-        from .congestion import locate_cgroup
         from .topology import parse_cpu_list
         from .numa_borrow import read_numa_lru_bytes
         expected = self.leaves[index, role]
-        actual = locate_cgroup(sandbox_id, self.parent)
-        if actual != expected:
-            raise RuntimeError(f'Cube preallocation cgroup routing failed: {actual} != {expected}')
+        # The leaf was empty immediately before Cube received the opaque token,
+        # and Cubelet can resolve that token only to this root-owned registry
+        # entry.  A populated leaf with vCPU threads therefore proves routing
+        # without an O(number of host processes) /proc scan for every VM.
+        actual = expected.resolve()
+        if actual == self.parent or not actual.is_relative_to(self.parent):
+            raise RuntimeError(f'Cube preallocation cgroup escaped its domain: {actual}')
         cpus = (actual/'cpuset.cpus.effective').read_text().strip()
         mems = (actual/'cpuset.mems.effective').read_text().strip()
         configured_cpus, configured_node = self.placements.get(index, (None, None))
@@ -172,7 +180,7 @@ class PriorityDomain:
                 raise RuntimeError(f'VM thread {tid} escaped compute cpuset')
             threads.append({'tid':int(tid), 'name':status['Name'].strip(), 'cpus_allowed':allowed})
         if not any(t['name'].startswith('vcpu') for t in threads):
-            raise RuntimeError(f'no vCPU threads observed in VM cgroup {actual}')
+            raise RuntimeError(f'Cube preallocation cgroup routing failed: no vCPU threads in {actual}')
         resident, unattributed = read_numa_lru_bytes(actual)
         evidence = {'priority': self.priorities[index], 'cgroup': str(actual),
                 'sandbox_id': sandbox_id, 'role': role, 'compute_numa':configured_node,

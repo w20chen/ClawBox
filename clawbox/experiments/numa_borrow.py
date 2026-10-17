@@ -118,6 +118,7 @@ class SandboxNumaBorrower:
         self._lock = RLock()
         self._borrowed: dict[str, _BorrowedAllocation] = {}
         self._leaf_cache: dict[str, tuple[Path, Path]] = {}
+        self._verified_leaves: dict[str, Path] = {}
 
     @staticmethod
     def _privileged_write(path: Path, value: str) -> None:
@@ -138,6 +139,16 @@ class SandboxNumaBorrower:
             )
 
     def _leaf_for(self, sandbox_id: str) -> Path:
+        verified = self._verified_leaves.get(sandbox_id)
+        if verified is not None:
+            try:
+                verified.relative_to(self.cgroup_root)
+                if (verified != self.cgroup_root
+                        and (verified / 'cpuset.mems').exists()):
+                    return verified
+            except (FileNotFoundError, ValueError):
+                pass
+            self._verified_leaves.pop(sandbox_id, None)
         cached = self._leaf_cache.get(sandbox_id)
         if cached is not None:
             leaf, witness = cached
@@ -308,14 +319,23 @@ class SandboxNumaBorrower:
             )
             return record
 
-    def pin_local(self, sandbox_id: str) -> None:
+    def pin_local(self, sandbox_id: str, *, verified_cgroup: str | Path | None = None) -> None:
         """Pin after create/restore, before the worker releases further work.
 
         Cube's VM boot/resume precedes this hook. Autonomous guest activity in
         that interval may already have run under the parent's allowed set.
         """
-        # Process discovery is read-only and may scan many processes. Do not
-        # block unrelated VM borrowing/accounting while locating this VM.
+        if verified_cgroup is not None:
+            leaf = Path(verified_cgroup).resolve()
+            try:
+                leaf.relative_to(self.cgroup_root)
+            except ValueError as exc:
+                raise RuntimeError(f'verified VM cgroup is outside the configured domain: {leaf}') from exc
+            if leaf == self.cgroup_root or not (leaf / 'cpuset.mems').exists():
+                raise RuntimeError(f'verified VM cgroup is not a writable leaf cpuset: {leaf}')
+            self._verified_leaves[sandbox_id] = leaf
+        # Legacy/non-preallocated callers still use process discovery. Do not
+        # hold the borrower lock during that read-only scan.
         leaf = self._leaf_for(sandbox_id)
         with self._lock:
             if sandbox_id in self._borrowed:

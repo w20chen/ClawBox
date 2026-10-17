@@ -385,6 +385,26 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor(tmp_path) -> N
     assert sandbox_id not in _Sandbox.items
 
 
+def test_lifecycle_passes_verified_cgroup_to_numa_borrower(tmp_path) -> None:
+    _Sandbox.items = {}
+    calls = []
+    class Borrower:
+        def pin_local(self, sandbox_id, *, verified_cgroup=None):
+            calls.append((sandbox_id, verified_cgroup))
+        def release_destroyed(self, sandbox_id):
+            pass
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    leaf = tmp_path/'leaf'
+    lifecycle = CubeSandboxLifecycle(
+        client, template='tpl', node_name='node-a', ownership=_owner(),
+        cold_snapshot_root=str(tmp_path/'cold'), numa_borrower=Borrower(),
+        verify_cgroup=lambda sandbox_id: {'sandbox_id': sandbox_id, 'cgroup': str(leaf)},
+    )
+    lifecycle.start()
+    assert calls == [(lifecycle.sandbox_id, str(leaf))]
+    lifecycle.close()
+
+
 def test_checkpoint_manifest_failure_does_not_mark_paused_vm_running() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
