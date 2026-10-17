@@ -445,8 +445,23 @@ class CubeSandboxClient:
                 if (item.get("metadata") or {}).get("clawbox.task-uid") == owner_id]
 
     def kill_owned_sandboxes(self, owner_id: str) -> None:
-        ids = self.journal.sandbox_ids(task_uid=owner_id) if self.journal else []
-        ids.extend(self._info_id(item) for item in self.list_owned_sandboxes(owner_id))
+        journal_ids = set(
+            self.journal.sandbox_ids(task_uid=owner_id) if self.journal else []
+        )
+        # Resolve the journal against one current inventory.  Looking up every
+        # historical ID separately makes interrupted high-density cleanup take
+        # O(journal entries * full inventory) and can exceed the supervisor's
+        # cleanup deadline even after most sandboxes are already gone.
+        listed = self._sandbox_class.list_v2(**self._sdk_kwargs())
+        ids: list[str] = []
+        for item in listed:
+            sandbox_id = self._info_id(item)
+            metadata = item.get("metadata") or {}
+            if sandbox_id in journal_ids or metadata.get("clawbox.task-uid") == owner_id:
+                ids.append(sandbox_id)
+                self._handles.setdefault(
+                    sandbox_id, self._sandbox_class(item, self._config)
+                )
         errors: list[str] = []
         for sandbox_id in dict.fromkeys(filter(None, ids)):
             try:

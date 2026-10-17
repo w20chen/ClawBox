@@ -28,7 +28,9 @@ making an application-level claim.
 | P0.1 | c1280-screen-c320-05 | INVALID, CLEANED | Predicted arm exposed the shared-return lifecycle race after 8,732 Tool operations |
 | P0.1 | c1280-screen-c320-os-06 | COMPLETE, VALID TIMEOUT BOUNDARY, CLEANED | 0/320 Agents in 3,600 s; 9,152 Tool completions; no OOM; peak measured VM-cgroup delta about 1,051 GiB |
 | P0.1 | c1280-screen-c320-predicted-06 | COMPLETE, CLEANED | 320/320 Agents in 992.83 s, 19.47 Agents/min, offered P99 959.80 s, no OOM |
-| P0.2 | c1280-primary-c640-07 | RUNNING, DETACHED | Four-phase comparison; predicted arm first, then OS/no-admission automatically |
+| P0.2 | c1280-primary-c640-07 | INVALID, DESTROYED | v5 omitted the configured completion marker; preserve only as diagnostic execution evidence |
+| P0.2 | c640-v6-smoke-01 | COMPLETE, CLEANED | Real-VM 1/1 validation proves the corrected four-phase trace and frozen predictions |
+| P0.2 | c1280-primary-c640-08-v6 | RUNNING, DETACHED | Only the two required arms; supervisor sequences and cleans them automatically |
 | P0.3 | c1280, OS default vs predicted | PENDING P0.2 | Overload boundary only if c640 progresses cleanly |
 | P0.4/P1/P2 | real trace and activated mechanisms | PENDING P0 | Run only the selected point/activated mechanisms |
 
@@ -271,11 +273,20 @@ as a ClawBox benefit.
 #### P0.2 Controlled c640 primary contention point
 
 - Config: `.experiment-audit/c1280-design-20261017/c640.yaml`
-- Status: `c1280-primary-c640-07` is running through the supported detached
-  supervisor. The predicted arm is first; an early checkpoint had 237/640
-  completed Agents, 4,929 completed Tool calls and no Tool admission or
-  controller failure. The same supervisor starts OS/no-admission only after
-  cleanup of the first arm.
+- `c1280-primary-c640-07` is excluded because the shortened v5 trace never
+  wrote `/testbed/stress-result.txt`; 629 sessions reached validation but all
+  necessarily failed that check. Its partial OS arm was cancelled and both
+  ownership sets were cleaned before any replacement run.
+- v6 preserves two 128 MiB and two 2,048 MiB phases and substitutes the third
+  phase with the already-trained 128 MiB command that writes the completion
+  marker. All four command hashes exist in the frozen prediction artifact.
+  Trace SHA256 is
+  `7c0e53b0b4ee6062b718e2187e46e30cc4902ccdcdc81c761f8770a6d6008119`.
+- `c640-v6-smoke-01` completed 1/1 real Agent with validation and cleanup true,
+  all four predictions from `frozen_clawbox_p50`, and no OOM or telemetry loss.
+- `c1280-primary-c640-08-v6` is now running detached with only
+  prediction/admission and OS/no-admission. The same supervisor starts the
+  second arm only after cleanup of the first.
 - Arms: `predicted-shared` and `os-default-no-admission` only.
 - Purpose: main positive-gain candidate. The prior c24/48 GiB boundary scales
   to roughly c464 at 928 GiB, so c640 should enter the useful contention regime.
