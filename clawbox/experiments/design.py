@@ -190,8 +190,9 @@ def lower_arm(design, name, m):
     if idle['policy'] == 'release_cost' and e['model_wait_prediction_source'] == 'trace_median':
         raise ValueError(f'{name}: release-cost reclamation cannot use evaluation-trace wait estimates')
     if coordination['action_selection'] == 'measured_cost' and (
-            shared['borrow'] != 'pressure' or not snapshots or not e['memory_action_costs']):
-        raise ValueError(f'{name}: measured-cost selection needs pressure borrowing, reclaim and empirical memory_action_costs')
+            shared['borrow'] == 'hard' or not (snapshots or shared['borrow'] == 'pressure')
+            or not e['memory_action_costs']):
+        raise ValueError(f'{name}: measured-cost selection needs reclaim or pressure borrowing and empirical memory_action_costs')
     if shared['borrow'] != 'off' and not r['shared_memory_borrow_limit_mib']:
         raise ValueError(f'{name}: borrowing requires a positive environment shared_memory_borrow_limit_mib')
     if snapshots and ck['residency'] == 'value' and ck['storage'] != 'tiered':
@@ -220,8 +221,9 @@ def lower_arm(design, name, m):
         # unused storage/encoding prerequisites constrain a resident control.
         r.update(snapshot_mechanism='full-copy', lazy_restore=True,
                  snapshot_storage='tiered', snapshot_destination='cold')
-    if (not snapshots or ck['storage'] == 'disk') and shared['borrow'] == 'off':
-        r['warm_memory_capacity_mib'] = 0
+    # Inactive operations do not remove the common physical shared-pool
+    # boundary. Existing charged shared-node pages can outlive a prior VM;
+    # treating the pool as zero makes a resident arm fail on those pages.
     if pl['policy'] == 'os_default':
         if shared['borrow'] != 'off' or pl['template_affinity']:
             raise ValueError(f'{name}: OS placement cannot enforce per-node borrowing or template affinity')

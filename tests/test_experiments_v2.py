@@ -29,6 +29,9 @@ def test_explicit_null_disables_arm_deadline() -> None:
     with pytest.raises(ValueError):
         ExecutionSpec(arm_timeout_seconds=None)
     assert ExecutionSpec().arm_timeout_seconds == 1800
+    assert ExecutionSpec().arm_finalization_timeout_seconds == 300
+    with pytest.raises(ValueError):
+        ExecutionSpec(arm_finalization_timeout_seconds=0)
 
 
 def test_priority_memory_charge_treats_a_cleaned_cgroup_as_zero(tmp_path: Path) -> None:
@@ -175,6 +178,7 @@ def test_watermark_controller_rejects_shared_live_plus_snapshots_over_pool() -> 
 def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None:
     gib = 1024 ** 3
     borrowed = set()
+    shared_policy = set()
     pool = WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib)
 
     class Borrower:
@@ -182,7 +186,7 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
         shared_pool = pool
 
         def allocates_shared(self, sandbox_id):
-            return sandbox_id in borrowed
+            return sandbox_id in shared_policy
 
         def borrowed(self):
             return tuple(borrowed)
@@ -195,13 +199,14 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
 
         def borrow_shared(self):
             borrowed.add(self.sandbox_id)
+            shared_policy.add(self.sandbox_id)
             return NumaBorrowRecord(
                 self.sandbox_id, "/cgroup/tool-1", 4 * gib, 0, 1,
                 1.0, 1.1, 0.1, 33 * gib, 33 * gib, 0, 0,
             )
 
     coordinator = SimpleNamespace(
-        projected_local_commitment=lambda amount: (35 * gib) + amount * 1024 ** 2,
+        local_commitment_exceeds=lambda amount, limit: (35 * gib) + amount * 1024 ** 2 > limit,
     )
     arm = SimpleNamespace(
         resources=SimpleNamespace(
@@ -222,6 +227,9 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
     assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
     assert controller.borrow_count == 1
     assert events[0]["reason"] == "predicted_local_hard_guard"
+    shared_policy.clear()  # LOCAL return retained the existing reservation
+    assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
+    assert controller.borrow_count == 2
 
 
 @pytest.mark.parametrize("root", [None, "", "   "])

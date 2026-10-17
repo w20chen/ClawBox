@@ -177,6 +177,7 @@ def test_host_cgroup_increment_is_distinct_from_rss_and_missing_samples_are_unkn
     (process / 'status').write_text('VmRSS:\t100 kB\n')
     group = tmp_path / 'group'; group.mkdir()
     charge = group / 'memory.current'; charge.write_text('1000000')
+    (group/'cgroup.procs').write_text('123\n')
     sampler = SandboxRSSSampler('sandbox-a', proc_root=tmp_path, cgroup=group)
     charge.write_text('3000000')
     measured = sampler.stop()
@@ -188,3 +189,18 @@ def test_host_cgroup_increment_is_distinct_from_rss_and_missing_samples_are_unkn
     result = missing.stop()
     assert result['host_cgroup_execution_increment_bytes'] is None
     assert result['host_cgroup_error']
+
+
+def test_prepared_vm_sampling_discovers_only_its_cgroup_processes(tmp_path, monkeypatch):
+    proc = tmp_path/'proc'; proc.mkdir()
+    process = proc/'123'; process.mkdir()
+    (process/'cmdline').write_bytes(b'cube\0sandbox-a\0')
+    (process/'status').write_text('VmRSS:\t100 kB\n')
+    group = tmp_path/'vm'; group.mkdir()
+    (group/'memory.current').write_text('1000')
+    (group/'cgroup.procs').write_text('123\n')
+    def unexpected_scan(_):
+        raise AssertionError('known VM cgroup must not scan global /proc')
+    monkeypatch.setattr(Path, 'iterdir', unexpected_scan)
+    sampler = SandboxRSSSampler('sandbox-a', proc_root=proc, cgroup=group)
+    assert sampler.stop()['host_vm_rss_baseline_bytes'] == 100*1024

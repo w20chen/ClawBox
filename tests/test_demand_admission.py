@@ -10,6 +10,60 @@ from clawbox.experiments.baselines import resolve_baseline
 MIB = 1024**2
 
 
+def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
+    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    reading, finish = threading.Event(), threading.Event()
+    def sample():
+        reading.set()
+        assert finish.wait(2)
+        return 20*MIB, 20*MIB
+    c.register_memory('s', tool=sample, lifecycle=lambda: (0, 0))
+    c.acquire('s', 10, .1)
+    original = c.demand.claims['s', 'tool_admission']
+    with ThreadPoolExecutor(2) as workers:
+        binding = workers.submit(c.bind_tool_memory, 's')
+        assert reading.wait(1)
+        try:
+            workers.submit(c.acquire, 'other', 10, .1).result(timeout=1)
+            with c._condition:
+                assert c.demand.pending() == 20*MIB
+            c.release('s', 10)
+            c.acquire('s', 10, .1)
+            replacement = c.demand.claims['s', 'tool_admission']
+        finally:
+            finish.set()
+        binding.result(timeout=1)
+    assert replacement is not original
+    assert replacement.sample is None
+    assert replacement.baseline == (0, 0)
+
+
+def test_same_vm_inflight_waiter_does_not_block_another_vm():
+    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    c.acquire('busy', 10, .1)
+    entered = threading.Event()
+    def same_vm():
+        entered.set()
+        return c.acquire('busy', 10, 2)
+    with ThreadPoolExecutor(2) as workers:
+        pending = workers.submit(same_vm)
+        assert entered.wait(.5)
+        with c._condition:
+            assert c._condition.wait_for(lambda: bool(c._waiters), .5)
+            assert c.resource_feedback()['memory_blocked'] is False
+        try:
+            unrelated = workers.submit(c.acquire, 'other', 10, .2)
+            unrelated.result(timeout=.5)
+            assert not pending.done()  # One in-flight operation per VM still holds.
+            c.release('other', 10)
+        finally:
+            c.release('busy', 10)
+        pending.result(timeout=.5)
+    c.release('busy', 10)
+
+
 def test_realized_growth_is_not_reserved_twice_and_retained_pages_still_count():
     used = [100, 10]
     group = [10, 10]
@@ -43,8 +97,9 @@ def test_policy_skips_per_claim_samples_when_nominal_upper_bound_fits():
             ledger.add((str(index), 'tool_admission'), scope='local',
                        amount=MIB, local_amount=MIB, sample=claim_sample)
         assert coordinator._pressure_reasons(MIB) == ()
+        assert not coordinator.local_commitment_exceeds(1,1000*MIB)
     assert calls[0] == 160  # add() establishes each claim baseline once.
-    assert ledger.pending_upper_bound_fast_path_count == 1
+    assert ledger.pending_upper_bound_fast_path_count == 2
     assert ledger.pending_exact_count == 0
 
 
@@ -58,16 +113,18 @@ def test_policy_uses_exact_claim_growth_when_upper_bound_nears_capacity():
     coordinator = PolicyCoordinator(
         resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
         emergency_free_mib=0, operation_headroom_mib=0,
-        demand_ledger=ledger,
+        demand_ledger=ledger, physical_sample=ledger.sample,
     )
     with ledger.condition:
         ledger.add(('a', 'tool_admission'), scope='local',
                    amount=6*MIB, local_amount=6*MIB, sample=claim_sample)
         group[:] = [6*MIB, 6*MIB]
         assert coordinator._pressure_reasons(4*MIB) == ()
-    assert calls[0] == 3  # baseline plus local/global exact checks.
+        assert not coordinator.local_commitment_exceeds(4,10*MIB)
+        assert coordinator.local_commitment_exceeds(6,10*MIB)
+    assert calls[0] == 5  # baseline, local/global checks, and two exact borrow guards.
     assert ledger.pending_upper_bound_fast_path_count == 0
-    assert ledger.pending_exact_count == 2
+    assert ledger.pending_exact_count == 4
 
 
 def test_global_claims_are_shared_but_local_claims_do_not_spend_other_nodes():
@@ -108,6 +165,19 @@ def test_two_nodes_cannot_race_past_global_budget():
     with ThreadPoolExecutor(2) as pool:
         assert sorted(pool.map(admit, range(2))) == [False, True]
     assert len(ledger.claims) == 1
+
+
+def test_feedback_zero_deficit_uses_safe_nominal_bound(monkeypatch):
+    from clawbox.experiments.policy import AdmissionRequest
+    c=PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+                        emergency_free_mib=0, operation_headroom_mib=0)
+    with c._condition:
+        c.demand.add(('old','create'),scope=c.demand_scope,amount=MIB,local_amount=MIB)
+        ticket=object()
+        c._waiters.append(ticket)
+        c._waiter_requests[ticket]=AdmissionRequest('new',MIB,'create',True)
+        monkeypatch.setattr(c.demand,'pending',lambda *args:pytest.fail('unneeded exact read'))
+        assert c.resource_feedback()['deficit_bytes']==0
 
 
 def test_restore_base_is_not_mistaken_for_tool_execution_growth():

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import yaml
+import pytest
 
 from clawbox import cli
 
@@ -109,6 +110,25 @@ def test_launch_qualifies_when_needed_then_starts_run(
     )
 
 
+def test_launch_host_apply_failure_stops_before_qualification(monkeypatch, tmp_path):
+    from argparse import Namespace
+    from clawbox.experiments import host, inputs, qualification
+    calls = []
+    host_path = tmp_path/'host.yaml'
+    host.init_config(host_path)
+    monkeypatch.setattr(inputs, 'validate_inputs', lambda spec: calls.append('inputs'))
+    def apply(config, profile):
+        assert profile == host_path.with_suffix('.json')
+        calls.append('apply')
+        raise RuntimeError('host apply failed')
+    monkeypatch.setattr(host, 'apply', apply)
+    monkeypatch.setattr(qualification, 'require_host_ready', lambda spec: pytest.fail('continued after failed apply'))
+    with pytest.raises(RuntimeError, match='host apply failed'):
+        cli.launch_experiment(Namespace(spec=Path('examples/experiments/getting-started.yaml'),
+            output_root=tmp_path, run_id='apply-failure', apply_host=host_path))
+    assert calls == ['inputs', 'apply']
+
+
 def test_launch_existing_active_returns_status_without_requalification(
     monkeypatch, tmp_path, capsys,
 ) -> None:
@@ -143,6 +163,7 @@ def test_launch_existing_active_returns_status_without_requalification(
         qualification_concurrency=None,
         force_qualify=False,
         run_id="already-running",
+        apply_host=tmp_path/'must-not-be-read.yaml',
         detach=False,
     )) == 0
     output = json.loads(capsys.readouterr().out)

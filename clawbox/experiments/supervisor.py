@@ -27,11 +27,21 @@ TERMINAL_STATES = {"succeeded", "failed", "cancelled", "destroyed"}
 
 def is_trial_outcome(result: ResultEnvelope) -> bool:
     """Completed overload outcomes must not be retried until they succeed."""
-    return (result.correctness.get("cleanup_verified") is True
-            and ((result.status is RunStatus.SUCCEEDED
-                  and not result.correctness.get("native_tool_telemetry_loss_total"))
-                 or result.failure_category in {
-                     FailureCategory.OOM, FailureCategory.TIMEOUT, FailureCategory.ADMISSION}))
+    correctness = result.correctness
+    if correctness.get("cleanup_verified") is not True:
+        return False
+    if result.status is RunStatus.SUCCEEDED:
+        return not correctness.get("native_tool_telemetry_loss_total")
+    if result.failure_category is FailureCategory.INFRASTRUCTURE:
+        return False
+    if result.failure_category in {
+        FailureCategory.OOM, FailureCategory.TIMEOUT, FailureCategory.ADMISSION,
+    }:
+        return True
+    return bool(correctness.get("session_failures")) and not (
+        correctness.get("arm_interrupted")
+        or correctness.get("infrastructure_failure")
+    )
 
 
 def atomic_text(path: Path, value: str) -> None:
@@ -363,7 +373,11 @@ class ExperimentSupervisor:
             )
             arm_state["worker"] = process_identity(process.pid)
             self._write_state()
-            deadline = time.monotonic() + arm.execution.arm_timeout_seconds
+            hard_timeout_seconds = (
+                arm.execution.arm_timeout_seconds
+                + arm.execution.arm_finalization_timeout_seconds
+            )
+            deadline = time.monotonic() + hard_timeout_seconds
             last_heartbeat = 0.0
             timed_out = False
             try:
@@ -432,7 +446,10 @@ class ExperimentSupervisor:
                 arm_state["result_error"] = f"{type(exc).__name__}: {exc}"
 
         if timed_out:
-            detail = f"arm exceeded hard timeout of {arm.execution.arm_timeout_seconds} seconds"
+            detail = (
+                "worker exceeded arm execution plus finalization timeout of "
+                f"{hard_timeout_seconds} seconds"
+            )
             result = _synthetic_result(
                 arm, run_id=self.run_id, attempt_id=self.attempt_id,
                 task_uid=task_uid, experiment_id=self.spec.experiment_id,

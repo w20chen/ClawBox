@@ -685,6 +685,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     def files(path):
         path.mkdir(parents=True, exist_ok=True)
         for key, value in {'memory.max': str(100000*1024**2), 'memory.current': '0',
+                           'cgroup.procs': '',
                            'memory.stat': 'anon 0\nfile 0\npgscan 0\npgsteal 0\n',
                            'memory.low': '0', 'memory.high': 'max', 'cpu.weight': '100',
                            'memory.events': 'high 0\noom_kill 0\n'}.items():
@@ -706,7 +707,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             return {'priority': self.priorities[index], 'cgroup': str(self.leaves[index, role])}
         def close(self): pass
     monkeypatch.setattr(worker_module, 'PriorityDomain', FakePriorityDomain)
-    monkeypatch.setattr(worker_module, 'locate_cgroup', lambda *args: next(cg.glob('*/session-0/tool')))
+    def unexpected_process_scan(*args):
+        raise AssertionError('Tool admission rescanned /proc despite a verified VM leaf')
+    monkeypatch.setattr(worker_module, 'locate_cgroup', unexpected_process_scan)
     trace = tmp_path / "openclaw-snapshot.jsonl"
     write_spans(trace, llm_spans(
         [{"role": "user", "content": "hello"}],

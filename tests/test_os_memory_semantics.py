@@ -92,6 +92,12 @@ def test_borrow_candidate_uses_local_residency_not_configured_capacity():
     c.borrower = SimpleNamespace(borrowed=lambda: (), observe_resident=lambda sid:
         SimpleNamespace(local_bytes={'large': 10, 'small': 400}[sid]))
     assert c._next_borrow_candidate() is small
+    c.borrower.borrowed = lambda: ('small',)
+    c.borrower.allocates_shared = lambda sid: False  # retained reservation, LOCAL policy
+    assert c._next_borrow_candidate() is small
+    c.borrower.allocates_shared = lambda sid: True
+    assert c._next_borrow_candidate() is large
+    c.borrower.borrowed = lambda: ()
     small.observe_borrow_candidate = lambda: None  # checkpoint won after candidate enumeration
     assert c._next_borrow_candidate() is large
 

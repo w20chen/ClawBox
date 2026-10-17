@@ -238,9 +238,12 @@ def parser() -> argparse.ArgumentParser:
         help="validate, refresh host state, qualify when needed, and run or resume",
     )
     launch.add_argument("spec", type=Path)
+    launch.add_argument("--apply-host", type=Path, metavar="HOST.yaml",
+                        help="apply a reviewed host YAML before a new/resumed run; save the verified profile beside it as .json; requires an idle VM host")
     launch.add_argument("--run-id")
     launch.add_argument("--qualification", type=Path)
-    launch.add_argument("--qualification-concurrency", type=int)
+    launch.add_argument("--qualification-concurrency", type=int,
+                        help="bound the real-VM capability smoke (default: maximum trial concurrency); covers every case, does not prove target density")
     launch.add_argument("--force-qualify", action="store_true")
     launch.add_argument("--detach", action="store_true")
     importer = sub.add_parser("import-trace", help="convert a supported research trace to replay schema 6")
@@ -458,6 +461,12 @@ def launch_experiment(args: argparse.Namespace) -> int:
         action = "resume"
 
     validate_inputs(spec)
+    if getattr(args, 'apply_host', None) is not None:
+        from clawbox.experiments.host import apply, load_config
+        host_path = args.apply_host
+        if host_path.suffix.lower() not in {'.yaml', '.yml'}:
+            raise ValueError('--apply-host requires a .yaml or .yml host configuration')
+        apply(load_config(host_path), host_path.with_suffix('.json'))
     require_host_ready(spec)
 
     receipt_path = args.qualification or default_receipt_path(args.spec)

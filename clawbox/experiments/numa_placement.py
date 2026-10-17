@@ -7,6 +7,7 @@ worker's normal VM creation path.
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 import time
 
 from .policy import AdmissionTimeout
@@ -76,6 +77,21 @@ class SessionPlacement:
         self.waiting = set()
         self.template_affinity_decisions = 0
         self.template_cache_hits = 0
+        self._memory_feedback = {}
+
+    def _placement_memory(self, key, memory_mib):
+        # Ranking shares the CPU monitor's 200-ms observation cadence. Do not
+        # resample every active claim for every waiting session under the same
+        # lock. acquire() below still checks current memory before reserving.
+        now = time.monotonic()
+        cache_key = key, memory_mib
+        cached = self._memory_feedback.get(cache_key)
+        if cached is None or now-cached[0] >= .2:
+            c = self.domains[key].coordinator
+            cached = (now, c.physical_sample()[0], c.demand.pending(c.demand_scope),
+                      c._pressure_reasons(memory_mib*MIB+c.startup_headroom_bytes))
+            self._memory_feedback[cache_key] = cached
+        return cached
 
     def acquire(self, session_id, *, vcpus, memory_mib, timeout, fixed=None,
                 template_id=None, template_aware=False,
@@ -127,12 +143,10 @@ class SessionPlacement:
                     )
                     if offered+vcpus > self.capacity[key]:
                         continue
-                    used = c.physical_sample()[0]
-                    pending = c.demand.pending(c.demand_scope)
+                    sampled_at, used, pending, reasons = self._placement_memory(key, memory_mib)
                     memory_pressure = (used+pending+memory_mib*MIB+c.operation_headroom_bytes)/c.budget_bytes
                     measured = [v for v in cpu[key].values() if v is not None]
                     cpu_pressure = max([offered/self.capacity[key], *measured])
-                    reasons = c._pressure_reasons(memory_mib*MIB+c.startup_headroom_bytes)
                     if c._new_session_admission_blocked:
                         reasons += ('local_high_hysteresis',)
                     same_template_peers = sum(
@@ -141,7 +155,8 @@ class SessionPlacement:
                     )
                     evidence = dict(cpu[key], offered_vcpus=offered, cpu_capacity=self.capacity[key],
                                     resident_bytes=used, outstanding_bytes=pending,
-                                    memory_budget_bytes=c.budget_bytes, safety_reasons=list(reasons))
+                                    memory_budget_bytes=c.budget_bytes, safety_reasons=list(reasons),
+                                    feedback_sample_age_seconds=max(0,time.monotonic()-sampled_at))
                     evidence.update(
                         template_id=template_id,
                         same_template_peers=same_template_peers,
@@ -194,6 +209,8 @@ class SessionPlacement:
                     self.condition.notify_all()
                 raise
             try:
+                with self.condition:
+                    self._memory_feedback.clear()  # The new claim changes ranking immediately.
                 self.emit({'event':'session_placement', 'session_id':session_id, 'compute_domain':key,
                            'score':score, 'wait_seconds':time.monotonic()-started,
                            'template_aware_requested':template_aware,
@@ -215,22 +232,31 @@ class SessionPlacement:
     def sample(self):
         with self.condition:
             cpu = self.monitor.sample()
-            result = {}
-            for key, domain in self.domains.items():
-                c = domain.coordinator
-                resident = c.physical_sample()[0]
-                pending = c.demand.pending(c.demand_scope)
-                result[key] = dict(cpu[key], resident_bytes=resident,
-                    outstanding_bytes=pending, remaining_budget_bytes=c.budget_bytes-resident-pending,
+            captured = time.monotonic()
+            claims = tuple(replace(claim) for claim in next(iter(self.domains.values())).coordinator.demand.claims.values())
+            sessions = {key: tuple(d.coordinator._sessions.values()) for key,d in self.domains.items()}
+            counters = {key: dict(
                     waiting_sessions_global=len(self.waiting),
-                    admission_queue_depth=len(c._waiters),
-                    cpu_psi=None, bandwidth_utilization=None,
+                    admission_queue_depth=len(d.coordinator._waiters),
                     admitted_sessions=sum(item[0] == key for item in self.sessions.values()),
-                    running_vms=sum(int(s.lifecycle.resident) + int(s.runtime_lifecycle is not None and s.runtime_lifecycle.resident)
-                                    for s in c._sessions.values()))
-            return result
+                ) for key,d in self.domains.items()}
+        # Reporting must not hold admission while kernel reads or a lifecycle
+        # transition is in progress. Claim membership/baselines are snapshotted.
+        result = {}
+        for key,domain in self.domains.items():
+            c = domain.coordinator
+            resident = c.physical_sample()[0]
+            pending = sum(claim.remaining()[1] for claim in claims if claim.scope==c.demand_scope)
+            result[key] = dict(cpu[key], **counters[key], resident_bytes=resident,
+                outstanding_bytes=pending, remaining_budget_bytes=c.budget_bytes-resident-pending,
+                cpu_psi=None, bandwidth_utilization=None,
+                running_vms=sum(int(s.lifecycle.resident)+int(s.runtime_lifecycle is not None and s.runtime_lifecycle.resident)
+                                for s in sessions[key]),
+                observation_seconds=time.monotonic()-captured)
+        return result
 
     def release(self, session_id):
         with self.condition:
             self.sessions.pop(session_id, None)
+            self._memory_feedback.clear()
             self.condition.notify_all()

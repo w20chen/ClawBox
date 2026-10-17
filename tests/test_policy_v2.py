@@ -505,7 +505,7 @@ def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
 
     assert order == ["second", "third"]
     metrics = coordinator.admission_metrics()
-    assert metrics["discipline"] == "progress_before_create_fifo"
+    assert metrics["discipline"] == "runnable_progress_before_create_fifo"
     assert metrics["admission_count"] == 3
     assert metrics["max_queue_depth"] == 2
     assert metrics["wait_p95_seconds"] is not None

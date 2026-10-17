@@ -71,6 +71,8 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": 1.0,
         "concurrency": max(qualified.execution.concurrency_levels),
+        "target_concurrency": max(spec.execution.concurrency_levels),
+        "scope": "capability_smoke",
         "policy_names": [policy.name for policy in qualified.policies],
         "target_node": spec.resources.target_node,
         "runtime_image_digest": spec.runtime.image_digest,
@@ -149,6 +151,23 @@ def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
     trace.write_text(trace.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="input_manifest"):
         validate_receipt(spec, receipt)
+
+
+def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
+    spec = load_experiment(EXAMPLE)
+    spec = spec.model_copy(update={"execution": spec.execution.model_copy(
+        update={"concurrency_levels": (320, 640, 1280)})})
+    path = tmp_path / 'bounded.json'
+    receipt = _receipt(spec, concurrency=1)
+    path.write_text(json.dumps(receipt))
+    verified = validate_receipt(spec, path)
+    assert verified['concurrency'] == 1
+    assert verified['target_concurrency'] == 1280
+    assert verified['scope'] == 'capability_smoke'
+    receipt['concurrency'] = 0
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match='concurrency'):
+        validate_receipt(spec, path)
 
 
 @pytest.mark.parametrize('storage,scheduling,fail_spill', [('warm-only', 'static', False), ('tiered', 'snapshot_only', False), ('tiered', 'joint', False), ('tiered', 'joint', True)])

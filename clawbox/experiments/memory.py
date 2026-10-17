@@ -565,7 +565,9 @@ class SandboxRSSSampler:
         # processes once, not with a host-wide /proc scan every 50 ms per tool.
         # The RSS reader still checks argv on each sample (including PID reuse).
         paths = []
-        for entry in proc_root.iterdir():
+        entries = (tuple(proc_root / pid for pid in (cgroup/'cgroup.procs').read_text().split())
+                   if cgroup is not None else proc_root.iterdir())
+        for entry in entries:
             if entry.name.isdigit():
                 try:
                     if sandbox_id.encode() in (entry / "cmdline").read_bytes():

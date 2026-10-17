@@ -82,6 +82,27 @@ def test_recipe_and_arm_names_do_not_change_execution():
         (a.resources, a.execution, a.policy.mechanisms) for a in after]
 
 
+@pytest.mark.parametrize('switch,value', [('idle_reclaim.policy', 'off'), ('shared_memory.borrow', 'off')])
+def test_full_single_capability_ablation_retains_cost_coordination(switch, value):
+    raw = base()
+    raw['mechanisms']['placement']['policy'] = 'load_aware'
+    raw['mechanisms']['runtime'].update(memory_protection=True, cpu_release_boost=True)
+    raw['mechanisms']['admission']['tool'] = 'predicted'
+    raw['mechanisms']['shared_memory']['borrow'] = 'pressure'
+    raw['mechanisms']['idle_reclaim']['policy'] = 'wait'
+    raw['mechanisms']['checkpoint']['storage'] = 'tiered'
+    raw['mechanisms']['coordination']['action_selection'] = 'measured_cost'
+    raw['comparison']['arms'] = [{'name': 'full'}, {'name': 'ablation', 'override': {switch: value}}]
+    spec = ExperimentSpec.model_validate(raw)
+    full, ablation = spec.policies
+    differences = {f'{group}.{key}' for group in GROUPS for key in full.mechanisms[group]
+                   if full.mechanisms[group][key] != ablation.mechanisms[group][key]}
+    assert differences == {switch}
+    assert ablation.mechanisms['coordination']['action_selection'] == 'measured_cost'
+    assert effective_spec(spec, full).resources.physical_live_limit_mib == effective_spec(spec, ablation).resources.physical_live_limit_mib
+    assert effective_spec(spec, ablation).resources.memory_action_costs is not None
+
+
 def test_runtime_controls_do_not_enable_reclaim():
     spec = design('runtime')
     p = spec.policies[-1]
@@ -89,6 +110,16 @@ def test_runtime_controls_do_not_enable_reclaim():
     assert not p.coordinates_release
     assert p.reclamation.value == 'resident'
     assert p.runtime_control.value == 'explicit'
+
+
+def test_resident_arm_keeps_common_physical_shared_pool_capacity():
+    raw = base()
+    raw['mechanisms']['runtime'].update(memory_protection=True, cpu_release_boost=True)
+    spec = ExperimentSpec.model_validate(raw)
+    arm = expand_matrix(spec)[0]
+    assert arm.resources.warm_memory_capacity_mib == raw['environment']['resources']['warm_memory_capacity_mib']
+    assert not arm.resources.shared_memory_borrow_limit_mib
+    assert arm.policy.reclamation.value == 'resident'
 
 
 def test_runtime_forecast_ttl_roundtrips_to_every_arm():

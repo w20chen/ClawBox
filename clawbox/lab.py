@@ -515,6 +515,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
     if doctor(profile, warm=args.warm):
         raise RuntimeError("Host checks failed; profile not saved")
     wait_for_vm_ready(profile)
+    profile['tcp_tw_reuse'] = getattr(args, 'tcp_tw_reuse', None)
     _write_json_atomic(args.profile, profile)
     print(f"Saved host profile: {args.profile}")
     return profile

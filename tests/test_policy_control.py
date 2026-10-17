@@ -77,6 +77,23 @@ def test_policy_control_is_idempotent_and_drains_inflight_completion() -> None:
         assert session.lifecycle is SessionLifecycle.CLOSED
 
 
+def test_failed_session_can_be_discarded_after_guest_cleanup() -> None:
+    server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
+                                 bind_host="127.0.0.1", bind_port=0)
+    server.advertised_port = server.actual_port
+    with server:
+        session = server.register("session-a", admit=lambda _request: {},
+                                  complete=lambda _request: {})
+        _post(session, "/v1/tool/admit", "exec-a")
+        assert session.close(timeout=0) is False
+        session.discard()
+        assert session.lifecycle is SessionLifecycle.CLOSED
+        assert server.session_count == 0
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post(session, "/v1/tool/complete", "exec-a")
+        assert error.value.code == 401
+
+
 def test_policy_control_rejects_wrong_session_and_execution_id_reuse() -> None:
     server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
                                  bind_host="127.0.0.1", bind_port=0)

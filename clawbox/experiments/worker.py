@@ -17,7 +17,7 @@ import sys
 import time
 import traceback
 import urllib.parse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -160,7 +160,37 @@ class CgroupCpuSampler:
         }
 
 
-def classify_arm_failure(failure, *, domain_oom_kills=0, infrastructure_error=None):
+class ArmInfrastructureError(RuntimeError):
+    """Shared controls or session cleanup can no longer preserve arm isolation."""
+
+
+def collect_session_results(futures, *, timeout, sessions, failures, events,
+                            arm_id, check_health):
+    """Drain independent outcomes; only shared failures escape to arm cleanup."""
+    first_failure = None
+    for future in as_completed(futures, timeout=timeout):
+        try:
+            result = future.result()
+        except Exception as exc:
+            record = {
+                "event": "session_failed",
+                "session_id": f"{arm_id}-{futures[future]:04d}",
+                "error": str(exc), "error_type": type(exc).__name__,
+            }
+            failures.append(record)
+            events.write(record)
+            if isinstance(exc, ArmInfrastructureError):
+                raise
+            check_health()
+            first_failure = first_failure or exc
+        else:
+            sessions.append(result)
+            check_health()
+    return first_failure
+
+
+def classify_arm_failure(failure, *, domain_oom_kills=0, infrastructure_error=None,
+                         session_failure=False):
     """Preserve overload outcomes without hiding control or cleanup failures."""
     if infrastructure_error is not None:
         return FailureCategory.INFRASTRUCTURE
@@ -170,7 +200,10 @@ def classify_arm_failure(failure, *, domain_oom_kills=0, infrastructure_error=No
         return FailureCategory.TIMEOUT
     if failure is None:
         return None
-    return failure_category_for(RunStatus.FAILED, str(failure))
+    category = failure_category_for(RunStatus.FAILED, str(failure))
+    if session_failure and category is FailureCategory.INFRASTRUCTURE:
+        return FailureCategory.AGENT
+    return category
 
 
 def drain_policy_futures(pending: list[Any], lock: Any, timeout_s: float | None) -> None:
@@ -204,6 +237,27 @@ def wait_for_admission_without_lifecycle_lock(
 def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     cases = arm.session_cases or (arm.case,)
     return cases[session_index % len(cases)]
+
+
+@contextmanager
+def creation_slot(gate, events, session_id):
+    """Queue before reserving memory; release at pair readiness, not task end."""
+    started = time.time()
+    events.write({'event':'sandbox_create_gate_wait_started','session_id':session_id})
+    gate.acquire()
+    acquired = time.time()
+    held = True
+    def release():
+        nonlocal held
+        if held:
+            held = False
+            gate.release()
+    try:
+        events.write({'event':'sandbox_create_gate_acquired','session_id':session_id,
+                      'wait_seconds':acquired-started})
+        yield started, acquired, release
+    finally:
+        release()
 
 
 def read_priority_memory_charge(path: Path, local_numa_node: int | None) -> tuple[int, int]:
@@ -312,7 +366,7 @@ class WatermarkController:
             if self._thread.is_alive():
                 raise RuntimeError("memory watermark controller did not stop")
         if self._error is not None:
-            raise RuntimeError("memory watermark controller failed") from self._error
+            raise RuntimeError(f"memory watermark controller failed: {self._error}") from self._error
 
     def _record_borrow(self, lifecycle: CubeSandboxLifecycle, *, reason: str) -> bool:
         with self._borrow_lock:
@@ -320,8 +374,9 @@ class WatermarkController:
             if self.borrower is None or self.memory_scheduling in {'local_only', 'snapshot_only'}:
                 self._last_borrow_rejection = 'borrowing_disabled'
                 return False
-            if lifecycle.sandbox_id in set(self.borrower.borrowed()):
-                return self.borrower.allocates_shared(lifecycle.sandbox_id)
+            if (lifecycle.sandbox_id in set(self.borrower.borrowed())
+                    and self.borrower.allocates_shared(lifecycle.sandbox_id)):
+                return True
             if self.memory_scheduling == 'joint' and time.monotonic()-self._last_borrow < self.borrow_cooldown:
                 self._last_borrow_rejection = 'borrow_cooldown'
                 return False
@@ -363,7 +418,8 @@ class WatermarkController:
     def _next_borrow_candidate(self) -> CubeSandboxLifecycle | None:
         if self.borrower is None:
             return None
-        borrowed = set(self.borrower.borrowed())
+        borrowed = {sandbox_id for sandbox_id in self.borrower.borrowed()
+                    if self.borrower.allocates_shared(sandbox_id)}
         with self._lock:
             candidates = [
                 lifecycle
@@ -471,10 +527,12 @@ class WatermarkController:
         """Borrow before an existing Tool's prediction would cross LOCAL HARD."""
         if self.borrower is None or self.memory_scheduling in {'local_only', 'snapshot_only'}:
             return False
-        if lifecycle.sandbox_id in set(self.borrower.borrowed()):
-            return self.borrower.allocates_shared(lifecycle.sandbox_id)
-        projected = self.coordinator.projected_local_commitment(predicted_increment_mib)
-        if projected <= (self.high if self.memory_scheduling == 'joint' else self.hard):
+        if (lifecycle.sandbox_id in set(self.borrower.borrowed())
+                and self.borrower.allocates_shared(lifecycle.sandbox_id)):
+            return True
+        if not self.coordinator.local_commitment_exceeds(
+                predicted_increment_mib,
+                self.high if self.memory_scheduling == 'joint' else self.hard):
             return False
         if not getattr(lifecycle, 'resident', True):
             return False
@@ -1457,6 +1515,7 @@ class ExperimentWorker:
             if domain.controller is not None:
                 domain.controller.start()
         sessions: list[dict[str, Any]] = []
+        session_failures: list[dict[str, Any]] = []
         failure: Exception | None = None
         infrastructure_error: Exception | None = None
         interrupted = False
@@ -1466,7 +1525,26 @@ class ExperimentWorker:
             max_workers=arm.concurrency, thread_name_prefix="agent"
         )
         futures: dict[Any, int] = {}
+        def check_shared_health():
+            try:
+                if self._runtime_memory is not None:
+                    self._runtime_memory.check()
+                for domain in domains.values():
+                    if domain.controller is not None and domain.controller._error is not None:
+                        raise domain.controller._error
+                    if domain.coordinator._cache_reclaim_error is not None:
+                        raise domain.coordinator._cache_reclaim_error
+            except Exception as exc:
+                raise ArmInfrastructureError("shared policy controller failed") from exc
+
         def run_placed_session(index):
+            offset = (index*arm.execution.stagger_interval_seconds
+                      if arm.execution.arrival_schedule.value == 'fixed_stagger' else 0)
+            time.sleep(max(0., arm_started_monotonic+offset-time.monotonic()))
+            with creation_slot(sandbox_create_gate, events, f'{arm.arm_id}-{index:04d}') as slot:
+                return run_placed_session_impl(index, slot)
+
+        def run_placed_session_impl(index, slot):
             session_id = f"{arm.arm_id}-{index:04d}"
             domain = session_domain(index)
             session_case = session_case_for(arm, index)
@@ -1500,10 +1578,10 @@ class ExperimentWorker:
             waited = time.monotonic()-started
             try:
                 result = self._run_session(domain.arm, index, domain.coordinator, events,
-                    policy_events, prediction_providers.get(session_case.case_id), sandbox_create_gate,
+                    policy_events, prediction_providers.get(session_case.case_id), None,
                     domain.sampler.observe, arm_started_wall, arm_started_monotonic,
                     snapshot_pool, domain.borrower, domain.controller,
-                    creation_reserved=placement is not None)
+                    creation_reserved=placement is not None, creation_gate_info=slot)
                 result['placement_wait_seconds'] = waited if placement is not None else 0.
                 offered = arm_started_wall + (index*arm.execution.stagger_interval_seconds
                     if arm.execution.arrival_schedule.value == 'fixed_stagger' else 0)
@@ -1514,10 +1592,14 @@ class ExperimentWorker:
                 return result
             finally:
                 if placement is not None:
-                    with demand_ledger.condition:
-                        if (session_id, 'create') in demand_ledger.claims:
-                            domain.coordinator.release(session_id, pair_mib, wait_class='create')
-                    placement.release(session_id)
+                    try:
+                        with demand_ledger.condition:
+                            if (session_id, 'create') in demand_ledger.claims:
+                                domain.coordinator.release(session_id, pair_mib, wait_class='create')
+                        placement.release(session_id)
+                    except Exception as exc:
+                        raise ArmInfrastructureError(
+                            f"placement cleanup incomplete for {session_id}") from exc
         try:
             placement = (SessionPlacement(domains,
                 cpu_overcommit=arm.execution.placement_cpu_overcommit,
@@ -1528,38 +1610,12 @@ class ExperimentWorker:
                 pool.submit(run_placed_session, index): index
                 for index in range(arm.concurrency)
             }
-            for future in as_completed(
+            failure = collect_session_results(
                 futures, timeout=arm.execution.arm_timeout_seconds,
-            ):
-                try:
-                    sessions.append(future.result())
-                except Exception as exc:  # one failed session fails the whole arm
-                    index = futures[future]
-                    events.write({
-                        "event": "session_failed",
-                        "session_id": f"{arm.arm_id}-{index:04d}",
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                    })
-                    failure = failure or exc
-                    # Fail the arm immediately.  Destroying its owned VMs
-                    # unblocks sibling Cube calls; the process supervisor is
-                    # the final hard boundary if a third-party call ignores
-                    # cancellation.
-                    for pending in futures:
-                        pending.cancel()
-                    try:
-                        self.client.kill_owned_sandboxes(self.task_uid)
-                    except Exception as cleanup_exc:
-                        exc.add_note(
-                            "early arm cleanup failed: "
-                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
-                        )
-                    interrupted = True
-                    break
-            pool.shutdown(wait=not interrupted, cancel_futures=interrupted)
-            if failure is not None:
-                raise failure
+                sessions=sessions, failures=session_failures, events=events,
+                arm_id=arm.arm_id, check_health=check_shared_health,
+            )
+            pool.shutdown(wait=True)
         except (KeyboardInterrupt, SystemExit):
             # ThreadPoolExecutor's context manager waits for every running
             # session before unwinding. On SIGTERM/KeyboardInterrupt that can
@@ -1576,6 +1632,9 @@ class ExperimentWorker:
             interrupted = True
             raise
         except Exception as exc:
+            interrupted = True
+            if isinstance(exc, ArmInfrastructureError):
+                infrastructure_error = exc
             for future in futures:
                 future.cancel()
             pool.shutdown(wait=False, cancel_futures=True)
@@ -1587,12 +1646,9 @@ class ExperimentWorker:
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
             policy_events.close(wait=not interrupted)
-            if self._runtime_memory is not None:
-                try:
-                    self._runtime_memory.close()
-                except Exception as exc:
-                    infrastructure_error = infrastructure_error or exc
-                    failure = failure or exc
+            # Watermark threads call DemandLedger.check(), which delegates to
+            # the shared pressure controller. Stop those readers before
+            # marking the pressure controller stopped.
             for domain in domains.values():
                 if domain.controller is not None:
                     try:
@@ -1600,6 +1656,12 @@ class ExperimentWorker:
                     except Exception as exc:
                         infrastructure_error = infrastructure_error or exc
                         failure = failure or exc
+            if self._runtime_memory is not None:
+                try:
+                    self._runtime_memory.close()
+                except Exception as exc:
+                    infrastructure_error = infrastructure_error or exc
+                    failure = failure or exc
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
@@ -1739,11 +1801,14 @@ class ExperimentWorker:
             experiment_id=self.spec.experiment_id, arm=arm,
             provenance=provenance, status=status,
             failure_category=classify_arm_failure(failure, domain_oom_kills=domain_oom_kills,
-                                                  infrastructure_error=infrastructure_error),
+                                                  infrastructure_error=infrastructure_error,
+                                                  session_failure=bool(session_failures) and not interrupted),
             started_at=started_at, completed_at=utcnow(),
             correctness={
                 "completed_sessions": sum(item.get("valid", False) for item in sessions),
                 "failed_sessions": arm.concurrency - sum(item.get("valid", False) for item in sessions),
+                "session_failures": session_failures,
+                "arm_interrupted": interrupted,
                 "validation_passed": failure is None and all(item.get("valid", False) for item in sessions),
                 "native_tool_exact_id_join_rate": (
                     min(
@@ -1970,7 +2035,8 @@ class ExperimentWorker:
                      snapshot_pool: WarmSnapshotPool | None = None,
                      numa_borrower: SandboxNumaBorrower | None = None,
                      watermark_controller: WatermarkController | None = None,
-                     creation_reserved: bool = False) -> dict[str, Any]:
+                     creation_reserved: bool = False,
+                     creation_gate_info=None) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         tool_sandbox = session_case.sandbox or arm.sandbox
         if session_case != arm.case or tool_sandbox != arm.sandbox:
@@ -2031,6 +2097,7 @@ class ExperimentWorker:
         )
         runtime_env: dict[str, str] = {}
         runtime_allow_out: list[str] = []
+        tool_allow_out: list[str] = []
         route_epoch = 0
         ssh_config: NativeSSHConfig | None = None
         if arm.agent.driver is AgentDriver.OPENCLAW:
@@ -2060,6 +2127,10 @@ class ExperimentWorker:
             runtime_allow_out.append(
                 f"{control_address}/{32 if control_address.version == 4 else 128}"
             )
+            # Toolbridge sends authenticated execution START/END directly to
+            # this host. Closed-network Tools need the same narrow control
+            # route as Runtime; otherwise valid commands fail with exit 125.
+            tool_allow_out.append(runtime_allow_out[-1])
             # ModelGateway and PolicyControl share the host address and have
             # distinct direct listeners; Kubernetes/NodePort is not involved.
             if self.model_gateway is None:
@@ -2128,6 +2199,9 @@ class ExperimentWorker:
             node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
             ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
             env_vars=tool_env,
+            network_allow_out=tool_allow_out,
+            network_deny_out=_runtime_network_deny_out(
+                arm.sandbox.allow_internet_access, tool_allow_out),
             physical_observation=physical_observation,
             role="tool",
             warm_snapshot_root=arm.resources.warm_snapshot_root,
@@ -2570,6 +2644,9 @@ class ExperimentWorker:
             ),
         )
         try:
+            if creation_gate_info is not None:
+                timeline['sandbox_create_gate_wait_start'] = creation_gate_info[0]
+                timeline['sandbox_create_gate_acquired'] = creation_gate_info[1]
             if lifetime:
                 coordinator.acquire_capacity(
                     session_id, lifetime, arm.execution.arm_timeout_seconds,
@@ -2646,6 +2723,8 @@ class ExperimentWorker:
                     coordinator.release(session_id, pair_reservation, wait_class="create")
                 if sandbox_create_gate is not None:
                     sandbox_create_gate.release()
+                if creation_gate_info is not None:
+                    creation_gate_info[2]()
             create_s = runtime_create_s + tool_create_s
             runtime_executor = CubeCommandExecutor(
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
@@ -2809,17 +2888,24 @@ class ExperimentWorker:
                     managed_command = (execution_scope == "agent-tool"
                                        and request.get("operation") != "filesystem")
                     prediction = None
-                    if managed_command and prediction_provider is not None:
-                        if arm.resources.prediction_mode == "runtime":
-                            from .prediction import command_sha256
-                            command = request.get("command")
-                            if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:
-                                raise PredictionUnavailable("runtime prediction command text/digest mismatch; update the SSH shim")
-                            prediction = prediction_provider.resolve(command, request.get('prediction'))
-                        else:
-                            prediction = prediction_provider.resolve_digest(
-                                str(request['command_sha256']), request.get('prediction'))
-                    elif arm.policy.admission is AdmissionPolicy.PREDICTED:
+                    if managed_command:
+                        if arm.policy.admission is AdmissionPolicy.PREDICTED:
+                            if prediction_provider is None:
+                                raise PredictionUnavailable(
+                                    "predicted command admission requires a prediction provider"
+                                )
+                            if arm.resources.prediction_mode == "runtime":
+                                from .prediction import command_sha256
+                                command = request.get("command")
+                                if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:
+                                    raise PredictionUnavailable("runtime prediction command text/digest mismatch; update the SSH shim")
+                                prediction = prediction_provider.resolve(command, request.get('prediction'))
+                            else:
+                                prediction = prediction_provider.resolve_digest(
+                                    str(request['command_sha256']), request.get('prediction'))
+                        # Fixed admission needs no prediction object. The
+                        # reservation helper reads static_tool_memory_mib.
+                    elif arm.policy.admission in {AdmissionPolicy.PREDICTED, AdmissionPolicy.FIXED}:
                         fixed_budget = (arm.resources.non_command_tool_memory_mib
                                         or arm.resources.static_tool_memory_mib)
                         if fixed_budget is None:
@@ -2837,6 +2923,11 @@ class ExperimentWorker:
                     reservation_acquired = False
                     with reservation_lock:
                         pending_admissions.add(execution_id)
+                    events.write({'event': 'tool_admission_queued',
+                                  'session_id': session_id,
+                                  'execution_id': execution_id,
+                                  'execution_scope': execution_scope,
+                                  'operation': request.get('operation')})
                     with wait_lock:
                         try:
                             # Claim the session before routing memory. Otherwise
@@ -2983,7 +3074,8 @@ class ExperimentWorker:
                             })
                             coordinator.bind_tool_memory(session_id)
                             host_sampler = SandboxRSSSampler(route.sandbox_id,
-                                cgroup=locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup)))
+                                cgroup=(priority_domain.leaves[index, 'tool'] if priority_domain is not None
+                                        else locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup))))
                             host_sampler.start()
                             if progress_control:
                                 progress_control.execution_admitted(session_id, execution_id,
@@ -3045,6 +3137,8 @@ class ExperimentWorker:
                     events.write({
                         "event": "tool_admitted", "session_id": session_id,
                         "execution_id": execution_id,
+                        "execution_scope": execution_scope,
+                        "operation": request.get("operation"),
                         "command_sha256": request["command_sha256"],
                         "prediction_key": prediction_record.get("canonical_prediction_key"),
                         "prediction_source": prediction_record.get("prediction_source"),
@@ -3215,13 +3309,20 @@ class ExperimentWorker:
 
                 if self.policy_control is None:
                     raise RuntimeError("PolicyControlServer is not active")
+                def record_tool_progress(request):
+                    phase = request.get('phase')
+                    progress_event('complete' if phase == 'end' else 'start',
+                                   str(request['execution_id']))
+                    events.write({'event': 'tool_execution_progress',
+                                  'session_id': session_id,
+                                  'execution_id': str(request['execution_id']),
+                                  'phase': phase,
+                                  'source': 'toolbridge_progress_http'})
                 policy_session = self.policy_control.register(
                     session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
                     abandon=abandon_openclaw_tool,
-                    start=lambda request: progress_event(
-                        'complete' if request.get('phase') == 'end' else 'start',
-                        str(request['execution_id'])),
+                    start=record_tool_progress,
                 )
                 # The Tool VM is authoritative for mutable state. Mark the
                 # installed shared SSH runtime as initialized so OpenClaw does
@@ -3526,7 +3627,9 @@ class ExperimentWorker:
                      ),
                      "timeline": timeline}
         finally:
+            session_error = sys.exception()
             cleanup_errors: list[str] = []
+            discard_failed_policy_session = False
 
             def cleanup_step(label: str, operation: Any) -> Any:
                 try:
@@ -3561,10 +3664,22 @@ class ExperimentWorker:
                     cleanup_errors.append("model gateway session did not drain")
             if policy_session is not None:
                 policy_drained = cleanup_step(
-                    "policy session", lambda: policy_session.close(timeout=30),
+                    "policy session",
+                    lambda: policy_session.close(
+                        timeout=0 if session_error is not None else 30,
+                    ),
                 )
                 if policy_drained is False:
-                    cleanup_errors.append(f"policy session did not drain: {session_id}")
+                    if session_error is None:
+                        cleanup_errors.append(
+                            f"policy session did not drain: {session_id}"
+                        )
+                    else:
+                        # A timed-out or failed Agent can leave an admitted SSH
+                        # execution without a completion callback.  Stop its VMs
+                        # below, then discard only this session.  The coordinator
+                        # unregister still releases all of its reservations.
+                        discard_failed_policy_session = True
             for host_sampler in tuple(locals().get("host_rss_samplers", {}).values()):
                 cleanup_step("host RSS sampler", host_sampler.stop)
             tool_destroy_s = cleanup_step("Tool sandbox", lifecycle.close)
@@ -3580,6 +3695,13 @@ class ExperimentWorker:
                     "event": "sandbox_destroyed", "session_id": session_id,
                     "role": "runtime", "service_seconds": runtime_destroy_s,
                     "lifecycle_timing": runtime_lifecycle.timings[-1],
+                }))
+            if discard_failed_policy_session:
+                cleanup_step("failed policy session", policy_session.discard)
+                cleanup_step("failed policy session event", lambda: events.write({
+                    "event": "policy_session_discarded",
+                    "session_id": session_id,
+                    "reason": "agent_failed_with_incomplete_execution",
                 }))
             timeline["lifecycle_timings"] = [
                 {"role": "tool", **timing}
@@ -3612,15 +3734,11 @@ class ExperimentWorker:
                     "watermark session", lambda: watermark_controller.unregister(session_id),
                 )
             if cleanup_errors:
-                failure = RuntimeError(
+                failure = ArmInfrastructureError(
                     f"session cleanup incomplete for {session_id}: "
                     + "; ".join(cleanup_errors)
                 )
-                active_exception = sys.exception()
-                if active_exception is not None:
-                    active_exception.add_note(str(failure))
-                else:
-                    raise failure
+                raise failure from sys.exception()
 
 
     def _restore_with_one_victim(self, arm: ExperimentArm, session_id: str,
@@ -3645,6 +3763,11 @@ class ExperimentWorker:
                               prediction: dict[str, Any] | None = None) -> int:
         if arm.policy.admission is AdmissionPolicy.OFF:
             return 0
+        if prediction and prediction.get('prediction_source') == 'non_command_fixed_host_budget':
+            # This is an explicit common budget, not a model estimate. Scaling
+            # it only in the predicted arm confounds admission comparisons.
+            return int(arm.resources.non_command_tool_memory_mib
+                       or arm.resources.static_tool_memory_mib)
         if arm.policy.admission is AdmissionPolicy.FIXED:
             return int(arm.resources.static_tool_memory_mib)
         if not prediction or prediction.get('admission_prediction_target') != 'host_cgroup_memory_current_increment':

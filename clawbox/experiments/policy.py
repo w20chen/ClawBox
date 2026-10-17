@@ -265,11 +265,19 @@ class PolicyCoordinator:
                 claim.baseline = lifecycle()
 
     def bind_tool_memory(self, session_id):
+        key = (session_id, 'tool_admission')
         with self._condition:
-            claim = self.demand.claims.get((session_id, 'tool_admission'))
-            if claim:
-                claim.sample = self._memory_samples.get(session_id, {}).get('tool_admission')
-                self.demand.rebase((session_id, 'tool_admission'))
+            claim = self.demand.claims.get(key)
+            sample = self._memory_samples.get(session_id, {}).get('tool_admission')
+        if claim is None or sample is None:
+            return
+        # Kernel NUMA accounting can block. Keep the nominal reservation
+        # charged while reading, so other sessions can still make progress.
+        baseline = sample()
+        with self._condition:
+            if self.demand.claims.get(key) is claim:
+                claim.baseline = baseline
+                claim.sample = sample
 
     def pressure(self, additional_bytes: int = 0) -> bool:
         with self._condition:
@@ -286,13 +294,24 @@ class PolicyCoordinator:
                 + self.operation_headroom_bytes
             )
 
+    def local_commitment_exceeds(self, additional_mib: int, limit_bytes: int) -> bool:
+        """Avoid per-claim reads when even the nominal upper bound fits."""
+        with self._condition:
+            used, _available = self.physical_sample()
+            upper = (max(used, sum(self._capacity_claims.values()))
+                     + self.demand.pending_upper_bound(self.demand_scope)
+                     + additional_mib*MIB + self.operation_headroom_bytes)
+            if upper <= limit_bytes:
+                self.demand.pending_upper_bound_fast_path_count += 1
+                return False
+            return self.projected_local_commitment(additional_mib) > limit_bytes
+
     def blocked_demand_pressure(self) -> bool:
         """Include the next runnable blocked admission in pressure detection."""
         with self._condition:
-            if not self._waiters:
+            head = self._admission_head_locked()
+            if head is None:
                 return self.pressure()
-            head = next((item for item in self._waiters
-                         if item in self._progress_waiters), self._waiters[0])
             request = self._waiter_requests[head]
             amount = request.amount_bytes
             if (request.wait_class == "create"
@@ -309,18 +328,25 @@ class PolicyCoordinator:
             if not self._waiters:
                 return {'memory_blocked': False, 'scope': self.demand_scope, 'waiters': 0}
             used, available = self.physical_sample()
-            head = next((t for t in self._waiters if t in self._progress_waiters), self._waiters[0])
+            head = self._admission_head_locked()
+            if head is None:
+                return {'memory_blocked': False, 'scope': self.demand_scope,
+                        'waiters': len(self._waiters), 'reasons': ['execution_already_inflight'],
+                        'local_used_bytes': used, 'local_available_bytes': available,
+                        'deficit_bytes': 0}
             request = self._waiter_requests[head]
             reasons = self._pressure_reasons(request.amount_bytes,
                 capacity_claim=request.capacity_claim,
                 existing_progress=request.wait_class == 'tool_admission')
             memory_reasons = set(reasons) - {'execution_already_inflight'}
+            extra = request.amount_bytes+self.operation_headroom_bytes
+            upper_deficit = used+self.demand.pending_upper_bound(self.demand_scope)+extra-self.budget_bytes
+            deficit = (0 if upper_deficit<=0 else
+                       max(0,used+self.demand.pending(self.demand_scope)+extra-self.budget_bytes))
             return {'memory_blocked': bool(memory_reasons), 'scope': self.demand_scope,
                     'waiters': len(self._waiters), 'reasons': list(reasons),
                     'local_used_bytes': used, 'local_available_bytes': available,
-                    'deficit_bytes': max(0, used + self.demand.pending(self.demand_scope)
-                                         + request.amount_bytes + self.operation_headroom_bytes
-                                         - self.budget_bytes)}
+                    'deficit_bytes': deficit}
 
     def _release_rank(self, state, now):
         """Measured LOCAL bytes / measured round-trip cost, with idle amortization."""
@@ -439,6 +465,19 @@ class PolicyCoordinator:
                 return True
         return False
 
+    def _admission_head_locked(self):
+        """Keep FIFO among runnable requests, prioritizing existing progress."""
+        first = None
+        for ticket in self._waiters:
+            request = self._waiter_requests[ticket]
+            if (request.session_id, request.wait_class) in self.demand.claims:
+                continue  # Same-VM polling must not stall unrelated VMs.
+            if first is None:
+                first = ticket
+            if ticket in self._progress_waiters:
+                return ticket
+        return first
+
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
                 capacity_claim: bool = False, total_mib: int | None = None) -> float:
@@ -481,8 +520,7 @@ class PolicyCoordinator:
                         raise RuntimeError("LOCAL cache reclamation failed") from self._cache_reclaim_error
                     # Existing sessions must be able to finish and free memory
                     # while a new VM pair is waiting for capacity.
-                    head = next((item for item in self._waiters
-                                 if item in self._progress_waiters), self._waiters[0])
+                    head = self._admission_head_locked()
                     at_head = head is ticket
                     safety_reasons = self._pressure_reasons(
                         amount + (self.startup_headroom_bytes
@@ -493,7 +531,7 @@ class PolicyCoordinator:
                         total_bytes=total + (self.startup_headroom_bytes if wait_class == "create"
                                             and self._startup_headroom_needed(session_id) else 0),
                     ) if at_head else ()
-                    if at_head and (session_id, wait_class) in self.demand.claims:
+                    if (session_id, wait_class) in self.demand.claims:
                         safety_reasons = (*safety_reasons, 'execution_already_inflight')
                     if (
                         at_head and wait_class == "create"
@@ -641,7 +679,7 @@ class PolicyCoordinator:
         count = len(samples)
         total = sum(samples)
         return {
-            "discipline": "progress_before_create_fifo",
+            "discipline": "runnable_progress_before_create_fifo",
             "admission_count": count,
             "max_queue_depth": max_queue_depth,
             "wait_total_seconds": total,

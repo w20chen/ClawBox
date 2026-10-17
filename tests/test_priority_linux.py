@@ -100,6 +100,32 @@ def test_flat_vm_defaults_and_recovery(parent, tmp_path):
     assert not list(parent.glob('clawbox-*'))
 
 
+def test_close_terminates_process_left_in_owned_leaf(parent):
+    from clawbox.experiments.priority import PriorityDomain
+    domain = PriorityDomain(parent, concurrency=1, repetition=0, legacy=False)
+    domain.start()
+    leaf = domain.leaves[0, 'tool']
+    program = '''
+import os, pathlib, sys, time
+pathlib.Path(sys.argv[1], 'cgroup.procs').write_text(str(os.getpid()))
+time.sleep(120)
+'''
+    proc = subprocess.Popen([sys.executable, '-c', program, str(leaf)])
+    try:
+        deadline = __import__('time').monotonic() + 5
+        while not (leaf/'cgroup.procs').read_text().strip():
+            assert proc.poll() is None
+            assert __import__('time').monotonic() < deadline
+            __import__('time').sleep(.02)
+        domain.close()
+        assert proc.wait(timeout=5) == -9
+        assert not list(parent.glob('clawbox-*'))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
 def test_cgroup_oom_is_counted_even_with_runtime_control_off(parent):
     from clawbox.experiments.congestion import RuntimeMemoryControl
     from clawbox.experiments.priority import PriorityDomain

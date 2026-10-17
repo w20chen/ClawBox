@@ -15,6 +15,14 @@
 
 ## 已有环境
 
+Agent 发生 OOM、命令超时或普通异常时，实验会保留其失败记录并继续其他 Agent。
+查看 report 中的完成数与全部提交数，以及 `correctness.session_failures`；不要只统计成功样本。
+该臂完成且清理验证通过后，后续比较臂会继续运行。
+共享控制器或资源清理失败、整臂截止时间到期和显式 abort 才会中止整臂。
+整臂截止后，supervisor 最多等待 YAML 中 `execution.arm_finalization_timeout_seconds`
+秒（默认 300）完成清理并写出部分结果；这段时间不供 Agent 继续工作。
+失败隔离代码更新后用新 run ID；已有运行不会热更新，也不需要重建镜像或重训。
+
 ```bash
 cd "$HOME/ClawBox"  # 改成实际 checkout；新安装示例是 $HOME/src/ClawBox。
 bash scripts/clawbox experiment --help
@@ -88,6 +96,7 @@ ${EDITOR:-vi} "$HOME/.config/clawbox/host.yaml"
 | `warm_root` | 专用 tmpfs 路径，不覆盖其他数据目录 |
 | `cold_root`, `cubelet_data_root`, `output_root` | 冷快照、现有 Cubelet 数据、结果路径；改字段不会迁移已有数据 |
 | `minimum_disk_free_gib` | 默认 20 GiB 最低剩余空间；磁盘使用率同时须低于 85% |
+| `tcp_tw_reuse` | 默认 `null`，不修改网络设置；`0` 禁用 TIME_WAIT 复用，`1` 全局启用，`2` 仅 loopback。作用于宿主网络命名空间，需 host apply；重启后再次 apply，无需重建镜像或重训 |
 
 machine.env 中的 `CLAWBOX_OUTPUT_ROOT`、`CLAWBOX_WARM_ROOT`、`CLAWBOX_COLD_ROOT`
 应与 host YAML 对应路径一致。完整说明见[主机配置](supernode.md)。
@@ -132,7 +141,29 @@ check 不修改主机，成功为 `ready_for_apply: true`，失败逐项给出 r
 失败后修复原因重试。改变现有 tmpfs 的 NUMA 时，先保留快照，在空闲时卸载旧挂载或换新空
 目录。服务和 S3lvol 恢复见[安装指南](installation.md#after-a-reboot)。
 
+高并发时若已确认短连接耗尽客户端端口（例如 MinIO 连接报 `Cannot assign requested address`），
+可在 host YAML 显式保存 `tcp_tw_reuse: 1`，先 `host check` 查看当前值和请求值，再 `host apply`。
+它允许协议安全条件下的 TIME_WAIT 复用，不保证消除所有连接瓶颈；取值含义见
+[Linux 网络参数说明](https://docs.kernel.org/networking/ip-sysctl.html#tcp-tw-reuse-integer)。
+所有对比臂使用相同设置。恢复时填写此前的明确取值并 apply；`null` 表示保持当前值，不表示恢复默认。
+该设置保存在 host.json，`host init --from-profile` 会保留它，不再需要每次手动运行 sysctl。
+
 ## 最小实验
+
+已有经过审阅的 host YAML 和实验 YAML 时，可直接使用同一个 launch 入口：
+
+```bash
+bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/smoke.yaml" \
+  --apply-host "$HOME/.config/clawbox/host.yaml" --run-id smoke-01 --qualification-concurrency 2
+```
+
+`--apply-host` 在输入校验后检查并应用主机配置，创建/执行/删除探测 VM，通过后把主机 profile
+保存为 host YAML 同目录同名的 `.json`，再进行实验预检和运行。适用于重启或主机配置变更后，
+要求 VM 主机空闲；已有环境未变化时省略此选项即可。首次填写配置仍先用 `host check` 审阅。
+同一 run ID 正在运行或已成功时，重复命令只返回状态/报告，不重复 apply 或运行。
+中断任务需要保留主机现状恢复时省略 `--apply-host`；若需重新 apply，先 abort/destroy 该 run ID。
+
+首次创建实验文件使用以下命令：
 
 ```bash
 mkdir -p "$HOME/clawbox-specs"
@@ -152,9 +183,16 @@ configure 读取已应用的主机配置中的模板、镜像摘要、NUMA 和�
 
 成功标准是最终 `state: succeeded`、任务验证成功、清理已验证；starting 或服务 active
 不是完成。任务通过两个 VM 将 complete 写入 `/workspace/result.txt`，只证明执行链路。
+
+大规模实验可在 `launch` 加 `--qualification-concurrency 2`，将前置真实 VM smoke 限为两会话（至少覆盖每个 workload case）；默认仍使用目标最大并发。receipt 分别记录实际 smoke 并发和目标并发，并保留完整输入、代码、快照/借用/放置探测及清理检查。小规模 qualification 只证明对应能力；密度和性能结论必须来自后续完整实验的实际执行。此选项无需 host apply、镜像重建或重训；更改实验参数使用新 run ID。
+
+完整系统的回收/借用消融使用 `comparison.recipe: custom`，在对应 arm 的 `override` 只设置 `idle_reclaim.policy: off` 或 `shared_memory.borrow: off`。可保留公共 `coordination.action_selection: measured_cost` 和实测成本；仅一种能力可用时没有成本选择。两种能力都关闭仍报错；物理额度保持公共配置，修改实验臂后使用新 run ID。
+比较固定/预测准入时，在公共 `mechanisms.admission.non_command_tool_memory_mib` 填写文件接口和后端维护操作的固定 MiB 预算。`prediction_reservation_scale` 只缩放模型预测的命令额度，两臂的非命令预算保持一致；调整额度仅需新 run ID，不需要 host apply、镜像重建或重训。
+
 launch 自动检查输入、主机和真实预检，然后运行负载。
 启用共享借用时，预检会在专用 Tool VM 的 `/dev/shm` 写入至多 128 MiB，随后销毁该 VM；
 分配上限为 Tool 内存的 1/16 与 128 MiB 中的较小值，并保留 4 MiB tmpfs 空间。
+原生 OpenClaw 的 Toolbridge 需要访问宿主 PolicyControl（默认 TCP 18080）以报告执行 start/end。即使 `allow_internet_access: false`，工作流也自动允许 `CLAWBOX_CONTROL_HOST` 这一宿主 IP；其余出站仍按配置限制。修改主机防火墙后用新 run ID 验证；此路由修复无需重建已有 progress-enabled 镜像或重训。
 镜像须提供 `dd`，tmpfs 至少有 5 MiB 可用空间；结果记录实际分配量。
 安装主机 numactl 包可额外保存 `numastat -p`，
 未安装时明确标记缺失；cgroup 驻留量和 `/proc/PID/numa_maps` 仍会保存。该探测不会改写正式 trace。
@@ -228,6 +266,10 @@ CPU 释放加速要求主机提供 `compute_nodes` 或 `local_numa_node`，且�
 
 准备快照/共享池实验时，先配置并 apply 对应主机拓扑、容量与路径。填写独立等待预测、实测成本，
 价值驻留还需每 case 复用概率。缺失证据不会填零；资格验证通过也不代表性能收益。
+VM 归还 LOCAL 后若仍有共享驻留页，借用额度继续保留；再次借用复用该额度，直到共享页清空或 VM 清理完成才释放。
+查看准入等待时同时检查 admission_control 的原因计数；execution_already_inflight 表示同 VM 操作串行等待，不代表内存不足。
+放置事件的 feedback_sample_age_seconds 表示内存排序观测年龄（最多约 0.2 秒）；实际准入仍检查当前用量。
+创建槽只限制正在创建的 VM 对，不限制正在执行的会话；排队等待创建槽的会话不提前预留 VM 内存。
 
 ## 修改参数或工作负载
 

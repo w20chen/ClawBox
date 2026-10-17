@@ -227,6 +227,10 @@ class PolicyControlSession:
     def close(self, *, timeout: float | None = None) -> bool:
         return self._server.unregister(self.token, timeout=timeout)
 
+    def discard(self) -> None:
+        """Forget an already-failed session after its VMs are destroyed."""
+        self._server.discard(self.token)
+
     def records(self) -> list[dict[str, Any]]:
         with self._state.condition:
             return [
@@ -409,6 +413,20 @@ class PolicyControlServer:
             with self._lock:
                 self._sessions.pop(token, None)
         return drained
+
+    def discard(self, token: str) -> None:
+        """Remove a failed session whose outstanding guest work cannot complete.
+
+        The caller must first stop the guest and release its coordinator state.
+        This path prevents an expected missing completion from turning one
+        Agent failure into an arm-wide infrastructure failure.
+        """
+        with self._lock:
+            state = self._sessions.pop(token, None)
+        if state is not None:
+            with state.condition:
+                state.lifecycle = SessionLifecycle.CLOSED
+                state.condition.notify_all()
 
     @property
     def session_count(self) -> int:

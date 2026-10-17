@@ -31,6 +31,30 @@ def scheduler(*, used=(0,0), cpu=(0.,0.), overcommit=1, capacity=20):
     return SessionPlacement(domains,cpu_overcommit=overcommit,monitor=monitor,emit=events.append),ledger,events
 
 
+def test_reporting_kernel_reads_do_not_hold_admission_lock():
+    from threading import Event
+    s,ledger,_=scheduler()
+    reading,finish=Event(),Event()
+    def slow_charge():
+        reading.set()
+        assert finish.wait(2)
+        return 0,0
+    with ledger.condition:
+        ledger.add(('old','create'),scope='n0',amount=MIB,local_amount=MIB)
+        ledger.claims['old','create'].sample=slow_charge
+    with ThreadPoolExecutor(2) as pool:
+        report=pool.submit(s.sample)
+        assert reading.wait(1)
+        try:
+            def take_lock():
+                with ledger.condition:
+                    return True
+            assert pool.submit(take_lock).result(timeout=.5)
+        finally:
+            finish.set()
+        assert report.result()['n0']['outstanding_bytes']==MIB
+
+
 @pytest.mark.parametrize('used,cpu', [((8,0),(0.,0.)),((0,0),(.9,.1))])
 def test_load_aware_selects_lower_pressure_and_reserves_once(used,cpu):
     s,ledger,events=scheduler(used=used,cpu=cpu)
@@ -103,6 +127,42 @@ def test_global_memory_budget_rejects_cross_node_race():
     with pytest.raises(AdmissionTimeout):
         s.acquire('b',vcpus=2,memory_mib=3,timeout=.02)
     assert ledger.pending()==3*MIB and len(s.sessions)==1
+
+
+def test_waiting_placement_read_cost_is_bounded_by_sampling_epoch(monkeypatch):
+    from clawbox.experiments import numa_placement
+    now=[100.]
+    monkeypatch.setattr(numa_placement.time,'monotonic',lambda:now[0])
+    s,ledger,_=scheduler()
+    reads=[0]
+    def charge():
+        reads[0]+=1
+        return 0,0
+    with ledger.condition:
+        for i in range(60):
+            ledger.add((str(i),'create'),scope='n0',amount=MIB,local_amount=MIB,sample=charge)
+        reads[0]=0
+        s._placement_memory('n0',1)
+        first=reads[0]
+        assert first>0
+        for _ in range(300):
+            s._placement_memory('n0',1)
+        assert reads[0]==first
+        now[0]+=.21
+        s._placement_memory('n0',1)
+        assert reads[0]>first
+
+
+def test_stale_placement_ranking_never_bypasses_live_memory_admission():
+    used=[0,0]
+    s,ledger,_=scheduler(used=used)
+    with ledger.condition:
+        for key in s.domains:
+            s._placement_memory(key,1)
+    used[:]=[10,10]
+    with pytest.raises(AdmissionTimeout):
+        s.acquire('new',vcpus=1,memory_mib=1,timeout=.01)
+    assert not ledger.claims and not s.sessions
 
 
 def test_placement_event_failure_releases_claim_and_cpu_slot():

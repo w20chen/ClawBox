@@ -75,6 +75,10 @@ chooses between reclaim-first and measured-cost borrowing/reclamation; the
 `conditions.prediction_source=kb` is common to all arms; `command-table` is for
 diagnostics and cannot be varied by arm override. Set it using
 `--set conditions.prediction_source=command-table` for a separate diagnostic run.
+`train-p50` adds an exact-command model only after at least two validated Cube
+memory observations for that command. Diagnostic selection tries lattice evidence,
+then the exact command, Tool, and Tool-class evidence in that order. Changing the
+training observations requires retraining and a new immutable prediction artifact.
 
 Template affinity automatically requires sharing qualification. There is no
 schema-4 sharing-enable switch or restore-timing selector: restore is reactive.
@@ -127,6 +131,7 @@ do not necessarily match a given base YAML.
 | `execution.randomized_order`, `random_seed` | Trial order is randomized by default; `--random-seed` fixes the seed; edit YAML to change the order switch |
 | `execution.arrival_schedule`, `stagger_interval_seconds` | `--arrival-schedule burst` or `fixed_stagger`; the latter needs a positive `--stagger-seconds` |
 | `execution.arm_timeout_seconds` | `--arm-timeout-seconds`; positive integer limit for the entire trial; cannot be `null` |
+| `execution.arm_finalization_timeout_seconds` | YAML only; seconds, default 300. Extra supervisor grace for cleanup and writing partial results after the trial deadline; excluded from workload time and not available for Agent work. |
 | `execution.command_timeout_seconds` | `--command-timeout-seconds`; command execution deadline; admission wait is timed separately but remains within the trial deadline |
 | `execution.memory_sample_interval_seconds`, `stabilization_seconds` | YAML only; seconds, defaults 0.2 and 1 respectively |
 | `runtime`, `sandbox` | Agent/tool VM templates, image digests, `vcpu`, `memory_mib`, workspace, preflight command, and internet setting |

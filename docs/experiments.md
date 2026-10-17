@@ -12,6 +12,16 @@
 `configure` 生成可编辑实验臂，`describe` 展示各臂实际机制，配方名和臂名不决定运行行为。
 从 [主机场景 walkthrough](self-service.md) 完成安装、host apply 和最小实验后继续。
 
+高并发短连接的宿主网络配置使用 host YAML 的 `tcp_tw_reuse`（默认 `null`，保持现状；
+`0` 禁用、`1` 全局、`2` 仅 loopback）。修改后 host apply，重启后重新 apply；无需镜像重建或重训。
+它作用于宿主网络命名空间，所有对比臂必须保持一致，并使用新 run ID。
+仅在确认 TIME_WAIT/端口耗尽瓶颈后选择相应值；操作与恢复步骤见 walkthrough。
+
+`experiment launch SPEC --apply-host HOST.yaml` 可在同一入口应用已审阅的主机配置并运行；
+默认不 apply。主机 profile 保存到 HOST 同目录同名 `.json`，要求主机无运行 VM。
+同一 run ID 已运行/已成功时不会重复 apply；容量、NUMA 或网络设置改变后使用新 run ID。
+无需因此重建镜像或重训。重启/中断恢复顺序见 walkthrough。
+
 ## 配置结构
 
 | 区域 | 内容 |
@@ -47,7 +57,7 @@ bash scripts/clawbox experiment schema > "$HOME/clawbox-specs/schema.json"
 | `runtime` | `memory_protection: false`、`cpu_release_boost: false`、`proactive_memory_reclaim: false` | 独立 VM 控制；CPU 提升依赖实际争用与释放历史。主动内存回收使用 memory.reclaim，不保证只回收缓存 |
 | `placement` | `policy: round_robin`，可选 os_default/explicit/load_aware；`template_affinity: false` | 模板亲和要求 load_aware 和 compute_nodes，并自动要求物理共享验证。显式放置填写 session_compute_nodes |
 | `idle_reclaim` | `policy: off`，可选 wait/release_cost；`scope: tool`，可选 agent_and_tool | wait 支持两种范围；release_cost 只支持 Tool。恢复固定为再次需要时触发；需要独立模型等待估计 |
-| `shared_memory` | `borrow: off`，可选 hard/pressure | 借用先预留配置容量。pressure 支持常驻 VM，也支持与回收组合 |
+| `shared_memory` | `borrow: off`，可选 hard/pressure | 借用先预留配置容量。pressure 支持常驻 VM，也支持与回收组合。归还 LOCAL 后若仍有共享驻留页，保留容量预留；该 VM 再次借用时复用已有预留 |
 | `checkpoint` | `mechanism: incremental-cow`，可选 full-copy；`storage: disk`，可选 warm-only/tiered；`residency: lru`，可选 value | value 要求 tiered、实测冷热恢复成本和每 case 复用概率。页面加载由后端机制决定，没有独立 eager/lazy 开关 |
 | `deployment` | `mode: managed`，可选 os-default | 部署基线。managed 按配置容量预留创建/恢复需求；os-default 不做这种预留，且要求 OS 放置、常驻、关闭工具准入、运行时控制、借用及模板亲和 |
 | `coordination` | `action_selection: reclaim_first`，可选 measured_cost | 跨借用与回收的动作选择；measured_cost 要求 pressure 借用、空闲回收和实测动作成本 |
@@ -64,10 +74,16 @@ CPU/内存控制不自动启用借用、回收或模板亲和。运行内存借�
 
 重要参数：
 
+准入对可运行请求保持先来先服务，并优先已有会话的进展。同一 VM 仍有执行中的操作时，后续请求等待该操作结束，不阻塞其他 VM；准入等待时间也包含这种同 VM 串行等待，不能全部解释为内存不足。
+负载感知放置的内存排序观测以 0.2 秒为周期共享，避免等待会话重复读取全部 VM；每次实际预留仍重新检查当前内存预算。放置事件记录观测年龄。
+创建队列先取得创建槽，再做放置和内存预留，避免尚不能创建的 VM 占用准入预算。VM 对就绪后立即释放创建槽，槽数不限制已运行会话数。
+`CLAWBOX_SANDBOX_CREATE_CONCURRENCY` 设置同时创建的 VM 对数，默认 8，必须为正整数，并受本次会话数限制；修改后使用新 run ID，无需 host apply、重建镜像或训练。
+
 | 路径 | 默认值 | 单位/用途 |
 |---|---:|---|
 | admission.static_tool_memory_mib | 未设置 | 固定准入额度 MiB；configure 的 `--static-tool-memory-mib auto` 从独立训练产物取实测 P90 |
 | admission.prediction_reservation_scale | 1 | host 校准后预测额度的倍数 |
+| admission.non_command_tool_memory_mib | 未设置 | MiB；文件接口和 SSH 后端维护操作的公共固定预算，未设置时用 static_tool_memory_mib；fixed/predicted 均不对它应用预测缩放 |
 | admission.admission_margin_mib / startup_headroom_mib | 256 / 256 | 全局准入余量/创建余量 MiB |
 | idle_reclaim.checkpoint_restore_headroom_mib | 1024 | LOCAL 内的生命周期操作余量 MiB |
 | runtime.runtime_poll_interval_seconds | 0.5 | 控制采样周期；也用于新控制器 |
@@ -95,6 +111,9 @@ release_forecast_ttl_factor=3（大于 1 的有限倍数）。CPU 释放预测�
 内存下降；guest 命令结束不代表宿主释放页面。内存保护针对宿主 VM cgroup 回收，
 不直接保护 guest 进程工作集。具体适用条件见 [压力控制说明](pressure-control.md)。
 
+关闭回收或借用的单开关消融可保留 `coordination.action_selection: measured_cost`；另一能力仍可用，只有一种可行动作时没有成本排序选择。必须保留独立实测成本，不能因此额外关闭协调或改变物理额度。两种能力都关闭时此设置报错。
+关闭操作不移除 `environment.resources` 中的物理共享池容量；它仍约束实际共享 NUMA 驻留，避免跨 arm 的残留缓存被误报为零容量越界。
+
 ## 证据输入
 
 - `evidence.prediction_artifact`：独立已验证训练产生的 JSON；runtime 模式还需要匹配的 `.kb.json`。
@@ -106,6 +125,9 @@ release_forecast_ttl_factor=3（大于 1 的有限倍数）。CPU 释放预测�
 成本单位都是秒/配置 GiB，复用概率范围 [0,1]。冷恢复不慢于热恢复时驻留价值为零，保留该负结果。
 模板共享必须通过同文件映射、Shared_Clean/PSS 等实际验证；逻辑 base 依赖不等于物理共享。
 PMU 保留现有执行 ID 对齐及四事件质量约束；采集和独立 LLC 放置研究不代表在线 LLC 调度。
+
+progress-enabled Toolbridge 的 `tool_execution_progress` 记录进程执行的 start/end（宿主接收时间）；用 execution ID 与带 `execution_scope` 的 `tool_admitted` 对齐可区分实际在途 Tool 与已准入未启动 Tool。缺失 end 的执行仍须作为未完成报告，不能只计算已结束命令的并发。
+`tool_admission_queued` 到同 execution ID 的 admitted/failed 事件表示准入等待区间；它与 VM 创建、放置队列分别统计。
 
 ## 配方与受控比较
 
@@ -197,6 +219,15 @@ comparison:
 `resources.idle_reclaim_costs` 判断剩余等待时间能否覆盖 checkpoint/restore 成本，并且只回收 Tool VM。
 
 ## 生效与验证
+
+单个 Agent 的 OOM、命令超时、验证失败或普通异常只结束该 Agent；其余 Agent 继续运行。
+`correctness.session_failures` 保存逐个失败原因，成功率分母仍为全部提交的 Agent。
+该臂完成并验证清理后，矩阵会继续下一臂，不会重试直到成功。
+共享控制器故障、无法完成资源清理、显式 abort 或 `execution.arm_timeout_seconds`
+到期会中止整臂，记录 `correctness.arm_interrupted`。命令超时不等于整臂截止时间。
+`execution.arm_finalization_timeout_seconds`（秒，默认 300）只供截止后的 VM 清理和部分结果落盘，
+不延长 Agent 工作时间，也不计入工作负载窗口；修改后使用新 run ID，无需 host apply、重建镜像或重训。
+升级失败隔离逻辑后使用新 run ID；不需要重新应用主机配置、重建镜像或重训。
 
 机制参数、并发、等待/成本证据改变：新 run ID。物理容量、NUMA、CPU 或挂载改变：host check/apply 后重新 configure。
 模板或 guest 依赖改变：重建/注册模板；预测测量环境改变：重新训练。控制器拆分本身不要求重建镜像；

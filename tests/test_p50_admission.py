@@ -61,6 +61,27 @@ def test_reservation_scale_does_not_change_model_prediction():
             ExperimentSpec.model_validate(raw)
 
 
+@pytest.mark.parametrize('mode', ['fixed', 'predicted'])
+def test_non_command_budget_is_identical_and_unscaled_across_admission_arms(mode):
+    from clawbox.experiments.spec import ExperimentSpec, expand_matrix
+    from clawbox.experiments.worker import ExperimentWorker
+    from test_experiments_v2 import raw_spec
+    raw = raw_spec()
+    raw['policies'] = [dict(name=mode, admission=mode, runtime_control='off',
+                           reclamation='resident', eviction='none', restore='none')]
+    raw['resources'].update(static_tool_memory_mib=630, non_command_tool_memory_mib=128,
+                            prediction_reservation_scale=.1)
+    arm = expand_matrix(ExperimentSpec.model_validate(raw))[0]
+    prediction = dict(prediction_source='non_command_fixed_host_budget',
+                      admission_prediction_target='host_cgroup_memory_current_increment',
+                      predicted_incremental_memory_mib=128)
+    assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=prediction) == 128
+    if mode == 'fixed':
+        # Managed exec calls do not carry the non-command marker and must use
+        # the independently calibrated fixed reservation.
+        assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=None) == 630
+
+
 def model(backend, value):
     return {'schema_version': 'call_load.v2', 'scope': 'tool_call',
             'memory_measurement': 'guest_memtotal_minus_memavailable',
@@ -89,10 +110,18 @@ def test_tool_class_is_last_measured_fallback():
     result = select_p50({'tool_class': coarse})
     assert result['predicted_incremental_memory_mib'] == 3
     assert result['fallback_level'] == 'tool_class'
-    assert set(result['unavailable_models']) == {'lattice', 'tool'}
+    assert set(result['unavailable_models']) == {'lattice', 'exact_command', 'tool'}
 
     direct = model('runtime', 2 * 2**20)
     assert select_p50({'tool': direct, 'tool_class': coarse})['fallback_level'] == 'tool'
+
+
+def test_exact_command_measurement_precedes_coarse_toolkb_fallback():
+    exact = model('runtime', 7 * 2**20)
+    coarse = model('runtime', 2 * 2**20)
+    result = select_p50({'exact_command': exact, 'tool': coarse})
+    assert result['predicted_incremental_memory_mib'] == 7
+    assert result['fallback_level'] == 'exact_command'
 
 
 def test_lightweight_requires_measured_short_duration_and_sampling_reason():

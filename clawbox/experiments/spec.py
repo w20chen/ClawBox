@@ -148,6 +148,9 @@ class ExecutionSpec(StrictFrozenModel):
     # Every supported run is supervised at the process boundary.  An
     # unbounded arm cannot provide a reliable terminal state or cleanup SLA.
     arm_timeout_seconds: int = Field(default=1800, ge=1)
+    # The worker enforces arm_timeout_seconds. The supervisor allows this
+    # additional time only for VM cleanup and writing the partial result.
+    arm_finalization_timeout_seconds: int = Field(default=300, ge=1)
     command_timeout_seconds: int = Field(default=300, ge=1)
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
@@ -312,8 +315,8 @@ class ResourcesSpec(StrictFrozenModel):
                 raise ValueError("local watermarks require LOW < HIGH < capacity")
         if self.local_memory_capacity_mib is not None and self.pool_memory_budget_mib > self.local_memory_capacity_mib:
             raise ValueError("pool memory budget cannot exceed physical LOCAL capacity")
-        if self.memory_action_costs is not None and self.memory_scheduling != "joint":
-            raise ValueError("memory_action_costs is supported only for memory_scheduling=joint")
+        if self.memory_action_costs is not None and self.memory_scheduling not in {"joint", "snapshot_only"}:
+            raise ValueError("memory_action_costs requires joint or snapshot_only memory scheduling")
         if (self.memory_action_costs is not None and self.snapshot_storage == "tiered"
                 and (self.memory_action_costs.cold_checkpoint_seconds_per_gib is None
                      or self.memory_action_costs.cold_restore_seconds_per_gib is None)):
@@ -700,7 +703,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                             "prediction_artifact": resources.prediction_artifact,
                             "observe_predictions": resources.observe_predictions})
                         execution = execution.model_copy(update={"placement_policy": "os_default", "session_compute_nodes": ()})
-                    if resources.snapshot_storage != "warm-only" and resources.shared_memory_borrow_limit_mib is None and resources.memory_scheduling not in {
+                    if spec.schema_version != 4 and resources.snapshot_storage != "warm-only" and resources.shared_memory_borrow_limit_mib is None and resources.memory_scheduling not in {
                         "snapshot_only", "joint",
                     }:
                         resources = resources.model_copy(update={"warm_memory_capacity_mib": 0})

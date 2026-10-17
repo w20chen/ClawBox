@@ -38,6 +38,40 @@ def test_numa_usage_assigns_unattributed_charge_to_local(tmp_path: Path) -> None
     assert unattributed == 10
 
 
+def test_verified_vm_lookup_does_not_rescan_all_processes(tmp_path, monkeypatch):
+    root, leaf, proc = make_tree(tmp_path)
+    borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup')
+    assert borrower._leaf_for('sandbox-abc') == leaf
+    original = Path.iterdir
+    def forbidden_scan(path):
+        if path == proc:
+            raise AssertionError('cached VM lookup scanned /proc')
+        return original(path)
+    monkeypatch.setattr(Path, 'iterdir', forbidden_scan)
+    assert borrower._leaf_for('sandbox-abc') == leaf
+
+
+def test_cached_vm_lookup_rechecks_pid_identity_and_cgroup(tmp_path):
+    root, leaf, proc = make_tree(tmp_path)
+    borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup')
+    assert borrower._leaf_for('sandbox-abc') == leaf
+    replacement = root/'43'
+    replacement.mkdir()
+    (replacement/'cpuset.mems').write_text('0')
+    (proc/'7/cgroup').write_text('0::/cube_sandbox/sandbox/43\n')
+    assert borrower._leaf_for('sandbox-abc') == replacement
+    # PID reuse must not retain the old VM's authority over this leaf.
+    (proc/'7/cmdline').write_bytes(b'qemu\0other-sandbox')
+    (proc/'8').mkdir()
+    (proc/'8/cmdline').write_bytes(b'qemu\0sandbox-abc')
+    (proc/'8/cgroup').write_text('0::/cube_sandbox/sandbox/42\n')
+    assert borrower._leaf_for('sandbox-abc') == leaf
+
+
 def test_live_borrow_rebinds_leaf_and_conserves_pool(tmp_path: Path) -> None:
     cgroup, leaf, proc = make_tree(tmp_path)
     pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)
@@ -79,11 +113,36 @@ def test_return_keeps_reservation_for_residual_remote_pages(tmp_path):
     assert record.shared_reclaimed_bytes == 0
     assert record.physical_effect == 'local_policy_restored_residual_shared_residency'
     assert pool.borrowed_bytes == 60
+    again = b.borrow('sandbox-abc', 60)
+    assert again.reservation_reused
+    assert again.effective_mems_after == '1'
+    assert pool.borrowed_bytes == 60
+    with pytest.raises(RuntimeError, match='already using shared'):
+        b.borrow('sandbox-abc', 60)
+    assert not b.return_local('sandbox-abc').reservation_released
     with pytest.raises(RuntimeError, match='reservation retained'):
         b.release_destroyed('sandbox-abc')
     (leaf/'memory.numa_stat').write_text('active_anon N0=80 N1=0\n')
     assert b.return_local('sandbox-abc').reservation_released
     assert pool.borrowed_bytes == 0
+
+
+@pytest.mark.parametrize('already_pinned',[True,False])
+def test_local_pin_verifies_existing_policy_and_repairs_only_changes(tmp_path,already_pinned):
+    root,leaf,proc=make_tree(tmp_path)
+    (leaf/'cpuset.cpus.effective').write_text('0,1' if already_pinned else '2-3')
+    (leaf/'cpuset.mems.effective').write_text('0' if already_pinned else '1')
+    writes=[]
+    def write(path,value):
+        writes.append(path.name)
+        path.write_text(value)
+        path.with_name(path.name+'.effective').write_text(value)
+    borrower=SandboxNumaBorrower(root,local_node=0,shared_node=1,cpus='0-1',
+        shared_pool=WarmSnapshotPool(128),proc_root=proc,cgroup_mount=tmp_path/'sys/fs/cgroup',writer=write)
+    borrower.pin_local('sandbox-abc')
+    borrower._verify_cpus(leaf)
+    assert (leaf/'cpuset.mems.effective').read_text()=='0'
+    assert writes==([] if already_pinned else ['cpuset.cpus','cpuset.mems'])
 
 
 def test_post_write_failure_keeps_capacity_until_verified_cleanup(tmp_path):

@@ -34,6 +34,7 @@ class NumaBorrowRecord:
     shared_bytes_before: int
     shared_bytes_after: int
     reservation_released: bool = False
+    reservation_reused: bool = False
     # Net resident changes include faults/frees; they are not migration traffic.
     measurement_scope: str = "vm_cgroup_resident_delta"
     migrated_bytes: int | None = None
@@ -116,24 +117,43 @@ class SandboxNumaBorrower:
         self.cleanup_timeout_seconds = cleanup_timeout_seconds
         self._lock = RLock()
         self._borrowed: dict[str, _BorrowedAllocation] = {}
+        self._leaf_cache: dict[str, tuple[Path, Path]] = {}
 
     @staticmethod
     def _privileged_write(path: Path, value: str) -> None:
+        limit = 5 if path.name == 'memory.reclaim' else 30
         try:
             completed = subprocess.run(
-                ["sudo", "-n", "tee", str(path)], input=value + "\n",
+                ["sudo", "-n", "timeout", "--signal=KILL", str(limit), "tee", str(path)], input=value + "\n",
                 text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                check=False, timeout=5,
+                check=False, timeout=limit+1,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"timed out updating {path}") from exc
+        if completed.returncode in (-9, 124, 137):
+            raise RuntimeError(f"timed out or killed updating {path}: kernel write limit is {limit} seconds")
         if completed.returncode:
             raise RuntimeError(
                 f"cannot update {path}: {completed.stderr.strip() or completed.returncode}"
             )
 
     def _leaf_for(self, sandbox_id: str) -> Path:
+        cached = self._leaf_cache.get(sandbox_id)
+        if cached is not None:
+            leaf, witness = cached
+            try:
+                unified = next(line.partition("0::")[2]
+                               for line in (witness / 'cgroup').read_text(encoding='ascii').splitlines()
+                               if line.startswith('0::'))
+                if (sandbox_id.encode() in (witness / 'cmdline').read_bytes()
+                        and (self.cgroup_mount / unified.lstrip('/')).resolve() == leaf
+                        and (leaf / 'cpuset.mems').exists()):
+                    return leaf
+            except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration):
+                pass
+            self._leaf_cache.pop(sandbox_id, None)
         leaves: set[Path] = set()
+        witnesses: dict[Path, Path] = {}
         for entry in self.proc_root.iterdir():
             if not entry.name.isdigit():
                 continue
@@ -150,13 +170,16 @@ class SandboxNumaBorrower:
                 if leaf == self.cgroup_root or not (leaf / "cpuset.mems").exists():
                     raise RuntimeError("VM process is not in a writable leaf cpuset")
                 leaves.add(leaf)
+                witnesses[leaf] = entry
             except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration):
                 continue
         if len(leaves) != 1:
             raise RuntimeError(
                 f"expected one cgroup for sandbox {sandbox_id}, found {sorted(map(str, leaves))}"
             )
-        return next(iter(leaves))
+        leaf = next(iter(leaves))
+        self._leaf_cache[sandbox_id] = (leaf, witnesses[leaf])
+        return leaf
 
     def _observe_leaf(self, sandbox_id: str, leaf: Path,
                       reserved_bytes: int = 0) -> NumaResidencyObservation:
@@ -195,15 +218,26 @@ class SandboxNumaBorrower:
         leaf = self._leaf_for(sandbox_id)
         before = self._observe_leaf(sandbox_id, leaf, capacity_bytes)
         self._verify_cpus(leaf)
+        reused = False
         if reserve:
-            parent_shared_before = self._shared_usage(self.cgroup_root)
-            self.shared_pool.reserve_borrow(sandbox_id, capacity_bytes)
-            # Retain ownership even if the write or its verification fails.
-            self._borrowed[sandbox_id] = _BorrowedAllocation(
-                leaf=leaf,
-                capacity_bytes=capacity_bytes,
-                parent_shared_bytes_before=parent_shared_before,
-            )
+            existing = self._borrowed.get(sandbox_id)
+            if existing is not None:
+                # Residual shared pages retain the full reservation after a
+                # return. Reuse that capacity when this LOCAL VM needs it again.
+                if before.effective_mems != str(self.local_node):
+                    raise RuntimeError(f"sandbox is already using shared memory: {sandbox_id}")
+                if existing.capacity_bytes != capacity_bytes or existing.leaf != leaf:
+                    raise RuntimeError('retained borrow reservation does not match the VM')
+                reused = True
+            else:
+                parent_shared_before = self._shared_usage(self.cgroup_root)
+                self.shared_pool.reserve_borrow(sandbox_id, capacity_bytes)
+                # Retain ownership even if the write or its verification fails.
+                self._borrowed[sandbox_id] = _BorrowedAllocation(
+                    leaf=leaf,
+                    capacity_bytes=capacity_bytes,
+                    parent_shared_bytes_before=parent_shared_before,
+                )
         started_wall = time.time()
         started = time.monotonic()
         try:
@@ -255,6 +289,7 @@ class SandboxNumaBorrower:
             local_bytes_before=before.local_bytes, local_bytes_after=after.local_bytes,
             shared_bytes_before=before.shared_bytes, shared_bytes_after=after.shared_bytes,
             reservation_released=released,
+            reservation_reused=reused,
             effective_mems_before=before.effective_mems,
             effective_mems_after=after.effective_mems,
             charged_bytes_before=before.charged_bytes,
@@ -268,8 +303,6 @@ class SandboxNumaBorrower:
 
     def borrow(self, sandbox_id: str, capacity_bytes: int) -> NumaBorrowRecord:
         with self._lock:
-            if sandbox_id in self._borrowed:
-                raise RuntimeError(f"sandbox is already using shared memory: {sandbox_id}")
             record = self._move(
                 sandbox_id, capacity_bytes, target_node=self.shared_node, reserve=True,
             )
@@ -281,14 +314,19 @@ class SandboxNumaBorrower:
         Cube's VM boot/resume precedes this hook. Autonomous guest activity in
         that interval may already have run under the parent's allowed set.
         """
+        # Process discovery is read-only and may scan many processes. Do not
+        # block unrelated VM borrowing/accounting while locating this VM.
+        leaf = self._leaf_for(sandbox_id)
         with self._lock:
             if sandbox_id in self._borrowed:
                 raise RuntimeError(f"borrowed sandbox cannot be newly pinned: {sandbox_id}")
-            leaf = self._leaf_for(sandbox_id)
             if self.cpus is not None:
-                self.writer(leaf / "cpuset.cpus", self.cpus)
+                from .topology import parse_cpu_list
+                if parse_cpu_list((leaf/'cpuset.cpus.effective').read_text()) != parse_cpu_list(self.cpus):
+                    self.writer(leaf / "cpuset.cpus", self.cpus)
                 self._verify_cpus(leaf)
-            self.writer(leaf / "cpuset.mems", str(self.local_node))
+            if (leaf/'cpuset.mems.effective').read_text().strip() != str(self.local_node):
+                self.writer(leaf / "cpuset.mems", str(self.local_node))
             effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
             if effective != str(self.local_node):
                 raise RuntimeError(

@@ -31,7 +31,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 9
+QUALIFICATION_SCHEMA_VERSION = 10
 
 
 def qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
@@ -467,7 +467,7 @@ def live_borrow_roundtrip_test(
         configured_memory_bytes=spec.sandbox.memory_mib * 1024 * 1024,
     )
     primary_error: BaseException | None = None
-    borrow_record = return_record = None
+    borrow_record = return_record = reborrow_record = second_return_record = None
     observations = {}
     allocation_mib = min(128, max(1, spec.sandbox.memory_mib // 16))
     try:
@@ -510,6 +510,17 @@ def live_borrow_roundtrip_test(
         expected_retained = (return_record.reserved_bytes if return_record.shared_bytes_after else 0)
         if shared_pool.borrowed_bytes != expected_retained:
             raise RuntimeError("live-borrow reservation does not match residual shared residency after return")
+        if expected_retained:
+            reborrow_record = lifecycle.borrow_shared()
+            if not reborrow_record.reservation_reused or shared_pool.borrowed_bytes != expected_retained:
+                raise RuntimeError('LOCAL VM could not reuse its retained shared reservation')
+            again = lifecycle.sandbox.commands.run('printf shared-again', timeout=30)
+            if again.exit_code or again.stdout != 'shared-again':
+                raise RuntimeError('VM did not execute after reusing its shared reservation')
+            second_return_record = lifecycle.return_local_memory()
+            expected = second_return_record.reserved_bytes if second_return_record.shared_bytes_after else 0
+            if shared_pool.borrowed_bytes != expected:
+                raise RuntimeError('reborrow changed conservative shared capacity accounting')
     except BaseException as exc:
         primary_error = exc
     cleanup_errors: list[str] = []
@@ -552,6 +563,8 @@ def live_borrow_roundtrip_test(
         "placements": borrower.placements,
         "borrow": asdict(borrow_record) if borrow_record is not None else None,
         "return": asdict(return_record) if return_record is not None else None,
+        "reborrow": asdict(reborrow_record) if reborrow_record is not None else None,
+        "second_return": asdict(second_return_record) if second_return_record is not None else None,
         "residency_observations": observations,
         "allocation_probe_mib": allocation_mib,
         "allocation_probe_scope": "guest_tmpfs_growth; host net residency is not exact migration or page-fault attribution",
@@ -802,6 +815,8 @@ def qualify(
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": time.time(),
         "concurrency": max(qualified.execution.concurrency_levels),
+        "target_concurrency": max(spec.execution.concurrency_levels),
+        "scope": "capability_smoke",
         "policy_names": [policy.name for policy in qualified.policies],
         "target_node": spec.resources.target_node,
         "runtime_image_digest": spec.runtime.image_digest,
@@ -850,11 +865,17 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         }, key=lambda value: value or ""),
         "status": "succeeded",
         "cleanup_verified": True,
+        "target_concurrency": max(spec.execution.concurrency_levels),
+        "scope": "capability_smoke",
     }
     mismatches = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
-    if receipt.get("concurrency", 0) < max(spec.execution.concurrency_levels):
+    # Concurrency is the actual executed smoke size, not evidence of target
+    # performance. Explicit --qualification-concurrency may bound this gate;
+    # every workload case must still execute, and all real mechanism probes
+    # and exact source/input/spec checks remain mandatory.
+    if receipt.get("concurrency", 0) < len(load_workload_cases(spec.workload)):
         mismatches.append("concurrency")
     if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
         mismatches.append("policy_names")

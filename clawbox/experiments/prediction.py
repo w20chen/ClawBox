@@ -73,7 +73,7 @@ def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = Non
     # (``exec``) when a compound command has no transferable binary identity.
     # Keep it after command-aware models so coarse evidence never masks a
     # clause or single-binary prediction.
-    for name in ("lattice", "tool", "tool_class"):
+    for name in ("lattice", "exact_command", "tool", "tool_class"):
         try:
             result = clawtune_extra_peak(models.get(name))
         except PredictionUnavailable as exc:

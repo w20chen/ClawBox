@@ -85,6 +85,43 @@ def _read_json_object(path: Path, *, description: str) -> dict:
     return value
 
 
+def _exact_command_memory_model(samples: list[dict]) -> dict | None:
+    """Build a frozen exact-command estimate from trusted Cube measurements."""
+    from clawtune_sidecar.monitoring.environment_memory import memory_labels
+
+    values = []
+    for sample in samples:
+        value = memory_labels(sample).get('memory_extra_peak_bytes')
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0):
+            values.append(float(value))
+    if len(values) < 2:
+        return None
+    return {
+        'schema_version': 'call_load.v2',
+        'memory_measurement': 'guest_memtotal_minus_memavailable',
+        'scope': 'tool_call',
+        'lifecycle': 'tool_hook_interval',
+        'targets': {
+            'memory_extra_peak_bytes': {
+                'status': 'available',
+                'unit': 'bytes',
+                'metric_definition': 'environment_memory_peak_minus_baseline',
+                'avg': sum(values) / len(values),
+                'p50': _percentile(values, .5),
+                'p90': _percentile(values, .9),
+                'backend': 'runtime',
+                'method': 'validated_exact_command_empirical',
+                'sample_count': len(values),
+                'context': ['public', 'exact_command'],
+                'assumptions': [],
+                'calibration': 'validated_training_run',
+                'unavailable_reason': None,
+            },
+        },
+    }
+
+
 def _training_arm_sources(run: Path, repository: str) -> tuple[ExperimentSpec, tuple[TrainingArmSource, ...]]:
     """Resolve only current supervised CubeSandbox runs into per-arm datasets."""
     run = run.resolve()
@@ -258,6 +295,9 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
                              ts_start=query_ts, memory_measurement='guest_memtotal_minus_memavailable')
         results = predict_native_call_load_models(runtime, query, lattice=lattice)
         models = {k: results[k].model_dump(mode='json') for k in ('lattice', 'tool')}
+        exact_command = _exact_command_memory_model(short[command])
+        if exact_command is not None:
+            models['exact_command'] = exact_command
         # Compound commands intentionally have no single binary identity in
         # ClawTune. Query the same native ToolKB at outer-tool granularity as
         # the final measured fallback instead of inventing a fixed estimate.

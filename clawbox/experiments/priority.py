@@ -10,6 +10,7 @@ import json
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 import uuid
 
@@ -185,19 +186,64 @@ class PriorityDomain:
         # Revoke capabilities first; never recursively delete an arbitrary path.
         for token in self.tokens.values():
             (self.registry / token).unlink(missing_ok=True)
-        errors = []
-        for path in reversed(self.paths):
-            try:
-                path.rmdir()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                errors.append(str(exc))
+        # Cube's destroy response can precede the final VMM thread leaving its
+        # cgroup by a few seconds.  Retry the same known leaves rather than
+        # making the next qualification or arm fail on that teardown race.
+        pending = list(reversed(self.paths))
+        deadline = time.monotonic() + 15
+        last_errors: dict[Path, OSError] = {}
+        while pending:
+            retry = []
+            for path in pending:
+                try:
+                    path.rmdir()
+                    last_errors.pop(path, None)
+                except FileNotFoundError:
+                    last_errors.pop(path, None)
+                except OSError as exc:
+                    retry.append(path)
+                    last_errors[path] = exc
+            if not retry or time.monotonic() >= deadline:
+                pending = retry
+                break
+            pending = retry
+            time.sleep(0.1)
+        # Cube may lose the API record while an owned shim remains alive.  At
+        # this point every sandbox has already been destroyed and capabilities
+        # are revoked, so terminate processes only inside our exact leaves.
+        if pending:
+            for path in pending:
+                kill = path / 'cgroup.kill'
+                try:
+                    if kill.exists():
+                        kill.write_text('1')
+                except FileNotFoundError:
+                    pass
+            deadline = time.monotonic() + 5
+            while pending:
+                retry = []
+                for path in pending:
+                    try:
+                        path.rmdir()
+                        last_errors.pop(path, None)
+                    except FileNotFoundError:
+                        last_errors.pop(path, None)
+                    except OSError as exc:
+                        retry.append(path)
+                        last_errors[path] = exc
+                if not retry or time.monotonic() >= deadline:
+                    pending = retry
+                    break
+                pending = retry
+                time.sleep(0.1)
         if self.lock_file is not None:
             self.lock_file.close()
             self.lock_file = None
-        if errors:
-            raise RuntimeError('priority domain cleanup failed: ' + '; '.join(errors))
+        if pending:
+            raise RuntimeError(
+                'priority domain cleanup failed: '
+                + '; '.join(str(last_errors[path]) for path in pending)
+            )
         if self.journal is not None:
             self.journal.unlink(missing_ok=True)
 

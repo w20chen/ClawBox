@@ -52,6 +52,7 @@ def _short_spec():
     return spec.model_copy(update={
         "execution": spec.execution.model_copy(update={
             "arm_timeout_seconds": 1,
+            "arm_finalization_timeout_seconds": 1,
             "stabilization_seconds": 0,
         }),
     })
@@ -75,6 +76,21 @@ def test_overload_classification_preserves_failed_trials_without_hiding_infrastr
     assert is_trial_outcome(result)  # an OOM may prevent final telemetry delivery
     assert not is_trial_outcome(result.model_copy(update={'failure_category': FailureCategory.INFRASTRUCTURE}))
     assert not is_trial_outcome(result.model_copy(update={'correctness': {'cleanup_verified': False}}))
+    isolated = result.model_copy(update={
+        'failure_category': FailureCategory.AGENT,
+        'correctness': {
+            'cleanup_verified': True, 'arm_interrupted': False,
+            'infrastructure_failure': None,
+            'session_failures': [{'session_id': 'arm-0001', 'error': 'agent failed'}],
+        },
+    })
+    assert is_trial_outcome(isolated)
+    assert not is_trial_outcome(isolated.model_copy(update={'correctness': {
+        **isolated.correctness, 'arm_interrupted': True,
+    }}))
+    assert not is_trial_outcome(isolated.model_copy(update={
+        'failure_category': FailureCategory.INFRASTRUCTURE,
+    }))
 
 
 def test_interruption_cleans_owned_vms_after_terminating_worker(tmp_path, monkeypatch):

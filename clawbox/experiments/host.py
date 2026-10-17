@@ -60,6 +60,7 @@ class HostConfig(BaseModel):
     cubelet_data_root: str = "/data/cubelet"
     output_root: str = "/data/clawbox-results"
     minimum_disk_free_gib: int = Field(default=20, gt=0)
+    tcp_tw_reuse: int | None = Field(default=None, ge=0, le=2)
 
     @model_validator(mode="before")
     @classmethod
@@ -108,6 +109,17 @@ def _run(*argv: str) -> str:
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout).strip() or f"exit {result.returncode}")
     return result.stdout.strip()
+
+
+def apply_network(config: HostConfig) -> None:
+    """Apply only an explicitly saved setting, and verify the kernel value."""
+    if config.tcp_tw_reuse is None:
+        return
+    desired = str(config.tcp_tw_reuse)
+    if _run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse') != desired:
+        _run('sudo', '-n', 'sysctl', '-w', f'net.ipv4.tcp_tw_reuse={desired}')
+    if _run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse') != desired:
+        raise RuntimeError('tcp_tw_reuse did not take effect; inspect sysctl permissions and rerun host apply')
 
 
 def inventory() -> dict:
@@ -166,6 +178,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
         for key in ('output_root', 'cubelet_data_root'):
             if profile.get(key):
                 values[key] = profile[key]
+        if profile.get('tcp_tw_reuse') is not None:
+            values['tcp_tw_reuse'] = profile['tcp_tw_reuse']
         for target, source in (("local_gib", "local_memory_capacity_mib"),
                                ("low_gib", "local_memory_low_watermark_mib"),
                                ("high_gib", "local_memory_high_watermark_mib"),
@@ -218,6 +232,12 @@ def check(config: HostConfig) -> dict:
     probe("cgroup v2", lambda: Path("/sys/fs/cgroup/cgroup.controllers").is_file(),
           "Boot with cgroup v2 before installing CubeSandbox.")
     probe("sudo", lambda: _run("sudo", "-n", "true"), "Run sudo -v in this terminal, then retry.")
+    if config.tcp_tw_reuse is not None:
+        probe('TCP reuse setting', lambda: {
+            'current': int(_run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse')),
+            'requested': config.tcp_tw_reuse,
+            'scope': 'host network namespace; applied until reboot',
+        }, 'Install sysctl and use a Linux host exposing net.ipv4.tcp_tw_reuse, or set tcp_tw_reuse: null to leave it unchanged.')
     probe("Docker", lambda: _run("docker", "info", "--format", "{{.ServerVersion}}"),
           "Start Docker and enable this user's Docker access; docs/installation.md step 1.")
     for name in ("findmnt", "mount", "numactl", "systemctl"):
@@ -305,6 +325,7 @@ def apply(config: HostConfig, profile: Path) -> dict:
     if not report["ready_for_apply"]:
         print(json.dumps(report, indent=2))
         raise ValueError("host prerequisites failed; follow checks[].remedy, then rerun host check")
+    apply_network(config)
     domains = [n.resolved().model_dump() for n in config.compute_nodes]
     local_gib = sum(n.memory_gib for n in config.compute_nodes) if domains else config.local_gib
     local_node = config.compute_nodes[0].numa_node if domains else config.local_node
