@@ -30,8 +30,8 @@ making an application-level claim.
 | P0.1 | c1280-screen-c320-predicted-06 | COMPLETE, CLEANED | 320/320 Agents in 992.83 s, 19.47 Agents/min, offered P99 959.80 s, no OOM |
 | P0.2 | c1280-primary-c640-07 | INVALID, DESTROYED | v5 omitted the configured completion marker; preserve only as diagnostic execution evidence |
 | P0.2 | c640-v6-smoke-01 | COMPLETE, CLEANED | Real-VM 1/1 validation proves the corrected four-phase trace and frozen predictions |
-| P0.2 | c1280-primary-c640-08-v6 | PREDICTED COMPLETE; OS RUNNING, DETACHED | Predicted 640/640 in 1,810.72 s; OS arm continues with isolated create failures |
-| P0.3 | c1280, OS default vs predicted | PENDING P0.2 | Overload boundary only if c640 progresses cleanly |
+| P0.2 | c1280-primary-c640-08-v6 | COMPLETE, CLEANED | Predicted 640/640 in 1,810.72 s; OS 0/640 inside 3,600 s and cleanup verified |
+| P0.3 | c1280, OS default vs predicted | BLOCKED ON STORAGE HEADROOM | Do not start while Cube storage can cross its 85% guard before intended memory contention |
 | P0.4/P1/P2 | real trace and activated mechanisms | PENDING P0 | Run only the selected point/activated mechanisms |
 
 ## Fixed resource configuration
@@ -291,13 +291,17 @@ as a ClawBox benefit.
   was 487,082,692,608 bytes. Shared borrow, return, pause and resume counts were
   all zero, so this arm supports the integrated prediction/admission path but
   does not support the dormant mechanisms individually.
-- The same supervisor has started the OS/no-admission arm. Its ordinary Agent
-  failures remain isolated. During execution, most observed failures are
-  CubeMaster `no more resource` create rejections and the `/data/cubelet`
-  filesystem has crossed the documented 85% storage guard. Preserve the final
-  arm, but do not attribute those failures specifically to memory contention
-  unless the terminal evidence excludes snapshot-storage capacity as the
-  cause.
+- The OS/no-admission arm completed as a valid timeout boundary: 0/640 Agents
+  completed inside the fixed 3,600 s execution window, 164 failed during
+  creation and 476 futures remained unfinished at timeout. Three Agents passed
+  validation only during post-deadline finalization and are correctly excluded
+  from successful throughput. Peak measured VM-cgroup delta was
+  873,553,260,544 bytes, with no OOM or infrastructure failure; all 1,280 VMs
+  were destroyed and cleanup was verified. Of the isolated create failures,
+  148 were CubeMaster `no more resource`. The `/data/cubelet` filesystem crossed
+  the documented 85% storage guard during the arm and returned to 83% after VM
+  cleanup. Therefore this is a valid platform-default end-to-end boundary, but
+  it does not isolate memory contention from snapshot-storage capacity.
 - Arms: `predicted-shared` and `os-default-no-admission` only.
 - Purpose: main positive-gain candidate. The prior c24/48 GiB boundary scales
   to roughly c464 at 928 GiB, so c640 should enter the useful contention regime.
@@ -409,14 +413,15 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
 1. Preserve the completed c320 boundary: predicted completed 320/320 while
    OS/no-admission completed 0/320 before timeout. Treat it as a catastrophic
    contention boundary rather than quoting an undefined finite speedup.
-2. Let the detached c640 supervisor finish the OS/no-admission arm using the four-phase v6
-   trace. It reuses trained commands and retains two overlapping
-   2 GiB phases, while allowing successful Agents to finish inside the fixed
-   window. The 50-phase v4 trace is retained only as an excluded duration
-   stress input because observed SSH/Tool cycle time makes completion
-   throughput unmeasurable at high concurrency.
-3. Decide c1280 eligibility from c640 actual CPU, memory, PSI, queue and progress
-   evidence; do not decide from configured capacity alone.
+2. Preserve the completed c640 boundary: predicted completed 640/640 at
+   21.28 Agents/min while OS/no-admission completed 0/640 inside the fixed
+   window. Report the OS storage-capacity confound and the three post-deadline
+   completions explicitly.
+3. Do not start c1280 until the saved host configuration proves enough Cube
+   storage headroom to keep the platform writable through the intended VM
+   population. The maintained crash-dump cleanup preview found zero removable
+   bytes; do not delete experiment results, VM/template storage or unrelated
+   workloads to manufacture headroom.
 4. After the admission boundary is established, freeze one real-trace F/B point,
    then run only the P1 comparisons whose mechanisms activated.
 
