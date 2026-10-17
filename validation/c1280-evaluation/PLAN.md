@@ -1,6 +1,6 @@
-# ClawBox c1280 evaluation tracking plan
+# ClawBox c320/c640 real-trace evaluation tracking plan
 
-Last updated: 2026-10-17 (Asia/Shanghai)
+Last updated: 2026-10-18 (Asia/Shanghai)
 
 ## Objective and claim boundary
 
@@ -31,10 +31,18 @@ making an application-level claim.
 | P0.2 | c1280-primary-c640-07 | INVALID, DESTROYED | v5 omitted the configured completion marker; preserve only as diagnostic execution evidence |
 | P0.2 | c640-v6-smoke-01 | COMPLETE, CLEANED | Real-VM 1/1 validation proves the corrected four-phase trace and frozen predictions |
 | P0.2 | c1280-primary-c640-08-v6 | COMPLETE, CLEANED | Predicted 640/640 in 1,810.72 s; OS 0/640 inside 3,600 s and cleanup verified |
+| Superseded | c320-admission-ablation-01 | CANCELLED BY USER, DESTROYED | Synthetic three-arm run stopped after about 14 minutes; completed-arm cleanup verified; no result is used |
 | P0.3 | c1280, OS default vs predicted | BLOCKED ON STORAGE HEADROOM | Do not start while Cube storage can cross its 85% guard before intended memory contention |
-| P0.4/P1/P2 | real trace and activated mechanisms | PENDING P0 | Run only the selected point/activated mechanisms |
+| New matrix | real trace c320/c640 | c320 FOUR-ARM CONTINUATION RUNNING | Attempt 06 Full reached the overload deadline, but a stale remote `policy.py` disabled the memory-return controller. The run was cancelled and cleaned. Qualification `qualification-9b7f1cf9a792` passed all four replacement arms and cleanup; run `real-trace-p0-c320-remaining-l160-01` is running. Full is not rerun at this low-value overload point |
+| Pressure pilot | c320 HIGH=512 GiB | CANCELLED, CLEANED | 112 sessions completed with zero idle/checkpoint actions; threshold too high for this trace |
+| Pressure pilot | c320 HIGH=96 GiB | INVALID, CANCELLED, CLEANED | 133 pauses, 126 restores and 98 borrows, but restore churn caused failed Agents; retained only to bound the useful regime |
+| Pair activation | c32 LOW/HIGH=48/52 GiB | PASSED, CANCELLED, CLEANED | 14 paired Runtime+Tool pauses and restores; 14 relay reconnects; zero policy failures; WARM peak 16.817 GiB |
+| Formal attempt 01 | c320 P0 | INVALID, CANCELLED, CLEANED | NUMA migration exceeded a hidden 30 s limit and stopped the watermark controller; raw data retained only as diagnostic evidence |
+| Formal attempt 02 | c320 P0 | INVALID, CANCELLED, CLEANED | Creation concurrency 16 caused 13 failures among the first 25 terminal Agents under concurrent trace/checkpoint load; fallback 8 selected before further time was spent |
+| Formal attempt 03 | c320 P0 | INVALID, CANCELLED, CLEANED | At concurrency 8, three distinct pause/restore paths exposed coarse borrow reservations retained while Cube kept resumable tombstones populated |
+| Formal attempt 04 | c320 P0 | INVALID, CANCELLED, CLEANED | Killing the populated cgroup after pause broke Cube tombstone restore semantics; the change was reverted. Pause now returns NUMA policy LOCAL while retaining physically backed residual reservation until restore/final destroy |
 
-## Fixed resource configuration
+## Historical synthetic scale-up resource configuration
 
 | Resource | Frozen value |
 |---|---:|
@@ -54,12 +62,15 @@ The socket has about 1007 GiB physical memory. LOCAL is capped at 928 GiB to
 leave room for the current non-VM footprint and avoid turning a policy trial
 into a host NUMA OOM experiment.
 
+The new real-trace matrix keeps this physical hard cap but overrides the c320
+LOW/HIGH policy watermarks as specified in its density table.
+
 The applied `/sys/fs/cgroup/cube_sandbox/sandbox` parent was verified with
 effective CPUs `0-159` and memory nodes `0-2`. Thus the OS-default arm inherits
 the same 160-CPU ceiling while Linux manages the combined memory domain; it
 cannot consume the controller CPUs `160-319`.
 
-## Priority order
+## Historical execution record and prior scale-up plan
 
 ### Execution rules after the VM-supply diagnosis
 
@@ -312,10 +323,11 @@ as a ClawBox benefit.
 - Success evidence: successful Agents/s, success rate, all-offered P95/P99,
   admission wait, PSI, LOCAL/shared residency, OOM events, and control overhead.
 
-#### P0.3 Controlled c1280 overload boundary
+#### P0.3 Controlled c1280 overload boundary (blocked, not scheduled)
 
 - Config: `.experiment-audit/c1280-design-20261017/c1280.yaml`
-- Status: PENDING c640 contention/progression review.
+- Status: BLOCKED by CubeSandbox storage headroom and superseded by the
+  real-trace G1--G4 matrix below.
 - Arms: `predicted-shared` and `os-default-no-admission` only.
 - Purpose: determine sustainable throughput and failure behavior at the maximum
   offered concurrency, not claim 1280 simultaneous execution.
@@ -325,70 +337,259 @@ as a ClawBox benefit.
 - Required reporting: offered, VM-started, resident, checkpointed, active Tool,
   and queued counts separately.
 
-#### P0.4 Real-trace F/B confirmation
+## Final redesigned remaining experiment matrix (2026-10-18)
 
-- Status: PENDING controlled boundary selection.
-- Workload: one frozen selected SWE-ReBench trace with its original Tool order
-  and model waits.
-- Arms:
-  - F: complete system with formal frozen KB prediction and admission.
-  - B: OS-default/no-admission system reference under the same resource limit.
-- Density: one contention point selected before viewing final F/B outcomes;
-  likely c160 or c320 rather than a broad sweep.
-- Purpose: application-level predictive-admission evidence. If KB granularity
-  remains too coarse, retain the negative result and restrict the positive claim
-  to the controlled exact-command mechanism study.
+This section supersedes every earlier pending matrix. Do not start a new run
+until all arm specifications, hashes and execution order are generated,
+qualified and frozen.
 
-### P1. One combined-system comparison and two central ablations
+### Workload and time semantics
 
-Run these at one contention point selected from P0. Do not run them at every
-density.
+Every formal arm uses the complete
+`examples/traces/sqlglot-4528-workspace-replay-v2.jsonl` replay with
+`time_scale: 1.0`. All 25 recorded LLM durations are preserved one-for-one:
+177.50 s total, 6.81 s median and 1.91--14.97 s range per request. The original
+recording spans 567.65 s end to end: 177.50 s in LLM calls and 390.15 s between
+them in Tool and agent processing. The replay
+must sleep for each recorded duration; replacing these waits with 10 ms or
+scaling them is experiment-invalid. Tool commands still execute in real VMs.
 
-#### P1.1 Full versus practical resident reference R
+Idle Checkpoint is therefore a primary dimension rather than a conditional
+follow-up. Policy decisions use the independent 2.718 s wait prediction from the
+excluded 15five trace. The SQLGlot trace's actual future wait is recorded only
+as an oracle for post-run error analysis. For a 4-GiB Tool VM, the current
+conservative checkpoint-plus-restore cost estimate is about 0.72 s and the 2x
+amortization guard is about 1.44 s, so the recorded waits are long enough for
+checkpointing to be logically useful.
 
-- F: all selected ClawBox mechanisms.
-- R: calibrated fixed admission, resident VMs, no runtime boost/protection, no
-  idle checkpointing, no dynamic borrowing, and balanced placement.
-- Give R the same workload, CPU budget, validation, timeout, and equal total
-  memory where topology permits.
-- Claim: combined system benefit relative to this reference; no attribution to
-  one mechanism.
+The earlier c320/c640 synthetic results remain separate near-zero-think-time
+contention evidence. They cannot support the real-trace, Idle Checkpoint or
+application-level claims below. The cancelled synthetic
+`c320-admission-ablation-01` is not resumed.
 
-#### P1.2 Shared live-memory borrowing ablation A4
+### Densities, host resources and time limits
 
-- F: `shared_memory.borrow=pressure`.
-- A4: change only borrowing to `off`; retain WARM checkpoints and all quotas.
-- Run only if P0 records real borrow actions or LOCAL pressure that borrowing
-  could relieve.
-- Claim: contribution of live borrowing under the chosen partition.
+Every comparison is run at both c320 and c640. One Agent owns one 2-vCPU/2-GiB
+Runtime VM and one 2-vCPU/4-GiB Tool VM, so the two densities require 640 and
+1,280 live VMs respectively when fully resident.
 
-#### P1.3 Idle reclamation/checkpoint ablation A3
+| Field | c320 | c640 |
+|---|---:|---:|
+| Offered Agents | 320 | 640 |
+| Required Runtime + Tool VMs | 640 | 1,280 |
+| Compute domain | CPUs 0-159, NUMA 0/1 | CPUs 0-159, NUMA 0/1 |
+| LOCAL LOW / HIGH / physical HARD | 128 / 160 / 928 GiB | primary 512 / 640 / 928 GiB; secondary stress Full 384 / 480 / 928 GiB |
+| Maximum WARM/shared pool | 384 GiB on NUMA 2 | 384 GiB on NUMA 2 |
+| Full-arm live-borrow cap | 192 GiB | 192 GiB |
+| Arrival | fixed stagger, 50 ms | fixed stagger, 500 ms |
+| Arm / finalization deadline | 2,400 / 600 s | 2,400 / 600 s |
+| VM-pair creation concurrency | 8 | 8 |
 
-- F: wait-aware idle Tool reclamation enabled.
-- A3: change only idle reclamation to resident.
-- Use a trace with multi-second model waits; the current controlled trace has
-  only 80 ms total model wait and is unsuitable.
-- Run only if the pilot records checkpoint/restore actions.
-- Claim: contribution and cost of reclaiming idle VMs.
+The c640 preflight must prove that 1,280 VMs plus expected run growth will keep
+`/data/cubelet` below its 85% guard. The prior c640 OS arm crossed that guard.
+If current capacity cannot provide at least 20% measured headroom, expand the
+CubeSandbox storage allocation before c640; do not delete unrelated workloads
+or reinterpret a storage-limited result as a policy result. This prerequisite
+is independent of the decision to avoid SSD snapshot tiers.
 
-### P2. Conditional mechanism evidence
+Creation concurrency 8 is the frozen fallback declared before the formal run.
+Concurrency 16 failed 13 of the first 25 terminal Agents when provisioning
+overlapped trace and checkpoint traffic. Attempt 05 has isolated a smaller
+HTTP-408 provisioning burst while the remaining Agents continued; these
+ordinary Agent failures remain in the denominator under the stopping rules.
 
-Run only for mechanisms retained as paper contributions and only after pilots
-show activation.
+The density-specific LOW/HIGH values are bounded by two preserved c320
+pilots. HIGH=512 GiB produced no reclaim action after 112 completed sessions,
+while HIGH=96 GiB produced excessive restore churn and failed Agents. The c320
+128/160-GiB point proved too severe for the 567.65-s application trace: attempt
+06 Full reached its 2,400-s deadline with 0 successful Agents after 14,639
+completed Tool operations and no OOM. Two early memory-return controller calls
+failed because the deployed `numa_borrow.py` expected
+`PolicyCoordinator.claim_memory_return`, while the remote `policy.py` was an
+older copy without that API. This makes the arm diagnostic evidence rather
+than a valid mechanism comparison. It still establishes that this point is an
+overload boundary, so Full is not rerun here; the c640 mild point supplies the
+next valid Full result.
 
-- Runtime memory: F versus F minus `memory.low` protection.
-- Runtime CPU: F versus F minus release-aware CPU boosting.
-- NUMA placement: load-aware versus balanced round-robin, with template
-  affinity disabled in both arms and identical eligible CPUs/memory.
-- Coordination: measured-cost selection versus reclaim-first, only when both
-  borrowing and reclamation are viable concurrent choices.
+The c640 plan therefore does not linearly copy the c320 trigger. It first runs
+one Full-only point at 512/640 GiB and 500-ms arrival spacing, then reuses that
+Full result and runs the four missing P0 baselines at the identical point. This
+is the primary comparison because it prioritizes a normally completing result
+while retaining enough pressure for admission and checkpoint actions. The
+384/480-GiB point becomes a secondary Full-only stress point; it is run only
+after the primary comparison if time remains. This order and both run IDs were
+frozen before any c640 outcome was viewed. Both retain the same 928-GiB physical
+LOCAL hard limit, 384-GiB WARM pool and 192-GiB borrowing cap. These thresholds
+change the managed policy trigger, not the installed memory available to
+OS-default.
 
-Do not claim an independent benefit for a skipped or non-activating mechanism.
+### Canonical Full configuration
+
+`F-S384` is the shared reference at each density. It deliberately enables the
+major ClawBox mechanisms together:
+
+| Dimension | Frozen Full setting |
+|---|---|
+| Deployment | managed |
+| Tool admission | predicted, frozen ClawTune artifact, reservation scale 1.0 |
+| Fixed-policy calibration | independent artifact P90 resolved by `auto` before qualification |
+| Admission constants | non-command 128 MiB; startup headroom 256 MiB; margin 256 MiB |
+| Placement | NUMA load-aware over nodes 0/1; template affinity off |
+| Idle reclamation | pressure-triggered `wait`, Runtime and Tool VM as one Agent pair |
+| Shared borrowing | pressure-based, 192 GiB cap |
+| Runtime control | memory protection, release-aware CPU boost and proactive reclaim on |
+| Coordination | measured-cost selection between safe idle reclaim and live borrowing |
+| Checkpoint | incremental COW, WARM-only, LRU; 1 GiB operation headroom per node; transfer concurrency 4 |
+| WARM/shared capacity | 384 GiB on NUMA node 2 |
+| Cold/SSD tier | disabled; no COLD spill or tiered storage |
+| Sampling | memory 1 s, controller 0.5 s |
+| Seed | 20261017 |
+
+The existing independently measured action costs remain frozen. WARM exhaustion
+must cause policy waiting or another valid in-memory action; it must never spill
+to SSD in this matrix.
+
+### Unique arm matrix
+
+Each row below reuses the same `F-S384` result for the relevant density. Every
+ablation changes only the stated field; workload, images, quotas, timeout,
+arrival order, prediction artifact and all other Full mechanisms remain fixed.
+
+| Study | Arms at both c320 and c640 | Only difference from Full | Question |
+|---|---|---|---|
+| A. Admission | `F-S384`, `A-fixed`, `A-off` | Tool admission predicted / calibrated fixed / off | Does admission prevent collapse, and does prediction beat one fixed reservation? |
+| I. Idle Checkpoint | `F-S384`, `I-resident` | `idle_reclaim.policy=off` in `I-resident` | Do real LLM waits make in-memory checkpoint/reclaim worthwhile? |
+| B. Shared borrowing | `F-S384`, `B-no-borrow` | `shared_memory.borrow=off` | Does live use of the shared NUMA pool improve successful throughput? |
+| S. Shared-pool scale | `S-tight`, `S-near-peak`, `F-S384` | Capacity selected from the measured Full peak by the frozen rule below | How much pool capacity is needed before benefit saturates? |
+| N. NUMA-aware placement | `F-S384`, `N-round-robin` | placement load-aware / round-robin | Does NUMA-aware placement improve balance, throughput or tails? |
+| R. Runtime control | `F-S384`, `R-runtime-off` | all three runtime controls on / off | Does runtime protection and boosting help under actual PSI/contention? |
+| D. Deployment reference | `F-S384`, `D-os-default` | complete ClawBox system / OS placement with all ClawBox controls off | Does the complete system beat a true no-prediction/no-admission deployment? |
+
+`A-off` remains a managed arm: it disables Tool admission only while retaining
+NUMA-aware placement, Idle Checkpoint, borrowing and runtime control. This is
+the causal no-admission comparison. `D-os-default` is a separate end-to-end
+system reference and necessarily disables prediction, admission, managed
+placement, runtime control, reclamation and borrowing.
+
+`A-fixed` uses the prediction artifact's independent static-memory calibration
+resolved by the supported `auto` path and frozen in the qualified YAML. Do not
+choose the fixed MiB value from c320/c640 outcomes. `F-S384`, `A-fixed` and
+`A-off` therefore compare the admission policy while every other mechanism is
+active and identical.
+
+The shared-pool scale study changes both in-memory checkpoint capacity and the
+live-borrow cap at a fixed 2:1 pool-to-borrow ratio. First run `F-S384` and
+measure the maximum physical WARM residency, `P`, separately at each density.
+Before running either capacity arm, freeze `S-near-peak` slightly below `P`
+(90% of `P`, rounded down to a 4-GiB boundary) and `S-tight` at half of that
+capacity. A capacity greater than the observed peak is effectively unbounded
+and is not added as another point. This uses the Full arm only to size the
+resource boundary, never to select a favorable outcome. `B-no-borrow` remains
+the pure borrowing ablation because it retains the full 384-GiB WARM capacity
+for snapshots.
+
+There are ten unique arms per primary density point:
+
+1. `F-S384`
+2. `A-fixed`
+3. `A-off`
+4. `I-resident`
+5. `B-no-borrow`
+6. `S-near-peak`
+7. `S-tight`
+8. `N-round-robin`
+9. `R-runtime-off`
+10. `D-os-default`
+
+The required primary matrix is therefore 20 formal arms across c320 and c640,
+plus the c640 mild Full calibration point. The Full
+arm is not rerun for every pair. Repeat it only if it is invalid or if pre/post
+host baselines show material drift greater than 5% in idle memory, service load
+or VM-create throughput.
+
+### Runtime-control detail
+
+The required runtime comparison treats memory protection, release-aware CPU
+boost and proactive reclaim as one package. Report their action counts and
+service overhead separately. If `F-S384` records nonzero actions for more than
+one component and the paper claims those components independently, add the
+following secondary arms at both c320 and c640:
+
+- `R-no-memory-protection`
+- `R-no-cpu-boost`
+- `R-no-proactive-reclaim`
+
+These six optional runs are not substitutes for `R-runtime-off`. A component
+with zero actions receives a dormant/neutral conclusion rather than a claimed
+benefit.
+
+### Priority and execution order
+
+Run the most consequential evidence first. Within a priority, finish c320 and
+verify cleanup before its c640 counterpart. Use the one frozen order below
+rather than selecting later arms from observed performance.
+
+| Priority | Arms, each at c320 then c640 | New arms | Reason |
+|---|---|---:|---|
+| P0a | c320 `A-off`, `A-fixed`, `I-resident`, `D-os-default`; retain invalid Full only as diagnostic | 4 new | Complete the remaining overload-boundary baselines without rerunning the low-value Full arm |
+| P0b | c640 primary `F-S384` at 512/640 GiB | 1 | Obtain a lower-contention, normally completing Full point first |
+| P0c | c640 primary `A-off`, `A-fixed`, `I-resident`, `D-os-default` at 512/640 GiB | 4 new | Complete the consequential baselines at the same point without rerunning Full |
+| P1a | c640 stress `F-S384` at 384/480 GiB | 1 | Add a second Pareto point only after the primary comparison |
+| P1 | `B-no-borrow`, `S-near-peak`, `S-tight` | 6 | Borrowing attribution and shared-pool capacity curve |
+| P2 | `N-round-robin`, `R-runtime-off` | 4 | NUMA-aware and runtime-control attribution |
+| P3 | component runtime arms, only under the rule above | up to 6 | Fine-grained runtime attribution if actions exist |
+
+Before the first formal arm, run the normal qualification at concurrency 2 and
+one narrow real-VM paired-checkpoint activation check; neither is a performance
+point. The check must observe both `runtime` and `tool` roles in successful
+pause and restore events, Runtime restore before model-response delivery, and
+no stale priority leaf. Do not add a c128 pilot or shorten LLM waits.
+One valid run per arm is sufficient. Ordinary Agent failures remain isolated and
+in the denominator; only infrastructure failure, contaminated cleanup or
+incorrect trace timing invalidates an arm.
+
+### Activation and interpretation requirements
+
+All required ablations run even if a mechanism later proves dormant. Activation
+determines what may be claimed, not whether an unfavorable comparator is kept.
+The 1:1 model waits reduce simultaneous Tool CPU demand and simultaneous memory
+growth, but resident Tool VM pages remain charged until reclamation. Therefore
+CPU contention should be lower than in the 10-ms synthetic workload, while
+resident-memory pressure can remain substantial. Admission benefit must be
+judged from successful throughput and failures rather than assumed from offered
+concurrency.
+
+For the Idle Checkpoint claim, `F-S384` should record at least 64 successful
+Tool pause/restore cycles and 4 GiB aggregate measured LOCAL release at c320,
+and at least 128 cycles and 8 GiB release at c640. These are activation-strength
+checks, not filters for discarding an unfavorable result. If they are not met,
+retain the `I-resident` comparison and report that the selected watermarks did
+not produce enough reclamation activity for a strong mechanism claim.
+
+For every arm, report:
+
+- successful Agents/s, success rate and all-offered P50/P95/P99;
+- provisioning, execution and finalization time separately;
+- actual active Tool overlap and VM/whole-host CPU equivalents;
+- LOCAL, shared-live and WARM snapshot residency, byte-seconds and HIGH crossings;
+- admission blocked count/time and predicted versus observed Tool memory;
+- checkpoint/restore counts, released LOCAL bytes and service time;
+- borrow/return counts, reservation bytes and measured NUMA residency;
+- runtime protection, CPU-boost and proactive-reclaim counts and overhead;
+- per-node placement counts, imbalance and NUMA memory distribution;
+- PSI, reclaim/scan activity, OOM events, isolated Agent failures and cleanup.
+
+A configured switch with zero physical actions is a valid negative result, but
+is not evidence that the mechanism improved performance. Configured capacity,
+predicted demand, reserved bytes and measured physical residency remain separate
+quantities in every table and figure.
 
 ## Decision and stopping rules
 
-- Prioritize P0. Do not delay c640/c1280 admission evidence for secondary
-  ablations or cosmetic infrastructure work.
+- Finish c320 P0a, run the c640 P0b Full, then run the four-arm c640 P0c
+  continuation at the same 512/640-GiB point. The 384/480-GiB Full stress point
+  and mechanism-specific P1/P2 arms follow only if time remains. c1280 remains
+  outside this matrix.
 - Do not modify code for warnings or issues that do not affect results,
   fairness, cleanup isolation, or reproducibility.
 - Fix and rerun only when a defect changes outcomes, disables a selected
@@ -396,6 +597,9 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
   the next arm.
 - One valid run per arm is sufficient. Repeat only an invalid or materially
   anomalous central result.
+- Do not retune within a comparison point. The c640 points above were frozen
+  from the c320 boundary before any c640 outcome; every configuration change has
+  a new run ID and is not directly paired with a different threshold.
 - A queued session is not a running Agent. Claims use successful Agents/s and
   include failures and the complete arm duration.
 - Freeze workload, configuration, code revision, seed, timeout, and comparison
@@ -412,20 +616,74 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
 
 ## Current next actions
 
-1. Preserve the completed c320 boundary: predicted completed 320/320 while
-   OS/no-admission completed 0/320 before timeout. Treat it as a catastrophic
-   contention boundary rather than quoting an undefined finite speedup.
-2. Preserve the completed c640 boundary: predicted completed 640/640 at
-   21.28 Agents/min while OS/no-admission completed 0/640 inside the fixed
-   window. Report the OS storage-capacity confound and the three post-deadline
-   completions explicitly.
-3. Do not start c1280 until the saved host configuration proves enough Cube
-   storage headroom to keep the platform writable through the intended VM
-   population. The maintained crash-dump cleanup preview found zero removable
-   bytes; do not delete experiment results, VM/template storage or unrelated
-   workloads to manufacture headroom.
-4. After the admission boundary is established, freeze one real-trace F/B point,
-   then run only the P1 comparisons whose mechanisms activated.
+1. c320 qualification, the stale-leaf Linux cgroup test, and the real-VM paired
+   Runtime+Tool checkpoint check passed. Formal attempt 01 was invalidated by
+   the hidden 30 s `cpuset.mems` timeout; the configured 120 s pool-operation
+   timeout now governs that migration. Attempt 02 proved that creation
+   concurrency 16 is unstable when provisioning overlaps real trace and
+   checkpoint traffic; it was cancelled and cleaned. Attempt 03 uses the
+   predeclared fallback of 8. Attempt 03 then isolated the stale-shim borrow
+   accounting defect without creation failures; it was cancelled and cleaned.
+   Attempt 04 proved that the populated cgroup is Cube's required resume
+   tombstone rather than a disposable shim, so that change was reverted.
+   Checkpoint now returns borrowed NUMA policy to LOCAL, retains only physically
+   backed residual reservation, and lets restore/final destroy release it.
+2. Finish qualification of the four-arm c320 continuation
+   `real-trace-p0-c320-remaining-l160-01`, then run `A-off`, `A-fixed`,
+   `I-resident`, and `D-os-default` in frozen order. Inspect failures and
+   paired-checkpoint events, then let the validated guard run P0 c640. Do not
+   rerun Full at c320, the two pressure pilots, or any completed valid arm.
+3. Measure current CubeSandbox storage use and project the 1,280-VM c640 peak.
+   Expand its storage allocation if the projected run cannot retain 20% free
+   headroom; do not begin c640 in a known storage-limited state.
+4. After each valid Full arm, freeze the two density-specific constrained WARM
+   capacities from its measured peak using the rule above; retain all raw event
+   logs used for that calculation.
+5. Continue with P1 and P2 within the time budget. Add P3 only when recorded
+   runtime actions justify component-level claims.
+
+Attempt 05 is invalid diagnostic evidence. Before the unrelated cleanup defect
+stopped it, the Full arm reached 420 pauses, 396 restores, 71 shared-memory
+borrows and more than 16,000 completed Tool calls with no OOM. WARM residency
+reached about 155 GiB of the configured 384 GiB. Ordinary HTTP 408, HTTP 502 and
+Tool transport failures initially remained isolated, but one failed Agent's
+model-gateway session then failed to drain and cleanup raised
+`ArmInfrastructureError`, terminating the arm with 0/320 reported completions.
+The run was cancelled and cleanup verified; its raw event log remains for
+diagnosis and cannot support a performance comparison.
+
+The narrow repair discards an undrained model-gateway session only when that
+Agent has already failed, after both of its VMs close, and records
+`model_gateway_session_discarded`. A successful Agent's undrained session still
+invalidates the arm. Thirty-five focused tests passed both locally and on
+Kunpeng. The replacement qualification `qualification-795bd93c4e9b` completed
+all five real-VM arms with verified cleanup. Formal run
+`real-trace-p0-c320-pair-l160-06`, attempt
+`attempt-af9e5cfa740c4252`, was cancelled and fully cleaned. Its Full arm timed
+out after 2,400 s with 0/320 successes, 14,639 completed Tool operations, 120
+pause and 118 restore events, 31 borrow actions, six isolated HTTP 408 Agent
+failures, and no OOM. Two controller failures caused by the stale remote
+`policy.py` invalidate mechanism attribution from this arm. The next `A-off`
+arm was stopped early and is not used. The matching policy source was deployed
+and its 47 policy/NUMA tests passed. Qualification
+`qualification-9b7f1cf9a792` then passed all four real-VM arms, paired
+incremental-COW checkpoint/restore, two-node borrow/return/reborrow, and
+verified cleanup. Formal continuation
+`real-trace-p0-c320-remaining-l160-01`, attempt
+`attempt-577b6cbfdfaf4b21`, is running the four previously incomplete arms. A
+guard starts c640 mild Full only after every c320 continuation arm produces a
+valid outcome with verified cleanup.
+
+The guarded continuation is now complete: c640 begins only after every c320 arm
+is an `is_trial_outcome` result with verified cleanup. It runs the 512/640-GiB
+Full and then its four missing baselines. The former automatic P1/P2 sequence is
+paused so that secondary arms cannot consume time before the primary evidence
+is complete. Ordinary Agent failure, OOM, admission and timeout outcomes remain
+valid outcomes rather than infrastructure failures. Constrained WARM configs
+are generated only after the c640 Full completes. The generator records
+measured physical pool residency and the controller's enforced
+shared-plus-snapshot charge separately, then uses their larger peak for the
+frozen 90%-and-half sizing rule.
 
 ## Locations
 
@@ -435,3 +693,7 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
 - Applied host profile: `/home/weitianc/clawbox-c1280-20261017/configs/host.json`
 - Observed foreground idle gate and c320 launcher:
   `/home/weitianc/clawbox-c1280-20261017/run-c320-when-idle.sh`
+
+## Additional Tasks
+
+When you finish everything above, if you still have time, please finish additional experiments in ClawBox/LLC.md

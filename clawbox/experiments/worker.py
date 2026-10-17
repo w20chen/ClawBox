@@ -3653,6 +3653,7 @@ class ExperimentWorker:
         finally:
             session_error = sys.exception()
             cleanup_errors: list[str] = []
+            discard_failed_gateway_session = False
             discard_failed_policy_session = False
 
             def cleanup_step(label: str, operation: Any) -> Any:
@@ -3681,11 +3682,20 @@ class ExperimentWorker:
                 gateway_drained = cleanup_step(
                     "model gateway session",
                     lambda: self.model_gateway.unregister(
-                        gateway_session.token, timeout=30,
+                        gateway_session.token,
+                        timeout=0 if session_error is not None else 30,
                     ),
                 )
                 if gateway_drained is False:
-                    cleanup_errors.append("model gateway session did not drain")
+                    if session_error is None:
+                        cleanup_errors.append("model gateway session did not drain")
+                    else:
+                        # unregister() has already removed this failed Agent's
+                        # token.  Its in-flight request can finish only after
+                        # the broken Runtime/Tool pair is stopped below, so it
+                        # is isolated Agent cleanup rather than shared-arm
+                        # contamination.
+                        discard_failed_gateway_session = True
             if policy_session is not None:
                 policy_drained = cleanup_step(
                     "policy session",
@@ -3719,6 +3729,12 @@ class ExperimentWorker:
                     "event": "sandbox_destroyed", "session_id": session_id,
                     "role": "runtime", "service_seconds": runtime_destroy_s,
                     "lifecycle_timing": runtime_lifecycle.timings[-1],
+                }))
+            if discard_failed_gateway_session:
+                cleanup_step("failed model gateway event", lambda: events.write({
+                    "event": "model_gateway_session_discarded",
+                    "session_id": session_id,
+                    "reason": "agent_failed_with_active_request",
                 }))
             if discard_failed_policy_session:
                 cleanup_step("failed policy session", policy_session.discard)

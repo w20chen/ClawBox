@@ -410,7 +410,12 @@ class CubeSandboxLifecycle:
                     self._tier = tier
                 self._state = SandboxState.SWAPPED
                 if self.numa_borrower is not None and self.sandbox_id is not None:
-                    self.numa_borrower.release_destroyed(self.sandbox_id)
+                    # Pause keeps a Cube tombstone/shim for resume, so its
+                    # cgroup may remain populated even though guest memory is
+                    # gone. Restore LOCAL placement and retain only any
+                    # reservation still backed by measured shared residency.
+                    if self.sandbox_id in self.numa_borrower.borrowed():
+                        self.numa_borrower.return_local(self.sandbox_id)
                 return self._record("checkpoint", before, self._state,
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,

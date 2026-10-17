@@ -405,6 +405,35 @@ def test_lifecycle_passes_verified_cgroup_to_numa_borrower(tmp_path) -> None:
     lifecycle.close()
 
 
+def test_checkpoint_returns_borrowed_tombstone_to_local_before_restore(tmp_path) -> None:
+    _Sandbox.items = {}
+    calls = []
+
+    class Borrower:
+        def pin_local(self, sandbox_id, *, verified_cgroup=None):
+            calls.append(('pin', sandbox_id))
+        def borrowed(self):
+            return (lifecycle.sandbox_id,)
+        def return_local(self, sandbox_id):
+            calls.append(('return', sandbox_id))
+        def release_destroyed(self, sandbox_id):
+            calls.append(('destroy', sandbox_id))
+
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox), template='tpl',
+        node_name='node-a', ownership=_owner(),
+        cold_snapshot_root=str(tmp_path / 'cold'), numa_borrower=Borrower(),
+    )
+    lifecycle.start()
+    sandbox_id = lifecycle.sandbox_id
+    lifecycle.checkpoint_and_evict()
+    assert ('return', sandbox_id) in calls
+    assert ('destroy', sandbox_id) not in calls
+    lifecycle.restore()
+    lifecycle.close()
+    assert ('destroy', sandbox_id) in calls
+
+
 def test_checkpoint_manifest_failure_does_not_mark_paused_vm_running() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)

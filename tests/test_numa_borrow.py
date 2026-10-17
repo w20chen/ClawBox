@@ -172,6 +172,30 @@ def test_local_pin_verifies_existing_policy_and_repairs_only_changes(tmp_path,al
     assert writes==([] if already_pinned else ['cpuset.cpus','cpuset.mems'])
 
 
+def test_local_pin_accepts_retained_borrow_reservation_after_restore(tmp_path):
+    root, leaf, proc = make_tree(tmp_path)
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)
+
+    def write(path, value):
+        path.write_text(value)
+        path.with_name(path.name + '.effective').write_text(value)
+
+    borrower = SandboxNumaBorrower(
+        root, local_node=0, shared_node=1, shared_pool=pool,
+        proc_root=proc, cgroup_mount=tmp_path / 'sys/fs/cgroup', writer=write,
+    )
+    borrower.borrow('sandbox-abc', 60)
+    (leaf / 'memory.numa_stat').write_text('active_anon N0=50 N1=1\n')
+    assert not borrower.return_local('sandbox-abc').reservation_released
+    borrower.pin_local('sandbox-abc', verified_cgroup=leaf)
+    assert borrower.borrowed() == ('sandbox-abc',)
+    assert pool.borrowed_bytes == 60
+    (leaf / 'memory.numa_stat').write_text('active_anon N0=50 N1=0\n')
+    borrower.pin_local('sandbox-abc', verified_cgroup=leaf)
+    assert borrower.borrowed() == ()
+    assert pool.borrowed_bytes == 0
+
+
 def test_post_write_failure_keeps_capacity_until_verified_cleanup(tmp_path):
     cgroup, leaf, proc = make_tree(tmp_path)
     pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)

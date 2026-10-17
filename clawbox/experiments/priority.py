@@ -25,6 +25,9 @@ def session_priority(index: int, concurrency: int, repetition: int) -> str:
 
 
 class PriorityDomain:
+    leaf_release_grace_seconds = 5.0
+    leaf_kill_grace_seconds = 5.0
+
     def __init__(self, parent: Path, *, concurrency: int, repetition: int,
                  registry: Path = REGISTRY, placements: dict | None = None,
                  journal_directory: Path | None = None, legacy: bool = True):
@@ -139,9 +142,22 @@ class PriorityDomain:
         leaf = self.leaves[index, role]
         # Cube's pause/destroy response can precede the final VMM thread leaving
         # its preallocated leaf. Restore may immediately reuse that same leaf.
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + self.leaf_release_grace_seconds
         while (leaf/'cgroup.procs').read_text().strip() and time.monotonic() < deadline:
             time.sleep(.05)
+        # A failed Cube resume can leave its old shim alive indefinitely even
+        # though the API operation has ended.  prepare() runs before Cube is
+        # asked to create the replacement VM, so every remaining process is a
+        # stale owner of this exact preallocated leaf.  Use the kernel's narrow
+        # cgroup kill operation rather than scanning or killing unrelated PIDs.
+        if (leaf/'cgroup.procs').read_text().strip():
+            kill = leaf/'cgroup.kill'
+            if kill.exists():
+                kill.write_text('1')
+                deadline = time.monotonic() + self.leaf_kill_grace_seconds
+                while ((leaf/'cgroup.procs').read_text().strip()
+                       and time.monotonic() < deadline):
+                    time.sleep(.05)
         if (leaf/'cgroup.procs').read_text().strip():
             raise RuntimeError(f'priority VM leaf is already populated: {leaf}')
         cpus, node = self.placements.get(index, (None, None))

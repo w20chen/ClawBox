@@ -120,9 +120,13 @@ class SandboxNumaBorrower:
         self._leaf_cache: dict[str, tuple[Path, Path]] = {}
         self._verified_leaves: dict[str, Path] = {}
 
-    @staticmethod
-    def _privileged_write(path: Path, value: str) -> None:
-        limit = 5 if path.name == 'memory.reclaim' else 30
+    def _privileged_write(self, path: Path, value: str) -> None:
+        # cpuset.mems may synchronously migrate a large VM working set.  Use
+        # the experiment's configured pool-operation timeout instead of a
+        # smaller hidden limit; memory.reclaim remains a short best-effort
+        # operation because it runs on the admission path.
+        limit = (5 if path.name == 'memory.reclaim' else
+                 max(30, int(self.cleanup_timeout_seconds or 0)))
         try:
             completed = subprocess.run(
                 ["sudo", "-n", "timeout", "--signal=KILL", str(limit), "tee", str(path)], input=value + "\n",
@@ -338,8 +342,17 @@ class SandboxNumaBorrower:
         # hold the borrower lock during that read-only scan.
         leaf = self._leaf_for(sandbox_id)
         with self._lock:
-            if sandbox_id in self._borrowed:
-                raise RuntimeError(f"borrowed sandbox cannot be newly pinned: {sandbox_id}")
+            retained = self._borrowed.get(sandbox_id)
+            if retained is not None and retained.leaf != leaf:
+                if retained.leaf.exists():
+                    raise RuntimeError(
+                        f"retained borrow reservation points at a different live cgroup: {sandbox_id}"
+                    )
+                self._borrowed[sandbox_id] = _BorrowedAllocation(
+                    leaf=leaf,
+                    capacity_bytes=retained.capacity_bytes,
+                    parent_shared_bytes_before=retained.parent_shared_bytes_before,
+                )
             if self.cpus is not None:
                 from .topology import parse_cpu_list
                 if parse_cpu_list((leaf/'cpuset.cpus.effective').read_text()) != parse_cpu_list(self.cpus):
@@ -352,6 +365,9 @@ class SandboxNumaBorrower:
                 raise RuntimeError(
                     f"VM LOCAL pin did not take effect: requested {self.local_node}, got {effective}"
                 )
+            if retained is not None and self._usage(leaf)[1] == 0:
+                self.shared_pool.release_borrow(sandbox_id)
+                self._borrowed.pop(sandbox_id)
             self.placements.append({
                 "sandbox_id": sandbox_id, "node_id": self.node_id,
                 "numa_node": self.local_node, "cpus": self.cpus,
