@@ -23,7 +23,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from threading import Event, Lock, RLock, Semaphore, Thread, Timer
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from clawbox.cube import (
     CubeCommandExecutor, CubeSandboxClient, CubeSandboxLifecycle,
@@ -566,13 +566,13 @@ class WatermarkController:
             return False
         with self._lock:
             lifecycles = {
-                lifecycle.sandbox_id: lifecycle
-                for session in self._lifecycles.values()
+                lifecycle.sandbox_id: (session_id, lifecycle)
+                for session_id, session in self._lifecycles.items()
                 for lifecycle in session
                 if lifecycle.resident and lifecycle.sandbox_id in borrowed
             }
         candidates = []
-        for sandbox_id, lifecycle in lifecycles.items():
+        for sandbox_id, (session_id, lifecycle) in lifecycles.items():
             # Observe through the lifecycle lock.  A session can finish and
             # remove its cgroup after the registry snapshot above; in that
             # case it is no longer a return candidate, not a controller-wide
@@ -586,12 +586,26 @@ class WatermarkController:
                 continue
             if local_used_bytes + observation.shared_bytes <= self.high:
                 candidates.append((observation.shared_bytes, sandbox_id,
-                                   lifecycle, observation))
+                                   session_id, lifecycle, observation))
         if not candidates:
             return False
-        _shared, _sandbox_id, lifecycle, before = min(candidates)
-        record = lifecycle.return_local_memory()
-        if record is None:
+        record = None
+        before = None
+        lifecycle = None
+        for _shared, _sandbox_id, session_id, candidate, observation in sorted(candidates):
+            coordinate_tool = candidate.role == "tool"
+            if coordinate_tool and not self.coordinator.claim_memory_return(session_id):
+                continue
+            try:
+                record = candidate.return_local_memory()
+            finally:
+                if coordinate_tool:
+                    self.coordinator.release_memory_return(session_id)
+            if record is not None:
+                lifecycle = candidate
+                before = observation
+                break
+        if record is None or lifecycle is None or before is None:
             return False
         self.return_count += 1
         self.return_release_count += int(record.reservation_released)
@@ -2949,28 +2963,22 @@ class ExperimentWorker:
                             # Claim the session before routing memory. Otherwise
                             # checkpoint/restore can reset a just-borrowed VM to
                             # LOCAL while this request carries a zero LOCAL claim.
-                            coordinator.set_tool_active(session_id, True)
-                            if (watermark_controller is not None
-                                    and watermark_controller.route_progress_to_shared(lifecycle, amount)):
-                                local_amount = 0
-                                admission_memory_tier = "shared"
-                            # Memory admission may intentionally wait for a
-                            # running Tool to finish. Do not hold the lifecycle
-                            # lock during that wait: the completion callback
-                            # needs it to publish the result and make progress.
-                            admission_wait = wait_for_admission_without_lifecycle_lock(
-                                wait_lock,
-                                lambda: coordinator.begin_tool_admission(
-                                    session_id, local_amount,
-                                    arm.execution.arm_timeout_seconds, total_mib=amount,
+                            (
+                                local_amount,
+                                admission_memory_tier,
+                                admission_wait,
+                                restored_tool,
+                            ) = self._prepare_tool_admission(
+                                arm, session_id, lifecycle, coordinator, events,
+                                watermark_controller, amount,
+                                wait_for_admission=lambda operation: (
+                                    wait_for_admission_without_lifecycle_lock(
+                                        wait_lock, operation,
+                                    )
                                 ),
                             )
                             reservation_acquired = True
-                            restored_tool = not lifecycle.resident
                             if restored_tool:
-                                self._restore_with_one_victim(
-                                    arm, session_id, lifecycle, coordinator, events,
-                                )
                                 bridge_ready_started = time.monotonic()
                                 bridge_error: Exception | None = None
                                 bridge_result = None
@@ -3774,6 +3782,47 @@ class ExperimentWorker:
                       "materialization_reservation_wait_seconds": reservation_wait,
                       "lifecycle_timing": lifecycle.timings[-1]})
         return elapsed
+
+    def _prepare_tool_admission(
+        self,
+        arm: ExperimentArm,
+        session_id: str,
+        lifecycle: CubeSandboxLifecycle,
+        coordinator: PolicyCoordinator,
+        events: EventWriter,
+        watermark_controller: WatermarkController | None,
+        amount_mib: int,
+        *,
+        wait_for_admission: Callable[[Callable[[], float]], float],
+    ) -> tuple[int, str, float, bool]:
+        """Restore first, then reserve growth in its actual allocation tier."""
+        coordinator.set_tool_active(session_id, True)
+        restored_tool = not lifecycle.resident
+        if restored_tool:
+            self._restore_with_one_victim(
+                arm, session_id, lifecycle, coordinator, events,
+            )
+
+        local_amount = amount_mib
+        admission_memory_tier = "local"
+        if (
+            watermark_controller is not None
+            and watermark_controller.route_progress_to_shared(lifecycle, amount_mib)
+        ):
+            local_amount = 0
+            admission_memory_tier = "shared"
+
+        # The caller drops its lifecycle lock during this wait so completion can
+        # publish the result and release the preceding Tool claim.
+        admission_wait = wait_for_admission(
+            lambda: coordinator.begin_tool_admission(
+                session_id,
+                local_amount,
+                arm.execution.arm_timeout_seconds,
+                total_mib=amount_mib,
+            )
+        )
+        return local_amount, admission_memory_tier, admission_wait, restored_tool
 
     def _tool_reservation_mib(self, arm: ExperimentArm, *,
                               prediction: dict[str, Any] | None = None) -> int:

@@ -30,7 +30,7 @@ making an application-level claim.
 | P0.1 | c1280-screen-c320-predicted-06 | COMPLETE, CLEANED | 320/320 Agents in 992.83 s, 19.47 Agents/min, offered P99 959.80 s, no OOM |
 | P0.2 | c1280-primary-c640-07 | INVALID, DESTROYED | v5 omitted the configured completion marker; preserve only as diagnostic execution evidence |
 | P0.2 | c640-v6-smoke-01 | COMPLETE, CLEANED | Real-VM 1/1 validation proves the corrected four-phase trace and frozen predictions |
-| P0.2 | c1280-primary-c640-08-v6 | RUNNING, DETACHED | Only the two required arms; supervisor sequences and cleans them automatically |
+| P0.2 | c1280-primary-c640-08-v6 | PREDICTED COMPLETE; OS RUNNING, DETACHED | Predicted 640/640 in 1,810.72 s; OS arm continues with isolated create failures |
 | P0.3 | c1280, OS default vs predicted | PENDING P0.2 | Overload boundary only if c640 progresses cleanly |
 | P0.4/P1/P2 | real trace and activated mechanisms | PENDING P0 | Run only the selected point/activated mechanisms |
 
@@ -284,9 +284,20 @@ as a ClawBox benefit.
   `7c0e53b0b4ee6062b718e2187e46e30cc4902ccdcdc81c761f8770a6d6008119`.
 - `c640-v6-smoke-01` completed 1/1 real Agent with validation and cleanup true,
   all four predictions from `frozen_clawbox_p50`, and no OOM or telemetry loss.
-- `c1280-primary-c640-08-v6` is now running detached with only
-  prediction/admission and OS/no-admission. The same supervisor starts the
-  second arm only after cleanup of the first.
+- `c1280-primary-c640-08-v6` predicted/admission completed 640/640 in
+  1,810.72 s at 21.28 Agents/min, with offered P95/P99 1,763.88/1,768.68 s,
+  JCT P95/P99 539.91/552.98 s, no failed session, OOM, telemetry loss or
+  infrastructure failure, and verified cleanup. Peak measured VM-cgroup delta
+  was 487,082,692,608 bytes. Shared borrow, return, pause and resume counts were
+  all zero, so this arm supports the integrated prediction/admission path but
+  does not support the dormant mechanisms individually.
+- The same supervisor has started the OS/no-admission arm. Its ordinary Agent
+  failures remain isolated. During execution, most observed failures are
+  CubeMaster `no more resource` create rejections and the `/data/cubelet`
+  filesystem has crossed the documented 85% storage guard. Preserve the final
+  arm, but do not attribute those failures specifically to memory contention
+  unless the terminal evidence excludes snapshot-storage capacity as the
+  cause.
 - Arms: `predicted-shared` and `os-default-no-admission` only.
 - Purpose: main positive-gain candidate. The prior c24/48 GiB boundary scales
   to roughly c464 at 928 GiB, so c640 should enter the useful contention regime.
@@ -398,7 +409,7 @@ Do not claim an independent benefit for a skipped or non-activating mechanism.
 1. Preserve the completed c320 boundary: predicted completed 320/320 while
    OS/no-admission completed 0/320 before timeout. Treat it as a catastrophic
    contention boundary rather than quoting an undefined finite speedup.
-2. Let the detached c640 supervisor finish both arms using the four-phase v5
+2. Let the detached c640 supervisor finish the OS/no-admission arm using the four-phase v6
    trace. It reuses trained commands and retains two overlapping
    2 GiB phases, while allowing successful Agents to finish inside the fixed
    window. The 50-phase v4 trace is retained only as an excluded duration

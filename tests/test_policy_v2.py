@@ -479,6 +479,40 @@ def test_tool_activation_waits_for_an_atomic_eviction_claim() -> None:
     assert coordinator.tool_active("tool")
 
 
+def test_memory_return_excludes_tool_claim_and_new_admission() -> None:
+    policy = PolicySpec(name="snapshot", admission="fixed",
+                        reclamation="snapshot_pause", eviction="wait_aware_pressure",
+                        restore="reactive")
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=0,
+        operation_headroom_mib=0,
+    )
+    lifecycle = Lifecycle()
+    coordinator.register("tool", lifecycle)
+
+    coordinator.begin_tool_admission("tool", 1, 0)
+    assert not coordinator.claim_memory_return("tool")
+    coordinator.release("tool", 1)
+    coordinator.set_tool_active("tool", False)
+    assert coordinator.claim_memory_return("tool")
+
+    attempting = threading.Event()
+    activated = threading.Event()
+
+    def activate() -> None:
+        attempting.set()
+        coordinator.set_tool_active("tool", True)
+        activated.set()
+
+    thread = threading.Thread(target=activate)
+    thread.start()
+    assert attempting.wait(timeout=1)
+    assert not activated.wait(timeout=0.05)
+    coordinator.release_memory_return("tool")
+    thread.join(timeout=1)
+    assert activated.is_set()
+
+
 def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
     policy = PolicySpec(name="resident", admission="fixed", reclamation="resident",
                         eviction="none", restore="none")

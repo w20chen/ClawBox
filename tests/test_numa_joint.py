@@ -343,7 +343,9 @@ def test_low_watermark_returns_only_shared_residency_that_fits_below_high():
         return_cooldown_seconds=0, memory_action_costs=None),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     c = WatermarkController(
-        arm, SimpleNamespace(), SimpleNamespace(), Borrower(),
+        arm, SimpleNamespace(claim_memory_return=lambda _: True,
+                             release_memory_return=lambda _: None),
+        SimpleNamespace(), Borrower(),
         SimpleNamespace(write=events.append),
     )
     c.register('session-1', Lifecycle(), SimpleNamespace(
@@ -354,6 +356,173 @@ def test_low_watermark_returns_only_shared_residency_that_fits_below_high():
     assert c.return_count == 1 and c.return_release_count == 1
     assert events[-2]['event'] == 'shared_memory_returned'
     assert events[-1]['action'] == 'return'
+
+
+def test_low_watermark_does_not_return_a_tool_with_inflight_growth():
+    mib = 1024**2
+    pool = WarmSnapshotPool(128*mib, borrow_capacity_bytes=64*mib)
+    observation = NumaResidencyObservation(
+        sandbox_id='tool-1', cgroup='/cg/tool-1', effective_mems='2',
+        local_bytes=0, shared_bytes=mib, other_numa_bytes=0,
+        unattributed_bytes=0, charged_bytes=mib, reserved_bytes=4*mib,
+        observed_unix_s=1,
+    )
+
+    class Lifecycle:
+        sandbox_id = 'tool-1'
+        role = 'tool'
+        resident = True
+        returned = False
+        def observe_borrow_candidate(self):
+            return observation
+        def return_local_memory(self):
+            self.returned = True
+            return NumaBorrowRecord(
+                self.sandbox_id, '/cg/tool-1', 4*mib, 2, 0,
+                1, 2, .1, 0, mib, 0, mib,
+                reservation_released=True,
+                physical_effect='local_policy_restored_reservation_released',
+            )
+
+    from clawbox.experiments.policy import PolicyCoordinator
+    from clawbox.experiments.spec import PolicySpec
+    policy = PolicySpec(name='joint', admission='predicted',
+                        reclamation='snapshot_pause',
+                        eviction='wait_aware_pressure', restore='reactive')
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=16, progress_budget_mib=18,
+        emergency_free_mib=0, operation_headroom_mib=1,
+        physical_sample=lambda: (10*mib, 100*mib),
+    )
+    lifecycle = Lifecycle()
+    coordinator.register('session-1', lifecycle)
+    coordinator.begin_tool_admission('session-1', 4, 0, total_mib=4)
+    borrower = SimpleNamespace(
+        node_id='node0', shared_node=2, shared_pool=pool,
+        borrowed=lambda: ('tool-1',),
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=12,
+        local_memory_high_watermark_mib=16,
+        local_memory_capacity_mib=18,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, coordinator, SimpleNamespace(), borrower,
+        SimpleNamespace(write=lambda event: None),
+    )
+    controller.register('session-1', lifecycle, SimpleNamespace(
+        sandbox_id='runtime-1', resident=False,
+    ))
+
+    assert controller._return_one(10*mib) is False
+    assert not lifecycle.returned
+    coordinator.release('session-1', 4)
+    coordinator.set_tool_active('session-1', False)
+    assert controller._return_one(10*mib) is True
+    assert lifecycle.returned
+
+
+def test_low_watermark_releases_return_claim_when_return_fails():
+    mib = 1024**2
+    calls = []
+    pool = WarmSnapshotPool(128*mib, borrow_capacity_bytes=64*mib)
+
+    class Lifecycle:
+        sandbox_id = 'tool-1'
+        role = 'tool'
+        resident = True
+        def observe_borrow_candidate(self):
+            return NumaResidencyObservation(
+                sandbox_id=self.sandbox_id, cgroup='/cg/tool-1', effective_mems='2',
+                local_bytes=0, shared_bytes=mib, other_numa_bytes=0,
+                unattributed_bytes=0, charged_bytes=mib, reserved_bytes=mib,
+                observed_unix_s=1,
+            )
+        def return_local_memory(self):
+            raise RuntimeError('return failed')
+
+    coordinator = SimpleNamespace(
+        claim_memory_return=lambda session_id: calls.append(('claim', session_id)) or True,
+        release_memory_return=lambda session_id: calls.append(('release', session_id)),
+    )
+    borrower = SimpleNamespace(
+        node_id='node0', shared_node=2, shared_pool=pool,
+        borrowed=lambda: ('tool-1',),
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=12,
+        local_memory_high_watermark_mib=16,
+        local_memory_capacity_mib=18,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, coordinator, SimpleNamespace(), borrower,
+        SimpleNamespace(write=lambda event: None),
+    )
+    controller.register('session-1', Lifecycle(), SimpleNamespace(
+        sandbox_id='runtime-1', resident=False,
+    ))
+
+    with pytest.raises(RuntimeError, match='return failed'):
+        controller._return_one(10*mib)
+
+    assert calls == [('claim', 'session-1'), ('release', 'session-1')]
+
+
+def test_low_watermark_runtime_return_does_not_use_tool_coordination():
+    mib = 1024**2
+    pool = WarmSnapshotPool(128*mib, borrow_capacity_bytes=64*mib)
+
+    class Lifecycle:
+        sandbox_id = 'runtime-1'
+        role = 'runtime'
+        resident = True
+        def observe_borrow_candidate(self):
+            return NumaResidencyObservation(
+                sandbox_id=self.sandbox_id, cgroup='/cg/runtime-1', effective_mems='2',
+                local_bytes=0, shared_bytes=mib, other_numa_bytes=0,
+                unattributed_bytes=0, charged_bytes=mib, reserved_bytes=mib,
+                observed_unix_s=1,
+            )
+        def return_local_memory(self):
+            return NumaBorrowRecord(
+                self.sandbox_id, '/cg/runtime-1', mib, 2, 0,
+                1, 2, .1, 0, mib, 0, mib,
+                reservation_released=True,
+                physical_effect='local_policy_restored_reservation_released',
+            )
+
+    coordinator = SimpleNamespace(
+        claim_memory_return=lambda _session_id: pytest.fail(
+            'Runtime return must not use Tool coordination'
+        ),
+        release_memory_return=lambda _session_id: pytest.fail(
+            'Runtime return must not use Tool coordination'
+        ),
+    )
+    borrower = SimpleNamespace(
+        node_id='node0', shared_node=2, shared_pool=pool,
+        borrowed=lambda: ('runtime-1',),
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=12,
+        local_memory_high_watermark_mib=16,
+        local_memory_capacity_mib=18,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, coordinator, SimpleNamespace(), borrower,
+        SimpleNamespace(write=lambda event: None),
+    )
+    controller.register('session-1', SimpleNamespace(
+        sandbox_id='tool-1', resident=True,
+    ), Lifecycle())
+
+    assert controller._return_one(10*mib) is True
 
 
 def test_low_watermark_does_not_return_an_already_local_residual_again():
@@ -399,7 +568,9 @@ def test_low_watermark_does_not_return_an_already_local_residual_again():
         return_cooldown_seconds=0, memory_action_costs=None),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     controller = WatermarkController(
-        arm, SimpleNamespace(), SimpleNamespace(), Borrower(),
+        arm, SimpleNamespace(claim_memory_return=lambda _: True,
+                             release_memory_return=lambda _: None),
+        SimpleNamespace(), Borrower(),
         SimpleNamespace(write=lambda event: None),
     )
     controller.register('session-1', Lifecycle(), SimpleNamespace(
@@ -437,7 +608,9 @@ def test_low_watermark_ignores_lifecycle_removed_after_registry_snapshot():
         return_cooldown_seconds=0, memory_action_costs=None),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     controller = WatermarkController(
-        arm, SimpleNamespace(), SimpleNamespace(), borrower,
+        arm, SimpleNamespace(claim_memory_return=lambda _: True,
+                             release_memory_return=lambda _: None),
+        SimpleNamespace(), borrower,
         SimpleNamespace(write=lambda event: None),
     )
     controller.register('session-1', Lifecycle(), SimpleNamespace(

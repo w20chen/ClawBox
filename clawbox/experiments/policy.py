@@ -225,14 +225,34 @@ class PolicyCoordinator:
             self._condition.notify_all()
             return True
 
+    def claim_memory_return(self, session_id: str) -> bool:
+        """Atomically keep Tool admission and an idle NUMA return apart."""
+        with self._condition:
+            state = self._sessions.get(session_id)
+            if (
+                state is None
+                or state.tool_active
+                or state.eviction_in_progress
+                or (session_id, "tool_admission") in self.demand.claims
+            ):
+                return False
+            state.eviction_in_progress = True
+            return True
+
+    def release_memory_return(self, session_id: str) -> None:
+        with self._condition:
+            state = self._sessions.get(session_id)
+            if state is not None:
+                state.eviction_in_progress = False
+            self._condition.notify_all()
+
     def begin_tool_admission(self, session_id: str, amount_mib: int,
                              timeout_s: float, *, total_mib: int | None = None) -> float:
-        """Protect a Tool before any restore or memory wait begins.
+        """Reserve Tool growth after the caller has chosen its allocation tier.
 
-        A competing admission may pause only sessions marked idle.  Marking
-        this session active before entering ``acquire`` closes the race where
-        another waiter could otherwise select its resident Tool as a victim
-        while its SSH admission is still being established.
+        The caller marks the session active before restore and routing.  Keep
+        that protection while ``acquire`` waits so another admission cannot
+        select this resident Tool as a victim.
         """
         self.set_tool_active(session_id, True)
         try:

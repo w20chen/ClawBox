@@ -692,6 +692,73 @@ def test_baseline_catalog_and_independent_policy_names():
         ExperimentSpec.model_validate(raw)
 
 
+def test_paused_tool_is_restored_before_growth_admission_and_routing():
+    calls = []
+    lifecycle = SimpleNamespace(resident=False)
+    coordinator = SimpleNamespace(
+        set_tool_active=lambda session_id, active: calls.append(
+            ("active", session_id, active)
+        ),
+        begin_tool_admission=lambda session_id, local, timeout, total_mib: (
+            calls.append(("admit", lifecycle.resident, local, total_mib)) or 0.25
+        ),
+    )
+    watermark = SimpleNamespace(
+        route_progress_to_shared=lambda candidate, amount: (
+            calls.append(("route", candidate.resident, amount)) or True
+        )
+    )
+    worker = object.__new__(ExperimentWorker)
+
+    def restore(*_args, **_kwargs):
+        calls.append(("restore", lifecycle.resident))
+        lifecycle.resident = True
+
+    worker._restore_with_one_victim = restore
+    arm = SimpleNamespace(execution=SimpleNamespace(arm_timeout_seconds=30))
+
+    result = worker._prepare_tool_admission(
+        arm, "session", lifecycle, coordinator, SimpleNamespace(),
+        watermark, 3, wait_for_admission=lambda operation: operation(),
+    )
+
+    assert result == (0, "shared", 0.25, True)
+    assert calls == [
+        ("active", "session", True),
+        ("restore", False),
+        ("route", True, 3),
+        ("admit", True, 0, 3),
+    ]
+
+
+def test_failed_tool_restore_does_not_reserve_growth():
+    calls = []
+    lifecycle = SimpleNamespace(resident=False)
+    coordinator = SimpleNamespace(
+        set_tool_active=lambda *_args: calls.append("active"),
+        begin_tool_admission=lambda *_args, **_kwargs: calls.append("admit"),
+    )
+    watermark = SimpleNamespace(
+        route_progress_to_shared=lambda *_args: calls.append("route")
+    )
+    worker = object.__new__(ExperimentWorker)
+
+    def restore(*_args, **_kwargs):
+        calls.append("restore")
+        raise RuntimeError("restore failed")
+
+    worker._restore_with_one_victim = restore
+    arm = SimpleNamespace(execution=SimpleNamespace(arm_timeout_seconds=30))
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        worker._prepare_tool_admission(
+            arm, "session", lifecycle, coordinator, SimpleNamespace(),
+            watermark, 3, wait_for_admission=lambda operation: operation(),
+        )
+
+    assert calls == ["active", "restore"]
+
+
 def test_release_cost_baseline_requires_complete_independent_evidence():
     raw = raw_spec()
     raw['policies'] = [
