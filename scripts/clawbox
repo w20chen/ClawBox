@@ -28,6 +28,25 @@ elif [[ -n "${CLAWBOX_MACHINE_ENV:-}" || "$MACHINE_ENV_EXPLICIT" == 1 ]]; then
   exit 2
 fi
 
+# Large experiments can have one sampler and several sockets per active VM.
+# Apply an explicitly saved per-process descriptor limit before sudo so every
+# invocation from this wrapper inherits the same reviewed host setting.
+if [[ -n "${CLAWBOX_NOFILE_LIMIT:-}" ]]; then
+  if [[ ! "$CLAWBOX_NOFILE_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'CLAWBOX_NOFILE_LIMIT must be a positive integer (open files per process).' >&2
+    exit 2
+  fi
+  NOFILE_HARD=$(ulimit -Hn)
+  if [[ "$NOFILE_HARD" != unlimited ]] && (( CLAWBOX_NOFILE_LIMIT > NOFILE_HARD )); then
+    echo "CLAWBOX_NOFILE_LIMIT=$CLAWBOX_NOFILE_LIMIT exceeds the hard limit $NOFILE_HARD; raise the host hard limit or choose a smaller value." >&2
+    exit 2
+  fi
+  if ! ulimit -Sn "$CLAWBOX_NOFILE_LIMIT"; then
+    echo "Could not set the open-file soft limit to CLAWBOX_NOFILE_LIMIT=$CLAWBOX_NOFILE_LIMIT." >&2
+    exit 1
+  fi
+fi
+
 # Daily commands should keep working in a new shell after the documented
 # editable install.  An explicit override still wins for remote/client use.
 if [[ -n "${CLAWBOX_PYTHON:-}" ]]; then

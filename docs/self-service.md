@@ -44,6 +44,11 @@ CLAWBOX_PYTHON=/absolute/path/venv/bin/python bash scripts/clawbox experiment --
 环境文件是可信 Bash 文件，其赋值覆盖同名 shell 变量；CLI 参数覆盖环境默认值。
 `--machine-env`、`--sudo` 放在普通 CLI 参数之前。指定的文件缺失会报错。
 
+大规模并发时，可在 `machine.env` 设置 `CLAWBOX_NOFILE_LIMIT=65536`。
+单位是单个 ClawBox 进程允许同时打开的文件描述符数量；未设置时保持主机当前软上限。
+该值不能超过 `ulimit -Hn`，wrapper 会在启动前校验并给出修复提示。修改后只需重新执行
+`scripts/clawbox`，不需要 host apply、镜像重建或重训。
+
 Python 环境缺失或需要更新时，换成实际源码路径再执行：
 
 ```bash

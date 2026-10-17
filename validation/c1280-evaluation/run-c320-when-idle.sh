@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-run_id=c1280-screen-c320-04
+run_id=c1280-screen-c320-05
 study_root=/home/weitianc/clawbox-c1280-20261017
 source_root=/home/weitianc/clawbox-high-density-followup-20261017/setup-source
 deadline=$((SECONDS + 3600))

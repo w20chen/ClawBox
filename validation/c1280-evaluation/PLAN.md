@@ -6,10 +6,10 @@ Last updated: 2026-10-17 (Asia/Shanghai)
 
 Evaluate ClawBox on one Kunpeng socket using CPUs 0-159, a 928 GiB LOCAL VM
 budget, and a separate 384 GiB WARM/shared pool on NUMA node 2. The primary
-question is whether prediction-guided Tool admission improves successful
-Agents/s over calibrated fixed admission and no Tool admission under real
-memory contention. Secondary mechanisms are evaluated only where they actually
-activate.
+question is whether the selected prediction-plus-admission ClawBox system
+improves successful Agents/s over an OS-default deployment with no ClawBox
+prediction, admission, placement, runtime control, reclamation, or borrowing.
+Secondary mechanisms are evaluated only where they actually activate.
 
 The controlled heterogeneous-memory trace is an operating-boundary experiment.
 Its command-table prediction results cannot be presented as a formal ClawTune
@@ -24,7 +24,8 @@ making an application-level claim.
 | No admission | c24/48 GiB attempts 01/02 | INVALID | Old drain/cleanup defect changed outcomes; do not claim a gain |
 | VM supply | c320-01/02/03 and c1280-priority-2h-01 | EXCLUDED, CLEANED | Identified creation-path scaling defect and unsafe gate 64 |
 | VM supply repair | create-path-smoke-c32-01 | COMPLETE, CLEANED | 64 VMs in 28.45 s; provisioning bottleneck removed |
-| P0.1 | c1280-screen-c320-04, OS default vs predicted | RUNNING | Stop after the first two frozen arms; defer fixed/admission ablations |
+| P0.1 | c1280-screen-c320-04 | INVALID, CLEANED | c320 VM supply passed, but FD exhaustion invalidated memory evidence |
+| P0.1 | c1280-screen-c320-05, OS default vs predicted | READY | Two primary arms only; saved FD limit fixes the measured infrastructure defect |
 | P0.2 | c640, OS default vs predicted | PENDING P0.1 | Primary memory-contention point |
 | P0.3 | c1280, OS default vs predicted | PENDING P0.2 | Overload boundary only if c640 progresses cleanly |
 | P0.4/P1/P2 | real trace and activated mechanisms | PENDING P0 | Run only the selected point/activated mechanisms |
@@ -43,6 +44,7 @@ making an application-level claim.
 | Arrival schedule | fixed stagger, 50 ms |
 | Placement overcommit ceiling | 32x |
 | Runtime/sample intervals | 2.0 / 1.0 s |
+| Worker open-file soft limit | 65,536, applied from machine.env by the supported wrapper |
 
 The socket has about 1007 GiB physical memory. LOCAL is capped at 928 GiB to
 leave room for the current non-VM footprint and avoid turning a policy trial
@@ -209,7 +211,7 @@ as a ClawBox benefit.
   sessions failed (49 HTTP 408 plus six envd initialization resets/timeouts).
   Other Agents continued, confirming failure isolation. Cleanup required
   terminating orphaned shims belonging only to this run; it is now destroyed.
-- Replacement run: `c1280-screen-c320-04` with creation concurrency 16 and the
+- Replacement run: `c1280-screen-c320-05` with creation concurrency 16 and the
   v3 trace. The trace reuses the seven independently trained commands, repeats
   the exact trained 2 GiB command four times, and interleaves it with the six
   128 MiB phases. No new prediction key is introduced.
@@ -218,26 +220,24 @@ as a ClawBox benefit.
     ClawBox runtime mechanisms.
   - `os-default-no-admission`: prediction, Tool/lifecycle admission, placement,
     runtime control, reclaim and borrowing disabled.
-- The frozen `c1280-screen-c320-04` file also contains fixed-P90, fixed-256 and
-  Tool-admission-off arms. Its randomized order places the two primary arms
-  first. Stop through the public CLI after both primary arms clean up; do not
-  execute the remaining three. Regenerated c640/c1280 configs contain only the
-  two primary arms.
-- Expanded-config fairness check: `no-tool-admission-shared` retains the same
-  928 GiB LOCAL capacity, 192 GiB live-borrow allowance, placement, runtime,
-  reclaim and checkpoint controls as `predicted-shared`; only Tool admission is
-  off. `os-default-no-admission` has the same 1120 GiB combined live-memory
-  ceiling but disables ClawBox lifecycle/Tool admission, placement, runtime
-  control, reclaim and live borrowing. Treat the former as the admission
-  ablation and the latter as the full-system reference.
+- The regenerated c320/c640/c1280 configs contain only these two primary arms.
+  Fixed and single-mechanism admission ablations are deferred unless the main
+  result requires attribution.
 - Purpose: low-contention/control boundary and infrastructure progression test.
-- Current status: RUNNING. With seed 20261017, the frozen order starts with the
-  OS/no-admission baseline and predicted ClawBox. Attempted launch
-  `c1280-screen-c320-04` did not create a run
-  or start an arm: its pre-run restore probe hit a delayed VMM cgroup-empty
-  race while an unrelated root benchmark was saturating CPUs 0--159. The probe
-  cleaned its owned VM/cgroup. A bounded 5 s wait now handles that verified
-  destroy-to-restore race. Do not count this as an experimental trial.
+- `c1280-screen-c320-04` is infrastructure-invalid and cleaned. Its OS arm
+  created all 640 VMs without errors in 143.06 s, so the repaired creation path
+  is valid at c320. During execution, however, the worker's inherited soft
+  limit of 1,024 file descriptors was exhausted by hundreds of concurrent VM
+  samplers. The required node-memory sampler then could not read `/proc/meminfo`,
+  so the worker correctly rejected the arm instead of publishing incomplete
+  memory evidence. Four ordinary Agent failures remained isolated and cleanup
+  removed all 640 VMs. The partial execution is diagnostic only: it is not a
+  throughput comparison and predicted ClawBox did not run.
+- `c1280-screen-c320-05` is ready with the same workload/resources and only the
+  two primary arms. `machine-c1280.env` now saves
+  `CLAWBOX_NOFILE_LIMIT=65536`; the supported wrapper validates it against the
+  host hard limit and applies it on every invocation. This changes no policy,
+  workload, memory budget, image, or prediction data.
 - Completion requirement: terminal result for both selected arms, verified cleanup, no
   arm-wide interruption caused by an ordinary Agent failure, and auditable
   started/resident/active counts.
