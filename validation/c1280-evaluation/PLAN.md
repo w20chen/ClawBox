@@ -26,7 +26,7 @@ making an application-level claim.
 | VM supply repair | create-path-smoke-c32-01 | COMPLETE, CLEANED | 64 VMs in 28.45 s; provisioning bottleneck removed |
 | P0.1 | c1280-screen-c320-04 | INVALID, CLEANED | c320 VM supply passed, but FD exhaustion invalidated memory evidence |
 | P0.1 | c1280-screen-c320-05 | INVALID, CLEANED | Predicted arm exposed the shared-return lifecycle race after 8,732 Tool operations |
-| P0.1 | c1280-screen-c320-os-06 | COMPLETE, VALID TIMEOUT BOUNDARY, CLEANED | 0/320 Agents in 3,600 s; 9,152 Tool completions; no OOM; peak measured VM-cgroup delta about 1,051 GiB |
+| P0.1 | c1280-screen-c320-os-06 | COMPLETE, VALID TIMEOUT BOUNDARY, CLEANED | 0/320 Agents in 3,600 s; 9,152 completed operations (including backend maintenance); no OOM; peak measured VM-cgroup delta about 1,051 GiB |
 | P0.1 | c1280-screen-c320-predicted-06 | COMPLETE, CLEANED | 320/320 Agents in 992.83 s, 19.47 Agents/min, offered P99 959.80 s, no OOM |
 | P0.2 | c1280-primary-c640-07 | INVALID, DESTROYED | v5 omitted the configured completion marker; preserve only as diagnostic execution evidence |
 | P0.2 | c640-v6-smoke-01 | COMPLETE, CLEANED | Real-VM 1/1 validation proves the corrected four-phase trace and frozen predictions |
@@ -249,8 +249,10 @@ as a ClawBox benefit.
   candidates through the lifecycle lock and records its underlying exception.
 - `c1280-screen-c320-os-06` is the completed replacement OS/no-admission
   single-arm run. It used the frozen ten-phase c320 workload and reached the
-  configured 3,600 s timeout with 0/320 completed Agents, 9,152 successful Tool
-  operations, no OOM kill and no infrastructure failure. All 640 VMs were
+  configured 3,600 s timeout with 0/320 completed Agents. The event log records
+  9,152 completed operations across Agent Tool work and backend maintenance;
+  2,171 Agent Tool requests were queued. There was no OOM kill or infrastructure
+  failure. All 640 VMs were
   destroyed and cleanup was verified. The measured VM-cgroup peak delta was
   1,128,836,882,432 bytes (about 1,051 GiB). This is retained as the natural
   no-admission timeout boundary, not rerun as a successful workload.
