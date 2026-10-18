@@ -33,6 +33,10 @@ htmlcov/
 /.verification/
 /traces/
 /.local/
+/.tmp/
+/tmp/
+/temp/
+/logs/
 /coverage.xml
 /junit.xml
 /working_set_plan.json
@@ -40,6 +44,14 @@ htmlcov/
 /deploy/rec-a-*.inspect.jsonl
 *.bundle
 *.log
+*.out
+*.err
+*.pid
+*.pid.lock
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
 
 # Local database state
 test-clawbox.db
