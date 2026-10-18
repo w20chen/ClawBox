@@ -150,11 +150,10 @@ class ExecutionSpec(StrictFrozenModel):
     placement_cpu_overcommit: float = Field(default=8.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
     # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
-    # scheduling. C2 changes only Tool vCPU affinity while a Tool call is active.
+    # scheduling. C2 changes Tool vCPU affinity only for active agent-tool execs.
     tool_call_cpu_policy: Literal["c0", "c2"] = "c0"
     tool_call_cpu_pressure_ratio: float = Field(default=0.10, gt=0, le=1, allow_inf_nan=False)
     tool_call_cpu_pressure_samples: int = Field(default=2, ge=1)
-    tool_call_cpu_cooldown_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     session_compute_nodes: tuple[str, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
     randomized_order: bool = True

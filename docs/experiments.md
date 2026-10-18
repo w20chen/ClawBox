@@ -90,8 +90,8 @@ CPU/内存控制不自动启用借用、回收或模板亲和。运行内存借�
 | runtime.pressure_control | 见下文 | 压力控制与释放判定参数 |
 | placement.placement_cpu_overcommit | 8 | offered vCPU/允许 CPU 数倍率，不是测得利用率 |
 | placement.template_balance_slack | 0.10 | 模板亲和相对于最佳压力分数的允许偏差 |
-| placement.tool_call_cpu_policy | c0 | `c0` 严格保留 8c555ae 的默认 CPU 行为：VM 使用已选 NUMA 的完整 CPU 集，由 Linux 调度且不增加拓扑采样。`c2` 仅在 Tool 调用期间，把 Tool VM 的 vCPU 线程限制到一个完整 `cluster_cpus_list` 物理核组；例如 `0-7` 去除 SMT 重复后为 `0,2,4,6`。Tool vCPU 数只规定候选 cluster 必须具有的最少独立物理核数，不切分 cluster。要求 Linux 可读 cache/cluster/SMT topology，且选定 NUMA 至少有两个完整候选 cluster，否则非零失败。调用结束、失败或响应丢失时恢复完整 NUMA mask。需要新 run ID；不需要 host apply、镜像重建或重训 |
-| placement.tool_call_cpu_pressure_ratio / tool_call_cpu_pressure_samples / tool_call_cpu_cooldown_seconds | 0.10 / 2 / 5 | C2 的 VM CPU PSI stall 比例、连续样本数和冷却秒数；按 `measurement.memory_sample_interval_seconds` 周期采样。活动调用持续超阈值时单向放宽到完整 NUMA。缺少 PSI 时也放宽并记录原因。C0 不读取这些观测 |
+| placement.tool_call_cpu_policy | c0 | `c0` 严格保留 8c555ae 的默认 CPU 行为：VM 使用已选 NUMA 的完整 CPU 集，由 Linux 调度且不增加拓扑采样。`c2` 只作用于 `agent-tool` 的 `exec` 调用：调用活动期间把 Tool VM 的 vCPU 线程限制到一个完整 `cluster_cpus_list` 物理核组；`filesystem`、backend maintenance 和未知操作保持 C0，不分配 cluster、不改 affinity。短 exec 仍可能进入 C2；按时长跳过属于后续工作。Tool vCPU 数只规定候选 cluster 必须具有的最少独立物理核数，不切分 cluster。要求 Linux 可读 cache/cluster/SMT topology，且选定 NUMA 至少有两个完整候选 cluster，否则非零失败。调用结束、失败或响应丢失时恢复完整 NUMA mask。需要新 run ID；不需要 host apply、镜像重建或重训 |
+| placement.tool_call_cpu_pressure_ratio / tool_call_cpu_pressure_samples | 0.10 / 2 | C2 的 VM CPU PSI stall 比例和连续样本数；按 `measurement.memory_sample_interval_seconds` 周期采样。活动 exec 调用持续超阈值时一次性放宽到完整 NUMA。缺少 PSI 时也放宽并记录原因；本次调用不再收缩。C0 和不适用 C2 的操作不读取这些观测 |
 | shared_memory.borrow_cooldown_seconds / return_cooldown_seconds | 5 / 5 | 借用/归还冷却时间 |
 | checkpoint.pool_transfer_concurrency / pool_transfer_timeout_seconds | 1 / 120 | 全池生命周期操作并发上限/等待期限；不是带宽 |
 | measurement.memory_sample_interval_seconds / stabilization_seconds | 0.2 / 1 | 内存采样/稳定等待 |

@@ -86,13 +86,13 @@ VM threads retain the full permitted CPU pool inside the selected compute NUMA n
 
 Supported experiment configurations that omit the new optional setting retain their original behavior. This does not impose compatibility requirements on deprecated workflows.
 
-### Shared Tool-call placement for C1 and C2
+### Shared exec-call placement for C1 and C2
 
 Before implementation, specify the following short policy contract. Choose the simplest mechanism supported by topology and pilot evidence; record and freeze it before formal measurements.
 
 | Decision | Required definition |
 |---|---|
-| Placement unit | One active Tool call. Runtime keeps C0 behavior. Concurrent calls in one Tool VM share its active assignment; the final completion restores the full C0 mask. |
+| Placement unit | One active `agent-tool` `exec` call. Runtime, filesystem operations, backend maintenance, and unknown operations keep C0 behavior. Concurrent eligible exec calls in one Tool VM share its active assignment; the final completion restores the full C0 mask. |
 | Initial allowed set | Selection of cluster/core groups, mask size, SMT handling, and behavior when a complete group is unavailable. |
 | Ranking | Measured load and assignment information used to choose a group, deterministic tie-breaking, and unknown-observation handling. |
 | Sharing | How concurrent VMs share CPUs without assuming dedicated cores or interpreting every assigned vCPU as active demand. |
@@ -106,15 +106,17 @@ Maintain atomic assignment accounting, but do not add a per-cluster/LLC hard adm
 
 ### C2: Adaptive affinity
 
-C2 applies the shared placement immediately before a Tool command is admitted,
+C2 applies the shared placement immediately before an `agent-tool` `exec` command is admitted,
 keeps the VM at the configured 2 vCPUs, and adjusts only those Tool vCPU thread
 affinities while the call is active. Completion, failure, or a lost admission
-response restores the full selected-NUMA C0 mask. Its contract must define:
+response restores the full selected-NUMA C0 mask. Filesystem and maintenance
+operations never acquire a C2 assignment. Short exec calls may still be bound;
+duration prediction is outside this version. Its contract must define:
 
 - Sampling interval, averaging window, and observation freshness requirements.
 - A usable scheduling-wait or CPU-pressure signal, plus CPU utilization and load of candidate CPU groups.
-- The condition for expansion or adjustment, the target mask, hysteresis, and cooldown.
-- Whether adjustment is one-way relaxation for a phase or includes contraction; contraction is not required for the first version.
+- The pressure condition for expansion and the target mask.
+- Adjustment is a one-way relaxation for the active assignment; it does not contract before release.
 - Adjustment timing during long Tool calls as well as lifecycle boundaries. Waiting until a delayed call finishes cannot relieve that call's scheduling delay.
 - Fallback conditions and how the new effective mask is verified and recorded.
 

@@ -74,7 +74,7 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
     raw = base()
     raw['mechanisms']['placement'].update(
         tool_call_cpu_policy='c2', tool_call_cpu_pressure_ratio=.2,
-        tool_call_cpu_pressure_samples=3, tool_call_cpu_cooldown_seconds=3,
+        tool_call_cpu_pressure_samples=3,
     )
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
@@ -84,6 +84,13 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
 
     raw['mechanisms']['placement']['policy'] = 'os_default'
     with pytest.raises(ValueError, match='C2 Tool-call CPU placement'):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_removed_c2_cooldown_field_is_rejected():
+    raw = base()
+    raw['mechanisms']['placement']['tool_call_cpu_cooldown_seconds'] = 3
+    with pytest.raises(ValueError, match='Extra inputs are not permitted'):
         ExperimentSpec.model_validate(raw)
 
 

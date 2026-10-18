@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from clawbox.experiments.priority import PriorityDomain, physical_cluster_groups
+from clawbox.experiments.priority import (
+    PriorityDomain, c2_applies, physical_cluster_groups,
+)
 
 
 def fake_topology(root: Path) -> Path:
@@ -76,6 +78,14 @@ def test_c0_does_not_discover_sample_or_change_affinity(monkeypatch, tmp_path):
     domain.configure_topology_placement(0, '0-15', 0)
     assert domain.sample_topology_placement() == []
     assert domain.topology_summary()['assignments'] == 0
+    assert domain.topology_summary()['total_expansions'] == 0
+    assert domain.topology_summary()['scope'] == 'agent_tool_exec'
+
+
+def test_c2_applies_only_to_agent_tool_exec():
+    assert c2_applies('agent-tool', 'exec') is True
+    assert c2_applies('agent-tool', 'filesystem') is False
+    assert c2_applies('backend-maintenance', 'exec') is False
 
 
 def c2_domain(monkeypatch, tmp_path):
@@ -87,7 +97,6 @@ def c2_domain(monkeypatch, tmp_path):
     domain = PriorityDomain(
         tmp_path, concurrency=1, repetition=0, legacy=False,
         topology_mode='c2', placements={0: ('0-15', 0)}, emit=events.append,
-        topology_cooldown_seconds=1,
     )
     leaf = tmp_path/'tool'
     leaf.mkdir()
@@ -139,6 +148,26 @@ def test_c2_expands_active_call_after_pressure_samples(monkeypatch, tmp_path):
     assert changes[0]['reason'] == 'cpu_pressure'
     assert changes[0]['to_cpus'] == '0-15'
     assert applied[-1] == (0, 'tool', '0-15')
+    assert domain.topology_summary()['total_expansions'] == 1
+    assert domain.topology_summary()['active_expanded'] == 1
+    domain.release_tool_call('exec-1')
+    assert domain.topology_summary()['active_expanded'] == 0
+    assert domain.topology_summary()['total_expansions'] == 1
+
+
+def test_c2_counts_pressure_unavailable_expansion(monkeypatch, tmp_path):
+    domain, leaf, _events, _applied = c2_domain(monkeypatch, tmp_path)
+    domain.acquire_tool_call(0, 'exec-1', vcpus=2)
+    (leaf/'cpu.pressure').write_text('invalid')
+
+    changes = domain.sample_topology_placement()
+
+    assert changes[0]['reason'] == 'pressure_unavailable'
+    assert domain.topology_summary()['total_expansions'] == 1
+    assert domain.topology_summary()['active_expanded'] == 1
+    domain.release_tool_call('exec-1')
+    assert domain.topology_summary()['active_expanded'] == 0
+    assert domain.topology_summary()['total_expansions'] == 1
 
 
 def test_c2_failed_affinity_restores_c0_without_publishing_assignment(monkeypatch, tmp_path):

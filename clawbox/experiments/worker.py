@@ -53,7 +53,7 @@ from .openclaw_driver import (
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .congestion import locate_cgroup
 from .pressure import PressureControl
-from .priority import PriorityDomain
+from .priority import PriorityDomain, c2_applies
 from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
 from .topology import place_session
@@ -1527,7 +1527,6 @@ class ExperimentWorker:
                 topology_mode=arm.execution.tool_call_cpu_policy,
                 topology_pressure_ratio=arm.execution.tool_call_cpu_pressure_ratio,
                 topology_pressure_samples=arm.execution.tool_call_cpu_pressure_samples,
-                topology_cooldown_seconds=arm.execution.tool_call_cpu_cooldown_seconds,
                 emit=events.write,
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)
@@ -2980,7 +2979,7 @@ class ExperimentWorker:
                             })
                             coordinator.bind_tool_memory(session_id)
                             if (arm.execution.tool_call_cpu_policy == 'c2'
-                                    and execution_scope == 'agent-tool'):
+                                    and c2_applies(execution_scope, request.get('operation'))):
                                 priority_domain.acquire_tool_call(
                                     index, execution_id, vcpus=tool_sandbox.vcpu,
                                 )

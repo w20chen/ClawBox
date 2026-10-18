@@ -19,6 +19,11 @@ REGISTRY = Path('/run/clawbox/cgroups')
 TOKEN_ENV = 'CLAWBOX_CGROUP_TOKEN'
 
 
+def c2_applies(execution_scope: str | None, operation: str | None) -> bool:
+    """Return whether one admitted operation is eligible for C2 placement."""
+    return execution_scope == 'agent-tool' and operation == 'exec'
+
+
 def _format_cpu_list(cpus) -> str:
     ordered = sorted(set(cpus))
     ranges = []
@@ -149,8 +154,7 @@ class PriorityDomain:
                  topology_mode: str = 'c0',
                  topology_pressure_ratio: float = .10,
                  topology_pressure_samples: int = 2,
-                 topology_cooldown_seconds: float = 10., emit=None,
-                 proc_stat: Path = Path('/proc/stat')):
+                 emit=None, proc_stat: Path = Path('/proc/stat')):
         self.parent = parent.resolve()
         self.legacy = legacy
         self.registry = registry
@@ -159,7 +163,6 @@ class PriorityDomain:
         self.topology_mode = topology_mode
         self.topology_pressure_ratio = topology_pressure_ratio
         self.topology_pressure_samples = topology_pressure_samples
-        self.topology_cooldown_seconds = topology_cooldown_seconds
         self.emit = emit or (lambda event: None)
         self._topology_lock = RLock()
         self._group_load: dict[str, int] = {}
@@ -168,7 +171,6 @@ class PriorityDomain:
         self._expanded: set[tuple[int, str]] = set()
         self._pressure_previous: dict[tuple[int, str], tuple[float, int]] = {}
         self._pressure_streak: dict[tuple[int, str], int] = {}
-        self._last_change: dict[tuple[int, str], float] = {}
         self._candidate_groups: set[str] = set()
         self._latest_group_utilization: dict[str, float | None] = {}
         self._proc_stat = proc_stat
@@ -183,6 +185,7 @@ class PriorityDomain:
         self._call_keys: dict[str, tuple[int, str]] = {}
         self._active_calls: dict[tuple[int, str], set[str]] = {}
         self._total_call_assignments = 0
+        self._total_expansions = 0
         self.lock_file = None
         self.prefix = 'clawbox-' + uuid.uuid4().hex
         self.high = self.parent / (self.prefix + '-high')
@@ -236,7 +239,7 @@ class PriorityDomain:
                 raise RuntimeError('C2 Tool-call placement requires an explicit compute CPU pool')
 
     def acquire_tool_call(self, index: int, execution_id: str, *, vcpus: int) -> dict | None:
-        """Apply C2 affinity immediately before one Tool command is admitted.
+        """Apply C2 affinity immediately before one eligible exec is admitted.
 
         Concurrent calls in the same Tool VM share its active assignment.  The
         assignment is released, and the full C0 mask restored, after the final
@@ -294,7 +297,6 @@ class PriorityDomain:
             self._call_keys[execution_id] = key
             self._expanded.discard(key)
             self._pressure_streak.pop(key, None)
-            self._last_change.pop(key, None)
             try:
                 self._pressure_previous[key] = (
                     time.monotonic(), _pressure_total(self.leaves[key]/'cpu.pressure')
@@ -345,7 +347,6 @@ class PriorityDomain:
             self._expanded.discard(key)
             self._pressure_previous.pop(key, None)
             self._pressure_streak.pop(key, None)
-            self._last_change.pop(key, None)
             event = {
                 'event': 'tool_call_cpu_placement', 'action': 'restore_c0',
                 'execution_id': execution_id, 'session_index': key[0],
@@ -426,6 +427,7 @@ class PriorityDomain:
                         'threads': applied,
                     }
                     self.topology_events.append(event); self.emit(event); changes.append(event)
+                    self._total_expansions += 1
                     continue
                 previous = self._pressure_previous.get(key)
                 self._pressure_previous[key] = now, total
@@ -434,8 +436,7 @@ class PriorityDomain:
                 ratio = (total-previous[1]) / ((now-previous[0])*1_000_000)
                 streak = self._pressure_streak.get(key, 0) + 1 if ratio >= self.topology_pressure_ratio else 0
                 self._pressure_streak[key] = streak
-                if (streak < self.topology_pressure_samples
-                        or now-self._last_change.get(key, 0) < self.topology_cooldown_seconds):
+                if streak < self.topology_pressure_samples:
                     continue
                 applied = self._apply_thread_affinity(
                     index, role, self._full_masks[key], strict=False,
@@ -443,7 +444,6 @@ class PriorityDomain:
                 if not applied:
                     continue
                 self._expanded.add(key)
-                self._last_change[key] = now
                 event = {
                     'event': 'tool_call_cpu_placement', 'action': 'expand',
                     'session_index': index, 'role': role, 'mode': self.topology_mode,
@@ -453,18 +453,19 @@ class PriorityDomain:
                     'selected_group_cpu_utilization': measured_load.get(fine),
                 }
                 self.topology_events.append(event); self.emit(event); changes.append(event)
+                self._total_expansions += 1
         return changes
 
     def topology_summary(self) -> dict:
         return {
             'mode': self.topology_mode,
-            'scope': 'tool_call',
+            'scope': 'agent_tool_exec',
             'pressure_ratio': self.topology_pressure_ratio,
             'pressure_samples': self.topology_pressure_samples,
-            'cooldown_seconds': self.topology_cooldown_seconds,
             'assignments': self._total_call_assignments,
             'active_assignments': len(self._fine_masks),
-            'expanded': len(self._expanded),
+            'total_expansions': self._total_expansions,
+            'active_expanded': len(self._expanded),
             'latest_candidate_group_cpu_utilization': dict(self._latest_group_utilization),
             'events': list(self.topology_events),
         }
