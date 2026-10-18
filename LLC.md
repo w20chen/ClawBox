@@ -1,285 +1,394 @@
-# ClawBox: Post-Evaluation Topology-Aware CPU Placement Extension
+# ClawBox: Tool-Call Cluster Affinity Follow-up Plan
 
-## Objective and scope
+## 0. Purpose and execution rule
 
-Implement and evaluate an optional CPU-placement optimization within the existing `clawbox experiment` workflow, using real CubeSandbox replay on Kunpeng.
+Evaluate the current optional Tool-call CPU-affinity policy through the supported
+`clawbox experiment` workflow on the Kunpeng host. The primary outcome is
+validated successful Agent throughput. Latency, CPU pressure, effective masks,
+and CPU consumption explain the result; they do not replace Agent throughput.
 
-The primary objective is successful Agent throughput (Agents/s). Report success rate, completion latency, and makespan alongside it. Tool progress and CPU efficiency explain results; they do not substitute for improved successful Agent throughput.
+This is a paper experiment, not a production-hardening project. Run the smallest
+experiment set that can answer the main question. Fix and rerun only when a
+problem can change correctness, policy activation, resource equivalence, or the
+reported conclusion. Do not repeat a clean completed run after documentation,
+reporting, cosmetic, or otherwise non-causal changes.
 
-Preserve the existing admission, checkpoint, shared-memory, NUMA, and runtime-control evaluation. Do not repeat its full matrix or restart completed experiments because CPU placement is being added. Keep historical positive, negative, invalid, excluded, interrupted, and timeout results.
+Repository root on the local workstation:
 
-This is a small paper-project extension. Implement only what is needed for experiment correctness and a reproducible comparison. Do not build a second scheduler framework or experiment execution path.
+`C:\Users\29068\Desktop\ClawBox`
 
-The main comparison is C0 (existing placement) versus C2 (topology-aware initial placement with adaptive affinity). C1 disables adaptation in the same implementation and is an optional mechanism ablation.
+Remote host and isolated checkout used by the existing LLC work:
 
-## 1. Close out the existing campaign and qualify the baseline
+- SSH target: `kunpeng`
+- Checkout: `/home/weitianc/clawbox-llc-20261018`
+- Result root: `/home/weitianc/clawbox-tiered-study-20260907/raw-standalone`
 
-Before modifying code or configuration used on Kunpeng:
+Before running anything, record the actual local and remote Git revisions and
+verify that no experiment supervisor, worker, owned QEMU process, or per-run
+cgroup remains active. Do not assume the revisions named in historical results
+are still HEAD.
 
-1. Inspect actual supervisors, active runs, continuation scripts, frozen configurations, and result directories.
-2. Respect the campaign's existing gates and any explicit stop decision. Establish whether it completed, failed, or was intentionally stopped; do not treat a stopped supervisor as successful evaluation.
-3. Verify cleanup of the relevant run resources before new experiments. Do not change code, CubeSandbox settings, host configuration, or shared cgroups used by an active run.
-4. Preserve results and outstanding limitations. Closing out the campaign does not require completing every previously proposed arm or reopening the old matrix.
-5. Use a separate Git revision, specifications, run IDs, and result directories for this extension.
+## 1. Current implementation and version boundary
 
-Do not assume that a configuration named Full or `F-S384` already has a valid real-trace performance baseline. Read its effective configuration and actual outcomes. Functional qualification, clean termination, and successful workload completion are different facts.
+### 1.1 Policy implemented at current HEAD
 
-Choose one representative real-trace condition for a small pilot. Prefer a density and measurement window that yield enough completed Agents to assess throughput and latency without infrastructure failures dominating the comparison. Select and freeze these settings using independent pilot evidence, before confirmatory comparisons.
+The current public option is `placement.tool_call_cpu_policy`:
 
-A zero-completion C0 is not automatically invalid:
+- `c0` is the default. Runtime and Tool VM threads retain the complete CPU mask
+  of the selected compute NUMA node and Linux schedules them within that pool.
+- `c2` applies only to active `agent-tool` `exec` calls. It selects a complete
+  cluster/core group inside the Tool VM's selected NUMA node and narrows the
+  Tool vCPU-thread affinity for the duration of the eligible call.
+- Filesystem operations, backend maintenance, and unknown operations keep C0
+  behavior.
+- Concurrent eligible calls in one Tool VM share that VM's active assignment.
+  The final completion, failure, or abandoned admission restores the full C0
+  NUMA mask.
+- C2 observes Tool-VM CPU PSI. After the configured number of consecutive high
+  samples, it performs a one-way relaxation to the complete selected-NUMA mask
+  for that active assignment. It does not contract again before release.
 
-- If both C0 and C2 complete zero Agents, successful Agents/s cannot distinguish them in that window. Report tool progress separately and diagnose the limitation.
-- If C0 completes zero and C2 completes Agents under a valid matched comparison, report absolute throughput and completion counts. Do not compute a finite percentage speedup over zero.
-- Distinguish infrastructure failures from workload timeouts and policy-induced delays before interpreting either case.
+This is affinity, not exclusive CPU ownership. C2 does not reserve physical
+cores, create an exclusive lease, or prevent another VM from using the same
+cluster. It also does not change VM vCPU count, `cpu.max`, `cpu.weight`, memory
+placement, or the common physical CPU budget.
 
-Do not silently shorten or replace the trace, accelerate model waits, or promote Steps/s to the primary objective to obtain a favorable result. Any pilot change to density or window must have a stated purpose and be identical within the resulting comparison.
+Relevant implementation files:
 
-## 2. Preserve the resource configuration
-
-Use the actual frozen Full configuration and applied host profile as the starting point. Do not copy stale planning numbers or small starter-example budgets as new defaults.
-
-Verify and retain:
-
-- Compute NUMA assignments and permitted CPU masks.
-- Per-node and aggregate LOCAL capacity and LOW/HIGH/HARD limits, with their scopes and units.
-- WARM/shared-pool placement and capacity, and the live borrowing limit.
-- Runtime and Tool VM templates, vCPU counts, and memory sizes.
-- Prediction/calibration artifacts and admission settings.
-- Idle checkpoint policy, snapshot mechanism, memory reclamation, and pressure control.
-- VM creation concurrency, arrival schedule, deadlines, and model-wait replay timing.
-
-Keep real trace timing at `time_scale=1.0` for this study. Preserve density-specific memory settings. If an inherited setting lacks valid evidence, identify that limitation rather than calling it validated.
-
-Do not change VM vCPU counts, CPU weights, CPU quotas, or memory budgets as part of the placement optimization. Necessary baseline corrections must be completed and frozen before the matched C0/C2 comparison; do not change them between arms.
-
-## 3. Establish the actual optimization target
-
-Discover online CPUs, physical cores, SMT siblings, cluster membership, cache levels and sharing sets, NUMA membership, and the effective permitted CPU pool. Intersect every candidate mask with that pool.
-
-The Kunpeng topology inspected for this plan reports:
-
-- NUMA 0 CPUs `0-79` share one L3 domain; the other NUMA nodes similarly have one reported L3 domain each.
-- Smaller cluster groups exist, such as `0-7` and `8-15`.
-- SMT siblings such as `0-1` share a physical core and its reported L2; this L2 sharing set is smaller than the cluster.
-
-Revalidate topology before execution. These examples are not hard-coded placement defaults.
-
-**On this topology, there is no choice between independent LLC domains inside one selected NUMA node.** Using all permitted CPUs in that node's sole LLC gives the C0 pool. Selecting a smaller set tests cluster/core affinity within the same LLC.
-
-Therefore:
-
-- For Kunpeng, formulate the initial hypothesis as NUMA-local cluster/core placement with adaptive relaxation.
-- Do not equate a cluster with an independent LLC, a shared L2 domain, or an isolated cache capacity allocation.
-- Claims about LLC slice locality require additional hardware evidence or targeted measurements. Cache-miss changes alone do not establish that mechanism.
-- Do not create a "same NUMA, different LLC" control when the topology has no such sets.
-- If no meaningful topology-based choice or plausible scheduling benefit exists, document that boundary and stop or defer the extension before building an elaborate policy.
-
-Potential benefits include reduced interference, fewer costly migrations, or better use of available CPU capacity. These are hypotheses to test. CPU scheduling contention is not required for cache interference, and vCPU overcommit does not establish scheduling contention.
-
-## 4. Define a small placement policy
-
-### C0: Existing placement with the extension disabled
-
-Keep the existing NUMA policy, including `load_aware` where configured. Do not introduce a replacement NUMA-selection path named `numa_only`.
-
-VM threads retain the full permitted CPU pool inside the selected compute NUMA node. Linux performs scheduling, balancing, and migration within that pool. Under the restricted-budget scenario, the common experimental CPU budget also constrains C0.
-
-Supported experiment configurations that omit the new optional setting retain their original behavior. This does not impose compatibility requirements on deprecated workflows.
-
-### Shared exec-call placement for C1 and C2
-
-Before implementation, specify the following short policy contract. Choose the simplest mechanism supported by topology and pilot evidence; record and freeze it before formal measurements.
-
-| Decision | Required definition |
-|---|---|
-| Placement unit | One active `agent-tool` `exec` call. Runtime, filesystem operations, backend maintenance, and unknown operations keep C0 behavior. Concurrent eligible exec calls in one Tool VM share its active assignment; the final completion restores the full C0 mask. |
-| Initial allowed set | Selection of cluster/core groups, mask size, SMT handling, and behavior when a complete group is unavailable. |
-| Ranking | Measured load and assignment information used to choose a group, deterministic tie-breaking, and unknown-observation handling. |
-| Sharing | How concurrent VMs share CPUs without assuming dedicated cores or interpreting every assigned vCPU as active demand. |
-| Lifecycle | Assignment ownership across creation, model waiting, pause, checkpoint, restore, failure, and destruction. |
-
-Keep each multi-vCPU VM on multiple physical cores when feasible. Do not unintentionally use two SMT siblings as if they were two independent physical cores. Account for the VMM/helper-thread scope when choosing and reporting masks.
-
-Runtime and Tool belonging to one Agent does not prove useful cache sharing between them. Do not assume that co-location is beneficial without evidence, and do not add an Agent-pair co-location experiment unless it is needed to support a specific claim.
-
-Maintain atomic assignment accounting, but do not add a per-cluster/LLC hard admission ceiling as part of this extension. Assignment counts are bookkeeping inputs, not measured CPU utilization. Preserve the existing session-admission mechanism.
-
-### C2: Adaptive affinity
-
-C2 applies the shared placement immediately before an `agent-tool` `exec` command is admitted,
-keeps the VM at the configured 2 vCPUs, and adjusts only those Tool vCPU thread
-affinities while the call is active. Completion, failure, or a lost admission
-response restores the full selected-NUMA C0 mask. Filesystem and maintenance
-operations never acquire a C2 assignment. Short exec calls may still be bound;
-duration prediction is outside this version. Its contract must define:
-
-- Sampling interval, averaging window, and observation freshness requirements.
-- A usable scheduling-wait or CPU-pressure signal, plus CPU utilization and load of candidate CPU groups.
-- The pressure condition for expansion and the target mask.
-- Adjustment is a one-way relaxation for the active assignment; it does not contract before release.
-- Adjustment timing during long Tool calls as well as lifecycle boundaries. Waiting until a delayed call finishes cannot relieve that call's scheduling delay.
-- Fallback conditions and how the new effective mask is verified and recorded.
-
-Do not build a predictive model unless simpler feedback is demonstrably insufficient. Do not move work across its selected compute NUMA node or outside the common CPU budget.
-
-Preserve locality when it is useful, but allow relaxation to the full permitted NUMA CPU pool when observations are unavailable or finer placement becomes counterproductive. Record the reason and time spent in fallback. Deliberate policy fallback is valid behavior; affinity write or verification failures must be reported as failures, not silently relabeled as fallback.
-
-### C1: Optional adaptation ablation
-
-C1 uses exactly C2's per-call initial placement with adaptation disabled. It is
-not a separate scheduling implementation or a required primary experiment.
-The first public implementation exposes only C0 and C2; add C1 to the same
-switch only if a real-VM pilot shows that adaptation activates and the paper
-needs to attribute that contribution.
-
-Verify the shared initial-placement logic before C2 measurements. Run a formal C1 comparison only when it helps explain a meaningful result or is needed for a separate claim about adaptation.
-
-## 5. Integrate with VM binding and memory lifecycle
-
-Read the active callers and shared code before editing:
-
-- `clawbox/experiments/numa_placement.py`
 - `clawbox/experiments/priority.py`
-- `clawbox/experiments/numa_borrow.py`
-- `clawbox/experiments/pressure.py`
 - `clawbox/experiments/worker.py`
+- `clawbox/experiments/spec.py`
+- `clawbox/experiments/design.py`
 - `clawbox/experiments/topology.py`
-- `clawbox/experiments/spec.py` and `design.py`
 
-Inspect existing placement/PMU helpers in `placement.py`, `placement_docker.py`, and `pointer_chase_runner.py`, plus the [reference implementation](https://github.com/amor0404/llc-placement/tree/main/src/llc_placement). Reuse suitable helpers, not an independent Docker/native execution path for the final evidence. The pointer-chase runner uses native workers and fixed CPU selections; it is not a ready-made real-VM pilot. Existing PMU validators also have collector and record-format assumptions.
+The current public implementation exposes C0 and C2. C1 is not a required
+up-front implementation. If a later mechanism diagnostic is justified, C1 must
+reuse exactly C2's per-call initial assignment and disable only PSI relaxation.
 
-### Resolve CPU-mask ownership
+### 1.2 Historical result boundary
 
-The current binding paths have a concrete conflict with narrower per-VM cgroups:
+The two archived runs under
+`validation/llc-extension-20261018/runs/` used the older
+`topology_cpu_placement=cluster_adaptive` implementation. The current HEAD uses
+`tool_call_cpu_policy=c2`. Therefore the archived performance values are
+historical pilot evidence, not repetitions of the current policy and not part
+of the new current-HEAD effect estimate.
 
-- `priority.prepare()` writes the saved session mask before creation/restore; `priority.verify()` checks the expected cgroup mask.
-- `SandboxNumaBorrower.pin_local()` writes its configured CPU mask after creation/restore if the effective mask differs.
-- The worker constructs each borrower with the compute domain's configured `node.cpus`.
-- Borrow and return call `_move()`, which requires that same CPU mask through `_verify_cpus()` before changing memory placement.
+Historical pilot results:
 
-Simply narrowing `cpuset.cpus` therefore risks being overwritten or failing borrow/return validation. Choose one ownership model and keep it consistent:
+| Run order | C2 Agents/min versus matched C0 | C2 mean-JCT change | Expansion |
+|---|---:|---:|---:|
+| C2 then C0 | +14.39% | -12.54% | 0 |
+| C0 then C2 | -5.34% | +5.43% | all recorded assignments expanded |
 
-| Approach | Required integration |
-|---|---|
-| Thread affinity | Keep the VM cgroup at the common NUMA CPU pool; apply the narrower mask to explicitly identified vCPU/VMM threads. Handle new/replaced threads and restore. Add verification against the policy's selected mask. |
-| Per-VM cgroup subset | Make priority preparation, borrower checks, and lifecycle restoration use the current per-VM mask consistently. A domain-wide borrower cannot use one mutable mask for concurrently different VM assignments. |
+The signs disagree. These runs establish that topology affinity can have a
+material, regime-dependent effect and that PSI relaxation can activate. They do
+not establish a stable speedup for either the old or current implementation.
 
-Neither approach is automatically simpler. Select based on the actual lifecycle hooks and smallest sufficient change.
+Use the archived data for workload selection, CPU-budget calibration, and
+measurement definitions only. Preserve all positive and negative results.
 
-The existing thread check only establishes that `Cpus_allowed_list` is contained in the cgroup mask. It does not establish that the finer policy took effect. Verify the intended allowed set for each targeted thread and record any creation/restore interval before it is enforced.
+## 2. Facts already established for the frozen trace
 
-Affinity decisions must preserve `cpuset.mems`, memory reservations, and borrowing semantics. Borrow/return must not accidentally reset CPU placement; CPU adaptation must not reset memory placement. Verify after relevant transitions and reapply only where needed, never by blindly invoking a memory-binding hook.
+Use the recorded SQLGlot Agent trace without shortening or changing replay
+timing:
 
-Preserve cgroup preallocation, tombstone handling, CPU weights/quotas, and failure cleanup. Keep desired masks, effective masks, assignment accounting, and VM generation identity consistent during concurrent lifecycle operations.
+- Trace:
+  `/home/weitianc/clawbox-high-density-followup-20261017/setup-source/examples/traces/sqlglot-4528-workspace-replay-v2.jsonl`
+- Repository: `tobymao/sqlglot`
+- Base commit: `bc68289d4d368b29241e56b8f0aefc36db65ad47`
+- Replay `time_scale`: `1.0`
+- Arrival: burst
+- Concurrency: 8 Agents
+- Runtime VM: 2 vCPU, 2048 MiB
+- Tool VM: 2 vCPU, 4096 MiB
+- One Runtime VM plus one Tool VM per Agent: 4 configured vCPU per Agent,
+  32 configured vCPU across eight Agents
 
-## 6. Small real-VM pilot and necessary observations
+Copy all template IDs, immutable image digests, validation commands, memory
+budgets, admission settings, checkpoint policy, borrowing policy, runtime
+control, timeouts, and creation limits from the frozen pilot specification:
 
-Use existing measurements first, then a small real CubeSandbox pilot before c320/c640-scale runs. The pilot should establish:
+`validation/llc-extension-20261018/pilot-c8-real.yaml`
 
-1. C0 preserves the existing behavior and performs no topology discovery, sampling, CPU admission, or affinity change.
-2. Per-call placement, completion restoration, and C2 adjustments actually reach the Tool VM vCPU threads.
-3. Creation, restore, borrow/return, and cleanup preserve CPU and memory policy.
-4. At least one usable wait/pressure signal and candidate-group CPU-load measurements support C2 decisions.
-5. Tool execution, model waiting, admission, and VM lifecycle costs can be distinguished well enough to select a useful operating condition.
+That file contains old placement field names. Do not launch it unchanged with
+current HEAD. Create new run specifications using the current public
+`tool_call_cpu_policy` fields while preserving all unrelated effective values.
 
-Check signal availability explicitly. The existing `CpuMonitor` reads scheduling wait only when `sched_schedstats` is enabled; missing values are not zero pressure. Existing VM-level PSI collection may be reusable, but does not by itself provide every candidate group's load. Any monitoring prerequisite or setting change must be documented and applied consistently to C0 and C2 outside active runs.
+### 2.1 Observed CPU demand in the 160-logical-CPU pool
 
-Record the minimum needed for decisions and interpretation: per-group CPU use, per-VM CPU time and wait/pressure where available, assignment counts, effective masks, adjustment reasons, and overhead. Do not make complete working-set estimation, migration counters, or PMU collection prerequisites for a first valid system comparison.
+The two historical C0 arms measured:
 
-Use PMU data only with verified event semantics, workload/thread scope, and running/enabled coverage. Store raw counters and coverage; unsupported or unreliable measurements remain unavailable, not zero. Optional microbenchmarks can test a hardware hypothesis, but neither positive nor negative native pointer-chase results establish real-VM system benefit.
+| Metric | C0 run 1 | C0 run 2 |
+|---|---:|---:|
+| Experiment cgroup mean CPU | 7.139 cores | 7.292 cores |
+| Mean utilization of 160 logical CPUs | 4.46% | 4.56% |
+| Maximum approximately one-second interval | 16.616 cores | 16.712 cores |
+| Peak interval utilization of 160 logical CPUs | 10.39% | 10.45% |
+| Mean per-call Tool CPU utilization | 1.015 cores | 0.992 cores |
+| Maximum call-duration average | 1.897 cores | 1.751 cores |
+| Peak concurrent Agent Tool calls | 8 | 8 |
+| CPU throttling | 0 | 0 |
 
-If the representative real-VM pilot gives no useful signal or plausible opportunity, stopping or deferring is acceptable. Report the tested boundary and evidence; do not assert that all adaptive placement is ineffective because one static microbenchmark was negative.
+`peak_interval_cores` is an average over the sampling interval, not an
+instantaneous microburst peak. CPU-core values are logical-CPU-time equivalents
+and must not be relabeled as physical-core occupancy.
 
-## 7. Fair comparisons and CPU budgets
+The 160-CPU condition has no evidence of global CPU-capacity contention. In the
+old adaptive run, however, selected clusters reached about 88.3%-93.8%
+utilization while the full pool remained lightly utilized. The relevant current
+hypothesis is therefore local pressure, migration, or cache/scheduling behavior
+created or changed by affinity, not exhaustion of the whole host CPU pool.
 
-Run a fresh matched C0 using the same revision as C2. Historical Full results remain context, not the sole causal baseline.
+The Kunpeng topology used by these runs has one reported L3 sharing domain per
+selected NUMA node. Smaller eight-logical-CPU/four-physical-core cluster groups
+exist inside that L3 domain, with SMT sibling pairs such as CPUs `0-1`.
+Consequently this experiment tests cluster/core affinity within one LLC. It
+must not be described as selecting among independent LLCs or allocating an LLC
+slice.
 
-Within each matched comparison, hold constant workloads and trace hashes, validation, templates, vCPU/memory specifications, LOCAL/WARM budgets, admission rules, snapshot/borrowing/control policies, arrival schedule, timeouts, creation limits, and available physical CPU pool.
+## 3. Research questions and claim boundary
 
-Only the optional CPU-placement mechanism should differ. Keep monitoring settings comparable and include policy-specific observation/decision costs in the optimization's overhead.
+Answer these questions in order:
 
-Record actual NUMA assignments and memory residency. They may change indirectly through feedback under an unchanged NUMA policy. If this obscures an important mechanism claim, add a small diagnostic with frozen assignments; do not change the main system comparison to force identical outcomes.
+1. Does the current per-call C2 implementation execute correctly and measurably
+   change the intended Tool vCPU-thread masks without changing memory placement
+   or other CPU controls?
+2. At a restricted but still topology-meaningful CPU budget, does C2 improve
+   validated Agents/min or JCT relative to C0?
+3. At the original 160-logical-CPU budget, is the effect absent, beneficial, or
+   harmful when global CPU pressure is low?
+4. If PSI relaxation activates and the C0/C2 result is material, is one small
+   C1 or threshold diagnostic necessary to explain the mechanism?
 
-### A: Original CPU budget
+Do not claim:
 
-Start with one representative real-trace density and the inherited CPU pool. Retain this condition even if the result is small or negative; it establishes the deployment boundary.
+- exclusive core allocation;
+- a general LLC-placement benefit;
+- cache causality from misses alone;
+- stable speedup from a single matched pair;
+- equivalence from a null result;
+- current-policy validation from the older prototype runs.
 
-### B: One calibrated restricted CPU budget
+The earlier static PMU experiment remains negative classifier evidence: 48
+clean trials and 192 qualified four-event records had a maximum placement gain
+of 5.35%, while historical LLC-load rate did not predict gain (Pearson -0.050,
+Spearman 0.200). Do not rerun that matrix for this follow-up. If a new cache
+causality claim is attempted, it requires qualified raw PMU records and a
+separate claim-specific design.
 
-Treat B as a second point on the CPU-budget dimension, not a new workload. Select one budget through independent topology and pressure calibration. Run it when a safe, meaningful matched restriction is feasible; otherwise state why it was deferred.
+## 4. Frozen CPU budgets
 
-Prefer the existing spec-level `compute_nodes[].cpus` configuration if its enforcement is verified on actual VMM/vCPU threads. Restrict all compared methods equally. A controller-only affinity change is insufficient.
+Use exactly two budgets. Do not add densities or additional CPU budgets unless
+one of these configurations is invalid on the current host.
 
-Record physical-core count, logical-CPU count, SMT sibling selection, available clusters, and reported LLC domains. Reducing physical cores and disabling SMT siblings are different changes. Preserve the SMT selection rule across budgets when feasible, and retain meaningful placement choices.
+| Budget | NUMA 0 CPUs | NUMA 1 CPUs | Logical CPUs | Physical cores | Role |
+|---|---|---|---:|---:|---|
+| A: original | `0-79` | `80-159` | 160 | 80 | Low-global-pressure boundary |
+| B: restricted | `0-15` | `80-95` | 32 | 16 | Primary contention/local-sharing test |
 
-The existing CPU commitment ceiling is:
+Budget B preserves two complete cluster groups in each selected NUMA node. It
+is small enough to reduce the large observed headroom, while retaining a real
+topology choice. A smaller pool with only one group per NUMA would remove the
+placement decision and is outside this plan.
 
-`number of configured logical CPUs × placement_cpu_overcommit`
+Keep the existing SMT rule represented by these masks. Record logical CPUs,
+physical cores, SMT siblings, cluster groups, and the effective cgroup and vCPU
+thread masks in every run.
 
-Reducing the pool without changing this parameter also reduces the commitment ceiling. If the intended A/B interpretation requires a constant commitment ceiling, calibrate and freeze the corresponding parameter; report both the ceiling and whether it actually bound admission. If the ceiling changes, do not describe A/B as an isolated CPU-budget effect.
+Keep `placement_cpu_overcommit=32` and all session-admission rules identical
+between C0 and C2. At c8 this commitment ceiling is expected not to bind; verify
+and record that fact. Configured capacity, admitted vCPUs, measured CPU use, and
+affinity masks are different quantities and must be reported separately.
 
-Within each budget, C0 and C2 must have identical admission rules and commitment ceilings. **Do not force identical actual admitted-session counts or admission timelines.** Faster completion can legitimately release resources earlier and admit more work; that is part of the system effect.
+## 5. Minimal experiment matrix
 
-Preserve memory budgets, VM vCPU counts, model waits, and CPU weights/quotas. Restricting VM CPU masks does not automatically isolate controller/Cubelet or unrelated host work. Record their activity and keep their configuration consistent; do not silently add service isolation or alter unrelated workloads.
+### 5.1 One-time qualification gate
 
-## 8. Minimal matrix and claim-specific diagnostics
+Before the formal arms, run the current public validation and one small real-VM
+qualification through the normal launcher. Verify only facts that can invalidate
+the study:
 
-| CPU budget | Baseline | Optimized |
-|---|---|---|
-| A: Original | C0 | C2 |
-| B: Calibrated restricted, when feasible | C0 | C2 |
+- current C0 leaves the full selected-NUMA mask unchanged;
+- current C2 applies to eligible Tool `exec` calls only;
+- vCPU-thread effective affinity equals the selected group while active;
+- completion/failure restores the full mask;
+- `cpuset.mems`, NUMA residency, borrowing, checkpoint/restore, and cleanup
+  remain valid;
+- PSI and selected-group load are either measured or explicitly unavailable;
+- no owned VM, worker, supervisor, or experiment cgroup remains afterward.
 
-Start with one valid run per setting for screening. Use independent pilot data for parameter selection and freeze the policy, workload, window, and settings before confirmatory comparisons.
+Run focused tests once locally and once in the isolated remote checkout. Do not
+run the full suite repeatedly. Do not rebuild images, reinstall the host, or
+retrain the memory predictor unless an input used by the experiment actually
+changed.
 
-Interleave and repeat selected comparisons when needed to support a benefit or regression beyond host/time variability. Do not require a full four-arm matrix or a fixed three-repeat campaign by default. A single null run supports only "no benefit observed in this run," not equivalence.
+### 5.2 Mandatory performance arms
 
-A fair C0/C2 comparison can establish the effect of the **complete strategy**. It cannot alone identify the contribution of cache locality, mask size, or runtime adaptation.
+Run the following four arms first, using new experiment IDs and the same current
+revision:
 
-Add only the diagnostic required by the intended claim:
+| Priority | CPU budget | Arms | Purpose |
+|---:|---|---|---|
+| 1 | B: 32 logical CPUs | C0 and C2 | Main opportunity test |
+| 2 | A: 160 logical CPUs | C0 and C2 | Low-pressure boundary |
 
-- **Adaptation:** compare C1 with matching C2, reusing the appropriate C0 context. C1 and C2 share initial placement and all other settings.
-- **Topology selection:** compare equal-size CPU masks with matched physical-core/SMT resources and comparable load, varying topology selection within the permitted NUMA node. On Kunpeng this can be a cluster-layout or topology-blind selection diagnostic, not a fictional cross-LLC control.
-- **Dynamic topology contribution:** if needed, use the same adaptation rules with topology-blind selection. A static pinned control alone does not control C2's time-varying mask behavior.
+Use the existing default C2 settings for the main result:
 
-C1/C2 similarity does not prove adaptation is universally useless; first check its activation. C1 below C2 can show that adaptation mitigates static-placement costs, but C0/C2 still determines whether the complete extension improves on the existing system.
+- CPU PSI ratio: `0.10`
+- consecutive samples: `2`
+- sampling interval: `1 second`
 
-Do not add a Runtime/Tool co-location matrix, more CPU budgets, or additional densities without a specific unresolved question. Preserve all runs and negative results; do not select or discard outcomes based on whether they favor the optimization.
+Do not tune the threshold after seeing throughput and then relabel the winning
+setting as the primary result.
 
-## 9. Metrics and interpretation
+### 5.3 Conditional repetition
 
-Freeze event definitions, observation windows, deadline semantics, and success validation before formal comparisons.
+Avoid routine repetition. Add exactly one reverse-order matched pair for a
+budget only when the first pair can materially affect the conclusion, for
+example:
 
-Report:
+- absolute Agents/min or mean-JCT difference is at least about 5%;
+- throughput and latency disagree;
+- C2 activation differs from the intended mechanism;
+- the result would otherwise be presented as a positive or negative paper
+  finding rather than a one-run boundary observation.
 
-- **Successful Agents/s:** validated successful Agent completions divided by the declared measurement window. Include offered, admitted, completed, failed, timed-out, and unfinished counts.
-- **Success rate:** give its denominator explicitly, including offered requests when reporting end-to-end service success.
-- **Latency:** mean and P95/P99 where sample counts support them; distinguish execution-start-to-completion, offered-to-completion, and cleanup completion. Report the completion subset and unfinished fraction; do not silently omit censored requests from interpretation.
-- **Makespan:** state the start/end definition. Do not describe a deadline-truncated observation as the completed batch's makespan.
-- **Tool progress:** distinguish logical trace calls, underlying command completions, and successful steps. Do not count maintenance commands as Agent work or label all command completions successful Steps/s.
-- **CPU efficiency:** CPU time per successful Agent, plus total measured CPU time and Tool CPU/wall time. With no successes, the per-success quantity is undefined.
-- **Mechanism activity:** pressure/load, effective mask occupancy over time, adjustment/fallback activity and overhead, NUMA residency, admission, creation, checkpoint/restore, and borrow/return activity.
-- **Optional diagnostics:** reliable LLC accesses/misses or MPKI, IPC, migrations, context switches, and quota throttling. Identify the scope of every CPU metric; VM cgroup consumption is not total host consumption.
+Use the opposite arm order in the repeat. If the two effects agree in direction
+and mechanism activity, report a replicated screening result with its exact
+scope. If their signs disagree, report the result as unstable and stop; do not
+keep adding repetitions until a preferred sign appears.
 
-Fixed arrival rates, model waits, memory admission, or infrastructure costs can limit Agents/s even if Tool execution becomes faster. Report local acceleration and system throughput separately. Neither lower cache misses nor higher Steps/s alone establishes improved successful Agent throughput.
+If the first pair differs by less than about 5%, all sessions succeed, and no
+mechanism anomaly appears, report that no material effect was observed in the
+screen and do not repeat it merely to shrink uncertainty.
 
-## 10. Configuration, validation, and deliverables
+### 5.4 Conditional mechanism diagnostic
 
-Expose the extension through the existing experiment configuration, defaulting to disabled. Keep NUMA selection and optional finer CPU placement distinct. Freeze the exact public fields during implementation; mode labels in this plan are not claims that those options already exist.
+Do not implement C1 or run a threshold sweep by default. Add at most one of the
+following diagnostics only if C2 activation is necessary to explain a material
+C0/C2 result:
 
-Every public policy parameter must be editable and documented with units, defaults, prerequisites, and the effects of missing observations. Explain which changes require host apply, image rebuild, retraining, or a new run ID. Update the scenario walkthrough and option reference with the implemented public change.
+1. **C1 diagnostic:** same per-call initial cluster assignment as C2, with PSI
+   relaxation disabled. Prefer this when C2 expands during important long calls.
+2. **One threshold sensitivity point:** keep sample count and interval fixed;
+   use `0.05` if the default never expands under sustained local pressure, or
+   `0.20` if it expands immediately without a meaningful restricted interval.
 
-Use focused tests for C0 masks, assignment concurrency, adaptation/fallback, actual affinity verification, lifecycle interactions, memory-binding preservation, and cleanup. Validate the public path on Kunpeng, including fresh-shell use, repeat execution, and relevant failure paths. If installation changes, exercise them in isolation; never reinstall a shared host merely for validation.
+The diagnostic is explanatory. It must not replace the frozen `0.10` primary
+result or be selected because its throughput is better. Do not sweep mask size,
+threshold, sample count, density, and CPU budget together.
 
-Keep verification artifacts separate from user documentation. Distinguish unit/syntax/help checks, real-VM integration, and formal performance evidence. Do not describe an existing-host run as proof of fresh installation.
+## 6. Fairness and measurements
 
-Deliver:
+Within each matched comparison, hold constant:
 
-1. The minimal policy contract, implemented configuration, source changes, focused tests, and usage documentation.
-2. Reproducible specs, topology, SMT selection, common CPU budgets, and verified effective masks.
-3. The small C0/C2 comparison, with B and claim-specific diagnostics only where justified and feasible.
-4. Throughput, latency, success, CPU efficiency/pressure, activation, and overhead results with their uncertainty and limitations.
-5. Run IDs, commit and artifact hashes, frozen configurations, raw result locations, and cleanup status.
+- trace bytes and hash, replay timing, prompts, validation, and output checks;
+- Runtime and Tool templates, image digests, vCPU and memory sizes;
+- memory admission artifact and scale, LOCAL/WARM budgets, borrowing, runtime
+  control, checkpoint policy, and lifecycle rules;
+- concurrency, arrival schedule, creation limit, timeouts, and result window;
+- available CPU pool, NUMA selection policy, CPU weights, and CPU quotas.
 
-If feasibility or pilot evidence stops the extension, deliver the evidence and the explicit unimplemented/untested scope instead of manufacturing a completed evaluation.
+Only the optional Tool-call CPU-affinity policy may differ. Policy-specific
+monitoring and decision overhead is part of C2's measured cost.
 
-**Execution priority:** Close out the existing campaign and verify cleanup → confirm the actual topology hypothesis and baseline condition → define and implement the smallest policy with consistent binding ownership and usable feedback → validate with a small real-VM pilot → freeze settings → run minimal C0/C2 comparisons → add only necessary diagnostics/repeats → report.
+Report at minimum:
+
+- successful Agents/min, offered/completed/failed counts, and success rate;
+- mean and P95 Agent JCT and Tool latency;
+- workload window and makespan definition;
+- experiment cgroup mean cores and `peak_interval_cores` with sampling interval;
+- utilization relative to the permitted logical CPU pool;
+- Tool-call CPU utilization distribution and Agent Tool-call concurrency;
+- per-NUMA and selected-cluster utilization where available;
+- CPU PSI samples, threshold streaks, assignment and expansion counts, and
+  expansion timing within affected calls;
+- effective vCPU-thread masks before assignment, after assignment, after
+  expansion, and after release;
+- `nr_throttled`, `throttled_usec`, CPU time per successful Agent, and policy
+  overhead;
+- NUMA memory residency, admission waits, checkpoint/restore, borrowing, OOM,
+  telemetry loss, validation, and cleanup status.
+
+Do not interpret the approximately one-second CPU peak as an instantaneous
+peak. Do not use assignment counts as CPU demand. Do not infer sensitivity from
+historical LLC-load rate alone.
+
+## 7. Failure, bug-fix, and rerun rules
+
+A run is invalid and may be fixed and rerun when any of these affect the arm:
+
+- wrong trace, template, image, CPU budget, or effective configuration;
+- validation failure, missing sessions, infrastructure failure, or timeout that
+  prevents the intended comparison;
+- C2 affinity write/verification failure or mask leakage outside the common
+  budget;
+- missing required result metadata, corrupted measurement, telemetry loss that
+  prevents mechanism interpretation, or incomplete cleanup;
+- unequal non-policy settings between matched arms.
+
+The following do not justify rerunning a clean completed arm unless evidence
+shows they changed the measured result:
+
+- cosmetic logs, documentation wording, report formatting, or extra diagnostics;
+- an unused legacy-path problem;
+- a warning in a metric not used for the conclusion;
+- a later code cleanup with no behavioral change to the frozen execution path;
+- desire for a more favorable sign.
+
+When a non-critical issue exists, record it as a limitation and continue. Keep
+all valid positive, negative, null, interrupted, and excluded results. Never
+silently weaken policy enforcement or relabel a failed affinity operation as a
+fallback.
+
+## 8. Supported execution path
+
+Use only the existing CLI and CubeSandbox workflow. Do not create a second
+runner.
+
+Before each run:
+
+1. Inspect `git status`, record the commit and diff, and freeze the spec.
+2. Verify host topology and that configured CPU masks are online and permitted.
+3. Verify no prior LLC run process, owned VM, perf process, or run cgroup remains.
+4. Run `bash scripts/clawbox experiment validate <spec> --inputs` from a fresh
+   shell.
+5. Launch with a unique run ID using
+   `bash scripts/clawbox --sudo experiment launch <spec> --run-id <run-id>`.
+6. Generate the standard report with
+   `bash scripts/clawbox --sudo experiment report <run-id>`.
+7. Archive the frozen spec, arm JSON, relevant event records, report, hashes,
+   revision, and cleanup evidence before starting the next arm set.
+
+Do not run overlapping trials on the same CPU or LLC domains. Parallel trials
+are allowed only with verified disjoint CPU and LLC domains; otherwise run them
+sequentially.
+
+## 9. Decision and deliverables
+
+The smallest acceptable completion consists of:
+
+1. current-revision qualification evidence;
+2. one matched current C0/C2 pair at B=32 logical CPUs;
+3. one matched current C0/C2 pair at A=160 logical CPUs;
+4. only the conditional reverse pair or single diagnostic justified by Section
+   5;
+5. an analysis that preserves paired signs, mechanism activation, uncertainty,
+   limitations, and all negative results.
+
+A single pair may establish that a mechanism executed and show an observed
+effect in that run. It does not establish stable speedup. Two opposite-order
+pairs with the same direction support a replicated screening claim, not a
+universal claim. Opposite signs mean the effect is unstable under the tested
+conditions; stop instead of accumulating favorable retries.
+
+If only Budget B improves, scope the conclusion to the restricted CPU regime.
+If Budget A is null or negative, treat that as the expected low-pressure
+boundary. If neither budget shows a material and repeatable benefit, retain C0
+as default and report the tested boundary rather than extending the matrix.
+
+Store auditable verification artifacts separately from user documentation.
+Final reporting must include run IDs, commit and artifact hashes, complete
+effective configurations, raw result locations, validation and cleanup status,
+and a concise statement of what remains untested.

@@ -40,7 +40,8 @@ DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
 PLACEMENT_FIELDS = (
     'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes',
     'tool_call_cpu_policy', 'tool_call_cpu_pressure_ratio',
-    'tool_call_cpu_pressure_samples',
+    'tool_call_cpu_pressure_samples', 'tool_call_cpu_group_max_active',
+    'tool_call_cpu_min_duration_seconds',
 )
 MEASUREMENT_FIELDS = ('memory_sample_interval_seconds', 'stabilization_seconds')
 

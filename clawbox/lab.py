@@ -314,8 +314,9 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
         ])
         if domains:
             from .experiments.topology import parse_cpu_list
-            checks.append(("compute CPU set", lambda: parse_cpu_list((local / "cpuset.cpus.effective").read_text().strip())
-                           == set().union(*(parse_cpu_list(n["cpus"]) for n in domains))))
+            checks.append(("compute CPU set", lambda: set().union(
+                *(parse_cpu_list(n["cpus"]) for n in domains)
+            ) <= parse_cpu_list((local / "cpuset.cpus.effective").read_text().strip())))
             for node in domains:
                 checks.append((f"{node['node_id']} CPUs belong to NUMA{node['numa_node']}",
                     lambda n=node: parse_cpu_list(n["cpus"]) <= parse_cpu_list(

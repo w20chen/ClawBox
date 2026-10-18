@@ -154,7 +154,7 @@ def test_detect_adapts_to_single_node_and_saved_settings(tmp_path, monkeypatch):
 def test_doctor_checks_dense_compute_nodes_without_a_shared_node(tmp_path, monkeypatch):
     from clawbox import lab
     for name, value in {'memory.max': str(16*1024**2), 'memory.swap.max': '0',
-                        'cpuset.mems.effective': '0-1', 'cpuset.cpus.effective': '0-3'}.items():
+                        'cpuset.mems.effective': '0-1', 'cpuset.cpus.effective': '0-7'}.items():
         (tmp_path / name).write_text(value)
     monkeypatch.setattr(lab, 'template_record', lambda _: {'ready': True})
     monkeypatch.setattr(lab, 'command', lambda *args, **kw: 'active' if args[0] == 'systemctl' else 'true')

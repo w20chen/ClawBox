@@ -154,6 +154,8 @@ class ExecutionSpec(StrictFrozenModel):
     tool_call_cpu_policy: Literal["c0", "c2"] = "c0"
     tool_call_cpu_pressure_ratio: float = Field(default=0.10, gt=0, le=1, allow_inf_nan=False)
     tool_call_cpu_pressure_samples: int = Field(default=2, ge=1)
+    tool_call_cpu_group_max_active: int = Field(default=2, ge=1)
+    tool_call_cpu_min_duration_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     session_compute_nodes: tuple[str, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
     randomized_order: bool = True

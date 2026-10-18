@@ -74,12 +74,15 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
     raw = base()
     raw['mechanisms']['placement'].update(
         tool_call_cpu_policy='c2', tool_call_cpu_pressure_ratio=.2,
-        tool_call_cpu_pressure_samples=3,
+        tool_call_cpu_pressure_samples=3, tool_call_cpu_group_max_active=3,
+        tool_call_cpu_min_duration_seconds=1.5,
     )
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
     assert arm.execution.tool_call_cpu_policy == 'c2'
     assert arm.execution.tool_call_cpu_pressure_ratio == .2
+    assert arm.execution.tool_call_cpu_group_max_active == 3
+    assert arm.execution.tool_call_cpu_min_duration_seconds == 1.5
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
     raw['mechanisms']['placement']['policy'] = 'os_default'

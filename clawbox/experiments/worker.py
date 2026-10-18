@@ -1527,6 +1527,8 @@ class ExperimentWorker:
                 topology_mode=arm.execution.tool_call_cpu_policy,
                 topology_pressure_ratio=arm.execution.tool_call_cpu_pressure_ratio,
                 topology_pressure_samples=arm.execution.tool_call_cpu_pressure_samples,
+                topology_group_max_active=arm.execution.tool_call_cpu_group_max_active,
+                topology_min_duration_seconds=arm.execution.tool_call_cpu_min_duration_seconds,
                 emit=events.write,
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)
@@ -2980,10 +2982,13 @@ class ExperimentWorker:
                             coordinator.bind_tool_memory(session_id)
                             if (arm.execution.tool_call_cpu_policy == 'c2'
                                     and c2_applies(execution_scope, request.get('operation'))):
-                                priority_domain.acquire_tool_call(
+                                placement_event = priority_domain.acquire_tool_call(
                                     index, execution_id, vcpus=tool_sandbox.vcpu,
                                 )
-                                cpu_placement_acquired = True
+                                cpu_placement_acquired = bool(
+                                    placement_event
+                                    and placement_event.get('release_required', True)
+                                )
                             host_sampler = SandboxRSSSampler(route.sandbox_id,
                                 cgroup=(priority_domain.leaves[index, 'tool'] if priority_domain is not None
                                         else locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup))))

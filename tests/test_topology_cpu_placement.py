@@ -96,7 +96,8 @@ def c2_domain(monkeypatch, tmp_path):
     events = []
     domain = PriorityDomain(
         tmp_path, concurrency=1, repetition=0, legacy=False,
-        topology_mode='c2', placements={0: ('0-15', 0)}, emit=events.append,
+        topology_mode='c2', topology_min_duration_seconds=0,
+        placements={0: ('0-15', 0)}, emit=events.append,
     )
     leaf = tmp_path/'tool'
     leaf.mkdir()
@@ -134,6 +135,109 @@ def test_c2_binds_only_for_active_tool_call_and_restores_c0(monkeypatch, tmp_pat
     assert [event['action'] for event in events] == [
         'assign', 'share', 'unshare', 'restore_c0',
     ]
+
+
+def test_c2_caches_topology_and_reuses_preferred_group(monkeypatch, tmp_path):
+    domain, _leaf, _events, applied = c2_domain(monkeypatch, tmp_path)
+    discoveries = []
+    monkeypatch.setattr(
+        'clawbox.experiments.priority.physical_cluster_groups',
+        lambda cpus, min_physical_cores: discoveries.append((cpus, min_physical_cores))
+        or ('0,2,4,6', '8,10,12,14'),
+    )
+
+    first = domain.acquire_tool_call(0, 'exec-1', vcpus=2)
+    assert first['selected_cpus'] == '8,10,12,14'
+    assert first['preferred_group_reused'] is False
+    domain.release_tool_call('exec-1')
+    monkeypatch.setattr(
+        domain, '_sample_group_utilization',
+        lambda groups: {'0,2,4,6': .1, '8,10,12,14': .8},
+    )
+
+    second = domain.acquire_tool_call(0, 'exec-2', vcpus=2)
+    assert second['selected_cpus'] == '8,10,12,14'
+    assert second['preferred_group_reused'] is True
+    assert discoveries == [('0-15', 2)]
+    assert applied[-1] == (0, 'tool', '8,10,12,14')
+
+
+def test_c2_bypasses_when_every_group_reaches_active_limit(monkeypatch, tmp_path):
+    domain, _leaf, events, _applied = c2_domain(monkeypatch, tmp_path)
+    domain.topology_group_max_active = 1
+    for index in (1, 2):
+        domain.configure_topology_placement(index, '0-15', 0)
+        leaf = tmp_path/f'tool-{index}'
+        leaf.mkdir()
+        (leaf/'cgroup.procs').write_text('100')
+        (leaf/'cpu.pressure').write_text('some avg10=0 avg60=0 avg300=0 total=0')
+        domain.leaves[index, 'tool'] = leaf
+
+    assert domain.acquire_tool_call(0, 'exec-0', vcpus=2)['action'] == 'assign'
+    assert domain.acquire_tool_call(1, 'exec-1', vcpus=2)['action'] == 'assign'
+    bypass = domain.acquire_tool_call(2, 'exec-2', vcpus=2)
+
+    assert bypass['action'] == 'bypass_full_numa'
+    assert bypass['release_required'] is False
+    assert bypass['group_active_assignments'] == {
+        '0,2,4,6': 1, '8,10,12,14': 1,
+    }
+    assert domain.topology_summary()['capacity_bypasses'] == 1
+    assert events[-1] == bypass
+
+
+def test_c2_delays_affinity_and_skips_short_calls(monkeypatch, tmp_path):
+    domain, _leaf, events, applied = c2_domain(monkeypatch, tmp_path)
+    domain.topology_min_duration_seconds = 1.0
+    times = iter((10.0, 10.5, 20.0, 21.1, 21.1))
+    monkeypatch.setattr('clawbox.experiments.priority.time.monotonic', lambda: next(times))
+
+    deferred = domain.acquire_tool_call(0, 'short', vcpus=2)
+    assert deferred['action'] == 'defer'
+    assert domain.sample_topology_placement() == []
+    completed = domain.release_tool_call('short')
+    assert completed['reason'] == 'short_call'
+    assert applied == []
+    assert domain.topology_summary()['short_call_bypasses'] == 1
+
+    deferred = domain.acquire_tool_call(0, 'long', vcpus=2)
+    assert deferred['action'] == 'defer'
+    changes = domain.sample_topology_placement()
+    assert changes[0]['action'] == 'assign'
+    assert applied[-1] == (0, 'tool', '8,10,12,14')
+    domain.release_tool_call('long')
+    assert [event['action'] for event in events if 'action' in event] == [
+        'defer', 'complete_full_numa', 'defer', 'assign', 'restore_c0',
+    ]
+
+
+def test_c2_delayed_call_stays_tracked_after_capacity_bypass(monkeypatch, tmp_path):
+    domain, _leaf, _events, _applied = c2_domain(monkeypatch, tmp_path)
+    domain.topology_min_duration_seconds = 1.0
+    domain.topology_group_max_active = 1
+    for index in (1, 2):
+        domain.configure_topology_placement(index, '0-15', 0)
+        leaf = tmp_path/f'delayed-tool-{index}'
+        leaf.mkdir()
+        (leaf/'cgroup.procs').write_text('100')
+        (leaf/'cpu.pressure').write_text('some avg10=0 avg60=0 avg300=0 total=0')
+        domain.leaves[index, 'tool'] = leaf
+    now = [0.0]
+    monkeypatch.setattr('clawbox.experiments.priority.time.monotonic', lambda: now[0])
+    for index in range(3):
+        assert domain.acquire_tool_call(index, f'exec-{index}', vcpus=2)['action'] == 'defer'
+
+    now[0] = 2.0
+    changes = domain.sample_topology_placement()
+
+    assert [event['action'] for event in changes] == [
+        'assign', 'assign', 'bypass_full_numa',
+    ]
+    assert set(domain.active_tool_call_ids()) == {'exec-0', 'exec-1', 'exec-2'}
+    completed = domain.release_tool_call('exec-2')
+    assert completed['reason'] == 'group_capacity'
+    assert completed['capacity_bypassed'] is True
+    assert set(domain.active_tool_call_ids()) == {'exec-0', 'exec-1'}
 
 
 def test_c2_expands_active_call_after_pressure_samples(monkeypatch, tmp_path):
