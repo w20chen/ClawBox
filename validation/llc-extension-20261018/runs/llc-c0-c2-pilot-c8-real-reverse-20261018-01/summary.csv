@@ -1,3 +1,0 @@
-arm_id,policy,concurrency,repetition,status,duration_seconds
-7d094c7a098a88b3116d5db7,c0-existing-placement,8,0,succeeded,667.4990525489998
-bf6916c556102d88f4bcb029,c2-adaptive-cluster,8,0,succeeded,705.2102858339999

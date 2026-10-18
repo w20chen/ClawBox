@@ -31,12 +31,17 @@ htmlcov/
 /release-evidence/
 /.artifacts/
 /.verification/
+/validation/
 /traces/
 /.local/
 /.tmp/
 /tmp/
 /temp/
 /logs/
+/prompt/
+/prompts/
+/images/
+/screenshots/
 /coverage.xml
 /junit.xml
 /working_set_plan.json
