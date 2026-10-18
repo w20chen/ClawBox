@@ -1,0 +1,140 @@
+[
+  {
+    "arm_id": "12d6758dbaf21dc4dfba56ca",
+    "run_state": "failed",
+    "cleanup_verified": true,
+    "requested_window_seconds": 960.0,
+    "observed_window_seconds": 959.9999442100525,
+    "offered_sessions": 320,
+    "target_sessions": 320,
+    "sessions_with_vm_created": 289,
+    "successful_agents": 0,
+    "successful_agents_per_second": 0.0,
+    "successful_fraction_of_offered": 0.0,
+    "failed_agents": 20,
+    "censored_offered_agents": 300,
+    "successful_latency_seconds_conditional_on_completion": null,
+    "latency_note": "Completion-conditioned percentiles exclude unfinished requests; no all-request P95/P99 claim.",
+    "admission_wait_seconds_completed_admissions": {
+      "p50": 7.700000423938036e-07,
+      "p90": 1.0000003385357559e-06,
+      "p95": 1.0800031304825097e-06,
+      "p99": 1.309999788645655e-06,
+      "max": 1.645099837332964e-05
+    },
+    "completed_execution_scopes": {
+      "backend-maintenance": 12297,
+      "agent-tool": 4807
+    },
+    "event_counts": {
+      "runtime_memory_started": 1,
+      "sandbox_create_gate_wait_started": 320,
+      "sandbox_create_gate_acquired": 310,
+      "session_placement": 307,
+      "pressure_vm_generation": 568,
+      "runtime_memory_placement": 568,
+      "sandbox_created": 563,
+      "memory_sample": 42,
+      "native_ssh_endpoint_resolved": 17511,
+      "tool_admission_queued": 17348,
+      "native_ssh_identity_ready": 17223,
+      "tool_admitted": 17198,
+      "tool_execution_progress": 34332,
+      "pressure_execution_release": 17101,
+      "tool_completed": 17104,
+      "sandbox_destroyed": 40,
+      "session_timing": 20,
+      "session_failed": 20,
+      "local_cache_reclaim_started": 6,
+      "shared_memory_borrowed": 8,
+      "memory_scheduling_decision": 32,
+      "local_cache_reclaim": 4,
+      "openclaw_agent_pid_observed": 4,
+      "sandbox_paused": 4,
+      "shared_memory_returned": 3,
+      "sandbox_restored": 3,
+      "model_relay_reconnected": 2,
+      "tool_restore_ready": 1,
+      "first_tool_after_restore": 1
+    },
+    "memory_peaks_bytes": {
+      "local_used_bytes": 384303661056,
+      "combined_live_used_bytes": 388966002688,
+      "shared_live_used_bytes": 4659802112,
+      "warm_allocated_bytes": 2372472832,
+      "warm_reserved_bytes": 0,
+      "warm_committed_bytes": 2372472832,
+      "shared_borrow_reserved_bytes": 17179869184
+    },
+    "cgroup_memory_event_deltas": {
+      "high": 0,
+      "low": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_group_kill": 0,
+      "oom_kill": 0
+    },
+    "cgroup_memory_psi_avg10_max": {
+      "full": 0,
+      "some": 0
+    },
+    "failure_examples": [
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "17551761931868",
+        "schema_version": 1,
+        "sequence_no": 49157,
+        "session_id": "12d6758dbaf21dc4dfba56ca-0203",
+        "wall_time": "2026-10-18T08:51:53.125762+00:00",
+        "wall_time_ns": "1792313513125771178"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "17702303656605",
+        "schema_version": 1,
+        "sequence_no": 80046,
+        "session_id": "12d6758dbaf21dc4dfba56ca-0255",
+        "wall_time": "2026-10-18T08:54:23.667486+00:00",
+        "wall_time_ns": "1792313663667495865"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "17704535845097",
+        "schema_version": 1,
+        "sequence_no": 80726,
+        "session_id": "12d6758dbaf21dc4dfba56ca-0256",
+        "wall_time": "2026-10-18T08:54:25.899677+00:00",
+        "wall_time_ns": "1792313665899684357"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "17710851088352",
+        "schema_version": 1,
+        "sequence_no": 82689,
+        "session_id": "12d6758dbaf21dc4dfba56ca-0259",
+        "wall_time": "2026-10-18T08:54:32.214920+00:00",
+        "wall_time_ns": "1792313672214927632"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "17712568117411",
+        "schema_version": 1,
+        "sequence_no": 83032,
+        "session_id": "12d6758dbaf21dc4dfba56ca-0249",
+        "wall_time": "2026-10-18T08:54:33.931948+00:00",
+        "wall_time_ns": "1792313673931956761"
+      }
+    ],
+    "source_events": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-aoff-20261018-01/attempts/attempt-dd497f44c23346ad/12d6758dbaf21dc4dfba56ca/events/12d6758dbaf21dc4dfba56ca.jsonl"
+  }
+]

@@ -1,0 +1,70 @@
+[
+  {
+    "arm_id": "af071069ac29418302d0cb5c",
+    "run_state": "running",
+    "cleanup_verified": false,
+    "requested_window_seconds": 300.0,
+    "observed_window_seconds": 299.9999027252197,
+    "offered_sessions": 120,
+    "target_sessions": 320,
+    "sessions_with_vm_created": 119,
+    "successful_agents": 0,
+    "successful_agents_per_second": 0.0,
+    "successful_fraction_of_offered": 0.0,
+    "failed_agents": 0,
+    "censored_offered_agents": 120,
+    "successful_latency_seconds_conditional_on_completion": null,
+    "latency_note": "Completion-conditioned percentiles exclude unfinished requests; no all-request P95/P99 claim.",
+    "admission_wait_seconds_completed_admissions": {
+      "p50": 0.00654883700190112,
+      "p90": 0.03885126200111699,
+      "p95": 0.06678336199911428,
+      "p99": 0.2347472480032593,
+      "max": 0.6450734089994512
+    },
+    "completed_execution_scopes": {
+      "backend-maintenance": 3093,
+      "agent-tool": 1159
+    },
+    "event_counts": {
+      "runtime_memory_started": 1,
+      "sandbox_create_gate_wait_started": 120,
+      "sandbox_create_gate_acquired": 120,
+      "session_placement": 119,
+      "pressure_vm_generation": 237,
+      "runtime_memory_placement": 237,
+      "sandbox_created": 237,
+      "memory_sample": 242,
+      "native_ssh_endpoint_resolved": 4408,
+      "tool_admission_queued": 4316,
+      "native_ssh_identity_ready": 4289,
+      "tool_admitted": 4283,
+      "tool_execution_progress": 8539,
+      "pressure_execution_release": 4259,
+      "tool_completed": 4252
+    },
+    "memory_peaks_bytes": {
+      "local_used_bytes": 173933703168,
+      "combined_live_used_bytes": 173972123648,
+      "shared_live_used_bytes": 1531904,
+      "warm_allocated_bytes": 0,
+      "warm_reserved_bytes": 0,
+      "warm_committed_bytes": 0,
+      "shared_borrow_reserved_bytes": 0
+    },
+    "cgroup_memory_event_deltas": {
+      "high": 0,
+      "low": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_group_kill": 0,
+      "oom_kill": 0
+    },
+    "cgroup_memory_psi_avg10_max": {
+      "full": 0,
+      "some": 0
+    },
+    "failure_examples": [],
+    "source_events": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-sustainable-full-20261018-01/attempts/attempt-652679496d194ce9/af071069ac29418302d0cb5c/events/af071069ac29418302d0cb5c.jsonl"
+  }
+]

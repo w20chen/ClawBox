@@ -1,413 +1,283 @@
-# ClawBox: Post-Evaluation LLC-Aware CPU Placement Extension
+# ClawBox: Post-Evaluation Topology-Aware CPU Placement Extension
 
-## Objective
+## Objective and scope
 
-After completing the currently running ClawBox evaluation, independently implement and experimentally evaluate LLC-aware CPU placement as an **optional, incremental optimization**.
+Implement and evaluate an optional CPU-placement optimization within the existing `clawbox experiment` workflow, using real CubeSandbox replay on Kunpeng.
 
-The primary objective remains maximizing successful Agent throughput (Agents/s and Steps/s), while reporting Agent completion latency, tail latency, and success rate.
+The primary objective is successful Agent throughput (Agents/s). Report success rate, completion latency, and makespan alongside it. Tool progress and CPU efficiency explain results; they do not substitute for improved successful Agent throughput.
 
-This is an extension of the existing system, **not a redesign of the current experiments**. Preserve all completed results and avoid repeating the existing admission, checkpoint, shared-memory, NUMA, and runtime-control evaluation matrix.
+Preserve the existing admission, checkpoint, shared-memory, NUMA, and runtime-control evaluation. Do not repeat its full matrix or restart completed experiments because CPU placement is being added. Keep historical positive, negative, invalid, excluded, interrupted, and timeout results.
 
-You should implement the mechanisms, run real experiments on Kunpeng, diagnose problems, improve the implementation when justified, and produce reproducible results. Do not stop at writing a proposal.
+This is a small paper-project extension. Implement only what is needed for experiment correctness and a reproducible comparison. Do not build a second scheduler framework or experiment execution path.
 
-## 1. Finish the existing evaluation first
+The main comparison is C0 (existing placement) versus C2 (topology-aware initial placement with adaptive affinity). C1 disables adaptation in the same implementation and is an optional mechanism ablation.
 
-The ongoing experiment campaign includes:
+## 1. Close out the existing campaign and qualify the baseline
 
-- Real SWE-ReBench/SQLGlot trace replay at c320 and c640.
-- The existing P0/P1/P2 evaluation sequence and conditionally required P3 experiments.
-- Frozen admission, NUMA, checkpoint, borrowing, and runtime-control ablations.
-- A supervised execution/cleanup workflow that must remain intact.
+Before modifying code or configuration used on Kunpeng:
 
-The existing remote study is under:
+1. Inspect actual supervisors, active runs, continuation scripts, frozen configurations, and result directories.
+2. Respect the campaign's existing gates and any explicit stop decision. Establish whether it completed, failed, or was intentionally stopped; do not treat a stopped supervisor as successful evaluation.
+3. Verify cleanup of the relevant run resources before new experiments. Do not change code, CubeSandbox settings, host configuration, or shared cgroups used by an active run.
+4. Preserve results and outstanding limitations. Closing out the campaign does not require completing every previously proposed arm or reopening the old matrix.
+5. Use a separate Git revision, specifications, run IDs, and result directories for this extension.
 
-`/home/weitianc/clawbox-c1280-20261017/`
+Do not assume that a configuration named Full or `F-S384` already has a valid real-trace performance baseline. Read its effective configuration and actual outcomes. Functional qualification, clean termination, and successful workload completion are different facts.
 
-Before introducing CPU-placement changes:
+Choose one representative real-trace condition for a small pilot. Prefer a density and measurement window that yield enough completed Agents to assess throughput and latency without infrastructure failures dominating the comparison. Select and freeze these settings using independent pilot evidence, before confirmatory comparisons.
 
-1. Inspect the actual supervisor state, active runs, continuation scripts, and result directories.
-2. Allow the existing evaluation sequence to finish through its established gates, including verification of terminal results and cleanup.
-3. Do not modify code, host configuration, CubeSandbox settings, or shared cgroup state used by an active run.
-4. Preserve all historical results, including negative, invalid, excluded, and timeout outcomes.
-5. Do not restart already completed experiments merely because CPU-placement support is being added.
-6. Only begin new CPU-placement experiments after the existing campaign has reached a clean terminal state.
+A zero-completion C0 is not automatically invalid:
 
-Use a separate Git revision, experiment specifications, run IDs, and result directories for the extension.
+- If both C0 and C2 complete zero Agents, successful Agents/s cannot distinguish them in that window. Report tool progress separately and diagnose the limitation.
+- If C0 completes zero and C2 completes Agents under a valid matched comparison, report absolute throughput and completion counts. Do not compute a finite percentage speedup over zero.
+- Distinguish infrastructure failures from workload timeouts and policy-induced delays before interpreting either case.
 
-## 2. Preserve experimentally validated resource configurations
+Do not silently shorten or replace the trace, accelerate model waits, or promote Steps/s to the primary objective to obtain a favorable result. Any pilot change to density or window must have a stated purpose and be identical within the resulting comparison.
 
-**Do not invent new memory budgets, concurrency limits, VM sizes, or snapshot settings.**
+## 2. Preserve the resource configuration
 
-Read the actual completed experiment specifications, their frozen effective configurations, and the applied host profile.
+Use the actual frozen Full configuration and applied host profile as the starting point. Do not copy stale planning numbers or small starter-example budgets as new defaults.
 
-In particular, inspect the existing Full configuration (`F-S384`, or its actual latest valid equivalent), including:
+Verify and retain:
 
-- NUMA 0/1 compute-node assignment and CPU masks.
-- LOCAL LOW/HIGH/HARD limits.
-- NUMA 2 WARM/shared-pool capacity and borrowing limit.
-- Runtime and Tool VM vCPU and memory sizes.
-- Admission predictions and frozen calibration artifacts.
-- Idle checkpointing, snapshot format, and memory reclamation.
-- Runtime pressure-control mechanisms and memory action costs.
-- VM creation concurrency, model-wait replay, deadlines, and arrival schedule.
+- Compute NUMA assignments and permitted CPU masks.
+- Per-node and aggregate LOCAL capacity and LOW/HIGH/HARD limits, with their scopes and units.
+- WARM/shared-pool placement and capacity, and the live borrowing limit.
+- Runtime and Tool VM templates, vCPU counts, and memory sizes.
+- Prediction/calibration artifacts and admission settings.
+- Idle checkpoint policy, snapshot mechanism, memory reclamation, and pressure control.
+- VM creation concurrency, arrival schedule, deadlines, and model-wait replay timing.
 
-For context, the latest tracking plan used:
+Keep real trace timing at `time_scale=1.0` for this study. Preserve density-specific memory settings. If an inherited setting lacks valid evidence, identify that limitation rather than calling it validated.
 
-- c320: LOCAL LOW/HIGH = 128/160 GiB.
-- c640: LOCAL LOW/HIGH = 256/320 GiB.
-- Physical LOCAL HARD = 928 GiB.
-- WARM/shared pool = 384 GiB on NUMA 2.
-- Maximum live borrowing = 192 GiB.
-- Runtime VM = 2 vCPU / 2 GiB; Tool VM = 2 vCPU / 4 GiB.
-- Real trace timing preserved at `time_scale=1.0`.
+Do not change VM vCPU counts, CPU weights, CPU quotas, or memory budgets as part of the placement optimization. Necessary baseline corrections must be completed and frozen before the matched C0/C2 comparison; do not change them between arms.
 
-These values are **references, not new hard-coded defaults**. Use the final validated configuration and retain its density-specific memory settings. If the actual completed configuration differs, document and use the actual one.
+## 3. Establish the actual optimization target
 
-Do not revert to the smaller memory budgets found in starter examples.
+Discover online CPUs, physical cores, SMT siblings, cluster membership, cache levels and sharing sets, NUMA membership, and the effective permitted CPU pool. Intersect every candidate mask with that pool.
 
-## 3. Implement CPU placement as a separate optional mechanism
+The Kunpeng topology inspected for this plan reports:
 
-Study the existing ClawBox implementation, especially:
+- NUMA 0 CPUs `0-79` share one L3 domain; the other NUMA nodes similarly have one reported L3 domain each.
+- Smaller cluster groups exist, such as `0-7` and `8-15`.
+- SMT siblings such as `0-1` share a physical core and its reported L2; this L2 sharing set is smaller than the cluster.
+
+Revalidate topology before execution. These examples are not hard-coded placement defaults.
+
+**On this topology, there is no choice between independent LLC domains inside one selected NUMA node.** Using all permitted CPUs in that node's sole LLC gives the C0 pool. Selecting a smaller set tests cluster/core affinity within the same LLC.
+
+Therefore:
+
+- For Kunpeng, formulate the initial hypothesis as NUMA-local cluster/core placement with adaptive relaxation.
+- Do not equate a cluster with an independent LLC, a shared L2 domain, or an isolated cache capacity allocation.
+- Claims about LLC slice locality require additional hardware evidence or targeted measurements. Cache-miss changes alone do not establish that mechanism.
+- Do not create a "same NUMA, different LLC" control when the topology has no such sets.
+- If no meaningful topology-based choice or plausible scheduling benefit exists, document that boundary and stop or defer the extension before building an elaborate policy.
+
+Potential benefits include reduced interference, fewer costly migrations, or better use of available CPU capacity. These are hypotheses to test. CPU scheduling contention is not required for cache interference, and vCPU overcommit does not establish scheduling contention.
+
+## 4. Define a small placement policy
+
+### C0: Existing placement with the extension disabled
+
+Keep the existing NUMA policy, including `load_aware` where configured. Do not introduce a replacement NUMA-selection path named `numa_only`.
+
+VM threads retain the full permitted CPU pool inside the selected compute NUMA node. Linux performs scheduling, balancing, and migration within that pool. Under the restricted-budget scenario, the common experimental CPU budget also constrains C0.
+
+Supported experiment configurations that omit the new optional setting retain their original behavior. This does not impose compatibility requirements on deprecated workflows.
+
+### Shared Tool-call placement for C1 and C2
+
+Before implementation, specify the following short policy contract. Choose the simplest mechanism supported by topology and pilot evidence; record and freeze it before formal measurements.
+
+| Decision | Required definition |
+|---|---|
+| Placement unit | One active Tool call. Runtime keeps C0 behavior. Concurrent calls in one Tool VM share its active assignment; the final completion restores the full C0 mask. |
+| Initial allowed set | Selection of cluster/core groups, mask size, SMT handling, and behavior when a complete group is unavailable. |
+| Ranking | Measured load and assignment information used to choose a group, deterministic tie-breaking, and unknown-observation handling. |
+| Sharing | How concurrent VMs share CPUs without assuming dedicated cores or interpreting every assigned vCPU as active demand. |
+| Lifecycle | Assignment ownership across creation, model waiting, pause, checkpoint, restore, failure, and destruction. |
+
+Keep each multi-vCPU VM on multiple physical cores when feasible. Do not unintentionally use two SMT siblings as if they were two independent physical cores. Account for the VMM/helper-thread scope when choosing and reporting masks.
+
+Runtime and Tool belonging to one Agent does not prove useful cache sharing between them. Do not assume that co-location is beneficial without evidence, and do not add an Agent-pair co-location experiment unless it is needed to support a specific claim.
+
+Maintain atomic assignment accounting, but do not add a per-cluster/LLC hard admission ceiling as part of this extension. Assignment counts are bookkeeping inputs, not measured CPU utilization. Preserve the existing session-admission mechanism.
+
+### C2: Adaptive affinity
+
+C2 applies the shared placement immediately before a Tool command is admitted,
+keeps the VM at the configured 2 vCPUs, and adjusts only those Tool vCPU thread
+affinities while the call is active. Completion, failure, or a lost admission
+response restores the full selected-NUMA C0 mask. Its contract must define:
+
+- Sampling interval, averaging window, and observation freshness requirements.
+- A usable scheduling-wait or CPU-pressure signal, plus CPU utilization and load of candidate CPU groups.
+- The condition for expansion or adjustment, the target mask, hysteresis, and cooldown.
+- Whether adjustment is one-way relaxation for a phase or includes contraction; contraction is not required for the first version.
+- Adjustment timing during long Tool calls as well as lifecycle boundaries. Waiting until a delayed call finishes cannot relieve that call's scheduling delay.
+- Fallback conditions and how the new effective mask is verified and recorded.
+
+Do not build a predictive model unless simpler feedback is demonstrably insufficient. Do not move work across its selected compute NUMA node or outside the common CPU budget.
+
+Preserve locality when it is useful, but allow relaxation to the full permitted NUMA CPU pool when observations are unavailable or finer placement becomes counterproductive. Record the reason and time spent in fallback. Deliberate policy fallback is valid behavior; affinity write or verification failures must be reported as failures, not silently relabeled as fallback.
+
+### C1: Optional adaptation ablation
+
+C1 uses exactly C2's per-call initial placement with adaptation disabled. It is
+not a separate scheduling implementation or a required primary experiment.
+The first public implementation exposes only C0 and C2; add C1 to the same
+switch only if a real-VM pilot shows that adaptation activates and the paper
+needs to attribute that contribution.
+
+Verify the shared initial-placement logic before C2 measurements. Run a formal C1 comparison only when it helps explain a meaningful result or is needed for a separate claim about adaptation.
+
+## 5. Integrate with VM binding and memory lifecycle
+
+Read the active callers and shared code before editing:
 
 - `clawbox/experiments/numa_placement.py`
 - `clawbox/experiments/priority.py`
+- `clawbox/experiments/numa_borrow.py`
+- `clawbox/experiments/pressure.py`
 - `clawbox/experiments/worker.py`
-- `clawbox/experiments/spec.py`
-- `clawbox/experiments/design.py`
+- `clawbox/experiments/topology.py`
+- `clawbox/experiments/spec.py` and `design.py`
 
-Also inspect the reference implementation:
+Inspect existing placement/PMU helpers in `placement.py`, `placement_docker.py`, and `pointer_chase_runner.py`, plus the [reference implementation](https://github.com/amor0404/llc-placement/tree/main/src/llc_placement). Reuse suitable helpers, not an independent Docker/native execution path for the final evidence. The pointer-chase runner uses native workers and fixed CPU selections; it is not a ready-made real-VM pilot. Existing PMU validators also have collector and record-format assumptions.
 
-https://github.com/amor0404/llc-placement/tree/main/src/llc_placement
+### Resolve CPU-mask ownership
 
-Reuse its useful topology and placement ideas, but adapt them correctly to CubeSandbox VMs rather than copying the Docker-specific implementation.
+The current binding paths have a concrete conflict with narrower per-VM cgroups:
 
-Introduce three CPU placement modes:
+- `priority.prepare()` writes the saved session mask before creation/restore; `priority.verify()` checks the expected cgroup mask.
+- `SandboxNumaBorrower.pin_local()` writes its configured CPU mask after creation/restore if the effective mask differs.
+- The worker constructs each borrower with the compute domain's configured `node.cpus`.
+- Borrow and return call `_move()`, which requires that same CPU mask through `_verify_cpus()` before changing memory placement.
 
-### C0 — `numa_only` (baseline)
+Simply narrowing `cpuset.cpus` therefore risks being overwritten or failing borrow/return validation. Choose one ownership model and keep it consistent:
 
-Preserve the existing ClawBox behavior exactly.
+| Approach | Required integration |
+|---|---|
+| Thread affinity | Keep the VM cgroup at the common NUMA CPU pool; apply the narrower mask to explicitly identified vCPU/VMM threads. Handle new/replaced threads and restore. Add verification against the policy's selected mask. |
+| Per-VM cgroup subset | Make priority preparation, borrower checks, and lifecycle restoration use the current per-VM mask consistently. A domain-wide borrower cannot use one mutable mask for concurrently different VM assignments. |
 
-- The existing NUMA placement policy chooses the compute node.
-- Linux schedules VM threads within that node's allowed CPU set.
-- No additional LLC-specific binding or runtime restriction.
-- This must remain the default for existing configurations.
+Neither approach is automatically simpler. Select based on the actual lifecycle hooks and smallest sufficient change.
 
-### C1 — `llc_static`
+The existing thread check only establishes that `Cpus_allowed_list` is contained in the cgroup mask. It does not establish that the finer policy took effect. Verify the intended allowed set for each targeted thread and record any creation/restore interval before it is enforced.
 
-Implement topology-aware placement within the selected NUMA node.
+Affinity decisions must preserve `cpuset.mems`, memory reservations, and borrowing semantics. Borrow/return must not accidentally reset CPU placement; CPU adaptation must not reset memory placement. Verify after relevant transitions and reapply only where needed, never by blindly invoking a memory-binding hook.
 
-- Discover physical CPU, SMT, cluster, LLC, and NUMA topology using host sysfs.
-- Prefer spreading independent VM workloads across LLC domains to avoid cache interference.
-- Prefer keeping a VM's multiple vCPU threads within one LLC when feasible.
-- Balance placement based on available CPU capacity and existing assignments.
-- Permit CPU sharing and Linux time-slice scheduling within the selected CPU set.
-- Avoid permanently pinning a multi-vCPU VM to one physical CPU.
-- Never cross the selected compute NUMA node merely to obtain a different LLC.
+Preserve cgroup preallocation, tombstone handling, CPU weights/quotas, and failure cleanup. Keep desired masks, effective masks, assignment accounting, and VM generation identity consistent during concurrent lifecycle operations.
 
-The mechanism should account for VM-level CPU demand and oversubscription rather than assuming that every VM owns dedicated physical cores.
+## 6. Small real-VM pilot and necessary observations
 
-### C2 — `llc_adaptive`
+Use existing measurements first, then a small real CubeSandbox pilot before c320/c640-scale runs. The pilot should establish:
 
-Extend C1 with contention-aware CPU-affinity adjustment.
+1. C0 preserves the existing behavior and performs no topology discovery, sampling, CPU admission, or affinity change.
+2. Per-call placement, completion restoration, and C2 adjustments actually reach the Tool VM vCPU threads.
+3. Creation, restore, borrow/return, and cleanup preserve CPU and memory policy.
+4. At least one usable wait/pressure signal and candidate-group CPU-load measurements support C2 decisions.
+5. Tool execution, model waiting, admission, and VM lifecycle costs can be distinguished well enough to select a useful operating condition.
 
-- Start with LLC-local placement when practical.
-- Observe actual CPU utilization, scheduling wait/pressure, and per-domain load.
-- Detect cases where a restricted LLC is overloaded while another permitted LLC has spare capacity.
-- Expand a VM's permitted CPU set when this is likely to reduce scheduling delay.
-- Preserve LLC locality when no useful alternative capacity exists.
-- Use hysteresis and cooldown to prevent frequent affinity oscillations.
-- Prefer safe lifecycle or tool-execution boundaries for reconfiguration.
-- Fall back to the original NUMA CPU set when the finer-grained policy cannot make a safe placement decision.
+Check signal availability explicitly. The existing `CpuMonitor` reads scheduling wait only when `sched_schedstats` is enabled; missing values are not zero pressure. Existing VM-level PSI collection may be reusable, but does not by itself provide every candidate group's load. Any monitoring prerequisite or setting change must be documented and applied consistently to C0 and C2 outside active runs.
 
-Do not interpret mere vCPU overcommit as proof of CPU saturation.
+Record the minimum needed for decisions and interpretation: per-group CPU use, per-VM CPU time and wait/pressure where available, assignment counts, effective masks, adjustment reasons, and overhead. Do not make complete working-set estimation, migration counters, or PMU collection prerequisites for a first valid system comparison.
 
-Avoid introducing a complicated predictive model unless existing measurements show that it is needed.
+Use PMU data only with verified event semantics, workload/thread scope, and running/enabled coverage. Store raw counters and coverage; unsupported or unreliable measurements remain unavailable, not zero. Optional microbenchmarks can test a hardware hypothesis, but neither positive nor negative native pointer-chase results establish real-VM system benefit.
 
-## 4. Integrate without disturbing existing ClawBox mechanisms
+If the representative real-VM pilot gives no useful signal or plausible opportunity, stopping or deferring is acceptable. Report the tested boundary and evidence; do not assert that all adaptive placement is ineffective because one static microbenchmark was negative.
 
-Keep the CPU-placement policy subordinate to the existing NUMA placement decision.
+## 7. Fair comparisons and CPU budgets
 
-The conceptual hierarchy is:
+Run a fresh matched C0 using the same revision as C2. Historical Full results remain context, not the sole causal baseline.
 
-1. Existing ClawBox logic selects the compute NUMA node.
-2. The optional CPU-placement policy selects an allowed CPU subset within that node.
-3. Linux continues scheduling the VM's vCPU threads within that subset.
+Within each matched comparison, hold constant workloads and trace hashes, validation, templates, vCPU/memory specifications, LOCAL/WARM budgets, admission rules, snapshot/borrowing/control policies, arrival schedule, timeouts, creation limits, and available physical CPU pool.
 
-Preserve the existing cgroup v2 and CubeSandbox preallocation/verification mechanism.
+Only the optional CPU-placement mechanism should differ. Keep monitoring settings comparable and include policy-specific observation/decision costs in the optimization's overhead.
 
-Pay particular attention to:
+Record actual NUMA assignments and memory residency. They may change indirectly through feedback under an unchanged NUMA policy. If this obscures an important mechanism claim, add a small diagnostic with frozen assignments; do not change the main system comparison to force identical outcomes.
 
-- `cpuset.cpus` versus `cpuset.mems`.
-- Existing CPU weights and quotas.
-- Runtime and Tool VM lifecycle.
-- Pause, checkpoint, resume, and restore.
-- Shared-memory borrowing and return.
-- cgroup tombstone semantics and post-restore affinity verification.
-- Atomic placement accounting and cleanup after failures.
+### A: Original CPU budget
 
-CPU placement must not accidentally reset memory bindings, invalidate shared-pool reservations, or interfere with checkpoint/restore behavior.
+Start with one representative real-trace density and the inherited CPU pool. Retain this condition even if the result is small or negative; it establishes the deployment boundary.
 
-Placement leases/accounting must remain consistent across concurrent VM creation and destruction.
+### B: One calibrated restricted CPU budget
 
-Do not alter existing VM vCPU counts or introduce CPU quota changes as part of the optimization.
+Treat B as a second point on the CPU-budget dimension, not a new workload. Select one budget through independent topology and pressure calibration. Run it when a safe, meaningful matched restriction is feasible; otherwise state why it was deferred.
 
-Expose the new modes through the existing experiment configuration system, preferably as an additional setting inside the existing placement dimension rather than creating a new architectural framework.
+Prefer the existing spec-level `compute_nodes[].cpus` configuration if its enforcement is verified on actual VMM/vCPU threads. Restrict all compared methods equally. A controller-only affinity change is insufficient.
 
-Old experiment YAML files must retain their original behavior.
+Record physical-core count, logical-CPU count, SMT sibling selection, available clusters, and reported LLC domains. Reducing physical cores and disabling SMT siblings are different changes. Preserve the SMT selection rule across budgets when feasible, and retain meaningful placement choices.
 
-Add focused unit, integration, and real-VM tests before formal measurements.
+The existing CPU commitment ceiling is:
 
-## 5. Fair experimental comparisons
+`number of configured logical CPUs × placement_cpu_overcommit`
 
-Use a valid existing Full configuration as the common foundation.
+Reducing the pool without changing this parameter also reduces the commitment ceiling. If the intended A/B interpretation requires a constant commitment ceiling, calibrate and freeze the corresponding parameter; report both the ceiling and whether it actually bound admission. If the ceiling changes, do not describe A/B as an isolated CPU-budget effect.
 
-Compare:
+Within each budget, C0 and C2 must have identical admission rules and commitment ceilings. **Do not force identical actual admitted-session counts or admission timelines.** Faster completion can legitimately release resources earlier and admit more work; that is part of the system effect.
 
-| Arm | CPU placement | Other ClawBox mechanisms |
+Preserve memory budgets, VM vCPU counts, model waits, and CPU weights/quotas. Restricting VM CPU masks does not automatically isolate controller/Cubelet or unrelated host work. Record their activity and keep their configuration consistent; do not silently add service isolation or alter unrelated workloads.
+
+## 8. Minimal matrix and claim-specific diagnostics
+
+| CPU budget | Baseline | Optimized |
 |---|---|---|
-| C0 | Existing NUMA-only placement | Unchanged |
-| C1 | Static LLC-aware placement | Identical to C0 |
-| C2 | Adaptive LLC-aware placement | Identical to C0 |
+| A: Original | C0 | C2 |
+| B: Calibrated restricted, when feasible | C0 | C2 |
 
-All three arms must use:
+Start with one valid run per setting for screening. Use independent pilot data for parameter selection and freeze the policy, workload, window, and settings before confirmatory comparisons.
 
-- Identical workloads, trace versions, model-wait timing, and validation.
-- Identical VM templates and vCPU/memory specifications.
-- Identical LOCAL/WARM budgets, checkpoint, borrowing, and admission policies.
-- Identical physical CPU availability and NUMA memory configuration.
-- Identical arrival schedule, timeout semantics, and creation-concurrency limits.
+Interleave and repeat selected comparisons when needed to support a benefit or regression beyond host/time variability. Do not require a full four-arm matrix or a fixed three-repeat campaign by default. A single null run supports only "no benefit observed in this run," not equivalence.
 
-**Only the CPU-placement mechanism should differ within a matched comparison.**
+A fair C0/C2 comparison can establish the effect of the **complete strategy**. It cannot alone identify the contribution of cache locality, mask size, or runtime adaptation.
 
-For causal isolation, record and compare actual NUMA placement. If necessary, add a small diagnostic experiment with frozen NUMA assignments, separate from the end-to-end system comparison.
+Add only the diagnostic required by the intended claim:
 
-Do not reuse a historical Full result as the sole causal baseline after changing the implementation. Run a fresh, matched C0 control using the new code revision, while keeping historical Full results as contextual evidence.
+- **Adaptation:** compare C1 with matching C2, reusing the appropriate C0 context. C1 and C2 share initial placement and all other settings.
+- **Topology selection:** compare equal-size CPU masks with matched physical-core/SMT resources and comparable load, varying topology selection within the permitted NUMA node. On Kunpeng this can be a cluster-layout or topology-blind selection diagnostic, not a fictional cross-LLC control.
+- **Dynamic topology contribution:** if needed, use the same adaptation rules with topology-blind selection. A static pinned control alone does not control C2's time-varying mask behavior.
 
-## 6. Choose a small, meaningful experiment matrix
+C1/C2 similarity does not prove adaptation is universally useless; first check its activation. C1 below C2 can show that adaptation mitigates static-placement costs, but C0/C2 still determines whether the complete extension improves on the existing system.
 
-Do not repeat the earlier 20-arm memory/NUMA/admission evaluation.
+Do not add a Runtime/Tool co-location matrix, more CPU budgets, or additional densities without a specific unresolved question. Preserve all runs and negative results; do not select or discard outcomes based on whether they favor the optimization.
 
-Start by examining the existing Full-run CPU measurements:
+## 9. Metrics and interpretation
 
-- Average and peak active CPU equivalents.
-- Actual runnable demand and scheduler wait.
-- Per-NUMA CPU utilization and imbalance.
-- CPU migrations and LLC/PMU measurements, if supported and valid.
-- Time spent in CPU-intensive Tool phases versus model waiting.
+Freeze event definitions, observation windows, deadline semantics, and success validation before formal comparisons.
 
-Determine whether the existing CPU pool is already sufficiently contended for LLC placement to matter.
+Report:
 
-### Scenario A: Existing full CPU pool
+- **Successful Agents/s:** validated successful Agent completions divided by the declared measurement window. Include offered, admitted, completed, failed, timed-out, and unfinished counts.
+- **Success rate:** give its denominator explicitly, including offered requests when reporting end-to-end service success.
+- **Latency:** mean and P95/P99 where sample counts support them; distinguish execution-start-to-completion, offered-to-completion, and cleanup completion. Report the completion subset and unfinished fraction; do not silently omit censored requests from interpretation.
+- **Makespan:** state the start/end definition. Do not describe a deadline-truncated observation as the completed batch's makespan.
+- **Tool progress:** distinguish logical trace calls, underlying command completions, and successful steps. Do not count maintenance commands as Agent work or label all command completions successful Steps/s.
+- **CPU efficiency:** CPU time per successful Agent, plus total measured CPU time and Tool CPU/wall time. With no successes, the per-success quantity is undefined.
+- **Mechanism activity:** pressure/load, effective mask occupancy over time, adjustment/fallback activity and overhead, NUMA residency, admission, creation, checkpoint/restore, and borrow/return activity.
+- **Optional diagnostics:** reliable LLC accesses/misses or MPKI, IPC, migrations, context switches, and quota throttling. Identify the scope of every CPU metric; VM cgroup consumption is not total host consumption.
 
-Run C0, C1, and C2 using the previously validated resource configuration.
+Fixed arrival rates, model waits, memory admission, or infrastructure costs can limit Agents/s even if Tool execution becomes faster. Report local acceleration and system throughput separately. Neither lower cache misses nor higher Steps/s alone establishes improved successful Agent throughput.
 
-Prefer one representative real-trace density first, selected from prior resource-pressure evidence. Add the second density only if the first results or observed CPU behavior justify it.
+## 10. Configuration, validation, and deliverables
 
-This measures whether CPU placement gives an incremental benefit without artificially introducing CPU scarcity.
+Expose the extension through the existing experiment configuration, defaulting to disabled. Keep NUMA selection and optional finer CPU placement distinct. Freeze the exact public fields during implementation; mode labels in this plan are not claims that those options already exist.
 
-### Scenario B: CPU-constrained deployment (conditional)
+Every public policy parameter must be editable and documented with units, defaults, prerequisites, and the effects of missing observations. Explain which changes require host apply, image rebuild, retraining, or a new run ID. Update the scenario walkthrough and option reference with the implemented public change.
 
-If existing experiments show little CPU pressure, investigate a smaller shared CPU pool as an additional operating regime.
+Use focused tests for C0 masks, assignment concurrency, adaptation/fallback, actual affinity verification, lifecycle interactions, memory-binding preservation, and cleanup. Validate the public path on Kunpeng, including fresh-shell use, repeat execution, and relevant failure paths. If installation changes, exercise them in isolation; never reinstall a shared host merely for validation.
 
-Select its size from the actual hardware topology and a short, independent CPU-pressure calibration. Do not hard-code a particular core count.
+Keep verification artifacts separate from user documentation. Distinguish unit/syntax/help checks, real-VM integration, and formal performance evidence. Do not describe an existing-host run as proof of fresh installation.
 
-All three arms must use the same restricted CPU pool.
+Deliver:
 
-Ensure the restriction applies to actual CubeSandbox VMM/vCPU threads, including the baseline, rather than merely limiting the ClawBox controller process.
+1. The minimal policy contract, implemented configuration, source changes, focused tests, and usage documentation.
+2. Reproducible specs, topology, SMT selection, common CPU budgets, and verified effective masks.
+3. The small C0/C2 comparison, with B and claim-specific diagnostics only where justified and feasible.
+4. Throughput, latency, success, CPU efficiency/pressure, activation, and overhead results with their uncertainty and limitations.
+5. Run IDs, commit and artifact hashes, frozen configurations, raw result locations, and cleanup status.
 
-Preserve the original LOCAL/WARM memory configuration wherever feasible, so that the CPU experiment does not silently change memory-pressure mechanisms.
+If feasibility or pilot evidence stops the extension, deliver the evidence and the explicit unimplemented/untested scope instead of manufacturing a completed evaluation.
 
-Account for the existing `placement_cpu_overcommit` admission ceiling. A smaller CPU pool must not accidentally introduce different session-admission policies between arms. If the commitment ceiling must be adjusted, use and document the same value in every matched arm.
-
-Do not change Tool vCPU counts, model-wait timing, or memory budgets simply to manufacture a favorable result.
-
-The goal is a realistic CPU-overcommitted deployment, not an artificially disadvantaged baseline.
-
-If implementing an equal CPU-pool restriction safely would require invasive changes to the running system, keep it separate and do not compromise the primary experiment.
-
-## 7. Evaluation and autonomous optimization
-
-Use real ClawBox/CubeSandbox replay, not placement simulations as the final performance evidence.
-
-Primary metrics:
-
-- Successful Agents/s.
-- Agent success rate.
-- Mean and P95/P99 Agent completion latency.
-- Offered-to-completion latency.
-- Overall experiment makespan.
-
-Secondary metrics:
-
-- Host CPU equivalents consumed.
-- CPU scheduler wait and pressure.
-- CPU migrations and context switches.
-- LLC misses and IPC when PMU measurements are reliable.
-- CPU quota throttling, if present.
-- NUMA placement and actual memory residency.
-- CPU-placement decision and rebalancing overhead.
-- VM creation, checkpoint/restore, borrowing, and admission activity.
-- Infrastructure failures and cleanup correctness.
-
-Report CPU efficiency separately from overall throughput.
-
-Start with one valid run per setting for screening. Interleave and repeat the most relevant matched comparisons if a meaningful benefit or regression appears, to separate actual effects from host/time variability.
-
-You may improve placement heuristics or tune parameters after diagnostic experiments. However:
-
-- Use a separate pilot for parameter selection.
-- Freeze the final policy and evaluation settings before confirmatory comparisons.
-- Do not select or discard experiments based on whether they favor LLC placement.
-- Preserve negative results and report cases where NUMA-only scheduling is better.
-- Do not claim an improvement based solely on reduced cache misses if successful Agent throughput does not improve.
-
-Prioritize configurations in which CPU-placement mechanisms actually activate and have a plausible opportunity to improve performance, while retaining the unconstrained baseline to establish the operating boundary.
-
-## 8. Required deliverables
-
-Complete the implementation and provide:
-
-1. Source-code changes with tests and documentation.
-2. New optional CPU-placement configuration and reproducible experiment specs.
-3. Hardware topology and verified effective CPU masks.
-4. A small but valid C0/C1/C2 comparison, including a CPU-contention scenario if safely feasible.
-5. A summary of throughput, latency, success rate, CPU contention, and placement overhead.
-6. An explanation of where the gain originates and where the optimization does not help.
-7. Exact run IDs, commit hashes, resource configuration, raw result locations, and cleanup status.
-
-Keep the original ClawBox evaluation intact.
-
-**Execution priority:** Finish existing experiments → verify cleanup → inspect existing CPU bottlenecks → implement LLC placement → test → run minimal matched comparisons → improve if justified → report.
-
-The objective is to obtain an additional, scientifically defensible CPU-placement optimization without invalidating or unnecessarily repeating the extensive experiments already completed.
-
-
-## Additional Clarifications: CPU Budget Scaling, C0/C2 Priorities, and C1 Ablation
-
-The following clarifications refine the original experimental plan and take precedence where the earlier C0/C1/C2 experiment matrix conflicts with the priorities below.
-
-### 1. Interpret Scenarios A and B as CPU Budget Scaling
-
-Scenarios A and B are not fundamentally different workloads or optimization objectives. They represent different **CPU resource budgets and potentially different levels of CPU contention** under otherwise identical ClawBox configurations.
-
-- **Scenario A — Original CPU budget:** Use the previously validated full CPU pool. This establishes whether LLC-aware placement provides an incremental benefit under the existing deployment configuration.
-- **Scenario B — Restricted CPU budget:** Reduce the available physical CPU pool while preserving the workload, VM specifications, memory configuration, and other ClawBox mechanisms. This investigates whether CPU placement becomes more valuable when runnable VM threads compete for fewer physical CPUs.
-
-Treat these scenarios as points along a CPU-budget scaling dimension, rather than two unrelated experiments.
-
-Importantly, CPU oversubscription does not necessarily imply actual CPU contention. Measure runnable demand, scheduler waiting, CPU PSI, and CPU utilization to establish the actual operating conditions.
-
-Start with the original CPU budget and one carefully calibrated restricted budget. Additional CPU-budget levels are optional and should be introduced only if the initial results suggest a meaningful trend.
-
-When restricting CPUs:
-
-- Apply the identical restriction to all compared methods, including the baseline.
-- Ensure the restriction affects actual CubeSandbox VMM/vCPU threads, not merely the ClawBox controller.
-- Use the same physical CPU pool and corresponding CPU/LLC topology for each matched comparison.
-- Prefer a representative subset that retains meaningful LLC placement choices. Record any changes in the number of available LLC domains.
-- Avoid introducing CPU quotas, changing VM vCPU counts, or modifying memory budgets.
-- Preserve the existing admission semantics. If the CPU commitment ceiling requires adjustment, apply the same calibrated setting to every method.
-
-The purpose is to characterize the performance impact of CPU placement across realistic CPU resource conditions, not to manufacture an artificial advantage for the optimized method.
-
-### 2. Clarify C0: A Strong NUMA-Only Baseline
-
-**C0 is the existing ClawBox NUMA-aware placement with Linux's default CPU scheduling inside the permitted CPU pool.**
-
-C0 must preserve the original NUMA selection, lifecycle management, memory placement, and all other ClawBox mechanisms.
-
-In particular:
-
-- The existing NUMA policy decides the compute NUMA node.
-- VM threads can use the full permitted CPU set within that selected NUMA node.
-- Linux retains responsibility for CPU scheduling, load balancing, and thread migration.
-- No LLC-specific CPU subsets or additional affinity restrictions are imposed.
-- Under Scenario B, the permitted CPU set is simply intersected with the common experimental CPU budget. C0 must not retain access to CPUs unavailable to C2.
-
-C0 must not be deliberately weakened through narrower affinities, lower CPU quotas, or different admission limits.
-
-This is especially important because Linux's unrestricted scheduling may already outperform overly restrictive LLC-local placement under heavy CPU contention.
-
-### 3. Clarify C2: The Primary LLC-Aware Optimization
-
-**C2 is the complete optimization proposed for evaluation. It combines topology-aware initial placement with adaptive runtime affinity management.**
-
-Its initial placement should use the actual hardware LLC topology to improve locality and reduce interference where feasible.
-
-However, LLC locality is a preference, not a permanent constraint.
-
-During execution, C2 should:
-
-1. Observe actual CPU demand, runnable pressure, scheduling delays, and load imbalance across LLC domains.
-2. Detect when an LLC-local CPU subset is causing unnecessary scheduling delays while other CPUs within the permitted NUMA node have usable capacity.
-3. Expand or adjust the VM's CPU affinity when the expected scheduling benefit justifies sacrificing some LLC locality.
-4. Avoid unnecessary changes when the original placement is working well.
-5. Use hysteresis, cooldown, and measured feedback to control adjustment overhead.
-6. Fall back to the full permitted NUMA CPU set when finer-grained placement becomes counterproductive or cannot be safely determined.
-
-C2 must never obtain additional physical CPU capacity unavailable to C0, cross the selected NUMA boundary solely for LLC optimization, or modify memory bindings as a side effect.
-
-Use the actual cache topology reported by the host. Do not assume that hardware clusters necessarily correspond to independent LLC domains.
-
-The expected benefit of C2 should come from improved locality, reduced cache interference, or more effective use of available CPU capacity—not from assigning more resources to the optimized method.
-
-**C2 is not guaranteed to outperform C0 or C1.** Under low contention, it may behave similarly to static placement. Under uniform heavy contention, it may have no useful opportunity to rebalance. Its overhead and possible regressions must be measured.
-
-### 4. Reduce the Main Experiment Matrix to C0 vs. C2
-
-Prioritize the following matched comparisons:
-
-| CPU resource condition | Baseline | Optimized |
-|---|---|---|
-| A: Original CPU budget | C0 | C2 |
-| B: Restricted CPU budget | C0 | C2 |
-
-These four configurations are the primary experiments.
-
-The central questions are:
-
-- Does the complete LLC-aware mechanism improve successful Agent throughput over the existing NUMA-only system?
-- How does its benefit or regression change as CPU resources become more constrained?
-- Are the observed differences explained by LLC behavior, CPU scheduling contention, load balancing, or optimization overhead?
-
-Keep the original full-budget scenario even if its improvement is small or nonexistent. It establishes the operating boundary of the optimization.
-
-Start with one run per configuration for screening. Repeat only the most informative comparisons when necessary for reliable conclusions.
-
-### 5. Reposition C1 as an Optional Mechanism Ablation
-
-**C1 is not a separate primary optimization target. Its main purpose is to isolate the contribution of runtime adaptation in C2.**
-
-Conceptually:
-
-- C1 = LLC-aware initial placement without runtime affinity adaptation.
-- C2 = The same initial placement plus adaptive runtime affinity adjustment.
-
-Therefore, prefer implementing C1 as `adaptive=false` within the shared LLC-aware placement implementation, rather than maintaining two independent scheduling frameworks.
-
-C1 can be deferred until the primary C0/C2 comparisons have completed.
-
-If C2 demonstrates meaningful improvement or regression, add one targeted C1 experiment under the most informative CPU-contention condition. Reuse the matching C0 and C2 results.
-
-This comparison establishes whether runtime adaptation contributes beyond static LLC-aware placement.
-
-If time is limited or C2 provides no meaningful system-level benefit, it is acceptable to postpone formal C1 evaluation. In that case, avoid making separate performance claims about the adaptation component.
-
-Functional verification of any shared static-placement logic is still required before running C2.
-
-### 6. Execution Priority
-
-The revised priority is:
-
-1. Complete and clean up the existing ClawBox evaluation.
-2. Inspect actual hardware topology and existing CPU-pressure measurements.
-3. Implement and validate C0-compatible behavior and the complete C2 mechanism.
-4. Run the smallest valid C0/C2 comparison under the original CPU budget.
-5. Calibrate one restricted CPU budget and perform the corresponding C0/C2 comparison.
-6. Diagnose benefits, regressions, and actual adaptation activity.
-7. Add the C1 static-placement ablation only if it provides useful explanatory evidence.
-8. Expand CPU-budget levels or repeat experiments only when justified by the results.
-
-Preserve all existing experimental results. Do not reopen the original admission, memory, checkpoint, NUMA, or runtime-control evaluation matrix.
-
-**The goal is a small, rigorous incremental evaluation showing whether LLC-aware adaptive CPU placement improves Agent throughput, under which CPU-resource conditions it works, and whether its complexity is justified.**
+**Execution priority:** Close out the existing campaign and verify cleanup → confirm the actual topology hypothesis and baseline condition → define and implement the smallest policy with consistent binding ownership and usable feedback → validate with a small real-VM pilot → freeze settings → run minimal C0/C2 comparisons → add only necessary diagnostics/repeats → report.

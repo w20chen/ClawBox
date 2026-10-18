@@ -1,0 +1,26 @@
+{
+  "recordCount": 13,
+  "truncated": true,
+  "metadata": {
+    "revision": "rha9x5",
+    "target": {
+      "id": "wb/1z6d9i",
+      "beforeLines": 0,
+      "afterLines": 0
+    },
+    "kind": {
+      "requested": "sheet,table",
+      "tokens": [
+        "sheet",
+        "table"
+      ]
+    },
+    "include": {
+      "tokens": []
+    },
+    "exclude": {
+      "tokens": []
+    },
+    "notices": []
+  }
+}

@@ -1,0 +1,79 @@
+source,run_id,policy,target_agents,window_s,successful_agents,failed_agents,observed_step_count,observed_steps_per_s,metric_scope,peak_memory_GiB,peak_memory_scope,completion_class,result_state
+three-day review,sqlglot-admission-c160-r2,default-resident,160,1800.0,0,0,3184.0,1.768888888888889,legacy-unclassified,236.7391700744629,VM cgroup,No completed Agent,timed_out
+three-day review,sqlglot-admission-c160-r2,predicted-resident,160,107.79358243942261,0,0,8.0,0.07421592101269857,legacy-unclassified,88.12238311767578,VM cgroup,No completed Agent,cancelled
+three-day review,sqlglot-admission-c160-r3,default-resident,160,3600.0,0,0,6040.0,1.6777777777777778,legacy-unclassified,243.3732795715332,VM cgroup,No completed Agent,timed_out
+three-day review,sqlglot-admission-c160-r3,predicted-resident,160,120.96232771873474,0,0,9.0,0.07440333010891682,legacy-unclassified,96.83366775512695,VM cgroup,No completed Agent,cancelled
+three-day review,pilot-admission-c16,predicted-100,16,694.5419871807098,0,0,300.0,0.4319393291365469,application-tool,15.9420166015625,VM cgroup,No completed Agent,cancelled
+three-day review,pilot-admission-c16-v2,predicted-100,16,944.3494551181793,0,0,59.0,0.06247687196750331,application-tool,19.714168548583984,VM cgroup,No completed Agent,cancelled
+three-day review,pilot-admission-c8-v3,fixed-64,8,701.9678461551666,8,0,416.0,0.5926197364715836,application-tool,21.296955108642578,VM cgroup,All Agents completed,succeeded
+three-day review,pilot-admission-c8-v3,predicted-100,8,692.1313433647156,8,0,416.0,0.6010419900616907,application-tool,20.989421844482422,VM cgroup,All Agents completed,succeeded
+three-day review,pilot-admission-c8-v3,fixed-630,8,713.5239198207855,8,0,416.0,0.5830217998921269,application-tool,21.204364776611328,VM cgroup,All Agents completed,succeeded
+three-day review,pilot-admission-c8-v3,predicted-025,8,825.867066860199,8,0,416.0,0.5037130268210823,application-tool,20.74966049194336,VM cgroup,All Agents completed,succeeded
+three-day review,final-primary-c320,full,320,193.63438987731934,0,1,0.0,0.0,application-tool,70.63854598999023,VM cgroup,No completed Agent,failed
+three-day review,final-mechanism-c128,full,128,86.46826148033142,0,1,0.0,0.0,application-tool,28.690288543701172,VM cgroup,No completed Agent,failed
+three-day review,final-primary-c320-r2,full,320,454.57581615448,0,0,4.0,0.008799412238509113,application-tool,123.18183898925781,VM cgroup,No completed Agent,cancelled
+three-day review,final-primary-c320-r3,full,320,114.65490746498108,0,1,0.0,0.0,application-tool,40.20609664916992,VM cgroup,No completed Agent,failed
+three-day review,final-primary-c320-r4,full,320,424.05689215660095,0,0,18.0,0.04244713464851018,application-tool,164.63673782348633,VM cgroup,No completed Agent,cancelled
+three-day review,final-primary-c320-r5,full,320,725.5675089359283,0,0,274.0,0.37763543243802516,application-tool,146.15973281860352,VM cgroup,No completed Agent,cancelled
+three-day review,final-primary-c320-r6,full,320,725.9638648033142,0,0,289.0,0.3980914395488527,application-tool,139.80975341796875,VM cgroup,No completed Agent,cancelled
+three-day review,final-primary-c320-r7,full,320,1783.7978839874268,0,0,5671.0,3.179171839425712,application-tool,260.4780616760254,VM cgroup,No completed Agent,destroyed
+three-day review,final-primary-c320-short,full,320,1500.0,0,0,5082.0,3.388,application-tool,306.52775955200195,VM cgroup,No completed Agent,failed
+three-day review,final-primary-c320-short-fixed-only,fixed,320,1500.0,5,0,5690.0,3.7933333333333334,application-tool,299.4721870422363,VM cgroup,Partial Agent completion,timed_out
+three-day review,pilot-c32-01,predicted-025,32,1723.8658046722412,0,0,1376.0,0.7982059834765497,application-tool,68.70181274414062,VM cgroup,No completed Agent,destroyed
+three-day review,final-primary-c320-01,fixed,320,80.330082654953,0,0,11.0,0.13693500163878844,application-tool,36.82857894897461,VM cgroup,No completed Agent,destroyed
+three-day review,final-primary-c320-01,full,320,1800.0,98,0,7191.0,3.995,application-tool,283.2217712402344,VM cgroup,Partial Agent completion,timed_out
+three-day review,final-primary-c320-03,full,320,1800.0,83,0,7185.0,3.9916666666666667,application-tool,289.6971244812012,VM cgroup,Partial Agent completion,failed
+three-day review,contention-pilot-c1-01,pilot-fixed-256,1,127.63137936592102,1,0,7.0,0.05484544658826336,application-tool,7.694343566894531,VM cgroup,All Agents completed,succeeded
+three-day review,contention-final-c32-01,full-predicted,32,241.25919723510742,0,0,111.0,0.4600860869640976,application-tool,80.00022888183594,VM cgroup,No completed Agent,failed
+three-day review,contention-command-table-c32-01,full-predicted,32,315.85297536849976,0,0,105.0,0.3324331514607341,application-tool,77.42573928833008,VM cgroup,No completed Agent,cancelled
+three-day review,contention-command-table-c28-01,full-predicted,28,307.87899017333984,0,0,104.0,0.3377950536392453,application-tool,77.58000946044922,VM cgroup,No completed Agent,cancelled
+three-day review,contention-command-table-c28-v2-01,fixed-256,28,238.83661246299744,28,0,196.0,0.8206446992308014,application-tool,80.0,VM cgroup,All Agents completed,succeeded
+three-day review,contention-command-table-c28-v2-01,full-predicted,28,268.43638849258423,28,0,196.0,0.7301543620842398,application-tool,70.58219528198242,VM cgroup,All Agents completed,succeeded
+three-day review,contention-command-table-c28-v2-m64-01,fixed-256,28,186.0771565437317,28,0,196.0,1.0533264998271632,application-tool,64.0,VM cgroup,All Agents completed,succeeded
+three-day review,contention-command-table-c28-v2-m64-01,full-predicted,28,207.74064326286316,28,0,196.0,0.9434841296413662,application-tool,57.01615524291992,VM cgroup,All Agents completed,succeeded
+three-day review,contention-command-table-c24-v2-m48-01,fixed-256,24,485.1386761665344,24,0,168.0,0.34629273701181956,application-tool,46.66074752807617,VM cgroup,All Agents completed,succeeded
+three-day review,contention-command-table-c24-v2-m48-01,full-predicted,24,295.86854887008667,24,0,168.0,0.567819731571967,application-tool,42.06788635253906,VM cgroup,All Agents completed,succeeded
+three-day review,contention-no-admission-c24-v2-m48-01,no-admission,24,509.7028634548187,0,1,154.0,0.3021368154696485,application-tool,48.0,VM cgroup,No completed Agent,failed
+three-day review,contention-no-admission-c24-v2-m48-02,no-admission,24,524.1842803955078,4,20,148.0,0.28234345350518897,application-tool,48.0,VM cgroup,Partial Agent completion,failed
+three-day review,c1280-screen-c320-01,no-tool-admission-shared,320,1200.0,174,0,1277.0,1.0641666666666667,application-tool,115.77892303466797,VM cgroup,Partial Agent completion,failed
+three-day review,c1280-screen-c320-02,no-tool-admission-shared,320,695.5422658920288,166,0,1777.0,2.5548411464557197,application-tool,286.8105354309082,VM cgroup,Partial Agent completion,cancelled
+three-day review,c1280-screen-c320-03,no-tool-admission-shared,320,560.1534469127655,6,56,620.0,1.1068395694377555,application-tool,230.69100952148438,VM cgroup,Partial Agent completion,destroyed
+three-day review,c1280-priority-2h-01,os-default-no-admission,1280,1200.0,0,1,1773.0,1.4775,application-tool,637.6207847595215,VM cgroup,No completed Agent,timed_out
+three-day review,c1280-priority-2h-01,os-default-no-admission,640,176.52652549743652,0,0,189.0,1.0706606243306171,application-tool,187.22347259521484,VM cgroup,No completed Agent,cancelled
+three-day review,c1280-screen-c320-04,os-default-no-admission,320,2400.0,0,4,969.0,0.40375,application-tool,615.9860382080078,VM cgroup,No completed Agent,failed
+three-day review,c1280-screen-c320-05,predicted-shared,320,2072.135226726532,0,2,2019.0,0.9743572591010516,application-tool,830.7265625,VM cgroup,No completed Agent,failed
+three-day review,c1280-screen-c320-os-06,os-default-no-admission,320,3600.0,0,0,1512.0,0.42,application-tool,1051.3064002990723,VM cgroup,No completed Agent,failed
+three-day review,c1280-screen-c320-predicted-06,predicted-shared,320,993.1795454025269,320,0,3200.0,3.2219753364967545,application-tool,601.1090698242188,VM cgroup,All Agents completed,succeeded
+three-day review,c1280-primary-c640-07,os-default-no-admission,640,1047.1369807720184,0,164,66.0,0.06302900309312011,application-tool,705.2962455749512,VM cgroup,No completed Agent,destroyed
+three-day review,c1280-primary-c640-07,predicted-shared,640,1178.9454021453857,0,640,2516.0,2.134110702176292,application-tool,443.9419174194336,VM cgroup,No completed Agent,failed
+three-day review,c1280-primary-c640-08-v6,os-default-no-admission,640,3600.0,0,164,497.0,0.13805555555555554,application-tool,813.5488128662109,VM cgroup,No completed Agent,failed
+three-day review,c1280-primary-c640-08-v6,predicted-shared,640,1811.0655755996704,640,0,2560.0,1.4135324719826041,application-tool,455.14147186279297,VM cgroup,All Agents completed,succeeded
+three-day review,c320-admission-ablation-01,admission-predicted,320,875.4546899795532,308,0,3197.0,3.6518166349359187,application-tool,484.86750411987305,VM cgroup,Partial Agent completion,destroyed
+three-day review,real-trace-p0-c320-01,f-s384,320,336.2280366420746,0,1,0.0,0.0,application-tool,226.82712936401367,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-l96-01,f-s384,320,982.591561794281,0,5,3065.0,3.119302179232127,application-tool,136.0303077697754,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-pair-l160-01,f-s384,320,319.8683400154114,0,1,331.0,1.034800755786122,application-tool,117.67290115356445,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-pair-l160-02,f-s384,320,845.0946531295776,0,13,2290.0,2.709755636862225,application-tool,139.36067962646484,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-pair-l160-03,f-s384,320,582.5463240146637,0,0,1218.0,2.090820849415129,application-tool,119.03445053100586,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-pair-l160-04,f-s384,320,344.8128263950348,0,1,372.0,1.0788461783431984,application-tool,122.48816680908203,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-pair-l160-05,f-s384,320,1671.9172050952911,0,22,4572.0,2.734585173276818,application-tool,121.63678741455078,VM cgroup,No completed Agent,failed
+three-day review,real-trace-p0-c320-pair-l160-06,a-off,320,429.354483127594,0,1,811.0,1.888882105276609,application-tool,146.62826538085938,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c320-pair-l160-06,f-s384,320,2400.0,0,6,4210.0,1.7541666666666667,application-tool,181.00022888183594,VM cgroup,No completed Agent,timed_out
+three-day review,real-trace-p0-c320-remaining-l160-01,a-off,320,2400.0,0,19,9125.0,3.8020833333333335,application-tool,302.5264701843262,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-mild-l640-01,f-s384,640,336.14369010925293,0,0,3.0,0.008924754764918968,application-tool,229.88005828857422,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-mild-l640-02,f-s384,640,1.9217123985290527,0,0,,,unavailable,,unavailable,No completed Agent,failed
+three-day review,real-trace-p0-c640-mild-l640-03,f-s384,640,2400.0,0,265,6498.0,2.7075,application-tool,515.8080368041992,VM cgroup,No completed Agent,timed_out
+three-day review,real-trace-p0-c640-balanced-full-l512-01,f-s384,640,1099.99671792984,0,59,5238.0,4.761832389698175,application-tool,389.6797637939453,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-paced-full-l352-01,f-s384,640,721.2741043567657,0,16,2121.0,2.9406296263630782,application-tool,286.61498260498047,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-paced-full-l352-01,f-s384,640,229.60441827774048,0,0,679.0,2.9572601655193287,application-tool,148.4403076171875,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-paced-full-l352-02,f-s384,640,1179.3952305316925,0,16,3486.0,2.9557521598832044,application-tool,291.01465606689453,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-relaxed-full-l640-01,f-s384,640,1115.2980422973633,0,0,3216.0,2.8835341568209647,application-tool,419.3871383666992,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-relaxed-full-l640-02,f-s384,640,2400.0,0,2,3240.0,1.35,application-tool,485.30781173706055,VM cgroup,No completed Agent,failed
+three-day review,real-trace-p0-c640-main-full-l896-01,f-s384,640,697.2564480304718,0,5,3667.0,5.259184063995552,application-tool,413.7068977355957,VM cgroup,No completed Agent,cancelled
+three-day review,real-trace-p0-c640-balanced-full-s075-01,f-s384,640,1200.0,0,33,4681.0,3.9008333333333334,application-tool,510.6824150085449,VM cgroup,No completed Agent,timed_out
+three-day review,real-trace-p0-c640-balanced-aoff-s075-01,a-off,640,1200.0,0,83,4873.0,4.060833333333333,application-tool,537.8955345153809,VM cgroup,No completed Agent,timed_out
+three-day review,real-trace-p0-c640-balanced-os-s075-01,d-os-default,640,1200.0,0,183,6481.0,5.400833333333333,application-tool,580.2337646484375,VM cgroup,No completed Agent,failed
+c320 supplement,Planned optimized,Optimized system,320,960.0,0,5,2319,2.415625,application-tool,358.3,LOCAL,No completed Agent,bounded observation
+c320 supplement,Planned admission disabled,Admission disabled,320,960.0,0,20,4807,5.007291666666666,application-tool,357.9,LOCAL,No completed Agent,bounded observation
+c320 supplement,Gate-12 calibration,Optimized system,320,300.0,0,0,1,0.0033333333333333335,application-tool,217.5,LOCAL,No completed Agent,bounded observation
+c320 supplement,1.5-s arrival calibration,Optimized system,320,600.0,0,26,3332,5.553333333333334,application-tool,312.0,LOCAL,No completed Agent,bounded observation
+c320 supplement,2.5-s arrival calibration,Optimized system,320,900.0,0,37,4007,4.452222222222222,application-tool,388.2,LOCAL,No completed Agent,bounded observation

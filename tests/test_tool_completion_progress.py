@@ -104,6 +104,7 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_en
     environment = dict(
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
         active_reservations={'exec': 512}, admitted_routes={'exec': route},
+            active_cpu_placements=set(), priority_domain=None,
         pending_admissions=set(),
         progress_control=None,
         host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})}, prediction_records=[],

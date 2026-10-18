@@ -1,0 +1,42 @@
+{
+  "arms": {
+    "8d0383797b333e2bc5fa85df": {
+      "artifact_root": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-full-20261018-01/attempts/attempt-495577f4257d45ea/8d0383797b333e2bc5fa85df",
+      "attempt_id": "attempt-495577f4257d45ea",
+      "cleanup_error": null,
+      "cleanup_verified": true,
+      "completed_unix_s": 1792312995.7773151,
+      "heartbeat_unix_s": 1792312914.4070473,
+      "result": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-full-20261018-01/arms/8d0383797b333e2bc5fa85df.json",
+      "semantic_progress": {
+        "event_bytes": 59648851,
+        "event_modified_unix_s": 1792312914.4015198
+      },
+      "started_unix_s": 1792311835.2457564,
+      "status": "timed_out",
+      "task_uid": "clawbox-16e62b6e9cf261a0eec9",
+      "worker": {
+        "create_time": 1792311834.88,
+        "pid": 576648
+      }
+    }
+  },
+  "attempt_id": "attempt-495577f4257d45ea",
+  "completed_unix_s": 1792312995.7792776,
+  "created_unix_s": 1792311835.2451375,
+  "current_arm_id": null,
+  "experiment_id": "supplement-m320-full-20261018",
+  "failure": "one or more trials failed",
+  "owner_id": "supp-m320-full-20261018-01",
+  "phase": "terminal",
+  "qualification_receipt": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-full-20261018-01/qualification.json",
+  "run_id": "supp-m320-full-20261018-01",
+  "schema_version": 1,
+  "spec_digest": "246dcbcbf3fd32e225757cb71f287ace5a85d5ad0931c4a72a8128961e780a24",
+  "state": "failed",
+  "supervisor": {
+    "create_time": 1792311830.52,
+    "pid": 576087
+  },
+  "updated_unix_s": 1792312995.7806885
+}

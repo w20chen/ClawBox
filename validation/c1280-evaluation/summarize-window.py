@@ -76,12 +76,15 @@ for arm_id, arm in state['arms'].items():
         if not values:
             return None
         s = sorted(values)
-        return {k: s[min(len(s)-1, math.ceil(q * len(s))-1)] for k, q in [('p50', .5), ('p95', .95), ('p99', .99), ('max', 1)]}
+        return {k: s[min(len(s)-1, math.ceil(q * len(s))-1)] for k, q in [('p50', .5), ('p90', .9), ('p95', .95), ('p99', .99), ('max', 1)]}
+    failed_agents = counts['session_failed']
     reports.append(dict(arm_id=arm_id, run_state=state['state'], cleanup_verified=arm.get('cleanup_verified'),
         requested_window_seconds=a.seconds, observed_window_seconds=duration,
         offered_sessions=offered, target_sessions=concurrency, sessions_with_vm_created=len(created_sessions),
         successful_agents=len(successful_latencies), successful_agents_per_second=len(successful_latencies)/duration if duration else None,
         successful_fraction_of_offered=len(successful_latencies)/offered if offered else None,
+        failed_agents=failed_agents,
+        censored_offered_agents=max(0, offered-len(successful_latencies)-failed_agents),
         successful_latency_seconds_conditional_on_completion=quantiles(successful_latencies),
         latency_note='Completion-conditioned percentiles exclude unfinished requests; no all-request P95/P99 claim.',
         admission_wait_seconds_completed_admissions=quantiles(waits),

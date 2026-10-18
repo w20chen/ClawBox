@@ -2,10 +2,45 @@
 
 Last updated: 2026-10-18 (Asia/Shanghai)
 
-## Current user instruction: correctness verification only
+## Latest supplement execution (2026-10-18)
 
-Formal experiments are stopped at the user's request on 2026-10-18. Do not
-launch or resume c320/c640 arms without a new user instruction. The historical
+The user requested a smaller, evidence-based follow-up with carefully chosen
+c320/c640 memory and pool sizes. See
+[the new two-hour supplement plan](SUPPLEMENT-PLAN-20261018.md).
+It supersedes the pending historical experiment matrix below: retain previous
+results, prioritize fair Full/A-off/OS comparisons and actual-idle ablation,
+and run at most six new arms with explicit tail-latency and time-budget gates.
+The user subsequently authorized execution. See
+[the supplementary result](SUPPLEMENT-RESULTS-20261018.md).
+
+The planned c320 Full and A-off arms and three bounded Full calibration points
+were executed on `kunpeng`. Every point had zero successful Agents in its
+frozen observation window; runs that reached all 320 offered requests began
+recording HTTP 408 failures. The planned point also had a 358.3 GiB LOCAL peak,
+below its 384 GiB LOW watermark, with no OOM or memory PSI. Relaxing memory to
+448/512 GiB and pacing arrivals at 1.5 or 2.5 seconds improved VM creation but
+still produced zero completions and respectively 26 or 37 failures.
+
+The matrix is therefore stopped rather than completed with uninterpretable
+arms. OS, I-off, B-off, other secondary ablations, and c640 were not run:
+there is no successful Full latency distribution to compare, relaxed Full did
+not activate the memory mechanisms, and c320 did not meet the plan's condition
+for escalating to c640. This is a configuration-search boundary, not a positive
+or negative general claim about ClawBox. Further formal execution requires an
+explicit choice to change execution capacity or the workload/window. Merely
+prioritizing a small subset cannot satisfy the 95% completion gate because the
+trace work count exceeds observed 960-second capacity. All attempted runs are
+terminal with verified cleanup; no experiment
+or QEMU process remains. The saved Kunpeng host profile now contains the M320
+384/448 GiB, WARM 256 GiB, and borrowing 64 GiB settings.
+
+## Historical stop and correctness verification
+
+Formal experiments were initially stopped at the user's request on 2026-10-18;
+the later supplement execution authorization superseded that instruction only
+for the bounded work recorded above. Do not launch or resume additional
+c320/c640 arms without a new user decision on the workload-capacity boundary.
+The historical
 experiment queue below is retained for reference, not authorization to run it.
 The prepared `actual-idle-matrix/` configurations are not completed results.
 `actual-idle-c320-full-01` never started: its prerequisite qualification
@@ -697,7 +732,11 @@ quantities in every table and figure.
 - A concise result table, figures for the primary comparison, limitations, and
   reproduction commands.
 
-## Current next actions
+## Historical next actions (superseded)
+
+The supplement execution and stop decision at the top of this file supersede
+this queue. The entries below are retained only as an audit trail; they are not
+current authorization or a recommendation to resume these arms.
 
 1. c320 qualification, the stale-leaf Linux cgroup test, and the real-VM paired
    Runtime+Tool checkpoint check passed. Formal attempt 01 was invalidated by

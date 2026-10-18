@@ -70,6 +70,38 @@ def test_every_recipe_roundtrips_and_expands(recipe, axis, count):
     assert all(set(p.mechanisms) == set(GROUPS) for p in spec.policies)
 
 
+def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
+    raw = base()
+    raw['mechanisms']['placement'].update(
+        tool_call_cpu_policy='c2', tool_call_cpu_pressure_ratio=.2,
+        tool_call_cpu_pressure_samples=3, tool_call_cpu_cooldown_seconds=3,
+    )
+    spec = ExperimentSpec.model_validate(raw)
+    arm = expand_matrix(spec)[0]
+    assert arm.execution.tool_call_cpu_policy == 'c2'
+    assert arm.execution.tool_call_cpu_pressure_ratio == .2
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+
+    raw['mechanisms']['placement']['policy'] = 'os_default'
+    with pytest.raises(ValueError, match='C2 Tool-call CPU placement'):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_c0_and_c2_effective_arms_differ_only_in_cpu_policy():
+    raw = base()
+    raw['comparison']['arms'] = [
+        {'name': 'c0'},
+        {'name': 'c2', 'override': {'placement.tool_call_cpu_policy': 'c2'}},
+    ]
+    c0, c2 = ExperimentSpec.model_validate(raw).policies
+    c0_execution = dict(c0.execution_overrides)
+    c2_execution = dict(c2.execution_overrides)
+    assert c0_execution.pop('tool_call_cpu_policy') == 'c0'
+    assert c2_execution.pop('tool_call_cpu_policy') == 'c2'
+    assert c0_execution == c2_execution
+    assert c0.resource_overrides == c2.resource_overrides
+
+
 def test_recipe_and_arm_names_do_not_change_execution():
     raw = export_design(design('runtime'))
     before = expand_matrix(ExperimentSpec.model_validate(raw))

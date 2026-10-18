@@ -1,0 +1,129 @@
+[
+  {
+    "arm_id": "af071069ac29418302d0cb5c",
+    "run_state": "running",
+    "cleanup_verified": false,
+    "requested_window_seconds": 600.0,
+    "observed_window_seconds": 599.9992308616638,
+    "offered_sessions": 240,
+    "target_sessions": 320,
+    "sessions_with_vm_created": 215,
+    "successful_agents": 0,
+    "successful_agents_per_second": 0.0,
+    "successful_fraction_of_offered": 0.0,
+    "failed_agents": 10,
+    "censored_offered_agents": 230,
+    "successful_latency_seconds_conditional_on_completion": null,
+    "latency_note": "Completion-conditioned percentiles exclude unfinished requests; no all-request P95/P99 claim.",
+    "admission_wait_seconds_completed_admissions": {
+      "p50": 0.006533595998917008,
+      "p90": 0.0642674580012681,
+      "p95": 0.16136291599832475,
+      "p99": 0.7219173080011387,
+      "max": 91.97511087600287
+    },
+    "completed_execution_scopes": {
+      "backend-maintenance": 6868,
+      "agent-tool": 2557
+    },
+    "event_counts": {
+      "runtime_memory_started": 1,
+      "sandbox_create_gate_wait_started": 240,
+      "sandbox_create_gate_acquired": 237,
+      "session_placement": 237,
+      "pressure_vm_generation": 425,
+      "runtime_memory_placement": 425,
+      "sandbox_created": 425,
+      "memory_sample": 273,
+      "native_ssh_endpoint_resolved": 9734,
+      "tool_admission_queued": 9580,
+      "native_ssh_identity_ready": 9511,
+      "tool_admitted": 9507,
+      "tool_execution_progress": 18900,
+      "pressure_execution_release": 9432,
+      "tool_completed": 9425,
+      "sandbox_destroyed": 20,
+      "session_timing": 10,
+      "session_failed": 10
+    },
+    "memory_peaks_bytes": {
+      "local_used_bytes": 318506463232,
+      "combined_live_used_bytes": 318682025984,
+      "shared_live_used_bytes": 1531904,
+      "warm_allocated_bytes": 0,
+      "warm_reserved_bytes": 0,
+      "warm_committed_bytes": 0,
+      "shared_borrow_reserved_bytes": 0
+    },
+    "cgroup_memory_event_deltas": {
+      "high": 0,
+      "low": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_group_kill": 0,
+      "oom_kill": 0
+    },
+    "cgroup_memory_psi_avg10_max": {
+      "full": 0,
+      "some": 0
+    },
+    "failure_examples": [
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "21530184850888",
+        "schema_version": 1,
+        "sequence_no": 75017,
+        "session_id": "af071069ac29418302d0cb5c-0213",
+        "wall_time": "2026-10-18T09:58:11.548659+00:00",
+        "wall_time_ns": "1792317491548687998"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "21531311202813",
+        "schema_version": 1,
+        "sequence_no": 75212,
+        "session_id": "af071069ac29418302d0cb5c-0215",
+        "wall_time": "2026-10-18T09:58:12.675022+00:00",
+        "wall_time_ns": "1792317492675041153"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "21531311531174",
+        "schema_version": 1,
+        "sequence_no": 75213,
+        "session_id": "af071069ac29418302d0cb5c-0216",
+        "wall_time": "2026-10-18T09:58:12.675363+00:00",
+        "wall_time_ns": "1792317492675370634"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "21533599359662",
+        "schema_version": 1,
+        "sequence_no": 75528,
+        "session_id": "af071069ac29418302d0cb5c-0207",
+        "wall_time": "2026-10-18T09:58:14.963178+00:00",
+        "wall_time_ns": "1792317494963197772"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "21536566821722",
+        "schema_version": 1,
+        "sequence_no": 75950,
+        "session_id": "af071069ac29418302d0cb5c-0208",
+        "wall_time": "2026-10-18T09:58:17.930631+00:00",
+        "wall_time_ns": "1792317497930659222"
+      }
+    ],
+    "source_events": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-sustainable-full-20261018-01/attempts/attempt-652679496d194ce9/af071069ac29418302d0cb5c/events/af071069ac29418302d0cb5c.jsonl"
+  }
+]

@@ -1,0 +1,28 @@
+runtime_template: tpl-c26532b6e4c64168bce9e1c1
+tool_template: tpl-2be5ffe644a745388f0325be
+node: 193.124.7.2
+compute_nodes:
+  - node_id: node0
+    numa_node: 0
+    cpus: 0-79
+    memory_gib: 464
+    low_gib: 192
+    high_gib: 224
+  - node_id: node1
+    numa_node: 1
+    cpus: 80-159
+    memory_gib: 464
+    low_gib: 192
+    high_gib: 224
+cube_source: /home/weitianc/clawbox-cold-base-reuse-20261016/source
+warm: true
+warm_node: 2
+warm_gib: 256
+shared_borrow_percent: 25
+warm_root: /mnt/clawbox-pool
+cold_root: /data/clawbox-cold
+cubelet_data_root: /data/cubelet
+output_root: /data/clawbox-results
+minimum_disk_free_gib: 20
+tcp_tw_reuse: 1
+cubelet_tap_init_num: 1280

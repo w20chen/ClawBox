@@ -1,0 +1,62 @@
+{
+  "arms": {
+    "7d094c7a098a88b3116d5db7": {
+      "artifact_root": "/home/weitianc/clawbox-llc-20261018/results/llc-c0-c2-pilot-c8-real-reverse-20261018-01/attempts/attempt-a5f1f878d75f43f4/7d094c7a098a88b3116d5db7",
+      "attempt_id": "attempt-a5f1f878d75f43f4",
+      "cleanup_error": null,
+      "cleanup_verified": true,
+      "completed_unix_s": 1792323085.8276758,
+      "heartbeat_unix_s": 1792323083.6737635,
+      "result": "/home/weitianc/clawbox-llc-20261018/results/llc-c0-c2-pilot-c8-real-reverse-20261018-01/arms/7d094c7a098a88b3116d5db7.json",
+      "semantic_progress": {
+        "event_bytes": 43852667,
+        "event_modified_unix_s": 1792323082.5623324
+      },
+      "started_unix_s": 1792322414.7072048,
+      "status": "succeeded",
+      "task_uid": "clawbox-87070d731f7420ce9030",
+      "worker": {
+        "create_time": 1792322414.36,
+        "pid": 216016
+      }
+    },
+    "bf6916c556102d88f4bcb029": {
+      "artifact_root": "/home/weitianc/clawbox-llc-20261018/results/llc-c0-c2-pilot-c8-real-reverse-20261018-01/attempts/attempt-a5f1f878d75f43f4/bf6916c556102d88f4bcb029",
+      "attempt_id": "attempt-a5f1f878d75f43f4",
+      "cleanup_error": null,
+      "cleanup_verified": true,
+      "completed_unix_s": 1792323795.6024878,
+      "heartbeat_unix_s": 1792323793.5629406,
+      "result": "/home/weitianc/clawbox-llc-20261018/results/llc-c0-c2-pilot-c8-real-reverse-20261018-01/arms/bf6916c556102d88f4bcb029.json",
+      "semantic_progress": {
+        "event_bytes": 44048476,
+        "event_modified_unix_s": 1792323792.0445693
+      },
+      "started_unix_s": 1792323086.4830391,
+      "status": "succeeded",
+      "task_uid": "clawbox-b77f21aa4940ee003667",
+      "worker": {
+        "create_time": 1792323086.14,
+        "pid": 274112
+      }
+    }
+  },
+  "attempt_id": "attempt-a5f1f878d75f43f4",
+  "completed_unix_s": 1792323796.9659016,
+  "created_unix_s": 1792322414.7065856,
+  "current_arm_id": null,
+  "experiment_id": "llc-c0-c2-pilot-c8-real-reverse-20261018",
+  "failure": null,
+  "owner_id": "llc-c0-c2-pilot-c8-real-reverse-20261018-01",
+  "phase": "terminal",
+  "qualification_receipt": "/home/weitianc/clawbox-llc-20261018/results/llc-c0-c2-pilot-c8-real-reverse-20261018-01/qualification.json",
+  "run_id": "llc-c0-c2-pilot-c8-real-reverse-20261018-01",
+  "schema_version": 1,
+  "spec_digest": "150c8faad46c4646d58a9689dd979b256b7b493b17499f534d84cbf0767584e7",
+  "state": "succeeded",
+  "supervisor": {
+    "create_time": 1792322406.68,
+    "pid": 215384
+  },
+  "updated_unix_s": 1792323798.4162562
+}

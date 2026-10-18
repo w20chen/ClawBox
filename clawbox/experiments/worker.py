@@ -1477,6 +1477,11 @@ class ExperimentWorker:
                 for domain in domains.values():
                     domain.peak_bytes = max(domain.peak_bytes, domain.sampler.current()[0])
                 pool = snapshot_pool.snapshot()
+                topology_changes = (
+                    self._priority_domain.sample_topology_placement()
+                    if (self._priority_domain is not None
+                        and arm.execution.tool_call_cpu_policy == 'c2') else []
+                )
                 warm_physical = None
                 if arm.resources.warm_memory_capacity_mib and arm.resources.warm_snapshot_root:
                     stat = os.statvfs(arm.resources.warm_snapshot_root)
@@ -1501,6 +1506,7 @@ class ExperimentWorker:
                     "warm_committed_bytes": pool["committed_bytes"],
                     "shared_borrow_reserved_bytes": pool["borrowed_bytes"],
                     "compute_pressure": placement.sample() if placement is not None else None,
+                    "tool_call_cpu_placement_changes": topology_changes,
                     "cgroup_cpu": cpu_sampler.sample() if cpu_sampler is not None else {
                         "measurement": "unavailable",
                         "reason": cpu_unavailable_reason,
@@ -1518,6 +1524,11 @@ class ExperimentWorker:
                 concurrency=arm.concurrency, repetition=arm.repetition,
                 legacy=False,
                 journal_directory=self.output_root/'priority-domains',
+                topology_mode=arm.execution.tool_call_cpu_policy,
+                topology_pressure_ratio=arm.execution.tool_call_cpu_pressure_ratio,
+                topology_pressure_samples=arm.execution.tool_call_cpu_pressure_samples,
+                topology_cooldown_seconds=arm.execution.tool_call_cpu_cooldown_seconds,
+                emit=events.write,
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)
                             for i in range(arm.concurrency)}
@@ -1606,6 +1617,9 @@ class ExperimentWorker:
                 domain = domains[key]
                 if not os_default:
                     self._priority_domain.placements[index] = (domain.cpus, domain.arm.resources.local_numa_node)
+                    self._priority_domain.configure_topology_placement(
+                        index, domain.cpus, domain.arm.resources.local_numa_node,
+                    )
             waited = time.monotonic()-started
             try:
                 result = self._run_session(domain.arm, index, domain.coordinator, events,
@@ -1705,6 +1719,15 @@ class ExperimentWorker:
                     self._priority_domain.close()
                 except Exception as exc:
                     cleanup_error = cleanup_error or exc
+            active_tool_call_ids = (
+                self._priority_domain.active_tool_call_ids()
+                if self._priority_domain is not None else ()
+            )
+            if active_tool_call_ids:
+                cleanup_error = cleanup_error or RuntimeError(
+                    'C2 Tool-call CPU assignments remained after session finalization: '
+                    f'{list(active_tool_call_ids)}'
+                )
             if cleanup_error is None:
                 for domain in domains.values():
                     if domain.borrower is not None:
@@ -1956,6 +1979,9 @@ class ExperimentWorker:
                     placement.template_affinity_decisions if placement else 0
                 ),
                 "template_cache_hits": placement.template_cache_hits if placement else 0,
+                "tool_call_cpu_policy": (
+                    self._priority_domain.topology_summary() if self._priority_domain else None
+                ),
                 "snapshot_aware_residency": arm.policy.snapshot_aware_residency,
                 "snapshot_pool": snapshot_pool.snapshot(),
                 "tool_execution_observations": tool_execution_observations,
@@ -2758,6 +2784,7 @@ class ExperimentWorker:
                 active_reservations: dict[str, int] = {}
                 admitted_routes: dict[str, NativeSSHRoute] = {}
                 host_rss_samplers: dict[str, SandboxRSSSampler] = {}
+                active_cpu_placements: set[str] = set()
                 pending_admissions: set[str] = set()
                 reservation_lock = Lock()
 
@@ -2805,6 +2832,7 @@ class ExperimentWorker:
                     local_amount = amount
                     admission_memory_tier = "local"
                     reservation_acquired = False
+                    cpu_placement_acquired = False
                     with reservation_lock:
                         pending_admissions.add(execution_id)
                     events.write({'event': 'tool_admission_queued',
@@ -2951,6 +2979,12 @@ class ExperimentWorker:
                                 "service_seconds": time.monotonic() - identity_started,
                             })
                             coordinator.bind_tool_memory(session_id)
+                            if (arm.execution.tool_call_cpu_policy == 'c2'
+                                    and execution_scope == 'agent-tool'):
+                                priority_domain.acquire_tool_call(
+                                    index, execution_id, vcpus=tool_sandbox.vcpu,
+                                )
+                                cpu_placement_acquired = True
                             host_sampler = SandboxRSSSampler(route.sandbox_id,
                                 cgroup=(priority_domain.leaves[index, 'tool'] if priority_domain is not None
                                         else locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup))))
@@ -2963,6 +2997,8 @@ class ExperimentWorker:
                                 active_reservations[execution_id] = local_amount
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
+                                if cpu_placement_acquired:
+                                    active_cpu_placements.add(execution_id)
                                 if execution_scope == "agent-tool":
                                     lifecycle.claim_first_tool_after_restore(execution_id)
                         except Exception as exc:
@@ -2976,7 +3012,10 @@ class ExperimentWorker:
                                 "error_type": type(exc).__name__,
                                 "error": str(exc),
                                 "reservation_acquired": reservation_acquired,
+                                "cpu_placement_acquired": cpu_placement_acquired,
                             })
+                            if cpu_placement_acquired:
+                                priority_domain.release_tool_call(execution_id)
                             if reservation_acquired:
                                 coordinator.release(session_id, local_amount)
                             with reservation_lock:
@@ -3110,6 +3149,9 @@ class ExperimentWorker:
                                 )
                                 break
                         coordinator.release(session_id, amount)
+                        if execution_id in active_cpu_placements:
+                            priority_domain.release_tool_call(execution_id)
+                            active_cpu_placements.remove(execution_id)
                         if progress_control:
                             progress_control.execution_complete(session_id, execution_id, host_observation,
                                 timestamps['execution_completed_at'] - timestamps['execution_started_at'],
@@ -3167,6 +3209,9 @@ class ExperimentWorker:
                             status="admission_response_lost",
                         )
                         coordinator.release(session_id, amount)
+                        if execution_id in active_cpu_placements:
+                            priority_domain.release_tool_call(execution_id)
+                            active_cpu_placements.remove(execution_id)
                     with wait_lock, reservation_lock:
                         coordinator.set_tool_active_if_registered(
                             session_id,

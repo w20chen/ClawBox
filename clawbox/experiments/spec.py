@@ -149,6 +149,12 @@ class ExecutionSpec(StrictFrozenModel):
     placement_policy: Literal["os_default", "round_robin", "load_aware", "explicit"] = "round_robin"
     placement_cpu_overcommit: float = Field(default=8.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
+    # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
+    # scheduling. C2 changes only Tool vCPU affinity while a Tool call is active.
+    tool_call_cpu_policy: Literal["c0", "c2"] = "c0"
+    tool_call_cpu_pressure_ratio: float = Field(default=0.10, gt=0, le=1, allow_inf_nan=False)
+    tool_call_cpu_pressure_samples: int = Field(default=2, ge=1)
+    tool_call_cpu_cooldown_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     session_compute_nodes: tuple[str, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
     randomized_order: bool = True
@@ -436,6 +442,14 @@ class ExperimentSpec(StrictFrozenModel):
         if (any(p.runtime_control.adaptive for p in self.policies)
                 and not self.resources.local_memory_cgroup):
             raise ValueError('pressure control requires resources.local_memory_cgroup and verified preallocation VM routing')
+        if self.execution.tool_call_cpu_policy == 'c2':
+            if not self.resources.compute_nodes or not self.resources.local_memory_cgroup:
+                raise ValueError(
+                    'C2 Tool-call CPU placement requires compute_nodes and '
+                    'resources.local_memory_cgroup'
+                )
+            if self.execution.placement_policy == 'os_default':
+                raise ValueError('C2 Tool-call CPU placement requires managed NUMA placement')
         if self.resources.lifecycle_admission == "os-managed" and any(
             policy.reclamation is not ReclamationPolicy.RESIDENT for policy in self.policies
         ):

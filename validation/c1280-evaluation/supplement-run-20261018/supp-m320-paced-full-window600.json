@@ -1,0 +1,129 @@
+[
+  {
+    "arm_id": "dea29fe56af150ab30a377a0",
+    "run_state": "running",
+    "cleanup_verified": false,
+    "requested_window_seconds": 600.0,
+    "observed_window_seconds": 599.9788863658905,
+    "offered_sessions": 320,
+    "target_sessions": 320,
+    "sessions_with_vm_created": 259,
+    "successful_agents": 0,
+    "successful_agents_per_second": 0.0,
+    "successful_fraction_of_offered": 0.0,
+    "failed_agents": 26,
+    "censored_offered_agents": 294,
+    "successful_latency_seconds_conditional_on_completion": null,
+    "latency_note": "Completion-conditioned percentiles exclude unfinished requests; no all-request P95/P99 claim.",
+    "admission_wait_seconds_completed_admissions": {
+      "p50": 0.0038320999992720317,
+      "p90": 0.04796855599852279,
+      "p95": 0.1218629119975958,
+      "p99": 0.5194427619971975,
+      "max": 2.7208719690024736
+    },
+    "completed_execution_scopes": {
+      "backend-maintenance": 8803,
+      "agent-tool": 3332
+    },
+    "event_counts": {
+      "runtime_memory_started": 1,
+      "sandbox_create_gate_wait_started": 320,
+      "sandbox_create_gate_acquired": 279,
+      "session_placement": 279,
+      "pressure_vm_generation": 496,
+      "runtime_memory_placement": 496,
+      "sandbox_created": 496,
+      "memory_sample": 158,
+      "native_ssh_endpoint_resolved": 12513,
+      "tool_admission_queued": 12317,
+      "native_ssh_identity_ready": 12218,
+      "tool_admitted": 12189,
+      "tool_execution_progress": 24347,
+      "pressure_execution_release": 12138,
+      "tool_completed": 12135,
+      "sandbox_destroyed": 52,
+      "session_timing": 26,
+      "session_failed": 26
+    },
+    "memory_peaks_bytes": {
+      "local_used_bytes": 335053766656,
+      "combined_live_used_bytes": 335278161920,
+      "shared_live_used_bytes": 210456576,
+      "warm_allocated_bytes": 0,
+      "warm_reserved_bytes": 0,
+      "warm_committed_bytes": 0,
+      "shared_borrow_reserved_bytes": 0
+    },
+    "cgroup_memory_event_deltas": {
+      "high": 0,
+      "low": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_group_kill": 0,
+      "oom_kill": 0
+    },
+    "cgroup_memory_psi_avg10_max": {
+      "full": 0,
+      "some": 0
+    },
+    "failure_examples": [
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "20127223127705",
+        "schema_version": 1,
+        "sequence_no": 56640,
+        "session_id": "dea29fe56af150ab30a377a0-0203",
+        "wall_time": "2026-10-18T09:34:48.586960+00:00",
+        "wall_time_ns": "1792316088586966975"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "20129329562921",
+        "schema_version": 1,
+        "sequence_no": 57124,
+        "session_id": "dea29fe56af150ab30a377a0-0206",
+        "wall_time": "2026-10-18T09:34:50.693393+00:00",
+        "wall_time_ns": "1792316090693402111"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "20132298440573",
+        "schema_version": 1,
+        "sequence_no": 57656,
+        "session_id": "dea29fe56af150ab30a377a0-0196",
+        "wall_time": "2026-10-18T09:34:53.662272+00:00",
+        "wall_time_ns": "1792316093662279813"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "20132442996304",
+        "schema_version": 1,
+        "sequence_no": 57707,
+        "session_id": "dea29fe56af150ab30a377a0-0197",
+        "wall_time": "2026-10-18T09:34:53.806826+00:00",
+        "wall_time_ns": "1792316093806835524"
+      },
+      {
+        "error": "HTTP 408",
+        "error_type": "ApiError",
+        "event": "session_failed",
+        "monotonic_time_ns": "20134681202088",
+        "schema_version": 1,
+        "sequence_no": 58233,
+        "session_id": "dea29fe56af150ab30a377a0-0198",
+        "wall_time": "2026-10-18T09:34:56.045032+00:00",
+        "wall_time_ns": "1792316096045041398"
+      }
+    ],
+    "source_events": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-paced-full-20261018-01/attempts/attempt-cfd476cc16d24137/dea29fe56af150ab30a377a0/events/dea29fe56af150ab30a377a0.jsonl"
+  }
+]

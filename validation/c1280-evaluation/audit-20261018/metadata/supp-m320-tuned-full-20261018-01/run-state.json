@@ -1,0 +1,39 @@
+{
+  "arms": {
+    "9f43842632d180795bdaa10f": {
+      "artifact_root": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-tuned-full-20261018-01/attempts/attempt-556fcda1418d4f97/9f43842632d180795bdaa10f",
+      "attempt_id": "attempt-556fcda1418d4f97",
+      "cleanup_error": null,
+      "cleanup_verified": true,
+      "heartbeat_unix_s": 1792315308.6387157,
+      "semantic_progress": {
+        "event_bytes": 52815081,
+        "event_modified_unix_s": 1792315308.2975302
+      },
+      "started_unix_s": 1792314477.9156756,
+      "status": "running",
+      "task_uid": "clawbox-5eb73add43b1306d8006",
+      "worker": {
+        "create_time": 1792314477.55,
+        "pid": 1572413
+      }
+    }
+  },
+  "attempt_id": "attempt-556fcda1418d4f97",
+  "created_unix_s": 1792314477.9150193,
+  "current_arm_id": "9f43842632d180795bdaa10f",
+  "experiment_id": "supplement-m320-relaxed-full-20261018",
+  "failure": "cancelled by user",
+  "owner_id": "supp-m320-tuned-full-20261018-01",
+  "phase": "terminal",
+  "qualification_receipt": "/home/weitianc/clawbox-c1280-20261017/results/supp-m320-tuned-full-20261018-01/qualification.json",
+  "run_id": "supp-m320-tuned-full-20261018-01",
+  "schema_version": 1,
+  "spec_digest": "a66f5678766c7cac98ab3899594aa53f124a7e1afa5d4a4ec226938eef14b5f4",
+  "state": "cancelled",
+  "supervisor": {
+    "create_time": 1792314473.37,
+    "pid": 1571880
+  },
+  "updated_unix_s": 1792315308.6440504
+}

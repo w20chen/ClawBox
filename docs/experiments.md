@@ -90,6 +90,8 @@ CPU/内存控制不自动启用借用、回收或模板亲和。运行内存借�
 | runtime.pressure_control | 见下文 | 压力控制与释放判定参数 |
 | placement.placement_cpu_overcommit | 8 | offered vCPU/允许 CPU 数倍率，不是测得利用率 |
 | placement.template_balance_slack | 0.10 | 模板亲和相对于最佳压力分数的允许偏差 |
+| placement.tool_call_cpu_policy | c0 | `c0` 严格保留 8c555ae 的默认 CPU 行为：VM 使用已选 NUMA 的完整 CPU 集，由 Linux 调度且不增加拓扑采样。`c2` 仅在 Tool 调用期间，把 Tool VM 的 vCPU 线程限制到一个完整 `cluster_cpus_list` 物理核组；例如 `0-7` 去除 SMT 重复后为 `0,2,4,6`。Tool vCPU 数只规定候选 cluster 必须具有的最少独立物理核数，不切分 cluster。要求 Linux 可读 cache/cluster/SMT topology，且选定 NUMA 至少有两个完整候选 cluster，否则非零失败。调用结束、失败或响应丢失时恢复完整 NUMA mask。需要新 run ID；不需要 host apply、镜像重建或重训 |
+| placement.tool_call_cpu_pressure_ratio / tool_call_cpu_pressure_samples / tool_call_cpu_cooldown_seconds | 0.10 / 2 / 5 | C2 的 VM CPU PSI stall 比例、连续样本数和冷却秒数；按 `measurement.memory_sample_interval_seconds` 周期采样。活动调用持续超阈值时单向放宽到完整 NUMA。缺少 PSI 时也放宽并记录原因。C0 不读取这些观测 |
 | shared_memory.borrow_cooldown_seconds / return_cooldown_seconds | 5 / 5 | 借用/归还冷却时间 |
 | checkpoint.pool_transfer_concurrency / pool_transfer_timeout_seconds | 1 / 120 | 全池生命周期操作并发上限/等待期限；不是带宽 |
 | measurement.memory_sample_interval_seconds / stabilization_seconds | 0.2 / 1 | 内存采样/稳定等待 |
@@ -211,6 +213,24 @@ comparison:
     - name: predicted
       override: {admission.tool: predicted}
 ```
+
+C0/C2 使用同一份配置和同一次矩阵展开，只覆盖一个策略字段：
+
+```yaml
+mechanisms:
+  placement:
+    tool_call_cpu_policy: c0
+comparison:
+  recipe: custom
+  arms:
+    - name: c0
+    - name: c2
+      override: {placement.tool_call_cpu_policy: c2}
+```
+
+不要在 C2 臂覆盖 `sandbox.vcpu`、CPU pool、quota/weight、内存、准入或工作负载。
+未显式设置时 Tool 沙箱仍使用 `sandbox.vcpu: 2`；C2 不修改 vCPU 限额，
+只要求完整候选 cluster 至少包含相同数量的独立物理核。
 
 修改公共值不会覆盖某臂已有的显式 override；重新选择 `--recipe` 会重新生成 arms。
 不支持对 environment 做臂内覆盖，架构变化用不同配置。schema-3 的 suite/baseline 不与新设计混用；

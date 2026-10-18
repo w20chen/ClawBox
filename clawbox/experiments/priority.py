@@ -12,10 +12,125 @@ import os
 import re
 import time
 from pathlib import Path
+from threading import RLock
 import uuid
 
 REGISTRY = Path('/run/clawbox/cgroups')
 TOKEN_ENV = 'CLAWBOX_CGROUP_TOKEN'
+
+
+def _format_cpu_list(cpus) -> str:
+    ordered = sorted(set(cpus))
+    ranges = []
+    for cpu in ordered:
+        if not ranges or cpu != ranges[-1][-1] + 1:
+            ranges.append([cpu, cpu])
+        else:
+            ranges[-1][-1] = cpu
+    return ','.join(str(first) if first == last else f'{first}-{last}'
+                    for first, last in ranges)
+
+
+def physical_cluster_groups(cpus: str, *, min_physical_cores: int,
+                            sysfs: Path = Path('/sys/devices/system/cpu')) -> tuple[str, ...]:
+    """Return complete Kunpeng cluster masks with one CPU per physical core.
+
+    Linux reports the outer L3 sharing set in cache ``shared_cpu_list`` and
+    the scheduling/LLC cluster in ``cluster_cpus_list``.  A candidate retains
+    the complete cluster, removes duplicate SMT siblings, and is accepted only
+    when the permitted CPU pool covers every physical core in that cluster.
+    """
+    from .topology import parse_cpu_list
+    allowed = parse_cpu_list(cpus)
+    seen_clusters: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
+    groups = []
+    for cpu in sorted(allowed):
+        topology = sysfs / f'cpu{cpu}' / 'topology'
+        cache_root = sysfs / f'cpu{cpu}' / 'cache'
+        cache_candidates = []
+        try:
+            indexes = tuple(cache_root.glob('index*'))
+        except OSError:
+            indexes = ()
+        for index in indexes:
+            try:
+                cache_type = (index/'type').read_text().strip()
+                level = int((index/'level').read_text().strip())
+                shared = tuple(sorted(parse_cpu_list((index/'shared_cpu_list').read_text())))
+            except (OSError, ValueError):
+                continue
+            if cache_type in {'Unified', 'Data'} and shared:
+                cache_candidates.append((level, cache_type == 'Unified', shared))
+        if not cache_candidates:
+            raise RuntimeError(f'CPU {cpu} has no readable LLC sharing metadata')
+        llc = max(cache_candidates)[2]
+        try:
+            cluster = tuple(sorted(parse_cpu_list((topology/'cluster_cpus_list').read_text())))
+        except OSError as exc:
+            raise RuntimeError(
+                f'CPU {cpu} has no readable LLC cluster metadata'
+            ) from exc
+        key = llc, cluster
+        if key in seen_clusters:
+            continue
+        seen_clusters.add(key)
+        if not cluster or not set(cluster) <= set(llc):
+            raise RuntimeError(
+                f'CPU cluster {cluster} is not contained in reported LLC {llc}'
+            )
+        physical_cores = set()
+        representatives = []
+        complete = True
+        for member in cluster:
+            try:
+                siblings = tuple(sorted(parse_cpu_list(
+                    (sysfs/f'cpu{member}'/'topology'/'thread_siblings_list').read_text()
+                )))
+            except OSError as exc:
+                raise RuntimeError(
+                    f'CPU {member} has no readable SMT sibling metadata'
+                ) from exc
+            if not siblings or siblings in physical_cores:
+                continue
+            physical_cores.add(siblings)
+            permitted = set(siblings) & allowed
+            if not permitted:
+                complete = False
+                break
+            representatives.append(min(permitted))
+        if complete and len(representatives) >= min_physical_cores:
+            groups.append(_format_cpu_list(representatives))
+    if not groups:
+        raise RuntimeError(
+            'no complete LLC cluster with at least '
+            f'{min_physical_cores} permitted physical cores exists in CPUs {cpus}'
+        )
+    return tuple(groups)
+
+
+def _pressure_total(path: Path) -> int:
+    for line in path.read_text().splitlines():
+        fields = line.split()
+        if fields and fields[0] == 'some':
+            for field in fields[1:]:
+                key, separator, value = field.partition('=')
+                if separator and key == 'total':
+                    return int(value)
+    raise RuntimeError(f'cpu pressure lacks some total: {path}')
+
+
+def _cpu_times(path: Path) -> dict[int, tuple[int, int]]:
+    """Read per-CPU busy and total ticks from procfs."""
+    result = {}
+    for line in path.read_text().splitlines():
+        fields = line.split()
+        if not fields or not re.fullmatch(r'cpu\d+', fields[0]):
+            continue
+        values = [int(value) for value in fields[1:]]
+        total = sum(values)
+        idle = sum(values[3:5])
+        result[int(fields[0][3:])] = total-idle, total
+    return result
 
 
 def session_priority(index: int, concurrency: int, repetition: int) -> str:
@@ -30,12 +145,44 @@ class PriorityDomain:
 
     def __init__(self, parent: Path, *, concurrency: int, repetition: int,
                  registry: Path = REGISTRY, placements: dict | None = None,
-                 journal_directory: Path | None = None, legacy: bool = True):
+                 journal_directory: Path | None = None, legacy: bool = True,
+                 topology_mode: str = 'c0',
+                 topology_pressure_ratio: float = .10,
+                 topology_pressure_samples: int = 2,
+                 topology_cooldown_seconds: float = 10., emit=None,
+                 proc_stat: Path = Path('/proc/stat')):
         self.parent = parent.resolve()
         self.legacy = legacy
         self.registry = registry
         self.placements = placements or {}
         self.observations = []
+        self.topology_mode = topology_mode
+        self.topology_pressure_ratio = topology_pressure_ratio
+        self.topology_pressure_samples = topology_pressure_samples
+        self.topology_cooldown_seconds = topology_cooldown_seconds
+        self.emit = emit or (lambda event: None)
+        self._topology_lock = RLock()
+        self._group_load: dict[str, int] = {}
+        self._full_masks: dict[tuple[int, str], str] = {}
+        self._fine_masks: dict[tuple[int, str], str] = {}
+        self._expanded: set[tuple[int, str]] = set()
+        self._pressure_previous: dict[tuple[int, str], tuple[float, int]] = {}
+        self._pressure_streak: dict[tuple[int, str], int] = {}
+        self._last_change: dict[tuple[int, str], float] = {}
+        self._candidate_groups: set[str] = set()
+        self._latest_group_utilization: dict[str, float | None] = {}
+        self._proc_stat = proc_stat
+        if topology_mode == 'c2':
+            try:
+                self._previous_cpu_times = _cpu_times(proc_stat)
+            except OSError:
+                self._previous_cpu_times = {}
+        else:
+            self._previous_cpu_times = {}
+        self.topology_events: list[dict] = []
+        self._call_keys: dict[str, tuple[int, str]] = {}
+        self._active_calls: dict[tuple[int, str], set[str]] = {}
+        self._total_call_assignments = 0
         self.lock_file = None
         self.prefix = 'clawbox-' + uuid.uuid4().hex
         self.high = self.parent / (self.prefix + '-high')
@@ -51,6 +198,276 @@ class PriorityDomain:
                             'low': max(1, 10000-round(10000/concurrency))}
         self.tokens = {(i, role): uuid.uuid4().hex for i in self.priorities for role in ('runtime','tool')}
         self.journal = journal_directory / (self.prefix+'.json') if journal_directory else None
+        if topology_mode not in {'c0', 'c2'}:
+            raise ValueError(f'unknown topology CPU placement mode: {topology_mode}')
+        if topology_pressure_samples < 1:
+            raise ValueError('topology pressure samples must be positive')
+        for index, (cpus, node) in sorted(self.placements.items()):
+            self.configure_topology_placement(index, cpus, node)
+
+    def _sample_group_utilization(self, groups) -> dict[str, float | None]:
+        from .topology import parse_cpu_list
+        try:
+            current = _cpu_times(self._proc_stat)
+        except OSError:
+            current = {}
+        utilization = {}
+        for group in groups:
+            busy_delta = total_delta = 0
+            for cpu in parse_cpu_list(group):
+                if cpu not in current or cpu not in self._previous_cpu_times:
+                    continue
+                busy_delta += current[cpu][0] - self._previous_cpu_times[cpu][0]
+                total_delta += current[cpu][1] - self._previous_cpu_times[cpu][1]
+            utilization[group] = (max(0., min(1., busy_delta/total_delta))
+                                  if total_delta > 0 else None)
+        self._previous_cpu_times = current
+        self._latest_group_utilization.update(utilization)
+        return utilization
+
+    def configure_topology_placement(self, index: int, cpus: str | None, node: int | None):
+        """Record the existing NUMA placement without changing C0 CPU behavior."""
+        with self._topology_lock:
+            existing = self.placements.get(index)
+            if existing is not None and existing != (cpus, node):
+                raise RuntimeError(f'CPU placement changed for session {index}: {existing} -> {(cpus, node)}')
+            self.placements[index] = cpus, node
+            if self.topology_mode == 'c2' and cpus is None:
+                raise RuntimeError('C2 Tool-call placement requires an explicit compute CPU pool')
+
+    def acquire_tool_call(self, index: int, execution_id: str, *, vcpus: int) -> dict | None:
+        """Apply C2 affinity immediately before one Tool command is admitted.
+
+        Concurrent calls in the same Tool VM share its active assignment.  The
+        assignment is released, and the full C0 mask restored, after the final
+        active call completes.
+        """
+        if self.topology_mode == 'c0':
+            return None
+        if execution_id in self._call_keys:
+            raise RuntimeError(f'duplicate Tool-call CPU assignment: {execution_id}')
+        key = index, 'tool'
+        with self._topology_lock:
+            active = self._active_calls.get(key)
+            if active:
+                active.add(execution_id)
+                self._call_keys[execution_id] = key
+                event = {
+                    'event': 'tool_call_cpu_placement', 'action': 'share',
+                    'execution_id': execution_id, 'session_index': index,
+                    'selected_cpus': self._fine_masks[key],
+                    'active_calls': len(active), 'mode': self.topology_mode,
+                }
+                self.topology_events.append(event); self.emit(event)
+                return event
+            cpus, node = self.placements.get(index, (None, None))
+            if cpus is None:
+                raise RuntimeError(f'C2 has no selected-NUMA CPU mask for session {index}')
+            groups = physical_cluster_groups(cpus, min_physical_cores=vcpus)
+            if len(groups) < 2:
+                raise RuntimeError(
+                    f'C2 requires at least two LLC/cluster physical-core groups in CPUs {cpus}'
+                )
+            self._candidate_groups.update(groups)
+            measured_load = self._sample_group_utilization(groups)
+            group = min(groups, key=lambda item: (
+                self._group_load.get(item, 0),
+                measured_load.get(item) is None,
+                measured_load.get(item) or 0., item,
+            ))
+            # Do not publish assignment ownership until every extant vCPU
+            # thread has accepted and verified the narrow mask.  A failed
+            # multi-thread update may already have changed earlier threads, so
+            # restore the C0 mask before propagating the policy failure.
+            try:
+                applied = self._apply_thread_affinity(index, 'tool', group)
+            except BaseException:
+                try:
+                    self._apply_thread_affinity(index, 'tool', cpus, strict=False)
+                except BaseException:
+                    pass
+                raise
+            self._group_load[group] = self._group_load.get(group, 0) + 1
+            self._full_masks[key] = cpus
+            self._fine_masks[key] = group
+            self._active_calls[key] = {execution_id}
+            self._call_keys[execution_id] = key
+            self._expanded.discard(key)
+            self._pressure_streak.pop(key, None)
+            self._last_change.pop(key, None)
+            try:
+                self._pressure_previous[key] = (
+                    time.monotonic(), _pressure_total(self.leaves[key]/'cpu.pressure')
+                )
+            except (OSError, RuntimeError, ValueError):
+                self._pressure_previous.pop(key, None)
+            self._total_call_assignments += 1
+            event = {
+                'event': 'tool_call_cpu_placement', 'action': 'assign',
+                'execution_id': execution_id, 'session_index': index,
+                'compute_numa': node, 'selected_cpus': group, 'full_cpus': cpus,
+                'topology_level': 'complete_llc_cluster_physical_cores',
+                'candidate_group_cpu_utilization': measured_load,
+                'threads': applied, 'mode': self.topology_mode,
+            }
+            self.topology_events.append(event); self.emit(event)
+            return event
+
+    def active_tool_call_ids(self) -> tuple[str, ...]:
+        with self._topology_lock:
+            return tuple(sorted(self._call_keys))
+
+    def release_tool_call(self, execution_id: str) -> dict | None:
+        if self.topology_mode == 'c0':
+            return None
+        with self._topology_lock:
+            key = self._call_keys.get(execution_id)
+            if key is None:
+                raise RuntimeError(f'no Tool-call CPU assignment for completion: {execution_id}')
+            active = self._active_calls[key]
+            if len(active) > 1:
+                active.remove(execution_id)
+                self._call_keys.pop(execution_id)
+                event = {
+                    'event': 'tool_call_cpu_placement', 'action': 'unshare',
+                    'execution_id': execution_id, 'session_index': key[0],
+                    'selected_cpus': self._fine_masks[key],
+                    'active_calls': len(active), 'mode': self.topology_mode,
+                }
+                self.topology_events.append(event); self.emit(event)
+                return event
+            applied = self._apply_thread_affinity(key[0], 'tool', self._full_masks[key])
+            active.remove(execution_id)
+            self._call_keys.pop(execution_id)
+            fine = self._fine_masks.pop(key)
+            self._group_load[fine] -= 1
+            self._active_calls.pop(key)
+            self._expanded.discard(key)
+            self._pressure_previous.pop(key, None)
+            self._pressure_streak.pop(key, None)
+            self._last_change.pop(key, None)
+            event = {
+                'event': 'tool_call_cpu_placement', 'action': 'restore_c0',
+                'execution_id': execution_id, 'session_index': key[0],
+                'from_cpus': fine, 'to_cpus': self._full_masks.pop(key),
+                'threads': applied, 'mode': self.topology_mode,
+            }
+            self.topology_events.append(event); self.emit(event)
+            return event
+
+    def _apply_thread_affinity(self, index: int, role: str, cpus: str, *, strict: bool = True) -> list[dict]:
+        from .topology import parse_cpu_list
+        leaf = self.leaves[index, role]
+        requested = parse_cpu_list(cpus)
+        applied = []
+        for tid_text in (leaf/'cgroup.threads').read_text().split():
+            tid = int(tid_text)
+            try:
+                name = next(line.split(':', 1)[1].strip()
+                            for line in Path(f'/proc/{tid}/status').read_text().splitlines()
+                            if line.startswith('Name:'))
+            except (FileNotFoundError, StopIteration):
+                continue
+            if not name.startswith('vcpu'):
+                continue
+            try:
+                os.sched_setaffinity(tid, requested)
+                effective = set(os.sched_getaffinity(tid))
+            except ProcessLookupError:
+                continue
+            if effective != requested:
+                raise RuntimeError(
+                    f'vCPU affinity mismatch for {tid}: requested {cpus}, got {_format_cpu_list(effective)}'
+                )
+            applied.append({'tid': tid, 'name': name, 'cpus_allowed': _format_cpu_list(effective)})
+        if not applied and strict:
+            raise RuntimeError(f'no vCPU threads available for topology placement: {leaf}')
+        return applied
+
+    def sample_topology_placement(self) -> list[dict]:
+        if self.topology_mode == 'c0':
+            return []
+        now = time.monotonic()
+        changes = []
+        with self._topology_lock:
+            measured_load = self._sample_group_utilization(sorted(self._candidate_groups))
+            if measured_load:
+                self.emit({
+                    'event': 'topology_cpu_group_load',
+                    'mode': self.topology_mode,
+                    'candidate_group_cpu_utilization': measured_load,
+                })
+            for key, fine in tuple(self._fine_masks.items()):
+                if key in self._expanded:
+                    continue
+                index, role = key
+                leaf = self.leaves.get(key)
+                try:
+                    populated = leaf is not None and bool((leaf/'cgroup.procs').read_text().strip())
+                except FileNotFoundError:
+                    continue
+                if not populated:
+                    continue
+                try:
+                    total = _pressure_total(leaf/'cpu.pressure')
+                except (OSError, RuntimeError, ValueError) as exc:
+                    applied = self._apply_thread_affinity(
+                        index, role, self._full_masks[key], strict=False,
+                    )
+                    if not applied:
+                        continue
+                    self._expanded.add(key)
+                    event = {
+                        'event': 'tool_call_cpu_placement', 'action': 'expand',
+                        'session_index': index, 'role': role, 'mode': self.topology_mode,
+                        'from_cpus': fine, 'to_cpus': self._full_masks[key],
+                        'reason': 'pressure_unavailable', 'detail': str(exc),
+                        'selected_group_cpu_utilization': measured_load.get(fine),
+                        'threads': applied,
+                    }
+                    self.topology_events.append(event); self.emit(event); changes.append(event)
+                    continue
+                previous = self._pressure_previous.get(key)
+                self._pressure_previous[key] = now, total
+                if previous is None or now <= previous[0] or total < previous[1]:
+                    continue
+                ratio = (total-previous[1]) / ((now-previous[0])*1_000_000)
+                streak = self._pressure_streak.get(key, 0) + 1 if ratio >= self.topology_pressure_ratio else 0
+                self._pressure_streak[key] = streak
+                if (streak < self.topology_pressure_samples
+                        or now-self._last_change.get(key, 0) < self.topology_cooldown_seconds):
+                    continue
+                applied = self._apply_thread_affinity(
+                    index, role, self._full_masks[key], strict=False,
+                )
+                if not applied:
+                    continue
+                self._expanded.add(key)
+                self._last_change[key] = now
+                event = {
+                    'event': 'tool_call_cpu_placement', 'action': 'expand',
+                    'session_index': index, 'role': role, 'mode': self.topology_mode,
+                    'from_cpus': fine, 'to_cpus': self._full_masks[key],
+                    'reason': 'cpu_pressure', 'pressure_ratio': ratio,
+                    'threshold': self.topology_pressure_ratio, 'threads': applied,
+                    'selected_group_cpu_utilization': measured_load.get(fine),
+                }
+                self.topology_events.append(event); self.emit(event); changes.append(event)
+        return changes
+
+    def topology_summary(self) -> dict:
+        return {
+            'mode': self.topology_mode,
+            'scope': 'tool_call',
+            'pressure_ratio': self.topology_pressure_ratio,
+            'pressure_samples': self.topology_pressure_samples,
+            'cooldown_seconds': self.topology_cooldown_seconds,
+            'assignments': self._total_call_assignments,
+            'active_assignments': len(self._fine_masks),
+            'expanded': len(self._expanded),
+            'latest_candidate_group_cpu_utilization': dict(self._latest_group_utilization),
+            'events': list(self.topology_events),
+        }
 
     def _journal(self):
         if self.journal is None:
@@ -185,6 +602,15 @@ class PriorityDomain:
                          (self.parent/'cpuset.mems.effective').read_text().strip())
         if parse_cpu_list(cpus) != parse_cpu_list(required_cpus) or parse_cpu_list(mems) != parse_cpu_list(required_mems):
             raise RuntimeError(f'VM effective cpuset mismatch at {actual}: CPUs={cpus}, memory={mems}')
+        topology_threads = None
+        key = index, role
+        if key in self._fine_masks:
+            selected = self._full_masks[key] if key in self._expanded else self._fine_masks[key]
+            topology_threads = self._apply_thread_affinity(index, role, selected)
+            try:
+                self._pressure_previous[key] = time.monotonic(), _pressure_total(actual/'cpu.pressure')
+            except (OSError, RuntimeError, ValueError):
+                pass
         threads = []
         for tid in (actual/'cgroup.threads').read_text().split():
             try:
@@ -202,7 +628,12 @@ class PriorityDomain:
                 'sandbox_id': sandbox_id, 'role': role, 'compute_numa':configured_node,
                 'effective_cpus':cpus, 'memory_nodes':sorted(parse_cpu_list(mems)),
                 'actual_residency_bytes':resident, 'unattributed_bytes':unattributed,
-                'threads':threads, 'enforcement':'preallocation_cgroup'}
+                'threads':threads, 'enforcement':'preallocation_cgroup',
+                'tool_call_cpu_placement': ({
+                    'mode': self.topology_mode,
+                    'selected_cpus': self._full_masks[key] if key in self._expanded else self._fine_masks[key],
+                    'full_cpus': self._full_masks[key], 'target_threads': topology_threads,
+                } if topology_threads is not None else None)}
         self.observations.append(evidence)
         return evidence
 

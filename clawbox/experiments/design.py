@@ -37,7 +37,11 @@ EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_resid
 DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
                   'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim')
-PLACEMENT_FIELDS = ('placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes')
+PLACEMENT_FIELDS = (
+    'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes',
+    'tool_call_cpu_policy', 'tool_call_cpu_pressure_ratio',
+    'tool_call_cpu_pressure_samples', 'tool_call_cpu_cooldown_seconds',
+)
 MEASUREMENT_FIELDS = ('memory_sample_interval_seconds', 'stabilization_seconds')
 
 
@@ -166,6 +170,14 @@ def lower_arm(design, name, m):
     snapshots = idle['policy'] != 'off'
     coordination = m['coordination']
     os_deployment = m['deployment']['mode'] == 'os-default'
+    if pl['tool_call_cpu_policy'] == 'c2':
+        if not r['compute_nodes'] or not r['local_memory_cgroup']:
+            raise ValueError(
+                f'{name}: C2 Tool-call CPU placement requires compute_nodes and '
+                'the verified local_memory_cgroup path'
+            )
+        if pl['policy'] == 'os_default':
+            raise ValueError(f'{name}: C2 Tool-call CPU placement requires managed NUMA placement')
     if os_deployment and (pl['policy'] != 'os_default' or a['tool'] != 'off'
             or snapshots or shared['borrow'] != 'off' or pl['template_affinity']
             or rt['memory_protection'] or rt['cpu_release_boost'] or rt['proactive_memory_reclaim']):
@@ -209,8 +221,12 @@ def lower_arm(design, name, m):
     # boundary. Existing charged shared-node pages can outlive a prior VM;
     # treating the pool as zero makes a resident arm fail on those pages.
     if pl['policy'] == 'os_default':
-        if shared['borrow'] != 'off' or pl['template_affinity']:
-            raise ValueError(f'{name}: OS placement cannot enforce per-node borrowing or template affinity')
+        if (shared['borrow'] != 'off' or pl['template_affinity']
+                or pl['tool_call_cpu_policy'] != 'c0'):
+            raise ValueError(
+                f'{name}: OS placement cannot enforce per-node borrowing, template affinity, '
+                'or topology CPU placement'
+            )
         # OS baseline inherits exactly the same host live-memory boundary.
         env = design.environment.resources
         capacity = (env.local_memory_capacity_mib or env.pool_memory_budget_mib) + (env.shared_memory_borrow_limit_mib or 0)
