@@ -145,7 +145,7 @@ do not necessarily match a given base YAML.
 | `resources.observe_predictions` | YAML boolean, default false; query predictions without using them for admission |
 | `resources.prediction_reservation_scale` | `--prediction-reservation-scale`; positive host-growth multiplier, default 1 |
 | `resources.admission_margin_mib` | `--admission-margin-mib`; nonnegative global reserve, default 256 MiB |
-| `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|no_control\|phase_memcg\|release_cpu\|pressure_lifecycle\|adaptive_joint`; suites default off; custom policy fields are independent |
+| `suite_runtime_control` / `policies[].runtime_control` | `--runtime-control off\|no_control\|phase_memcg\|release_cpu`; suites default off; custom policy fields are independent |
 | `resources.pressure_control` | Editable [pressure policy fields and units](pressure-control.md); requires a new run ID |
 | `resources.runtime_poll_interval_seconds` | `--runtime-poll-interval-seconds`; positive seconds, default 0.5 |
 | `policies[].deployment` | `managed` (default) or `os-default`; the latter resolves to OS placement, resident VMs, no admission/controller/cache reclaim, using the applied VM domain |

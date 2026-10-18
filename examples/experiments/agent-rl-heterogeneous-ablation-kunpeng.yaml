@@ -76,8 +76,6 @@ inference:
     model: recorded-agent-rl-model
     time_scale: 1.0
     openclaw_exec_yield_ms: 120000
-    model_wait_prediction_seconds: 1.0
-    model_wait_prediction_source: controlled-ablation-constant-not-a-measured-result
 runtime:
   template_id: tpl-bba239bc4d324efe8e4a7a22
   source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a

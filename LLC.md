@@ -4,7 +4,7 @@
 
 After completing the currently running ClawBox evaluation, independently implement and experimentally evaluate LLC-aware CPU placement as an **optional, incremental optimization**.
 
-The primary objective remains maximizing successful Agent throughput (Agents/s), while reporting Agent completion latency, tail latency, and success rate.
+The primary objective remains maximizing successful Agent throughput (Agents/s and Steps/s), while reporting Agent completion latency, tail latency, and success rate.
 
 This is an extension of the existing system, **not a redesign of the current experiments**. Preserve all completed results and avoid repeating the existing admission, checkpoint, shared-memory, NUMA, and runtime-control evaluation matrix.
 
@@ -280,3 +280,134 @@ Keep the original ClawBox evaluation intact.
 **Execution priority:** Finish existing experiments → verify cleanup → inspect existing CPU bottlenecks → implement LLC placement → test → run minimal matched comparisons → improve if justified → report.
 
 The objective is to obtain an additional, scientifically defensible CPU-placement optimization without invalidating or unnecessarily repeating the extensive experiments already completed.
+
+
+## Additional Clarifications: CPU Budget Scaling, C0/C2 Priorities, and C1 Ablation
+
+The following clarifications refine the original experimental plan and take precedence where the earlier C0/C1/C2 experiment matrix conflicts with the priorities below.
+
+### 1. Interpret Scenarios A and B as CPU Budget Scaling
+
+Scenarios A and B are not fundamentally different workloads or optimization objectives. They represent different **CPU resource budgets and potentially different levels of CPU contention** under otherwise identical ClawBox configurations.
+
+- **Scenario A — Original CPU budget:** Use the previously validated full CPU pool. This establishes whether LLC-aware placement provides an incremental benefit under the existing deployment configuration.
+- **Scenario B — Restricted CPU budget:** Reduce the available physical CPU pool while preserving the workload, VM specifications, memory configuration, and other ClawBox mechanisms. This investigates whether CPU placement becomes more valuable when runnable VM threads compete for fewer physical CPUs.
+
+Treat these scenarios as points along a CPU-budget scaling dimension, rather than two unrelated experiments.
+
+Importantly, CPU oversubscription does not necessarily imply actual CPU contention. Measure runnable demand, scheduler waiting, CPU PSI, and CPU utilization to establish the actual operating conditions.
+
+Start with the original CPU budget and one carefully calibrated restricted budget. Additional CPU-budget levels are optional and should be introduced only if the initial results suggest a meaningful trend.
+
+When restricting CPUs:
+
+- Apply the identical restriction to all compared methods, including the baseline.
+- Ensure the restriction affects actual CubeSandbox VMM/vCPU threads, not merely the ClawBox controller.
+- Use the same physical CPU pool and corresponding CPU/LLC topology for each matched comparison.
+- Prefer a representative subset that retains meaningful LLC placement choices. Record any changes in the number of available LLC domains.
+- Avoid introducing CPU quotas, changing VM vCPU counts, or modifying memory budgets.
+- Preserve the existing admission semantics. If the CPU commitment ceiling requires adjustment, apply the same calibrated setting to every method.
+
+The purpose is to characterize the performance impact of CPU placement across realistic CPU resource conditions, not to manufacture an artificial advantage for the optimized method.
+
+### 2. Clarify C0: A Strong NUMA-Only Baseline
+
+**C0 is the existing ClawBox NUMA-aware placement with Linux's default CPU scheduling inside the permitted CPU pool.**
+
+C0 must preserve the original NUMA selection, lifecycle management, memory placement, and all other ClawBox mechanisms.
+
+In particular:
+
+- The existing NUMA policy decides the compute NUMA node.
+- VM threads can use the full permitted CPU set within that selected NUMA node.
+- Linux retains responsibility for CPU scheduling, load balancing, and thread migration.
+- No LLC-specific CPU subsets or additional affinity restrictions are imposed.
+- Under Scenario B, the permitted CPU set is simply intersected with the common experimental CPU budget. C0 must not retain access to CPUs unavailable to C2.
+
+C0 must not be deliberately weakened through narrower affinities, lower CPU quotas, or different admission limits.
+
+This is especially important because Linux's unrestricted scheduling may already outperform overly restrictive LLC-local placement under heavy CPU contention.
+
+### 3. Clarify C2: The Primary LLC-Aware Optimization
+
+**C2 is the complete optimization proposed for evaluation. It combines topology-aware initial placement with adaptive runtime affinity management.**
+
+Its initial placement should use the actual hardware LLC topology to improve locality and reduce interference where feasible.
+
+However, LLC locality is a preference, not a permanent constraint.
+
+During execution, C2 should:
+
+1. Observe actual CPU demand, runnable pressure, scheduling delays, and load imbalance across LLC domains.
+2. Detect when an LLC-local CPU subset is causing unnecessary scheduling delays while other CPUs within the permitted NUMA node have usable capacity.
+3. Expand or adjust the VM's CPU affinity when the expected scheduling benefit justifies sacrificing some LLC locality.
+4. Avoid unnecessary changes when the original placement is working well.
+5. Use hysteresis, cooldown, and measured feedback to control adjustment overhead.
+6. Fall back to the full permitted NUMA CPU set when finer-grained placement becomes counterproductive or cannot be safely determined.
+
+C2 must never obtain additional physical CPU capacity unavailable to C0, cross the selected NUMA boundary solely for LLC optimization, or modify memory bindings as a side effect.
+
+Use the actual cache topology reported by the host. Do not assume that hardware clusters necessarily correspond to independent LLC domains.
+
+The expected benefit of C2 should come from improved locality, reduced cache interference, or more effective use of available CPU capacity—not from assigning more resources to the optimized method.
+
+**C2 is not guaranteed to outperform C0 or C1.** Under low contention, it may behave similarly to static placement. Under uniform heavy contention, it may have no useful opportunity to rebalance. Its overhead and possible regressions must be measured.
+
+### 4. Reduce the Main Experiment Matrix to C0 vs. C2
+
+Prioritize the following matched comparisons:
+
+| CPU resource condition | Baseline | Optimized |
+|---|---|---|
+| A: Original CPU budget | C0 | C2 |
+| B: Restricted CPU budget | C0 | C2 |
+
+These four configurations are the primary experiments.
+
+The central questions are:
+
+- Does the complete LLC-aware mechanism improve successful Agent throughput over the existing NUMA-only system?
+- How does its benefit or regression change as CPU resources become more constrained?
+- Are the observed differences explained by LLC behavior, CPU scheduling contention, load balancing, or optimization overhead?
+
+Keep the original full-budget scenario even if its improvement is small or nonexistent. It establishes the operating boundary of the optimization.
+
+Start with one run per configuration for screening. Repeat only the most informative comparisons when necessary for reliable conclusions.
+
+### 5. Reposition C1 as an Optional Mechanism Ablation
+
+**C1 is not a separate primary optimization target. Its main purpose is to isolate the contribution of runtime adaptation in C2.**
+
+Conceptually:
+
+- C1 = LLC-aware initial placement without runtime affinity adaptation.
+- C2 = The same initial placement plus adaptive runtime affinity adjustment.
+
+Therefore, prefer implementing C1 as `adaptive=false` within the shared LLC-aware placement implementation, rather than maintaining two independent scheduling frameworks.
+
+C1 can be deferred until the primary C0/C2 comparisons have completed.
+
+If C2 demonstrates meaningful improvement or regression, add one targeted C1 experiment under the most informative CPU-contention condition. Reuse the matching C0 and C2 results.
+
+This comparison establishes whether runtime adaptation contributes beyond static LLC-aware placement.
+
+If time is limited or C2 provides no meaningful system-level benefit, it is acceptable to postpone formal C1 evaluation. In that case, avoid making separate performance claims about the adaptation component.
+
+Functional verification of any shared static-placement logic is still required before running C2.
+
+### 6. Execution Priority
+
+The revised priority is:
+
+1. Complete and clean up the existing ClawBox evaluation.
+2. Inspect actual hardware topology and existing CPU-pressure measurements.
+3. Implement and validate C0-compatible behavior and the complete C2 mechanism.
+4. Run the smallest valid C0/C2 comparison under the original CPU budget.
+5. Calibrate one restricted CPU budget and perform the corresponding C0/C2 comparison.
+6. Diagnose benefits, regressions, and actual adaptation activity.
+7. Add the C1 static-placement ablation only if it provides useful explanatory evidence.
+8. Expand CPU-budget levels or repeat experiments only when justified by the results.
+
+Preserve all existing experimental results. Do not reopen the original admission, memory, checkpoint, NUMA, or runtime-control evaluation matrix.
+
+**The goal is a small, rigorous incremental evaluation showing whether LLC-aware adaptive CPU placement improves Agent throughput, under which CPU-resource conditions it works, and whether its complexity is justified.**

@@ -13,6 +13,7 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"warm_root": "/data/../warm"}, {"warm_gib": -1},
     {"warm_gbi": 100}, {"local_node": "0"}, {"shared_borrow_percent": 51},
     {"tcp_tw_reuse": 3}, {"tcp_tw_reuse": True},
+    {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
 ])
 def test_invalid_host_plan_rejected(values):
     with pytest.raises(ValidationError):
@@ -46,6 +47,23 @@ def test_network_setting_is_explicit_verified_and_idempotent(monkeypatch):
     monkeypatch.setattr(host, '_run', lambda *args: '2')
     with pytest.raises(RuntimeError, match='did not take effect'):
         host.apply_network(HostConfig(tcp_tw_reuse=1))
+
+
+def test_cubelet_tap_pool_is_explicit_and_idempotent(monkeypatch):
+    from clawbox.experiments import host
+    current, writes = [500], []
+    monkeypatch.setattr(host, '_cubelet_tap_init_num', lambda: current[0])
+
+    def run(*args):
+        writes.append(args)
+        current[0] = int(args[-1])
+        return ''
+
+    monkeypatch.setattr(host, '_run', run)
+    assert not host.apply_cubelet_tap_pool(HostConfig())
+    assert host.apply_cubelet_tap_pool(HostConfig(cubelet_tap_init_num=1536))
+    assert not host.apply_cubelet_tap_pool(HostConfig(cubelet_tap_init_num=1536))
+    assert len(writes) == 1
 
 
 def test_malformed_host_yaml_has_actionable_cli_error(tmp_path, capsys):
@@ -90,6 +108,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
         "local_memory_high_watermark_mib": 20 * 1024,
         "warm_capacity_mib": 32 * 1024, "shared_memory_borrow_limit_mib": 8 * 1024,
         "tcp_tw_reuse": 1,
+        "cubelet_tap_init_num": 1536,
     }))
     path = tmp_path / "host.yaml"
     init_config(path, original)
@@ -98,6 +117,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert config.shared_borrow_percent == 25
     assert config.local_gib == 24
     assert config.tcp_tw_reuse == 1
+    assert config.cubelet_tap_init_num == 1536
 
 
 def test_profile_import_supports_dense_host_without_warm_memory(tmp_path):

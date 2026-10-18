@@ -1,0 +1,10 @@
+{
+  "id": "ed40ef0493-attempt-6d28da94bd9e4d36-ef060ba494250a8ae6c10142",
+  "run_path": "/home/weitianc/clawbox-c1280-20261017/results/c1280-primary-c640-07",
+  "run_id": "c1280-primary-c640-07",
+  "arm_id": "ef060ba494250a8ae6c10142",
+  "attempt_id": "attempt-6d28da94bd9e4d36",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/ed40ef0493-experiment.yaml",
+  "effective_config_source": null
+}

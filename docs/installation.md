@@ -352,6 +352,10 @@ topology; `host check` checks prerequisites; `host apply` configures the
 VM cgroup, shared-pool tmpfs, snapshot roots, and CubeSandbox services on an
 idle host. The example uses NUMA 0 and 1 for compute, NUMA 2 for the shared pool.
 Change node IDs, CPU lists, memory capacities and storage paths to fit the host.
+For dense runs, set `cubelet_tap_init_num` in the host YAML to at least the
+maximum simultaneous Runtime plus Tool VM count. `host apply` updates Cubelet,
+restarts Cubelet/egress on an idle host, and waits for the normal VM probe;
+pre-creating a large TAP pool can add several minutes.
 The resulting experiment spec must use the same templates and snapshot roots.
 Match `CLAWBOX_WARM_ROOT`, `CLAWBOX_COLD_ROOT`, and `CLAWBOX_OUTPUT_ROOT` in
 `machine.env` to `warm_root`, `cold_root`, and `output_root` in the host YAML;

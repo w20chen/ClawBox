@@ -1,4 +1,4 @@
-﻿"""Convenience recipes; policy names never select execution behavior."""
+"""Convenience recipes; policy names never select execution behavior."""
 from dataclasses import dataclass
 from types import MappingProxyType
 from .spec import PolicySpec
@@ -34,19 +34,11 @@ BASELINES = MappingProxyType({b.name: b for b in (
              comparison_groups=('runtime-control', 'joint-control')),
     Baseline('release_cpu', AdmissionPolicy.OFF, runtime_control=RuntimeControl.RELEASE_CPU,
              comparison_groups=('runtime-control', 'joint-control')),
-    Baseline('pressure_lifecycle', AdmissionPolicy.OFF,
-             ReclamationPolicy.SNAPSHOT_PAUSE, EvictionPolicy.WAIT_AWARE_PRESSURE,
-             RestorePolicy.REACTIVE, RuntimeControl.PRESSURE_LIFECYCLE,
-             comparison_groups=('idle-reclaim', 'joint-control'), runtime_snapshot=False),
-    Baseline('adaptive_joint', AdmissionPolicy.OFF,
-             ReclamationPolicy.SNAPSHOT_PAUSE, EvictionPolicy.WAIT_AWARE_PRESSURE,
-             RestorePolicy.REACTIVE, RuntimeControl.ADAPTIVE_JOINT,
-             comparison_groups=('joint-control',), runtime_snapshot=False),
     Baseline('default-resident', AdmissionPolicy.OFF, runtime_control=RuntimeControl.OFF,
              deployment='os-default', comparison_groups=('deployment',)),
     Baseline('uncontrolled-resident', AdmissionPolicy.OFF, runtime_control=RuntimeControl.OFF,
              comparison_groups=('deployment', 'admission', 'runtime-control',
-                                'idle-reclaim', 'joint-control')),
+                                'joint-control')),
     Baseline('fixed-resident', AdmissionPolicy.FIXED,
              comparison_groups=('admission',)),
     Baseline('predicted-resident', AdmissionPolicy.PREDICTED,
@@ -54,7 +46,7 @@ BASELINES = MappingProxyType({b.name: b for b in (
     Baseline('predicted-wait-snapshot', AdmissionPolicy.PREDICTED,
              ReclamationPolicy.SNAPSHOT_PAUSE, EvictionPolicy.WAIT_AWARE_PRESSURE,
              RestorePolicy.REACTIVE, comparison_groups=('integrated',),
-             idle_release_ranking=True, runtime_snapshot=False),
+             runtime_snapshot=True),
 )})
 ACTIVE_BASELINES = tuple(BASELINES)
 

@@ -3,7 +3,7 @@
 New experiments use independent `mechanisms.runtime.memory_protection`,
 `cpu_release_boost`, and `mechanisms.idle_reclaim.policy` fields. Use
 `--recipe runtime` for the four runtime arms, or `--recipe idle-reclaim` for
-the four lifecycle arms. The runtime recipe pins proactive memory reclaim off;
+the three lifecycle arms. The runtime recipe pins proactive memory reclaim off;
 use `--recipe memory-reclaim` to compare that control separately. Other mechanism
 groups remain common across these comparisons. See [the six-dimension guide](experiments.md).
 The mode names below describe the backend and schema-3 records.
@@ -17,22 +17,16 @@ named admission/snapshot presets use neutral per-VM groups.
 | `no_control` | Default 100 | Default low=0, high=max | None |
 | `phase_memcg` | Default | Bounded protection during reclaim | None |
 | `release_cpu` | Temporary release-aware weight | Default | None |
-| `pressure_lifecycle` | Default | Default | Safe Tool eviction ranking |
-| `adaptive_joint` | Release-aware | Bounded protection | Safe Tool eviction ranking |
 
 The modes use Tool admission off in their legacy presets; `no_control` remains
 an explicit runtime mode but is not a second public baseline because its execution
 is identical to `uncontrolled-resident`. Lifecycle admission remains the existing
 configured policy. For a prediction-admission comparison, explicitly set the same
 `admission: predicted` and artifact in each compared policy.
-The last two presets explicitly select `snapshot_pause`, `wait_aware_pressure`,
-and reactive restore. Selecting a runtime-control mode alone never enables
-snapshots, borrowing, migration, or a different placement algorithm.
-`pressure_lifecycle` rejects resident-only configuration. `adaptive_joint` can
-be used with resident VMs, in which case its lifecycle mechanism is inactive.
-When either mode coordinates eviction, measured `resources.idle_reclaim_costs`
-are required. They seed the first decision; without them no prior checkpoint and
-restore pair exists from which the round-trip cost could be learned.
+Idle checkpoint is configured independently with `idle_reclaim.policy: wait`.
+LLM-duration prediction, oracle scheduling, and the old `pressure_lifecycle` /
+`adaptive_joint` presets are unsupported. Tool memory prediction and CPU release
+history are separate mechanisms and remain available.
 
 All new modes use flat, stable per-VM leaves prepared before guest allocation.
 Runtime and Tool keep separate leaves through restore. The controller leaves
@@ -47,20 +41,17 @@ LLM_WAITING requires an outstanding model request with no Tool in flight.
 Repeated terminal events and delayed starts cannot reopen a completed ID.
 Pre-start/restore preparation marks TRANSITION; verified VMM creation advances
 the generation. Missing completion keeps the Tool ineligible for eviction until
-normal failure cleanup. A waiting Runtime is never suspended by the new policy.
+normal failure cleanup.
 
-Capacity release follows this chain: a LOCAL admission deficit selects an idle
-Tool with measured LOCAL charge and sufficient predicted idle time; lifecycle
-atomically rechecks eligibility and checkpoints it; the leaf's measured charge
-drop is recorded; admission retries through its existing condition and queue.
-The ranking is LOCAL bytes divided by conservative checkpoint-plus-restore cost.
-Costs come from successful lifecycle timings or the existing measured
-`resources.memory_action_costs` with provenance. Missing costs cause abstention.
-Idle time uses the configured historical model-wait estimate, never an upcoming
-trace duration. Supply an estimate from a separate training trace; do not use
-`--model-wait-prediction-seconds auto` on the evaluation trace for these modes.
-After a release, cooldown prevents immediate repetition. Failure to release the
-minimum bytes disables that session as a release candidate for the run.
+Idle reclamation requires a real outstanding model request, no active Tool,
+and memory pressure. `scope: tool` reclaims Tool only; `agent_and_tool` reclaims
+both VMs. All ordinary pressure paths use the configured action selector.
+Disabled borrowing is excluded from candidate inspection and cost selection.
+WARM capacity for the entire scope is reserved before either VM pauses. A full
+WARM-only pool causes backpressure, while actual checkpoint failures propagate.
+A generated response removes eligibility immediately; any committed pair pause
+finishes before Runtime is restored and the response is delivered. Tool restores
+at its next admission. No predicted remaining LLM time is consulted.
 
 CPU redistribution follows this chain: a LOCAL blocked request plus actual CPU
 PSI selects an active Tool whose same-template, same-command history repeatedly

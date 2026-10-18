@@ -15,6 +15,11 @@
 
 ## 已有环境
 
+空闲回收使用真实未完成的模型请求和内存压力，不配置 LLM 时长预测。
+`idle-reclaim` 配方生成 resident、wait-tool、wait-pair 三组；
+`mechanisms.shared_memory.borrow: off` 将借用排除在候选选择之外。
+这些实验设置修改后使用新 run ID，无需 host apply、重建镜像或重训。
+
 Agent 发生 OOM、命令超时或普通异常时，实验会保留其失败记录并继续其他 Agent。
 查看 report 中的完成数与全部提交数，以及 `correctness.session_failures`；不要只统计成功样本。
 该臂完成且清理验证通过后，后续比较臂会继续运行。
@@ -102,6 +107,7 @@ ${EDITOR:-vi} "$HOME/.config/clawbox/host.yaml"
 | `cold_root`, `cubelet_data_root`, `output_root` | 冷快照、现有 Cubelet 数据、结果路径；改字段不会迁移已有数据 |
 | `minimum_disk_free_gib` | 默认 20 GiB 最低剩余空间；磁盘使用率同时须低于 85% |
 | `tcp_tw_reuse` | 默认 `null`，不修改网络设置；`0` 禁用 TIME_WAIT 复用，`1` 全局启用，`2` 仅 loopback。作用于宿主网络命名空间，需 host apply；重启后再次 apply，无需重建镜像或重训 |
+| `cubelet_tap_init_num` | 默认 `null`，保留 Cubelet 当前设置；填写启动时预创建的 TAP 数量。至少覆盖并存的 Runtime VM 与 Tool VM 总数（例如 c640 最坏为 1280，可设 1536）。修改需在空闲主机执行 host apply，会重启 Cubelet/egress；无需重建镜像或重训 |
 
 machine.env 中的 `CLAWBOX_OUTPUT_ROOT`、`CLAWBOX_WARM_ROOT`、`CLAWBOX_COLD_ROOT`
 应与 host YAML 对应路径一致。完整说明见[主机配置](supernode.md)。
@@ -152,6 +158,7 @@ check 不修改主机，成功为 `ready_for_apply: true`，失败逐项给出 r
 [Linux 网络参数说明](https://docs.kernel.org/networking/ip-sysctl.html#tcp-tw-reuse-integer)。
 所有对比臂使用相同设置。恢复时填写此前的明确取值并 apply；`null` 表示保持当前值，不表示恢复默认。
 该设置保存在 host.json，`host init --from-profile` 会保留它，不再需要每次手动运行 sysctl。
+`cubelet_tap_init_num` 同样保存在 host.json。Cubelet 会逐个预建 TAP；大池首次启动可能需要数分钟，host apply 随后的真实 VM 探测成功后才表示主机可用于实验。
 
 ## 最小实验
 
@@ -266,12 +273,13 @@ bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/runtime-fixed
 
 生成配置后先运行 `experiment describe CONFIG`：resident 组的快照编码、存储与驻留参数会标为不生效。
 CPU 释放加速要求主机提供 `compute_nodes` 或 `local_numa_node`，且不能使用 OS 默认放置。
-选择 checkpoint 配方前显式设置 `--set idle_reclaim.policy=wait`（或 release_cost），并提供独立等待证据。
+选择 checkpoint 配方前显式设置 `--set idle_reclaim.policy=wait`；同时暂停两台 VM 再加 `--set idle_reclaim.scope=agent_and_tool`。它使用真实 LLM 等待状态，不使用时长预测或 oracle；旧配置中的预测字段必须删除。
 配方与继承设置冲突时，修改对应字段后重新 configure；不要绕过 validate。配置改变使用新 run ID。
 
-准备快照/共享池实验时，先配置并 apply 对应主机拓扑、容量与路径。填写独立等待预测、实测成本，
+准备快照/共享池实验时，先配置并 apply 对应主机拓扑、容量与路径。按所选策略填写实测成本；
 价值驻留还需每 case 复用概率。缺失证据不会填零；资格验证通过也不代表性能收益。
 VM 归还 LOCAL 后若仍有共享驻留页，借用额度继续保留；再次借用复用该额度，直到共享页清空或 VM 清理完成才释放。
+WARM-only 回收先预留所选范围内全部 VM 的快照空间；容量不足时保留 VM 驻留并等待或尝试允许的借用，不会只因池满使实验失败。`checkpoint_capacity_skips` 记录预留被容量限制的次数。策略修改只需重新验证并使用新 run ID，无需重建镜像或训练 Tool 内存预测器；主机容量或路径变化仍需 host apply。
 查看准入等待时同时检查 admission_control 的原因计数；execution_already_inflight 表示同 VM 操作串行等待，不代表内存不足。
 放置事件的 feedback_sample_age_seconds 表示内存排序观测年龄（最多约 0.2 秒）；实际准入仍检查当前用量。
 创建槽只限制正在创建的 VM 对，不限制正在执行的会话；排队等待创建槽的会话不提前预留 VM 内存。
@@ -320,7 +328,9 @@ OpenClaw + replay。配置容量、预测预留、实际内存和快照字节数
 
 使用 `--set dimension.field=value` 修改公共机制，或编辑 `comparison.arms[].override` 改单臂。
 例如 `--set runtime.memory_protection=true` 只启用工作集保护，不开启快照或借用。
-`--set idle_reclaim.policy=wait` 需要 evidence 中的独立等待估计和有效快照路径。
+`--set idle_reclaim.policy=wait` 需要有效快照路径；在真实 LLM 等待期间按内存压力回收，不需要等待时长预测或 oracle。
+设置 `--set idle_reclaim.scope=agent_and_tool` 可同时暂停 Runtime 与 Tool；Runtime 在交付模型响应前恢复，Tool 在下次执行前恢复。
+此配置变更需要新的 run ID 和资格验证，不需要 host apply、镜像重建或重训。
 
 `describe --json` 列出六维参数、各臂差异、有效资源和依赖；`plan` 展开最终 trial。
 共享池账本、原始 PMU 和状态迁移证据仍由原执行链记录。运行前核对实验矩阵，避免把多个

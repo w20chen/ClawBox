@@ -1,0 +1,10 @@
+{
+  "id": "62f911ba5e-attempt-9564b2164f7e-6813373818ff0be175ec077f",
+  "run_path": "/home/weitianc/clawbox-high-density-20261017/results/qualification-0937ebb5cb87",
+  "run_id": "qualification-0937ebb5cb87",
+  "arm_id": "6813373818ff0be175ec077f",
+  "attempt_id": "attempt-9564b2164f7e",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/62f911ba5e-experiment.yaml",
+  "effective_config_source": null
+}

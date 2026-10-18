@@ -21,7 +21,9 @@ separately from policy switches when comparing their effects.
 In the host YAML, `compute_nodes` sets the name, NUMA node, allowed CPUs,
 memory capacity, and watermarks for each compute node.
 `warm_node`, `warm_gib`, and `shared_borrow_percent` describe the one
-shared pool. After changing them, run `host check` and `host apply`, then
+shared pool. `cubelet_tap_init_num` optionally fixes the Cubelet TAP pool size;
+size it for both Runtime and Tool VMs that may coexist. After changing these
+settings, run `host check` and `host apply`, then
 generate a new experiment YAML with `configure`. The experiment's
 `--pool-memory-gib` must equal the sum of the compute nodes' high
 watermarks; `configure` normally copies that value from the applied host

@@ -1,0 +1,20 @@
+{
+  "clawbox/cli.py": "bb2542a8be385ae768614e418c6446fa5f36c5156ac4b165dcd021cba4b962da",
+  "clawbox/cube/lifecycle.py": "455265976fe1ca4d2ed61862243949beca7828abbc7158df4f088721f22e87c6",
+  "clawbox/experiments/audit.py": "4a23fb22c71e6091ea81b164840a753199ed5f047e18f63ad398bdf5588bc0f8",
+  "clawbox/experiments/baselines.py": "a444b6cf41ca9e1696b1ff1f721cacd7650fc63592a1356e5475f52f9d3294d7",
+  "clawbox/experiments/configure.py": "758ce0ed38b47404e51fa2ebd683fe76dec5dbd1b9678cfc8807aabe8f77b986",
+  "clawbox/experiments/design.py": "c65d975d355e0d1c4db454e04e09d596f6e66b8571ed462acca0fbebf876fd0f",
+  "clawbox/experiments/policy.py": "f06637b57bae0885dbbd147d62828c49fd915bafc3ce56fe00339a325bb30295",
+  "clawbox/experiments/spec.py": "56d7ca9d20b33fd2b624669221775e1f2d9852b831e5ccda578c3fdf81a9f284",
+  "clawbox/experiments/worker.py": "625b18406d2cf3bcfa1b760a6fb7e5971a701dac1a3cafd7839651779e097ca5",
+  "clawbox/experiments/qualification.py": "31ccd8dbc0910790f56e93198ae8f46f2ab94f8c2fe452c3e6268e4829b13960",
+  "tests/test_policy_v2.py": "2e4856d53bdf65206ec248689dba60897b7cedf224f95c5ad2239c098c5d099d",
+  "tests/test_cube.py": "0337dca5b22ca42a3c8e34ab3bb3601a6f16bb829fedb6ac4d94fcf4106875ca",
+  "tests/test_experiment_design.py": "03f648dd54115b0bd210cc0b5a772f80d34d82a1c2d521041fc7e028c7230af2",
+  "tests/test_snapshot_pool.py": "c4144fffcbdfeb326e31da9689ebd22634f22b1b46150601e374f94c0f098ed0",
+  "tests/test_cli.py": "e32435477f2102c4c0fcbd4367f1ce844a282230e3c9a311ea81b65e3613279f",
+  "tests/test_pressure_control.py": "f57cc167e3cce92ed44578c8885496d4430bb7e943772e90663815a202ffc599",
+  "tests/test_experiments_v2.py": "0585fcb26a5a6c15f7936fe59629db52225bec280420248294efe0004d446d98",
+  "validation/c1280-evaluation/idle-actual-wait-verification.yaml": "8423d7e211035ce0ea9f40b5c0417a59ea74ec7e92aa643b9f00fb51bb3370a9"
+}

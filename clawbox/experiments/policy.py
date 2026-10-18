@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from threading import Condition, Thread
@@ -11,6 +12,7 @@ from typing import Protocol
 from .spec import EvictionPolicy, PolicySpec, ReclamationPolicy, RestorePolicy
 from .spec_types import SnapshotTier
 from .admission import DemandLedger
+from .snapshot_pool import WarmCapacityError
 
 MIB = 1024 * 1024
 
@@ -33,9 +35,7 @@ class SessionState:
     runtime_before_pause: Callable[[], None] | None = None
     wait_id: str | None = None
     wait_started_monotonic_s: float | None = None
-    wait_deadline_monotonic_s: float | None = None
     response_ready: bool = False
-    release_before: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,28 @@ class AdmissionRequest:
 
 class AdmissionTimeout(RuntimeError):
     pass
+
+
+@contextmanager
+def checkpoint_reservations(lifecycles, tier):
+    """Admit the whole pair before pause; preserve configured tiered fallback."""
+    lifecycles = [vm for vm in lifecycles if vm is not None]
+    with ExitStack() as reservations:
+        try:
+            for vm in lifecycles:
+                reserve = getattr(vm, "reserve_checkpoint", None)
+                if reserve is not None:
+                    reservations.enter_context(reserve(tier=tier))
+        except WarmCapacityError:
+            reservations.close()
+            if tier is not None or not all(
+                    getattr(vm, "snapshot_storage", None) == "tiered"
+                    and getattr(vm, "cold_snapshot_root", None) for vm in lifecycles):
+                raise
+            tier = SnapshotTier.COLD
+            for vm in lifecycles:
+                reservations.enter_context(vm.reserve_checkpoint(tier=tier))
+        yield tier
 
 
 class PolicyEventExecutor:
@@ -102,6 +124,8 @@ class PolicyCoordinator:
         self._cache_reclaim_error: Exception | None = None
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self.on_pressure_pause = on_pressure_pause
+        self.pressure_relief: Callable[[], bool] | None = None
+        self.checkpoint_capacity_skips = 0
         self.demand_scope = demand_scope
         self.demand = demand_ledger or DemandLedger(
             sample=self.physical_sample, capacity=self.progress_budget_bytes,
@@ -134,11 +158,6 @@ class PolicyCoordinator:
         self.safety_intervention_count = 0
         self.safety_interventions_by_reason: dict[str, int] = {}
         self._new_session_admission_blocked = False
-        self.release_options = None
-        self.release_costs = None
-        self.release_after = {}
-        self.release_disabled = set()
-        self.release_observations = []
 
     def set_new_session_admission_blocked(self, blocked: bool) -> None:
         """Latch only new VM-pair admission; existing sessions must make progress."""
@@ -158,16 +177,12 @@ class PolicyCoordinator:
             self._sessions[session_id].runtime_lifecycle = lifecycle
             self._sessions[session_id].runtime_before_pause = before_pause
 
-    def begin_model_wait(self, session_id: str, wait_id: str,
-                         predicted_duration_s: float) -> None:
-        if predicted_duration_s < 0:
-            raise ValueError("predicted_duration_s must be non-negative")
+    def begin_model_wait(self, session_id: str, wait_id: str) -> None:
         now = time.monotonic()
         with self._condition:
             state = self._sessions[session_id]
             state.wait_id = wait_id
             state.wait_started_monotonic_s = now
-            state.wait_deadline_monotonic_s = now + predicted_duration_s
             state.response_ready = False
             state.eviction_eligible = True
             state.last_used = now
@@ -176,15 +191,16 @@ class PolicyCoordinator:
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
         with self._condition:
             state = self._sessions[session_id]
+            if state.wait_id != wait_id:
+                return
+            state.response_ready = True
+            state.eviction_eligible = False
             # Admission may already have atomically claimed this waiting pair.
             # Let that checkpoint finish before the gateway publishes its
             # response; the response callback can then restore Runtime first.
             while state.eviction_in_progress:
                 self._condition.wait()
-            if state.wait_id == wait_id:
-                state.response_ready = True
-                state.eviction_eligible = False
-                self._condition.notify_all()
+            self._condition.notify_all()
 
     def unregister(self, session_id: str) -> None:
         with self._condition:
@@ -368,58 +384,6 @@ class PolicyCoordinator:
                     'local_used_bytes': used, 'local_available_bytes': available,
                     'deficit_bytes': deficit}
 
-    def _release_rank(self, state, now):
-        """Measured LOCAL bytes / measured round-trip cost, with idle amortization."""
-        options = self.release_options
-        if (state.session_id in self.release_disabled
-                or now < self.release_after.get(state.session_id, 0)
-                or state.wait_deadline_monotonic_s is None):
-            return None
-        reader = self._memory_samples.get(state.session_id, {}).get('tool_admission')
-        if reader is None:
-            return None
-        local = reader()[1]
-        if local < options.min_release_mib * MIB:
-            return None
-        timings = getattr(state.lifecycle, 'timings', [])
-        costs = []
-        for operation in ('checkpoint', 'restore'):
-            values = [float(t['service_seconds']) for t in timings
-                      if t.get('operation') == operation and t.get('status') == 'ok'
-                      and t.get('service_seconds') is not None]
-            if not values:
-                break
-            costs.append(max(values[-3:]))
-        if len(costs) != 2:
-            if self.release_costs is None:
-                return None
-            # Account for either tier; tier choice still belongs to lifecycle.
-            rates = self.release_costs
-            checkpoint = max(rates.warm_checkpoint_seconds_per_gib,
-                             rates.cold_checkpoint_seconds_per_gib or 0)
-            restore = max(rates.warm_restore_seconds_per_gib,
-                          rates.cold_restore_seconds_per_gib or 0)
-            costs = [(checkpoint + restore) * state.lifecycle.configured_memory_bytes / 1024**3]
-        overhead = max(.001, sum(costs))
-        remaining = state.wait_deadline_monotonic_s - now
-        if remaining < options.amortization_factor * overhead:
-            return None
-        return local / overhead
-
-    def _observe_release(self, victim, before):
-        if self.release_options is None or before is None:
-            return
-        reader = self._memory_samples.get(victim.session_id, {}).get('tool_admission')
-        if reader is None:
-            return
-        released = max(0, before - reader()[1])
-        self.release_after[victim.session_id] = time.monotonic() + self.release_options.cooldown_seconds
-        if released < self.release_options.min_release_mib * MIB:
-            self.release_disabled.add(victim.session_id)
-        self.release_observations.append({'session_id': victim.session_id,
-                                          'local_released_bytes': released})
-        self._condition.notify_all()
-
     def _pressure_reasons(self, additional_bytes: int = 0, *,
                           capacity_claim: bool = False,
                           existing_progress: bool = False,
@@ -580,49 +544,14 @@ class PolicyCoordinator:
                             self.safety_interventions_by_reason[reason] = (
                                 self.safety_interventions_by_reason.get(reason, 0) + 1
                             )
-                    victim = (self._claim_victim_locked(exclude=session_id)
-                              if at_head and 'execution_already_inflight' not in safety_reasons else None)
-                    if at_head and victim is not None:
+                    if at_head and 'execution_already_inflight' not in safety_reasons:
                         self._condition.release()
-                        tool_elapsed = None
-                        runtime_elapsed = None
                         try:
-                            tool_elapsed = victim.lifecycle.checkpoint_and_evict()
-                            pause_runtime = (
-                                self.release_options is None
-                                and self.policy.runtime_snapshot
-                                and victim.runtime_lifecycle is not None
-                                and victim.runtime_lifecycle.resident
-                                and victim.wait_id is not None
-                                and not victim.response_ready
-                                and self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE
-                            )
-                            if pause_runtime:
-                                if victim.runtime_before_pause is not None:
-                                    victim.runtime_before_pause()
-                                runtime_elapsed = victim.runtime_lifecycle.checkpoint_and_evict()
+                            relieved = self.relieve_pressure(exclude=session_id)
                         finally:
                             self._condition.acquire()
-                            victim.eviction_in_progress = False
-                            victim.eviction_eligible = False
-                            self._observe_release(victim, victim.release_before)
-                            self._condition.notify_all()
-                        elapsed = sum(
-                            value for value in (tool_elapsed, runtime_elapsed)
-                            if value is not None
-                        )
-                        paused_vms = sum(
-                            value is not None for value in (tool_elapsed, runtime_elapsed)
-                        )
-                        if paused_vms:
-                            self.pause_count += paused_vms
-                            self.pause_service_seconds += elapsed
-                            if self.on_pressure_pause is not None:
-                                self.on_pressure_pause(
-                                    victim, tool_elapsed, runtime_elapsed,
-                                    "memory_admission",
-                                )
-                        continue
+                        if relieved:
+                            continue
                     remaining = 0.2 if deadline is None else deadline - time.monotonic()
                     if remaining <= 0:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
@@ -759,10 +688,7 @@ class PolicyCoordinator:
         with self._condition:
             victim.eviction_in_progress = False
             victim.eviction_eligible = False
-            try:
-                self._observe_release(victim, victim.release_before)
-            finally:
-                self._condition.notify_all()
+            self._condition.notify_all()
 
     def watermark_reclaim_candidate(self) -> dict[str, object] | None:
         """Describe the current safe victim without claiming or pausing it.
@@ -777,8 +703,7 @@ class PolicyCoordinator:
                 return None
             lifecycles = [victim.lifecycle]
             if (
-                self.release_options is None
-                and self.policy.runtime_snapshot
+                self.policy.runtime_snapshot
                 and victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
                 and victim.wait_id is not None
@@ -793,71 +718,67 @@ class PolicyCoordinator:
                 int(getattr(lifecycle, "snapshot_reservation_bytes", 0) or 0)
                 for lifecycle in lifecycles
             )
-            remaining = (
-                max(0.0, victim.wait_deadline_monotonic_s - time.monotonic())
-                if victim.wait_deadline_monotonic_s is not None else None
-            )
             return {
                 "session_id": victim.session_id,
                 "configured_bytes": configured,
                 "snapshot_reservation_bytes": reservation,
                 "vm_count": len(lifecycles),
-                "predicted_idle_seconds_remaining": remaining,
             }
 
-    def evict_one_for_watermark(self, *, tier: SnapshotTier | None = None) -> bool:
-        """Checkpoint one safe waiting session without requiring an admission waiter."""
-        with self._condition:
-            victim = self._claim_victim_locked(exclude="")
-        if victim is None:
-            return False
-        tool_elapsed = None
-        runtime_elapsed = None
-        try:
-            tool_elapsed = (
-                victim.lifecycle.checkpoint_and_evict()
-                if tier is None else victim.lifecycle.checkpoint_and_evict(tier=tier)
-            )
-            if (
-                self.release_options is None
-                and self.policy.runtime_snapshot
-                and victim.runtime_lifecycle is not None
-                and victim.runtime_lifecycle.resident
-                and victim.wait_id is not None
-                and not victim.response_ready
-            ):
-                if victim.runtime_before_pause is not None:
-                    victim.runtime_before_pause()
-                runtime_elapsed = (
-                    victim.runtime_lifecycle.checkpoint_and_evict()
-                    if tier is None else victim.runtime_lifecycle.checkpoint_and_evict(tier=tier)
-                )
-        finally:
-            self.release_victim(victim)
-        elapsed = sum(
-            value for value in (tool_elapsed, runtime_elapsed) if value is not None
-        )
-        paused_vms = sum(value is not None for value in (tool_elapsed, runtime_elapsed))
-        if paused_vms:
-            with self._condition:
-                self.pause_count += paused_vms
-                self.pause_service_seconds += elapsed
-            if self.on_pressure_pause is not None:
-                self.on_pressure_pause(
-                    victim, tool_elapsed, runtime_elapsed, "local_high_watermark",
-                )
-        return bool(paused_vms)
+    def relieve_pressure(self, *, exclude: str = "") -> bool:
+        """Use the arm's common action selector for admission and idle callbacks."""
+        if self.pressure_relief is not None:
+            return self.pressure_relief()
+        return self.evict_one_for_watermark(exclude=exclude, reason="memory_admission")
 
-    def model_wait_plan(
-        self, predicted_duration_s: float | None,
-    ) -> tuple[float | None, float | None]:
-        """Plan pressure reclamation using only the request-time prediction."""
-        if self.policy.reclamation is ReclamationPolicy.RESIDENT:
-            return None, None
-        if (predicted_duration_s is None or predicted_duration_s <= 0
-                or not self.blocked_demand_pressure()):
-            return None, None
-        return 0.0, None
+    def evict_one_for_watermark(self, *, tier: SnapshotTier | None = None,
+                                exclude: str = "", reason: str = "local_high_watermark") -> bool:
+        """Atomically claim one actual idle session, then checkpoint its configured scope."""
+        with self._condition:
+            victim = self._claim_victim_locked(exclude=exclude)
+            if victim is None:
+                return False
+            # Once claimed, response delivery and Tool start wait for the whole
+            # pair. Do not change scope halfway through when a response arrives.
+            runtime = (victim.runtime_lifecycle if self.policy.runtime_snapshot
+                       and victim.wait_id is not None and not victim.response_ready
+                       and victim.runtime_lifecycle is not None
+                       and victim.runtime_lifecycle.resident else None)
+        capacity_skipped = False
+        reservations_ready = False
+        try:
+            with checkpoint_reservations((victim.lifecycle, runtime), tier) as tier:
+                reservations_ready = True
+                tool_elapsed = (victim.lifecycle.checkpoint_and_evict()
+                                if tier is None else victim.lifecycle.checkpoint_and_evict(tier=tier))
+                runtime_elapsed = None
+                if runtime is not None:
+                    if victim.runtime_before_pause is not None:
+                        victim.runtime_before_pause()
+                    runtime_elapsed = (runtime.checkpoint_and_evict() if tier is None
+                                       else runtime.checkpoint_and_evict(tier=tier))
+            paused = sum(v is not None for v in (tool_elapsed, runtime_elapsed))
+            with self._condition:
+                self.pause_count += paused
+                self.pause_service_seconds += sum(v for v in (tool_elapsed, runtime_elapsed) if v is not None)
+            if paused and self.on_pressure_pause is not None:
+                self.on_pressure_pause(victim, tool_elapsed, runtime_elapsed, reason)
+            return bool(paused)
+        except WarmCapacityError:
+            if reservations_ready:
+                # A post-pause accounting failure is not ordinary capacity
+                # backpressure and must remain visible to the experiment.
+                raise
+            # Capacity exhaustion is ordinary backpressure, not an Agent or
+            # arm failure. Pair reservations ensure neither VM paused for it.
+            capacity_skipped = True
+            self.checkpoint_capacity_skips += 1
+            return False
+        finally:
+            with self._condition:
+                self.release_victim(victim)
+                if capacity_skipped:
+                    victim.eviction_eligible = not victim.tool_active and not victim.response_ready
 
     def materialize(self, session_id: str, amount_mib: int,
                     operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:
@@ -885,23 +806,12 @@ class PolicyCoordinator:
             except Exception as first:
                 if getattr(first, "status_code", None) != 409:
                     raise
-                victim = self.victim_for_restore(session_id)
-                if victim is None:
+                if not self.evict_one_for_watermark(
+                        exclude=session_id, reason="cube_restore_capacity"):
                     raise RuntimeError(
-                        "CubeSandbox restore capacity rejection with no eligible victim"
+                        "CubeSandbox restore capacity rejection with no reclaimable idle VM pair; "
+                        "free LOCAL/WARM capacity or reduce concurrency"
                     ) from first
-                try:
-                    elapsed = victim.lifecycle.checkpoint_and_evict()
-                finally:
-                    self.release_victim(victim)
-                with self._condition:
-                    if elapsed is not None:
-                        self.pause_count += 1
-                        self.pause_service_seconds += elapsed
-                        if self.on_pressure_pause is not None:
-                            self.on_pressure_pause(
-                                victim, elapsed, None, "cube_restore_capacity",
-                            )
                 elapsed = operation()  # second rejection is deliberately final
                 self.resume_count += 1
                 self.resume_service_seconds += elapsed
@@ -917,25 +827,14 @@ class PolicyCoordinator:
                       and not state.eviction_in_progress and not state.tool_active
                       and state.lifecycle.resident]
         if self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
-            now = time.monotonic()
+            # Model duration is unknown online. A request remains idle until
+            # its response is generated. No predicted or trace duration is consulted.
             candidates = [state for state in candidates
-                          if state.wait_id is not None and not state.response_ready
-                          and state.wait_deadline_monotonic_s is not None
-                          and state.wait_deadline_monotonic_s > now]
-        if self.release_options is not None:
-            if not self.resource_feedback()['memory_blocked']:
-                return None
-            now = time.monotonic()
-            ranked = [(self._release_rank(state, now), state) for state in candidates]
-            return max((item for item in ranked if item[0] is not None),
-                       key=lambda item: (item[0], -item[1].last_used),
-                       default=(None, None))[1]
+                          if state.wait_id is not None and not state.response_ready]
         return min(candidates, key=lambda state: state.last_used, default=None)
 
     def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:
         victim = self._select_victim_locked(exclude=exclude)
         if victim is not None:
             victim.eviction_in_progress = True
-            reader = self._memory_samples.get(victim.session_id, {}).get('tool_admission')
-            victim.release_before = reader()[1] if self.release_options is not None and reader else None
         return victim

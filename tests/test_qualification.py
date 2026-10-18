@@ -170,15 +170,17 @@ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
         validate_receipt(spec, path)
 
 
+@pytest.mark.parametrize('pair', [False, True])
 @pytest.mark.parametrize('storage,scheduling,fail_spill', [('warm-only', 'static', False), ('tiered', 'snapshot_only', False), ('tiered', 'joint', False), ('tiered', 'joint', True)])
 def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
-    tmp_path: Path, monkeypatch, storage, scheduling, fail_spill,
+    tmp_path: Path, monkeypatch, storage, scheduling, fail_spill, pair,
 ) -> None:
     import clawbox.experiments.qualification as module
 
     spec = load_experiment(EXAMPLE)
     spec = spec.model_copy(update={
-        "policies": (BASELINES["predicted-wait-snapshot"].as_policy(),),
+        "policies": (BASELINES["predicted-wait-snapshot"].as_policy().model_copy(
+            update={"runtime_snapshot": pair}),),
         "resources": spec.resources.model_copy(update={
             "prediction_artifact": "/data/p50.json",
             "snapshot_storage": storage,
@@ -199,7 +201,8 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
         def run(self, command, timeout):
             calls.append(command)
             result = CommandResult()
-            result.stdout = command.removeprefix("printf ")
+            result.stdout = ("4242" if command.startswith("nohup sleep")
+                             else command.removeprefix("printf "))
             return result
 
     class Files:
@@ -238,9 +241,12 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
             self.generation = 0
             self.pool = kwargs['snapshot_pool']
             self.snapshot_key = None
+            self.role = kwargs['role']
+            self.resident = False
 
         def start(self):
             calls.append("start")
+            self.resident = True
 
         def checkpoint_and_evict(self):
             from clawbox.experiments.snapshot_pool import SnapshotKey
@@ -248,7 +254,7 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
             self.generation += 1
             if self.snapshot_key is not None:
                 self.pool.remove(self.snapshot_key)
-            self.snapshot_key = SnapshotKey('qualification', 'tool', self.generation)
+            self.snapshot_key = SnapshotKey('qualification', self.role, self.generation)
             self.pool.reserve(self.snapshot_key, 128)
             def spill(_manifest):
                 calls.append('spill')
@@ -269,9 +275,12 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
                     "transferred_bytes": 4096 if self.generation == 1 else 128,
                 },
             })
+            self.resident = False
+            return .1
 
         def restore(self):
             calls.append("restore")
+            self.resident = True
 
         def close(self):
             calls.append("close")
@@ -289,6 +298,15 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
 
     assert result["passed"] is True
     assert result["incremental_delta_verified"] is True
+    assert result['pair_checkpoint_verified'] is pair
+    if pair:
+        assert calls.count('checkpoint') == 4
+        assert calls.count('restore') == 4
+        assert calls.count('kill -0 4242') == 2
+        assert calls.count('close') == 2
+        assert len(result['runtime_timings']) == 2
+        assert result['cold_relocation_verified'] is (True if storage == 'tiered' else None)
+        return
     assert calls[0:5] == [
         "start", "printf qualification-before", "checkpoint", "restore",
         "checkpoint",
@@ -357,7 +375,8 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
         def __init__(self, *args, shared_pool, **kwargs):
             self.shared_pool = shared_pool
 
-    def record(source, target, local_before, local_after, shared_before, shared_after):
+    def record(source, target, local_before, local_after, shared_before, shared_after,
+               *, reservation_reused=False):
         return NumaBorrowRecord(
             sandbox_id="sandbox", cgroup="/cgroup/leaf",
             reserved_bytes=4096 * 1024 ** 2, source_node=source,
@@ -365,6 +384,8 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
             service_seconds=.1, local_bytes_before=local_before,
             local_bytes_after=local_after, shared_bytes_before=shared_before,
             shared_bytes_after=shared_after,
+            reservation_reused=reservation_reused,
+            reservation_released=target == 0 and shared_after == 0,
         )
 
     class Lifecycle:
@@ -372,17 +393,22 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
         def __init__(self, client, **kwargs):
             self.sandbox = type("Sandbox", (), {"commands": Commands()})()
             self.borrower = kwargs["numa_borrower"]
+            self.reserved = False
 
         def start(self):
             calls.append("start")
 
         def borrow_shared(self):
-            self.borrower.shared_pool.reserve_borrow("sandbox", 4096 * 1024 ** 2)
-            return record(0, 1, 5, 1, 0, 4)
+            reused = self.reserved
+            if not self.reserved:
+                self.borrower.shared_pool.reserve_borrow("sandbox", 4096 * 1024 ** 2)
+                self.reserved = True
+            return record(0, 1, 5, 1, 0, 4, reservation_reused=reused)
 
         def return_local_memory(self):
             if not residual:
                 self.borrower.shared_pool.release_borrow("sandbox")
+                self.reserved = False
             return record(1, 0, 1, 5, 4, residual)
 
         def close(self):

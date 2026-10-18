@@ -1,0 +1,196 @@
+schema_version: 4
+experiment_id: kunpeng-one-socket-admission-c320
+environment:
+  runtime:
+    template_id: tpl-bba239bc4d324efe8e4a7a22
+    template_alias: null
+    source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+    image_digest: sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 2048
+    workspace: /workspace
+    preflight_command: null
+    allow_internet_access: false
+  sandbox:
+    template_id: tpl-27ffbf13c086499db99109ae
+    template_alias: null
+    source_image_reference: 127.0.0.1:5000/clawbox/sqlglot-progress@sha256:2969104a6eac597504e137090e65c3df5d3e9f709bdce0c6e340ed0f7dc8cfb1
+    image_digest: sha256:2969104a6eac597504e137090e65c3df5d3e9f709bdce0c6e340ed0f7dc8cfb1
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 4096
+    workspace: /testbed
+    preflight_command: null
+    allow_internet_access: false
+  resources:
+    compute_nodes:
+    - node_id: node0
+      numa_node: 0
+      cpus: 0-79
+      memory_capacity_mib: 475136
+      low_watermark_mib: 409600
+      high_watermark_mib: 442368
+    - node_id: node1
+      numa_node: 1
+      cpus: 80-159
+      memory_capacity_mib: 475136
+      low_watermark_mib: 409600
+      high_watermark_mib: 442368
+    target_node: 193.124.7.2
+    pool_memory_budget_mib: 884736
+    local_memory_low_watermark_mib: 819200
+    local_memory_high_watermark_mib: 884736
+    shared_memory_borrow_limit_mib: 196608
+    emergency_free_memory_mib: 32768
+    local_memory_capacity_mib: 950272
+    warm_memory_capacity_mib: 393216
+    warm_snapshot_root: /mnt/clawbox-pool
+    cold_snapshot_root: /data/clawbox-cold
+    local_numa_node: null
+    local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+    warm_numa_node: 2
+workload:
+  source: recorded_trace
+  input: /home/weitianc/clawbox-c1280-20261017/workloads/heterogeneous-memory-contention-v3.jsonl
+  repetitions: 1
+  cases:
+  - case_id: heterogeneous-memory-contention-v3
+    prompt: Run the recorded heterogeneous memory phases.
+    source: recorded_trace
+    source_reference: /home/weitianc/clawbox-c1280-20261017/workloads/heterogeneous-memory-contention-v3.jsonl
+    repository: controlled-memory-phases
+    base_commit: null
+    replay_trace_reference: /home/weitianc/clawbox-c1280-20261017/workloads/heterogeneous-memory-contention-v3.jsonl
+    validation: test "$(cat /testbed/stress-result.txt)" = complete
+    sandbox: null
+    snapshot_reuse_probability: null
+    metadata:
+      purpose: controlled operating-boundary study
+      low_phase_mib: 128
+      high_phase_mib: 2048
+      low_phase_count: 6
+      high_phase_count: 4
+  session_assignment: single_case
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: recorded-agent-model
+    time_scale: 1.0
+evidence:
+  prediction_artifact: /home/weitianc/clawbox-c1280-20261017/configs/contention-predictions-v4.json
+  memory_action_costs:
+    provenance: '/home/weitianc/clawbox-high-density-20261017/action-costs-03: existing
+      qualification probes, two NUMA nodes, 4 GiB Tool; cold checkpoint seed is measured
+      warm-checkpoint plus spill; paired real pytest penalty; all Tools restore for
+      subsequent work or final validation'
+    live_borrow_service_seconds_per_gib: 0.06576317062499015
+    live_borrow_runtime_penalty_seconds_per_gib: 0.0010951932500233852
+    warm_checkpoint_seconds_per_gib: 0.039426525750002384
+    warm_restore_seconds_per_gib: 0.09528314949997707
+    cold_checkpoint_seconds_per_gib: 0.06452185099999497
+    cold_restore_seconds_per_gib: 0.1151175211249722
+    expected_restore_probability: 1.0
+    remote_access_latency_ns: null
+    remote_stream_bandwidth_mib_per_second: null
+  snapshot_residency_costs: null
+  idle_reclaim_costs:
+    provenance: '/home/weitianc/clawbox-high-density-20261017/action-costs-03: existing
+      qualification probes, two NUMA nodes, 4 GiB Tool; cold checkpoint seed is measured
+      warm-checkpoint plus spill; paired real pytest penalty; all Tools restore for
+      subsequent work or final validation'
+    warm_checkpoint_seconds_per_gib: 0.039426525750002384
+    warm_restore_seconds_per_gib: 0.09528314949997707
+    cold_checkpoint_seconds_per_gib: 0.06452185099999497
+    cold_restore_seconds_per_gib: 0.1151175211249722
+  model_wait_prediction_seconds: 0.01
+  model_wait_prediction_source: recorded 10 ms response duration in the immutable
+    controlled trace
+measurement:
+  memory_sample_interval_seconds: 1.0
+  stabilization_seconds: 1.0
+  observe_predictions: false
+  validation:
+    command: test "$(cat /testbed/stress-result.txt)" = complete
+  output:
+    directory: /results
+mechanisms:
+  admission:
+    startup_headroom_mib: 4096
+    admission_margin_mib: 8192
+    static_tool_memory_mib: 1950
+    non_command_tool_memory_mib: 128
+    prediction_reservation_scale: 1.0
+    tool: predicted
+  runtime:
+    pressure_control:
+      release_history_samples: 3
+      release_forecast_ttl_factor: 3.0
+      psi_ratio: 0.1
+      exit_hysteresis_seconds: 1.0
+      cooldown_seconds: 5.0
+      action_window_seconds: 2.0
+      protection_budget_mib: 32768
+      max_boosted_vms: 4
+      boost_cpu_weight: 200
+      min_release_mib: 64
+      amortization_factor: 2.0
+    runtime_poll_interval_seconds: 2.0
+    proactive_memory_reclaim: true
+    memory_protection: true
+    cpu_release_boost: true
+  placement:
+    placement_cpu_overcommit: 32.0
+    template_balance_slack: 0.1
+    session_compute_nodes: []
+    policy: load_aware
+    template_affinity: false
+  idle_reclaim:
+    checkpoint_restore_headroom_mib: 1024
+    policy: release_cost
+    scope: tool
+  shared_memory:
+    borrow_cooldown_seconds: 5.0
+    return_cooldown_seconds: 5.0
+    borrow: pressure
+  checkpoint:
+    pool_transfer_concurrency: 4
+    pool_transfer_timeout_seconds: 120.0
+    mechanism: incremental-cow
+    storage: tiered
+    residency: lru
+  deployment:
+    mode: managed
+  coordination:
+    action_selection: measured_cost
+conditions:
+  prediction_source: command-table
+comparison:
+  recipe: custom
+  arms:
+  - name: predicted-shared
+    override: {}
+  - name: os-default-no-admission
+    override:
+      admission.tool: 'off'
+      runtime.proactive_memory_reclaim: false
+      runtime.memory_protection: false
+      runtime.cpu_release_boost: false
+      placement.policy: os_default
+      placement.template_affinity: false
+      idle_reclaim.policy: 'off'
+      shared_memory.borrow: 'off'
+      deployment.mode: os-default
+      coordination.action_selection: reclaim_first
+execution:
+  concurrency_levels:
+  - 320
+  randomized_order: true
+  random_seed: 20261017
+  arm_timeout_seconds: 2400
+  arm_finalization_timeout_seconds: 900
+  command_timeout_seconds: 120
+  arrival_schedule: fixed_stagger
+  stagger_interval_seconds: 0.05

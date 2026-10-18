@@ -252,28 +252,36 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                          transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds)
         if spec.resources.warm_memory_capacity_mib > 0 else None
     )
-    lifecycle = CubeSandboxLifecycle(
-        client,
-        template=spec.sandbox.template,
-        node_name=spec.resources.target_node,
-        ownership=ownership,
-        allow_internet_access=spec.sandbox.allow_internet_access,
-        role="tool",
-        warm_snapshot_root=spec.resources.warm_snapshot_root,
-        cold_snapshot_root=spec.resources.cold_snapshot_root,
-        snapshot_pool=pool,
-        default_snapshot_tier=spec.resources.default_snapshot_tier,
-        snapshot_reservation_bytes=(spec.sandbox.memory_mib + 256) * 1024 * 1024,
-        snapshot_mechanism=spec.resources.snapshot_mechanism,
-        snapshot_storage=spec.resources.snapshot_storage,
-        lazy_restore=spec.resources.lazy_restore,
-        numa_borrower=SandboxNumaBorrower(
-            Path(spec.resources.local_memory_cgroup), local_node=spec.resources.local_numa_node,
-            shared_node=spec.resources.warm_numa_node, shared_pool=pool,
-            cpus=_node.cpus if _node else None, node_id=_node.node_id if _node else None,
-            cleanup_timeout_seconds=spec.resources.pool_transfer_timeout_seconds,
-        ) if spec.resources.shared_memory_borrow_limit_mib is not None else None,
-    )
+    def make_lifecycle(sandbox, role):
+        return CubeSandboxLifecycle(
+            client,
+            template=sandbox.template,
+            node_name=spec.resources.target_node,
+            ownership=ownership,
+            allow_internet_access=sandbox.allow_internet_access,
+            role=role,
+            warm_snapshot_root=spec.resources.warm_snapshot_root,
+            cold_snapshot_root=spec.resources.cold_snapshot_root,
+            snapshot_pool=pool,
+            default_snapshot_tier=spec.resources.default_snapshot_tier,
+            snapshot_reservation_bytes=(sandbox.memory_mib + 256) * 1024 * 1024,
+            snapshot_mechanism=spec.resources.snapshot_mechanism,
+            snapshot_storage=spec.resources.snapshot_storage,
+            lazy_restore=spec.resources.lazy_restore,
+            numa_borrower=SandboxNumaBorrower(
+                Path(spec.resources.local_memory_cgroup), local_node=spec.resources.local_numa_node,
+                shared_node=spec.resources.warm_numa_node, shared_pool=pool,
+                cpus=_node.cpus if _node else None, node_id=_node.node_id if _node else None,
+                cleanup_timeout_seconds=spec.resources.pool_transfer_timeout_seconds,
+            ) if spec.resources.shared_memory_borrow_limit_mib is not None else None,
+        )
+    lifecycle = make_lifecycle(spec.sandbox, "tool")
+    pair_policy = next((policy for policy in spec.policies
+                       if policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
+                       and policy.runtime_snapshot), None)
+    runtime = make_lifecycle(spec.runtime, "runtime") if pair_policy else None
+    coordinator = None
+    runtime_pid = None
     primary_error: BaseException | None = None
     incremental_delta_verified = False
     cold_relocation_verified: bool | None = None
@@ -282,11 +290,31 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         before = lifecycle.sandbox.commands.run("printf qualification-before", timeout=30)
         if before.exit_code or before.stdout != "qualification-before":
             raise RuntimeError("snapshot probe could not execute before checkpoint")
+        if runtime is not None:
+            from .policy import PolicyCoordinator
+            runtime.start()
+            process = runtime.sandbox.commands.run(
+                "nohup sleep 600 >/dev/null 2>&1 & echo $!", timeout=30)
+            runtime_pid = process.stdout.strip()
+            if process.exit_code or not runtime_pid.isdigit():
+                raise RuntimeError("Runtime snapshot probe could not start PID witness")
+            coordinator = PolicyCoordinator(pair_policy,
+                budget_mib=spec.resources.pool_memory_budget_mib,
+                emergency_free_mib=0, operation_headroom_mib=0)
+            coordinator.register(probe_id, lifecycle)
+            coordinator.register_runtime(probe_id, runtime)
         generations = 2 if spec.resources.snapshot_mechanism == "incremental-cow" else 1
         for generation in range(1, generations + 1):
             marker = f"qualification-state-{generation}"
             lifecycle.sandbox.files.write("/tmp/clawbox-qualification-state", marker)
-            lifecycle.checkpoint_and_evict()
+            if coordinator is not None:
+                coordinator.begin_model_wait(probe_id, str(generation))
+                if not coordinator.evict_one_for_watermark():
+                    raise RuntimeError("snapshot probe cannot reserve capacity for the configured VM pair")
+                if lifecycle.resident or runtime.resident:
+                    raise RuntimeError("pair checkpoint left a VM resident")
+            else:
+                lifecycle.checkpoint_and_evict()
             if (
                 generation == generations
                 and spec.resources.snapshot_storage == "tiered"
@@ -302,6 +330,14 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 # COLD lineage before the volatile WARM files are removed.
                 pool.spill_for_admission(pool.capacity_bytes - committed + 1)
                 cold_relocation_verified = True
+            if coordinator is not None:
+                coordinator.complete_model_wait(probe_id, str(generation))
+                runtime.restore()
+                alive = runtime.sandbox.commands.run(f"kill -0 {runtime_pid}", timeout=30)
+                if alive.exit_code:
+                    raise RuntimeError("Runtime PID did not survive pair checkpoint/restore")
+                if lifecycle.resident:
+                    raise RuntimeError("Runtime response restore unexpectedly restored Tool")
             lifecycle.restore()
             if lifecycle.sandbox.files.read("/tmp/clawbox-qualification-state") != marker:
                 raise RuntimeError(
@@ -331,10 +367,12 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
     except BaseException as exc:
         primary_error = exc
     cleanup_errors: list[str] = []
-    try:
-        lifecycle.close()
-    except Exception as exc:
-        cleanup_errors.append(f"lifecycle close: {type(exc).__name__}: {exc}")
+    for vm in (runtime, lifecycle):
+        if vm is not None:
+            try:
+                vm.close()
+            except Exception as exc:
+                cleanup_errors.append(f"{vm.role} lifecycle close: {type(exc).__name__}: {exc}")
     try:
         client.kill_owned_sandboxes(probe_id)
     except Exception as exc:
@@ -350,6 +388,9 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "incremental_delta_verified": incremental_delta_verified,
         "cold_relocation_verified": cold_relocation_verified,
         "timings": lifecycle.timings,
+        "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
+        "runtime_pid": runtime_pid,
+        "runtime_timings": runtime.timings if runtime is not None else [],
         "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
         "failure": (
             f"{type(primary_error).__name__}: {primary_error}"
@@ -380,6 +421,9 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "incremental_delta_verified": incremental_delta_verified,
         "cold_relocation_verified": cold_relocation_verified,
         "timings": lifecycle.timings,
+        "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
+        "runtime_pid": runtime_pid,
+        "runtime_timings": runtime.timings if runtime is not None else [],
         "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
         "artifact_root": str(artifact_root),
     }

@@ -283,6 +283,38 @@ class CubeSandboxLifecycle:
                 )
                 raise
 
+    @contextmanager
+    def reserve_checkpoint(self, *, tier: SnapshotTier | None = None):
+        """Reserve WARM capacity before any member of an idle VM pair pauses.
+
+        The caller enters both lifecycles' contexts before checkpointing either.
+        Failed pair admission therefore releases reservations without pausing a VM.
+        """
+        with self._lock:
+            target = tier or self.default_snapshot_tier
+            if self.snapshot_storage == "warm-only":
+                if target is SnapshotTier.COLD:
+                    raise ValueError("COLD snapshots are disabled by warm-only storage")
+                target = SnapshotTier.WARM
+            key = None
+            if self.resident and target is SnapshotTier.WARM:
+                if self.snapshot_pool is None or self.snapshot_reservation_bytes is None:
+                    raise RuntimeError("WARM snapshot accounting is not configured")
+                key = SnapshotKey(self.ownership.session_id, self.role, self._generation + 1)
+                self.snapshot_pool.reserve_for_admission(
+                    key, self.snapshot_reservation_bytes, timeout_s=0,
+                    retention_value_seconds=self._retention_value_seconds(
+                        self.configured_memory_bytes or self.snapshot_reservation_bytes),
+                )
+                self._pending_snapshot_keys.add(key)
+            try:
+                yield
+            finally:
+                if (key is not None and key in self._pending_snapshot_keys
+                        and self._state is SandboxState.RUNNING):
+                    self.snapshot_pool.abort(key)
+                    self._pending_snapshot_keys.discard(key)
+
     def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None:
         """Ask CubeSandbox to snapshot the VM and destroy its live runtime.
 
@@ -349,11 +381,12 @@ class CubeSandboxLifecycle:
                                 self.configured_memory_bytes
                                 or self.snapshot_reservation_bytes
                             )
-                            self.snapshot_pool.reserve_for_admission(
-                                key, self.snapshot_reservation_bytes,
-                                timeout_s=0 if predecessor is not None or self.default_snapshot_tier is not None else 120,
-                                retention_value_seconds=retention_value,
-                            )
+                            if key not in self._pending_snapshot_keys:
+                                self.snapshot_pool.reserve_for_admission(
+                                    key, self.snapshot_reservation_bytes,
+                                    timeout_s=0 if predecessor is not None or self.default_snapshot_tier is not None else 120,
+                                    retention_value_seconds=retention_value,
+                                )
                             self._pending_snapshot_keys.add(key)
                         except WarmCapacityError:
                             if self.snapshot_storage == "warm-only":

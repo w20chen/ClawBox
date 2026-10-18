@@ -1,0 +1,6 @@
+{
+  "clawbox/experiments/worker.py": "1f4c1d8204d146ca6175b0c5684e7d669ed8956ab84ff71d2af8d8db655d51e3",
+  "tests/test_numa_joint.py": "c0720533be71e3ca7ed017991e795ae529b7d6ffaa7352131e2cedae4b406209",
+  "tests/test_qualification.py": "8dc79ab9a77f264e1da8b542024f6f7059a2a79a8f0cb500223397b51e666bb2",
+  "tests/test_supernode.py": "ef84e484bbb37f9e7bd05c4eb34fb18b0ce25e88ca57c32b765820b9c5bbfd44"
+}

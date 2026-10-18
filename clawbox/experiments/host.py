@@ -61,6 +61,7 @@ class HostConfig(BaseModel):
     output_root: str = "/data/clawbox-results"
     minimum_disk_free_gib: int = Field(default=20, gt=0)
     tcp_tw_reuse: int | None = Field(default=None, ge=0, le=2)
+    cubelet_tap_init_num: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -122,6 +123,40 @@ def apply_network(config: HostConfig) -> None:
         raise RuntimeError('tcp_tw_reuse did not take effect; inspect sysctl permissions and rerun host apply')
 
 
+CUBELET_CONFIG = Path("/usr/local/services/cubetoolbox/Cubelet/config/config.toml")
+
+
+def _cubelet_tap_init_num() -> int:
+    text = _run("sudo", "-n", "cat", str(CUBELET_CONFIG))
+    match = re.search(r"(?m)^\s*tap_init_num\s*=\s*(\d+)\s*$", text)
+    if not match:
+        raise ValueError(f"{CUBELET_CONFIG}: tap_init_num is missing")
+    return int(match.group(1))
+
+
+def apply_cubelet_tap_pool(config: HostConfig) -> bool:
+    """Apply an explicit Cubelet TAP pool size. Return whether services need restart."""
+    desired = config.cubelet_tap_init_num
+    if desired is None or _cubelet_tap_init_num() == desired:
+        return False
+    script = r"""
+import pathlib, re, shutil, sys, time
+p = pathlib.Path(sys.argv[1])
+desired = int(sys.argv[2])
+text = p.read_text()
+updated, count = re.subn(r'(?m)^(\s*tap_init_num\s*=\s*)\d+(\s*)$',
+                         lambda m: m.group(1) + str(desired) + m.group(2), text)
+if count != 1:
+    raise SystemExit(f'{p}: expected one tap_init_num assignment, found {count}')
+shutil.copy2(p, p.with_name(p.name + '.pre-clawbox-' + str(time.time_ns())))
+p.write_text(updated)
+"""
+    _run("sudo", "-n", "python3", "-c", script, str(CUBELET_CONFIG), str(desired))
+    if _cubelet_tap_init_num() != desired:
+        raise RuntimeError("Cubelet tap_init_num did not take effect; inspect config permissions and rerun host apply")
+    return True
+
+
 def inventory() -> dict:
     nodes = []
     for path in sorted(Path("/sys/devices/system/node").glob("node[0-9]*")):
@@ -180,6 +215,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
                 values[key] = profile[key]
         if profile.get('tcp_tw_reuse') is not None:
             values['tcp_tw_reuse'] = profile['tcp_tw_reuse']
+        if profile.get('cubelet_tap_init_num') is not None:
+            values['cubelet_tap_init_num'] = profile['cubelet_tap_init_num']
         for target, source in (("local_gib", "local_memory_capacity_mib"),
                                ("low_gib", "local_memory_low_watermark_mib"),
                                ("high_gib", "local_memory_high_watermark_mib"),
@@ -238,6 +275,12 @@ def check(config: HostConfig) -> dict:
             'requested': config.tcp_tw_reuse,
             'scope': 'host network namespace; applied until reboot',
         }, 'Install sysctl and use a Linux host exposing net.ipv4.tcp_tw_reuse, or set tcp_tw_reuse: null to leave it unchanged.')
+    if config.cubelet_tap_init_num is not None:
+        probe('Cubelet TAP pool', lambda: {
+            'current': _cubelet_tap_init_num(),
+            'requested': config.cubelet_tap_init_num,
+            'required_vms': 'runtime and tool VMs combined',
+        }, 'Install CubeSandbox with a readable Cubelet config containing tap_init_num, or set cubelet_tap_init_num: null to leave it unchanged.')
     probe("Docker", lambda: _run("docker", "info", "--format", "{{.ServerVersion}}"),
           "Start Docker and enable this user's Docker access; docs/installation.md step 1.")
     for name in ("findmnt", "mount", "numactl", "systemctl"):
@@ -326,6 +369,10 @@ def apply(config: HostConfig, profile: Path) -> dict:
         print(json.dumps(report, indent=2))
         raise ValueError("host prerequisites failed; follow checks[].remedy, then rerun host check")
     apply_network(config)
+    restart_cubelet = apply_cubelet_tap_pool(config)
+    if restart_cubelet:
+        lab.command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cubelet", timeout=120)
+        lab.command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cube-egress", timeout=120)
     domains = [n.resolved().model_dump() for n in config.compute_nodes]
     local_gib = sum(n.memory_gib for n in config.compute_nodes) if domains else config.local_gib
     local_node = config.compute_nodes[0].numa_node if domains else config.local_node

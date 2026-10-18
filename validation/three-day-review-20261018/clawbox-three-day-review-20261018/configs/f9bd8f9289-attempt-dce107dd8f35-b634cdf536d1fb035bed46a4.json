@@ -1,0 +1,10 @@
+{
+  "id": "f9bd8f9289-attempt-dce107dd8f35-b634cdf536d1fb035bed46a4",
+  "run_path": "/home/weitianc/clawbox-c1280-20261017/results/qualification-51367dfb7932",
+  "run_id": "qualification-51367dfb7932",
+  "arm_id": "b634cdf536d1fb035bed46a4",
+  "attempt_id": "attempt-dce107dd8f35",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/f9bd8f9289-experiment.yaml",
+  "effective_config_source": null
+}

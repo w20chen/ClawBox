@@ -169,8 +169,6 @@ def configure_experiment(
     stabilization_seconds: float | None = None,
     time_scale: float | None = None,
     openclaw_exec_yield_ms: int | None = None,
-    model_wait_prediction_seconds: float | str | None = None,
-    model_wait_prediction_source: str | None = None,
     inference_backend: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
@@ -480,31 +478,6 @@ def configure_experiment(
     if api_key_env is not None:
         configuration["api_key_env"] = api_key_env
 
-    if model_wait_prediction_seconds == "auto":
-        if inference.get("backend") != "replay":
-            raise ValueError("automatic model-wait prediction requires replay inference")
-        trace_path = Path(str(workload.get("input") or ""))
-        try:
-            durations = [action.duration_s for action in load_trace(trace_path)]
-        except (OSError, ValueError) as exc:
-            raise ValueError(
-                f"cannot calibrate model wait from recorded trace {trace_path}: {exc}"
-            ) from exc
-        scale = float(configuration.get("time_scale", 1.0))
-        configuration["model_wait_prediction_seconds"] = (
-            statistics.median(durations) * scale
-        )
-        configuration["model_wait_prediction_source"] = (
-            "recorded-trace-median-scaled:"
-            + hashlib.sha256(trace_path.read_bytes()).hexdigest()
-        )
-    elif model_wait_prediction_seconds is not None:
-        configuration["model_wait_prediction_seconds"] = model_wait_prediction_seconds
-        if model_wait_prediction_source is not None:
-            configuration["model_wait_prediction_source"] = model_wait_prediction_source
-    elif model_wait_prediction_source is not None:
-        configuration["model_wait_prediction_source"] = model_wait_prediction_source
-
     if selected_suite and resources.get("compute_nodes"):
         aggregate = sum(n["high_watermark_mib"] for n in resources["compute_nodes"])
         if pool_memory_gib is not None and gib_to_mib(pool_memory_gib, name="pool memory") != aggregate:
@@ -520,44 +493,6 @@ def configure_experiment(
     elif runtime_control is not None:
         for policy in policy_mappings:
             policy["runtime_control"] = runtime_control
-    if any(item.get("eviction") == "wait_aware_pressure" for item in policy_mappings):
-        predicted_wait = configuration.get("model_wait_prediction_seconds")
-        prediction_source = str(
-            configuration.get("model_wait_prediction_source") or ""
-        ).strip()
-        try:
-            predicted_wait_value = float(predicted_wait)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "wait-aware baselines require --model-wait-prediction-seconds"
-            ) from exc
-        if not math.isfinite(predicted_wait_value) or predicted_wait_value <= 0:
-            raise ValueError("model wait prediction must be positive")
-        if not prediction_source:
-            raise ValueError(
-                "wait-aware baselines require --model-wait-prediction-source"
-            )
-    coordinates_release = any(
-        item.get("idle_release_ranking")
-        or item.get("runtime_control") in {"pressure_lifecycle", "adaptive_joint"}
-        for item in policy_mappings
-    )
-    if coordinates_release:
-        prediction_source = str(
-            configuration.get("model_wait_prediction_source") or ""
-        )
-        if prediction_source.startswith("recorded-trace-median-scaled:"):
-            raise ValueError(
-                "release-cost baselines require an independent model-wait "
-                "prediction; do not use --model-wait-prediction-seconds auto"
-            )
-        if not (resources.get("idle_reclaim_costs")
-                or resources.get("memory_action_costs")):
-            raise ValueError(
-                "release-cost baselines require measured "
-                "resources.idle_reclaim_costs in the input YAML"
-            )
-
     spec = ExperimentSpec.model_validate(root)
     ensure_supported_experiment(spec)
     return spec

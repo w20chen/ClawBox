@@ -65,6 +65,26 @@ def test_snapshot_only_never_borrows():
     assert calls == ['reclaim']
 
 
+@pytest.mark.parametrize('mode', ['snapshot_only', 'local_only'])
+def test_disabled_borrow_is_not_a_calibrated_candidate(mode):
+    costs = MemoryActionCostSpec(
+        provenance='test-calibration', live_borrow_service_seconds_per_gib=.1,
+        live_borrow_runtime_penalty_seconds_per_gib=.1,
+        warm_checkpoint_seconds_per_gib=.2, warm_restore_seconds_per_gib=.2,
+        expected_restore_probability=1,
+    )
+    c, calls, events = controller(mode, costs=costs)
+    c.arm.resources.snapshot_destination = 'warm'
+    c.coordinator.watermark_reclaim_candidate = lambda: None
+    def unexpected_borrow_scan():
+        pytest.fail('disabled borrowing must not inspect live VM candidates')
+    c._next_borrow_candidate = unexpected_borrow_scan
+    assert c._joint_relieve_pressure(
+        preferred_borrow=SimpleNamespace(), reason='test-pressure') == 'wait'
+    assert calls == []
+    assert events[-1]['candidates']['borrow'] is None
+
+
 def test_snapshot_watermarks_work_without_a_live_borrower():
     original, calls, events = controller('snapshot_only', idle=True)
     blocked = []
@@ -137,7 +157,7 @@ def test_empirical_cost_model_compares_configured_vm_footprints():
     assert estimates['reclaim']['basis'] == 'configured_vm_gib'
 
 
-def test_cost_calibration_is_joint_only():
+def test_cost_calibration_rejects_static_scheduling():
     raw = raw_spec()
     raw['resources']['memory_action_costs'] = {
         'provenance': '/results/calibration.json',
@@ -149,7 +169,7 @@ def test_cost_calibration_is_joint_only():
         'cold_restore_seconds_per_gib': .7,
         'expected_restore_probability': .5,
     }
-    with pytest.raises(ValueError, match='memory_scheduling=joint'):
+    with pytest.raises(ValueError, match='requires joint or snapshot_only'):
         ExperimentSpec.model_validate(raw)
 
 
@@ -288,6 +308,7 @@ def test_calibrated_joint_plans_cold_when_warm_capacity_is_reserved(forced_cold)
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     borrower = SimpleNamespace(
         node_id='node0', shared_pool=pool, borrowed=lambda: ('existing-vm',),
+        allocates_shared=lambda sandbox_id: sandbox_id == 'existing-vm',
     )
     c = WatermarkController(
         arm, coordinator, SimpleNamespace(), borrower,

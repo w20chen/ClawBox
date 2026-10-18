@@ -1,0 +1,138 @@
+schema_version: 3
+suite: admission
+suite_ablations: false
+suite_runtime_control: 'off'
+experiment_id: clawtune-1bdb-e2e
+workload:
+  source: recorded_trace
+  input: /home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl
+  repetitions: 1
+  cases:
+  - case_id: marker
+    prompt: Allocate and touch 64 MiB for three seconds, then write complete to /workspace/result.txt.
+    source: recorded_trace
+    source_reference: /home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl
+    repository: self-service/clawtune-integration
+    base_commit: null
+    replay_trace_reference: /home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl
+    validation: null
+    sandbox: null
+    snapshot_reuse_probability: null
+    metadata: {}
+  session_assignment: single_case
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: example-model
+    time_scale: 1.0
+runtime:
+  template_id: tpl-bba239bc4d324efe8e4a7a22
+  template_alias: null
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+  image_digest: sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 2048
+  workspace: /workspace
+  preflight_command: null
+  allow_internet_access: true
+sandbox:
+  template_id: tpl-2fc904576f874d90b63452b8
+  template_alias: null
+  source_image_reference: 127.0.0.1:5000/clawbox/lab-sandbox@sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98
+  image_digest: sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98
+  architecture: arm64
+  vcpu: 2
+  memory_mib: 4096
+  workspace: /workspace
+  preflight_command: null
+  allow_internet_access: true
+execution:
+  placement_policy: load_aware
+  placement_cpu_overcommit: 8.0
+  template_balance_slack: 0.1
+  session_compute_nodes: []
+  concurrency_levels:
+  - 1
+  randomized_order: true
+  random_seed: 0
+  arm_timeout_seconds: 240
+  command_timeout_seconds: 60
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1.0
+  arrival_schedule: burst
+  stagger_interval_seconds: 0.0
+resources:
+  lifecycle_admission: configured-capacity
+  proactive_cache_reclaim: true
+  compute_nodes:
+  - node_id: node0
+    numa_node: 0
+    cpus: 0-79
+    memory_capacity_mib: 36864
+    low_watermark_mib: 28672
+    high_watermark_mib: 32768
+  - node_id: node1
+    numa_node: 1
+    cpus: 80-159
+    memory_capacity_mib: 36864
+    low_watermark_mib: 28672
+    high_watermark_mib: 32768
+  target_node: 193.124.7.2
+  pool_memory_budget_mib: 65536
+  local_memory_low_watermark_mib: 57344
+  local_memory_high_watermark_mib: 65536
+  shared_memory_borrow_limit_mib: 65536
+  emergency_free_memory_mib: 1024
+  startup_headroom_mib: 256
+  admission_margin_mib: 256
+  checkpoint_restore_headroom_mib: 1024
+  static_tool_memory_mib: 256
+  non_command_tool_memory_mib: null
+  prediction_artifact: /home/weitianc/clawbox-specs/clawtune-1bdb-p50.json
+  prediction_mode: runtime
+  observe_predictions: false
+  prediction_reservation_scale: 1.0
+  agentcgroup_source: null
+  local_memory_capacity_mib: 73728
+  warm_memory_capacity_mib: 131072
+  snapshot_mechanism: incremental-cow
+  snapshot_storage: tiered
+  warm_snapshot_root: /mnt/clawbox-pool
+  cold_snapshot_root: /data/clawbox-cold
+  local_numa_node: null
+  local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+  warm_numa_node: 2
+  memory_scheduling: local_only
+  pool_transfer_concurrency: 1
+  pool_transfer_timeout_seconds: 120.0
+  borrow_cooldown_seconds: 5.0
+  return_cooldown_seconds: 5.0
+  memory_action_costs: null
+  snapshot_residency_costs: null
+  template_base_sharing: disabled
+policies:
+- name: default-resident
+  deployment: managed
+  admission: 'off'
+  runtime_control: 'off'
+  reclamation: resident
+  eviction: none
+  restore: none
+  template_aware_placement: false
+  snapshot_aware_residency: false
+- name: predicted-resident
+  deployment: managed
+  admission: predicted
+  runtime_control: 'off'
+  reclamation: resident
+  eviction: none
+  restore: none
+  template_aware_placement: false
+  snapshot_aware_residency: false
+validation:
+  command: test "$(cat /workspace/result.txt)" = complete
+output:
+  directory: /results

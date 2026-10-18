@@ -316,8 +316,7 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--ablations", action=argparse.BooleanOptionalAction, default=None,
                            help="include intermediate arms for the selected suite")
     configure.add_argument("--runtime-control", choices=("off", "no_control",
-                           "phase_memcg", "release_cpu",
-                           "pressure_lifecycle", "adaptive_joint"),
+                           "phase_memcg", "release_cpu"),
                            help="optional pressure/progress control; suite deployment baseline stays off")
     configure.add_argument("--prediction-mode", choices=("runtime", "frozen"),
                            help="query trained ClawTune KB per command, or replay frozen command predictions")
@@ -390,11 +389,6 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--arm-timeout-seconds", type=int)
     configure.add_argument("--command-timeout-seconds", type=int)
     configure.add_argument("--time-scale", type=float)
-    configure.add_argument(
-        "--model-wait-prediction-seconds", type=positive_float_or_auto,
-        help="predicted model wait, or auto for the scaled recorded-trace median",
-    )
-    configure.add_argument("--model-wait-prediction-source")
     configure.add_argument("--inference-backend", choices=("replay", "api"))
     configure.add_argument("--model")
     configure.add_argument("--base-url")
@@ -638,15 +632,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if "resources.local_memory_cgroup" not in required_settings:
                     required_settings.append("resources.local_memory_cgroup")
-                if value.eviction_policy.value == "wait_aware_pressure":
-                    required_settings.extend([
-                        "inference.configuration.model_wait_prediction_seconds",
-                        "inference.configuration.model_wait_prediction_source",
-                    ])
-                if value.as_policy().coordinates_release:
-                    required_settings.append("resources.idle_reclaim_costs")
-                if value.eviction_policy.value == "time_oracle":
-                    required_settings.append("inference.backend=replay")
                 rows.append({
                     "name": name,
                     "admission": value.admission_policy.value,
@@ -871,8 +856,6 @@ def main(argv: list[str] | None = None) -> int:
                 arm_timeout_seconds=args.arm_timeout_seconds,
                 command_timeout_seconds=args.command_timeout_seconds,
                 time_scale=args.time_scale,
-                model_wait_prediction_seconds=args.model_wait_prediction_seconds,
-                model_wait_prediction_source=args.model_wait_prediction_source,
                 inference_backend=args.inference_backend,
                 model=args.model,
                 base_url=args.base_url,

@@ -1,0 +1,2203 @@
+{
+  "arm_ids": [
+    "d5c510ebca0d482ad365e51e"
+  ],
+  "cleanup_verified": true,
+  "concurrency": 8,
+  "implementation_digest": "1f3de220e4e5c286226d1467d404ecbf48801ded76a33bc564f5d842daa9627a",
+  "input_manifest": {
+    "prediction_files": [],
+    "traces": [
+      {
+        "case_id": "sqlglot-4528",
+        "path": "/home/weitianc/clawbox-high-density-followup-20261017/setup-source/examples/traces/sqlglot-4528-workspace-replay-v2.jsonl",
+        "sha256": "6998e1d3baf4d1b3e3a2ca127fdfef51771d05f945179b2f943bb3013d7c242c"
+      }
+    ]
+  },
+  "live_borrow_roundtrip_test": {
+    "by_policy": {
+      "wait-pair": "cb6e378564803434"
+    },
+    "passed": true,
+    "probes": {
+      "cb6e378564803434": {
+        "borrow_limit_bytes": 0,
+        "passed": true,
+        "required": false,
+        "shared_capacity_bytes": 412316860416
+      }
+    },
+    "required": false
+  },
+  "policy_names": [
+    "wait-pair"
+  ],
+  "qualification_spec_digest": "17d86db4a96434847ce376b1f84cc28c38ef743b7f77e982d8866e9603ec11ca",
+  "qualified_unix_s": 1792306450.3467572,
+  "run_root": "/home/weitianc/clawbox-c1280-20261017/results/qualification-3ff1ef31ab25",
+  "runtime_control_test": {
+    "by_policy": {
+      "wait-pair": "cb6e378564803434"
+    },
+    "passed": true,
+    "probes": {
+      "cb6e378564803434": {
+        "cleanup_errors": [],
+        "failure": null,
+        "guest_free_releases_host_memory": "not_established_by_this_probe",
+        "host_memory_observations": [
+          {
+            "current_bytes": 118640640,
+            "memory_stat": "anon 7098368\nfile 108654592\nkernel 0\nkernel_stack 0\npagetables 0\nsec_pagetables 0\npercpu 0\nsock 0\nvmalloc 0\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 27840512\nfile_dirty 28672\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 2637824\nactive_anon 4034560\ninactive_file 94228480\nactive_file 14381056\nunevictable 0\nslab_reclaimable 0\nslab_unreclaimable 0\nslab 0\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgscan 0\npgsteal 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgfault 2484\npgmajfault 36\npgrefill 0\npgactivate 3540\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nzswpin 0\nzswpout 0\nthp_fault_alloc 0\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0\n",
+            "phase": "created",
+            "priority": "neutral",
+            "role": "runtime"
+          },
+          {
+            "current_bytes": 141930496,
+            "memory_stat": "anon 8069120\nfile 130908160\nkernel 0\nkernel_stack 0\npagetables 0\nsec_pagetables 0\npercpu 0\nsock 0\nvmalloc 0\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 30699520\nfile_dirty 24576\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 2707456\nactive_anon 4902912\ninactive_file 115245056\nactive_file 15638528\nunevictable 0\nslab_reclaimable 0\nslab_unreclaimable 0\nslab 0\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgscan 0\npgsteal 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgfault 2782\npgmajfault 40\npgrefill 0\npgactivate 3854\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nzswpin 0\nzswpout 0\nthp_fault_alloc 0\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0\n",
+            "phase": "created",
+            "priority": "neutral",
+            "role": "tool"
+          },
+          {
+            "current_bytes": 12881920,
+            "memory_stat": "anon 7053312\nfile 45056\nkernel 0\nkernel_stack 0\npagetables 0\nsec_pagetables 0\npercpu 0\nsock 0\nvmalloc 0\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 24576\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 2560000\nactive_anon 3928064\ninactive_file 20480\nactive_file 0\nunevictable 0\nslab_reclaimable 0\nslab_unreclaimable 0\nslab 0\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgscan 0\npgsteal 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgfault 2470\npgmajfault 0\npgrefill 0\npgactivate 29\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nzswpin 0\nzswpout 0\nthp_fault_alloc 0\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0\n",
+            "phase": "created",
+            "priority": "neutral",
+            "role": "runtime"
+          },
+          {
+            "current_bytes": 13422592,
+            "memory_stat": "anon 0\nfile 0\nkernel 0\nkernel_stack 0\npagetables 0\nsec_pagetables 0\npercpu 0\nsock 0\nvmalloc 0\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 0\ninactive_file 0\nactive_file 0\nunevictable 0\nslab_reclaimable 0\nslab_unreclaimable 0\nslab 0\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgscan 0\npgsteal 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgfault 0\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nzswpin 0\nzswpout 0\nthp_fault_alloc 0\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0\n",
+            "phase": "created",
+            "priority": "neutral",
+            "role": "tool"
+          }
+        ],
+        "neutral_placement_verified": true,
+        "passed": true,
+        "placements": [
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 115281920,
+              "2": 0,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0000-runtime",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "runtime",
+            "sandbox_id": "80a536ccf3e949c195fe5f8e60f3f946",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355132
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355133
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355134
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355135
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355136
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355137
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355139
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355140
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355147
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355148
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355149
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355150
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355151
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355152
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355154
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355153
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355155
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355156
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355157
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355158
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355159
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355160
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355161
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355162
+              }
+            ],
+            "unattributed_bytes": 3358720
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 111779840,
+              "2": 2818048,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0000-runtime",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "runtime",
+            "sandbox_id": "80a536ccf3e949c195fe5f8e60f3f946",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355232
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355233
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355234
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355235
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355236
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355237
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355239
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355240
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355246
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355247
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355248
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355249
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355250
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355251
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355252
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355253
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355254
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355255
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355256
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355257
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355258
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355259
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355260
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355261
+              }
+            ],
+            "unattributed_bytes": 6672384
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 138493952,
+              "2": 0,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0000-tool",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "tool",
+            "sandbox_id": "569b79367a51439eaadef4f248bb21f7",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355264
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355265
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355266
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355267
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355268
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355269
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355272
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355273
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355279
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355280
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355281
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355282
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355283
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355284
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355285
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355286
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355287
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355288
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355289
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355290
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355291
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355292
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355293
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355294
+              }
+            ],
+            "unattributed_bytes": 3436544
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 136056832,
+              "2": 2859008,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0000-tool",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "tool",
+            "sandbox_id": "569b79367a51439eaadef4f248bb21f7",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355364
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355365
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355366
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355367
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355368
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355369
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355374
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355375
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355381
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355382
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355383
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355384
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355385
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355386
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355387
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355388
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355389
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355390
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355391
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355392
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355393
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355394
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355395
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355396
+              }
+            ],
+            "unattributed_bytes": 6561792
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 6508544,
+              "2": 0,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0001-runtime",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "runtime",
+            "sandbox_id": "d358ebbd4b8f4d5299cdd3d666e33704",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355399
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355400
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355401
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355402
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355403
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355404
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355406
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355407
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355413
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355414
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355415
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355416
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355417
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355418
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355419
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355420
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355421
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355422
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355423
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355424
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355425
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355426
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355427
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355428
+              }
+            ],
+            "unattributed_bytes": 6373376
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 262144,
+              "2": 32768,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0001-runtime",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "runtime",
+            "sandbox_id": "d358ebbd4b8f4d5299cdd3d666e33704",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355509
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355510
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355511
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355512
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355513
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355514
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355516
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355517
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355523
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355524
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355525
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355526
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355527
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355528
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355529
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355530
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355531
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355532
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355533
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355534
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355535
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355536
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355537
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355538
+              }
+            ],
+            "unattributed_bytes": 12664832
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 0,
+              "2": 0,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0001-tool",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "tool",
+            "sandbox_id": "161a85f71bc74089b40ad29629f0eeca",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355541
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355542
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355543
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355544
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355545
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355546
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355548
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355549
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355555
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355556
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355557
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355558
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355559
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355560
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355561
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355562
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355563
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355564
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355565
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355566
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355567
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355568
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355569
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355570
+              }
+            ],
+            "unattributed_bytes": 13422592
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 262144,
+              "2": 36864,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-vm-probe-b01f6393c1e0414d8b451b9a9ec62b1e/clawbox-893c9722f9114d56b3110c44ae413b39-vm-0001-tool",
+            "compute_numa": null,
+            "effective_cpus": "0-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              0,
+              1,
+              2
+            ],
+            "priority": "neutral",
+            "role": "tool",
+            "sandbox_id": "161a85f71bc74089b40ad29629f0eeca",
+            "threads": [
+              {
+                "cpus_allowed": "0-159",
+                "name": "containerd-shim",
+                "tid": 355653
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355654
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355655
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355656
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355657
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tokio-runtime-w",
+                "tid": 355658
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vmm",
+                "tid": 355660
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "http-server",
+                "tid": 355661
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vsock",
+                "tid": 355667
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cubebox-im",
+                "tid": 355668
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q0",
+                "tid": 355669
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_ctrl",
+                "tid": 355670
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_ro_q1",
+                "tid": 355671
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "tap-0_qp0",
+                "tid": 355672
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q0",
+                "tid": 355673
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-os-im",
+                "tid": 355674
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "virtio_rw_q1",
+                "tid": 355675
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "disk-0_q0",
+                "tid": 355676
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__console",
+                "tid": 355677
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "pmem-cube-agent",
+                "tid": 355678
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "__rng",
+                "tid": 355679
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu0",
+                "tid": 355680
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "vcpu1",
+                "tid": 355681
+              },
+              {
+                "cpus_allowed": "0-159",
+                "name": "cube-log",
+                "tid": 355682
+              }
+            ],
+            "unattributed_bytes": 11870208
+          }
+        ],
+        "required": true,
+        "restore_verified": true,
+        "snapshot_mechanism": "incremental-cow"
+      }
+    },
+    "required": true
+  },
+  "runtime_image_digest": "sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+  "schema_version": 10,
+  "scope": "capability_smoke",
+  "snapshot_roundtrip_test": {
+    "by_policy": {
+      "wait-pair": "cb6e378564803434"
+    },
+    "passed": true,
+    "probes": {
+      "cb6e378564803434": {
+        "cold_relocation_verified": null,
+        "incremental_delta_verified": true,
+        "mechanism": "incremental-cow",
+        "nodes": {
+          "node0": {
+            "artifact_root": "/home/weitianc/clawbox-c1280-20261017/results/.qualification-probes/qualification-3ff1ef31ab25/snapshot/cb6e378564803434/node0",
+            "cold_relocation_verified": null,
+            "incremental_delta_verified": true,
+            "mechanism": "incremental-cow",
+            "pair_checkpoint_verified": true,
+            "passed": true,
+            "placements": [],
+            "required": true,
+            "runtime_pid": "15",
+            "runtime_timings": [
+              {
+                "completed_monotonic_s": 10418.043637256,
+                "completed_unix_s": 1792306379.407477,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "create",
+                "service_seconds": 0.11621599399950355,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10417.927421262,
+                "started_unix_s": 1792306379.2912612,
+                "state_after": "running",
+                "state_before": "new",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              },
+              {
+                "completed_monotonic_s": 10418.342045133,
+                "completed_unix_s": 1792306379.7058847,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.12618133300020418,
+                "snapshot_generation": 1,
+                "snapshot_metrics": {
+                  "allocated_bytes": 6987776,
+                  "dependency_count": 2,
+                  "dirty_bytes": 6950912,
+                  "external_base_allocated_bytes": 144879616,
+                  "external_base_identity": "64768:3240076139",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-bba239bc4d324efe8e4a7a22-memory/tpl-tpl-bba239bc4d324efe8e4a7a22-memory",
+                  "full_base": false,
+                  "generation": 1,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 144879616,
+                      "external": true,
+                      "identity": "64768:3240076139",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 6950912,
+                      "external": false,
+                      "identity": "38:432",
+                      "layer_index": 1
+                    }
+                  ],
+                  "lineage_layers": 2,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/98094db3bd114952bda7b1c7bf10d245/runtime-g1.mem.lineage.json",
+                  "logical_bytes": 2147483648,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/98094db3bd114952bda7b1c7bf10d245/runtime-g1.mem",
+                  "private_delta_bytes": 6950912,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 6950912,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/98094db3bd114952bda7b1c7bf10d245/runtime-g1.mem",
+                "started_monotonic_s": 10418.2158638,
+                "started_unix_s": 1792306379.5797038,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10418.449154613,
+                "completed_unix_s": 1792306379.8129942,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.10694612899897038,
+                "snapshot_generation": 1,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10418.342208484,
+                "started_unix_s": 1792306379.7060483,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10419.071513263,
+                "completed_unix_s": 1792306380.435353,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.12334308899880853,
+                "snapshot_generation": 2,
+                "snapshot_metrics": {
+                  "allocated_bytes": 12742656,
+                  "dependency_count": 3,
+                  "dirty_bytes": 5722112,
+                  "external_base_allocated_bytes": 144879616,
+                  "external_base_identity": "64768:3240076139",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-bba239bc4d324efe8e4a7a22-memory/tpl-tpl-bba239bc4d324efe8e4a7a22-memory",
+                  "full_base": false,
+                  "generation": 2,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 144879616,
+                      "external": true,
+                      "identity": "64768:3240076139",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 6950912,
+                      "external": false,
+                      "identity": "38:432",
+                      "layer_index": 1
+                    },
+                    {
+                      "allocated_bytes": 5722112,
+                      "external": false,
+                      "identity": "38:440",
+                      "layer_index": 2
+                    }
+                  ],
+                  "lineage_layers": 3,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/98094db3bd114952bda7b1c7bf10d245/runtime-g2.mem.lineage.json",
+                  "logical_bytes": 2147483648,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/98094db3bd114952bda7b1c7bf10d245/runtime-g2.mem",
+                  "private_delta_bytes": 12673024,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 5722112,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/98094db3bd114952bda7b1c7bf10d245/runtime-g2.mem",
+                "started_monotonic_s": 10418.948170174,
+                "started_unix_s": 1792306380.3120103,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10419.204848342,
+                "completed_unix_s": 1792306380.568688,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.13327824599946325,
+                "snapshot_generation": 2,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10419.071570096,
+                "started_unix_s": 1792306380.43541,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10419.646065596,
+                "completed_unix_s": 1792306381.009905,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "destroy",
+                "service_seconds": 0.05127055099910649,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10419.594795045,
+                "started_unix_s": 1792306380.958635,
+                "state_after": "closed",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              }
+            ],
+            "storage": "warm-only",
+            "timings": [
+              {
+                "completed_monotonic_s": 10417.576809313,
+                "completed_unix_s": 1792306378.940649,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "create",
+                "service_seconds": 0.08527502799915965,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10417.491534285,
+                "started_unix_s": 1792306378.8553736,
+                "state_after": "running",
+                "state_before": "new",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              },
+              {
+                "completed_monotonic_s": 10418.215846709,
+                "completed_unix_s": 1792306379.5796866,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.14440792099958344,
+                "snapshot_generation": 1,
+                "snapshot_metrics": {
+                  "allocated_bytes": 29179904,
+                  "dependency_count": 2,
+                  "dirty_bytes": 29126656,
+                  "external_base_allocated_bytes": 416071680,
+                  "external_base_identity": "64768:3521645470",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-27ffbf13c086499db99109ae-memory/tpl-tpl-27ffbf13c086499db99109ae-memory",
+                  "full_base": false,
+                  "generation": 1,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 416071680,
+                      "external": true,
+                      "identity": "64768:3521645470",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 29126656,
+                      "external": false,
+                      "identity": "38:427",
+                      "layer_index": 1
+                    }
+                  ],
+                  "lineage_layers": 2,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/96f8849719f14e7dbe9d9f1fe36e3880/tool-g1.mem.lineage.json",
+                  "logical_bytes": 4294967296,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/96f8849719f14e7dbe9d9f1fe36e3880/tool-g1.mem",
+                  "private_delta_bytes": 29126656,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 29126656,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/96f8849719f14e7dbe9d9f1fe36e3880/tool-g1.mem",
+                "started_monotonic_s": 10418.071438788,
+                "started_unix_s": 1792306379.4352787,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10418.69844878,
+                "completed_unix_s": 1792306380.0622883,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.11824343599982967,
+                "snapshot_generation": 1,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10418.580205344,
+                "started_unix_s": 1792306379.944045,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10418.948148293,
+                "completed_unix_s": 1792306380.311988,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.1281732630013721,
+                "snapshot_generation": 2,
+                "snapshot_metrics": {
+                  "allocated_bytes": 35491840,
+                  "dependency_count": 3,
+                  "dirty_bytes": 6275072,
+                  "external_base_allocated_bytes": 416071680,
+                  "external_base_identity": "64768:3521645470",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-27ffbf13c086499db99109ae-memory/tpl-tpl-27ffbf13c086499db99109ae-memory",
+                  "full_base": false,
+                  "generation": 2,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 416071680,
+                      "external": true,
+                      "identity": "64768:3521645470",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 29126656,
+                      "external": false,
+                      "identity": "38:427",
+                      "layer_index": 1
+                    },
+                    {
+                      "allocated_bytes": 6275072,
+                      "external": false,
+                      "identity": "38:436",
+                      "layer_index": 2
+                    }
+                  ],
+                  "lineage_layers": 3,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/96f8849719f14e7dbe9d9f1fe36e3880/tool-g2.mem.lineage.json",
+                  "logical_bytes": 4294967296,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/96f8849719f14e7dbe9d9f1fe36e3880/tool-g2.mem",
+                  "private_delta_bytes": 35401728,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 6275072,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/96f8849719f14e7dbe9d9f1fe36e3880/tool-g2.mem",
+                "started_monotonic_s": 10418.81997503,
+                "started_unix_s": 1792306380.183815,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10419.47488257,
+                "completed_unix_s": 1792306380.8387222,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.11856628700115834,
+                "snapshot_generation": 2,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10419.356316283,
+                "started_unix_s": 1792306380.7201562,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10419.705480528,
+                "completed_unix_s": 1792306381.06932,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "destroy",
+                "service_seconds": 0.059380009000960854,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10419.646100519,
+                "started_unix_s": 1792306381.0099404,
+                "state_after": "closed",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              }
+            ]
+          },
+          "node1": {
+            "artifact_root": "/home/weitianc/clawbox-c1280-20261017/results/.qualification-probes/qualification-3ff1ef31ab25/snapshot/cb6e378564803434/node1",
+            "cold_relocation_verified": null,
+            "incremental_delta_verified": true,
+            "mechanism": "incremental-cow",
+            "pair_checkpoint_verified": true,
+            "passed": true,
+            "placements": [],
+            "required": true,
+            "runtime_pid": "15",
+            "runtime_timings": [
+              {
+                "completed_monotonic_s": 10420.095512117,
+                "completed_unix_s": 1792306381.4593515,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "create",
+                "service_seconds": 0.10109462900072685,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10419.994417488,
+                "started_unix_s": 1792306381.358257,
+                "state_after": "running",
+                "state_before": "new",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              },
+              {
+                "completed_monotonic_s": 10420.388705284,
+                "completed_unix_s": 1792306381.7525454,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.10212931599926378,
+                "snapshot_generation": 1,
+                "snapshot_metrics": {
+                  "allocated_bytes": 6995968,
+                  "dependency_count": 2,
+                  "dirty_bytes": 6959104,
+                  "external_base_allocated_bytes": 144879616,
+                  "external_base_identity": "64768:3240076139",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-bba239bc4d324efe8e4a7a22-memory/tpl-tpl-bba239bc4d324efe8e4a7a22-memory",
+                  "full_base": false,
+                  "generation": 1,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 144879616,
+                      "external": true,
+                      "identity": "64768:3240076139",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 6959104,
+                      "external": false,
+                      "identity": "38:450",
+                      "layer_index": 1
+                    }
+                  ],
+                  "lineage_layers": 2,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/ef141e4fde4f41a2a86f79de280b05c3/runtime-g1.mem.lineage.json",
+                  "logical_bytes": 2147483648,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/ef141e4fde4f41a2a86f79de280b05c3/runtime-g1.mem",
+                  "private_delta_bytes": 6959104,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 6959104,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/ef141e4fde4f41a2a86f79de280b05c3/runtime-g1.mem",
+                "started_monotonic_s": 10420.286575968,
+                "started_unix_s": 1792306381.650416,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10420.499923772,
+                "completed_unix_s": 1792306381.8637636,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.11117768500116654,
+                "snapshot_generation": 1,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10420.388746087,
+                "started_unix_s": 1792306381.752586,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10421.164096356,
+                "completed_unix_s": 1792306382.5279362,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.12599520100047812,
+                "snapshot_generation": 2,
+                "snapshot_metrics": {
+                  "allocated_bytes": 12632064,
+                  "dependency_count": 3,
+                  "dirty_bytes": 5603328,
+                  "external_base_allocated_bytes": 144879616,
+                  "external_base_identity": "64768:3240076139",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-bba239bc4d324efe8e4a7a22-memory/tpl-tpl-bba239bc4d324efe8e4a7a22-memory",
+                  "full_base": false,
+                  "generation": 2,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 144879616,
+                      "external": true,
+                      "identity": "64768:3240076139",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 6959104,
+                      "external": false,
+                      "identity": "38:450",
+                      "layer_index": 1
+                    },
+                    {
+                      "allocated_bytes": 5603328,
+                      "external": false,
+                      "identity": "38:458",
+                      "layer_index": 2
+                    }
+                  ],
+                  "lineage_layers": 3,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/ef141e4fde4f41a2a86f79de280b05c3/runtime-g2.mem.lineage.json",
+                  "logical_bytes": 2147483648,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/ef141e4fde4f41a2a86f79de280b05c3/runtime-g2.mem",
+                  "private_delta_bytes": 12562432,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 5603328,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/ef141e4fde4f41a2a86f79de280b05c3/runtime-g2.mem",
+                "started_monotonic_s": 10421.038101155,
+                "started_unix_s": 1792306382.401941,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10421.301465609,
+                "completed_unix_s": 1792306382.6653051,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.13726133599993773,
+                "snapshot_generation": 2,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10421.164204273,
+                "started_unix_s": 1792306382.5280442,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10421.733683256,
+                "completed_unix_s": 1792306383.0975225,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "destroy",
+                "service_seconds": 0.05494814099984069,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10421.678735115,
+                "started_unix_s": 1792306383.042575,
+                "state_after": "closed",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              }
+            ],
+            "storage": "warm-only",
+            "timings": [
+              {
+                "completed_monotonic_s": 10419.813111583,
+                "completed_unix_s": 1792306381.176951,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "create",
+                "service_seconds": 0.09620207999978447,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10419.716909503,
+                "started_unix_s": 1792306381.080749,
+                "state_after": "running",
+                "state_before": "new",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              },
+              {
+                "completed_monotonic_s": 10420.286560167,
+                "completed_unix_s": 1792306381.6504,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.16538914800003113,
+                "snapshot_generation": 1,
+                "snapshot_metrics": {
+                  "allocated_bytes": 29204480,
+                  "dependency_count": 2,
+                  "dirty_bytes": 29151232,
+                  "external_base_allocated_bytes": 416071680,
+                  "external_base_identity": "64768:3521645470",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-27ffbf13c086499db99109ae-memory/tpl-tpl-27ffbf13c086499db99109ae-memory",
+                  "full_base": false,
+                  "generation": 1,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 416071680,
+                      "external": true,
+                      "identity": "64768:3521645470",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 29151232,
+                      "external": false,
+                      "identity": "38:445",
+                      "layer_index": 1
+                    }
+                  ],
+                  "lineage_layers": 2,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/9dd6307266834f35aabdfe3974dc661a/tool-g1.mem.lineage.json",
+                  "logical_bytes": 4294967296,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/9dd6307266834f35aabdfe3974dc661a/tool-g1.mem",
+                  "private_delta_bytes": 29151232,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 29151232,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/9dd6307266834f35aabdfe3974dc661a/tool-g1.mem",
+                "started_monotonic_s": 10420.121171019,
+                "started_unix_s": 1792306381.4850109,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10420.765988122,
+                "completed_unix_s": 1792306382.1298275,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.10980245600148919,
+                "snapshot_generation": 1,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10420.656185666,
+                "started_unix_s": 1792306382.0200253,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10421.038049132,
+                "completed_unix_s": 1792306382.401889,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": "cubesandbox_pause_snapshot_destroy",
+                "operation": "checkpoint",
+                "service_seconds": 0.13346910799918987,
+                "snapshot_generation": 2,
+                "snapshot_metrics": {
+                  "allocated_bytes": 34627584,
+                  "dependency_count": 3,
+                  "dirty_bytes": 5382144,
+                  "external_base_allocated_bytes": 416071680,
+                  "external_base_identity": "64768:3521645470",
+                  "external_base_path": "/data/cubelet/storage/xfs/objects/volumes/tpl-tpl-27ffbf13c086499db99109ae-memory/tpl-tpl-27ffbf13c086499db99109ae-memory",
+                  "full_base": false,
+                  "generation": 2,
+                  "layer_allocations": [
+                    {
+                      "allocated_bytes": 416071680,
+                      "external": true,
+                      "identity": "64768:3521645470",
+                      "layer_index": 0
+                    },
+                    {
+                      "allocated_bytes": 29151232,
+                      "external": false,
+                      "identity": "38:445",
+                      "layer_index": 1
+                    },
+                    {
+                      "allocated_bytes": 5382144,
+                      "external": false,
+                      "identity": "38:454",
+                      "layer_index": 2
+                    }
+                  ],
+                  "lineage_layers": 3,
+                  "lineage_manifest_path": "/mnt/clawbox-pool/9dd6307266834f35aabdfe3974dc661a/tool-g2.mem.lineage.json",
+                  "logical_bytes": 4294967296,
+                  "memory_snapshot_path": "/mnt/clawbox-pool/9dd6307266834f35aabdfe3974dc661a/tool-g2.mem",
+                  "private_delta_bytes": 34533376,
+                  "reused_base_allocated_bytes": 0,
+                  "snapshot_mechanism": "incremental-cow",
+                  "tier": "warm",
+                  "transferred_bytes": 5382144,
+                  "transferred_bytes_unavailable_reason": null
+                },
+                "snapshot_path": "/mnt/clawbox-pool/9dd6307266834f35aabdfe3974dc661a/tool-g2.mem",
+                "started_monotonic_s": 10420.904580024,
+                "started_unix_s": 1792306382.2684197,
+                "state_after": "swapped",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": "local",
+                "tier_to": "warm"
+              },
+              {
+                "completed_monotonic_s": 10421.55574026,
+                "completed_unix_s": 1792306382.91958,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "restore",
+                "service_seconds": 0.12013898000077461,
+                "snapshot_generation": 2,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10421.43560128,
+                "started_unix_s": 1792306382.799441,
+                "state_after": "running",
+                "state_before": "swapped",
+                "status": "ok",
+                "tier_from": "warm",
+                "tier_to": "local"
+              },
+              {
+                "completed_monotonic_s": 10421.796426305,
+                "completed_unix_s": 1792306383.1602657,
+                "error_type": null,
+                "host_memory_after": null,
+                "host_memory_before": null,
+                "host_memory_effect": null,
+                "host_observed_growth_bytes": null,
+                "host_observed_net_change_bytes": null,
+                "host_observed_reclaimed_bytes": null,
+                "host_reclamation_evidence": "unavailable",
+                "lifecycle_mechanism": null,
+                "operation": "destroy",
+                "service_seconds": 0.06270893600049021,
+                "snapshot_generation": null,
+                "snapshot_metrics": null,
+                "snapshot_path": null,
+                "started_monotonic_s": 10421.733717369,
+                "started_unix_s": 1792306383.0975573,
+                "state_after": "closed",
+                "state_before": "running",
+                "status": "ok",
+                "tier_from": null,
+                "tier_to": null
+              }
+            ]
+          }
+        },
+        "passed": true,
+        "required": true,
+        "storage": "warm-only"
+      }
+    },
+    "required": true
+  },
+  "source_spec_digest": "a89af23b029a7088dd7a45410835549faea4c0e1de761c24373ed56a11bde44f",
+  "status": "succeeded",
+  "supervision_fault_test": {
+    "duration_seconds": 0.08678951600086293,
+    "passed": true
+  },
+  "target_concurrency": 8,
+  "target_node": "193.124.7.2",
+  "template_base_sharing_test": {
+    "by_policy": {
+      "wait-pair": "cb6e378564803434"
+    },
+    "passed": true,
+    "probes": {
+      "cb6e378564803434": {
+        "passed": true,
+        "reason": "resources.template_base_sharing=disabled",
+        "required": false,
+        "supported": false
+      }
+    },
+    "required": false
+  },
+  "tool_image_digest": "sha256:2969104a6eac597504e137090e65c3df5d3e9f709bdce0c6e340ed0f7dc8cfb1",
+  "tool_image_digests": [
+    "sha256:2969104a6eac597504e137090e65c3df5d3e9f709bdce0c6e340ed0f7dc8cfb1"
+  ]
+}

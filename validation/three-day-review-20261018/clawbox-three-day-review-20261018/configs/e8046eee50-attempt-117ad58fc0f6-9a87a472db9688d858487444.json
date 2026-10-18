@@ -1,0 +1,10 @@
+{
+  "id": "e8046eee50-attempt-117ad58fc0f6-9a87a472db9688d858487444",
+  "run_path": "/home/weitianc/clawbox-baseline-audit-20261016-a91-v4/sqlglot-results/qualification-c259431b418c",
+  "run_id": "qualification-c259431b418c",
+  "arm_id": "9a87a472db9688d858487444",
+  "attempt_id": "attempt-117ad58fc0f6",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/e8046eee50-experiment.yaml",
+  "effective_config_source": null
+}

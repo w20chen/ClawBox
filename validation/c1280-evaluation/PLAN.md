@@ -2,6 +2,24 @@
 
 Last updated: 2026-10-18 (Asia/Shanghai)
 
+## Current user instruction: correctness verification only
+
+Formal experiments are stopped at the user's request on 2026-10-18. Do not
+launch or resume c320/c640 arms without a new user instruction. The historical
+experiment queue below is retained for reference, not authorization to run it.
+The prepared `actual-idle-matrix/` configurations are not completed results.
+`actual-idle-c320-full-01` never started: its prerequisite qualification
+`qualification-fe2a68e8f908` failed on a policy-control port bind conflict before
+session execution; its terminal state reports verified cleanup. No experiment
+worker or launcher remained in the process inspection. Preserve all logs.
+
+Repository verification completed: Windows 832 passed / 50 skipped; Kunpeng
+isolated source with the actual CLI interpreter and saved ClawTune dependency
+859 passed / 23 skipped. A small disabled-borrow candidate guard and stale test
+fixtures/docs were corrected. No formal performance run was started.
+See [verification evidence and limits](REPOSITORY-CORRECTNESS-20261018.md).
+Formal experiments remain stopped; do not automatically resume the queue below.
+
 ## Objective and claim boundary
 
 Evaluate ClawBox on one Kunpeng socket using CPUs 0-159, a 928 GiB LOCAL VM
@@ -15,6 +33,58 @@ The controlled heterogeneous-memory trace is an operating-boundary experiment.
 Its command-table prediction results cannot be presented as a formal ClawTune
 KB or SWE-ReBench result. A selected real trace comparison is required before
 making an application-level claim.
+
+## Current correctness gate (2026-10-18, actual-idle repair)
+
+The user authorized fixing the idle-checkpoint audit findings and explicitly
+excluded LLM-duration prediction and oracle strategies. Do not launch more
+Full/checkpoint/WARM-scaling arms until end-to-end verification below completes.
+The OS-default screen has ended and its cleanup is verified.
+
+**Gate cleared:** the repair is deployed and the bounded verification below is
+complete for that bounded scope. The newer instruction above stops further
+formal experiments. Overall experimental goals remain incomplete.
+
+- Full and A-off at c640 LOW/HIGH 512/640 GiB, scale 0.75 have finished their
+  1,200-second windows with verified cleanup. Both have zero successful Agents.
+  A-off has 600 scheduled requests, 421 sessions with a VM created, 83 recorded
+  independent failures, 4,873 agent-tool and 14,291 backend completions, LOCAL
+  sampled peak 535.18 GiB, six borrows, zero checkpoint, and no OOM.
+- OS-default `real-trace-p0-c640-balanced-os-s075-01` completed its matched
+  screen: 598 sessions with a VM, zero successful Agents, 183 independent
+  failures, 6,481 agent-tool completions, LOCAL peak 580.23 GiB, zero OOM.
+  Preserve `raw-balanced-os.tgz` and the remote per-session/model logs.
+- Confirmed design mismatch: `wait` required a 2.7181621785-second LLM-duration
+  forecast and excluded candidates when that forecast expired. The expiry
+  condition was added by commit d7a5126 on October 17 at 01:02 CST; frozen
+  real-trace c320/c640 configs already contain the same forecast. Real LLM
+  waits at 1:1 are present. Existing data describes this forecast-gated policy,
+  not the intended actual-idle policy. Do not discard or silently relabel it.
+- Deployed after OS cleanup: actual outstanding requests now define idle;
+  release_cost and LLM-duration/oracle configuration are rejected. Admission,
+  model-wait and watermark reclamation use the common selector. Both snapshot
+  reservations precede either VM pause; WARM exhaustion causes backpressure.
+  Cube-409 recovery honors pair scope. Response generation removes eligibility
+  before waiting for committed checkpoint completion.
+- Regression validation: 335 tests pass on Kunpeng Linux. Real VM qualification
+  on NUMA 0 and 1 passed two-generation incremental pair checkpoint/restore,
+  preserving Runtime PID and guest state. The c32 qualification at LOW/HIGH
+  16/20 GiB completed 15 bounded sessions, including 12 paired pause/restore
+  cycles with unchanged OpenClaw PIDs and no session/policy errors. It was
+  stopped when retained file cache blocked further creation with proactive
+  reclaim off; all logs and verified cleanup are retained. A subsequent c8
+  public qualification with the existing cache-reclaim switch on completed
+  8/8 and verified cleanup. Both retain 1:1 waits but only the first model step;
+  neither is full-trace performance evidence. See `IDLE-CHECKPOINT-VERIFICATION.md`.
+- The prior claim of 112 completed c320 pilot sessions is not yet supported by
+  the raw run located as `real-trace-p0-c320-01`: its events contain zero
+  session_complete, one session_failed, and LOCAL peak 225.35 GiB. Withdraw
+  the 112-success claim unless a matching raw source is found; do not use it
+  to select the next memory configuration.
+
+The one-hour main-evidence target was not fully met: three matched observation
+windows are complete, and the intended actual-idle checkpoint ablations
+remain pending after this repair. Keep the overall goal incomplete.
 
 ## Status at a glance
 
@@ -33,8 +103,8 @@ making an application-level claim.
 | P0.2 | c1280-primary-c640-08-v6 | COMPLETE, CLEANED | Predicted 640/640 in 1,810.72 s; OS 0/640 inside 3,600 s and cleanup verified |
 | Superseded | c320-admission-ablation-01 | CANCELLED BY USER, DESTROYED | Synthetic three-arm run stopped after about 14 minutes; completed-arm cleanup verified; no result is used |
 | P0.3 | c1280, OS default vs predicted | BLOCKED ON STORAGE HEADROOM | Do not start while Cube storage can cross its 85% guard before intended memory contention |
-| New matrix | real trace c320/c640 | c320 FOUR-ARM CONTINUATION RUNNING | Attempt 06 Full reached the overload deadline, but a stale remote `policy.py` disabled the memory-return controller. The run was cancelled and cleaned. Qualification `qualification-9b7f1cf9a792` passed all four replacement arms and cleanup; run `real-trace-p0-c320-remaining-l160-01` is running. Full is not rerun at this low-value overload point |
-| Pressure pilot | c320 HIGH=512 GiB | CANCELLED, CLEANED | 112 sessions completed with zero idle/checkpoint actions; threshold too high for this trace |
+| New matrix | real trace c320/c640 | c320 BOUNDARY RETAINED; c640 MATCHED A-OFF RUNNING | c640 scale=0.75 Full has a completed 20-minute observation window and verified cleanup. A-off runs the same configuration; OS default is queued after cleanup. Full matrix at a useful memory point remains pending |
+| Pressure pilot | c320 HIGH=512 GiB | CANCELLED, CLEANED; COMPLETION CLAIM WITHDRAWN | Located raw run has 0 successful Agents, 1 failure, LOCAL peak 225.35 GiB and no pauses; prior 112-completion claim is unsupported |
 | Pressure pilot | c320 HIGH=96 GiB | INVALID, CANCELLED, CLEANED | 133 pauses, 126 restores and 98 borrows, but restore churn caused failed Agents; retained only to bound the useful regime |
 | Pair activation | c32 LOW/HIGH=48/52 GiB | PASSED, CANCELLED, CLEANED | 14 paired Runtime+Tool pauses and restores; 14 relay reconnects; zero policy failures; WARM peak 16.817 GiB |
 | Formal attempt 01 | c320 P0 | INVALID, CANCELLED, CLEANED | NUMA migration exceeded a hidden 30 s limit and stopped the watermark controller; raw data retained only as diagnostic evidence |
@@ -399,8 +469,10 @@ HTTP-408 provisioning burst while the remaining Agents continued; these
 ordinary Agent failures remain in the denominator under the stopping rules.
 
 The density-specific LOW/HIGH values are bounded by two preserved c320
-pilots. HIGH=512 GiB produced no reclaim action after 112 completed sessions,
-while HIGH=96 GiB produced excessive restore churn and failed Agents. The c320
+pilots. The earlier claim that HIGH=512 GiB completed 112 sessions is
+withdrawn: the located raw pilot has no session_complete events. HIGH=96 GiB
+produced excessive restore churn and failed Agents. Neither proves a useful
+completion regime under the intended actual-idle policy. The c320
 128/160-GiB point proved too severe for the 567.65-s application trace: attempt
 06 Full reached its 2,400-s deadline with 0 successful Agents after 14,639
 completed Tool operations and no OOM. Two early memory-return controller calls
@@ -531,9 +603,13 @@ rather than selecting later arms from observed performance.
 
 | Priority | Arms, each at c320 then c640 | New arms | Reason |
 |---|---|---:|---|
-| P0a | c320 `A-off`, `A-fixed`, `I-resident`, `D-os-default`; retain invalid Full only as diagnostic | 4 new | Complete the remaining overload-boundary baselines without rerunning the low-value Full arm |
+| P0a | c320 `A-off`; retain invalid Full only as diagnostic | 1 diagnostic | Closed by the frozen time gate after both Full and no-Tool-admission produced zero successes; three pending arms skipped |
 | P0b | c640 primary `F-S384` at 512/640 GiB | 1 | Obtain a lower-contention, normally completing Full point first |
 | P0c | c640 primary `A-off`, `A-fixed`, `I-resident`, `D-os-default` at 512/640 GiB | 4 new | Complete the consequential baselines at the same point without rerunning Full |
+| P0d | c640 balanced `F-S384`, then `A-off`, `I-resident`, `D-os-default` at 448/512 GiB and 1.0-s arrivals | 1 + 3 conditional | If the 0.5-s point is an unusable CPU/I/O overload boundary, retain c640 scale while reducing phase overlap; screen Full before spending time on the consequential comparisons |
+| P1c | c640 balanced `A-fixed` at the same point | 1 conditional | Complete the admission ablation after the consequential comparisons; fixed is secondary because it is a constructed baseline |
+| P0e | c640 paced `F-S384`, then `A-off`, `I-resident`, `D-os-default` at 320/352 GiB and 2.0-s arrivals | 1 + 3 conditional | Final real-trace point after 1.0-s arrivals still overloaded Cube at about 300 live Agents; lower offered arrival rate while lowering watermarks to preserve memory-policy activation |
+| P1d | c640 paced `A-fixed`, then `B-no-borrow`, `N-round-robin`, `R-runtime-off` | 1 + 3 conditional | Queue secondary attribution only after valid Full and core comparisons at the paced point |
 | P1a | c640 stress `F-S384` at 384/480 GiB | 1 | Add a second Pareto point only after the primary comparison |
 | P1 | `B-no-borrow`, `S-near-peak`, `S-tight` | 6 | Borrowing attribution and shared-pool capacity curve |
 | P2 | `N-round-robin`, `R-runtime-off` | 4 | NUMA-aware and runtime-control attribution |
@@ -597,6 +673,13 @@ quantities in every table and figure.
   the next arm.
 - One valid run per arm is sufficient. Repeat only an invalid or materially
   anomalous central result.
+- Time-priority gate for the c320 continuation: if `A-off` reaches its 2,400-s
+  deadline with zero successful Agents, stop the three still-pending c320 arms.
+  Together with the diagnostic Full timeout, that establishes the 128/160-GiB
+  point as an unusable overload boundary; additional ablations there cannot
+  yield a meaningful throughput comparison. Proceed directly to the c640
+  512/640-GiB primary point. If `A-off` completes Agents, retain the full c320
+  continuation.
 - Do not retune within a comparison point. The c640 points above were frozen
   from the c320 boundary before any c640 outcome; every configuration change has
   a new run ID and is not directly paired with a different threshold.
@@ -628,11 +711,15 @@ quantities in every table and figure.
    tombstone rather than a disposable shim, so that change was reverted.
    Checkpoint now returns borrowed NUMA policy to LOCAL, retains only physically
    backed residual reservation, and lets restore/final destroy release it.
-2. Finish qualification of the four-arm c320 continuation
-   `real-trace-p0-c320-remaining-l160-01`, then run `A-off`, `A-fixed`,
-   `I-resident`, and `D-os-default` in frozen order. Inspect failures and
-   paired-checkpoint events, then let the validated guard run P0 c640. Do not
-   rerun Full at c320, the two pressure pilots, or any completed valid arm.
+2. Complete the matched c640 512/640-GiB, scale=0.75 `A-off` window after
+   Full, then use its actual residency and completion curve to choose the
+   next memory budget. Do not expand the entire ablation matrix at a point
+   with no successful Agents. Run `I-resident` where Full actually checkpoints;
+   the saved 320/352-GiB Full provides activation evidence but does not prove
+   a throughput benefit. Keep `D-os-default`, `A-fixed`, borrowing, placement,
+   runtime and WARM-size comparisons pending in priority order.
+   Do not rerun Full at c320, the skipped c320 arms, the two pressure pilots,
+   or any completed valid arm.
 3. Measure current CubeSandbox storage use and project the 1,280-VM c640 peak.
    Expand its storage allocation if the projected run cannot retain 20% free
    headroom; do not begin c640 in a known storage-limited state.
@@ -670,20 +757,217 @@ and its 47 policy/NUMA tests passed. Qualification
 incremental-COW checkpoint/restore, two-node borrow/return/reborrow, and
 verified cleanup. Formal continuation
 `real-trace-p0-c320-remaining-l160-01`, attempt
-`attempt-577b6cbfdfaf4b21`, is running the four previously incomplete arms. A
-guard starts c640 mild Full only after every c320 continuation arm produces a
-valid outcome with verified cleanup.
+`attempt-577b6cbfdfaf4b21`, ran `A-off` to the 2,400-s execution boundary. It
+recorded 0 successful Agents, 19 isolated Agent failures, 31,154 completed Tool
+operations, 236 pauses, 225 restores, 72 borrows, five returns, no OOM, and no
+controller or policy-event failures. WARM usage reached at least 112 GiB in a
+live observation. The time-priority gate then skipped `A-fixed`, `I-resident`,
+and `D-os-default`. Abort initially encountered eight run-owned Cube shims in
+the saved priority domain; after terminating only those verified PIDs, the
+public cleanup succeeded, removed all 448 run-owned cgroups, and marked cleanup
+verified. This cancelled raw run is diagnostic overload evidence rather than a
+formal throughput result. The guard then began c640 Full qualification.
 
-The guarded continuation is now complete: c640 begins only after every c320 arm
-is an `is_trial_outcome` result with verified cleanup. It runs the 512/640-GiB
-Full and then its four missing baselines. The former automatic P1/P2 sequence is
-paused so that secondary arms cannot consume time before the primary evidence
-is complete. Ordinary Agent failure, OOM, admission and timeout outcomes remain
-valid outcomes rather than infrastructure failures. Constrained WARM configs
-are generated only after the c640 Full completes. The generator records
-measured physical pool residency and the controller's enforced
-shared-plus-snapshot charge separately, then uses their larger peak for the
-frozen 90%-and-half sizing rule.
+The guarded continuation is now complete: c640 begins only after the c320 time
+gate and verified cleanup. The first c640 launch inherited a 1,024 soft
+file-descriptor limit because it bypassed the supported wrapper and failed with
+`EMFILE` while creating Agents; it was aborted and cleaned and is excluded. The
+second launch correctly used the wrapper but found one stale qualification VM in
+the physical VM domain, failed before its arm began, and cleaned up; it is also
+excluded. The stale VM was identified from its qualification ownership journal
+and removed with the supported cleanup command. Run
+`real-trace-p0-c640-mild-l640-03` is the first correctly launched formal
+attempt: both its supervisor and worker had a 65,536 soft and 524,288 hard FD
+limit. It ended at the 3,000-s supervisor boundary with a recorded timed-out
+trial, 0/640 completed Agents, cleanup verified, 575,349 aggregate seconds of
+Tool-admission waiting, four pauses, and no memory-watermark crossing. A live
+observation after about 27 minutes recorded 183 isolated HTTP 408 Agent
+failures, 777 sandbox creations, 26,413 completed Tool calls, eight
+shared-memory borrows, no controller/policy failures, about 490 GiB in the Cube
+parent cgroup, zero memory PSI, load average about 350, and substantial I/O PSI.
+One session directly recorded 901.7 s in the VM-create queue. Thus the 0.5-s
+arrival point is a Cube lifecycle, I/O and command-latency overload boundary,
+not a useful memory-policy comparison. Its four-arm matrix was skipped.
+
+A second guarded fallback is predeclared rather than tuned after seeing its
+performance. If and only if the 0.5-s Full has below 80% Agent success, c640
+balanced uses 1.0-s fixed arrivals, 448/512-GiB LOCAL watermarks, a 512-GiB pool
+budget, a 192-GiB borrow cap, the same 384-GiB WARM capacity, and a 1,200-s Tool
+command timeout. It first runs Full. Only a valid Full with completed Agents and
+material admission/checkpoint pressure unlocks `A-off`, `I-resident`, and
+`D-os-default`. `A-fixed` is a separate P1 arm after those comparisons. This
+keeps the c640 request scale and 1:1 LLM waits while moving away from the
+observed CPU/I/O cliff and preserving enough memory pressure to exercise the
+mechanisms. This 1.0-s screen was also stopped after about 18 minutes: it had
+0 completions, 54 independent failures, 615 created VMs, 18,540 completed Tool
+calls, six borrows, two returns, no pauses and about 383 GiB current VM-cgroup
+memory. HTTP 408, proxy 502 and envd-reset errors showed that Cube control-plane
+load still dominated before the 512-GiB memory watermark could activate. The
+cancelled diagnostic was cleaned after terminating only 26 root shims whose
+`/proc/<pid>/cgroup` paths exactly matched the run-owned prefix; the public
+abort then verified cleanup and the physical VM domain returned to
+`populated 0`.
+
+The first paced run `real-trace-p0-c640-paced-full-l352-01` is excluded. Its
+first attempt ran cleanly until the host unexpectedly rebooted; the resumed
+attempt reached 428 sandbox creations, 7,689 completed Tool operations, six
+pause/restore cycles and two borrows with zero completions and five isolated
+Agent failures. Cube then returned `no more resource`. The decisive host fact
+was Cubelet `tap_init_num = 500`, although c640 may need 1,280 simultaneous
+Runtime and Tool VM interfaces while Agents remain live. The attempt was
+cancelled and cleanup verified. This is infrastructure-limit evidence, not a
+policy result.
+
+The TAP pool was raised to 1,536. Cubelet pre-created the complete pool (1,563
+total host network interfaces including non-pool devices), snapshot storage
+registered, and a real VM create/execute/destroy doctor probe passed. The clean
+replacement `real-trace-p0-c640-paced-full-l352-02`, attempt
+`attempt-63b01b3701324682`, is now running. It retains 640 offered Agents and
+1:1 model waits, uses a 2.0-s fixed arrival
+interval, 320/352-GiB LOCAL watermarks, a 352-GiB admission budget, a 192-GiB
+borrow cap, the 384-GiB WARM pool and a 1,200-s Tool timeout. This halves VM
+arrival pressure relative to the failed 1.0-s point while lowering the memory
+trigger to the usage range inferred from that point. Full must complete at least
+512 Agents and materially activate admission or checkpointing before the guard
+launches `A-off`, `I-resident` and `D-os-default`. A separate validated guard
+then queues `A-fixed`, followed by borrowing, NUMA-placement and runtime-control
+ablations. Constrained WARM sizes are generated only from the valid Full's
+measured physical and enforced-charge peaks.
+
+Before this launch, 2,667 S3lvol rotated log files older than two hours were
+removed from `/data/log/rcow`; current service logs and all per-run result
+artifacts were preserved. This released about 66 GiB. Cube garbage collection
+then brought root-filesystem free space to about 560 GiB. The c640 continuation
+guard is protected by `flock` and will launch core comparisons only after the
+Full result envelope and cleanup verification are both present and the Full
+passes the frozen informativeness rule.
+
+The clean 320/352-GiB replacement was stopped by the same frozen screen rule
+after about 19 minutes. It had 0 completed Agents, 16 isolated session failures,
+458 created sandboxes, 50 successful pauses (25 Runtime and 25 Tool), 43
+restores, 10 borrows, about 29 GiB WARM use and no OOM. Creation remained at
+458 sandboxes for more than seven minutes while individual Tool admissions
+waited about 35 seconds. At most roughly 229 session pairs had entered the
+workload, so the arm could not reach the required 512 completions in its
+remaining window. It is retained as direct evidence that 320/352 GiB is an
+over-conservative admission regime for the 567.65-second application trace.
+This remains a useful point on the resource/successful-throughput Pareto
+frontier: report its lower live-memory footprint together with its zero
+completed-Agent throughput, queueing, tail behavior and mechanism counts. Do
+not rerun it and do not delete its raw event, lifecycle or cleanup artifacts.
+Eight residual Cube shim PIDs were enumerated only under the exact run-owned
+cgroup prefix, verified through `/proc/<pid>/cgroup`, terminated, and recorded;
+the public abort then reported cleanup success and the parent VM cgroup returned
+to `populated 0`.
+
+The next predeclared Pareto point changes only the memory budget: total
+LOW/HIGH/pool budget are 512/640/640 GiB (256/320 GiB per compute NUMA node).
+It retains c640, the 2.0-second fixed arrival schedule, 1:1 recorded waits,
+384-GiB WARM, 192-GiB borrow cap, images, prediction data, seed, create
+concurrency 8 and timeouts. Full qualification `qualification-eff4435df4c4`
+passed real VM, paired checkpoint/restore, two-node borrow/return/reborrow,
+supervision-fault and cleanup checks. Formal run
+`real-trace-p0-c640-relaxed-full-l640-01`, attempt
+`attempt-2683c13570654a7f`, is excluded as infrastructure-failure evidence. It
+created 554 VMs and completed 12,056 Tool calls with no Agent outcome before VM
+creation stopped. S3lvol then repeatedly reported missing S3 chunks and failed
+dirty-chunk flushes. The run was cancelled and cleanup verified; its events
+cannot be used for a policy comparison.
+
+The unusable S3lvol store was backed up and reset with the maintained purge
+workflow while the host was idle. A reboot cleared a separate stale BPF/TAP RCU
+stall. The c640 TAP pool is now the exact worst-case 1,280 Runtime plus Tool
+VMs, Cubelet reports healthy, the repaired store checkpoints normally, and
+host apply passed a real VM creation/execution/destruction probe. Fresh Runtime
+and Tool templates retain the same immutable image digests, vCPU, memory and
+kernel identities. The frozen prediction artifact retains its predictions and
+records only the new Tool template ID.
+
+Replacement qualification `qualification-95f0aaef71a7` passed at smoke
+concurrency 2, including paired Runtime+Tool incremental-COW
+checkpoint/restore, two-node borrow/return/reborrow, placement, supervision
+fault handling and verified cleanup. Formal run
+`real-trace-p0-c640-relaxed-full-l640-02`, attempt
+`attempt-b91fe025ae1247cc`, ended after 2,843.8 seconds with cleanup verified
+but an invalid infrastructure `failed` envelope: one ModelGateway session did
+not drain during post-deadline convergence. It is not rerun. Its raw evidence
+is retained as a Pareto-boundary diagnostic: 0/640 successful Agents, 15,632
+completed Tool calls before convergence, two independent Agent failures, no
+OOM or policy/controller failure, no checkpoint/restore/borrow action, and
+about 485 GiB steady Cube-cgroup memory. Across 416 sessions that had emitted
+timing records during convergence, request-to-cleanup P50/P95/P99 were
+2,094.6/2,453.2/2,455.9 seconds. Those are censored request-to-cleanup
+times, not successful completion latency. The previously labelled 1,817.7/
+1,866.5-second Tool waits mixed creation/placement waits and are withdrawn.
+Within the first 1,200 seconds, the exact completed-admission
+`admission_blocked_seconds` P95/P99 were 2.47/318.38 seconds. Logs and lifecycle artifacts must not be deleted, but
+the point is too conservative for a full ablation matrix.
+
+The next primary point keeps c640, 2.0-second arrivals, 1:1 recorded LLM waits,
+the 384-GiB WARM pool and 192-GiB borrow limit, while raising total LOCAL
+LOW/HIGH and the admission budget to 768/896/896 GiB (384/448 GiB per compute
+NUMA node). This leaves 32 GiB below the measured 928-GiB LOCAL capacity and
+allows 40% more logical reservation than the 640-GiB boundary. It uses a
+1,500-second measurement window plus 300 seconds for finalization. Qualified
+run `real-trace-p0-c640-main-full-l896-01`, attempt
+`attempt-0a78c934f47c4fd4`, is running Full first. Around the trace's
+567.65-second natural duration, the early Agent completion curve determines
+whether this is the useful main point; do not wait for the hard limit merely to
+declare another overload boundary. Only after Full demonstrates useful
+successful throughput run matched `A-off` and `D-os-default`. `I-resident`
+remains unnecessary unless Full actually checkpoints. Fixed and secondary
+mechanism ablations remain conditional and lower priority.
+
+The 896-GiB Full was stopped after about 10.6 minutes during the arrival
+ramp. This retained partial point does not establish low contention after
+all requests arrive: it had 569 created
+VMs, 12,453 completed Tool calls, 0 Agent completions or failures, about
+412.7 GiB current Cube-cgroup memory, and no checkpoint, restore, borrow,
+controller failure or policy failure. Its first public abort timed out with 84
+run-owned shims. Their exact priority-domain cgroups and PIDs were recorded in
+`bounded-cgroup-kill.json`; after bounded `cgroup.kill`, the public abort
+succeeded and the parent cgroup reported `populated 0`. Raw logs are retained.
+
+The one-hour primary evidence gate now runs only matched c640 Full and `A-off`
+at the 512/640-GiB point with prediction reservation scale 0.75. The scale is
+an exploratory reduction motivated by the gap between the old 640-GiB logical
+admission boundary and about 485 GiB physical residency. That aggregate ratio
+does not calibrate per-tool predictions or imply a linear increase in admitted
+work: baseline residency, pending growth and creation headroom also count.
+Each arm has a 1,200-second observation
+window and 180-second finalization limit. Qualified Full run
+`real-trace-p0-c640-balanced-full-s075-01`, attempt
+`attempt-1421d77e952d413e`, is running. Inspect the first completion curve and
+mechanism activation around the trace's 567.65-second natural duration; stop
+early and retain the point if it is plainly over- or under-loaded. Run the
+matched no-admission arm next. OS default, fixed and mechanism attribution wait
+until this primary pair is recorded.
+
+Reporting corrections for the short-window comparison: at 2-second fixed
+arrivals the last of 640 requests arrives at 1,278 seconds, outside the
+1,200-second window. Report target count and actually offered count separately;
+this is a finite-window screen, not a completed c640 batch. Successful
+Agents/second uses the actual observation duration. Unfinished requests are
+censored, not assigned invented completion latencies. Completed-only latency
+quantiles must be labelled and cannot stand in for all-request P95/P99.
+`tool_completed` includes backend operations; separate execution scopes before
+calling it application-tool throughput. The raw replay has 25 recorded LLM
+spans totaling 177.503573177 seconds of model wait; the previously cited
+567.65 seconds refers to the original application timeline, not a guaranteed
+replay completion time. Keep every partial/failed-run event file and mark
+post-stop cleanup observations separately from workload-window observations.
+
+At 2026-10-18 13:48 CST, the scale=0.75 Full ended as `timed_out` with
+cleanup verified. Its 1,200-second window contained 600 scheduled arrivals,
+0 successful Agents, 33 independent failures, 4,681 completed agent-tool
+executions and 12,924 backend-maintenance executions. LOCAL sampled peak was
+510.07 GiB, with two borrows, one return and no checkpoint. Admission wait
+P95/P99 among admitted operations was 7.21/39.91 seconds, excluding pending
+requests. The final envelope's 640 failed-to-complete targets must not be
+misreported as 640 independent exceptions. Matched `A-off` passed qualification and started at 13:49:30 CST after
+verified cleanup. Its unchanged 1,200-second window is running; the
+all-mechanisms-off OS baseline is queued behind verified cleanup. Detailed raw-window summaries
+and the comparison table are in `REAL-TRACE-WINDOW-RESULTS.md`.
 
 ## Locations
 

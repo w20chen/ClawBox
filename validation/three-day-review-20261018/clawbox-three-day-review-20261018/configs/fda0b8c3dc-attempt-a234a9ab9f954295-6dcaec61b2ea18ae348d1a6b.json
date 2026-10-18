@@ -1,0 +1,10 @@
+{
+  "id": "fda0b8c3dc-attempt-a234a9ab9f954295-6dcaec61b2ea18ae348d1a6b",
+  "run_path": "/home/weitianc/clawbox-high-density-followup-20261017/results/contention-calibration-c32-02",
+  "run_id": "contention-calibration-c32-02",
+  "arm_id": "6dcaec61b2ea18ae348d1a6b",
+  "attempt_id": "attempt-a234a9ab9f954295",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/fda0b8c3dc-experiment.yaml",
+  "effective_config_source": null
+}

@@ -1,0 +1,372 @@
+{
+  "id": "d81a71152f-attempt-d5113157faee-99fb0316c23a6ffad1e3749a",
+  "run_path": "/home/weitianc/clawbox-high-density-followup-20261017/results/qualification-97c8c3319ee0",
+  "run_id": "qualification-97c8c3319ee0",
+  "arm_id": "99fb0316c23a6ffad1e3749a",
+  "attempt_id": "attempt-d5113157faee",
+  "effective_arm": {
+    "agent": {
+      "driver": "openclaw"
+    },
+    "arm_id": "99fb0316c23a6ffad1e3749a",
+    "case": {
+      "base_commit": null,
+      "case_id": "validation-failure",
+      "metadata": {},
+      "prompt": "Run true once and finish.",
+      "replay_trace_reference": "/home/weitianc/clawbox-high-density-followup-20261017/configs/isolation-validation-failure.jsonl",
+      "repository": null,
+      "sandbox": null,
+      "snapshot_reuse_probability": null,
+      "source": "recorded_trace",
+      "source_reference": "/home/weitianc/clawbox-high-density-followup-20261017/configs/isolation-validation-failure.jsonl",
+      "validation": "false"
+    },
+    "concurrency": 2,
+    "execution": {
+      "arm_timeout_seconds": 300,
+      "arrival_schedule": "burst",
+      "command_timeout_seconds": 30,
+      "concurrency_levels": [
+        2
+      ],
+      "memory_sample_interval_seconds": 0.2,
+      "placement_cpu_overcommit": 32.0,
+      "placement_policy": "load_aware",
+      "random_seed": 20261017,
+      "randomized_order": false,
+      "session_compute_nodes": [],
+      "stabilization_seconds": 1.0,
+      "stagger_interval_seconds": 0.0,
+      "template_balance_slack": 0.1
+    },
+    "inference": {
+      "backend": "replay",
+      "configuration": {
+        "max_model_steps": 1,
+        "model": "recorded-agent-model",
+        "model_wait_prediction_seconds": 2.7181621785,
+        "model_wait_prediction_source": "median of independent 15five-scim2 recorded trace, excluded from evaluation",
+        "time_scale": 1.0
+      }
+    },
+    "policy": {
+      "admission": "fixed",
+      "cpu_release_boost": true,
+      "deployment": "managed",
+      "eviction": "none",
+      "execution_overrides": {
+        "placement_cpu_overcommit": 32.0,
+        "placement_policy": "load_aware",
+        "session_compute_nodes": [],
+        "template_balance_slack": 0.1
+      },
+      "idle_release_ranking": false,
+      "mechanisms": {
+        "admission": {
+          "admission_margin_mib": 256,
+          "non_command_tool_memory_mib": 128,
+          "prediction_reservation_scale": 1.0,
+          "startup_headroom_mib": 256,
+          "static_tool_memory_mib": 64,
+          "tool": "fixed"
+        },
+        "checkpoint": {
+          "mechanism": "incremental-cow",
+          "pool_transfer_concurrency": 1,
+          "pool_transfer_timeout_seconds": 120.0,
+          "residency": "lru",
+          "storage": "tiered"
+        },
+        "coordination": {
+          "action_selection": "measured_cost"
+        },
+        "deployment": {
+          "mode": "managed"
+        },
+        "idle_reclaim": {
+          "checkpoint_restore_headroom_mib": 1024,
+          "policy": "off",
+          "scope": "tool"
+        },
+        "placement": {
+          "placement_cpu_overcommit": 32.0,
+          "policy": "load_aware",
+          "session_compute_nodes": [],
+          "template_affinity": false,
+          "template_balance_slack": 0.1
+        },
+        "runtime": {
+          "cpu_release_boost": true,
+          "memory_protection": true,
+          "pressure_control": {
+            "action_window_seconds": 2.0,
+            "amortization_factor": 2.0,
+            "boost_cpu_weight": 200,
+            "cooldown_seconds": 5.0,
+            "exit_hysteresis_seconds": 1.0,
+            "max_boosted_vms": 4,
+            "min_release_mib": 64,
+            "protection_budget_mib": 4096,
+            "psi_ratio": 0.1,
+            "release_forecast_ttl_factor": 3.0,
+            "release_history_samples": 3
+          },
+          "proactive_memory_reclaim": true,
+          "runtime_poll_interval_seconds": 0.5
+        },
+        "shared_memory": {
+          "borrow": "pressure",
+          "borrow_cooldown_seconds": 5.0,
+          "return_cooldown_seconds": 5.0
+        }
+      },
+      "memory_protection": true,
+      "name": "failure-isolation",
+      "reclamation": "resident",
+      "resource_overrides": {
+        "admission_margin_mib": 256,
+        "borrow_cooldown_seconds": 5.0,
+        "checkpoint_restore_headroom_mib": 1024,
+        "cold_snapshot_root": "/data/clawbox-cold",
+        "compute_nodes": [
+          {
+            "cpus": "0-7",
+            "high_watermark_mib": 28672,
+            "low_watermark_mib": 24576,
+            "memory_capacity_mib": 32768,
+            "node_id": "node0",
+            "numa_node": 0
+          },
+          {
+            "cpus": "80-87",
+            "high_watermark_mib": 28672,
+            "low_watermark_mib": 24576,
+            "memory_capacity_mib": 32768,
+            "node_id": "node1",
+            "numa_node": 1
+          }
+        ],
+        "emergency_free_memory_mib": 32768,
+        "idle_reclaim_costs": {
+          "cold_checkpoint_seconds_per_gib": 0.06452185099999497,
+          "cold_restore_seconds_per_gib": 0.1151175211249722,
+          "provenance": "/home/weitianc/clawbox-high-density-20261017/action-costs-03: existing qualification probes, two NUMA nodes, 4 GiB Tool; cold checkpoint seed is measured warm-checkpoint plus spill; paired real pytest penalty; all Tools restore for subsequent work or final validation",
+          "warm_checkpoint_seconds_per_gib": 0.039426525750002384,
+          "warm_restore_seconds_per_gib": 0.09528314949997707
+        },
+        "lazy_restore": true,
+        "lifecycle_admission": "configured-capacity",
+        "local_memory_capacity_mib": 65536,
+        "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+        "local_memory_high_watermark_mib": 57344,
+        "local_memory_low_watermark_mib": 49152,
+        "local_numa_node": null,
+        "memory_action_costs": {
+          "cold_checkpoint_seconds_per_gib": 0.06452185099999497,
+          "cold_restore_seconds_per_gib": 0.1151175211249722,
+          "expected_restore_probability": 1.0,
+          "live_borrow_runtime_penalty_seconds_per_gib": 0.0010951932500233852,
+          "live_borrow_service_seconds_per_gib": 0.06576317062499015,
+          "provenance": "/home/weitianc/clawbox-high-density-20261017/action-costs-03: existing qualification probes, two NUMA nodes, 4 GiB Tool; cold checkpoint seed is measured warm-checkpoint plus spill; paired real pytest penalty; all Tools restore for subsequent work or final validation",
+          "remote_access_latency_ns": null,
+          "remote_stream_bandwidth_mib_per_second": null,
+          "warm_checkpoint_seconds_per_gib": 0.039426525750002384,
+          "warm_restore_seconds_per_gib": 0.09528314949997707
+        },
+        "memory_scheduling": "joint",
+        "non_command_tool_memory_mib": 128,
+        "observe_predictions": false,
+        "physical_live_limit_mib": 131072,
+        "pool_memory_budget_mib": 57344,
+        "pool_transfer_concurrency": 1,
+        "pool_transfer_timeout_seconds": 120.0,
+        "prediction_artifact": null,
+        "prediction_mode": "runtime",
+        "prediction_reservation_scale": 1.0,
+        "pressure_control": {
+          "action_window_seconds": 2.0,
+          "amortization_factor": 2.0,
+          "boost_cpu_weight": 200,
+          "cooldown_seconds": 5.0,
+          "exit_hysteresis_seconds": 1.0,
+          "max_boosted_vms": 4,
+          "min_release_mib": 64,
+          "protection_budget_mib": 4096,
+          "psi_ratio": 0.1,
+          "release_forecast_ttl_factor": 3.0,
+          "release_history_samples": 3
+        },
+        "proactive_cache_reclaim": true,
+        "return_cooldown_seconds": 5.0,
+        "runtime_poll_interval_seconds": 0.5,
+        "shared_memory_borrow_limit_mib": 65536,
+        "snapshot_destination": "cold",
+        "snapshot_mechanism": "full-copy",
+        "snapshot_residency_costs": null,
+        "snapshot_storage": "tiered",
+        "startup_headroom_mib": 256,
+        "static_tool_memory_mib": 64,
+        "target_node": "193.124.7.2",
+        "template_base_sharing": "disabled",
+        "warm_memory_capacity_mib": 131072,
+        "warm_numa_node": 2,
+        "warm_snapshot_root": "/mnt/clawbox-pool"
+      },
+      "restore": "none",
+      "runtime_control": "explicit",
+      "runtime_snapshot": false,
+      "snapshot_aware_residency": false,
+      "template_aware_placement": false
+    },
+    "repetition": 0,
+    "resources": {
+      "admission_margin_mib": 256,
+      "borrow_cooldown_seconds": 5.0,
+      "checkpoint_restore_headroom_mib": 1024,
+      "cold_snapshot_root": "/data/clawbox-cold",
+      "compute_nodes": [
+        {
+          "cpus": "0-7",
+          "high_watermark_mib": 28672,
+          "low_watermark_mib": 24576,
+          "memory_capacity_mib": 32768,
+          "node_id": "node0",
+          "numa_node": 0
+        },
+        {
+          "cpus": "80-87",
+          "high_watermark_mib": 28672,
+          "low_watermark_mib": 24576,
+          "memory_capacity_mib": 32768,
+          "node_id": "node1",
+          "numa_node": 1
+        }
+      ],
+      "emergency_free_memory_mib": 32768,
+      "idle_reclaim_costs": {
+        "cold_checkpoint_seconds_per_gib": 0.06452185099999497,
+        "cold_restore_seconds_per_gib": 0.1151175211249722,
+        "provenance": "/home/weitianc/clawbox-high-density-20261017/action-costs-03: existing qualification probes, two NUMA nodes, 4 GiB Tool; cold checkpoint seed is measured warm-checkpoint plus spill; paired real pytest penalty; all Tools restore for subsequent work or final validation",
+        "warm_checkpoint_seconds_per_gib": 0.039426525750002384,
+        "warm_restore_seconds_per_gib": 0.09528314949997707
+      },
+      "lazy_restore": true,
+      "lifecycle_admission": "configured-capacity",
+      "local_memory_capacity_mib": 65536,
+      "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+      "local_memory_high_watermark_mib": 57344,
+      "local_memory_low_watermark_mib": 49152,
+      "local_numa_node": null,
+      "memory_action_costs": {
+        "cold_checkpoint_seconds_per_gib": 0.06452185099999497,
+        "cold_restore_seconds_per_gib": 0.1151175211249722,
+        "expected_restore_probability": 1.0,
+        "live_borrow_runtime_penalty_seconds_per_gib": 0.0010951932500233852,
+        "live_borrow_service_seconds_per_gib": 0.06576317062499015,
+        "provenance": "/home/weitianc/clawbox-high-density-20261017/action-costs-03: existing qualification probes, two NUMA nodes, 4 GiB Tool; cold checkpoint seed is measured warm-checkpoint plus spill; paired real pytest penalty; all Tools restore for subsequent work or final validation",
+        "remote_access_latency_ns": null,
+        "remote_stream_bandwidth_mib_per_second": null,
+        "warm_checkpoint_seconds_per_gib": 0.039426525750002384,
+        "warm_restore_seconds_per_gib": 0.09528314949997707
+      },
+      "memory_scheduling": "joint",
+      "non_command_tool_memory_mib": 128,
+      "observe_predictions": false,
+      "physical_live_limit_mib": 131072,
+      "pool_memory_budget_mib": 57344,
+      "pool_transfer_concurrency": 1,
+      "pool_transfer_timeout_seconds": 120.0,
+      "prediction_artifact": null,
+      "prediction_mode": "runtime",
+      "prediction_reservation_scale": 1.0,
+      "pressure_control": {
+        "action_window_seconds": 2.0,
+        "amortization_factor": 2.0,
+        "boost_cpu_weight": 200,
+        "cooldown_seconds": 5.0,
+        "exit_hysteresis_seconds": 1.0,
+        "max_boosted_vms": 4,
+        "min_release_mib": 64,
+        "protection_budget_mib": 4096,
+        "psi_ratio": 0.1,
+        "release_forecast_ttl_factor": 3.0,
+        "release_history_samples": 3
+      },
+      "proactive_cache_reclaim": true,
+      "return_cooldown_seconds": 5.0,
+      "runtime_poll_interval_seconds": 0.5,
+      "shared_memory_borrow_limit_mib": 65536,
+      "snapshot_destination": "cold",
+      "snapshot_mechanism": "full-copy",
+      "snapshot_residency_costs": null,
+      "snapshot_storage": "tiered",
+      "startup_headroom_mib": 256,
+      "static_tool_memory_mib": 64,
+      "target_node": "193.124.7.2",
+      "template_base_sharing": "disabled",
+      "warm_memory_capacity_mib": 131072,
+      "warm_numa_node": 2,
+      "warm_snapshot_root": "/mnt/clawbox-pool"
+    },
+    "runtime": {
+      "allow_internet_access": false,
+      "architecture": "arm64",
+      "image_digest": "sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "memory_mib": 2048,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "template_alias": null,
+      "template_id": "tpl-bba239bc4d324efe8e4a7a22",
+      "vcpu": 2,
+      "workspace": "/workspace"
+    },
+    "sandbox": {
+      "allow_internet_access": false,
+      "architecture": "arm64",
+      "image_digest": "sha256:2969104a6eac597504e137090e65c3df5d3e9f709bdce0c6e340ed0f7dc8cfb1",
+      "memory_mib": 4096,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/sqlglot-progress@sha256:2969104a6eac597504e137090e65c3df5d3e9f709bdce0c6e340ed0f7dc8cfb1",
+      "template_alias": null,
+      "template_id": "tpl-27ffbf13c086499db99109ae",
+      "vcpu": 2,
+      "workspace": "/testbed"
+    },
+    "session_assignment": "round_robin",
+    "session_cases": [
+      {
+        "base_commit": null,
+        "case_id": "validation-failure",
+        "metadata": {},
+        "prompt": "Run true once and finish.",
+        "replay_trace_reference": "/home/weitianc/clawbox-high-density-followup-20261017/configs/isolation-validation-failure.jsonl",
+        "repository": null,
+        "sandbox": null,
+        "snapshot_reuse_probability": null,
+        "source": "recorded_trace",
+        "source_reference": "/home/weitianc/clawbox-high-density-followup-20261017/configs/isolation-validation-failure.jsonl",
+        "validation": "false"
+      },
+      {
+        "base_commit": null,
+        "case_id": "healthy",
+        "metadata": {},
+        "prompt": "Run true once and finish.",
+        "replay_trace_reference": "/home/weitianc/clawbox-high-density-followup-20261017/configs/isolation-healthy.jsonl",
+        "repository": null,
+        "sandbox": null,
+        "snapshot_reuse_probability": null,
+        "source": "recorded_trace",
+        "source_reference": "/home/weitianc/clawbox-high-density-followup-20261017/configs/isolation-healthy.jsonl",
+        "validation": "true"
+      }
+    ],
+    "spec_digest": "24b1e56422a41c822d408052026857bab2d92b9f8ec1acb8930529d7bfee6b72",
+    "validation": {
+      "command": "true"
+    }
+  },
+  "frozen_spec_file": "configs/d81a71152f-experiment.yaml",
+  "effective_config_source": "/home/weitianc/clawbox-high-density-followup-20261017/results/qualification-97c8c3319ee0/arms/99fb0316c23a6ffad1e3749a.json"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "3cd5f0c1dd-attempt-4ca4b363e84b46ef-9b16d7c2ca46d4b27c792244",
+  "run_path": "/home/weitianc/clawbox-c1280-20261017/results/real-trace-pair-activation-c32-l52-01",
+  "run_id": "real-trace-pair-activation-c32-l52-01",
+  "arm_id": "9b16d7c2ca46d4b27c792244",
+  "attempt_id": "attempt-4ca4b363e84b46ef",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/3cd5f0c1dd-experiment.yaml",
+  "effective_config_source": null
+}

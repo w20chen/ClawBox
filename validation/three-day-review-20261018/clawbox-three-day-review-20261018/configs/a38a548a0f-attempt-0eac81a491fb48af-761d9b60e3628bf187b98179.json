@@ -1,0 +1,10 @@
+{
+  "id": "a38a548a0f-attempt-0eac81a491fb48af-761d9b60e3628bf187b98179",
+  "run_path": "/home/weitianc/clawbox-high-density-followup-20261017/results/contention-final-c32-01",
+  "run_id": "contention-final-c32-01",
+  "arm_id": "761d9b60e3628bf187b98179",
+  "attempt_id": "attempt-0eac81a491fb48af",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/a38a548a0f-experiment.yaml",
+  "effective_config_source": null
+}

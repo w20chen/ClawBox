@@ -1,0 +1,160 @@
+{
+  "id": "40c19edc65-attempt-e8d87830ac4a45f3-b1431146c338c8595eb256eb",
+  "run_path": "/home/weitianc/clawbox-suite-validation-20261016-7a32/results/suite-admission-smoke",
+  "run_id": "suite-admission-smoke",
+  "arm_id": "b1431146c338c8595eb256eb",
+  "attempt_id": "attempt-e8d87830ac4a45f3",
+  "effective_arm": {
+    "agent": {
+      "driver": "openclaw"
+    },
+    "arm_id": "b1431146c338c8595eb256eb",
+    "case": {
+      "base_commit": null,
+      "case_id": "marker",
+      "metadata": {},
+      "prompt": "Allocate and touch 64 MiB for three seconds, then write complete to /workspace/result.txt.",
+      "replay_trace_reference": "/home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl",
+      "repository": "self-service/clawtune-integration",
+      "sandbox": null,
+      "snapshot_reuse_probability": null,
+      "source": "recorded_trace",
+      "source_reference": "/home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl",
+      "validation": null
+    },
+    "concurrency": 1,
+    "execution": {
+      "arm_timeout_seconds": 180,
+      "arrival_schedule": "burst",
+      "command_timeout_seconds": 60,
+      "concurrency_levels": [
+        1
+      ],
+      "memory_sample_interval_seconds": 0.2,
+      "placement_cpu_overcommit": 8.0,
+      "placement_policy": "load_aware",
+      "random_seed": 0,
+      "randomized_order": true,
+      "session_compute_nodes": [],
+      "stabilization_seconds": 1.0,
+      "stagger_interval_seconds": 0.0,
+      "template_balance_slack": 0.1
+    },
+    "inference": {
+      "backend": "replay",
+      "configuration": {
+        "model": "example-model",
+        "time_scale": 1.0
+      }
+    },
+    "policy": {
+      "admission": "fixed",
+      "eviction": "none",
+      "name": "fixed-resident",
+      "reclamation": "resident",
+      "restore": "none",
+      "runtime_control": "agentcgroup_cgroup",
+      "snapshot_aware_residency": false,
+      "template_aware_placement": false
+    },
+    "repetition": 0,
+    "resources": {
+      "admission_margin_mib": 256,
+      "agentcgroup_source": null,
+      "borrow_cooldown_seconds": 5.0,
+      "checkpoint_restore_headroom_mib": 1024,
+      "cold_snapshot_root": "/data/clawbox-cold",
+      "compute_nodes": [
+        {
+          "cpus": "0-79",
+          "high_watermark_mib": 32768,
+          "low_watermark_mib": 28672,
+          "memory_capacity_mib": 36864,
+          "node_id": "node0",
+          "numa_node": 0
+        },
+        {
+          "cpus": "80-159",
+          "high_watermark_mib": 32768,
+          "low_watermark_mib": 28672,
+          "memory_capacity_mib": 36864,
+          "node_id": "node1",
+          "numa_node": 1
+        }
+      ],
+      "emergency_free_memory_mib": 1024,
+      "lifecycle_admission": "configured-capacity",
+      "local_memory_capacity_mib": 73728,
+      "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+      "local_memory_high_watermark_mib": 65536,
+      "local_memory_low_watermark_mib": 57344,
+      "local_numa_node": null,
+      "memory_action_costs": null,
+      "memory_scheduling": "local_only",
+      "non_command_tool_memory_mib": null,
+      "pool_memory_budget_mib": 65536,
+      "pool_transfer_concurrency": 1,
+      "pool_transfer_timeout_seconds": 120.0,
+      "prediction_artifact": "/home/weitianc/clawbox-specs/clawtune-1bdb-p50.json",
+      "proactive_cache_reclaim": true,
+      "return_cooldown_seconds": 5.0,
+      "shared_memory_borrow_limit_mib": 65536,
+      "snapshot_mechanism": "incremental-cow",
+      "snapshot_residency_costs": null,
+      "snapshot_storage": "tiered",
+      "startup_headroom_mib": 256,
+      "static_tool_memory_mib": 24,
+      "target_node": "193.124.7.2",
+      "template_base_sharing": "disabled",
+      "warm_memory_capacity_mib": 131072,
+      "warm_numa_node": 2,
+      "warm_snapshot_root": "/mnt/clawbox-pool"
+    },
+    "runtime": {
+      "allow_internet_access": true,
+      "architecture": "arm64",
+      "image_digest": "sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "memory_mib": 2048,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "template_alias": null,
+      "template_id": "tpl-bba239bc4d324efe8e4a7a22",
+      "vcpu": 2,
+      "workspace": "/workspace"
+    },
+    "sandbox": {
+      "allow_internet_access": true,
+      "architecture": "arm64",
+      "image_digest": "sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98",
+      "memory_mib": 4096,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/lab-sandbox@sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98",
+      "template_alias": null,
+      "template_id": "tpl-2fc904576f874d90b63452b8",
+      "vcpu": 2,
+      "workspace": "/workspace"
+    },
+    "session_assignment": "single_case",
+    "session_cases": [
+      {
+        "base_commit": null,
+        "case_id": "marker",
+        "metadata": {},
+        "prompt": "Allocate and touch 64 MiB for three seconds, then write complete to /workspace/result.txt.",
+        "replay_trace_reference": "/home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl",
+        "repository": "self-service/clawtune-integration",
+        "sandbox": null,
+        "snapshot_reuse_probability": null,
+        "source": "recorded_trace",
+        "source_reference": "/home/weitianc/ClawBox/examples/traces/memory-smoke.jsonl",
+        "validation": null
+      }
+    ],
+    "spec_digest": "5016dec34c65fa473d3d12ad7e49a859c8755fd849c163587349d8ff5e9f2111",
+    "validation": {
+      "command": "test \"$(cat /workspace/result.txt)\" = complete"
+    }
+  },
+  "frozen_spec_file": "configs/40c19edc65-experiment.yaml",
+  "effective_config_source": "/home/weitianc/clawbox-suite-validation-20261016-7a32/results/suite-admission-smoke/arms/b1431146c338c8595eb256eb.json"
+}

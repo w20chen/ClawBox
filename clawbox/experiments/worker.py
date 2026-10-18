@@ -21,7 +21,7 @@ from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
-from threading import Event, Lock, RLock, Semaphore, Thread, Timer
+from threading import Event, Lock, RLock, Semaphore, Thread
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -439,11 +439,13 @@ class WatermarkController:
                                reason: str) -> str:
         """Try each safe action once, ordered by calibrated cost when present."""
         self._last_borrow_rejection = None
+        borrowing_enabled = (self.borrower is not None
+                             and self.memory_scheduling not in {'local_only', 'snapshot_only'})
         if self.action_cost_model is None:
             if self.coordinator.evict_one_for_watermark():
                 self._decision('reclaim', reason)
                 return 'reclaim'
-            borrowed = (
+            borrowed = borrowing_enabled and (
                 self._record_borrow(preferred_borrow, reason=reason)
                 if preferred_borrow is not None else self._borrow_one()
             )
@@ -454,7 +456,8 @@ class WatermarkController:
             )
             return action
 
-        borrow_candidate = preferred_borrow or self._next_borrow_candidate()
+        borrow_candidate = ((preferred_borrow or self._next_borrow_candidate())
+                            if borrowing_enabled else None)
         reclaim_candidate_fn = getattr(
             self.coordinator, 'watermark_reclaim_candidate', None,
         )
@@ -695,7 +698,7 @@ class WatermarkController:
             ))
             return above_high
         if above_high and self.arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE:
-            if self.coordinator.evict_one_for_watermark():
+            if self._joint_relieve_pressure(reason="local_high_watermark") != "wait":
                 return above_high
         if self.memory_scheduling in {'local_only', 'snapshot_only'}:
             return above_high
@@ -1346,6 +1349,8 @@ class ExperimentWorker:
                     "role": role,
                     "service_seconds": elapsed,
                     "reason": reason,
+                    "request_id": state.wait_id,
+                    "snapshot_tier": lifecycle.tier.value,
                     "lifecycle_timing": timings[-1] if timings else None,
                 })
         def reclaim_local_cache() -> None:
@@ -1424,9 +1429,6 @@ class ExperimentWorker:
                                and arm.resources.proactive_cache_reclaim else None),
                 on_pressure_pause=record_pressure_pause,
             )
-            if arm.policy.coordinates_release:
-                coordinator.release_options = arm.resources.pressure_control
-                coordinator.release_costs = arm.resources.idle_reclaim_costs or arm.resources.memory_action_costs
             numa_borrower = (
                 SandboxNumaBorrower(
                     Path(arm.resources.local_memory_cgroup),
@@ -1443,6 +1445,11 @@ class ExperimentWorker:
                 and domain_arm.resources.local_memory_low_watermark_mib is not None
                 and domain_arm.resources.local_memory_high_watermark_mib is not None else None
             )
+            if controller is not None:
+                coordinator.pressure_relief = (
+                    lambda controller=controller: controller._joint_relieve_pressure(
+                        reason="memory_admission_or_model_wait") != "wait"
+                )
             domains[node.node_id if node else "local"] = SimpleNamespace(
                 arm=domain_arm, sampler=domain_sampler, coordinator=coordinator, cpus=node.cpus if node else None,
                 borrower=numa_borrower, controller=controller, peak_bytes=0,
@@ -1738,7 +1745,7 @@ class ExperimentWorker:
             node_results[node_id] = {
                 "resources": domain.arm.resources.model_dump(mode="json"),
                 "admission_control": domain.coordinator.admission_metrics(),
-                "pressure_release_observations": list(domain.coordinator.release_observations),
+                "checkpoint_capacity_skips": domain.coordinator.checkpoint_capacity_skips,
                 "peak_commitment_bytes": domain.coordinator.peak_commitment_bytes,
                 "observed_peak_bytes": domain.peak_bytes,
                 "placements": [row for row in self._priority_domain.observations
@@ -2094,8 +2101,6 @@ class ExperimentWorker:
                 evidence = priority_domain.verify(index, role, sandbox_id)
                 if progress_control:
                     progress_control.generation(session_id, role, sandbox_id)
-                    coordinator.release_after[session_id] = (
-                        time.monotonic() + arm.resources.pressure_control.cooldown_seconds)
                 events.write({'event': 'runtime_memory_placement', 'session_id': session_id, **evidence})
                 return evidence
             def prepare():
@@ -2263,8 +2268,6 @@ class ExperimentWorker:
         policy_drained = True
         lifetime_acquired = False
         wait_lock = Lock()
-        wait_timer: Timer | None = None
-        restore_timer: Timer | None = None
         wait_state: dict[str, Any] = {}
         completed_model_requests: set[str] = set()
         generated_model_requests: set[str] = set()
@@ -2294,104 +2297,24 @@ class ExperimentWorker:
             # next SSH admission.
             runtime_snapshot_enabled = (
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
-                and not arm.policy.coordinates_release
                 and arm.policy.runtime_snapshot
             )
-            prediction_wait = inference_configuration.get("model_wait_prediction_seconds")
-            prediction_source = inference_configuration.get(
-                "model_wait_prediction_source"
-            )
-            if prediction_wait is not None:
-                try:
-                    prediction_wait = float(prediction_wait)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("model_wait_prediction_seconds must be finite") from exc
-                if not math.isfinite(prediction_wait) or prediction_wait < 0:
-                    raise ValueError("model_wait_prediction_seconds must be non-negative")
-
             def pause_for_model_wait(event: dict[str, Any]) -> None:
-                nonlocal wait_timer
                 try:
-                    with wait_lock:
-                        wait_timer = None
-                        request_id = str(event.get("request_id"))
-                        with generated_model_requests_lock:
-                            response_generated = request_id in generated_model_requests
-                        if (
-                            request_id in completed_model_requests
-                            or response_generated
-                            or not lifecycle.resident
-                            or coordinator.tool_active(session_id)
-                        ):
-                            return
-                        if gateway_session is None:
-                            raise RuntimeError("model wait has no gateway session")
-                        agent_pid_before = observe_openclaw_agent_pid("before_tool_pause")
-                        started = time.time()
-                        target_tier = (
-                            SnapshotTier(str(wait_state["target_tier"]))
-                            if wait_state.get("target_tier") else None
-                        )
-                        tool_elapsed = lifecycle.checkpoint_and_evict(tier=target_tier)
-                        agent_pid_after = observe_openclaw_agent_pid("after_tool_pause")
-                        if agent_pid_before != agent_pid_after:
-                            raise RuntimeError(
-                                "OpenClaw agent PID changed across Tool pause: "
-                                f"{agent_pid_before} -> {agent_pid_after}"
-                            )
-                        finished = time.time()
-                        wait_state.update({
-                            "pause_started_at": started,
-                            "pause_completed_at": finished,
-                            "pause_request_id": event.get("request_id"),
-                            "openclaw_agent_pid": agent_pid_after,
-                        })
-                        runtime_elapsed = None
-                        runtime_pause_timing = None
-                        if runtime_snapshot_enabled and runtime_lifecycle.resident:
-                            runtime_pid_before = observe_openclaw_agent_pid(
-                                "before_runtime_pause"
-                            )
-                            runtime_started = time.time()
-                            gateway_session.invalidate_pending_delivery()
-                            runtime_elapsed = runtime_lifecycle.checkpoint_and_evict(
-                                tier=target_tier
-                            )
-                            runtime_pause_timing = dict(runtime_lifecycle.timings[-1])
-                            runtime_finished = time.time()
-                            wait_state.update({
-                                "runtime_pause_started_at": runtime_started,
-                                "runtime_pause_completed_at": runtime_finished,
-                                "runtime_pause_request_id": event.get("request_id"),
-                                "runtime_agent_pid_before_pause": runtime_pid_before,
-                            })
-                    if tool_elapsed is not None:
-                        coordinator.pause_count += 1
-                        coordinator.pause_service_seconds += tool_elapsed
-                        events.write({
-                            "event": "sandbox_paused", "session_id": session_id,
-                            "role": "tool", "service_seconds": tool_elapsed,
-                            "reason": "model_request_wait",
-                            "request_id": event.get("request_id"),
-                            "snapshot_tier": lifecycle.tier.value,
-                            "lifecycle_timing": lifecycle.timings[-1],
-                        })
-                    if runtime_elapsed is not None:
-                        coordinator.pause_count += 1
-                        coordinator.pause_service_seconds += runtime_elapsed
-                        events.write({
-                            "event": "sandbox_paused", "session_id": session_id,
-                            "role": "runtime", "service_seconds": runtime_elapsed,
-                            "reason": "model_request_wait",
-                            "request_id": event.get("request_id"),
-                            "snapshot_tier": runtime_lifecycle.tier.value,
-                            "lifecycle_timing": runtime_pause_timing,
-                        })
+                    # Recheck live pressure; the queued event may be stale.
+                    # Candidate selection/claim shares the Tool admission lock.
+                    if coordinator.blocked_demand_pressure():
+                        coordinator.relieve_pressure()
                 except Exception as exc:
                     policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
                     events.write({"event": "policy_event_failed", "session_id": session_id,
                                   "operation": "pause", "error": str(exc),
                                   "error_type": type(exc).__name__})
+
+            def before_runtime_idle_pause() -> None:
+                wait_state["runtime_agent_pid_before_pause"] = observe_openclaw_agent_pid(
+                    "before_runtime_pause")
+                gateway_session.invalidate_pending_delivery()
 
             def restore_runtime_for_model_wait_locked(
                 event: dict[str, Any], *, phase: str,
@@ -2449,91 +2372,32 @@ class ExperimentWorker:
                     "runtime_agent_pid_after_restore": agent_pid_after,
                 })
 
-            def restore_for_model_wait(event: dict[str, Any]) -> None:
-                nonlocal restore_timer
-                try:
-                    with wait_lock:
-                        restore_timer = None
-                        if str(event.get("request_id")) in completed_model_requests:
-                            return
-                        restore_runtime_for_model_wait_locked(
-                            event, phase="scheduled",
-                        )
-                except Exception as exc:
-                    policy_event_errors.append(f"restore: {type(exc).__name__}: {exc}")
-
             def on_model_request_started(event: dict[str, Any]) -> None:
-                """Enqueue lifecycle work; never checkpoint in the gateway callback."""
-                progress_event('model_start', str(event.get('request_id')))
-                submit_policy_event(handle_model_request_started, event)
-
-            def handle_model_request_started(event: dict[str, Any]) -> None:
-                nonlocal wait_timer, restore_timer
-                timeline.setdefault("first_model_request", float(event["request_started_at"]))
+                """Register actual waiting synchronously; enqueue only blocking policy work."""
                 request_id = str(event.get("request_id"))
-                with wait_lock:
-                    with generated_model_requests_lock:
-                        response_generated = request_id in generated_model_requests
-                    # A zero-scaled replay response can arrive before the
-                    # executor gets scheduled. Never create a late checkpoint
-                    # for an already completed model request.
-                    if request_id in completed_model_requests or response_generated:
+                progress_event('model_start', request_id)
+                with wait_lock, generated_model_requests_lock:
+                    if (request_id in generated_model_requests
+                            or request_id in completed_model_requests):
                         return
-                coordinator.set_eviction_eligible(session_id, True)
-                oracle_wait = event.get("oracle_model_wait_seconds")
-                if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
-                    if prediction_wait is None:
-                        raise RuntimeError(
-                            "wait-aware policy is missing model wait prediction"
-                        )
-                    coordinator.begin_model_wait(
-                        session_id, request_id, prediction_wait,
-                    )
-                if (arm.policy.reclamation is ReclamationPolicy.RESIDENT
-                        or arm.policy.coordinates_release):
-                    return
-                target_tier = None
-                delay = 0.0 if coordinator.blocked_demand_pressure() else None
-                with wait_lock:
                     wait_state.clear()
-                    wait_state.update({
-                        "request_id": event.get("request_id"),
-                        "request_started_at": event.get("request_started_at"),
-                        "predicted_wait_seconds": prediction_wait,
-                        "prediction_source": prediction_source,
-                        "oracle_wait_seconds": event.get(
-                            "oracle_model_wait_seconds"
-                        ),
-                        "oracle_wait_source": event.get(
-                            "oracle_model_wait_source"
-                        ),
-                        "checkpoint_break_even_seconds": (
-                            None
-                        ),
-                        "target_tier": target_tier.value if target_tier is not None else None,
-                    })
-                    elapsed_since_request = max(
-                        0.0, time.time() - float(event["request_started_at"])
-                    )
-                    if delay is not None:
-                        wait_timer = Timer(
-                            max(0.0, float(delay) - elapsed_since_request),
-                            lambda: submit_policy_event(pause_for_model_wait, event),
-                        )
-                        wait_timer.daemon = True
-                        wait_timer.start()
+                    wait_state.update(request_id=request_id,
+                                      request_started_at=event.get("request_started_at"))
+                    if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+                        coordinator.begin_model_wait(session_id, request_id)
+                if arm.policy.reclamation is not ReclamationPolicy.RESIDENT:
+                    submit_policy_event(pause_for_model_wait, event)
 
             def before_model_response_ready(step: int | None, message: dict[str, Any],
                                             event: dict[str, Any]) -> dict[str, Any]:
-                nonlocal wait_timer, restore_timer
                 request_id = str(event.get("request_id"))
                 progress_event('model_end', request_id)
-                coordinator.complete_model_wait(session_id, request_id)
                 # Publish generation before waiting for lifecycle serialization.
                 # A queued eager-pause callback must not start checkpointing a
                 # Runtime after its model response already exists.
                 with generated_model_requests_lock:
                     generated_model_requests.add(request_id)
+                coordinator.complete_model_wait(session_id, request_id)
                 # A paused Runtime cannot receive the pending HTTP response.
                 # Restore it synchronously in the gateway producer before the
                 # response becomes visible to OpenClaw. Tool restore remains
@@ -2544,12 +2408,17 @@ class ExperimentWorker:
                     # this marker, snapshotting Runtime after the response is
                     # ready and leaving no callback able to restore it.
                     completed_model_requests.add(request_id)
-                    if wait_timer is not None:
-                        wait_timer.cancel()
-                        wait_timer = None
-                    if restore_timer is not None:
-                        restore_timer.cancel()
-                        restore_timer = None
+                    for vm, prefix in ((lifecycle, ""), (runtime_lifecycle, "runtime_")):
+                        timing = next((t for t in reversed(vm.timings)
+                                       if t.get("operation") == "checkpoint"
+                                       and t.get("status", "ok") != "error"
+                                       and t.get("started_unix_s", 0) >= float(event["request_started_at"])), None)
+                        if timing is not None:
+                            wait_state.update({
+                                prefix + "pause_request_id": request_id,
+                                prefix + "pause_started_at": timing["started_unix_s"],
+                                prefix + "pause_completed_at": timing["completed_unix_s"],
+                            })
                     restore_runtime_for_model_wait_locked(
                         event, phase="response",
                     )
@@ -2573,22 +2442,7 @@ class ExperimentWorker:
                         "runtime_snapshot_performed": (
                             str(request_state.get("runtime_pause_request_id")) == request_id
                         ),
-                        "predicted_wait_seconds": prediction_wait,
-                        "prediction_source": prediction_source,
-                        "oracle_wait_seconds": request_state.get(
-                            "oracle_wait_seconds"
-                        ),
-                        "oracle_wait_source": request_state.get(
-                            "oracle_wait_source"
-                        ),
-                        "checkpoint_break_even_seconds": request_state.get(
-                            "checkpoint_break_even_seconds"
-                        ),
                         "actual_wait_seconds": actual_wait,
-                        "prediction_error_seconds": (
-                            None if prediction_wait is None else actual_wait - prediction_wait
-                        ),
-                        "scheduled_restore_time": request_state.get("scheduled_restore_time"),
                         "tool_pause_started_at": request_state.get("pause_started_at"),
                         "tool_pause_completed_at": request_state.get("pause_completed_at"),
                         "restore_started_at": request_state.get("restore_started_at"),
@@ -2669,7 +2523,7 @@ class ExperimentWorker:
         coordinator.register_runtime(
             session_id, runtime_lifecycle,
             before_pause=(
-                gateway_session.invalidate_pending_delivery
+                before_runtime_idle_pause
                 if gateway_session is not None else None
             ),
         )
@@ -3418,13 +3272,6 @@ class ExperimentWorker:
                 # No Agent SSH process remains after run_openclaw returns.
                 # Drain callbacks already queued by model/tool completions so
                 # none can pause a VM underneath collection or validation.
-                with wait_lock:
-                    if wait_timer is not None:
-                        wait_timer.cancel()
-                        wait_timer = None
-                    if restore_timer is not None:
-                        restore_timer.cancel()
-                        restore_timer = None
                 drain_policy_events()
                 timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
@@ -3672,12 +3519,6 @@ class ExperimentWorker:
                 )
                 finalization_active = False
             timeline["sandbox_cleanup_start"] = time.time()
-            # Timer.cancel is thread-safe.  Cleanup must not wait for a policy
-            # callback that may itself be blocked in external Cube I/O.
-            if wait_timer is not None:
-                wait_timer.cancel()
-            if restore_timer is not None:
-                restore_timer.cancel()
             if gateway_session is not None and self.model_gateway is not None:
                 gateway_drained = cleanup_step(
                     "model gateway session",

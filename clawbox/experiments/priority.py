@@ -310,9 +310,49 @@ def cleanup_priority_domains(directory: Path):
                 paths.extend([session/'runtime',session/'tool',session])
             if not record.get('flat'):
                 paths.extend([parent/(prefix+'-high'),parent/(prefix+'-low')])
-            for path in paths:
-                try:
-                    path.rmdir()
-                except FileNotFoundError:
-                    pass
+            # A killed worker cannot run PriorityDomain.close().  Cube's API
+            # can still report a sandbox destroyed before its last shim leaves
+            # the owned leaf, so recovery needs the same bounded wait and
+            # exact-cgroup kill used by normal teardown.
+            pending=list(paths)
+            deadline=time.monotonic()+15
+            last_errors: dict[Path,OSError]={}
+            while pending:
+                retry=[]
+                for path in pending:
+                    try:
+                        path.rmdir()
+                        last_errors.pop(path,None)
+                    except FileNotFoundError:
+                        last_errors.pop(path,None)
+                    except OSError as exc:
+                        retry.append(path); last_errors[path]=exc
+                if not retry or time.monotonic()>=deadline:
+                    pending=retry; break
+                pending=retry; time.sleep(.1)
+            if pending:
+                for path in pending:
+                    kill=path/'cgroup.kill'
+                    try:
+                        if kill.exists():
+                            kill.write_text('1')
+                    except FileNotFoundError:
+                        pass
+                deadline=time.monotonic()+5
+                while pending:
+                    retry=[]
+                    for path in pending:
+                        try:
+                            path.rmdir()
+                            last_errors.pop(path,None)
+                        except FileNotFoundError:
+                            last_errors.pop(path,None)
+                        except OSError as exc:
+                            retry.append(path); last_errors[path]=exc
+                    if not retry or time.monotonic()>=deadline:
+                        pending=retry; break
+                    pending=retry; time.sleep(.1)
+            if pending:
+                raise RuntimeError('priority recovery cleanup failed: '
+                                   +'; '.join(str(last_errors[path]) for path in pending))
             journal.unlink()

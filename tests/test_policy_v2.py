@@ -231,7 +231,7 @@ def test_wait_aware_pressure_includes_a_blocked_create_request() -> None:
             time.sleep(0.001)
         assert coordinator._waiters
         assert coordinator.pressure() is False
-        assert coordinator.model_wait_plan(3.0) == (0.0, None)
+        assert coordinator.blocked_demand_pressure()
         used[0] = 0
         pending.result(timeout=2)
     assert created.is_set()
@@ -254,13 +254,32 @@ def test_high_watermark_proactively_evicts_a_safe_waiting_pair(include_runtime) 
     coordinator.register_runtime(
         "waiting", runtime, before_pause=lambda: runtime_pauses.append(True),
     )
-    coordinator.begin_model_wait("waiting", "wait-1", 10.0)
+    coordinator.begin_model_wait("waiting", "wait-1")
 
     assert coordinator.evict_one_for_watermark() is True
     assert (tool.pauses, runtime.pauses) == (1, int(include_runtime))
     assert runtime_pauses == ([True] if include_runtime else [])
     assert coordinator.pause_count == 1 + int(include_runtime)
     assert coordinator.evict_one_for_watermark() is False
+
+
+def test_actual_model_response_removes_unpredicted_idle_candidate() -> None:
+    policy = PolicySpec(
+        name="wait", admission="predicted", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive",
+    )
+    coordinator = PolicyCoordinator(policy, budget_mib=32, emergency_free_mib=0,
+                                    operation_headroom_mib=0)
+    tool = Lifecycle()
+    coordinator.register("waiting", tool)
+    coordinator.begin_model_wait("waiting", "request")
+    coordinator.set_tool_active("waiting", True)
+    assert coordinator.victim_for_restore("other") is None
+    coordinator.set_tool_active("waiting", False)
+    assert coordinator.watermark_reclaim_candidate() is not None
+    coordinator.complete_model_wait("waiting", "request")
+    assert coordinator.evict_one_for_watermark() is False
+    assert tool.pauses == 0
 
 
 def test_resident_policy_has_no_high_watermark_eviction_victim() -> None:
@@ -295,7 +314,7 @@ def test_wait_aware_admission_pauses_both_vms_during_model_wait() -> None:
         "waiting", runtime,
         before_pause=lambda: before_runtime_pause.append(True),
     )
-    coordinator.begin_model_wait("waiting", "request-1", 3.0)
+    coordinator.begin_model_wait("waiting", "request-1")
     with ThreadPoolExecutor(max_workers=1) as pool:
         pending = pool.submit(
             coordinator.materialize, "new-pair", 4,
@@ -323,7 +342,7 @@ def test_model_response_waits_for_claimed_pair_checkpoint() -> None:
     )
     coordinator.register("waiting", Lifecycle())
     coordinator.register_runtime("waiting", Lifecycle())
-    coordinator.begin_model_wait("waiting", "request-1", 3.0)
+    coordinator.begin_model_wait("waiting", "request-1")
     victim = coordinator.victim_for_restore("other")
     assert victim is not None
 
@@ -382,7 +401,7 @@ def test_snapshot_policy_uses_only_idle_eligible_lru_victim() -> None:
     coordinator.register("active", active)
     coordinator.register("idle", idle)
     coordinator.set_tool_active("active", True)
-    coordinator.begin_model_wait("idle", "wait-1", 10.0)
+    coordinator.begin_model_wait("idle", "wait-1")
     victim = coordinator.victim_for_restore("requester")
     assert victim is not None and victim.session_id == "idle"
     coordinator.release_victim(victim)
@@ -432,7 +451,7 @@ def test_tool_admission_protects_resident_tool_before_memory_wait() -> None:
     )
     lifecycle = Lifecycle()
     coordinator.register("tool", lifecycle)
-    coordinator.begin_model_wait("tool", "wait-1", 10.0)
+    coordinator.begin_model_wait("tool", "wait-1")
     result: list[BaseException] = []
 
     def delayed_admission() -> None:
@@ -462,7 +481,7 @@ def test_tool_activation_waits_for_an_atomic_eviction_claim() -> None:
                                     operation_headroom_mib=0)
     lifecycle = Lifecycle()
     coordinator.register("tool", lifecycle)
-    coordinator.begin_model_wait("tool", "wait-1", 10.0)
+    coordinator.begin_model_wait("tool", "wait-1")
     victim = coordinator.victim_for_restore("other")
     assert victim is not None
     assert coordinator.victim_for_restore("third") is None
@@ -589,7 +608,7 @@ def test_incremental_reservation_is_added_to_observed_host_memory() -> None:
         coordinator.acquire("tool", 3, 0)
 
 
-def test_wait_plan_uses_only_request_time_prediction() -> None:
+def test_wait_plan_needs_pressure_but_not_duration_prediction() -> None:
     policy = PolicySpec(
         name="predicted", admission="fixed", reclamation="snapshot_pause",
         eviction="wait_aware_pressure", restore="reactive",
@@ -598,9 +617,8 @@ def test_wait_plan_uses_only_request_time_prediction() -> None:
         policy, budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
         physical_sample=lambda: (2 * 1024**2, 100 * 1024**2),
     )
-    # A missing estimate cannot be replaced with the held-out actual duration.
-    assert coordinator.model_wait_plan(None) == (None, None)
-    assert coordinator.model_wait_plan(3.0) == (0.0, None)
+    assert coordinator.blocked_demand_pressure()
+    assert coordinator.blocked_demand_pressure()
 
 
 @pytest.mark.parametrize("eviction", ["eager", "fixed_delay", "time_oracle", "tiered_time_oracle", "tiered_lru_oracle"])
@@ -614,3 +632,72 @@ def test_unsupported_proactive_restore_fails_before_execution():
     with pytest.raises(ValueError, match="supported restore"):
         PolicySpec(name="unsupported", admission="fixed", reclamation="snapshot_pause",
                    eviction="wait_aware_pressure", restore="proactive")
+
+
+def idle_pair_coordinator():
+    c = PolicyCoordinator(PolicySpec(name="wait", admission="off", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive"), budget_mib=32,
+        emergency_free_mib=0, operation_headroom_mib=0)
+    tool, runtime = Lifecycle(), Lifecycle()
+    c.register("idle", tool); c.register_runtime("idle", runtime)
+    c.begin_model_wait("idle", "request")
+    return c, tool, runtime
+
+
+def test_restore_409_recovery_honors_pair_scope():
+    c, tool, runtime = idle_pair_coordinator()
+    calls = []
+    class CapacityRejected(RuntimeError):
+        status_code = 409
+    def restore():
+        calls.append(True)
+        if len(calls) == 1:
+            raise CapacityRejected()
+        return 0.01
+    c.restore("other", 0, restore, 1)
+    assert len(calls) == 2
+    assert tool.pauses == runtime.pauses == 1
+    assert c.pause_count == 2
+
+
+def test_response_during_tool_pause_still_finishes_committed_runtime_pause():
+    c, tool, runtime = idle_pair_coordinator()
+    entered, finish = threading.Event(), threading.Event()
+    original = tool.checkpoint_and_evict
+    def pause():
+        entered.set()
+        assert finish.wait(2)
+        return original()
+    tool.checkpoint_and_evict = pause
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pause_future = executor.submit(c.evict_one_for_watermark)
+        assert entered.wait(1)
+        response = executor.submit(c.complete_model_wait, "idle", "request")
+        deadline = time.monotonic() + 1
+        while not c._sessions["idle"].response_ready and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert c._sessions["idle"].response_ready
+        assert not response.done()
+        finish.set()
+        assert pause_future.result(timeout=2)
+        response.result(timeout=2)
+    assert tool.pauses == runtime.pauses == 1
+    assert c.watermark_reclaim_candidate() is None
+
+
+def test_admission_uses_configured_selector_instead_of_direct_checkpoint():
+    c, tool, runtime = idle_pair_coordinator()
+    calls = []
+    c.pressure_relief = lambda: calls.append(True) or False
+    c.physical_sample = lambda: (64 * 1024**2, 1024 * 1024**2)
+    with pytest.raises(AdmissionTimeout):
+        c.acquire("other", 1, 0)
+    assert calls
+    assert tool.pauses == runtime.pauses == 0
+
+
+@pytest.mark.parametrize("runtime", ["pressure_lifecycle", "adaptive_joint"])
+def test_llm_prediction_dependent_runtime_modes_are_rejected(runtime):
+    with pytest.raises(ValueError, match="LLM-duration prediction is not implemented"):
+        PolicySpec(name="invalid", admission="off", reclamation="snapshot_pause",
+                   eviction="wait_aware_pressure", restore="reactive", runtime_control=runtime)

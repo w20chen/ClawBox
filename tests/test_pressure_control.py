@@ -296,10 +296,9 @@ class VM:
 
 
 def coordinator():
-    c = PolicyCoordinator(resolve_baseline('pressure_lifecycle').as_policy(),
+    c = PolicyCoordinator(resolve_baseline('predicted-wait-snapshot').as_policy(),
         budget_mib=256, emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (256*MIB, 1024*MIB))
-    c.release_options = PressureControlSpec()
     return c
 
 
@@ -309,8 +308,7 @@ def test_release_eligibility_local_measurement_and_runtime_safety():
     c.register('idle', tool)
     c.register_runtime('idle', runtime)
     c.register_memory('idle', tool=lambda: (tool.charge, tool.charge), lifecycle=lambda: (0, 0))
-    c.begin_model_wait('idle', 'model', 100)
-    assert c._select_victim_locked(exclude='') is None  # no blocked demand
+    c.begin_model_wait('idle', 'model')
     ticket = object()
     c._waiters.append(ticket)
     c._waiter_requests[ticket] = AdmissionRequest('new', 128*MIB, 'create', False)
@@ -318,21 +316,17 @@ def test_release_eligibility_local_measurement_and_runtime_safety():
     assert c._select_victim_locked(exclude='') is None
     c.set_tool_active('idle', False)
     assert c.evict_one_for_watermark()
-    assert not tool.resident and runtime.resident
-    assert c.release_observations[-1]['local_released_bytes'] == 256*MIB
+    assert not tool.resident and not runtime.resident
     assert not c.evict_one_for_watermark()
 
 
-def test_no_shared_pool_credit_or_unmeasured_cost():
+def test_actual_wait_does_not_require_cost_or_duration_prediction():
     c = coordinator()
     vm = VM()
-    c.register('s', vm)
-    c.register_memory('s', tool=lambda: (256*MIB, 0), lifecycle=lambda: (0, 0))
-    c.begin_model_wait('s', 'm', 100)
-    assert c._release_rank(c._sessions['s'], time.monotonic()) is None
-    c.register_memory('s', tool=lambda: (256*MIB, 256*MIB), lifecycle=lambda: (0, 0))
     vm.timings = []
-    assert c._release_rank(c._sessions['s'], time.monotonic()) is None
+    c.register('s', vm)
+    c.begin_model_wait('s', 'm')
+    assert c._select_victim_locked(exclude='') is not None
 
 
 def test_existing_admission_retries_after_actual_tool_release():
@@ -343,10 +337,9 @@ def test_existing_admission_retries_after_actual_tool_release():
     c.register('idle', tool)
     c.register_runtime('idle', runtime)
     c.register_memory('idle', tool=lambda: (tool.charge, tool.charge), lifecycle=lambda: (0, 0))
-    c.begin_model_wait('idle', 'm', 100)
+    c.begin_model_wait('idle', 'm')
     c.acquire('new', 128, 1, wait_class='create')
-    assert not tool.resident and runtime.resident
-    assert c.release_observations[-1]['local_released_bytes'] == 256*MIB
+    assert not tool.resident and not runtime.resident
     c.release('new', 128, wait_class='create')
 
 
@@ -370,20 +363,20 @@ def test_start_endpoint_rejects_stale_generation_and_late_start():
 
 def test_supported_modes_are_explicit_and_cgroup_ablations_resident():
     assert not RuntimeControl.NO_CONTROL.adaptive
-    for name in ('phase_memcg', 'release_cpu',
-                 'pressure_lifecycle', 'adaptive_joint'):
+    for name in ('phase_memcg', 'release_cpu'):
         p = resolve_baseline(name).as_policy()
         assert p.runtime_control.value == name
         assert (p.reclamation.value == 'snapshot_pause') == p.runtime_control.coordinates_release
 
 
-def test_wait_aware_selection_rejects_expired_prediction():
+def test_response_completion_removes_wait_candidate():
     c = coordinator()
     vm = VM()
     c.register('s', vm)
     c.register_memory('s', tool=lambda: (256*MIB, 256*MIB), lifecycle=lambda: (0, 0))
-    c.begin_model_wait('s', 'm', 0)
+    c.begin_model_wait('s', 'm')
     ticket = object()
     c._waiters.append(ticket)
     c._waiter_requests[ticket] = AdmissionRequest('new', 128*MIB, 'create', False)
+    c.complete_model_wait('s', 'm')
     assert c._select_victim_locked(exclude='') is None

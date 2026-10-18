@@ -863,8 +863,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         }]},
         "agent": {"driver": "openclaw"},
         "inference": {"backend": "replay", "configuration": {
-            "model": "recorded-model", "model_wait_prediction_seconds": 0.3,
-            "model_wait_prediction_source": "frozen-test-predictor",
+            "model": "recorded-model",
         }},
         "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
         "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
@@ -1087,3 +1086,91 @@ def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> Non
     assert second.sandbox_id not in PartiallyFailingSandbox.items
     assert first.sandbox_id not in PartiallyFailingSandbox.items
     assert PartiallyFailingSandbox.items == {}
+
+
+@pytest.mark.parametrize("capacity,borrowed,expected", [(1536, 0, False), (2048, 1024, False), (2048, 0, True)])
+def test_idle_pair_reserves_both_snapshots_before_either_pause(tmp_path, capacity, borrowed, expected):
+    from clawbox.experiments.policy import PolicyCoordinator
+    from clawbox.experiments.spec import PolicySpec
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(capacity, borrow_capacity_bytes=capacity)
+    if borrowed:
+        pool.reserve_borrow("borrower", borrowed)
+    vms = [CubeSandboxLifecycle(client, template="tpl", node_name="node-a", ownership=_owner(),
+            role=role, snapshot_mechanism="full-copy", snapshot_storage="warm-only",
+            warm_snapshot_root=str(tmp_path), snapshot_pool=pool, snapshot_reservation_bytes=1024)
+           for role in ("tool", "runtime")]
+    for vm in vms:
+        vm.start()
+    c = PolicyCoordinator(PolicySpec(name="wait", admission="off", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive"), budget_mib=32,
+        emergency_free_mib=0, operation_headroom_mib=0)
+    c.register("session", vms[0]); c.register_runtime("session", vms[1])
+    c.begin_model_wait("session", "request")
+    try:
+        assert c.evict_one_for_watermark() is expected
+        assert all(vm.resident != expected for vm in vms)
+        assert pool.reserved_bytes == 0
+        assert c.pause_count == (2 if expected else 0)
+        if not expected:
+            assert c.checkpoint_capacity_skips == 1
+            assert c.watermark_reclaim_candidate() is not None
+        if borrowed:
+            pool.release_borrow("borrower")
+            assert c.evict_one_for_watermark()
+            assert all(not vm.resident for vm in vms)
+    finally:
+        for vm in vms:
+            vm.close()
+    assert pool.reserved_bytes == pool.committed_bytes == 0
+
+
+def test_reserved_checkpoint_failure_keeps_unknown_snapshot_charge(tmp_path):
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(2048)
+    vm = CubeSandboxLifecycle(client, template="tpl", node_name="node-a", ownership=_owner(),
+        snapshot_storage="warm-only", warm_snapshot_root=str(tmp_path), snapshot_pool=pool,
+        snapshot_reservation_bytes=1024)
+    vm.start()
+    def fail_after_pause(sandbox, **kwargs):
+        sandbox.state = "paused"
+        raise RuntimeError("lost manifest")
+    client.pause_sandbox = fail_after_pause
+    with pytest.raises(RuntimeError, match="lost manifest"):
+        with vm.reserve_checkpoint():
+            vm.checkpoint_and_evict()
+    assert pool.reserved_bytes == 1024
+    assert vm.state.value == "unknown"
+    vm.close()
+    assert pool.reserved_bytes == 0
+
+
+@pytest.mark.parametrize("pair", [False, True])
+def test_public_snapshot_qualification_exercises_selected_scope(tmp_path, monkeypatch, pair):
+    from clawbox.experiments import qualification as q
+    from clawbox.experiments.spec import load_experiment, PolicySpec
+    spec = load_experiment(Path("examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"))
+    resources = spec.resources.model_copy(update={
+        "compute_nodes": (), "shared_memory_borrow_limit_mib": None,
+        "snapshot_mechanism": "full-copy", "snapshot_storage": "warm-only",
+        "warm_memory_capacity_mib": 16384, "warm_snapshot_root": str(tmp_path / "warm"),
+        "snapshot_destination": "warm",
+    })
+    policy = PolicySpec(name="wait", admission="off", reclamation="snapshot_pause",
+                        eviction="wait_aware_pressure", restore="reactive", runtime_snapshot=pair)
+    spec = spec.model_copy(update={"schema_version": 3, "resources": resources, "policies": (policy,)})
+    _Sandbox.items = {}
+    def run(self, command, **kwargs):
+        stdout = "qualification-before" if command.startswith("printf") else "4242"
+        return SimpleNamespace(exit_code=0, stdout=stdout, stderr="")
+    monkeypatch.setattr(_Commands, "run", run)
+    monkeypatch.setattr(q, "CubeSandboxClient", lambda **kw: CubeSandboxClient(sandbox_class=_Sandbox, **kw))
+    result = q.snapshot_roundtrip_test(spec, artifact_root=tmp_path / "probe", _template="tpl")
+    assert result["passed"]
+    assert result["pair_checkpoint_verified"] is pair
+    runtime_operations = [t["operation"] for t in result["runtime_timings"]]
+    assert ("checkpoint" in runtime_operations) is pair
+    assert ("restore" in runtime_operations) is pair
+    assert not _Sandbox.items

@@ -57,7 +57,7 @@ Placement = subset('Placement', ExecutionSpec, PLACEMENT_FIELDS,
                    policy=(Literal['os_default', 'round_robin', 'explicit', 'load_aware'], 'round_robin'),
                    template_affinity=(bool, False))
 IdleReclaim = subset('IdleReclaim', ResourcesSpec, RESOURCE_FIELDS['idle_reclaim'],
-                     policy=(Literal['off', 'wait', 'release_cost'], 'off'),
+                     policy=(Literal['off', 'wait'], 'off'),
                      scope=(Literal['tool', 'agent_and_tool'], 'tool'))
 SharedMemory = subset('SharedMemory', ResourcesSpec, RESOURCE_FIELDS['shared_memory'],
                       borrow=(Literal['off', 'hard', 'pressure'], 'off'))
@@ -95,9 +95,7 @@ EnvironmentResources = subset('EnvironmentResources', ResourcesSpec,
                               set(ResourcesSpec.model_fields) - owned - set(EVIDENCE_FIELDS) - set(DERIVED_FIELDS))
 DesignExecution = subset('DesignExecution', ExecutionSpec,
                           set(ExecutionSpec.model_fields) - set(PLACEMENT_FIELDS) - set(MEASUREMENT_FIELDS) - {'placement_policy'})
-Evidence = subset('Evidence', ResourcesSpec, EVIDENCE_FIELDS,
-                  model_wait_prediction_seconds=(float | None, Field(default=None, gt=0, allow_inf_nan=False)),
-                  model_wait_prediction_source=(str | None, None))
+Evidence = subset('Evidence', ResourcesSpec, EVIDENCE_FIELDS)
 Measurement = subset('Measurement', ExecutionSpec, MEASUREMENT_FIELDS,
                      observe_predictions=(bool, False),
                      validation=(ValidationSpec, Field(default_factory=ValidationSpec)),
@@ -178,17 +176,6 @@ def lower_arm(design, name, m):
     if rt['cpu_release_boost'] and (pl['policy'] == 'os_default' or
             (not r['compute_nodes'] and r['local_numa_node'] is None)):
         raise ValueError(f'{name}: cpu_release_boost requires fixed LOCAL NUMA placement; configure compute_nodes or local_numa_node and use managed placement')
-    if idle['policy'] == 'release_cost' and idle['scope'] != 'tool':
-        raise ValueError(f'{name}: release-cost ranking currently supports Tool eviction only')
-    if snapshots and (e['model_wait_prediction_seconds'] is None or not e['model_wait_prediction_source']):
-        raise ValueError(f'{name}: idle reclaim requires independently measured model-wait evidence')
-    if idle['policy'] == 'release_cost' and not e['idle_reclaim_costs']:
-        raise ValueError(
-            f'{name}: release-cost reclamation requires independently measured '
-            'evidence.idle_reclaim_costs'
-        )
-    if idle['policy'] == 'release_cost' and e['model_wait_prediction_source'] == 'trace_median':
-        raise ValueError(f'{name}: release-cost reclamation cannot use evaluation-trace wait estimates')
     if coordination['action_selection'] == 'measured_cost' and (
             shared['borrow'] == 'hard' or not (snapshots or shared['borrow'] == 'pressure')
             or not e['memory_action_costs']):
@@ -201,9 +188,6 @@ def lower_arm(design, name, m):
         raise ValueError(f'{name}: WARM storage requires configured pool capacity and path')
     if snapshots and ck['storage'] in {'disk', 'tiered'} and not r['cold_snapshot_root']:
         raise ValueError(f'{name}: disk/tiered snapshots require cold_snapshot_root')
-    if idle['policy'] == 'release_cost' and ck['storage'] != 'warm-only' and e['idle_reclaim_costs'] and (
-            not e['idle_reclaim_costs']['cold_checkpoint_seconds_per_gib'] or not e['idle_reclaim_costs']['cold_restore_seconds_per_gib']):
-        raise ValueError(f'{name}: disk/tiered release ranking requires COLD checkpoint and restore costs')
     if shared['borrow'] == 'off':
         r['shared_memory_borrow_limit_mib'] = None
     r['memory_action_costs'] = e['memory_action_costs'] if coordination['action_selection'] == 'measured_cost' else None
@@ -237,7 +221,7 @@ def lower_arm(design, name, m):
     p = dict(name=name, deployment=m['deployment']['mode'], admission=a['tool'],
              runtime_control='explicit' if adaptive else 'off',
              memory_protection=rt['memory_protection'], cpu_release_boost=rt['cpu_release_boost'],
-             idle_release_ranking=idle['policy'] == 'release_cost', runtime_snapshot=idle['scope'] == 'agent_and_tool',
+             idle_release_ranking=False, runtime_snapshot=idle['scope'] == 'agent_and_tool',
              reclamation='snapshot_pause' if snapshots else 'resident',
              eviction='wait_aware_pressure' if snapshots else 'none', restore='reactive' if snapshots else 'none',
              template_aware_placement=pl['template_affinity'], snapshot_aware_residency=snapshots and ck['residency'] == 'value',
@@ -265,12 +249,6 @@ def compile_design(raw):
         if resources is None:
             resources, execution = r, x
     inference = d.inference.model_dump(mode='json')
-    # Evidence owns wait estimates; never derive them from the evaluation trace.
-    for key in ('model_wait_prediction_seconds', 'model_wait_prediction_source'):
-        if key in inference['configuration']:
-            raise ValueError(f'move inference.configuration.{key} to evidence.{key}')
-        if getattr(d.evidence, key) is not None:
-            inference['configuration'][key] = getattr(d.evidence, key)
     frozen = d.model_dump(mode='json')
     frozen['comparison']['arms'] = [dict(name=p['name'], override={
         f'{dimension}.{key}': value for dimension in GROUPS
@@ -292,8 +270,6 @@ def export_design(spec):
     raw['experiment_id'] = spec.experiment_id
     raw['workload'] = spec.workload.model_dump(mode='json')
     raw['inference'] = spec.inference.model_dump(mode='json')
-    for key in ('model_wait_prediction_seconds', 'model_wait_prediction_source'):
-        raw['inference']['configuration'].pop(key, None)
     raw['execution'] = {key: getattr(spec.execution, key) for key in DesignExecution.model_fields}
     raw['measurement'].update({key: getattr(spec.execution, key) for key in MEASUREMENT_FIELDS})
     raw['measurement']['validation'] = spec.validation.model_dump(mode='json')
@@ -327,8 +303,7 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
     if recipe == 'idle-reclaim':
         return [arm('resident', idle_reclaim__policy='off'),
                 arm('wait-tool', idle_reclaim__policy='wait', idle_reclaim__scope='tool'),
-                arm('wait-pair', idle_reclaim__policy='wait', idle_reclaim__scope='agent_and_tool'),
-                arm('release-cost-tool', idle_reclaim__policy='release_cost', idle_reclaim__scope='tool')]
+                arm('wait-pair', idle_reclaim__policy='wait', idle_reclaim__scope='agent_and_tool')]
     if recipe == 'shared-memory':
         return [arm('local', shared_memory__borrow='off', coordination__action_selection='reclaim_first'),
                 arm('hard-borrow', shared_memory__borrow='hard', coordination__action_selection='reclaim_first'),
@@ -405,9 +380,7 @@ def design_overview(spec):
         if p.runtime_control.adaptive:
             requirements.append('progress-enabled Toolbridge; relevant PSI and measured release history for CPU boost')
         if p.reclamation.value == 'snapshot_pause':
-            requirements.append('snapshot/restore qualification and independent model-wait evidence')
-        if p.coordinates_release:
-            requirements.append('independently measured idle-reclaim checkpoint and restore costs')
+            requirements.append('snapshot/restore qualification; actual outstanding model requests')
         if p.template_aware_placement:
             requirements.append('physical template-base sharing qualification')
         costs = resolved.resources.snapshot_residency_costs
@@ -452,9 +425,6 @@ def configure_design(raw, options):
         # Import explicit scalar parameters, not legacy preset/suite semantics.
         for dimension, fields in RESOURCE_FIELDS.items():
             raw['mechanisms'][dimension].update({k: r[k] for k in fields if k in r})
-        for key in ('model_wait_prediction_seconds', 'model_wait_prediction_source'):
-            if key in raw['inference']['configuration']:
-                raw['evidence'][key] = raw['inference']['configuration'].pop(key)
     raw = deepcopy(raw)
     env = raw['environment']
     resources = env['resources']
@@ -596,12 +566,10 @@ def configure_design(raw, options):
         raise ValueError('--fixed-methods requires --recipe')
     if recipe:
         if recipe == 'checkpoint' and not options.get('fixed_methods') and raw['mechanisms']['idle_reclaim']['policy'] == 'off':
-            raise ValueError('checkpoint comparison requires idle reclaim; set idle_reclaim.policy=wait or release_cost before selecting this recipe')
+            raise ValueError('checkpoint comparison requires idle reclaim; set idle_reclaim.policy=wait before selecting this recipe')
         if options.get('fixed_methods'):
             if conditions.get('prediction_source', 'kb') != 'kb':
                 raise ValueError('fixed methods require conditions.prediction_source=kb; command-table is diagnostic')
-            if recipe == 'idle-reclaim' and not evidence.get('idle_reclaim_costs'):
-                raise ValueError('fixed idle-reclaim requires independently measured evidence.idle_reclaim_costs')
             arms = fixed_recipe_arms(recipe, common=raw['mechanisms'], checkpoint_axis=options.get('checkpoint_axis'))
         else:
             arms = recipe_arms(recipe, checkpoint_axis=options.get('checkpoint_axis'))

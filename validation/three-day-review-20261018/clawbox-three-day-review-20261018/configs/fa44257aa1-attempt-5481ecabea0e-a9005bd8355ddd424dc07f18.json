@@ -1,0 +1,333 @@
+{
+  "id": "fa44257aa1-attempt-5481ecabea0e-a9005bd8355ddd424dc07f18",
+  "run_path": "/home/weitianc/clawbox-six-dim-20261016-validation/verification/results/qualification-9375b169cd11",
+  "run_id": "qualification-9375b169cd11",
+  "arm_id": "a9005bd8355ddd424dc07f18",
+  "attempt_id": "attempt-5481ecabea0e",
+  "effective_arm": {
+    "agent": {
+      "driver": "openclaw"
+    },
+    "arm_id": "a9005bd8355ddd424dc07f18",
+    "case": {
+      "base_commit": null,
+      "case_id": "marker",
+      "metadata": {},
+      "prompt": "Create /workspace/result.txt containing complete.",
+      "replay_trace_reference": "/home/weitianc/clawbox-six-dim-20261016-validation/examples/traces/smoke.jsonl",
+      "repository": null,
+      "sandbox": null,
+      "snapshot_reuse_probability": null,
+      "source": "recorded_trace",
+      "source_reference": "/home/weitianc/clawbox-six-dim-20261016-validation/examples/traces/smoke.jsonl",
+      "validation": null
+    },
+    "concurrency": 1,
+    "execution": {
+      "arm_timeout_seconds": 300,
+      "arrival_schedule": "burst",
+      "command_timeout_seconds": 60,
+      "concurrency_levels": [
+        1
+      ],
+      "memory_sample_interval_seconds": 0.2,
+      "placement_cpu_overcommit": 8.0,
+      "placement_policy": "round_robin",
+      "random_seed": 0,
+      "randomized_order": false,
+      "session_compute_nodes": [],
+      "stabilization_seconds": 1.0,
+      "stagger_interval_seconds": 0.0,
+      "template_balance_slack": 0.1
+    },
+    "inference": {
+      "backend": "replay",
+      "configuration": {
+        "max_model_steps": 1,
+        "model": "example-model",
+        "time_scale": 1.0
+      }
+    },
+    "policy": {
+      "admission": "off",
+      "cpu_release_boost": false,
+      "deployment": "managed",
+      "eviction": "none",
+      "execution_overrides": {
+        "placement_cpu_overcommit": 8.0,
+        "placement_policy": "round_robin",
+        "session_compute_nodes": [],
+        "template_balance_slack": 0.1
+      },
+      "idle_release_ranking": false,
+      "mechanisms": {
+        "admission": {
+          "admission_margin_mib": 256,
+          "lifecycle_admission": "configured-capacity",
+          "non_command_tool_memory_mib": null,
+          "prediction_mode": "runtime",
+          "prediction_reservation_scale": 1.0,
+          "startup_headroom_mib": 256,
+          "static_tool_memory_mib": null,
+          "tool": "off"
+        },
+        "checkpoint": {
+          "lazy_restore": true,
+          "mechanism": "incremental-cow",
+          "pool_transfer_concurrency": 1,
+          "pool_transfer_timeout_seconds": 120.0,
+          "residency": "lru",
+          "storage": "disk"
+        },
+        "idle_reclaim": {
+          "checkpoint_restore_headroom_mib": 1024,
+          "policy": "off",
+          "restore": "reactive",
+          "scope": "tool"
+        },
+        "placement": {
+          "placement_cpu_overcommit": 8.0,
+          "policy": "round_robin",
+          "session_compute_nodes": [],
+          "template_affinity": false,
+          "template_balance_slack": 0.1,
+          "template_base_sharing": "disabled"
+        },
+        "runtime": {
+          "agentcgroup_event_threshold": 1,
+          "agentcgroup_poll_interval_seconds": 0.5,
+          "agentcgroup_pressure_ratio": 0.85,
+          "agentcgroup_protection_window_seconds": 1.0,
+          "agentcgroup_source": null,
+          "backend": "agentcgroup",
+          "cpu_release_boost": false,
+          "memory_protection": false,
+          "pressure_control": {
+            "action_window_seconds": 2.0,
+            "amortization_factor": 2.0,
+            "boost_cpu_weight": 200,
+            "cooldown_seconds": 10.0,
+            "exit_hysteresis_seconds": 1.0,
+            "max_boosted_vms": 1,
+            "min_release_mib": 64,
+            "protection_budget_mib": 256,
+            "psi_ratio": 0.1,
+            "release_history_samples": 3
+          },
+          "proactive_cache_reclaim": false
+        },
+        "shared_memory": {
+          "action_selection": "reclaim_first",
+          "borrow": "off",
+          "borrow_cooldown_seconds": 5.0,
+          "return_cooldown_seconds": 5.0
+        }
+      },
+      "memory_protection": false,
+      "name": "agentcgroup",
+      "reclamation": "resident",
+      "resource_overrides": {
+        "admission_margin_mib": 256,
+        "agentcgroup_event_threshold": 1,
+        "agentcgroup_poll_interval_seconds": 0.5,
+        "agentcgroup_pressure_ratio": 0.85,
+        "agentcgroup_protection_window_seconds": 1.0,
+        "agentcgroup_source": null,
+        "borrow_cooldown_seconds": 5.0,
+        "checkpoint_restore_headroom_mib": 1024,
+        "cold_snapshot_root": "/data/clawbox-cold",
+        "compute_nodes": [
+          {
+            "cpus": "0-79",
+            "high_watermark_mib": 32768,
+            "low_watermark_mib": 28672,
+            "memory_capacity_mib": 36864,
+            "node_id": "node0",
+            "numa_node": 0
+          },
+          {
+            "cpus": "80-159",
+            "high_watermark_mib": 32768,
+            "low_watermark_mib": 28672,
+            "memory_capacity_mib": 36864,
+            "node_id": "node1",
+            "numa_node": 1
+          }
+        ],
+        "emergency_free_memory_mib": 1024,
+        "idle_reclaim_costs": null,
+        "lazy_restore": true,
+        "lifecycle_admission": "configured-capacity",
+        "local_memory_capacity_mib": 73728,
+        "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-six-dimension-validation",
+        "local_memory_high_watermark_mib": 65536,
+        "local_memory_low_watermark_mib": 57344,
+        "local_numa_node": null,
+        "memory_action_costs": null,
+        "memory_scheduling": "local_only",
+        "non_command_tool_memory_mib": null,
+        "observe_predictions": false,
+        "physical_live_limit_mib": 139264,
+        "pool_memory_budget_mib": 65536,
+        "pool_transfer_concurrency": 1,
+        "pool_transfer_timeout_seconds": 120.0,
+        "prediction_artifact": null,
+        "prediction_mode": "runtime",
+        "prediction_reservation_scale": 1.0,
+        "pressure_control": {
+          "action_window_seconds": 2.0,
+          "amortization_factor": 2.0,
+          "boost_cpu_weight": 200,
+          "cooldown_seconds": 10.0,
+          "exit_hysteresis_seconds": 1.0,
+          "max_boosted_vms": 1,
+          "min_release_mib": 64,
+          "protection_budget_mib": 256,
+          "psi_ratio": 0.1,
+          "release_history_samples": 3
+        },
+        "proactive_cache_reclaim": false,
+        "return_cooldown_seconds": 5.0,
+        "shared_memory_borrow_limit_mib": null,
+        "snapshot_destination": "cold",
+        "snapshot_mechanism": "incremental-cow",
+        "snapshot_residency_costs": null,
+        "snapshot_storage": "tiered",
+        "startup_headroom_mib": 256,
+        "static_tool_memory_mib": null,
+        "target_node": "193.124.7.2",
+        "template_base_sharing": "disabled",
+        "warm_memory_capacity_mib": 0,
+        "warm_numa_node": 2,
+        "warm_snapshot_root": "/mnt/clawbox-pool"
+      },
+      "restore": "none",
+      "runtime_control": "agentcgroup_legacy",
+      "runtime_snapshot": false,
+      "snapshot_aware_residency": false,
+      "template_aware_placement": false
+    },
+    "repetition": 0,
+    "resources": {
+      "admission_margin_mib": 256,
+      "agentcgroup_event_threshold": 1,
+      "agentcgroup_poll_interval_seconds": 0.5,
+      "agentcgroup_pressure_ratio": 0.85,
+      "agentcgroup_protection_window_seconds": 1.0,
+      "agentcgroup_source": null,
+      "borrow_cooldown_seconds": 5.0,
+      "checkpoint_restore_headroom_mib": 1024,
+      "cold_snapshot_root": "/data/clawbox-cold",
+      "compute_nodes": [
+        {
+          "cpus": "0-79",
+          "high_watermark_mib": 32768,
+          "low_watermark_mib": 28672,
+          "memory_capacity_mib": 36864,
+          "node_id": "node0",
+          "numa_node": 0
+        },
+        {
+          "cpus": "80-159",
+          "high_watermark_mib": 32768,
+          "low_watermark_mib": 28672,
+          "memory_capacity_mib": 36864,
+          "node_id": "node1",
+          "numa_node": 1
+        }
+      ],
+      "emergency_free_memory_mib": 1024,
+      "idle_reclaim_costs": null,
+      "lazy_restore": true,
+      "lifecycle_admission": "configured-capacity",
+      "local_memory_capacity_mib": 73728,
+      "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-six-dimension-validation",
+      "local_memory_high_watermark_mib": 65536,
+      "local_memory_low_watermark_mib": 57344,
+      "local_numa_node": null,
+      "memory_action_costs": null,
+      "memory_scheduling": "local_only",
+      "non_command_tool_memory_mib": null,
+      "observe_predictions": false,
+      "physical_live_limit_mib": 139264,
+      "pool_memory_budget_mib": 65536,
+      "pool_transfer_concurrency": 1,
+      "pool_transfer_timeout_seconds": 120.0,
+      "prediction_artifact": null,
+      "prediction_mode": "runtime",
+      "prediction_reservation_scale": 1.0,
+      "pressure_control": {
+        "action_window_seconds": 2.0,
+        "amortization_factor": 2.0,
+        "boost_cpu_weight": 200,
+        "cooldown_seconds": 10.0,
+        "exit_hysteresis_seconds": 1.0,
+        "max_boosted_vms": 1,
+        "min_release_mib": 64,
+        "protection_budget_mib": 256,
+        "psi_ratio": 0.1,
+        "release_history_samples": 3
+      },
+      "proactive_cache_reclaim": false,
+      "return_cooldown_seconds": 5.0,
+      "shared_memory_borrow_limit_mib": null,
+      "snapshot_destination": "cold",
+      "snapshot_mechanism": "incremental-cow",
+      "snapshot_residency_costs": null,
+      "snapshot_storage": "tiered",
+      "startup_headroom_mib": 256,
+      "static_tool_memory_mib": null,
+      "target_node": "193.124.7.2",
+      "template_base_sharing": "disabled",
+      "warm_memory_capacity_mib": 0,
+      "warm_numa_node": 2,
+      "warm_snapshot_root": "/mnt/clawbox-pool"
+    },
+    "runtime": {
+      "allow_internet_access": true,
+      "architecture": "arm64",
+      "image_digest": "sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "memory_mib": 2048,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "template_alias": null,
+      "template_id": "tpl-bba239bc4d324efe8e4a7a22",
+      "vcpu": 2,
+      "workspace": "/workspace"
+    },
+    "sandbox": {
+      "allow_internet_access": true,
+      "architecture": "arm64",
+      "image_digest": "sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98",
+      "memory_mib": 4096,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/lab-sandbox@sha256:6374b8002dedff5a8214c1d24233d269a438f2ad1959baf8a7a78ea4a475df98",
+      "template_alias": null,
+      "template_id": "tpl-2fc904576f874d90b63452b8",
+      "vcpu": 2,
+      "workspace": "/workspace"
+    },
+    "session_assignment": "single_case",
+    "session_cases": [
+      {
+        "base_commit": null,
+        "case_id": "marker",
+        "metadata": {},
+        "prompt": "Create /workspace/result.txt containing complete.",
+        "replay_trace_reference": "/home/weitianc/clawbox-six-dim-20261016-validation/examples/traces/smoke.jsonl",
+        "repository": null,
+        "sandbox": null,
+        "snapshot_reuse_probability": null,
+        "source": "recorded_trace",
+        "source_reference": "/home/weitianc/clawbox-six-dim-20261016-validation/examples/traces/smoke.jsonl",
+        "validation": null
+      }
+    ],
+    "spec_digest": "36eb01e3f9949faffb0870f9ed498b92b4ef247ea60357b5e123138259e2478b",
+    "validation": {
+      "command": "true"
+    }
+  },
+  "frozen_spec_file": "configs/fa44257aa1-experiment.yaml",
+  "effective_config_source": "/home/weitianc/clawbox-six-dim-20261016-validation/verification/results/qualification-9375b169cd11/arms/a9005bd8355ddd424dc07f18.json"
+}

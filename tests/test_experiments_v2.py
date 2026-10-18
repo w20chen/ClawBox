@@ -143,7 +143,7 @@ def test_watermark_controller_drains_to_low_after_crossing_high() -> None:
     usage[:] = [28 * gib, 0, 28 * gib]
     assert controller._sample_once(0.5, latched) is False
     assert coordinator.new_sessions_blocked is False
-    assert [row["event"] for row in events.rows] == [
+    assert [row["event"] for row in events.rows if row["event"] != "memory_scheduling_decision"] == [
         "local_high_watermark_crossed", "local_low_watermark_reached",
     ]
 
@@ -290,8 +290,6 @@ def raw_spec() -> dict:
         },
         "agent": {"driver": "openclaw"},
         "inference": {"backend": "replay", "configuration": {
-            "model_wait_prediction_seconds": 1.0,
-            "model_wait_prediction_source": "separate-recording-fixed",
         }},
         "runtime": {"template_alias": "runtime-arm64", "vcpu": 1, "memory_mib": 2048},
         "sandbox": {"template_alias": "task-arm64", "vcpu": 2, "memory_mib": 4096},
@@ -636,8 +634,6 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
     raw["inference"] = {
         "backend": "replay", "configuration": {
             "model": "recorded-model",
-            "model_wait_prediction_seconds": 1,
-            "model_wait_prediction_source": "independent-test-recording",
         },
     }
     path = tmp_path / "openclaw.yaml"
@@ -659,7 +655,7 @@ def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
 
 def test_baseline_catalog_and_independent_policy_names():
     from clawbox.experiments.baselines import ACTIVE_BASELINES, ensure_supported_experiment
-    assert len(ACTIVE_BASELINES) == 9
+    assert len(ACTIVE_BASELINES) == 7
     assert 'no_control' not in ACTIVE_BASELINES
     assert all(BASELINES[n].implementation_status == 'implemented' for n in ACTIVE_BASELINES)
     normalized = [
@@ -668,8 +664,8 @@ def test_baseline_catalog_and_independent_policy_names():
     ]
     assert len({json.dumps(policy, sort_keys=True) for policy in normalized}) == len(normalized)
     wait_snapshot = BASELINES['predicted-wait-snapshot'].as_policy()
-    assert wait_snapshot.coordinates_release
-    assert not wait_snapshot.runtime_snapshot
+    assert not wait_snapshot.coordinates_release
+    assert wait_snapshot.runtime_snapshot
     groups = {
         group: {name for name, baseline in BASELINES.items()
                 if group in baseline.comparison_groups}
@@ -759,29 +755,16 @@ def test_failed_tool_restore_does_not_reserve_growth():
     assert calls == ["active", "restore"]
 
 
-def test_release_cost_baseline_requires_complete_independent_evidence():
+@pytest.mark.parametrize("field,value", [
+    ("model_wait_prediction_seconds", 1),
+    ("model_wait_prediction_source", "independent-recording"),
+    ("oracle_model_wait_seconds", 1),
+])
+def test_llm_duration_settings_are_rejected_even_for_resident_arms(field, value):
     raw = raw_spec()
-    raw['policies'] = [
-        resolve_baseline('predicted-wait-snapshot').as_policy().model_dump(mode='json')
-    ]
-    raw['resources']['idle_reclaim_costs'] = {
-        'provenance': 'independent-unit-test',
-        'warm_checkpoint_seconds_per_gib': 1,
-        'warm_restore_seconds_per_gib': 1,
-    }
-    with pytest.raises(ValueError, match='cold checkpoint and restore costs'):
+    raw['inference']['configuration'][field] = value
+    with pytest.raises(ValueError, match='prediction/oracle policy is unsupported'):
         ExperimentSpec.model_validate(raw)
-    raw['resources']['idle_reclaim_costs'].update(
-        cold_checkpoint_seconds_per_gib=2,
-        cold_restore_seconds_per_gib=2,
-    )
-    raw['inference']['configuration']['model_wait_prediction_source'] = 'trace_median'
-    with pytest.raises(ValueError, match='independent model-wait prediction'):
-        ExperimentSpec.model_validate(raw)
-    raw['inference']['configuration'][
-        'model_wait_prediction_source'
-    ] = 'independent-unit-test'
-    assert ExperimentSpec.model_validate(raw).policies[0].coordinates_release
 
 
 def test_unsupported_oracle_is_rejected_at_schema_boundary() -> None:

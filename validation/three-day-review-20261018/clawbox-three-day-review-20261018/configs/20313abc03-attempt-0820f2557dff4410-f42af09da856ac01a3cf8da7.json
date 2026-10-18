@@ -1,0 +1,10 @@
+{
+  "id": "20313abc03-attempt-0820f2557dff4410-f42af09da856ac01a3cf8da7",
+  "run_path": "/home/weitianc/clawbox-high-density-20261017/results/pilot-admission-c16-v2",
+  "run_id": "pilot-admission-c16-v2",
+  "arm_id": "f42af09da856ac01a3cf8da7",
+  "attempt_id": "attempt-0820f2557dff4410",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/20313abc03-experiment.yaml",
+  "effective_config_source": null
+}

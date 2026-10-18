@@ -1,0 +1,10 @@
+{
+  "id": "27bf90e0c1-attempt-7c984ef610524a4a-bd627ce0a2030145035021f9",
+  "run_path": "/home/weitianc/clawbox-c1280-20261017/results/real-trace-p0-c320-01",
+  "run_id": "real-trace-p0-c320-01",
+  "arm_id": "bd627ce0a2030145035021f9",
+  "attempt_id": "attempt-7c984ef610524a4a",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/27bf90e0c1-experiment.yaml",
+  "effective_config_source": null
+}

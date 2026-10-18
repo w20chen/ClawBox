@@ -22,7 +22,6 @@ def base():
                 workload=raw['workload'], inference=dict(backend='replay', configuration={'model': 'test'}),
                 mechanisms=Mechanisms().model_dump(mode='json'),
                 evidence=dict(prediction_artifact='/separate-training/prediction.json',
-                    model_wait_prediction_seconds=30, model_wait_prediction_source='separate-training',
                     snapshot_residency_costs=dict(provenance='unit-test', warm_restore_seconds_per_gib=1, cold_restore_seconds_per_gib=2),
                     idle_reclaim_costs=dict(provenance='unit-test', warm_checkpoint_seconds_per_gib=1,
                         warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
@@ -55,7 +54,7 @@ def design(recipe='custom', axis=None):
 
 @pytest.mark.parametrize('recipe,axis,count', [
     ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
-    ('idle-reclaim', None, 4), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
+    ('idle-reclaim', None, 3), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
     ('checkpoint', 'encoding', 2), ('checkpoint', 'storage', 3),
     ('checkpoint', 'residency', 2), ('integrated', None, 3), ('custom', None, 1),
 ])
@@ -110,6 +109,18 @@ def test_runtime_controls_do_not_enable_reclaim():
     assert not p.coordinates_release
     assert p.reclamation.value == 'resident'
     assert p.runtime_control.value == 'explicit'
+
+
+def test_wait_checkpoint_does_not_require_llm_duration_evidence():
+    raw = base()
+    raw['mechanisms']['idle_reclaim'].update(policy='wait', scope='agent_and_tool')
+    spec = ExperimentSpec.model_validate(raw)
+    assert spec.policies[0].runtime_snapshot
+    assert spec.inference.configuration.get('model_wait_prediction_seconds') is None
+
+    raw['mechanisms']['idle_reclaim'].update(policy='release_cost', scope='tool')
+    with pytest.raises(ValueError, match="Input should be 'off' or 'wait'"):
+        ExperimentSpec.model_validate(raw)
 
 
 def test_resident_arm_keeps_common_physical_shared_pool_capacity():
@@ -298,11 +309,11 @@ def test_removed_controller_is_not_public_or_accepted(capsys):
     assert 'agentcgroup' not in capsys.readouterr().out.lower()
 
 
-def test_reclaim_ranking_does_not_enable_cpu_or_memory_controls():
+def test_pair_reclaim_does_not_enable_cpu_or_memory_controls():
     p = design('idle-reclaim').policies[-1]
-    assert p.coordinates_release
+    assert not p.coordinates_release
     assert not p.memory_protection and not p.cpu_release_boost
-    assert not p.runtime_snapshot
+    assert p.runtime_snapshot
 
 
 def test_pressure_borrow_without_snapshots_is_supported():
@@ -349,7 +360,7 @@ def test_disk_snapshots_keep_live_borrow_pool_but_target_cold():
 @pytest.mark.parametrize('patch,match', [
     ({'runtime.backend':'agentcgroup', 'runtime.cpu_release_boost': True}, 'unknown mechanism'),
     ({'placement.template_affinity':True}, 'load_aware'),
-    ({'idle_reclaim.policy':'release_cost', 'idle_reclaim.scope':'agent_and_tool'}, 'Tool eviction only'),
+    ({'idle_reclaim.policy':'release_cost', 'idle_reclaim.scope':'agent_and_tool'}, "Input should be 'off' or 'wait'"),
     ({'coordination.action_selection':'measured_cost'}, 'measured-cost'),
     ({'idle_reclaim.policy':'wait', 'checkpoint.residency':'value'}, 'value residency'),
     ({'checkpoint.lazy_restore':False}, 'unknown mechanism'),
@@ -487,7 +498,7 @@ def test_fixed_methods_reset_inherited_switches_and_roundtrip(recipe, axis):
                              proactive_memory_reclaim=True)
     common['placement'].update(policy='explicit', template_affinity=True,
                                session_compute_nodes=['unrelated'])
-    common['idle_reclaim'].update(policy='release_cost', scope='agent_and_tool')
+    common['idle_reclaim'].update(policy='wait', scope='agent_and_tool')
     common['shared_memory']['borrow'] = 'pressure'
     common['coordination']['action_selection'] = 'measured_cost'
     common['checkpoint'].update(storage='warm-only', residency='value')
@@ -525,7 +536,6 @@ def test_fixed_configure_preconditions(tmp_path):
         configure_experiment(path, fixed_methods=True)
     raw['evidence']['idle_reclaim_costs'] = None
     path.write_text(yaml.safe_dump(raw), encoding='utf-8')
-    with pytest.raises(ValueError, match='idle_reclaim_costs'):
-        configure_experiment(path, recipe='idle-reclaim', fixed_methods=True)
+    assert len(configure_experiment(path, recipe='idle-reclaim', fixed_methods=True).policies) == 3
     with pytest.raises(ValueError, match='single-family'):
         configure_experiment(path, recipe='integrated', fixed_methods=True)

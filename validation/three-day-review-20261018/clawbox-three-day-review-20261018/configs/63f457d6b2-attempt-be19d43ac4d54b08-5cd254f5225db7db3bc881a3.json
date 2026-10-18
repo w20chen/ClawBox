@@ -1,0 +1,10 @@
+{
+  "id": "63f457d6b2-attempt-be19d43ac4d54b08-5cd254f5225db7db3bc881a3",
+  "run_path": "/home/weitianc/clawbox-c1280-20261017/results/c320-admission-ablation-01",
+  "run_id": "c320-admission-ablation-01",
+  "arm_id": "5cd254f5225db7db3bc881a3",
+  "attempt_id": "attempt-be19d43ac4d54b08",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/63f457d6b2-experiment.yaml",
+  "effective_config_source": null
+}

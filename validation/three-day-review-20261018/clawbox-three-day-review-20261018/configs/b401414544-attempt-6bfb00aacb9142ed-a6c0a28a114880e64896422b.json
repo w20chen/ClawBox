@@ -1,0 +1,10 @@
+{
+  "id": "b401414544-attempt-6bfb00aacb9142ed-a6c0a28a114880e64896422b",
+  "run_path": "/home/weitianc/clawbox-high-density-20261017/results/final-primary-c320-r2",
+  "run_id": "final-primary-c320-r2",
+  "arm_id": "a6c0a28a114880e64896422b",
+  "attempt_id": "attempt-6bfb00aacb9142ed",
+  "effective_arm": null,
+  "frozen_spec_file": "configs/b401414544-experiment.yaml",
+  "effective_config_source": null
+}

@@ -1,0 +1,66 @@
+........................................................................ [  8%]
+..........sss........................................................... [ 16%]
+........................................................................ [ 24%]
+........................................................................ [ 32%]
+...................................................................F...s [ 40%]
+sssssss..............................................................s.. [ 48%]
+........................................................................ [ 57%]
+........................................................................ [ 65%]
+........................................................................ [ 73%]
+.......................................................................s [ 81%]
+ssssss......................................ssss........................ [ 89%]
+........................................................................ [ 97%]
+.F..F...F.......F.                                                       [100%]
+=================================== FAILURES ===================================
+______________ test_reliable_pmu_reaches_native_clawtune_snapshot ______________
+tests/test_kb_flush.py:337: in test_reliable_pmu_reaches_native_clawtune_snapshot
+    assert snapshot["schema"] == "runtime_tool_resource_kb_v4"
+E   AssertionError: assert 'runtime_tool_resource_kb_v3' == 'runtime_tool_resource_kb_v4'
+E     
+E     - runtime_tool_resource_kb_v4
+E     ?                           ^
+E     + runtime_tool_resource_kb_v3
+E     ?                           ^
+________ test_native_api_publishes_atomic_pair_and_replays_idempotently ________
+tests/test_tuning_server.py:90: in test_native_api_publishes_atomic_pair_and_replays_idempotently
+    assert snapshot["clause_snapshot"]["schema"] == "runtime_clause_resource_kb_v7"
+E   AssertionError: assert 'runtime_clau...esource_kb_v6' == 'runtime_clau...esource_kb_v7'
+E     
+E     - runtime_clause_resource_kb_v7
+E     ?                             ^
+E     + runtime_clause_resource_kb_v6
+E     ?                             ^
+__________________ test_post_observations_then_read_snapshot ___________________
+tests/test_tuning_server.py:185: in test_post_observations_then_read_snapshot
+    assert claw_data["schema"] == "runtime_tool_resource_kb_v4"
+E   AssertionError: assert 'runtime_tool_resource_kb_v3' == 'runtime_tool_resource_kb_v4'
+E     
+E     - runtime_tool_resource_kb_v4
+E     ?                           ^
+E     + runtime_tool_resource_kb_v3
+E     ?                           ^
+____________ test_init_upgrades_legacy_native_pair_to_three_kb_set _____________
+tests/test_tuning_store.py:51: in test_init_upgrades_legacy_native_pair_to_three_kb_set
+    assert json.loads(row["lattice_snapshot"])["schema"] == "clause_lattice_kb_v4"
+E   AssertionError: assert 'clause_lattice_kb_v3' == 'clause_lattice_kb_v4'
+E     
+E     - clause_lattice_kb_v4
+E     ?                    ^
+E     + clause_lattice_kb_v3
+E     ?                    ^
+____________________ test_clawtune_snapshot_loadable_shape _____________________
+tests/test_tuning_store.py:300: in test_clawtune_snapshot_loadable_shape
+    assert clawtune["schema"] == "runtime_tool_resource_kb_v4"
+E   AssertionError: assert 'runtime_tool_resource_kb_v3' == 'runtime_tool_resource_kb_v4'
+E     
+E     - runtime_tool_resource_kb_v4
+E     ?                           ^
+E     + runtime_tool_resource_kb_v3
+E     ?                           ^
+=========================== short test summary info ============================
+FAILED tests/test_kb_flush.py::test_reliable_pmu_reaches_native_clawtune_snapshot
+FAILED tests/test_tuning_server.py::test_native_api_publishes_atomic_pair_and_replays_idempotently
+FAILED tests/test_tuning_server.py::test_post_observations_then_read_snapshot
+FAILED tests/test_tuning_store.py::test_init_upgrades_legacy_native_pair_to_three_kb_set
+FAILED tests/test_tuning_store.py::test_clawtune_snapshot_loadable_shape - As...
+5 failed, 854 passed, 23 skipped in 41.06s
