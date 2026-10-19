@@ -4,3 +4,4 @@
 *.go text eol=lf
 Dockerfile* text eol=lf
 deploy/cubesandbox/*.patch whitespace=-blank-at-eol,-space-before-tab
+examples/traces/llc-shared-chase-*.jsonl -text

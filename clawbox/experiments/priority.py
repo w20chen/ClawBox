@@ -37,13 +37,15 @@ def _format_cpu_list(cpus) -> str:
 
 
 def physical_cluster_groups(cpus: str, *, min_physical_cores: int,
+                            include_smt: bool = False,
                             sysfs: Path = Path('/sys/devices/system/cpu')) -> tuple[str, ...]:
-    """Return complete Kunpeng cluster masks with one CPU per physical core.
+    """Return complete Kunpeng cluster masks for the permitted CPU pool.
 
     Linux reports the outer L3 sharing set in cache ``shared_cpu_list`` and
     the scheduling/LLC cluster in ``cluster_cpus_list``.  A candidate retains
-    the complete cluster, removes duplicate SMT siblings, and is accepted only
-    when the permitted CPU pool covers every physical core in that cluster.
+    the complete cluster and is accepted only when the permitted CPU pool
+    covers every physical core in it. By default the mask uses one permitted
+    representative per core; ``include_smt`` retains all permitted siblings.
     """
     from .topology import parse_cpu_list
     allowed = parse_cpu_list(cpus)
@@ -85,6 +87,7 @@ def physical_cluster_groups(cpus: str, *, min_physical_cores: int,
             )
         physical_cores = set()
         representatives = []
+        logical_members = []
         complete = True
         for member in cluster:
             try:
@@ -103,8 +106,9 @@ def physical_cluster_groups(cpus: str, *, min_physical_cores: int,
                 complete = False
                 break
             representatives.append(min(permitted))
+            logical_members.extend(sorted(permitted))
         if complete and len(representatives) >= min_physical_cores:
-            groups.append(_format_cpu_list(representatives))
+            groups.append(_format_cpu_list(logical_members if include_smt else representatives))
     if not groups:
         raise RuntimeError(
             'no complete LLC cluster with at least '
@@ -156,6 +160,7 @@ class PriorityDomain:
                  topology_pressure_samples: int = 2,
                  topology_group_max_active: int = 2,
                  topology_min_duration_seconds: float = 1.0,
+                 topology_include_smt: bool = False,
                  emit=None, proc_stat: Path = Path('/proc/stat')):
         self.parent = parent.resolve()
         self.legacy = legacy
@@ -167,10 +172,11 @@ class PriorityDomain:
         self.topology_pressure_samples = topology_pressure_samples
         self.topology_group_max_active = topology_group_max_active
         self.topology_min_duration_seconds = topology_min_duration_seconds
+        self.topology_include_smt = topology_include_smt
         self.emit = emit or (lambda event: None)
         self._topology_lock = RLock()
         self._group_load: dict[str, int] = {}
-        self._groups_by_pool: dict[tuple[str, int], tuple[str, ...]] = {}
+        self._groups_by_pool: dict[tuple[str, int, bool], tuple[str, ...]] = {}
         self._preferred_groups: dict[tuple[int, str], str] = {}
         self._vcpu_threads: dict[tuple[int, str], tuple[tuple[int, str], ...]] = {}
         self._full_masks: dict[tuple[int, str], str] = {}
@@ -308,10 +314,15 @@ class PriorityDomain:
         cpus, node = self.placements.get(index, (None, None))
         if cpus is None:
             raise RuntimeError(f'C2 has no selected-NUMA CPU mask for session {index}')
-        pool_key = cpus, vcpus
+        pool_key = cpus, vcpus, self.topology_include_smt
         groups = self._groups_by_pool.get(pool_key)
         if groups is None:
-            groups = physical_cluster_groups(cpus, min_physical_cores=vcpus)
+            if self.topology_include_smt:
+                groups = physical_cluster_groups(
+                    cpus, min_physical_cores=vcpus, include_smt=True,
+                )
+            else:
+                groups = physical_cluster_groups(cpus, min_physical_cores=vcpus)
             self._groups_by_pool[pool_key] = groups
         if len(groups) < 2:
             raise RuntimeError(
@@ -381,7 +392,9 @@ class PriorityDomain:
             'event': 'tool_call_cpu_placement', 'action': 'assign',
             'execution_id': execution_id, 'session_index': index,
             'compute_numa': node, 'selected_cpus': group, 'full_cpus': cpus,
-            'topology_level': 'complete_llc_cluster_physical_cores',
+            'topology_level': ('complete_llc_cluster_logical_cpus'
+                               if self.topology_include_smt
+                               else 'complete_llc_cluster_physical_cores'),
             'candidate_group_cpu_utilization': measured_load,
             'group_active_assignments': self._group_load[group],
             'group_max_active': self.topology_group_max_active,
@@ -597,6 +610,7 @@ class PriorityDomain:
             'pressure_samples': self.topology_pressure_samples,
             'group_max_active': self.topology_group_max_active,
             'minimum_duration_seconds': self.topology_min_duration_seconds,
+            'include_smt': self.topology_include_smt,
             'assignments': self._total_call_assignments,
             'capacity_bypasses': self._total_capacity_bypasses,
             'short_call_bypasses': self._total_short_bypasses,

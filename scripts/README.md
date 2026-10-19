@@ -1,8 +1,7 @@
 # Scripts
 
 The supported interface is `clawbox experiment`. Start with the
-[self-service workflow](../docs/self-service.md); use the
-[command reference](../docs/guide.md) for options and the
+[experiment guide](../docs/guide.md) for operation and options, and the
 [installation guide](../docs/installation.md) for provisioning.
 
 `bash scripts/clawbox` loads `~/.config/clawbox/machine.env`, selects the project's

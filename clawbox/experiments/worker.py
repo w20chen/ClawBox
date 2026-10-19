@@ -1529,6 +1529,7 @@ class ExperimentWorker:
                 topology_pressure_samples=arm.execution.tool_call_cpu_pressure_samples,
                 topology_group_max_active=arm.execution.tool_call_cpu_group_max_active,
                 topology_min_duration_seconds=arm.execution.tool_call_cpu_min_duration_seconds,
+                topology_include_smt=arm.execution.tool_call_cpu_include_smt,
                 emit=events.write,
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)

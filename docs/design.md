@@ -1,218 +1,130 @@
-# Execution and measurement
+# Execution and measurement model
 
-This page describes what the supported experiment measures and the limits
-of its single-host NUMA model. For commands and fields, see the
-[configuration reference](guide.md); for host setup, see the
-[step-by-step guide](self-service.md).
+This page defines the semantics needed to interpret an experiment. See the
+[experiment guide](guide.md) for commands and configuration.
 
-## Agent and tool VMs
+## Session execution
 
-Each session has an agent VM running OpenClaw and a tool VM containing
-the mutable workspace and tool processes. The experiment worker controls
-admission and the VM lifecycle through standalone CubeSandbox. It runs
-tool commands over SSH. For each managed command, it:
+Each session owns an agent VM and a tool VM. OpenClaw runs in the agent VM; the
+tool VM contains the mutable workspace and executes commands over SSH. Templates
+may repeat, but live VM state, trace position, ownership, and workspaces are not
+shared between sessions.
 
-1. If tool admission is enabled, selects a fixed host-memory reservation or a
-   frozen ClawTune P50 prediction calibrated to host growth.
-2. If tool admission is enabled, checks measured memory use, unrealized growth
-   claims, the candidate reservation, and the configured safety margin.
-3. Restores the tool VM if needed and resolves its current SSH endpoint.
-4. Verifies the endpoint and executes the command once.
-5. Collects the result and telemetry, then releases the reservation.
+For an admitted tool command, the worker:
 
-Runtime congestion control runs throughout the trial independently of admission.
-The [pressure/progress modes](pressure-control.md) use neutral per-VM cgroups and
-bounded controls driven by measured contention and release evidence. A separate
-demand ledger owns tool and lifecycle admission. Admission OFF removes
-tool gating while retaining the same runtime control, priorities, creation rules,
-NUMA placement and shared-pool accounting. Snapshot reclamation is independent.
-Both VM roles enter stable priority leaves before creation or restore allocates RAM.
-Controller state survives tool completion, model waits and VM replacement.
+1. Chooses a fixed reservation or a frozen ClawTune prediction when admission
+   is enabled.
+2. Checks measured memory, outstanding growth claims, the new reservation, and
+   safety margins.
+3. Restores the tool VM when necessary and resolves its current endpoint.
+4. Verifies identity, executes the command once, and collects telemetry.
+5. Releases the command reservation after completion.
 
-An execution ID links admission, SSH execution, completion, and
-measurements. A retry must not execute the same command twice. After
-restoration, CubeSandbox may assign a different endpoint, so the worker
-must resolve it again.
+An execution ID joins admission, SSH execution, tool progress, completion, and
+measurements. Restore may change the endpoint. Retries must not execute the same
+command twice.
 
-For heterogeneous rollout replay, every `workload.case` may override the
-global Tool `sandbox`. Session assignment selects the case first, then creates
-a distinct Runtime VM, Tool VM, workspace, trace stream, rollout/session ID,
-and ownership record. Templates may repeat, but live VM state is never shared
-between rollouts. This is workload simulation only: ClawBox does not implement
-an RL optimizer, policy update, GPU training, or another Agent runtime.
+## Capacity and admission
 
-## CPU performance counters
+These quantities are deliberately separate:
 
-The tool VM uses ClawTune's `perf_event_open` collector to measure
-cycles, instructions, last-level cache (LLC) read accesses, and LLC
-read misses for a command. Collection starts before the command is
-released to run. The profile is stored with the command's resource
-record. The agent and tool images use the same ClawTune collector
-source.
+- Configured VM memory is guest-visible capacity.
+- Host cgroup charge is observed physical consumption plus host overhead.
+- A prediction estimates command growth; it is not a limit.
+- An admission reservation represents growth not yet visible in measurements.
+- `memory.max` is an enforced cgroup limit, not an expected working set.
 
-Each active tool command uses one group of four counter descriptors.
-The per-VM limit is `TOOL_MAX_CONCURRENCY`; the experiment worker
-runs one such command per tool VM. A guest running ratio shows
-multiplexing visible inside the guest, but cannot rule out contention
-in the host's virtual PMU. Missing capabilities, unsupported events,
-or low counter running time leave the PMU result unavailable or
-degraded without changing the tool command's exit status.
+VM creation and restore reserve configured capacity until measurements reflect
+the growth. Tool reservations cover calibrated additional host growth and must
+not count resident pages again. Unknown predictions or missing samples remain
+unavailable; they are never treated as zero.
 
-On ARM64, the collector uses Linux last-level cache read events.
-Generic cache-miss events and HiSilicon `hisi_l3c` uncore events
-must not be reported as the command's LLC read misses. A profile is
-usable for PMU-based analysis only when its execution ID matches,
-all four events are supported, kernel coverage is present, and each
-counter ran for 100% of its enabled time. Missing or degraded profiles
-must not train PMU predictions; CPU and memory measurements can
-still be used. Inspect `pmu-profile-*.json` and its coverage fields
-on the target guest kernel before making an LLC claim. The sibling
-ClawTune repository defines the detailed PMU schema.
+Every compute domain enforces its LOCAL budget, while one atomic ledger covers
+shared-pool reservations. A VM using shared memory reserves its configured
+capacity so later guest growth remains covered. Snapshot reservations and live
+borrowing consume the same shared ledger.
 
-## Memory admission
+## Runtime pressure control
 
-Tool admission can be off, use a fixed host-memory reservation, or use a frozen
-per-command ClawTune P50 estimate calibrated to host memory growth. Runtime
-congestion control and snapshot reclamation are separate switches. See
-[supported policies](guide.md#supported-comparison-policies) for their CLI names.
+Runtime control is independent of tool admission and idle checkpointing. It
+samples the host VM cgroup, CPU pressure, command progress, and release history.
+Memory protection and CPU release boost act only when their configured evidence
+and contention conditions hold. They do not infer host release from guest command
+completion or from shared-memory residency.
 
-A reservation controls when work may start; it does not change the
-guest's configured RAM. Configured VM capacity, already resident
-memory, and extra command memory are different quantities.
-Admission must not count resident pages again as new allocation.
-All policies use the configured host available-memory safety floor.
-Only checkpointing policies reserve additional capacity for
-checkpoint and restore operations.
+CPU boost changes cgroup weight, not vCPU count or affinity. Memory protection
+affects host reclaim priority; it does not pin a guest process's working set.
+Missing required PSI interfaces fail qualification instead of silently disabling
+the mechanism. All controls are reset after completion, timeout, loss of pressure,
+or VM replacement.
 
-VM creation and restore reserve configured capacity conservatively until measured
-charges reflect that growth. A common startup margin is independent of the tool
-admission switch. Tool reservations cover calibrated host growth that is not yet
-visible in the stable VM cgroup; restoration of a VM's base is accounted separately
-from its subsequent execution growth. Every compute domain shares one atomic global
-ledger and also enforces its LOCAL budget. Shared capacity is usable only after a
-successful pool reservation and rebind. Lack of shared capacity leaves predicted
-work queued against LOCAL instead of granting nominal shared headroom.
+## Placement and NUMA
 
-ClawTune's guest environment increment and host cgroup growth are distinct targets.
-A frozen training artifact retains both the guest prediction and an explicit empirical
-host calibration. Unknown values are not zero; prediction is not a memory guarantee.
+A managed session assigns both VMs to one compute node. Placement may be
+round-robin, explicit, or load-aware. Load-aware placement combines measured CPU
+use, scheduling pressure when available, offered vCPU commitments, memory
+residency, and outstanding claims. It does not use memory bandwidth as an input.
 
-## Checkpointing and storage
+CPU lists restrict where vCPUs may run; they do not reserve cores or change the
+template vCPU quota. C2 may temporarily narrow an eligible tool call to one LLC
+cluster, but it restores the full selected-NUMA mask when the call ends or CPU
+pressure requires expansion.
 
-A checkpoint cannot interrupt an active tool command. While an agent
-waits for a model response, the worker can checkpoint its agent and
-tool VMs. The model gateway holds a pending response until the agent
-VM is restored. The tool VM may remain checkpointed until its next
-command. The worker coordinates response arrival, checkpointing, and
-restoration so a completed response does not trigger a late checkpoint.
+Changing `cpuset.mems` requests a new allocation policy and may migrate pages,
+but it does not prove complete migration. Physical residency comes from cgroup
+`memory.numa_stat`. Unattributed memory is counted conservatively for admission
+and only once in host totals.
 
-| Memory or storage location | Meaning |
+This is a single-host NUMA model. It uses the host's real distances and does not
+simulate a cross-host fabric, remote failures, or configurable link bandwidth.
+
+## Checkpointing and the shared pool
+
+Checkpointing never interrupts an active tool command. During a real model wait,
+the worker may checkpoint the tool VM or both VMs. A pending replay response is
+held until the agent VM is restored; the tool VM may remain checkpointed until
+the next command.
+
+| Location | Meaning |
 | --- | --- |
-| Compute-node memory | Running VM pages normally placed on the assigned NUMA node |
-| Shared-pool memory for running VMs | A running VM whose memory allocation is rebound to the shared NUMA node under pressure |
-| Shared-pool tmpfs | Checkpoint files held in memory on the shared NUMA node |
-| Disk | Checkpoint files on an SSD or other configured disk filesystem |
+| Compute-node memory | Running VM pages normally allocated on its assigned NUMA node |
+| Shared NUMA memory | Pages of a running VM temporarily rebound under pressure |
+| WARM tmpfs | In-memory checkpoint files allocated on the shared node |
+| COLD storage | Checkpoint files on the configured disk filesystem |
 
-While copying a VM from compute-node memory to the shared-pool tmpfs,
-both source RAM and destination pages consume capacity. An incremental
-checkpoint uses a base image and changed ranges; restore can fault
-pages in on demand, and writes use copy-on-write. A running VM may
-still reference its memory-backed checkpoint, which cannot be
-spilled until those references are released. Report the time until
-the VM is ready separately from the latency of its first tool
-command, which may include later page faults.
+During checkpoint copy, source RAM and destination pages coexist. WARM capacity
+is charged by actual allocated snapshot bytes after an initial conservative
+reservation. `warm-only` has no disk fallback. `tiered` may place a new snapshot
+on disk or spill an eligible WARM generation.
 
-In `tiered` storage, a checkpoint too large for the shared-pool
-tmpfs goes to disk, and eligible older checkpoints may spill there.
-A spill copies the full dependency chain before releasing its
-memory-backed copy. Disk restore measurements must distinguish
-device I/O from page-cache hits. `warm-only` storage has no disk
-fallback; a capacity failure must be reported as a failure.
-The selected `full-copy` or `incremental-cow` mechanism must match
-what the run actually used.
+Incremental CoW snapshots may reference an immutable template RAM base. A logical
+base reference is not proof of physical sharing. Template-aware placement is
+qualified only when two VMMs expose the same large file-backed mapping with
+supporting `Shared_Clean` and PSS evidence. When aggregating storage, deduplicate
+layer device/inode identities instead of summing every lineage's referenced
+bytes.
 
-An `incremental-cow` lineage may name the immutable Cube template RAM file as
-external layer zero. This is a dependency, not proof that two VMs physically
-share DRAM. `template_base_sharing: required` therefore gates template
-affinity on a qualification probe that finds the same large file-backed
-device/inode mapping in two VMMs and observes Linux `Shared_Clean`/PSS. When
-that probe is not requested or fails, cross-VM base savings are unsupported
-and are not inferred. WARM accounting charges only owned delta files; a COLD
-migration gives the destination an owned reference to the immutable external
-base: a hardlink when the base and COLD directory are on the same filesystem,
-otherwise a sparse copy. Its lineage uses destination-local names, so removing
-the original template pathname or another snapshot cannot break recovery.
-Private WARM layers are copied before releasing their WARM names. This reuses
-base data without a shared cache or a separate garbage-collection registry.
-Cross-filesystem transfers still copy the base for each lineage; this path
-does not deduplicate separate files by content.
+## PMU measurements
 
-`transferred_bytes` reports bytes copied, excluding hardlinked base data.
-`reused_base_allocated_bytes` reports the base allocation reused at migration.
-The metadata reader exposes `layer_allocations` with device/inode identities;
-deduplicate these identities when summing physical RAM-snapshot storage across
-lineages. Per-lineage `allocated_bytes` is the referenced allocation and must
-not be summed as exclusive ownership when bases are shared.
+The Tool VM's ClawTune collector records cycles, instructions, LLC read accesses,
+and LLC read misses for each command. Collection starts before execution is
+released. A PMU profile is usable only when its execution ID matches, all four
+events are supported, kernel coverage is present, and every counter ran for 100%
+of its enabled time.
 
-Template-aware placement first enforces CPU commitment, LOCAL memory safety,
-and the ordinary pressure score. It may prefer an already-active verified
-template only among nodes within `template_balance_slack` of the best pressure,
-so affinity cannot override feasibility or create unbounded imbalance.
-Snapshot-aware residency uses the existing WARM pool and SSD relocation path.
-It ranks private generations by expected reuse times the measured WARM-versus-
-SSD restore-time saving per allocated byte; a lower-value candidate goes
-directly to SSD. Reservations, live borrowing, retained lazy-restore references,
-spill pins, and rollback stay in the same atomic pool ledger.
+On ARM64, use Linux last-level-cache read events for command-level LLC analysis.
+Generic cache misses and HiSilicon `hisi_l3c` uncore events are different
+measurements. Missing or multiplexed PMU data may still leave CPU and memory
+measurements usable, but it must not train an LLC model.
 
-Measured compute-node memory includes charged guest RAM, VM
-overhead, and retained cache. The configured checkpoint/restore
-margin is within the local capacity. The shared-pool tmpfs lies
-outside the parent VM cgroup and allocates pages as needed.
-Admission initially reserves configured VM RAM plus 256 MiB for a
-checkpoint, then records its actual allocated size. Requested cache
-reclamation is credited only after a new measurement confirms it.
+## Evidence and comparisons
 
-## Two compute nodes on one host
+Replay preserves recorded model waits while executing tools normally. Keep the
+workload, starting workspace, templates, case assignment, arrival schedule,
+random seed, hardware scope, and evidence fixed across policy arms.
 
-Each compute node has its own capacity, low/high watermarks, and
-admission decisions. The default configuration assigns NUMA 0 and 1
-to compute and NUMA 2 to a shared pool; all IDs and capacities are
-editable. A running VM using shared-pool memory first reserves its
-configured capacity, not just its current resident set, to cover
-later guest growth. These running-VM reservations and checkpoint
-reservations share one pool-wide ledger.
-
-The parent VM cgroup's `memory.max` covers the sum of local
-capacities plus the global borrowing limit. It is not a separate
-hard limit per NUMA node. Per-node `memory.numa_stat` measures
-physical residency for admission and reporting. Memory charges
-that cannot be attributed to a node are counted conservatively
-for each node's admission decision but only once in host totals.
-Changing a VM's binding does not immediately move every existing
-page. See [host configuration](supernode.md) for placement and
-result interpretation.
-
-This uses the host's real NUMA distances. It does not model a
-cross-host interconnect, its failure modes, or configurable network
-bandwidth and latency. Report host topology and measured transfer
-costs; do not treat these as absolute multi-host speedups.
-
-## Replay and evidence
-
-Replay requires the agent configuration and starting guest
-environment to match those used when the trace was recorded. The
-public CLI has no recording command. The model gateway supplies
-responses in order and keeps recorded model wait separate from
-delays caused by the memory policy. OpenClaw runs the tools
-normally; actual outputs are retained rather than replaced by
-recorded text.
-
-Keep workload, starting workspace, templates, task assignment,
-arrival pattern, random seed, and resource scope fixed when
-comparing policies. Check completed sessions, task validation,
-execution-ID joins, telemetry loss, duplicate commands, OOMs,
-and VM cleanup before interpreting throughput or latency.
-Report completion time, admission wait, host memory use,
-prediction coverage/error, reclaimed bytes, and checkpoint/
-restore costs. Keep failed or interrupted trials distinct from
-completed measurements.
+Before claiming a performance improvement, verify completion counts, final task
+validation, execution-ID joins, telemetry coverage, OOMs, timeouts, cleanup, and
+arm order. Report throughput and completion latency with repeat uncertainty.
+Admission wait, tool time, memory, placement, checkpoint cost, and PMU records
+are explanatory evidence, not substitutes for the end-to-end result.

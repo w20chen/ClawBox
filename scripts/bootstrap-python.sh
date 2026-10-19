@@ -69,4 +69,4 @@ PY
 "$venv/bin/python" "$project/scripts/validate_clawtune_integration.py" --clawtune-root "$clawtune"
 "$venv/bin/python" -m clawbox.cli experiment --help
 printf 'Python environment ready: %s\n' "$venv"
-echo 'Next: configure machine.env and host.yaml using docs/self-service.md.'
+echo 'Next: configure machine.env and host.yaml using docs/guide.md.'

@@ -16,10 +16,9 @@ host setup and image helpers are still called by `clawbox experiment setup` and
 `clawbox experiment images`; use the public experiment commands for new runs.
 
 New experiments use schema version 4 and the six-dimensional recipes printed by
-`clawbox experiment recipes`; see the [experiment guide](experiments.md).
+`clawbox experiment recipes`; see the [experiment guide](guide.md).
 Use `configure --recipe` to create explicit comparison arms. Schema-3 inputs
-remain usable by the existing worker and as inputs to this configuration command;
-their suite/baseline selectors must not be mixed with schema-4 recipes.
+and their suite/baseline selectors are outside the supported contract.
 Deprecated verification scripts and control-plane workflows retain their source
 but do not constrain current experiment tests.
 

@@ -31,6 +31,13 @@ def test_groups_use_physical_cores_and_never_cross_llc(tmp_path):
     ) == ('0,2,4,6', '8,10,12,14')
 
 
+def test_groups_can_include_permitted_smt_siblings(tmp_path):
+    assert physical_cluster_groups(
+        '0-15', min_physical_cores=2, include_smt=True,
+        sysfs=fake_topology(tmp_path),
+    ) == ('0-7', '8-15')
+
+
 def test_groups_accept_smt_disabled_pool_but_reject_partial_physical_cluster(tmp_path):
     topology = fake_topology(tmp_path)
     assert physical_cluster_groups(

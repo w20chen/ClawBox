@@ -54,6 +54,10 @@ htmlcov/
 *.pid
 *.pid.lock
 
+# Local agent instructions, research plans and prompt material
+/AGENTS.md
+/LLC.md
+
 # OS/editor metadata
 .DS_Store
 Thumbs.db

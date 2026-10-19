@@ -75,7 +75,7 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
     raw['mechanisms']['placement'].update(
         tool_call_cpu_policy='c2', tool_call_cpu_pressure_ratio=.2,
         tool_call_cpu_pressure_samples=3, tool_call_cpu_group_max_active=3,
-        tool_call_cpu_min_duration_seconds=1.5,
+        tool_call_cpu_min_duration_seconds=1.5, tool_call_cpu_include_smt=True,
     )
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
@@ -83,6 +83,7 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
     assert arm.execution.tool_call_cpu_pressure_ratio == .2
     assert arm.execution.tool_call_cpu_group_max_active == 3
     assert arm.execution.tool_call_cpu_min_duration_seconds == 1.5
+    assert arm.execution.tool_call_cpu_include_smt is True
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
     raw['mechanisms']['placement']['policy'] = 'os_default'
@@ -110,6 +111,46 @@ def test_c0_and_c2_effective_arms_differ_only_in_cpu_policy():
     assert c2_execution.pop('tool_call_cpu_policy') == 'c2'
     assert c0_execution == c2_execution
     assert c0.resource_overrides == c2.resource_overrides
+
+
+def test_prepare_llc_shared_experiment_materializes_complete_pair(tmp_path):
+    from scripts import prepare_llc_shared_experiment as prepare
+
+    source = tmp_path / 'base.yaml'
+    source.write_text(yaml.safe_dump(base()), encoding='utf-8')
+    output = tmp_path / 'generated'
+    assert prepare.main([
+        '--base-spec', str(source), '--output-dir', str(output),
+        '--trace-runtime-dir', '/data/llc-reproduction',
+        '--node-cpus', 'node0=0-15', '--node-cpus', 'node1=80-95',
+        '--session-node', 'node0', '--session-node', 'node1',
+    ]) == 0
+
+    c2_first = yaml.safe_load((output / 'experiment-c2-first.yaml').read_text())
+    c0_first = yaml.safe_load((output / 'experiment-c0-first.yaml').read_text())
+    assert [arm['name'] for arm in c2_first['comparison']['arms']] == [
+        'c2-shared-smt', 'c0-shared']
+    assert [arm['name'] for arm in c0_first['comparison']['arms']] == [
+        'c0-shared', 'c2-shared-smt']
+    assert c2_first['execution']['concurrency_levels'] == [16]
+    assert c2_first['environment']['runtime']['vcpu'] == 2
+    assert c2_first['environment']['runtime']['memory_mib'] == 2048
+    assert c2_first['environment']['sandbox']['vcpu'] == 2
+    assert c2_first['environment']['sandbox']['memory_mib'] == 4096
+    assert c2_first['mechanisms']['placement']['tool_call_cpu_include_smt'] is True
+    assert c2_first['mechanisms']['placement']['session_compute_nodes'] == [
+        'node0', 'node1'] * 8
+    manifest = yaml.safe_load((output / 'manifest.json').read_text())
+    assert manifest['files']['llc-shared-chase-early.jsonl'] == (
+        '698fda469572319e5895d906c82b0842e68ccbe7321474284314f3446e08e05e')
+    assert manifest['files']['llc-shared-chase-late.jsonl'] == (
+        '4c5ee3940f3b0e8a6f6bce6c5405e4ddcc746eabf3410e549d299813416f4302')
+    assert (output / 'llc-shared-chase-early.jsonl').read_bytes() == Path(
+        'examples/traces/llc-shared-chase-early.jsonl').read_bytes()
+    assert (output / 'llc-shared-chase-late.jsonl').read_bytes() == Path(
+        'examples/traces/llc-shared-chase-late.jsonl').read_bytes()
+    assert (output / 'llc-shared-chase-early.jsonl').is_file()
+    assert (output / 'llc-shared-chase-late.jsonl').is_file()
 
 
 def test_recipe_and_arm_names_do_not_change_execution():
