@@ -26,11 +26,11 @@ inference:
 runtime:
   template_alias: runtime-example-arm64
   vcpu: 2
-  memory_mib: 2048
+  memory_mib: 1024
 sandbox:
   template_alias: tool-example-arm64
   vcpu: 2
-  memory_mib: 4096
+  memory_mib: 3072
   workspace: /workspace
 execution:
   concurrency_levels:

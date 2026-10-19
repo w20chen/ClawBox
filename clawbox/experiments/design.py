@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import Field, create_model
 import yaml
 
-from .spec import (StrictFrozenModel, ResourcesSpec, ExecutionSpec, SandboxSpec,
+from .spec import (StrictFrozenModel, ResourcesSpec, ExecutionSpec, SandboxSpec, RuntimeSandboxSpec,
                    WorkloadSpec, AgentSpec, InferenceSpec, ValidationSpec, OutputSpec)
 
 DIMENSIONS = ('admission', 'runtime', 'placement', 'idle_reclaim', 'shared_memory', 'checkpoint')
@@ -112,7 +112,7 @@ Measurement = subset('Measurement', ExecutionSpec, MEASUREMENT_FIELDS,
 
 
 class Environment(StrictFrozenModel):
-    runtime: SandboxSpec
+    runtime: RuntimeSandboxSpec
     sandbox: SandboxSpec
     resources: EnvironmentResources
 

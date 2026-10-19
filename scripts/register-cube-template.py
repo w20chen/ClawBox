@@ -23,7 +23,7 @@ def main() -> int:
         "--cpu-millicores", type=int, default=2000,
         help="template CPU quota in millicores (default: 2000 = 2 vCPU)",
     )
-    parser.add_argument("--memory-mib", type=int, default=4096)
+    parser.add_argument("--memory-mib", type=int, default=3072)
     parser.add_argument(
         "--writable-layer-size", default="20G",
         help=(

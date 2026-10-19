@@ -25,7 +25,7 @@ parser.add_argument("--cold", required=True, type=Path)
 parser.add_argument("--output", required=True, type=Path)
 parser.add_argument("--helper-image", required=True)
 parser.add_argument("--require-local-numa", type=int)
-parser.add_argument("--expected-memory-mib", type=int, default=4096)
+parser.add_argument("--expected-memory-mib", type=int, default=3072)
 parser.add_argument("--snapshot-mechanism", choices=("full-copy", "incremental-cow"),
                     default="full-copy")
 parser.add_argument("--rounds", type=int, default=2)

@@ -2,7 +2,10 @@
 
 Start with the [experiment guide](../docs/guide.md). It uses
 `clawbox experiment configure` to fill in the applied host's templates, NUMA
-layout and capacities. Save generated experiment YAMLs outside this directory.
+layout and capacities. New experiments use 1 GiB Runtime and 3 GiB Tool VMs;
+register matching templates and apply the host profile before configuring a run.
+Frozen reproduction specs and historical host examples preserve their original
+VM shapes and measurements. Save generated experiment YAMLs outside this directory.
 
 | File or directory | Use |
 | --- | --- |

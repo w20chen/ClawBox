@@ -148,13 +148,13 @@ IDs empty until registration.
 
 ## 4. Register templates and verify VM access
 
-Register the usual 2 GiB Runtime and 4 GiB Tool pair:
+Register the standard 1 GiB Runtime and 3 GiB Tool pair:
 
 ```bash
 cd "$HOME/src/ClawBox"
 bash scripts/register-machine-templates.sh \
   --output-dir "$HOME/clawbox-templates/first" \
-  --runtime-memory-mib 2048 --tool-memory-mib 4096 \
+  --runtime-memory-mib 1024 --tool-memory-mib 3072 \
   --cpu-millicores 2000 --runtime-disk 20G --tool-disk 40G
 
 set -a
@@ -207,7 +207,7 @@ python scripts/validate-tiered-storage.py \
   --template "$CLAWBOX_TOOL_TEMPLATE" --node "$CUBE_NODE" \
   --warm "$CLAWBOX_WARM_ROOT" --cold "$CLAWBOX_COLD_ROOT" \
   --helper-image "$CLAWBOX_TOOL_IMAGE" \
-  --expected-memory-mib 4096 \
+  --expected-memory-mib 3072 \
   --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
 

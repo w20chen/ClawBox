@@ -68,7 +68,9 @@ arbitrary large files.
 
 ## Create an experiment
 
-New experiments use `schema_version: 4`. Start from a checked-in example or a
+New experiments use `schema_version: 4`. The standard VM sizes are Runtime
+1024 MiB (1 GiB) and Tool 3072 MiB (3 GiB), for 4 GiB per session.
+At a 0.75 ledger scale, the pair is charged 3072 MiB (3 GiB). Start from a checked-in example or a
 previous experiment, then inject the applied host identity:
 
 ```bash

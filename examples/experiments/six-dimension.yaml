@@ -2,8 +2,8 @@
 schema_version: 4
 experiment_id: six-dimension-smoke
 environment:
-  runtime: {template_alias: runtime-example-arm64, vcpu: 2, memory_mib: 2048}
-  sandbox: {template_alias: tool-example-arm64, vcpu: 2, memory_mib: 4096, workspace: /workspace}
+  runtime: {template_alias: runtime-example-arm64, vcpu: 2, memory_mib: 1024}
+  sandbox: {template_alias: tool-example-arm64, vcpu: 2, memory_mib: 3072, workspace: /workspace}
   resources:
     target_node: replace-with-your-cubesandbox-node
     pool_memory_budget_mib: 16384

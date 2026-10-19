@@ -129,6 +129,7 @@ def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> 
         physical = ResourcesSpec.model_validate({
             **spec.resources.model_dump(mode='json'),
             'lifecycle_admission': 'configured-capacity',
+            'resident_capacity_accounting': False, 'lifecycle_reservation_scale': 1.0,
             **spec.design['environment']['resources'],
         })
         spec = spec.model_copy(update={'schema_version': 3, 'resources': physical})
@@ -171,7 +172,7 @@ def _node_spec(spec, node):
         "local_memory_capacity_mib": node.memory_capacity_mib,
         "local_memory_low_watermark_mib": node.low_watermark_mib,
         "local_memory_high_watermark_mib": node.high_watermark_mib,
-        "pool_memory_budget_mib": node.high_watermark_mib,
+        "pool_memory_budget_mib": spec.resources.compute_node_budget_mib(node),
     })})
 
 

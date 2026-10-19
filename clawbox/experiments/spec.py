@@ -123,7 +123,7 @@ class SandboxSpec(StrictFrozenModel):
     image_digest: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
     architecture: str = Field(default="arm64", pattern=r"^arm64$")
     vcpu: int = Field(default=2, ge=1)
-    memory_mib: int = Field(default=4096, ge=128)
+    memory_mib: int = Field(default=3072, ge=128)
     workspace: str = Field(default="/workspace", pattern=r"^/")
     preflight_command: str | None = Field(default=None, min_length=1)
     allow_internet_access: bool = True
@@ -137,6 +137,17 @@ class SandboxSpec(StrictFrozenModel):
     @property
     def template(self) -> str:
         return self.template_id or self.template_alias or ""
+
+
+class RuntimeSandboxSpec(SandboxSpec):
+    """Runtime VMs default to 1 GiB; Tool VMs default to 3 GiB."""
+    memory_mib: int = Field(default=1024, ge=128)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_explicit_sandbox_spec(cls, value):
+        # Internal callers may pass an already resolved, explicitly sized VM.
+        return value.model_dump() if isinstance(value, SandboxSpec) else value
 
 
 # Resolve the per-case Tool VM override after SandboxSpec exists.  WorkloadCase
@@ -429,7 +440,7 @@ class ExperimentSpec(StrictFrozenModel):
     workload: WorkloadSpec
     agent: AgentSpec = Field(default_factory=AgentSpec)
     inference: InferenceSpec = Field(default_factory=InferenceSpec)
-    runtime: SandboxSpec
+    runtime: RuntimeSandboxSpec
     sandbox: SandboxSpec
     execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
     resources: ResourcesSpec
@@ -628,7 +639,7 @@ class ExperimentArm(StrictFrozenModel):
     policy: PolicySpec
     agent: AgentSpec
     inference: InferenceSpec
-    runtime: SandboxSpec
+    runtime: RuntimeSandboxSpec
     sandbox: SandboxSpec
     execution: ExecutionSpec
     resources: ResourcesSpec

@@ -271,9 +271,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--node-cpus", action="append", default=[],
                         metavar="NODE=CPULIST", help="override a saved compute-node CPU pool")
     parser.add_argument("--runtime-vcpu", type=int, default=2)
-    parser.add_argument("--runtime-memory-mib", type=int, default=2048)
+    parser.add_argument("--runtime-memory-mib", type=int, default=1024)
     parser.add_argument("--tool-vcpu", type=int, default=2)
-    parser.add_argument("--tool-memory-mib", type=int, default=4096)
+    parser.add_argument("--tool-memory-mib", type=int, default=3072)
     parser.add_argument("--threads", type=int, default=DEFAULTS["threads"])
     parser.add_argument("--working-set-mib", type=int, default=DEFAULTS["working_set_mib"])
     parser.add_argument("--steps", type=int, default=DEFAULTS["steps"])

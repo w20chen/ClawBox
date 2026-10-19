@@ -193,15 +193,15 @@ def test_impossible_memory_request_fails_without_waiting_for_timeout():
 
 def test_spec_rejects_vm_pair_that_cannot_fit_compute_high_watermark():
     constrained = tuple(node.model_copy(update={
-        'low_watermark_mib': 4096,
-        'high_watermark_mib': 5120,
+        'low_watermark_mib': 2048,
+        'high_watermark_mib': 3072,
     }) for node in nodes())
     with pytest.raises(ValueError, match='VM pair plus policy operation headroom'):
         configure_experiment(
             Path('examples/experiments/getting-started.yaml'),
             baseline_names=['uncontrolled-resident'],
             compute_nodes=[node.model_dump() for node in constrained],
-            pool_memory_gib=10,
+            pool_memory_gib=6,
         )
 
 

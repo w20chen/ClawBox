@@ -5,13 +5,13 @@ project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 machine=${CLAWBOX_MACHINE_ENV:-$HOME/.config/clawbox/machine.env}
 output=
 profile=
-runtime_memory=2048 tool_memory=4096 cpu=2000 runtime_disk=20G tool_disk=40G
+runtime_memory=1024 tool_memory=3072 cpu=2000 runtime_disk=20G tool_disk=40G
 kernel=/usr/local/services/cubetoolbox/cube-kernel-scf/version.json
 while (( $# )); do
   case "$1" in
     --help)
       echo 'Usage: bash scripts/register-machine-templates.sh --output-dir NEW_DIR [--machine-env FILE]'
-      echo 'Options: --runtime-memory-mib 2048 --tool-memory-mib 4096 --cpu-millicores 2000'
+      echo 'Options: --runtime-memory-mib 1024 --tool-memory-mib 3072 --cpu-millicores 2000'
       echo '         --runtime-disk 20G --tool-disk 40G --kernel-manifest FILE'
       echo '         --profile HOST.json (use the applied images and node, e.g. when resizing existing templates)'
       exit 0 ;;

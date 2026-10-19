@@ -135,9 +135,9 @@ def test_prepare_llc_shared_experiment_materializes_complete_pair(tmp_path):
         'c0-shared', 'c2-shared-smt']
     assert c2_first['execution']['concurrency_levels'] == [16]
     assert c2_first['environment']['runtime']['vcpu'] == 2
-    assert c2_first['environment']['runtime']['memory_mib'] == 2048
+    assert c2_first['environment']['runtime']['memory_mib'] == 1024
     assert c2_first['environment']['sandbox']['vcpu'] == 2
-    assert c2_first['environment']['sandbox']['memory_mib'] == 4096
+    assert c2_first['environment']['sandbox']['memory_mib'] == 3072
     assert c2_first['mechanisms']['placement']['tool_call_cpu_include_smt'] is True
     assert c2_first['mechanisms']['placement']['session_compute_nodes'] == [
         'node0', 'node1'] * 8
@@ -796,3 +796,39 @@ def test_all_recipes_replace_inherited_cpu_slot_multiplier():
             for arm in recipe_arms(recipe, checkpoint_axis=axis):
                 resolved = override_mechanisms(common, arm['override'])
                 assert resolved['placement']['placement_cpu_overcommit'] == 1024
+
+
+def test_role_specific_default_memory_roundtrips_and_charges_three_gib():
+    raw = base()
+    raw['environment']['runtime'].pop('memory_mib')
+    raw['environment']['sandbox'].pop('memory_mib')
+    raw['comparison'] = dict(recipe='resident-capacity', arms=[recipe_arms('resident-capacity')[2]])
+    spec = ExperimentSpec.model_validate(raw)
+    resolved = effective_spec(spec, spec.policies[0])
+    assert (resolved.runtime.memory_mib, resolved.sandbox.memory_mib) == (1024, 3072)
+    assert resolved.resources.lifecycle_reservation_mib(resolved.runtime.memory_mib, resolved.sandbox.memory_mib) == 3072
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+
+
+def test_explicit_runtime_shape_survives_runtime_model_conversion():
+    from clawbox.experiments.spec import SandboxSpec, RuntimeSandboxSpec
+    assert RuntimeSandboxSpec(template_id='runtime').memory_mib == 1024
+    assert SandboxSpec(template_id='tool').memory_mib == 3072
+    old = SandboxSpec(template_id='historical-runtime', memory_mib=2048)
+    assert RuntimeSandboxSpec.model_validate(old).memory_mib == 2048
+
+
+def test_pure_ledger_host_check_uses_common_physical_profile(monkeypatch):
+    from clawbox.experiments import qualification
+    raw = base()
+    raw['comparison'] = dict(recipe='resident-capacity', arms=[recipe_arms('resident-capacity')[2]])
+    spec = ExperimentSpec.model_validate(raw)
+    assert spec.resources.pool_memory_budget_mib > raw['environment']['resources']['pool_memory_budget_mib']
+    profiles = []
+    monkeypatch.setattr(qualification, 'apply_environment', profiles.append)
+    monkeypatch.setattr(qualification, 'doctor', lambda *_args, **_kwargs: [])
+    qualification.require_host_ready(spec)
+    assert profiles[0]['local_memory_capacity_mib'] == spec.resources.local_memory_capacity_mib
+    assert profiles[0]['shared_memory_borrow_limit_mib'] == raw['environment']['resources']['shared_memory_borrow_limit_mib']
+    node = spec.resources.compute_nodes[0]
+    assert qualification._node_spec(spec, node).resources.pool_memory_budget_mib == node.memory_capacity_mib
