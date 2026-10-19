@@ -195,67 +195,32 @@ run ID. Use a new run ID for any configuration change.
 
 ## Reproduce the shared-LLC C0/C2 experiment
 
-On an installed host with an applied profile and matching 2-vCPU/2-GiB Runtime
-and 2-vCPU/4-GiB Tool templates, run the complete reproduction with one command:
+This repository includes the frozen specifications, traces, and prediction
+artifact from the 2026-10-19 SQLGlot experiment. On a configured compatible
+ARM64 host, reproduce both arm orders with one command:
 
 ```bash
 bash scripts/run-llc-shared-reproduction.sh
 ```
 
-The ad-hoc runner selects the first two compute nodes saved in `host.json` and
-the first two complete LLC clusters in each node, matching the original CPU
-scope. It prints the selection, generates both arm orders, validates and
-qualifies them, runs them sequentially, and writes both reports. It fails before
-VM execution when the saved VM shapes or LLC topology are incompatible. Select
-two other saved nodes with repeated `--node NODE_ID`; use `--prepare-only` to
-generate and validate without launching VMs. It does not install CubeSandbox or
-create guest images; complete [host installation](installation.md) first.
+The command verifies every frozen asset by SHA-256, verifies the original VM
+image digests and memory configuration in the applied host profile, selects two
+8-logical-CPU LLC clusters on each of two NUMA nodes, and runs the 16-session
+C0/C2 comparison sequentially in both arm orders. It forces a fresh real-VM
+qualification for each order and prints both reports. The reference runs measured
+`+4.12%` and `+5.95%`; the mean C2 throughput gain was `+5.03%`.
 
-The commands below expose the same generation and execution steps for auditing
-or parameter studies.
-
-The generator takes an already configured schema-4 base spec and writes two arm
-orders, deterministic traces, complete YAML files, and a SHA-256 manifest:
+Check compatibility and generated inputs without starting a VM:
 
 ```bash
-python scripts/prepare_llc_shared_experiment.py \
-  --base-spec /data/clawbox-specs/base.yaml \
-  --output-dir /data/llc-shared-reproduction \
-  --trace-runtime-dir /data/llc-shared-reproduction \
-  --concurrency 16 \
-  --runtime-vcpu 2 --runtime-memory-mib 2048 \
-  --tool-vcpu 2 --tool-memory-mib 4096 \
-  --node-cpus node0=0-15 --node-cpus node1=80-95 \
-  --session-node node0 --session-node node1 \
-  --threads 2 --working-set-mib 2 --steps 300000000 \
-  --heavy-phases 12 --late-short-phases 8 --short-seconds 0.2 \
-  --min-duration-seconds 1 --group-max-active 4 \
-  --pressure-ratio 0.1 --pressure-samples 2 --include-smt
+bash scripts/run-llc-shared-reproduction.sh --prepare-only
 ```
 
-The canonical traces are
-[`llc-shared-chase-early.jsonl`](../examples/traces/llc-shared-chase-early.jsonl)
-and
-[`llc-shared-chase-late.jsonl`](../examples/traces/llc-shared-chase-late.jsonl).
-Their SHA-256 values are `698fda469572319e5895d906c82b0842e68ccbe7321474284314f3446e08e05e`
-and `4c5ee3940f3b0e8a6f6bce6c5405e4ddcc746eabf3410e549d299813416f4302`.
-
-Validate and run the two generated specifications sequentially. Do not overlap
-them on the same CPU and LLC domains:
-
-```bash
-for order in c2-first c0-first; do
-  spec="/data/llc-shared-reproduction/experiment-${order}.yaml"
-  clawbox experiment validate "$spec" --inputs
-  sudo -E "$(command -v clawbox)" --output-root /data/clawbox-results \
-    experiment qualify "$spec" --concurrency 16
-  sudo -E "$(command -v clawbox)" --output-root /data/clawbox-results \
-    experiment run "$spec" --run-id "llc-shared-${order}"
-done
-```
-
-The base spec supplies host-specific template IDs, image digests, capacities,
-and evidence. Never copy these identities to another host.
+Prerequisites are the normal installation and applied host profile plus the
+original Runtime and Tool images registered under their recorded digests. VM
+images and CubeSandbox host installation are not stored in Git; the command
+fails with the exact missing or mismatched prerequisite instead of substituting
+a different image or resource setting.
 
 ## Read results
 

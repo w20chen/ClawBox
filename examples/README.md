@@ -13,12 +13,13 @@ layout and capacities. Save generated experiment YAMLs outside this directory.
 | [traces/memory-smoke.jsonl](traces/memory-smoke.jsonl) | Longer memory workload used by the training walkthrough. |
 | [traces/llc-shared-chase-early.jsonl](traces/llc-shared-chase-early.jsonl) | Canonical shared-LLC replay input with the long call early in each session. |
 | [traces/llc-shared-chase-late.jsonl](traces/llc-shared-chase-late.jsonl) | Canonical shared-LLC replay input with the long call late in each session. |
+| [experiments/llc-shared-c16-b32-20261019.yaml](experiments/llc-shared-c16-b32-20261019.yaml) and [reverse order](experiments/llc-shared-c16-b32-reverse-20261019.yaml) | Frozen specifications used by the one-command LLC reproduction. |
+| [predictions/llc-shared-prediction-progress.json](predictions/llc-shared-prediction-progress.json) | Frozen prediction artifact for the LLC reproduction; its companion KB is in the same directory. |
 | [experiments/control-ablation.yaml](experiments/control-ablation.yaml) | Four-policy comparison; configure the host and provide a separate validated training artifact. |
-| [experiments/llc-shared-reproduction.yaml](experiments/llc-shared-reproduction.yaml) | Portable base consumed by the one-command shared-LLC reproduction; do not launch it directly. |
 | Other experiment YAMLs and traces | Workload or historical host examples. Check their comments, template identities, repository dependencies and paths before use. |
 | [predictions/](predictions/) | Historical prediction fixtures. Generate current artifacts with `clawbox experiment train`. |
 | [clawbox-snapshot-host.env.example](clawbox-snapshot-host.env.example) | Older single-node helper settings. New deployments use the editable host YAML described in the experiment guide. |
 
-Do not put credentials, generated predictions, local traces or experiment results
-into these checked-in examples. The command/configuration reference is in
+Do not put credentials, other generated predictions, local traces or experiment
+results into these checked-in examples. The command/configuration reference is in
 [docs/guide.md](../docs/guide.md).
