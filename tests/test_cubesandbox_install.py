@@ -37,6 +37,9 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     lifecycle_timing = (
         ROOT / "deploy" / "cubesandbox" / "tiered-memory-api.patch"
     ).read_text(encoding="utf-8")
+    control_timeouts = (
+        ROOT / "deploy" / "cubesandbox" / "sdk-control-timeouts.patch"
+    ).read_text(encoding="utf-8")
 
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
     assert "apply --check" in helper
@@ -52,6 +55,8 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "remote_port_mapping" in hairpin
     assert "mvmip_to_ifindex" in hairpin
     assert "TIER_API_PATCH_FILE" in helper
+    assert "CONTROL_TIMEOUT_PATCH_FILE" in helper
+    assert "timeout=cfg.request_timeout" in control_timeouts
     assert '"phase":       "snapshot_create"' in lifecycle_timing
     assert '"phase":       "swap_out"' in lifecycle_timing
     assert '"duration_ms"' in lifecycle_timing

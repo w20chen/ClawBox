@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from requests import Timeout as RequestsTimeout
 from trace_fixtures import llm_spans, write_spans
 
 from clawbox.cube import (
@@ -151,6 +152,31 @@ def test_cube_client_pins_node_disables_automatic_lifecycle_and_journals(tmp_pat
     assert _Sandbox.create_kwargs["lifecycle"] == {"on_timeout": "kill", "auto_resume": False}
     assert _Sandbox.create_kwargs["distribution_scope"] == ["node-a"]
     assert journal.sandbox_ids(task_uid="task") == [sandbox.sandbox_id]
+
+
+def test_cube_client_reconciles_a_timed_out_create_by_unique_ownership(
+    tmp_path: Path,
+) -> None:
+    class TimedOutSandbox(_Sandbox):
+        @classmethod
+        def create(cls, **kwargs):
+            item = cls({
+                "sandboxID": "sb-recovered", "templateID": kwargs["template"],
+                "metadata": kwargs["metadata"],
+            })
+            cls.items[item.sandbox_id] = item
+            raise RequestsTimeout("create response was lost")
+
+    TimedOutSandbox.items = {}
+    journal = OwnedSandboxJournal(tmp_path / "owned-sandboxes.jsonl")
+    client = CubeSandboxClient(journal=journal, sandbox_class=TimedOutSandbox)
+
+    sandbox = client.create_sandbox(
+        template="tpl-arm64", node_name="node-a", ownership=_owner(),
+    )
+
+    assert sandbox.sandbox_id == "sb-recovered"
+    assert journal.sandbox_ids(task_uid="task") == ["sb-recovered"]
 
 
 def test_cube_client_adds_only_explicit_narrow_egress_allowlist() -> None:
@@ -696,7 +722,12 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             super().__init__(data, config)
             self.pause_calls = 0
             self.resume_calls = 0
+            self.endpoint_calls = 0
             self.commands = SnapshotCommands(self)
+
+        def get_tcp_endpoint(self, container_port):
+            self.endpoint_calls += 1
+            return super().get_tcp_endpoint(container_port)
 
         @classmethod
         def create(cls, **kwargs):
@@ -838,9 +869,40 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             "endpoint_host": admission["host"],
             "endpoint_port": admission["port"],
         })
+        endpoint_calls_after_first_admission = SnapshotSandbox.created[0].endpoint_calls
+        identity_checks_after_first_admission = sum(
+            'printf %s "$TASK_ID"' in command
+            for command, _kwargs in SnapshotSandbox.created[1].command_calls
+        )
+        admission2 = post_policy(policy_control, "/v1/tool/admit", {
+            "session_id": session_id, "execution_id": "exec-2",
+            "operation": "exec", "command_sha256": command_sha256,
+            "runtime_request_at": time.time(),
+        })
+        assert admission2["sandbox_id"] == admission["sandbox_id"]
+        assert admission2["epoch"] == admission["epoch"]
+        assert SnapshotSandbox.created[0].endpoint_calls == endpoint_calls_after_first_admission
+        assert sum(
+            'printf %s "$TASK_ID"' in command
+            for command, _kwargs in SnapshotSandbox.created[1].command_calls
+        ) == identity_checks_after_first_admission
+        started2 = time.time()
+        post_policy(policy_control, "/v1/tool/complete", {
+            "session_id": session_id, "execution_id": "exec-2",
+            "operation": "exec", "command_sha256": command_sha256,
+            "runtime_request_at": started2,
+            "execution_started_at": started2,
+            "ssh_reaped_at": started2 + 0.01,
+            "execution_completed_at": started2 + 0.01,
+            "exit_code": 0,
+            "endpoint_sandbox_id": admission2["sandbox_id"],
+            "endpoint_epoch": admission2["epoch"],
+            "endpoint_host": admission2["host"],
+            "endpoint_port": admission2["port"],
+        })
         return {
             "agent_pid_file": f"/state/openclaw/{session_id}/agent.pid",
-            "tool_latencies": [0.01], "runtime_traces": [],
+            "tool_latencies": [0.01, 0.01], "runtime_traces": [],
             "agent_replay_invalid": True, "agent_tool_failures": 0,
             "policy_control_records": policy_control.records(),
         }
@@ -850,11 +912,11 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         worker_module, "collect_and_validate_native_tool_artifacts",
         lambda **_kwargs: SimpleNamespace(
             root=tmp_path / "native", validation={"ok": True},
-            cgroup_artifacts={"exec-1": {
+            cgroup_artifacts={execution_id: {
                 "memory_rss_peak_bytes": 2 * 1024 * 1024,
                 "ts_start": 1.0, "ts_end": 1.01,
                 "cpu_utilization_avg_cores": 0.25,
-            }},
+            } for execution_id in ("exec-1", "exec-2")},
         ),
     )
     monkeypatch.setenv("CLAWBOX_CONTROL_HOST", "127.0.0.1")

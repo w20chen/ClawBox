@@ -172,12 +172,12 @@ class ExecutionSpec(StrictFrozenModel):
     concurrency_levels: tuple[int, ...] = (1,)
     # Limit only concurrent VM-pair creation. Once a pair is ready, its
     # session releases this slot and remains active at offered concurrency.
-    sandbox_create_concurrency: int = Field(default=4, ge=1)
+    sandbox_create_concurrency: int = Field(default=8, ge=1)
     randomized_order: bool = True
     random_seed: int = 0
     # Every supported run is supervised at the process boundary.  An
     # unbounded arm cannot provide a reliable terminal state or cleanup SLA.
-    arm_timeout_seconds: int = Field(default=1800, ge=1)
+    arm_timeout_seconds: int = Field(default=3600, ge=1)
     # The worker enforces arm_timeout_seconds. The supervisor allows this
     # additional time only for VM cleanup and writing the partial result.
     arm_finalization_timeout_seconds: int = Field(default=300, ge=1)
@@ -186,11 +186,11 @@ class ExecutionSpec(StrictFrozenModel):
     stabilization_seconds: float = Field(default=1.0, ge=0)
     arrival_schedule: ArrivalSchedule = ArrivalSchedule.POISSON
     stagger_interval_seconds: float = Field(default=0.0, ge=0)
-    # Expected last-arrival time is this fraction of the median selected
-    # trace's recorded wall span. 0.25 places arrivals in the first 20% of the
-    # expected arrival-plus-trace interval while retaining substantial overlap.
+    # Expected last-arrival time is this multiple of the median selected
+    # trace's recorded wall span. 2.0 keeps VM demand below the measured
+    # high-density creation rate while retaining substantial execution overlap.
     poisson_arrival_window_fraction: float = Field(
-        default=0.25, gt=0, le=1, allow_inf_nan=False,
+        default=2.0, gt=0, le=10, allow_inf_nan=False,
     )
 
     @field_validator("concurrency_levels")

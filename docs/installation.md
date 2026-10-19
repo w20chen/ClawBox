@@ -80,8 +80,8 @@ python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
 The helper pins CubeSandbox v0.7.0, applies the required endpoint, networking,
-image-provenance, snapshot, and cgroup-routing patches, and builds Cubelet and
-Shim. It does not install or restart services. Repeating the same patch set
+image-provenance, snapshot, cgroup-routing, and bounded control-RPC patches,
+and builds Cubelet and Shim. It does not install or restart services. Repeating the same patch set
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
 

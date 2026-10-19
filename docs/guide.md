@@ -172,7 +172,7 @@ To run only the discounted arms, remove `resident-capacity-1` from the generated
 `comparison.arms` before validation and launch.
 
 `execution.sandbox_create_concurrency` is the maximum number of Runtime/Tool VM
-pairs being created at once (default `4`, unit: session pairs). It is a startup
+pairs being created at once (default `8`, unit: session pairs). It is a startup
 transport limit, not tool admission: a session releases its creation slot as soon
 as both VMs are ready and then continues at the offered concurrency. Set it no
 higher than `max(execution.concurrency_levels)`. A lower value deliberately queues
@@ -240,14 +240,18 @@ executes the first real tool call for every case and checks every distinct Tool
 template on every selected compute node.
 
 Baseline experiments default to reproducible Poisson arrivals and unique trace
-assignment. `execution.poisson_arrival_window_fraction` defaults to `0.25`:
-the expected last arrival is one quarter of the median selected trace's recorded
-wall-clock span. Thus arrivals occupy about the first 20% of the expected
-arrival-plus-trace interval. The realized exponential inter-arrivals are derived
+assignment. `execution.poisson_arrival_window_fraction` defaults to `2.0`:
+the expected last arrival is twice the median selected trace's recorded
+wall-clock span. A run therefore normally spans about three trace durations,
+with overlapping sessions but enough time for bounded VM creation to keep up.
+The realized exponential inter-arrivals are derived
 from `random_seed`, repetition, concurrency, and ordered case IDs; policy names
 are excluded so every compared baseline receives the identical arrival sequence.
 Set `arrival_schedule: burst` only for an explicit burst experiment, or
 `fixed_stagger` with `stagger_interval_seconds` for a fixed-rate experiment.
+The default `execution.arm_timeout_seconds` is `3600` seconds. This is a failure
+deadline, not an added delay; increase it for traces whose expected arrival
+window plus maximum trace duration can exceed one hour.
 
 Prepare the default unique SWE-rebench corpus on the machine holding the raw
 recordings, then copy the entire output directory to the experiment host:

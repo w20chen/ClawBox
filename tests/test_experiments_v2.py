@@ -28,7 +28,7 @@ def test_explicit_null_disables_arm_deadline() -> None:
     from clawbox.experiments.spec import ExecutionSpec
     with pytest.raises(ValueError):
         ExecutionSpec(arm_timeout_seconds=None)
-    assert ExecutionSpec().arm_timeout_seconds == 1800
+    assert ExecutionSpec().arm_timeout_seconds == 3600
     assert ExecutionSpec().arm_finalization_timeout_seconds == 300
     with pytest.raises(ValueError):
         ExecutionSpec(arm_finalization_timeout_seconds=0)
@@ -446,7 +446,7 @@ def test_arrival_schedule_is_explicit_and_validated() -> None:
     raw = raw_spec()
     execution = ExperimentSpec.model_validate(raw).execution
     assert execution.arrival_schedule.value == "poisson"
-    assert execution.poisson_arrival_window_fraction == 0.25
+    assert execution.poisson_arrival_window_fraction == 2.0
     raw["execution"].update({
         "arrival_schedule": "fixed_stagger", "stagger_interval_seconds": 0.25,
     })
@@ -474,7 +474,7 @@ def test_poisson_arrivals_are_deterministic_fair_and_trace_scaled() -> None:
     assert first == second
     assert first[0] == 0
     assert all(left < right for left, right in zip(first, first[1:]))
-    # The configured expected window is 25% of the 400-second trace span.
+    # The configured expected window is twice the 400-second trace span.
     # One deterministic sample need not equal its expectation, but it must be
     # a genuine non-uniform Poisson realization rather than fixed staggering.
     assert len({round(right - left, 9)
@@ -816,7 +816,7 @@ def test_openclaw_cube_example_uses_native_tool_names() -> None:
 
 
 def test_worker_uses_explicit_pair_creation_concurrency() -> None:
-    assert ExecutionSpec().sandbox_create_concurrency == 4
+    assert ExecutionSpec().sandbox_create_concurrency == 8
     assert ExperimentWorker._sandbox_create_limit(40, 3) == 3
     assert ExperimentWorker._sandbox_create_limit(2, 3) == 2
     with pytest.raises(ValidationError, match="sandbox_create_concurrency"):

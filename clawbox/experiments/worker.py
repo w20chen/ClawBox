@@ -2794,6 +2794,15 @@ class ExperimentWorker:
                 })
                 return route
 
+            # A running CubeSandbox keeps one published TCP mapping.  Resolve
+            # and prove that mapping once, then reuse it until a restore says
+            # the Tool generation changed.  Re-resolving and opening a second
+            # SSH connection before every OpenClaw SSH invocation turns one
+            # Agent tool into several control-plane round trips and collapses
+            # throughput at hundreds of sessions.
+            admitted_route = setup_route
+            admitted_route_identity_verified = False
+
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
@@ -2870,6 +2879,7 @@ class ExperimentWorker:
                 reservation_lock = Lock()
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
+                    nonlocal admitted_route, admitted_route_identity_verified
                     execution_id = str(request["execution_id"])
                     if progress_control:
                         progress_control.execution_ready(session_id, execution_id,
@@ -2942,6 +2952,8 @@ class ExperimentWorker:
                             )
                             reservation_acquired = True
                             if restored_tool:
+                                admitted_route = None
+                                admitted_route_identity_verified = False
                                 bridge_ready_started = time.monotonic()
                                 bridge_error: Exception | None = None
                                 bridge_result = None
@@ -2991,7 +3003,12 @@ class ExperimentWorker:
                                 })
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
-                            route = resolve_native_ssh_route("admit")
+                            current_sandbox_id = self.client.sandbox_id(lifecycle.sandbox)
+                            if (admitted_route is None
+                                    or admitted_route.sandbox_id != current_sandbox_id):
+                                admitted_route = resolve_native_ssh_route("admit")
+                                admitted_route_identity_verified = False
+                            route = admitted_route
                             # Cube may publish a restored mapping slightly
                             # before CubeProxy accepts its fresh route. Prove
                             # reachability and the stable Tool identity from
@@ -3018,47 +3035,49 @@ class ExperimentWorker:
                                 "-p", str(route.port), f"executor@{endpoint_host}",
                                 "printf %s \"$TASK_ID\"",
                             ])
-                            identity_started = time.monotonic()
-                            identity_result = None
-                            identity_error: Exception | None = None
-                            # Under hundreds of simultaneous VM lifecycle operations,
-                            # CubeProxy can keep the previous port mapping reachable
-                            # beyond the former 15-second window.  The identity check
-                            # remains authoritative; allow the already-configured
-                            # command timeout (at least 60 seconds here) to absorb
-                            # publication lag instead of accepting the wrong Tool.
-                            identity_attempt_limit = max(
-                                30,
-                                min(120, int(arm.execution.command_timeout_seconds * 2)),
-                            )
-                            for identity_attempt in range(1, identity_attempt_limit + 1):
-                                try:
-                                    candidate = runtime_executor.execute(identity_command, 30)
-                                except Exception as exc:
-                                    identity_error = exc
+                            if not admitted_route_identity_verified:
+                                identity_started = time.monotonic()
+                                identity_result = None
+                                identity_error: Exception | None = None
+                                # Under hundreds of simultaneous VM lifecycle operations,
+                                # CubeProxy can keep the previous port mapping reachable
+                                # beyond the former 15-second window.  The identity check
+                                # remains authoritative; allow the already-configured
+                                # command timeout (at least 60 seconds here) to absorb
+                                # publication lag instead of accepting the wrong Tool.
+                                identity_attempt_limit = max(
+                                    30,
+                                    min(120, int(arm.execution.command_timeout_seconds * 2)),
+                                )
+                                for identity_attempt in range(1, identity_attempt_limit + 1):
+                                    try:
+                                        candidate = runtime_executor.execute(identity_command, 30)
+                                    except Exception as exc:
+                                        identity_error = exc
+                                        if identity_attempt < identity_attempt_limit:
+                                            time.sleep(0.5)
+                                        continue
+                                    if (candidate.exit_code == 0
+                                            and candidate.stdout.strip() == session_id):
+                                        identity_result = candidate
+                                        break
                                     if identity_attempt < identity_attempt_limit:
                                         time.sleep(0.5)
-                                    continue
-                                if (candidate.exit_code == 0
-                                        and candidate.stdout.strip() == session_id):
-                                    identity_result = candidate
-                                    break
-                                if identity_attempt < identity_attempt_limit:
-                                    time.sleep(0.5)
-                            if identity_result is None:
-                                raise RuntimeError(
-                                    "native SSH endpoint did not present the intended Tool "
-                                    f"identity for {session_id} after {identity_attempt} attempts"
-                                ) from identity_error
-                            events.write({
-                                "event": "native_ssh_identity_ready",
-                                "session_id": session_id,
-                                "execution_id": execution_id,
-                                "sandbox_id": route.sandbox_id,
-                                "endpoint_epoch": route.epoch,
-                                "attempts": identity_attempt,
-                                "service_seconds": time.monotonic() - identity_started,
-                            })
+                                if identity_result is None:
+                                    raise RuntimeError(
+                                        "native SSH endpoint did not present the intended Tool "
+                                        f"identity for {session_id} after {identity_attempt} attempts"
+                                    ) from identity_error
+                                admitted_route_identity_verified = True
+                                events.write({
+                                    "event": "native_ssh_identity_ready",
+                                    "session_id": session_id,
+                                    "execution_id": execution_id,
+                                    "sandbox_id": route.sandbox_id,
+                                    "endpoint_epoch": route.epoch,
+                                    "attempts": identity_attempt,
+                                    "service_seconds": time.monotonic() - identity_started,
+                                })
                             coordinator.bind_tool_memory(session_id)
                             if (arm.execution.tool_call_cpu_policy == 'c2'
                                     and c2_applies(execution_scope, request.get('operation'))):

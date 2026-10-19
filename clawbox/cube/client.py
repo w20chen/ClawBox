@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from requests import Timeout as RequestsTimeout
+
 from .api_retry import read_with_backoff, retry_with_backoff
 
 
@@ -117,17 +119,50 @@ class CubeSandboxClient:
             network["allow_out"] = network_allow_out
         if network_deny_out:
             network["deny_out"] = network_deny_out
-        sandbox = self._sandbox_class.create(
-            template=template,
-            timeout=-1,  # cubesandbox.NEVER_TIMEOUT in SDK v0.7.0
-            lifecycle={"on_timeout": "kill", "auto_resume": False},
-            metadata=ownership.metadata(),
-            distribution_scope=[node_name],
-            env_vars=env_vars,
-            allow_internet_access=allow_internet_access,
-            network=network or None,
-            **self._sdk_kwargs(),
-        )
+        ownership_metadata = ownership.metadata()
+        try:
+            sandbox = self._sandbox_class.create(
+                template=template,
+                timeout=-1,  # cubesandbox.NEVER_TIMEOUT in SDK v0.7.0
+                lifecycle={"on_timeout": "kill", "auto_resume": False},
+                metadata=ownership_metadata,
+                distribution_scope=[node_name],
+                env_vars=env_vars,
+                allow_internet_access=allow_internet_access,
+                network=network or None,
+                **self._sdk_kwargs(),
+            )
+        except RequestsTimeout as create_error:
+            # A read timeout does not prove that CubeAPI rejected the create.
+            # Never repeat this non-idempotent POST. Resolve its unique
+            # ownership identity until the bounded reconciliation window ends.
+            def resolve_timed_out_create() -> dict[str, Any]:
+                matches = [
+                    item for item in self._sandbox_class.list_v2(**self._sdk_kwargs())
+                    if all(
+                        (item.get("metadata") or {}).get(key) == value
+                        for key, value in ownership_metadata.items()
+                    )
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        "expected exactly one sandbox after timed-out create, "
+                        f"found {len(matches)}"
+                    )
+                return matches[0]
+
+            try:
+                recovered = read_with_backoff(
+                    resolve_timed_out_create,
+                    label=f"ownership reconciliation for {ownership.session_id}",
+                    attempts=10, initial_delay_s=0.25, max_delay_s=2.0,
+                )
+            except Exception as reconciliation_error:
+                raise RuntimeError(
+                    "CubeSandbox create timed out and ownership reconciliation "
+                    f"failed for {ownership.session_id}"
+                ) from reconciliation_error
+            sandbox = self._sandbox_class(recovered, self._config)
         sandbox_id = self.sandbox_id(sandbox)
         self._handles[sandbox_id] = sandbox
         if self.journal is not None:

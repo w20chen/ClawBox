@@ -1,0 +1,23 @@
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+index 604877e..ca65d67 100644
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -330,7 +330,8 @@ class Sandbox:
+ 
+         s = requests.Session()
+         resp = s.post(f"{cfg.api_url}/sandboxes", json=payload,
+-                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
++                      headers={"Content-Type": "application/json", **_auth_headers(cfg)},
++                      timeout=cfg.request_timeout)
+         _check_response(resp)
+         return cls(resp.json(), config=cfg)
+ 
+@@ -397,6 +398,7 @@ class Sandbox:
+         """
+         cfg = config or Config()
+         s = requests.Session()
+-        resp = s.get(f"{cfg.api_url}/v2/sandboxes", headers=_auth_headers(cfg))
++        resp = s.get(f"{cfg.api_url}/v2/sandboxes", headers=_auth_headers(cfg),
++                     timeout=cfg.request_timeout)
+         _check_response(resp)
+         return resp.json()
