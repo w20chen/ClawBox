@@ -39,6 +39,12 @@ class HostComputeNode(BaseModel):
                            low_watermark_mib=self.low_gib * 1024, high_watermark_mib=self.high_gib * 1024)
 
 
+class CubeOvercommitRatio(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    cpu_ratio: float = Field(gt=0, allow_inf_nan=False)
+    mem_ratio: float = Field(gt=0, allow_inf_nan=False)
+
+
 class HostConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -62,6 +68,7 @@ class HostConfig(BaseModel):
     minimum_disk_free_gib: int = Field(default=20, gt=0)
     tcp_tw_reuse: int | None = Field(default=None, ge=0, le=2)
     cubelet_tap_init_num: int | None = Field(default=None, ge=1)
+    cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -217,6 +224,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
             values['tcp_tw_reuse'] = profile['tcp_tw_reuse']
         if profile.get('cubelet_tap_init_num') is not None:
             values['cubelet_tap_init_num'] = profile['cubelet_tap_init_num']
+        if profile.get('cube_scheduler_overcommit') is not None:
+            values['cube_scheduler_overcommit'] = profile['cube_scheduler_overcommit']
         for target, source in (("local_gib", "local_memory_capacity_mib"),
                                ("low_gib", "local_memory_low_watermark_mib"),
                                ("high_gib", "local_memory_high_watermark_mib"),
@@ -281,6 +290,12 @@ def check(config: HostConfig) -> dict:
             'requested': config.cubelet_tap_init_num,
             'required_vms': 'runtime and tool VMs combined',
         }, 'Install CubeSandbox with a readable Cubelet config containing tap_init_num, or set cubelet_tap_init_num: null to leave it unchanged.')
+    if config.cube_scheduler_overcommit is not None:
+        from .cube_capacity import scheduler_settings
+        probe('Cube configured-VM overcommit', lambda: {
+            'current': scheduler_settings(),
+            'requested_by_instance_type': {k:v.model_dump() for k,v in config.cube_scheduler_overcommit.items()},
+        }, 'Verify CubeMaster conf.yaml is readable with sudo and review CPU/memory multipliers; this does not allocate physical capacity.')
     probe("Docker", lambda: _run("docker", "info", "--format", "{{.ServerVersion}}"),
           "Start Docker and enable this user's Docker access; docs/installation.md step 1.")
     for name in ("findmnt", "mount", "numactl", "systemctl"):
@@ -369,6 +384,10 @@ def apply(config: HostConfig, profile: Path) -> dict:
         print(json.dumps(report, indent=2))
         raise ValueError("host prerequisites failed; follow checks[].remedy, then rerun host check")
     apply_network(config)
+    if config.cube_scheduler_overcommit is not None:
+        from .cube_capacity import apply_ratios
+        if apply_ratios({k:v.model_dump() for k,v in config.cube_scheduler_overcommit.items()}):
+            lab.command('sudo', '-n', 'systemctl', 'restart', 'cube-sandbox-cubemaster', timeout=120)
     restart_cubelet = apply_cubelet_tap_pool(config)
     if restart_cubelet:
         lab.command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cubelet", timeout=120)

@@ -43,6 +43,7 @@ file before applying it. Important host fields are:
 | `minimum_disk_free_gib` | Required free space; CubeSandbox also rejects snapshot writes above 85% filesystem use |
 | `tcp_tw_reuse` | `null` preserves the host value; `0`, `1`, and `2` request Linux's documented modes |
 | `cubelet_tap_init_num` | Optional pre-created TAP count; cover both VMs for every simultaneous session |
+| `cube_scheduler_overcommit` | Optional map from Cube node `InstanceType` to positive `cpu_ratio` and `mem_ratio`; `null` preserves Cube's settings. These multiply Cube's reported configured-VM quotas, not physical CPU/RAM allocations. |
 
 Check without mutation, then apply on an idle host:
 
@@ -54,6 +55,29 @@ bash scripts/clawbox --sudo experiment host apply "$HOME/.config/clawbox/host.ya
 Apply again after reboot or after changing topology, CPU lists, memory capacity,
 mounts, or host networking. `host apply` writes the adjacent `host.json` only
 after service, storage, and real-VM probes succeed.
+
+For high-density runs, check Cube's separate configured-VM quotas as well as
+ClawBox's measured admission limits. `launch` checks a conservative envelope of
+all offered Runtime/Tool pairs before qualification; heterogeneous cases use the
+largest Tool specification. Existing Cube allocations and per-instance-type
+overrides count. A quota rejection is not evidence that physical RAM or CPU is full.
+For example, **only if the node reports `InstanceType: cubebox`**, an explicit plan is:
+
+```yaml
+cube_scheduler_overcommit:
+  cubebox:
+    cpu_ratio: 10.0
+    mem_ratio: 3.0
+```
+
+Choose multipliers from the reported node quotas and requested VM specifications,
+allowing headroom because Cube rejects equality. Use the same infrastructure
+quotas across compared baselines. `host apply` backs up CubeMaster's configuration
+and restarts **CubeMaster only when these values change**; apply on an idle host.
+The setting affects all nodes of that instance type served by this CubeMaster.
+It does not change the experiment CPU set, LOCAL/shared budgets, physical-memory
+safety checks, or VM sizes. No image rebuild or KB retraining is needed; use a
+new run ID for the changed experimental conditions.
 
 Crash-dump cleanup is opt-in and narrow:
 

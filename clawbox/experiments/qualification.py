@@ -83,7 +83,18 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
         return {"template_id": value.template, "memory_mib": value.memory_mib,
                 "vcpu": value.vcpu}
 
+    # A conservative envelope: every offered session may own both VMs. This
+    # checks Cube's independent quota, not a claim about resident concurrency.
+    tools = [case.sandbox or spec.sandbox for case in load_workload_cases(spec.workload)]
+    count = max(spec.execution.concurrency_levels)
+    demand = dict(
+        cpu_milli=count * (spec.runtime.vcpu + max(t.vcpu for t in tools)) * 1000,
+        memory_mib=count * (spec.runtime.memory_mib + max(t.memory_mib for t in tools)),
+        max_vm_cpu_milli=max(spec.runtime.vcpu, *(t.vcpu for t in tools)) * 1000,
+        max_vm_memory_mib=max(spec.runtime.memory_mib, *(t.memory_mib for t in tools)),
+    )
     return {
+        "cube_capacity_demand": demand,
         "node": spec.resources.target_node,
         "compute_nodes": [n.model_dump() for n in spec.resources.compute_nodes],
         "runtime": sandbox(spec.runtime),

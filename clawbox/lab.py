@@ -286,6 +286,9 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
     checks = [("KVM access", lambda: os.access("/dev/kvm", os.R_OK | os.W_OK)),
               ("cgroup v2", lambda: Path("/sys/fs/cgroup/cgroup.controllers").exists()),
               ("disk space >= 5 GiB", lambda: shutil.disk_usage(ROOT).free >= 5 * 1024**3)]
+    if profile.get('cube_capacity_demand'):
+        from .experiments.cube_capacity import require_capacity
+        checks.insert(0, ('Cube configured-VM capacity', lambda: require_capacity(profile)))
     for module in ("jsonschema", "cryptography", "yaml", "httpx"):
         checks.append(("Python " + module, lambda m=module: bool(importlib.import_module(m))))
     for unit in SERVICES:
@@ -521,6 +524,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
     wait_for_vm_ready(profile)
     profile['tcp_tw_reuse'] = getattr(args, 'tcp_tw_reuse', None)
     profile['cubelet_tap_init_num'] = getattr(args, 'cubelet_tap_init_num', None)
+    profile['cube_scheduler_overcommit'] = getattr(args, 'cube_scheduler_overcommit', None)
     _write_json_atomic(args.profile, profile)
     print(f"Saved host profile: {args.profile}")
     return profile
