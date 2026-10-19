@@ -42,7 +42,7 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
         RuntimePredictionProvider(path, repository='r')
 
 
-def test_cold_start_prediction_accepts_any_repo_but_requires_same_image(tmp_path, monkeypatch):
+def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tmp_path):
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
     from tool_time.lattice_kb import LatticeTimeKB
@@ -61,9 +61,11 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_image(tmp_path
                             'sample_count': 3, 'scale': 2, 'offset_bytes': 0}}))
     resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
     provider = ColdStartPredictionProvider(path, repository='another/repo',
-                                           sandbox_identity=resized)
+                                           sandbox_identity=identity)
     assert provider.repository == 'another/repo'
     assert provider.prediction_source == 'runtime_clawtune_cold_start_kb'
+    with pytest.raises(ValueError, match='environments differ'):
+        ColdStartPredictionProvider(path, repository='another/repo', sandbox_identity=resized)
     with pytest.raises(ValueError, match='environments differ'):
         ColdStartPredictionProvider(path, repository='another/repo',
                                     sandbox_identity={**resized, 'image_digest': 'sha256:other'})

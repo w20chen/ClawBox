@@ -126,11 +126,10 @@ KB for its matching repository and Tool image. `--prediction-mode cold-start`
 uses one immutable ClawTune bootstrap KB for every workload repository; its
 artifact must declare `prediction_scope: clawtune_cold_start` and
 `repository: "*"`. The cold-start mode still verifies the KB hash, validated
-host-memory calibration, Tool image digest, architecture, and vCPU shape. A
-template may be resized without retraining because admission predicts an
-increment over the VM baseline; the calibration and evaluation identities are
-both retained in run provenance. Changing the mode or artifact requires a new
-run ID, not an image rebuild.
+host-memory calibration, and the complete Tool environment identity, including
+VM size. The bootstrap KB must contain compatible memory observations; a
+time-only seed cannot support predicted memory admission. Changing the mode or
+artifact requires a new run ID, not an image rebuild.
 
 ### Resident capacity baselines
 

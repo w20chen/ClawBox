@@ -207,10 +207,7 @@ class P50PredictionProvider(FrozenPredictionProvider):
         if payload.get("training_validated") is not True:
             raise ValueError("P50 artifact requires a validated Cube training run")
         if sandbox_identity is not None and payload.get("sandbox_identity") != sandbox_identity:
-            if not global_cold_start or not _same_cold_start_environment(
-                payload.get("sandbox_identity"), sandbox_identity,
-            ):
-                raise ValueError("P50 training and evaluation Tool environments differ")
+            raise ValueError("P50 training and evaluation Tool environments differ")
         super().__init__(path, repository=repository, prediction_source="frozen_clawbox_p50")
         self.evaluation_sandbox_identity = sandbox_identity
         self.global_cold_start = global_cold_start
@@ -361,19 +358,6 @@ class RuntimePredictionProvider(P50PredictionProvider):
 
     def resolve_digest(self, digest, runtime_metadata):
         raise PredictionUnavailable("runtime prediction requires command text, not a frozen digest lookup")
-
-
-def _same_cold_start_environment(calibration: Any, evaluation: Any) -> bool:
-    """Permit a resized template only when the executable image is unchanged.
-
-    Host calibration maps incremental guest memory to incremental cgroup memory.
-    Template identity and the configured memory ceiling do not change that
-    mapping; image, architecture and vCPU shape do.
-    """
-    if not isinstance(calibration, dict) or not isinstance(evaluation, dict):
-        return False
-    return all(calibration.get(key) == evaluation.get(key)
-               for key in ("image_digest", "architecture", "vcpu"))
 
 
 class ColdStartPredictionProvider(RuntimePredictionProvider):
