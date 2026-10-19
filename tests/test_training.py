@@ -9,6 +9,7 @@ from clawbox.experiments.configure import dump_experiment
 from clawbox.experiments.qualification import qualification_spec
 from clawbox.experiments.results import ResultEnvelope, RunStatus, utcnow
 from clawbox.experiments.spec import expand_matrix, load_experiment
+from clawbox.experiments.spec_types import SessionAssignment
 from clawbox.experiments.training import (
     COLLECTOR_SEMANTICS, _clawtune_revision, _percentile, _training_arm_sources,
 )
@@ -50,6 +51,9 @@ def _write_run(
             "execution": spec.execution.model_copy(update={
                 "concurrency_levels": tuple(range(1, len(attempts) + 1)),
                 "randomized_order": False,
+            }),
+            "workload": spec.workload.model_copy(update={
+                "session_assignment": SessionAssignment.SINGLE_CASE,
             }),
         })
     if qualification:

@@ -259,6 +259,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  model_gateway: Any | None = None,
                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
+                 resident_wait: Callable[[str, float], CommandResult | None] | None = None,
                  checkpoint_relay: bool = False) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
@@ -634,19 +635,36 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             )
         agent_started = time.monotonic()
         deadline = None if timeout_seconds is None else agent_started + timeout_seconds
-        while True:
-            status = resident_poll(
-                f"test -s {shlex.quote(agent_exit_file)}", 10,
-            )
-            if status is not None and status.exit_code == 0:
-                break
-            if deadline is not None and time.monotonic() >= deadline:
+        if resident_wait is not None and timeout_seconds is not None:
+            try:
+                status = resident_wait(agent_exit_file, float(timeout_seconds))
+            except TimeoutError:
                 resident_poll(
                     f"kill -TERM $(cat {shlex.quote(agent_pid_file)}) 2>/dev/null || true",
                     10,
                 )
                 raise TimeoutError("OpenClaw detached Agent timed out")
-            time.sleep(0.2)
+            if status is None:
+                raise RuntimeError("Runtime became non-resident while waiting for Agent result")
+            if status.exit_code != 0:
+                raise RuntimeError(
+                    "resident Agent completion wait failed: "
+                    + (status.stderr or status.stdout)[-1000:]
+                )
+        else:
+            while True:
+                status = resident_poll(
+                    f"test -s {shlex.quote(agent_exit_file)}", 10,
+                )
+                if status is not None and status.exit_code == 0:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    resident_poll(
+                        f"kill -TERM $(cat {shlex.quote(agent_pid_file)}) 2>/dev/null || true",
+                        10,
+                    )
+                    raise TimeoutError("OpenClaw detached Agent timed out")
+                time.sleep(1.0)
         exit_result = resident_poll(f"cat {shlex.quote(agent_exit_file)}", 10)
         stdout_result = resident_poll(f"cat {shlex.quote(agent_stdout_file)}", 30)
         stderr_result = resident_poll(f"cat {shlex.quote(agent_stderr_file)}", 30)

@@ -117,6 +117,7 @@ def configure_experiment(
     session_compute_nodes: list[str] | None = None,
     experiment_id: str | None = None,
     trace: str | None = None,
+    workload_manifest: str | None = None,
     case_id: str | None = None,
     prompt: str | None = None,
     repository: str | None = None,
@@ -162,6 +163,7 @@ def configure_experiment(
     runtime_poll_interval_seconds: float | None = None,
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
+    poisson_arrival_window_fraction: float | None = None,
     random_seed: int | None = None,
     arm_timeout_seconds: int | None = None,
     command_timeout_seconds: int | None = None,
@@ -244,7 +246,20 @@ def configure_experiment(
 
     if experiment_id is not None:
         root["experiment_id"] = experiment_id
-    if any(value is not None for value in (trace, case_id, prompt, repository, base_commit, validation_command)):
+    single_case_values = (trace, case_id, prompt, repository, base_commit)
+    if workload_manifest is not None and any(
+        value is not None for value in single_case_values
+    ):
+        raise ValueError(
+            "--workload-manifest cannot be combined with single-case workload overrides"
+        )
+    if workload_manifest is not None:
+        workload = _mapping(root.get("workload"), name="workload")
+        workload["source"] = "swe_rebench"
+        workload["input"] = workload_manifest
+        workload["session_assignment"] = "unique"
+        workload.pop("cases", None)
+    elif any(value is not None for value in single_case_values):
         workload = _mapping(root.get("workload"), name="workload")
         cases = workload.get("cases")
         if not cases and workload.get("source") == "recorded_trace":
@@ -275,6 +290,12 @@ def configure_experiment(
             case["validation"] = validation_command
     else:
         workload = _mapping(root.get("workload"), name="workload")
+    if validation_command is not None and workload_manifest is None:
+        cases = workload.get("cases")
+        if isinstance(cases, list) and len(cases) == 1:
+            _mapping(cases[0], name="workload.cases[0]")["validation"] = (
+                validation_command
+            )
     if repetitions is not None:
         workload["repetitions"] = repetitions
     if session_assignment is not None:
@@ -440,8 +461,16 @@ def configure_experiment(
         execution["arrival_schedule"] = arrival_schedule
         if arrival_schedule == "burst":
             execution["stagger_interval_seconds"] = 0
-        elif float(execution.get("stagger_interval_seconds", 0)) <= 0:
+        elif arrival_schedule == "fixed_stagger" and float(
+            execution.get("stagger_interval_seconds", 0)
+        ) <= 0:
             execution["stagger_interval_seconds"] = 0.2
+        elif arrival_schedule == "poisson":
+            execution["stagger_interval_seconds"] = 0
+    if poisson_arrival_window_fraction is not None:
+        execution["poisson_arrival_window_fraction"] = (
+            poisson_arrival_window_fraction
+        )
     if random_seed is not None:
         execution["random_seed"] = random_seed
     if arm_timeout_seconds is not None:
@@ -715,6 +744,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
         "execution": {
             "arrival_schedule": spec.execution.arrival_schedule.value,
             "stagger_interval_seconds": spec.execution.stagger_interval_seconds,
+            "poisson_arrival_window_fraction": (
+                spec.execution.poisson_arrival_window_fraction
+            ),
             "random_seed": spec.execution.random_seed,
             "arm_timeout_seconds": spec.execution.arm_timeout_seconds,
             "command_timeout_seconds": spec.execution.command_timeout_seconds,

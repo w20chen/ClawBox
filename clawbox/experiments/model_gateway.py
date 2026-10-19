@@ -35,7 +35,8 @@ class SessionGatewayState:
                  tool_transport_timeout_s: float | None = None,
                  max_model_steps: int | None = None,
                  on_request_started: Callable[..., None] | None = None,
-                 before_response_ready: Callable[..., dict[str, Any]] | None = None) -> None:
+                 before_response_ready: Callable[..., dict[str, Any]] | None = None,
+                 flush_gate: threading.Semaphore | None = None) -> None:
         self.session_id = session_id
         self.token = token
         self.url = ""
@@ -56,6 +57,8 @@ class SessionGatewayState:
         self._active_requests = 0
         self._draining = False
         self._delivery_generation = 0
+        self._flush_when_idle = False
+        self._flush_gate = flush_gate
 
     @property
     def mode(self) -> str:
@@ -73,10 +76,15 @@ class SessionGatewayState:
             return True
 
     def release(self) -> None:
+        flush = False
         with self._condition:
             self._active_requests -= 1
             if self._active_requests == 0:
                 self._condition.notify_all()
+                flush = self._draining and self._flush_when_idle
+                self._flush_when_idle = False
+        if flush:
+            self.flush()
 
     def delivery_generation(self) -> int:
         with self._condition:
@@ -93,6 +101,7 @@ class SessionGatewayState:
 
     def drain(self, timeout: float | None = None) -> bool:
         deadline = None if timeout is None else time.monotonic() + timeout
+        drained = True
         with self._condition:
             self._draining = True
             while self._active_requests:
@@ -101,9 +110,22 @@ class SessionGatewayState:
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        return False
+                        self._flush_when_idle = True
+                        drained = False
+                        break
                     self._condition.wait(remaining)
-            return True
+        # Successful sessions write their complete evidence once. Failed
+        # sessions still retain a consistent partial snapshot immediately;
+        # release() refreshes it if the last in-flight request later exits.
+        self.flush()
+        return drained
+
+    def flush(self) -> None:
+        if self._flush_gate is None:
+            self.gateway.flush()
+            return
+        with self._flush_gate:
+            self.gateway.flush()
 
     def complete_http(self, payload: dict[str, Any]) -> tuple[int, str, bytes, str]:
         return self.gateway.complete_http(payload)
@@ -129,11 +151,14 @@ class ManagedModelGateway:
         self.advertised_port = int(advertised_port)
         self._sessions: dict[str, SessionGatewayState] = {}
         self._lock = threading.RLock()
+        # Final evidence writes are no longer on request paths. Bound the
+        # remaining end-of-session serialization burst across dense arms.
+        self._flush_gate = threading.Semaphore(2)
         self._started = False
         gateway = self
 
         class ConcurrentHTTPServer(ThreadingHTTPServer):
-            request_queue_size = 256
+            request_queue_size = 4096
             daemon_threads = True
             allow_reuse_address = True
 
@@ -328,6 +353,7 @@ class ManagedModelGateway:
             tool_transport_timeout_s=tool_transport_timeout_s,
             on_request_started=on_request_started,
             before_response_ready=before_response_ready,
+            flush_gate=self._flush_gate,
         )
         state.url = self.url
         with self._lock:

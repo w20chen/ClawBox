@@ -9,6 +9,7 @@ workload:
   source: recorded_trace
   input: examples/traces/smoke.jsonl
   repetitions: 8
+  session_assignment: single_case
   cases:
   - case_id: marker
     source: recorded_trace

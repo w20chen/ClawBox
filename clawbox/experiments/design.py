@@ -562,7 +562,18 @@ def configure_design(raw, options):
         execution['stagger_interval_seconds'] = options['stagger_seconds']
     if options.get('experiment_id') is not None:
         raw['experiment_id'] = options['experiment_id']
-    if any(options.get(k) is not None for k in ('trace', 'case_id', 'prompt', 'repository', 'base_commit')):
+    single_case_keys = ('trace', 'case_id', 'prompt', 'repository', 'base_commit')
+    if options.get('workload_manifest') is not None and any(
+        options.get(key) is not None for key in single_case_keys
+    ):
+        raise ValueError('--workload-manifest cannot be combined with single-case workload overrides')
+    if options.get('workload_manifest') is not None:
+        workload.update(
+            source='swe_rebench', input=options['workload_manifest'],
+            session_assignment='unique',
+        )
+        workload.pop('cases', None)
+    elif any(options.get(k) is not None for k in single_case_keys):
         cases = workload.get('cases')
         if not cases and workload['source'] == 'recorded_trace':
             trace = options.get('trace') or workload['input']

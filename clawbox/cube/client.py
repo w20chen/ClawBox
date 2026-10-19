@@ -178,13 +178,24 @@ class CubeSandboxClient:
         # published the corresponding L4 route record.  Retry only this
         # read-after-lifecycle boundary; the endpoint remains wholly owned by
         # CubeSandbox and no cached or alternate route is introduced.
-        raw = read_with_backoff(
-            lambda: getter(container_port),
-            label=(f"TCP endpoint for {self.sandbox_id(sandbox)}:{container_port}"),
-            attempts=self.tcp_endpoint_attempts,
-            initial_delay_s=self.tcp_endpoint_initial_delay_s,
-            max_delay_s=self.tcp_endpoint_max_delay_s,
-        )
+        try:
+            raw = read_with_backoff(
+                lambda: getter(container_port),
+                label=(f"TCP endpoint for {self.sandbox_id(sandbox)}:{container_port}"),
+                attempts=self.tcp_endpoint_attempts,
+                initial_delay_s=self.tcp_endpoint_initial_delay_s,
+                max_delay_s=self.tcp_endpoint_max_delay_s,
+            )
+        finally:
+            # The SDK keeps one requests connection pool on every live sandbox
+            # handle. Endpoint discovery is a discrete control-plane operation;
+            # retaining hundreds of its idle sockets exhausts the worker's
+            # default RLIMIT_NOFILE before the offered concurrency is reached.
+            # Public Sandbox.close() only closes cached clients; it does not
+            # destroy the VM, and later operations rebuild them lazily.
+            close = getattr(sandbox, "close", None)
+            if callable(close):
+                close()
         if isinstance(raw, Mapping):
             sandbox_id = raw.get("sandboxID") or raw.get("sandbox_id")
             returned_port = raw.get("containerPort") or raw.get("container_port")
@@ -399,8 +410,13 @@ class CubeSandboxClient:
 
     def kill_sandbox(self, sandbox_or_id: Any) -> None:
         if not isinstance(sandbox_or_id, str):
-            sandbox_or_id.kill()
-            self._handles.pop(self.sandbox_id(sandbox_or_id), None)
+            try:
+                sandbox_or_id.kill()
+            finally:
+                close = getattr(sandbox_or_id, "close", None)
+                if callable(close):
+                    close()
+                self._handles.pop(self.sandbox_id(sandbox_or_id), None)
             return
         sandbox_id = sandbox_or_id
         handle = self._handles.pop(sandbox_id, None)
@@ -430,6 +446,11 @@ class CubeSandboxClient:
                     return
                 handle = None
                 raise
+            finally:
+                if handle is not None:
+                    close = getattr(handle, "close", None)
+                    if callable(close):
+                        close()
 
         retry_with_backoff(
             kill_once, label=f"kill sandbox {sandbox_id}", attempts=10,

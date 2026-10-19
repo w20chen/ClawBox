@@ -95,6 +95,9 @@ class ModelGateway:
         self._process_sessions: dict[str, dict[str, str]] = {}
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
+        self._flush_lock = threading.Lock()
+        self._persistence_revision = 0
+        self._persisted_revision = -1
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -140,7 +143,12 @@ class ModelGateway:
             def log_message(self, _format: str, *_args: object) -> None:
                 return
 
-        self._server = ThreadingHTTPServer((host, port), Handler)
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 4096
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self._server = Server((host, port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return f"http://{host}:{self._server.server_port}/v1"
@@ -153,6 +161,7 @@ class ModelGateway:
         if self._thread is not None:
             self._thread.join(timeout=2)
             self._thread = None
+        self.flush()
 
     def complete(self, payload: dict[str, Any]) -> tuple[int, str, bytes]:
         status, content_type, body, _request_id = self._complete_with_identity(
@@ -571,11 +580,33 @@ class ModelGateway:
 
 
     def _persist(self) -> None:
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.store_path.with_name(self.store_path.name + ".next")
-        temporary.write_text(json.dumps([asdict(item) for item in self._requests.values()], sort_keys=True))
-        temporary.replace(self.store_path)
+        """Mark the in-memory ledger dirty without blocking response delivery.
 
+        A request carries the complete conversation, and the ledger retains
+        every prior request. Rewriting that whole structure at every state
+        transition made replay persistence quadratic and put JSON encoding and
+        filesystem I/O directly on the model-response critical path. The
+        managed gateway flushes one atomic final snapshot when the session
+        drains; ``close`` does the same for the standalone gateway.
+        """
+        self._persistence_revision += 1
+
+    def flush(self) -> None:
+        """Atomically persist one consistent ledger snapshot if it changed."""
+        with self._flush_lock:
+            with self._lock:
+                revision = self._persistence_revision
+                if revision == self._persisted_revision and self.store_path.is_file():
+                    return
+                snapshot = [asdict(item) for item in self._requests.values()]
+            encoded = json.dumps(snapshot, sort_keys=True)
+            self.store_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.store_path.with_name(self.store_path.name + ".next")
+            temporary.write_text(encoded, encoding="utf-8")
+            temporary.replace(self.store_path)
+            with self._lock:
+                if self._persistence_revision == revision:
+                    self._persisted_revision = revision
 
 def _checkpoint_retry_duplicate_message(
     previous: dict[str, Any], current: dict[str, Any],

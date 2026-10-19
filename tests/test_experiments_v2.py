@@ -16,12 +16,12 @@ from clawbox.experiments.worker import (
     EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
     WatermarkController, policy_event_workers, policy_operation_headroom_mib,
     policy_progress_budget_mib,
-    read_priority_memory_charge, session_case_for,
+    read_priority_memory_charge, session_case_for, session_offer_offsets,
 )
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.numa_borrow import NumaBorrowRecord
 from clawbox.replay.lifecycle import CommandResult
-from clawbox.experiments.spec import ReclamationPolicy
+from clawbox.experiments.spec import ExecutionSpec, ReclamationPolicy
 
 
 def test_explicit_null_disables_arm_deadline() -> None:
@@ -285,6 +285,7 @@ def raw_spec() -> dict:
         "experiment_id": "unit",
         "workload": {
             "source": "recorded_trace", "input": "trace.jsonl", "repetitions": 2,
+            "session_assignment": "single_case",
             "cases": [{"case_id": "case-a", "source": "recorded_trace",
                        "source_reference": "trace.jsonl", "replay_trace_reference": "trace.jsonl"}],
         },
@@ -443,13 +444,47 @@ def test_snapshot_aware_policy_requires_measured_costs_and_case_reuse() -> None:
 
 def test_arrival_schedule_is_explicit_and_validated() -> None:
     raw = raw_spec()
-    assert ExperimentSpec.model_validate(raw).execution.arrival_schedule.value == "burst"
+    execution = ExperimentSpec.model_validate(raw).execution
+    assert execution.arrival_schedule.value == "poisson"
+    assert execution.poisson_arrival_window_fraction == 0.25
     raw["execution"].update({
         "arrival_schedule": "fixed_stagger", "stagger_interval_seconds": 0.25,
     })
     assert ExperimentSpec.model_validate(raw).execution.stagger_interval_seconds == 0.25
     raw["execution"]["stagger_interval_seconds"] = 0
     with pytest.raises(ValidationError, match="positive stagger"):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_poisson_arrivals_are_deterministic_fair_and_trace_scaled() -> None:
+    raw = raw_spec()
+    raw["workload"].update(
+        repetitions=1,
+        session_assignment="unique",
+        cases=[{
+            "case_id": f"case-{index}", "source": "recorded_trace",
+            "source_reference": f"trace-{index}.jsonl",
+            "replay_trace_reference": f"trace-{index}.jsonl",
+            "metadata": {"recorded_duration_seconds": 400.0},
+        } for index in range(4)],
+    )
+    raw["execution"]["concurrency_levels"] = [4]
+    arms = expand_matrix(ExperimentSpec.model_validate(raw))
+    first, second = session_offer_offsets(arms[0]), session_offer_offsets(arms[1])
+    assert first == second
+    assert first[0] == 0
+    assert all(left < right for left, right in zip(first, first[1:]))
+    # The configured expected window is 25% of the 400-second trace span.
+    # One deterministic sample need not equal its expectation, but it must be
+    # a genuine non-uniform Poisson realization rather than fixed staggering.
+    assert len({round(right - left, 9)
+                for left, right in zip(first, first[1:])}) > 1
+
+
+def test_unique_assignment_requires_one_case_per_offered_session() -> None:
+    raw = raw_spec()
+    raw["workload"]["session_assignment"] = "unique"
+    with pytest.raises(ValidationError, match="requires at least 4"):
         ExperimentSpec.model_validate(raw)
 
 
@@ -780,13 +815,12 @@ def test_openclaw_cube_example_uses_native_tool_names() -> None:
     assert "sandboxed exec" in spec.workload.cases[0].prompt
 
 
-def test_worker_bounds_pair_creation_for_high_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "3")
-    assert ExperimentWorker._sandbox_create_limit(40) == 3
-    assert ExperimentWorker._sandbox_create_limit(2) == 2
-    monkeypatch.setenv("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "0")
-    with pytest.raises(ValueError, match="positive integer"):
-        ExperimentWorker._sandbox_create_limit(40)
+def test_worker_uses_explicit_pair_creation_concurrency() -> None:
+    assert ExecutionSpec().sandbox_create_concurrency == 4
+    assert ExperimentWorker._sandbox_create_limit(40, 3) == 3
+    assert ExperimentWorker._sandbox_create_limit(2, 3) == 2
+    with pytest.raises(ValidationError, match="sandbox_create_concurrency"):
+        ExecutionSpec(sandbox_create_concurrency=0)
 
 
 def test_vm_startup_headroom_matches_the_arm_admission_policy() -> None:

@@ -1,4 +1,5 @@
 import json
+import json
 from pathlib import Path
 
 import pytest
@@ -40,11 +41,30 @@ def test_arbitrary_trace_and_case_replace_single_case_and_keep_concurrency(tmp_p
     spec = configure_experiment(base, trace=str(trace), case_id="different-task",
                                 prompt="A different task", repository="example/project",
                                 base_commit="revision", concurrency="2,3",
+                                session_assignment="single_case",
                                 validation_command="test -f /workspace/result.txt")
     assert spec.execution.concurrency_levels == (2, 3)
     assert spec.workload.cases[0].repository == "example/project"
     assert spec.workload.cases[0].validation == "test -f /workspace/result.txt"
     assert validate_inputs(spec)["traces"][0]["path"] == str(trace)
+
+
+def test_workload_manifest_selects_unique_corpus_without_single_case_overrides(tmp_path):
+    manifest = tmp_path / "workload.json"
+    trace = tmp_path / "one.replay.jsonl"
+    trace.write_text(Path("examples/traces/smoke.jsonl").read_text(), encoding="utf-8")
+    manifest.write_text(json.dumps({"tasks": [{
+        "case_id": "one", "prompt": "one", "replay_trace_reference": trace.name,
+    }]}), encoding="utf-8")
+    spec = configure_experiment(EXAMPLE, workload_manifest=str(manifest))
+    assert spec.workload.source == "swe_rebench"
+    assert spec.workload.input == str(manifest)
+    assert spec.workload.session_assignment.value == "unique"
+    assert spec.workload.cases == ()
+    with pytest.raises(ValueError, match="cannot be combined"):
+        configure_experiment(
+            EXAMPLE, workload_manifest=str(manifest), trace="one.jsonl",
+        )
 
 
 def test_missing_trace_is_rejected_before_worker_creation(tmp_path, monkeypatch, capsys):

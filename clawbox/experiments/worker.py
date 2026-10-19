@@ -9,6 +9,7 @@ import json
 import math
 import os
 import platform
+import random
 import statistics
 import subprocess
 import base64
@@ -57,7 +58,7 @@ from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
 from .topology import place_session
 from .numa_placement import CpuMonitor, SessionPlacement
-from .spec_types import InferenceBackend, SnapshotTier
+from .spec_types import ArrivalSchedule, InferenceBackend, SessionAssignment, SnapshotTier
 from .policy_control import PolicyControlServer
 from .prediction import P50PredictionProvider, PredictionUnavailable, prediction_provider_type
 from .admission import DemandLedger
@@ -236,7 +237,74 @@ def wait_for_admission_without_lifecycle_lock(
 
 def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     cases = arm.session_cases or (arm.case,)
+    if arm.session_assignment is SessionAssignment.UNIQUE:
+        if session_index >= len(cases):
+            raise IndexError("unique session assignment exhausted workload cases")
+        return cases[session_index]
     return cases[session_index % len(cases)]
+
+
+def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
+    """Return deterministic offered-arrival offsets shared by compared policies."""
+    count = arm.concurrency
+    schedule = arm.execution.arrival_schedule
+    if schedule is ArrivalSchedule.BURST:
+        return (0.0,) * count
+    if schedule is ArrivalSchedule.FIXED_STAGGER:
+        return tuple(index * arm.execution.stagger_interval_seconds
+                     for index in range(count))
+    selected = [session_case_for(arm, index) for index in range(count)]
+    time_scale = float(arm.inference.configuration.get("time_scale", 1.0))
+    durations = []
+    for case in selected:
+        recorded = case.metadata.get("recorded_duration_seconds")
+        if recorded is None:
+            actions = load_trace(Path(
+                case.replay_trace_reference or case.source_reference
+            ))
+            recorded = (
+                max(action.start_s + action.duration_s for action in actions)
+                - min(action.start_s for action in actions)
+            )
+        durations.append(max(1.0, float(recorded) * time_scale))
+    reference = statistics.median(durations)
+    expected_window = (
+        reference * arm.execution.poisson_arrival_window_fraction
+    )
+    if count == 1:
+        return (0.0,)
+    mean_interval = expected_window / (count - 1)
+    seed_material = json.dumps({
+        "random_seed": arm.execution.random_seed,
+        "repetition": arm.repetition,
+        "concurrency": arm.concurrency,
+        "case_ids": [case.case_id for case in selected],
+    }, sort_keys=True, separators=(",", ":"))
+    seed = int(hashlib.sha256(seed_material.encode()).hexdigest()[:16], 16)
+    generator = random.Random(seed)
+    offsets = [0.0]
+    for _ in range(1, count):
+        offsets.append(offsets[-1] + generator.expovariate(1.0 / mean_interval))
+    return tuple(offsets)
+
+
+def ensure_worker_fd_limit(concurrency: int) -> tuple[int | None, int | None]:
+    """Reserve enough descriptors for concurrent VM control and Agent streams."""
+    if os.name != "posix":
+        return None, None
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    required = 512 + 16 * concurrency
+    if hard != resource.RLIM_INFINITY and hard < required:
+        raise RuntimeError(
+            "worker file-descriptor hard limit is too low for offered concurrency: "
+            f"need at least {required}, hard limit is {hard}; raise LimitNOFILE/ulimit -Hn"
+        )
+    target = max(soft, required)
+    if target != soft:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    return target, hard
 
 
 @contextmanager
@@ -758,6 +826,22 @@ class RuntimeStatusPoller:
                 return None
             return _execute_idempotent(self.executor, command, timeout)
 
+    def wait_for_file(self, path: str, timeout: float) -> CommandResult | None:
+        """Wait inside a resident Runtime instead of issuing 5 polls/second."""
+        if self.snapshot_enabled:
+            raise RuntimeError(
+                "a snapshot-enabled Runtime must use bounded lifecycle polling"
+            )
+        if not self.lifecycle.resident:
+            return None
+        command = (
+            "while [ ! -s " + shlex.quote(path) + " ]; do sleep 1; done"
+        )
+        # This call intentionally occupies one Cube command stream until the
+        # Agent exits.  Do not retry it: a deadline is the Agent deadline, not
+        # a transient read-only probe failure.
+        return self.executor.execute(command, timeout)
+
 
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1196,20 +1280,9 @@ class ExperimentWorker:
         self.model_gateway: ManagedModelGateway | None = None
 
     @staticmethod
-    def _sandbox_create_limit(concurrency: int) -> int:
-        """Bound pair creation so c40 does not stampede Cubelet/containerd."""
-        raw = os.environ.get("CLAWBOX_SANDBOX_CREATE_CONCURRENCY", "8")
-        try:
-            limit = int(raw)
-        except ValueError as exc:
-            raise ValueError(
-                "CLAWBOX_SANDBOX_CREATE_CONCURRENCY must be a positive integer"
-            ) from exc
-        if limit < 1:
-            raise ValueError(
-                "CLAWBOX_SANDBOX_CREATE_CONCURRENCY must be a positive integer"
-            )
-        return min(concurrency, limit)
+    def _sandbox_create_limit(concurrency: int, configured_limit: int) -> int:
+        """Return the explicit, auditable VM-pair creation concurrency."""
+        return min(concurrency, configured_limit)
 
     @staticmethod
     def _startup_headroom_mib(
@@ -1235,6 +1308,7 @@ class ExperimentWorker:
             arms = [arm for arm in arms if arm.arm_id in arm_ids]
             if not arms:
                 raise ValueError("at least one experiment arm must be selected")
+        self._fd_limit = ensure_worker_fd_limit(max(arm.concurrency for arm in arms))
         requires_control = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
         if requires_control and not control_host:
             raise RuntimeError("native SSH policy control requires CLAWBOX_CONTROL_HOST")
@@ -1517,7 +1591,9 @@ class ExperimentWorker:
             sampler.sample_hook = record_memory_sample
         policy_events = PolicyEventExecutor(workers=policy_event_workers(arm))
         watermark_controller = next(iter(domains.values())).controller
-        sandbox_create_gate = Semaphore(self._sandbox_create_limit(arm.concurrency))
+        sandbox_create_gate = Semaphore(self._sandbox_create_limit(
+            arm.concurrency, arm.execution.sandbox_create_concurrency,
+        ))
         self._runtime_memory = None
         self._priority_domain = None
         if arm.resources.local_memory_cgroup:
@@ -1570,6 +1646,7 @@ class ExperimentWorker:
         pool = ThreadPoolExecutor(
             max_workers=arm.concurrency, thread_name_prefix="agent"
         )
+        offer_offsets = session_offer_offsets(arm)
         futures: dict[Any, int] = {}
         def check_shared_health():
             try:
@@ -1584,8 +1661,7 @@ class ExperimentWorker:
                 raise ArmInfrastructureError("shared policy controller failed") from exc
 
         def run_placed_session(index):
-            offset = (index*arm.execution.stagger_interval_seconds
-                      if arm.execution.arrival_schedule.value == 'fixed_stagger' else 0)
+            offset = offer_offsets[index]
             time.sleep(max(0., arm_started_monotonic+offset-time.monotonic()))
             with creation_slot(sandbox_create_gate, events, f'{arm.arm_id}-{index:04d}') as slot:
                 return run_placed_session_impl(index, slot)
@@ -1599,8 +1675,7 @@ class ExperimentWorker:
                 arm.runtime.memory_mib, tool_sandbox.memory_mib)
             started = time.monotonic()
             if placement is not None:
-                offset = (index*arm.execution.stagger_interval_seconds
-                          if arm.execution.arrival_schedule.value == 'fixed_stagger' else 0)
+                offset = offer_offsets[index]
                 time.sleep(max(0., arm_started_monotonic+offset-time.monotonic()))
                 started = time.monotonic()
                 fixed = (None if arm.execution.placement_policy == 'load_aware'
@@ -1630,10 +1705,10 @@ class ExperimentWorker:
                     policy_events, prediction_providers.get(session_case.case_id), None,
                     domain.sampler.observe, arm_started_wall, arm_started_monotonic,
                     snapshot_pool, domain.borrower, domain.controller,
-                    creation_reserved=placement is not None, creation_gate_info=slot)
+                    creation_reserved=placement is not None, creation_gate_info=slot,
+                    offered_offset_seconds=offer_offsets[index])
                 result['placement_wait_seconds'] = waited if placement is not None else 0.
-                offered = arm_started_wall + (index*arm.execution.stagger_interval_seconds
-                    if arm.execution.arrival_schedule.value == 'fixed_stagger' else 0)
+                offered = arm_started_wall + offer_offsets[index]
                 result['offered_to_completion_seconds'] = max(0.,
                     result['timeline']['final_agent_completion']-offered)
                 result['compute_node'] = (None if os_default else
@@ -2103,14 +2178,15 @@ class ExperimentWorker:
                      numa_borrower: SandboxNumaBorrower | None = None,
                      watermark_controller: WatermarkController | None = None,
                      creation_reserved: bool = False,
-                     creation_gate_info=None) -> dict[str, Any]:
+                     creation_gate_info=None,
+                     offered_offset_seconds: float | None = None) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         tool_sandbox = session_case.sandbox or arm.sandbox
         if session_case != arm.case or tool_sandbox != arm.sandbox:
             arm = arm.model_copy(update={"case": session_case, "sandbox": tool_sandbox})
         offered_offset = (
-            index * arm.execution.stagger_interval_seconds
-            if arm.execution.arrival_schedule.value == "fixed_stagger" else 0.0
+            session_offer_offsets(arm)[index]
+            if offered_offset_seconds is None else offered_offset_seconds
         )
         if arm_started_monotonic is not None:
             time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
@@ -3317,6 +3393,8 @@ class ExperimentWorker:
                                          if prediction_provider is not None else None),
                     resident_poll=poll_resident_runtime,
                     checkpoint_relay=runtime_snapshot_enabled,
+                    **({"resident_wait": poll_resident_runtime.wait_for_file}
+                       if not runtime_snapshot_enabled else {}),
                 )
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
@@ -3847,6 +3925,9 @@ class ExperimentWorker:
             "arrival_schedule": {
                 "kind": arm.execution.arrival_schedule.value,
                 "stagger_interval_seconds": arm.execution.stagger_interval_seconds,
+                "poisson_arrival_window_fraction": (
+                    arm.execution.poisson_arrival_window_fraction
+                ),
             },
             "resource_scope": {
                 "target_node": arm.resources.target_node,

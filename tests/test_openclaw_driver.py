@@ -242,6 +242,48 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
     assert result["stdout"] == '{"ok":true}\n'
 
 
+def test_openclaw_resident_wait_replaces_repeated_status_polling(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    commands: list[str] = []
+    waits: list[tuple[str, float]] = []
+
+    class RuntimeExecutor:
+        def execute(self, command, _timeout):
+            commands.append(command)
+            return CommandResult(0, "", "", 0.01)
+
+    def resident_poll(command: str, _timeout: float) -> CommandResult:
+        commands.append("POLL " + command)
+        if "cat /state/openclaw/session-a/agent.exit" in command:
+            return CommandResult(0, "0\n", "", 0.01)
+        if "cat /state/openclaw/session-a/logs/agent.stdout" in command:
+            return CommandResult(0, '{"ok":true}\n', "", 0.01)
+        return CommandResult(0, "", "", 0.01)
+
+    def resident_wait(path: str, timeout: float) -> CommandResult:
+        waits.append((path, timeout))
+        return CommandResult(0, "", "", 0.01)
+
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    run_openclaw(
+        prompt="test", session_id="session-a",
+        configuration={"base_url": "http://model.test/v1", "model": "test-model"},
+        ssh=NativeSSHConfig(
+            target="executor@192.0.2.20:2222",
+            identity_private_key="PRIVATE KEY\n",
+            host_public_key="ssh-ed25519 AAAATEST",
+            sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
+        ),
+        policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+        output_dir=tmp_path, timeout_seconds=60,
+        resident_poll=resident_poll, resident_wait=resident_wait,
+    )
+
+    assert waits == [("/state/openclaw/session-a/agent.exit", 60.0)]
+    assert not any(item.startswith("POLL test -s ") for item in commands)
+
+
 def test_openclaw_failure_preserves_complete_agent_streams(
     monkeypatch, tmp_path: Path,
 ) -> None:

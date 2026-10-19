@@ -98,6 +98,57 @@ def test_managed_gateway_keeps_replay_cursors_and_delivery_state_session_local(t
         assert gateway.session_count == 0
 
 
+def test_managed_gateway_persists_once_after_session_drain(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    payload = write_trace(trace)
+    store = tmp_path / "store.json"
+    with ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    ) as gateway:
+        session = gateway.register(
+            session_id="persist-at-drain", store_path=store,
+            mode="replay", trace=trace, time_scale=0,
+        )
+        assert gateway.server.request_queue_size >= 1024
+        post(gateway.url, session.token, payload)
+
+        # Model responses must not serialize and rewrite the accumulated
+        # request ledger on their latency-critical path.
+        assert not store.exists()
+
+        assert session.drain(1)
+        records = json.loads(store.read_text(encoding="utf-8"))
+        assert len(records) == 1
+        assert records[0]["delivered"] is True
+        assert records[0]["started_unix_s"] > 0
+        assert records[0]["model_generated_unix_s"] > 0
+        assert records[0]["response_released_unix_s"] > 0
+        assert records[0]["delivered_unix_s"] > 0
+
+
+def test_timed_out_drain_flushes_partial_then_final_evidence(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    write_trace(trace)
+    with ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0,
+        bind_host="127.0.0.1", bind_port=0,
+    ) as gateway:
+        session = gateway.register(
+            session_id="failed-inflight", store_path=tmp_path / "store.json",
+            mode="replay", trace=trace, time_scale=0,
+        )
+        flushes = []
+        session.gateway.flush = lambda: flushes.append("flush")
+        assert session.acquire()
+
+        assert session.drain(0) is False
+        assert flushes == ["flush"]
+
+        session.release()
+        assert flushes == ["flush", "flush"]
+
+
 def test_managed_gateway_forwards_session_request_timeout(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     write_trace(trace)

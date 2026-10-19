@@ -88,7 +88,7 @@ class WorkloadSpec(StrictFrozenModel):
     input: str = Field(min_length=1)
     repetitions: int = Field(default=1, ge=1)
     cases: tuple[WorkloadCase, ...] = ()
-    session_assignment: SessionAssignment = SessionAssignment.SINGLE_CASE
+    session_assignment: SessionAssignment = SessionAssignment.UNIQUE
 
     @model_validator(mode="after")
     def cases_match_source(self) -> "WorkloadSpec":
@@ -170,6 +170,9 @@ class ExecutionSpec(StrictFrozenModel):
     tool_call_cpu_include_smt: bool = False
     session_compute_nodes: tuple[str, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
+    # Limit only concurrent VM-pair creation. Once a pair is ready, its
+    # session releases this slot and remains active at offered concurrency.
+    sandbox_create_concurrency: int = Field(default=4, ge=1)
     randomized_order: bool = True
     random_seed: int = 0
     # Every supported run is supervised at the process boundary.  An
@@ -181,8 +184,14 @@ class ExecutionSpec(StrictFrozenModel):
     command_timeout_seconds: int = Field(default=300, ge=1)
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
-    arrival_schedule: ArrivalSchedule = ArrivalSchedule.BURST
+    arrival_schedule: ArrivalSchedule = ArrivalSchedule.POISSON
     stagger_interval_seconds: float = Field(default=0.0, ge=0)
+    # Expected last-arrival time is this fraction of the median selected
+    # trace's recorded wall span. 0.25 places arrivals in the first 20% of the
+    # expected arrival-plus-trace interval while retaining substantial overlap.
+    poisson_arrival_window_fraction: float = Field(
+        default=0.25, gt=0, le=1, allow_inf_nan=False,
+    )
 
     @field_validator("concurrency_levels")
     @classmethod
@@ -205,6 +214,11 @@ class ExecutionSpec(StrictFrozenModel):
             and self.stagger_interval_seconds != 0
         ):
             raise ValueError("burst requires stagger_interval_seconds=0")
+        if (
+            self.arrival_schedule is ArrivalSchedule.POISSON
+            and self.stagger_interval_seconds != 0
+        ):
+            raise ValueError("poisson requires stagger_interval_seconds=0")
         return self
 
 
@@ -492,9 +506,16 @@ class ExperimentSpec(StrictFrozenModel):
         ):
             raise ValueError("os-managed lifecycle admission requires resident policies")
         scheduling = self.resources.memory_scheduling
-        cases = self.workload.cases
+        cases = self.workload.cases or load_workload_cases(self.workload)
         if len({case.case_id for case in cases}) != len(cases):
             raise ValueError("workload.cases case_id values must be unique")
+        if self.workload.session_assignment is SessionAssignment.UNIQUE:
+            required = max(self.execution.concurrency_levels)
+            if len(cases) < required:
+                raise ValueError(
+                    "unique session assignment requires at least "
+                    f"{required} workload cases"
+                )
         if any(policy.template_aware_placement for policy in self.policies):
             if not self.resources.compute_nodes:
                 raise ValueError("template_aware_placement requires resources.compute_nodes")
@@ -675,7 +696,9 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
     workload_cases = load_workload_cases(spec.workload)
     case_groups = (
         ((workload_cases[0], workload_cases),)
-        if spec.workload.session_assignment is SessionAssignment.ROUND_ROBIN
+        if spec.workload.session_assignment in {
+            SessionAssignment.ROUND_ROBIN, SessionAssignment.UNIQUE,
+        }
         else tuple((case, (case,)) for case in workload_cases)
     )
     for case, session_cases in case_groups:
@@ -752,16 +775,26 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
         case_id = str(record.get("instance_id") or record.get("task_id") or record.get("case_id") or record.get("id") or "").strip()
         if not case_id:
             raise ValueError("every workload record needs an id")
+        replay_reference = record.get("replay_trace_reference")
+        if replay_reference and not Path(str(replay_reference)).is_absolute():
+            replay_reference = str((path.parent / str(replay_reference)).resolve())
         cases.append(WorkloadCase(
             case_id=case_id,
             prompt=str(record.get("problem_statement") or record.get("problem") or record.get("prompt") or ""),
-            source=workload.source, source_reference=str(path),
+            source=workload.source,
+            source_reference=str(record.get("source_reference") or path),
             repository=str(record.get("repo") or record.get("repository") or "") or None,
             base_commit=str(record.get("base_commit") or "") or None,
+            replay_trace_reference=(
+                str(replay_reference) if replay_reference else None
+            ),
             validation=record.get("validation_command") or record.get("validation"),
+            sandbox=record.get("sandbox"),
             metadata={key: value for key, value in record.items() if key not in {
                 "instance_id", "task_id", "case_id", "id", "problem_statement", "problem",
-                "prompt", "repo", "repository", "base_commit", "validation_command", "validation"}},
+                "prompt", "repo", "repository", "base_commit", "validation_command", "validation",
+                "source_reference", "replay_trace_reference", "sandbox", "metadata"}
+            } | (record.get("metadata") or {}),
         ))
     return tuple(cases)
 

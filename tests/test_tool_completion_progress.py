@@ -56,6 +56,53 @@ def test_snapshot_runtime_poll_serializes_with_lifecycle_transition():
     assert completed.is_set()
 
 
+def test_resident_runtime_wait_uses_one_remote_command_without_lifecycle_lock():
+    lifecycle_lock = Lock()
+    lifecycle_lock.acquire()
+    calls = []
+
+    def execute(command, timeout):
+        calls.append((command, timeout))
+        return CommandResult(0, "", "", 0.0)
+
+    poller = RuntimeStatusPoller(
+        lifecycle=SimpleNamespace(resident=True),
+        executor=SimpleNamespace(execute=execute),
+        lifecycle_lock=lifecycle_lock,
+        snapshot_enabled=False,
+    )
+    completed = Event()
+    result = []
+    thread = Thread(
+        target=lambda: (
+            result.append(poller.wait_for_file("/state/agent exit", 60)),
+            completed.set(),
+        ),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert completed.wait(1), "resident wait must not take the lifecycle lock"
+    finally:
+        lifecycle_lock.release()
+        thread.join(1)
+
+    assert result[0].exit_code == 0
+    assert calls == [(
+        "while [ ! -s '/state/agent exit' ]; do sleep 1; done", 60,
+    )]
+
+
+def test_snapshot_runtime_rejects_unserialized_resident_wait():
+    poller = RuntimeStatusPoller(
+        lifecycle=SimpleNamespace(resident=True),
+        executor=SimpleNamespace(execute=lambda *_args: None),
+        lifecycle_lock=Lock(), snapshot_enabled=True,
+    )
+    with pytest.raises(RuntimeError, match="snapshot-enabled"):
+        poller.wait_for_file("/state/agent.exit", 60)
+
+
 def test_blocked_admission_does_not_block_tool_completion():
     lifecycle_lock = Lock()
     admission_started = Event()

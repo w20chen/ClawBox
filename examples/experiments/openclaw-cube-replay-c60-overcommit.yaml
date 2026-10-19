@@ -6,6 +6,7 @@ workload:
   source: recorded_trace
   input: examples/traces/openclaw-cube-replay.jsonl
   repetitions: 1
+  session_assignment: single_case
   cases:
     - case_id: openclaw-cube-replay
       source: recorded_trace

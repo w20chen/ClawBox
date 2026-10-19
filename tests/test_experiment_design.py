@@ -557,6 +557,7 @@ def test_freeze_preserves_qualification_changes():
 def test_cli_configuration_uses_public_design(tmp_path):
     spec = configure_experiment(Path('examples/experiments/getting-started.yaml'), recipe='runtime',
                                 concurrency='1,2', local_numa_node=0,
+                                session_assignment='single_case',
                                 mechanism_settings=['runtime.pressure_control.boost_cpu_weight=250'])
     path = tmp_path/'design.yaml'
     path.write_text(dump_experiment(spec), encoding='utf-8')

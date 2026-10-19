@@ -104,7 +104,7 @@ execution:
   command_timeout_seconds: 900
   memory_sample_interval_seconds: 0.2
   stabilization_seconds: 1.0
-  arrival_schedule: burst
+  arrival_schedule: poisson
   stagger_interval_seconds: 0.0
 resources:
   compute_nodes:

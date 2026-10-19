@@ -12,6 +12,22 @@ from trace_fixtures import llm_spans, write_spans
 from clawbox.replay.model_gateway import ModelGateway, _defer_exec_tool_timeouts, _response_message
 
 
+def test_standalone_gateway_flushes_final_ledger_on_close(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    store = tmp_path / "store.json"
+    write_spans(trace, llm_spans([], {"content": "done"}, duration_ms=0))
+    gateway = ModelGateway(store, mode="replay", trace=trace)
+    _status, _content_type, _body, request_id = gateway.complete_http({"messages": []})
+    gateway.mark_delivery(request_id, delivered=True)
+    assert not store.exists()
+
+    gateway.close()
+
+    records = json.loads(store.read_text(encoding="utf-8"))
+    assert len(records) == 1
+    assert records[0]["delivered"] is True
+
+
 def test_gateway_timeout_is_terminal_for_retries_and_late_producer(
     tmp_path: Path,
 ) -> None:

@@ -171,6 +171,23 @@ Use a host-configured workload and registered VM templates of the desired sizes.
 To run only the discounted arms, remove `resident-capacity-1` from the generated
 `comparison.arms` before validation and launch.
 
+`execution.sandbox_create_concurrency` is the maximum number of Runtime/Tool VM
+pairs being created at once (default `4`, unit: session pairs). It is a startup
+transport limit, not tool admission: a session releases its creation slot as soon
+as both VMs are ready and then continues at the offered concurrency. Set it no
+higher than `max(execution.concurrency_levels)`. A lower value deliberately queues
+pair startup and therefore changes time-to-full-concurrency; changing it requires
+validation, qualification, and a new run ID. It replaces the former undocumented
+`CLAWBOX_SANDBOX_CREATE_CONCURRENCY` host environment variable. Increase it only
+after a short run at the target host and VM density confirms that Cube remains
+responsive and sandbox creation has no failures; available CPU and memory alone
+do not establish a safe lifecycle-control concurrency.
+
+The worker raises its soft file-descriptor limit to `512 + 16 * max_concurrency`
+before starting an arm and fails before VM creation if the host hard limit is
+smaller. This covers live Agent, model, SSH, and Cube streams; the Cube client
+also closes idle per-sandbox control connections after endpoint discovery.
+
 For custom arms, the explicit fields are
 `deployment.resident_capacity_accounting: true` and
 `deployment.lifecycle_reservation_scale` (greater than zero and at most one).
@@ -221,6 +238,36 @@ workspace. For multiple workloads, define `workload.cases[]`; a case-level
 `sandbox` is a complete VM description, not a partial override. Qualification
 executes the first real tool call for every case and checks every distinct Tool
 template on every selected compute node.
+
+Baseline experiments default to reproducible Poisson arrivals and unique trace
+assignment. `execution.poisson_arrival_window_fraction` defaults to `0.25`:
+the expected last arrival is one quarter of the median selected trace's recorded
+wall-clock span. Thus arrivals occupy about the first 20% of the expected
+arrival-plus-trace interval. The realized exponential inter-arrivals are derived
+from `random_seed`, repetition, concurrency, and ordered case IDs; policy names
+are excluded so every compared baseline receives the identical arrival sequence.
+Set `arrival_schedule: burst` only for an explicit burst experiment, or
+`fixed_stagger` with `stagger_interval_seconds` for a fixed-rate experiment.
+
+Prepare the default unique SWE-rebench corpus on the machine holding the raw
+recordings, then copy the entire output directory to the experiment host:
+
+```powershell
+python -m clawbox.cli experiment import-corpus `
+  "C:\Users\29068\Desktop\swe-rebench-original-flat-644-20260904\swe-rebench-original-flat-644-20260904" `
+  --output .artifacts/swe-rebench-replay --count 332
+```
+
+The command imports schema-5 recordings to replay schema 6, writes relocatable
+paths in `workload.json`, and round-robins PennyLane and SQLGlot before appending
+the remaining projects lexically. Configure `workload.source: swe_rebench`, set
+`workload.input` to that manifest, and set `session_assignment: unique`, or use
+`clawbox experiment configure BASE --workload-manifest PATH/workload.json ...`;
+that option applies all three settings and removes the base spec's inline cases. The
+maximum configured concurrency must not exceed the manifest's case count. The
+manifest preserves each original source path and SHA-256. It does not guess Tool
+template identities: use one Tool template containing every selected repository,
+or add a complete case-level `sandbox` for each repository before validation.
 
 Training uses separate successful runs with complete measurements, final task
 validation, and verified cleanup. Missing observations remain unavailable; they

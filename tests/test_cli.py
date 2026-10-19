@@ -55,7 +55,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
     assert set(commands.choices) == {
         "baselines", "configure", "describe", "validate", "plan", "run", "status",
         "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
-        "trace", "import-trace", "train", "images", "report", "launch", "host", "recipes", "schema",
+        "trace", "import-trace", "import-corpus", "train", "images", "report", "launch", "host", "recipes", "schema",
     }
 
 

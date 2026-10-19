@@ -358,7 +358,7 @@ class PolicyControlServer:
                 return
 
         class Server(ThreadingHTTPServer):
-            request_queue_size = 256
+            request_queue_size = 4096
             daemon_threads = True
             allow_reuse_address = True
 

@@ -167,12 +167,19 @@ def test_cube_client_adds_only_explicit_narrow_egress_allowlist() -> None:
 
 
 def test_cube_client_consumes_semantic_tcp_endpoint_and_checks_identity() -> None:
-    sandbox = _Sandbox({"sandboxID": "sb-7"})
+    class ClosableSandbox(_Sandbox):
+        closed = 0
+
+        def close(self):
+            type(self).closed += 1
+
+    sandbox = ClosableSandbox({"sandboxID": "sb-7"})
     client = CubeSandboxClient(sandbox_class=_Sandbox)
     endpoint = client.get_tcp_endpoint(sandbox)
     assert endpoint == CubeSandboxTcpEndpoint(
         sandbox_id="sb-7", container_port=2222, address="192.0.2.7:20007",
     )
+    assert ClosableSandbox.closed == 1
 
     class WrongEndpoint(_Sandbox):
         def get_tcp_endpoint(self, container_port):

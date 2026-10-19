@@ -105,9 +105,14 @@ def emit_overview(value: dict[str, Any]) -> None:
         )
     execution = value["execution"]
     safety = value["safety"]
+    schedule_detail = (
+        f"window={execution['poisson_arrival_window_fraction']:g}×median-trace"
+        if execution["arrival_schedule"] == "poisson"
+        else f"stagger={execution['stagger_interval_seconds']:g}s"
+    )
     print(
         f"Schedule: {execution['arrival_schedule']} "
-        f"(stagger={execution['stagger_interval_seconds']:g}s), "
+        f"({schedule_detail}), "
         f"seed={execution['random_seed']}"
     )
     print(
@@ -258,6 +263,20 @@ def parser() -> argparse.ArgumentParser:
         "--target-workspace", default="/workspace",
         help="OpenClaw workspace path exposed to replayed tools (default: /workspace)",
     )
+    corpus = sub.add_parser(
+        "import-corpus",
+        help="import unique SWE-rebench traces and write a prioritized workload manifest",
+    )
+    corpus.add_argument("source", type=Path)
+    corpus.add_argument("--output", required=True, type=Path)
+    corpus.add_argument("--count", type=int)
+    corpus.add_argument(
+        "--prefer", action="append", default=None,
+        help="preferred project substring; repeat to set priority order (default: pennylane, sqlglot)",
+    )
+    corpus.add_argument("--python", default="python3")
+    corpus.add_argument("--source-workspace", default="/testbed")
+    corpus.add_argument("--target-workspace", default="/workspace")
     trainer = sub.add_parser("train", help="fit frozen P50 LatticeKB/ToolKB predictions from Cube runs")
     trainer.add_argument("runs", nargs="+", type=Path)
     trainer.add_argument("--trace", required=True, type=Path)
@@ -327,6 +346,10 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--runtime-poll-interval-seconds", type=float,
                            help="Runtime control sampling interval; default 0.5")
     configure.add_argument("--trace")
+    configure.add_argument(
+        "--workload-manifest",
+        help="manifest from experiment import-corpus; selects unique cases",
+    )
     configure.add_argument("--case-id")
     configure.add_argument("--prompt")
     configure.add_argument("--repository", help="repository identity stored with the selected case")
@@ -334,7 +357,7 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--validation-command")
     configure.add_argument("--repetitions", type=int)
     configure.add_argument(
-        "--session-assignment", choices=("single_case", "round_robin"),
+        "--session-assignment", choices=("single_case", "round_robin", "unique"),
     )
     configure.add_argument("--concurrency", help="comma-separated offered levels, e.g. 1,5,60")
     configure.add_argument(
@@ -383,8 +406,11 @@ def parser() -> argparse.ArgumentParser:
         "--prediction-artifact",
         help="frozen clawbox_prediction_v2 file from a separate validated training run",
     )
-    configure.add_argument("--arrival-schedule", choices=("burst", "fixed_stagger"))
+    configure.add_argument(
+        "--arrival-schedule", choices=("burst", "fixed_stagger", "poisson")
+    )
     configure.add_argument("--stagger-seconds", type=float)
+    configure.add_argument("--poisson-arrival-window-fraction", type=float)
     configure.add_argument("--random-seed", type=int)
     configure.add_argument("--arm-timeout-seconds", type=int)
     configure.add_argument("--command-timeout-seconds", type=int)
@@ -512,6 +538,16 @@ def main(argv: list[str] | None = None) -> int:
             emit(import_trace(
                 args.source, args.output, python=args.python,
                 source_workspace=args.source_workspace,
+                target_workspace=args.target_workspace,
+            ))
+            return 0
+        if args.command == "import-corpus":
+            from clawbox.replay.import_corpus import prepare_corpus
+
+            emit(prepare_corpus(
+                args.source, args.output, count=args.count,
+                preferred_projects=args.prefer or ("pennylane", "sqlglot"),
+                python=args.python, source_workspace=args.source_workspace,
                 target_workspace=args.target_workspace,
             ))
             return 0
@@ -851,7 +887,11 @@ def main(argv: list[str] | None = None) -> int:
                 static_tool_memory_mib=args.static_tool_memory_mib,
                 prediction_artifact=args.prediction_artifact,
                 arrival_schedule=args.arrival_schedule,
+                workload_manifest=args.workload_manifest,
                 stagger_seconds=args.stagger_seconds,
+                poisson_arrival_window_fraction=(
+                    args.poisson_arrival_window_fraction
+                ),
                 random_seed=args.random_seed,
                 arm_timeout_seconds=args.arm_timeout_seconds,
                 command_timeout_seconds=args.command_timeout_seconds,

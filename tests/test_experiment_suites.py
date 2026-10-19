@@ -86,7 +86,9 @@ def test_configure_can_reuse_compact_suite(tmp_path):
     original = admission(tmp_path)
     path = tmp_path / "base.yaml"
     path.write_text(dump_experiment(original, compact=True))
-    updated = configure_experiment(path, concurrency="2,4")
+    updated = configure_experiment(
+        path, concurrency="2,4", session_assignment="single_case",
+    )
     assert updated.execution.concurrency_levels == (2, 4)
     assert updated.policies == original.policies
 

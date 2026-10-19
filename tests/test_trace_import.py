@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from clawbox.replay.import_trace import adapt_call, import_trace, LIST_DIRECTORY
+from clawbox.replay.import_corpus import prepare_corpus
 from clawbox.replay.trace import load_trace
 
 
@@ -67,6 +68,45 @@ def test_import_roundtrip_keeps_timing_and_provenance(tmp_path):
     assert output.with_suffix('.import.json').exists()
     with pytest.raises(ValueError, match='already exists'):
         import_trace(source, output)
+
+
+def test_corpus_import_prefers_projects_and_writes_unique_replay_cases(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+
+    def write_trace(name, instance_id, start):
+        path = source_root / name
+        rows = [
+            {"type": "trace_metadata", "trace_format_version": 5,
+             "benchmark": "swe-rebench", "scaffold": "openclaw",
+             "model": "recorded-model", "instance_id": instance_id},
+            {"type": "action", "action_type": "llm_call",
+             "action_id": "llm-0", "instance_id": instance_id,
+             "ts_start": start, "ts_end": start + 10,
+             "data": {"messages_in": [{"role": "user", "content": instance_id}],
+                      "raw_response": {"choices": [{"message": {
+                          "role": "assistant", "content": "done",
+                      }}]}}},
+        ]
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+
+    write_trace("other__owner__repo-1.trace.jsonl", "owner__repo-1", 1)
+    write_trace("sqlglot-dev__tobymao__sqlglot-2.trace.jsonl",
+                "tobymao__sqlglot-2", 2)
+    write_trace("pennylane__PennyLaneAI__pennylane-3.trace.jsonl",
+                "PennyLaneAI__pennylane-3", 3)
+    write_trace("pennylane__PennyLaneAI__pennylane-4.trace.jsonl",
+                "PennyLaneAI__pennylane-4", 4)
+    report = prepare_corpus(source_root, tmp_path / "output", count=2)
+    manifest = json.loads(Path(report["manifest"]).read_text())
+    assert [case["case_id"] for case in manifest["tasks"]] == [
+        "PennyLaneAI__pennylane-3", "tobymao__sqlglot-2",
+    ]
+    assert len({case["replay_trace_reference"] for case in manifest["tasks"]}) == 2
+    assert all(case["metadata"]["recorded_duration_seconds"] == 10
+               for case in manifest["tasks"])
+    # Re-running resumes verified imports instead of rebuilding them.
+    assert prepare_corpus(source_root, tmp_path / "output", count=2)["trace_count"] == 2
 
 
 def test_failed_import_does_not_publish_partial_trace(tmp_path):

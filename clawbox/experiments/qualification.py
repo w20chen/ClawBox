@@ -27,6 +27,7 @@ from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, expand_matrix,
     load_workload_cases, spec_digest,
 )
+from .spec_types import ArrivalSchedule
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json
 
@@ -665,6 +666,8 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "concurrency_levels": (max(level, len(cases)),),
         "randomized_order": False,
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
+        "arrival_schedule": ArrivalSchedule.BURST,
+        "stagger_interval_seconds": 0.0,
     })
     validation = spec.validation.model_copy(update={"command": "true"})
     return spec.model_copy(update={

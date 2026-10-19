@@ -36,6 +36,7 @@ def test_policy_control_is_idempotent_and_drains_inflight_completion() -> None:
     server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
                                  bind_host="127.0.0.1", bind_port=0)
     server.advertised_port = server.actual_port
+    assert server.server.request_queue_size >= 1024
     with server:
         session = server.register(
             "session-a",

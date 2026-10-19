@@ -84,6 +84,7 @@ def test_configure_and_validate_explicit_mapping(tmp_path):
         compute_nodes=[n.model_dump() for n in nodes()],
         placement_policy="explicit", session_compute_nodes=["node1", "node0"],
         concurrency="1,2", pool_memory_gib=64, warm_numa_node=2,
+        session_assignment="single_case",
         warm_memory_capacity_mib=131072, shared_memory_borrow_limit_mib=65536,
         local_memory_cgroup="/vm",
     )
