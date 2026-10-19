@@ -195,6 +195,25 @@ run ID. Use a new run ID for any configuration change.
 
 ## Reproduce the shared-LLC C0/C2 experiment
 
+On an installed host with an applied profile and matching 2-vCPU/2-GiB Runtime
+and 2-vCPU/4-GiB Tool templates, run the complete reproduction with one command:
+
+```bash
+bash scripts/run-llc-shared-reproduction.sh
+```
+
+The ad-hoc runner selects the first two compute nodes saved in `host.json` and
+the first two complete LLC clusters in each node, matching the original CPU
+scope. It prints the selection, generates both arm orders, validates and
+qualifies them, runs them sequentially, and writes both reports. It fails before
+VM execution when the saved VM shapes or LLC topology are incompatible. Select
+two other saved nodes with repeated `--node NODE_ID`; use `--prepare-only` to
+generate and validate without launching VMs. It does not install CubeSandbox or
+create guest images; complete [host installation](installation.md) first.
+
+The commands below expose the same generation and execution steps for auditing
+or parameter studies.
+
 The generator takes an already configured schema-4 base spec and writes two arm
 orders, deterministic traces, complete YAML files, and a SHA-256 manifest:
 

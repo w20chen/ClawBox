@@ -14,6 +14,7 @@ layout and capacities. Save generated experiment YAMLs outside this directory.
 | [traces/llc-shared-chase-early.jsonl](traces/llc-shared-chase-early.jsonl) | Canonical shared-LLC replay input with the long call early in each session. |
 | [traces/llc-shared-chase-late.jsonl](traces/llc-shared-chase-late.jsonl) | Canonical shared-LLC replay input with the long call late in each session. |
 | [experiments/control-ablation.yaml](experiments/control-ablation.yaml) | Four-policy comparison; configure the host and provide a separate validated training artifact. |
+| [experiments/llc-shared-reproduction.yaml](experiments/llc-shared-reproduction.yaml) | Portable base consumed by the one-command shared-LLC reproduction; do not launch it directly. |
 | Other experiment YAMLs and traces | Workload or historical host examples. Check their comments, template identities, repository dependencies and paths before use. |
 | [predictions/](predictions/) | Historical prediction fixtures. Generate current artifacts with `clawbox experiment train`. |
 | [clawbox-snapshot-host.env.example](clawbox-snapshot-host.env.example) | Older single-node helper settings. New deployments use the editable host YAML described in the experiment guide. |

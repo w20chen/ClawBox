@@ -1,0 +1,71 @@
+# Portable base for scripts/run-llc-shared-reproduction.py.
+# The applied host profile replaces templates, images, node identity and capacity.
+schema_version: 4
+experiment_id: llc-shared-reproduction
+environment:
+  runtime:
+    template_alias: runtime-example-arm64
+    vcpu: 2
+    memory_mib: 2048
+    workspace: /workspace
+  sandbox:
+    template_alias: tool-example-arm64
+    vcpu: 2
+    memory_mib: 4096
+    workspace: /testbed
+    preflight_command: command -v gcc >/dev/null
+  resources:
+    target_node: replace-with-your-cubesandbox-node
+    pool_memory_budget_mib: 65536
+    emergency_free_memory_mib: 1024
+    cold_snapshot_root: /data/clawbox/cold
+workload:
+  source: recorded_trace
+  input: examples/traces/llc-shared-chase-early.jsonl
+  repetitions: 1
+  cases:
+    - case_id: shared-early
+      prompt: Run the recorded shared-LLC workload.
+      source: recorded_trace
+      source_reference: examples/traces/llc-shared-chase-early.jsonl
+      replay_trace_reference: examples/traces/llc-shared-chase-early.jsonl
+      repository: tobymao/sqlglot
+      base_commit: bc68289d4d368b29241e56b8f0aefc36db65ad47
+      validation: test -f /workspace/llc-result.txt
+  session_assignment: single_case
+agent: {driver: openclaw}
+inference:
+  backend: replay
+  configuration: {model: recorded-agent-model, time_scale: 1.0}
+evidence: {}
+measurement:
+  validation: {command: test -f /workspace/llc-result.txt}
+  output: {directory: /results}
+mechanisms:
+  deployment: {mode: managed}
+  coordination: {action_selection: reclaim_first}
+  admission: {tool: 'off'}
+  runtime:
+    memory_protection: false
+    cpu_release_boost: false
+    proactive_memory_reclaim: false
+  placement:
+    policy: round_robin
+    template_affinity: false
+    tool_call_cpu_policy: c0
+  idle_reclaim: {policy: 'off', scope: tool}
+  shared_memory: {borrow: 'off'}
+  checkpoint: {mechanism: incremental-cow, storage: disk, residency: lru}
+conditions: {prediction_source: kb}
+comparison:
+  recipe: custom
+  arms:
+    - {name: managed-neutral}
+execution:
+  concurrency_levels: [16]
+  random_seed: 20261018
+  randomized_order: false
+  arrival_schedule: burst
+  stagger_interval_seconds: 0.0
+  arm_timeout_seconds: 1200
+  command_timeout_seconds: 300

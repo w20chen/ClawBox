@@ -17,6 +17,7 @@ point in new terminals to avoid repeating environment and privilege setup.
 | Register a Runtime/Tool pair and save IDs after both become READY | [register-machine-templates.sh](register-machine-templates.sh) |
 | Inspect/configure the host or preview/apply crash-dump cleanup | [clawbox](clawbox), `experiment host` |
 | Configure, validate, launch, train, report or recover an experiment | [clawbox](clawbox), `experiment` |
+| Run the ad-hoc shared-LLC C0/C2 reproduction end to end | [run-llc-shared-reproduction.sh](run-llc-shared-reproduction.sh) |
 
 The installation helpers support `--help`. Complete command sequences are in
 the installation guide. Keep generated bundles, registration records and logs
