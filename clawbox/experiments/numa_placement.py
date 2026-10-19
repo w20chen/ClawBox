@@ -126,7 +126,9 @@ class SessionPlacement:
         ):
             raise ValueError(
                 'VM pair plus policy operation headroom exceeds placement memory budget; '
-                'increase the eligible compute-node HIGH watermark'
+                + ('increase the eligible compute-node capacity'
+                   if any(self.domains[k].coordinator.resident_capacity_accounting for k in keys)
+                   else 'increase the eligible compute-node HIGH watermark')
             )
         while True:
             with self.condition:
@@ -147,7 +149,7 @@ class SessionPlacement:
                     memory_pressure = (used+pending+memory_mib*MIB+c.operation_headroom_bytes)/c.budget_bytes
                     measured = [v for v in cpu[key].values() if v is not None]
                     cpu_pressure = max([offered/self.capacity[key], *measured])
-                    if c._new_session_admission_blocked:
+                    if c._new_session_admission_blocked and not c.resident_capacity_accounting:
                         reasons += ('local_high_hysteresis',)
                     same_template_peers = sum(
                         item[0] == key and item[2] == template_id
@@ -223,6 +225,7 @@ class SessionPlacement:
                            'candidates':{item[2]:item[3] for item in candidates}, **evidence})
             except BaseException:
                 c.release(session_id, memory_mib, wait_class='create')
+                c.release_resident_capacity(session_id)
                 with self.condition:
                     self.sessions.pop(session_id)
                     self.condition.notify_all()

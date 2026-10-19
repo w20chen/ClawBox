@@ -97,6 +97,7 @@ class PolicyCoordinator:
                  progress_budget_mib: int | None = None,
                  startup_headroom_mib: int = 0,
                  os_managed_lifecycle: bool = False,
+                 resident_capacity_accounting: bool = False,
                  demand_ledger: DemandLedger | None = None,
                  demand_scope: str = "local",
                  reclaim_cache: Callable[[], None] | None = None,
@@ -107,6 +108,8 @@ class PolicyCoordinator:
                  ) -> None:
         self.policy = policy
         self.os_managed_lifecycle = os_managed_lifecycle
+        self.resident_capacity_accounting = resident_capacity_accounting
+        self._resident_capacity_claims: dict[str, int] = {}
         self.budget_bytes = budget_mib * MIB
         self.progress_budget_bytes = (
             progress_budget_mib * MIB
@@ -117,7 +120,7 @@ class PolicyCoordinator:
         self.emergency_free_bytes = emergency_free_mib * MIB
         self.operation_headroom_bytes = operation_headroom_mib * MIB
         self.operation_headroom_mib = operation_headroom_mib
-        self.startup_headroom_bytes = startup_headroom_mib * MIB
+        self.startup_headroom_bytes = (0 if resident_capacity_accounting else startup_headroom_mib * MIB)
         self.reclaim_cache = reclaim_cache
         self._last_cache_reclaim = float("-inf")
         self._cache_reclaim_running = False
@@ -211,6 +214,7 @@ class PolicyCoordinator:
                     self.demand.release(key)
             self._reservations.pop(session_id, None)
             self._capacity_claims.pop(session_id, None)
+            self._resident_capacity_claims.pop(session_id, None)
             self._condition.notify_all()
 
     def set_tool_active(self, session_id: str, active: bool) -> None:
@@ -388,6 +392,13 @@ class PolicyCoordinator:
                           capacity_claim: bool = False,
                           existing_progress: bool = False,
                           total_bytes: int | None = None) -> tuple[str, ...]:
+        if self.resident_capacity_accounting:
+            # Static overcommit uses nominal charges for the entire VM lifetime.
+            # RSS, pending physical growth, free-memory floors and congestion
+            # are observations, not admission conditions for this baseline.
+            return (("resident_capacity_budget",)
+                    if sum(self._resident_capacity_claims.values()) + additional_bytes > self.budget_bytes
+                    else ())
         used, available = self.physical_sample()
         capacity = sum(self._capacity_claims.values())
         if capacity_claim:
@@ -520,6 +531,7 @@ class PolicyCoordinator:
                     if (
                         at_head and wait_class == "create"
                         and self._new_session_admission_blocked
+                        and not self.resident_capacity_accounting
                     ):
                         safety_reasons = (*safety_reasons, "local_high_hysteresis")
                     if at_head and not safety_reasons:
@@ -544,7 +556,8 @@ class PolicyCoordinator:
                             self.safety_interventions_by_reason[reason] = (
                                 self.safety_interventions_by_reason.get(reason, 0) + 1
                             )
-                    if at_head and 'execution_already_inflight' not in safety_reasons:
+                    if (at_head and not self.resident_capacity_accounting
+                            and 'execution_already_inflight' not in safety_reasons):
                         self._condition.release()
                         try:
                             relieved = self.relieve_pressure(exclude=session_id)
@@ -563,6 +576,8 @@ class PolicyCoordinator:
                     amount=total, local_amount=amount,
                     sample=(self._memory_samples.get(session_id, {}).get(wait_class)
                             if wait_class != 'tool_admission' else None))
+                if self.resident_capacity_accounting and wait_class == "create":
+                    self._resident_capacity_claims[session_id] = amount
                 ledger = self._capacity_claims if capacity_claim else self._reservations
                 ledger[session_id] = ledger.get(session_id, 0) + amount
                 self.peak_commitment_bytes = max(
@@ -656,6 +671,11 @@ class PolicyCoordinator:
         with self._condition:
             self._release_from(self._reservations, session_id, amount_mib)
             self.demand.release((session_id, wait_class))
+
+    def release_resident_capacity(self, session_id: str) -> None:
+        with self._condition:
+            self._resident_capacity_claims.pop(session_id, None)
+            self._condition.notify_all()
 
     def acquire_capacity(self, session_id: str, amount_mib: int,
                          timeout_s: float) -> float:

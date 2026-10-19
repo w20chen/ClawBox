@@ -147,7 +147,7 @@ WorkloadCase.model_rebuild()
 
 class ExecutionSpec(StrictFrozenModel):
     placement_policy: Literal["os_default", "round_robin", "load_aware", "explicit"] = "round_robin"
-    placement_cpu_overcommit: float = Field(default=8.0, ge=1, allow_inf_nan=False)
+    placement_cpu_overcommit: float = Field(default=1024.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
     # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
     # scheduling. C2 changes Tool vCPU affinity only for active agent-tool execs.
@@ -214,6 +214,8 @@ class PressureControlSpec(StrictFrozenModel):
 class ResourcesSpec(StrictFrozenModel):
     pressure_control: PressureControlSpec = Field(default_factory=PressureControlSpec)
     lifecycle_admission: Literal["configured-capacity", "os-managed"] = "configured-capacity"
+    resident_capacity_accounting: bool = False
+    lifecycle_reservation_scale: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
     proactive_cache_reclaim: bool = True
     compute_nodes: tuple[ComputeNode, ...] = ()
     target_node: str = Field(min_length=1)
@@ -254,9 +256,15 @@ class ResourcesSpec(StrictFrozenModel):
     idle_reclaim_costs: IdleReclaimCostSpec | None = None
     template_base_sharing: Literal["disabled", "required"] = "disabled"
 
-    def lifecycle_reservation_mib(self, configured_mib: int) -> int:
+    def compute_node_budget_mib(self, node: ComputeNode) -> int:
+        """Static ledgers use capacity; measured admission uses HIGH."""
+        return node.memory_capacity_mib if self.resident_capacity_accounting else node.high_watermark_mib
+
+    def lifecycle_reservation_mib(self, configured_mib: int, *other_vm_mib: int) -> int:
         """A scheduling promise, never a measurement of resident RAM."""
-        return configured_mib if self.lifecycle_admission == "configured-capacity" else 0
+        return (sum(math.ceil(value * self.lifecycle_reservation_scale)
+                    for value in (configured_mib, *other_vm_mib))
+                if self.lifecycle_admission == "configured-capacity" else 0)
 
     @property
     def default_snapshot_tier(self) -> SnapshotTier | None:
@@ -277,6 +285,12 @@ class ResourcesSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        if self.resident_capacity_accounting and self.shared_memory_borrow_limit_mib:
+            raise ValueError("resident capacity accounting does not support shared-memory borrowing")
+        if self.lifecycle_reservation_scale != 1 and not self.resident_capacity_accounting:
+            raise ValueError("discounted lifecycle reservations require resident capacity accounting")
+        if self.resident_capacity_accounting and self.lifecycle_admission != "configured-capacity":
+            raise ValueError("resident capacity accounting requires configured-capacity admission")
         if self.snapshot_mechanism == 'incremental-cow' and not self.lazy_restore:
             raise ValueError('incremental-cow requires lazy_restore=true')
         if self.lifecycle_admission == "os-managed":
@@ -324,8 +338,9 @@ class ResourcesSpec(StrictFrozenModel):
             if self.pool_memory_budget_mib != high:
                 raise ValueError("pool_memory_budget_mib must equal the HIGH watermark")
         elif self.compute_nodes:
-            if self.pool_memory_budget_mib != self.local_memory_high_watermark_mib:
-                raise ValueError("pool_memory_budget_mib must equal the sum of compute HIGH watermarks")
+            if self.pool_memory_budget_mib != sum(self.compute_node_budget_mib(node) for node in self.compute_nodes):
+                budget_kind = "capacities" if self.resident_capacity_accounting else "HIGH watermarks"
+                raise ValueError(f"pool_memory_budget_mib must equal the sum of compute {budget_kind}")
         elif any(value is not None for value in values[:2]):
             if any(value is None for value in values[:3]) or not values[0] < values[1] < values[2]:
                 raise ValueError("local watermarks require LOW < HIGH < capacity")
@@ -441,6 +456,15 @@ class ExperimentSpec(StrictFrozenModel):
             for policy in self.policies:
                 effective_spec(self, policy)
             return self
+        if self.resources.resident_capacity_accounting and any(
+            p.reclamation is not ReclamationPolicy.RESIDENT for p in self.policies
+        ):
+            raise ValueError("resident capacity accounting requires resident policies")
+        if self.resources.resident_capacity_accounting:
+            if any(p.admission is not AdmissionPolicy.OFF for p in self.policies):
+                raise ValueError("resident capacity accounting requires tool admission=off")
+            if self.resources.proactive_cache_reclaim:
+                raise ValueError("resident capacity accounting does not support proactive memory reclaim")
         if (any(p.runtime_control.adaptive for p in self.policies)
                 and not self.resources.local_memory_cgroup):
             raise ValueError('pressure control requires resources.local_memory_cgroup and verified preallocation VM routing')
@@ -526,7 +550,7 @@ class ExperimentSpec(StrictFrozenModel):
             tool_shapes = tuple(
                 case.sandbox or self.sandbox for case in cases
             ) or (self.sandbox,)
-            pair_mib = self.resources.lifecycle_reservation_mib(self.runtime.memory_mib + max(
+            pair_mib = self.resources.lifecycle_reservation_mib(self.runtime.memory_mib, max(
                 sandbox.memory_mib for sandbox in tool_shapes
             ))
             operation_headroom_mib = (
@@ -551,7 +575,7 @@ class ExperimentSpec(StrictFrozenModel):
                 eligible = nodes
             fits = tuple(
                 node for node in eligible
-                if required_mib <= node.high_watermark_mib
+                if required_mib <= self.resources.compute_node_budget_mib(node)
             )
             if (
                 self.execution.placement_policy == "load_aware" and not fits
@@ -561,7 +585,8 @@ class ExperimentSpec(StrictFrozenModel):
             ):
                 raise ValueError(
                     "a VM pair plus policy operation headroom does not fit the "
-                    "HIGH watermark of every eligible compute node"
+                    + ("capacity" if self.resources.resident_capacity_accounting else "HIGH watermark")
+                    + " of every eligible compute node"
                 )
         if self.agent.driver is AgentDriver.OPENCLAW:
             if self.inference.backend not in {InferenceBackend.API, InferenceBackend.REPLAY}:

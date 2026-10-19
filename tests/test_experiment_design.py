@@ -53,7 +53,7 @@ def design(recipe='custom', axis=None):
 
 
 @pytest.mark.parametrize('recipe,axis,count', [
-    ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
+    ('resident-capacity', None, 3), ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
     ('idle-reclaim', None, 3), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
     ('checkpoint', 'encoding', 2), ('checkpoint', 'storage', 3),
     ('checkpoint', 'residency', 2), ('integrated', None, 3), ('custom', None, 1),
@@ -68,6 +68,7 @@ def test_every_recipe_roundtrips_and_expands(recipe, axis, count):
     assert len(arms) == count * spec.workload.repetitions
     assert {a.arm_id for a in arms} == {a.arm_id for a in expand_matrix(loaded)}
     assert all(set(p.mechanisms) == set(GROUPS) for p in spec.policies)
+    assert all(a.execution.placement_cpu_overcommit == 1024 for a in arms)
 
 
 def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
@@ -580,7 +581,7 @@ def test_fixed_methods_reset_inherited_switches_and_roundtrip(recipe, axis):
     common['runtime'].update(memory_protection=True, cpu_release_boost=True,
                              proactive_memory_reclaim=True)
     common['placement'].update(policy='explicit', template_affinity=True,
-                               session_compute_nodes=['unrelated'])
+                               tool_call_cpu_policy='c2', session_compute_nodes=['unrelated'])
     common['idle_reclaim'].update(policy='wait', scope='agent_and_tool')
     common['shared_memory']['borrow'] = 'pressure'
     common['coordination']['action_selection'] = 'measured_cost'
@@ -592,6 +593,7 @@ def test_fixed_methods_reset_inherited_switches_and_roundtrip(recipe, axis):
     for p in spec.policies:
         m = p.mechanisms
         assert m['placement']['session_compute_nodes'] == []
+        assert m['placement']['tool_call_cpu_policy'] == 'c0'
         if recipe != 'runtime':
             assert not m['runtime']['memory_protection']
             assert not m['runtime']['cpu_release_boost']
@@ -622,3 +624,175 @@ def test_fixed_configure_preconditions(tmp_path):
     assert len(configure_experiment(path, recipe='idle-reclaim', fixed_methods=True).policies) == 3
     with pytest.raises(ValueError, match='single-family'):
         configure_experiment(path, recipe='integrated', fixed_methods=True)
+
+
+def test_resident_capacity_baselines_disable_inherited_optimizations():
+    raw = base()
+    m = raw['mechanisms']
+    m['placement'].update(policy='load_aware', template_affinity=True, tool_call_cpu_policy='c2')
+    m['runtime'].update(memory_protection=True, cpu_release_boost=True, proactive_memory_reclaim=True)
+    m['idle_reclaim']['policy'] = 'wait'
+    m['shared_memory']['borrow'] = 'pressure'
+    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
+    spec = ExperimentSpec.model_validate(raw)
+    for policy, scale in zip(spec.policies, (1, .8, .75)):
+        arm = effective_spec(spec, policy)
+        assert arm.resources.resident_capacity_accounting
+        assert arm.resources.lifecycle_reservation_scale == scale
+        assert arm.resources.lifecycle_reservation_mib(6144) == {1: 6144, .8: 4916, .75: 4608}[scale]
+        assert arm.resources.lifecycle_reservation_mib(6144, 6144) == 2 * arm.resources.lifecycle_reservation_mib(6144)
+        assert arm.runtime.memory_mib == raw['environment']['runtime']['memory_mib']
+        assert policy.reclamation.value == 'resident'
+        assert policy.admission.value == 'off'
+        assert not arm.resources.proactive_cache_reclaim
+        assert not arm.resources.shared_memory_borrow_limit_mib
+        assert arm.execution.tool_call_cpu_policy == 'c0'
+        assert arm.execution.placement_policy == 'round_robin'
+
+
+@pytest.mark.parametrize('scale', [0, -1, 1.1, float('nan'), float('inf')])
+def test_resident_capacity_rejects_invalid_scales(scale):
+    raw = base()
+    raw['mechanisms']['deployment'].update(resident_capacity_accounting=True, lifecycle_reservation_scale=scale)
+    with pytest.raises(ValueError):
+        ExperimentSpec.model_validate(raw)
+
+
+@pytest.mark.parametrize('change', ['snapshot', 'os-default', 'missing-accounting'])
+def test_resident_capacity_rejects_incompatible_modes(change):
+    raw = base()
+    raw['mechanisms']['deployment'].update(resident_capacity_accounting=True, lifecycle_reservation_scale=.8)
+    if change == 'snapshot':
+        raw['mechanisms']['idle_reclaim']['policy'] = 'wait'
+    elif change == 'os-default':
+        raw['mechanisms']['deployment']['mode'] = 'os-default'
+        raw['mechanisms']['placement']['policy'] = 'os_default'
+    else:
+        raw['mechanisms']['deployment']['resident_capacity_accounting'] = False
+    with pytest.raises(ValueError):
+        ExperimentSpec.model_validate(raw)
+
+
+@pytest.mark.parametrize('group,updates,error', [
+    ('admission', {'tool': 'fixed', 'static_tool_memory_mib': 128}, 'tool admission=off'),
+    ('admission', {'tool': 'predicted'}, 'tool admission=off'),
+    ('shared_memory', {'borrow': 'hard'}, 'shared-memory borrowing'),
+    ('shared_memory', {'borrow': 'pressure'}, 'shared-memory borrowing'),
+    ('runtime', {'proactive_memory_reclaim': True}, 'proactive memory reclaim'),
+])
+def test_pure_ledger_rejects_unsupported_mechanism_combinations(group, updates, error):
+    raw = base()
+    raw['mechanisms']['deployment']['resident_capacity_accounting'] = True
+    raw['mechanisms'][group].update(updates)
+    with pytest.raises(ValueError, match=error):
+        ExperimentSpec.model_validate(raw)
+    # The same mechanisms remain available under the original measured mode.
+    raw['mechanisms']['deployment']['resident_capacity_accounting'] = False
+    ExperimentSpec.model_validate(raw)
+
+
+def test_integrated_resets_c2_only_for_control_arms():
+    raw = base()
+    raw['mechanisms']['placement']['tool_call_cpu_policy'] = 'c2'
+    raw['comparison'] = dict(recipe='integrated', arms=recipe_arms('integrated'))
+    spec = ExperimentSpec.model_validate(raw)
+    assert [effective_spec(spec, p).execution.tool_call_cpu_policy for p in spec.policies] == ['c0', 'c0', 'c2']
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+
+
+def test_configure_reports_shadowed_set_without_changing_arm_precedence():
+    from clawbox.experiments.design import configure_design
+    raw = base()
+    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
+    with pytest.warns(UserWarning, match='deployment.lifecycle_reservation_scale.*overridden.*resident-capacity-0-8'):
+        spec = configure_design(raw, {'mechanism_settings': ['deployment.lifecycle_reservation_scale=0.6']})
+    assert [effective_spec(spec, p).resources.lifecycle_reservation_scale for p in spec.policies] == [1, .8, .75]
+
+
+def test_configure_does_not_warn_for_effective_or_identical_overrides():
+    import warnings
+    from clawbox.experiments.design import configure_design
+    raw = base()
+    raw['comparison']['arms'][0]['override'] = {'placement.tool_call_cpu_policy': 'c2'}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        spec = configure_design(raw, {'mechanism_settings': [
+            'placement.tool_call_cpu_policy=c2', 'runtime.memory_protection=true']})
+    assert not caught
+    assert spec.policies[0].memory_protection
+    assert effective_spec(spec, spec.policies[0]).execution.tool_call_cpu_policy == 'c2'
+
+
+@pytest.mark.parametrize('high_gib', [8, 480])
+def test_two_512_gib_nodes_use_capacity_not_high_for_pure_ledger(high_gib):
+    from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
+    raw = base()
+    r = raw['environment']['resources']
+    r.update(compute_nodes=[dict(node_id=f'n{i}', numa_node=i,
+        cpus=f'{80*i}-{80*i+79}', memory_capacity_mib=512*1024,
+        low_watermark_mib=4*1024, high_watermark_mib=high_gib*1024) for i in range(2)],
+        local_numa_node=None, local_memory_capacity_mib=1024*1024,
+        local_memory_low_watermark_mib=8*1024,
+        local_memory_high_watermark_mib=high_gib*2*1024,
+        pool_memory_budget_mib=high_gib*2*1024,
+        shared_memory_borrow_limit_mib=None, warm_numa_node=None, warm_memory_capacity_mib=0)
+    raw['environment']['runtime']['memory_mib'] = 6144
+    raw['environment']['sandbox']['memory_mib'] = 6144
+    for case in raw['workload'].get('cases', []):
+        if case.get('sandbox'):
+            case['sandbox']['memory_mib'] = 6144
+    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
+    spec = ExperimentSpec.model_validate(raw)
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    for p in spec.policies:
+        resolved = effective_spec(spec, p)
+        assert resolved.resources.pool_memory_budget_mib == 1024*1024
+        assert resolved.execution.placement_cpu_overcommit == 1024
+        for node in resolved.resources.compute_nodes:
+            budget = resolved.resources.compute_node_budget_mib(node)
+            assert budget == 512*1024
+            charge = resolved.resources.lifecycle_reservation_mib(6144, 6144)
+            coordinator = PolicyCoordinator(p, budget_mib=budget,
+                emergency_free_mib=0, operation_headroom_mib=0, resident_capacity_accounting=True)
+            for i in range(budget // charge):
+                coordinator.acquire(str(i), charge, .1, wait_class='create')
+                coordinator.release(str(i), charge, wait_class='create')
+            with pytest.raises(AdmissionTimeout):
+                coordinator.acquire('full', charge, .01, wait_class='create')
+    raw['comparison'] = dict(recipe='custom', arms=[dict(name='measured')])
+    if high_gib == 8:
+        with pytest.raises(ValueError, match='HIGH watermark'):
+            ExperimentSpec.model_validate(raw)
+    else:
+        measured = ExperimentSpec.model_validate(raw)
+        assert measured.resources.pool_memory_budget_mib == 960*1024
+        assert measured.execution.placement_cpu_overcommit == 1024
+        assert measured.resources.compute_node_budget_mib(measured.resources.compute_nodes[0]) == 480*1024
+
+
+def test_pure_ledger_still_rejects_pair_larger_than_node_capacity():
+    raw = base()
+    raw['environment']['runtime']['memory_mib'] = 1024*1024
+    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
+    with pytest.raises(ValueError, match='capacity of every eligible compute node'):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_pure_ledger_cpu_multiplier_can_be_overridden_explicitly():
+    raw = base()
+    arms = recipe_arms('resident-capacity')
+    arms[0]['override']['placement.placement_cpu_overcommit'] = 16
+    raw['comparison'] = dict(recipe='resident-capacity', arms=arms)
+    spec = ExperimentSpec.model_validate(raw)
+    assert [effective_spec(spec, p).execution.placement_cpu_overcommit for p in spec.policies] == [16, 1024, 1024]
+
+
+def test_all_recipes_replace_inherited_cpu_slot_multiplier():
+    from clawbox.experiments.design import RECIPES, override_mechanisms
+    common = Mechanisms().model_dump(mode='json')
+    common['placement']['placement_cpu_overcommit'] = 1
+    for recipe in RECIPES:
+        for axis in (('encoding', 'storage', 'residency') if recipe == 'checkpoint' else (None,)):
+            for arm in recipe_arms(recipe, checkpoint_axis=axis):
+                resolved = override_mechanisms(common, arm['override'])
+                assert resolved['placement']['placement_cpu_overcommit'] == 1024

@@ -68,6 +68,7 @@ def test_load_aware_selects_lower_pressure_and_reserves_once(used,cpu):
     assert ledger.pending()==MIB
     c.release('a',3,wait_class='create');s.release('a')
     assert not ledger.claims and not s.sessions
+    assert all(not d.coordinator._resident_capacity_claims for d in s.domains.values())
 
 
 def test_template_affinity_only_breaks_balanced_verified_tie():
@@ -167,6 +168,8 @@ def test_stale_placement_ranking_never_bypasses_live_memory_admission():
 
 def test_placement_event_failure_releases_claim_and_cpu_slot():
     s,ledger,_=scheduler()
+    for domain in s.domains.values():
+        domain.coordinator.resident_capacity_accounting = True
     def fail(_):raise OSError('event sink failed')
     s.emit=fail
     with pytest.raises(OSError,match='event sink'):
@@ -230,3 +233,18 @@ def test_os_default_is_a_real_placement_policy_not_pool_toggle():
 @pytest.mark.parametrize('value',[0,float('inf'),float('nan')])
 def test_cpu_overcommit_must_be_finite_and_at_least_one(value):
     with pytest.raises(ValueError):ExecutionSpec(placement_cpu_overcommit=value)
+
+
+def test_resident_capacity_placement_ignores_physical_pressure_and_watermark():
+    s, ledger, events = scheduler(used=(100, 100), capacity=1, overcommit=100)
+    for domain in s.domains.values():
+        domain.coordinator.resident_capacity_accounting = True
+        domain.coordinator.set_new_session_admission_blocked(True)
+    assert s.acquire('a', vcpus=2, memory_mib=10, timeout=.1, fixed='n0') == 'n0'
+    c = s.domains['n0'].coordinator
+    c.release('a', 10, wait_class='create')
+    with pytest.raises(AdmissionTimeout):
+        s.acquire('b', vcpus=2, memory_mib=1, timeout=.01, fixed='n0')
+    c.unregister('a')
+    s.release('a')
+    assert s.acquire('b', vcpus=2, memory_mib=10, timeout=.5, fixed='n0') == 'n0'

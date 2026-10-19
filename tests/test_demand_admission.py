@@ -247,3 +247,60 @@ def test_no_psi_reclaim_signal_recovers_without_assuming_guest_backing_is_freed(
         now[0] = 1.3
         assert not ledger.reasons(40)  # retained charge unchanged; predicted demand still fits
         assert ledger.reasons(51) == ('global_memory_budget',)
+
+
+@pytest.mark.parametrize('scale,expected', [(1, 21), (.8, 26), (.75, 28)])
+def test_resident_capacity_survives_creation_until_cleanup(scale, expected):
+    from math import ceil
+    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+                          budget_mib=128*1024, emergency_free_mib=0, operation_headroom_mib=0,
+                          resident_capacity_accounting=True,
+                          physical_sample=lambda: (0, 128*1024*MIB))
+    charge = ceil(6144 * scale)
+    for i in range(expected):
+        c.acquire(str(i), charge, .1, wait_class='create')
+        c.release(str(i), charge, wait_class='create')
+    # Creation completed and RSS is zero; nominal capacity must still be held.
+    with pytest.raises(AdmissionTimeout):
+        c.acquire('extra', charge, .01, wait_class='create')
+    c.unregister('0')
+    c.acquire('extra', charge, .1, wait_class='create')
+    c.release('extra', charge, wait_class='create')
+    c.unregister('extra')
+    assert len(c._resident_capacity_claims) == expected - 1
+
+
+@pytest.mark.parametrize('pure_ledger', [False, True])
+def test_resident_capacity_admission_ignores_physical_pressure_only_when_enabled(pure_ledger):
+    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+                          budget_mib=100, emergency_free_mib=10, operation_headroom_mib=0,
+                          startup_headroom_mib=200,
+                          resident_capacity_accounting=pure_ledger,
+                          physical_sample=lambda: (150*MIB, 0))
+    c.set_new_session_admission_blocked(True)
+    c.demand.congested = True
+    if not pure_ledger:
+        with pytest.raises(AdmissionTimeout):
+            c.acquire('extra', 100, .01, wait_class='create')
+        return
+    c.acquire('extra', 100, .1, wait_class='create')
+    assert c.startup_headroom_bytes == 0
+    c.release('extra', 100, wait_class='create')
+    with pytest.raises(AdmissionTimeout):
+        c.acquire('blocked', 1, .01, wait_class='create')
+    c.unregister('extra')
+    c.acquire('next', 100, .1, wait_class='create')
+
+
+def test_pure_ledger_does_not_read_physical_admission_samplers():
+    def unexpected():
+        raise AssertionError('physical admission must not run')
+    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+                          budget_mib=10, emergency_free_mib=10, operation_headroom_mib=0,
+                          resident_capacity_accounting=True, physical_sample=unexpected)
+    c.demand.sample = unexpected
+    c.demand.check = unexpected
+    c.pressure_relief = unexpected
+    c.acquire('a', 10, .1, wait_class='create')
+    with pytest.raises(AdmissionTimeout):
+        c.acquire('b', 1, .01, wait_class='create')

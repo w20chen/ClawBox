@@ -1407,7 +1407,7 @@ class ExperimentWorker:
                     "local_memory_capacity_mib": node.memory_capacity_mib,
                     "local_memory_low_watermark_mib": node.low_watermark_mib,
                     "local_memory_high_watermark_mib": node.high_watermark_mib,
-                    "pool_memory_budget_mib": node.high_watermark_mib,
+                    "pool_memory_budget_mib": arm.resources.compute_node_budget_mib(node),
                 })})
                 domain_sampler = NumaCgroupMemorySampler(
                     Path(arm.resources.local_memory_cgroup),
@@ -1424,6 +1424,7 @@ class ExperimentWorker:
                 progress_budget_mib=policy_progress_budget_mib(domain_arm),
                 startup_headroom_mib=self._startup_headroom_mib(domain_arm, prediction_provider),
                 os_managed_lifecycle=domain_arm.resources.lifecycle_admission == "os-managed",
+                resident_capacity_accounting=domain_arm.resources.resident_capacity_accounting,
                 physical_sample=domain_sampler.current,
                 reclaim_cache=(reclaim_local_cache if isinstance(sampler, CgroupMemorySampler)
                                and arm.resources.proactive_cache_reclaim else None),
@@ -1442,6 +1443,7 @@ class ExperimentWorker:
                 WatermarkController(domain_arm, coordinator, domain_sampler, numa_borrower, events,
                                     shared_pool=snapshot_pool, node_id=node.node_id if node else None)
                 if isinstance(domain_sampler, NumaCgroupMemorySampler)
+                and not domain_arm.resources.resident_capacity_accounting
                 and domain_arm.resources.local_memory_low_watermark_mib is not None
                 and domain_arm.resources.local_memory_high_watermark_mib is not None else None
             )
@@ -1594,7 +1596,7 @@ class ExperimentWorker:
             session_case = session_case_for(arm, index)
             tool_sandbox = session_case.sandbox or arm.sandbox
             pair_mib = arm.resources.lifecycle_reservation_mib(
-                arm.runtime.memory_mib + tool_sandbox.memory_mib)
+                arm.runtime.memory_mib, tool_sandbox.memory_mib)
             started = time.monotonic()
             if placement is not None:
                 offset = (index*arm.execution.stagger_interval_seconds
@@ -1643,6 +1645,7 @@ class ExperimentWorker:
                         with demand_ledger.condition:
                             if (session_id, 'create') in demand_ledger.claims:
                                 domain.coordinator.release(session_id, pair_mib, wait_class='create')
+                        domain.coordinator.release_resident_capacity(session_id)
                         placement.release(session_id)
                     except Exception as exc:
                         raise ArmInfrastructureError(
@@ -2580,7 +2583,7 @@ class ExperimentWorker:
             try:
                 if not lifetime:
                     pair_amount = arm.resources.lifecycle_reservation_mib(
-                        arm.sandbox.memory_mib + arm.runtime.memory_mib)
+                        arm.sandbox.memory_mib, arm.runtime.memory_mib)
                     pair_wait = 0.0 if creation_reserved else coordinator.acquire(
                         session_id, pair_amount, arm.execution.arm_timeout_seconds,
                         wait_class="create",
@@ -3864,6 +3867,12 @@ class ExperimentWorker:
                 ),
                 "session_tool_memory_mib": tool_memory_mib,
                 "session_pair_memory_mib": pair_memory_mib,
+                "resident_capacity_accounting": arm.resources.resident_capacity_accounting,
+                "lifecycle_reservation_scale": arm.resources.lifecycle_reservation_scale,
+                "session_capacity_charge_mib": [
+                    arm.resources.lifecycle_reservation_mib(arm.runtime.memory_mib, value)
+                    for value in tool_memory_mib
+                ],
                 "tool_memory_mib_by_case": {
                     case.case_id: (case.sandbox or arm.sandbox).memory_mib
                     for case in cases

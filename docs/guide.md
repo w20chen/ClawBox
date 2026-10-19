@@ -101,10 +101,14 @@ The schema has six mechanism dimensions plus deployment and coordination:
 Use `configure --fixed-methods --recipe FAMILY` for a controlled single-family
 comparison. It resets unrelated mechanism switches while retaining the workload,
 host resources, measurements, and numeric tuning. Inspect `describe` because arm
-names and recipe labels never select runtime behavior.
+names and recipe labels never select runtime behavior. Fixed-method comparisons reset
+tool-call CPU placement to C0. The integrated recipe also uses C0 for its two
+control arms while preserving the configured design's CPU policy.
 
 `comparison.arms[].override` accepts dotted mechanism fields. Environment,
-workload, hardware limits, and evidence remain common across arms. Invalid
+workload, hardware limits, and evidence remain common across arms. Arm overrides
+take precedence over common `--set` values; `configure` warns when an explicit
+setting is overridden and lists the affected arms and their effective values. Invalid
 combinations fail validation instead of silently disabling a mechanism.
 
 Use these interfaces instead of copying field lists from documentation:
@@ -114,6 +118,65 @@ bash scripts/clawbox experiment schema
 bash scripts/clawbox experiment configure --help
 bash scripts/clawbox experiment describe --help
 ```
+
+### Resident capacity baselines
+
+`--recipe resident-capacity` generates three supported arms:
+
+| Arm | Charge per VM |
+| --- | --- |
+| `resident-capacity-1` | configured RAM * 1.0 |
+| `resident-capacity-0-8` | configured RAM * 0.8 |
+| `resident-capacity-0-75` | configured RAM * 0.75 |
+
+These arms keep both VMs resident, disable runtime checkpointing, tool-call
+admission, runtime optimizations, shared-memory borrowing and template affinity,
+and use round-robin placement with C0 CPU scheduling. All generated recipes currently set
+`placement.placement_cpu_overcommit` to 1024, also the global default, keeping the
+CPU slot mechanism available but making it unlikely to limit these experiments. This does not
+change the allowed host CPU lists or VM vCPU counts. Edit the arm override to
+choose another multiplier. VM RAM is unchanged.
+Each VM's charge is rounded up separately to MiB; a session reserves the sum of
+its Agent and Tool charges until cleanup, including model waits. For example,
+a 6144 MiB VM is charged 4916 MiB at 0.8 or 4608 MiB at 0.75. Failed creation
+releases the charge during cleanup. Admission uses only the persistent nominal
+ledger: existing charges plus the new pair's charge must fit the configured
+per-domain budget. For this mode the budget equals each compute node's
+`memory_capacity_mib`; the aggregate budget is the sum of those capacities.
+With no compute nodes, it uses `local_memory_capacity_mib` when present, otherwise
+`pool_memory_budget_mib`. LOW/HIGH remain host-profile fields for measured modes
+but do not determine the pure-ledger budget. RSS, in-flight physical growth, free-memory floors, congestion
+and LOW/HIGH hysteresis do not veto admission in this mode. Memory samples remain
+available as observations; VM creation and kernel memory failures remain real
+experiment outcomes.
+
+```bash
+bash scripts/clawbox experiment configure \
+  examples/experiments/six-dimension.yaml "$HOME/clawbox-specs/resident.yaml" \
+  --profile "$HOME/.config/clawbox/host.json" \
+  --recipe resident-capacity --concurrency 32
+bash scripts/clawbox experiment describe "$HOME/clawbox-specs/resident.yaml"
+bash scripts/clawbox experiment validate "$HOME/clawbox-specs/resident.yaml" --inputs
+bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/resident.yaml" \
+  --run-id resident-capacity-01
+```
+
+The concurrency value is offered session concurrency, not a guaranteed number
+of resident pairs. Capacity accounting, per-node budgets and CPU placement limits
+can reduce simultaneous residency. The recipe sets
+startup headroom to zero; it does not enlarge the host's available memory budget.
+Use a host-configured workload and registered VM templates of the desired sizes.
+To run only the discounted arms, remove `resident-capacity-1` from the generated
+`comparison.arms` before validation and launch.
+
+For custom arms, the explicit fields are
+`deployment.resident_capacity_accounting: true` and
+`deployment.lifecycle_reservation_scale` (greater than zero and at most one).
+Discounting requires managed resident capacity accounting. Pure ledger mode
+requires tool admission off and rejects shared-memory borrowing and proactive
+memory reclaim, whose execution paths are incompatible with this mode. Existing experiments
+retain their original accounting unless this mode is enabled. Results include
+`resource_scope.session_capacity_charge_mib` and the scale for auditing.
 
 ### C0 and C2 tool-call CPU placement
 

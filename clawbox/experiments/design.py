@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import warnings
 from typing import Any, Literal
 
 from pydantic import Field, create_model
@@ -18,7 +19,7 @@ from .spec import (StrictFrozenModel, ResourcesSpec, ExecutionSpec, SandboxSpec,
 DIMENSIONS = ('admission', 'runtime', 'placement', 'idle_reclaim', 'shared_memory', 'checkpoint')
 GROUPS = DIMENSIONS + ('deployment', 'coordination')
 RECIPES = ('admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination',
-           'checkpoint', 'integrated', 'custom')
+           'checkpoint', 'integrated', 'resident-capacity', 'custom')
 
 # Every existing parameter has one public owner. Physical limits stay in the
 # environment; decision parameters can vary by arm. No arbitrary resource patch
@@ -36,7 +37,8 @@ RESOURCE_FIELDS = {
 EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs', 'idle_reclaim_costs')
 DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
-                  'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim')
+                  'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim',
+                  'resident_capacity_accounting', 'lifecycle_reservation_scale')
 PLACEMENT_FIELDS = (
     'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes',
     'tool_call_cpu_policy', 'tool_call_cpu_pressure_ratio',
@@ -74,6 +76,8 @@ Checkpoint = subset('Checkpoint', ResourcesSpec, RESOURCE_FIELDS['checkpoint'],
 
 class Deployment(StrictFrozenModel):
     mode: Literal['managed', 'os-default'] = 'managed'
+    resident_capacity_accounting: bool = False
+    lifecycle_reservation_scale: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
 
 
 class Coordination(StrictFrozenModel):
@@ -119,7 +123,7 @@ class DesignArm(StrictFrozenModel):
 
 
 class Comparison(StrictFrozenModel):
-    recipe: Literal['admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination', 'checkpoint', 'integrated', 'custom'] = 'custom'
+    recipe: Literal['admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination', 'checkpoint', 'integrated', 'resident-capacity', 'custom'] = 'custom'
     arms: tuple[DesignArm, ...] = Field(min_length=1)
 
 
@@ -184,8 +188,17 @@ def lower_arm(design, name, m):
             or rt['memory_protection'] or rt['cpu_release_boost'] or rt['proactive_memory_reclaim']):
         raise ValueError(f'{name}: os-default deployment requires OS placement, no tool admission, resident VMs and all runtime controls/borrowing/affinity off')
     r['lifecycle_admission'] = 'os-managed' if os_deployment else 'configured-capacity'
+    r['resident_capacity_accounting'] = m['deployment']['resident_capacity_accounting']
+    r['lifecycle_reservation_scale'] = m['deployment']['lifecycle_reservation_scale']
+    if r['resident_capacity_accounting'] and (os_deployment or snapshots):
+        raise ValueError('resident capacity accounting requires managed resident VMs')
+    if r['lifecycle_reservation_scale'] != 1 and not r['resident_capacity_accounting']:
+        raise ValueError('discounted lifecycle reservations require resident capacity accounting')
     r['prediction_mode'] = 'runtime' if design.conditions.prediction_source == 'kb' else 'frozen'
     r['proactive_cache_reclaim'] = rt['proactive_memory_reclaim']
+    if r['resident_capacity_accounting']:
+        # The static ledger uses allocated LOCAL capacity, not pressure thresholds.
+        r['pool_memory_budget_mib'] = r['local_memory_capacity_mib'] or r['pool_memory_budget_mib']
     if rt['cpu_release_boost'] and (pl['policy'] == 'os_default' or
             (not r['compute_nodes'] and r['local_numa_node'] is None)):
         raise ValueError(f'{name}: cpu_release_boost requires fixed LOCAL NUMA placement; configure compute_nodes or local_numa_node and use managed placement')
@@ -302,7 +315,20 @@ def export_design(spec):
 
 def recipe_arms(recipe, *, checkpoint_axis=None):
     def arm(name, **fields):
+        fields.setdefault('placement__placement_cpu_overcommit',
+                          ExecutionSpec.model_fields['placement_cpu_overcommit'].default)
         return dict(name=name, override={key.replace('__', '.'): value for key, value in fields.items()})
+    if recipe == 'resident-capacity':
+        neutral = dict(admission__tool='off', admission__startup_headroom_mib=0,
+                       runtime__memory_protection=False, runtime__cpu_release_boost=False,
+                       runtime__proactive_memory_reclaim=False,
+                       placement__policy='round_robin', placement__template_affinity=False,
+                       placement__tool_call_cpu_policy='c0', placement__session_compute_nodes=[],
+                       idle_reclaim__policy='off', shared_memory__borrow='off',
+                       deployment__mode='managed', deployment__resident_capacity_accounting=True,
+                       coordination__action_selection='reclaim_first')
+        return [arm('resident-capacity-'+label.replace('.', '-'), **neutral, deployment__lifecycle_reservation_scale=scale)
+                for label, scale in (('1', 1.0), ('0.8', .8), ('0.75', .75))]
     if recipe == 'admission':
         return [arm('admission-'+mode, admission__tool=mode) for mode in ('off', 'fixed', 'predicted')]
     if recipe == 'runtime':
@@ -336,10 +362,11 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
                          'residency': ('residency', ('lru', 'value'))}[checkpoint_axis]
         return [arm('checkpoint-'+value, **{'checkpoint__'+field: value}) for value in values]
     if recipe == 'integrated':
-        neutral = {'admission__tool': 'off',
+        neutral = {'deployment__resident_capacity_accounting': False,
+                   'deployment__lifecycle_reservation_scale': 1.0, 'admission__tool': 'off',
                    'runtime__memory_protection': False, 'runtime__cpu_release_boost': False,
                    'runtime__proactive_memory_reclaim': False, 'placement__template_affinity': False,
-                   'idle_reclaim__policy': 'off',
+                   'placement__tool_call_cpu_policy': 'c0', 'idle_reclaim__policy': 'off',
                    'shared_memory__borrow': 'off', 'coordination__action_selection': 'reclaim_first',
                    'checkpoint__residency': 'lru'}
         return [arm('os-default', **neutral, placement__policy='os_default', deployment__mode='os-default', placement__session_compute_nodes=[]),
@@ -353,10 +380,12 @@ def fixed_recipe_arms(recipe, *, common, checkpoint_axis=None):
     if recipe in {'custom', 'integrated'}:
         raise ValueError('--fixed-methods requires a single-family recipe; custom/integrated inherit user choices')
     switches = {
-        'deployment.mode': 'managed', 'coordination.action_selection': 'reclaim_first',
+        'deployment.mode': 'managed', 'deployment.resident_capacity_accounting': False,
+        'deployment.lifecycle_reservation_scale': 1.0, 'coordination.action_selection': 'reclaim_first',
         'admission.tool': 'off', 'runtime.memory_protection': False,
         'runtime.cpu_release_boost': False, 'runtime.proactive_memory_reclaim': False,
         'placement.policy': 'round_robin', 'placement.template_affinity': False,
+        'placement.tool_call_cpu_policy': 'c0',
         'placement.session_compute_nodes': [], 'idle_reclaim.policy': 'off',
         'idle_reclaim.scope': 'tool', 'shared_memory.borrow': 'off',
         'checkpoint.mechanism': 'full-copy', 'checkpoint.storage': 'disk',
@@ -593,4 +622,23 @@ def configure_design(raw, options):
         raw['comparison'] = dict(recipe=recipe, arms=arms)
     if options.get('checkpoint_axis') and recipe != 'checkpoint':
         raise ValueError('--checkpoint-axis requires --recipe checkpoint')
-    return ExperimentSpec.model_validate(raw)
+    spec = ExperimentSpec.model_validate(raw)
+    for path in changes:
+        fields = path.split('.')
+        requested = raw['mechanisms']
+        for field in fields:
+            requested = requested[field]
+        overridden = []
+        for policy in spec.policies:
+            effective = policy.mechanisms
+            for field in fields:
+                effective = effective[field]
+            if effective != requested:
+                overridden.append(f'{policy.name}={effective!r}')
+        if overridden:
+            warnings.warn(
+                f'--set {path}={requested!r} is overridden by comparison arms: '
+                + ', '.join(overridden) + '; edit comparison.arms[].override to change these arms.',
+                UserWarning, stacklevel=2,
+            )
+    return spec
