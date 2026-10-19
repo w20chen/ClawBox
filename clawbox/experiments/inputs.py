@@ -107,7 +107,7 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
                 from .training import trace_commands
                 from .prediction import command_sha256
                 commands = trace_commands(Path(case.replay_trace_reference or case.source_reference))
-                if spec.resources.prediction_mode == "runtime":
+                if spec.resources.prediction_mode in {"runtime", "cold-start"}:
                     for command in commands:
                         provider.resolve(command, {"raw_command_sha256": command_sha256(command)})
                 else:
@@ -115,6 +115,6 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
                     if missing:
                         raise ValueError(f"P50 artifact missing {len(missing)} replay commands")
         files.append(str(path))
-        if spec.resources.prediction_mode == "runtime":
+        if spec.resources.prediction_mode in {"runtime", "cold-start"}:
             files.append(str(path.with_suffix(".kb.json")))
     return {"traces": traces, "prediction_files": files}

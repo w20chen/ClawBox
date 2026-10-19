@@ -85,7 +85,7 @@ class Coordination(StrictFrozenModel):
 
 
 class Conditions(StrictFrozenModel):
-    prediction_source: Literal['kb', 'command-table'] = 'kb'
+    prediction_source: Literal['kb', 'cold-start-kb', 'command-table'] = 'kb'
 
 
 class Mechanisms(StrictFrozenModel):
@@ -194,7 +194,9 @@ def lower_arm(design, name, m):
         raise ValueError('resident capacity accounting requires managed resident VMs')
     if r['lifecycle_reservation_scale'] != 1 and not r['resident_capacity_accounting']:
         raise ValueError('discounted lifecycle reservations require resident capacity accounting')
-    r['prediction_mode'] = 'runtime' if design.conditions.prediction_source == 'kb' else 'frozen'
+    r['prediction_mode'] = {
+        'kb': 'runtime', 'cold-start-kb': 'cold-start', 'command-table': 'frozen',
+    }[design.conditions.prediction_source]
     r['proactive_cache_reclaim'] = rt['proactive_memory_reclaim']
     if r['resident_capacity_accounting']:
         # The static ledger uses allocated LOCAL capacity, not pressure thresholds.
@@ -490,7 +492,9 @@ def configure_design(raw, options):
     measurement = raw.setdefault('measurement', {})
     conditions = raw.setdefault('conditions', {})
     if options.get('prediction_mode') is not None:
-        conditions['prediction_source'] = {'runtime': 'kb', 'frozen': 'command-table'}[options['prediction_mode']]
+        conditions['prediction_source'] = {
+            'runtime': 'kb', 'cold-start': 'cold-start-kb', 'frozen': 'command-table',
+        }[options['prediction_mode']]
     if options.get('template_base_sharing') is not None:
         raise ValueError('schema 4 derives template sharing qualification from placement.template_affinity; remove --template-base-sharing')
     # Existing ergonomic scalar options retain their units; all mechanism
@@ -625,8 +629,8 @@ def configure_design(raw, options):
         if recipe == 'checkpoint' and not options.get('fixed_methods') and raw['mechanisms']['idle_reclaim']['policy'] == 'off':
             raise ValueError('checkpoint comparison requires idle reclaim; set idle_reclaim.policy=wait before selecting this recipe')
         if options.get('fixed_methods'):
-            if conditions.get('prediction_source', 'kb') != 'kb':
-                raise ValueError('fixed methods require conditions.prediction_source=kb; command-table is diagnostic')
+            if conditions.get('prediction_source', 'kb') == 'command-table':
+                raise ValueError('fixed methods require a KB prediction source; command-table is diagnostic')
             arms = fixed_recipe_arms(recipe, common=raw['mechanisms'], checkpoint_axis=options.get('checkpoint_axis'))
         else:
             arms = recipe_arms(recipe, checkpoint_axis=options.get('checkpoint_axis'))

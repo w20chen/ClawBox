@@ -91,12 +91,14 @@ def prepare_corpus(
             raise ValueError(
                 f"requested {count} unique traces but source contains {len(sources)}"
             )
-        sources = sources[:count]
     output_root.mkdir(parents=True, exist_ok=True)
     trace_root = output_root / "traces"
     trace_root.mkdir(parents=True, exist_ok=True)
     cases = []
+    skipped = []
     for source in sources:
+        if count is not None and len(cases) >= count:
+            break
         output = trace_root / source.name.replace(".trace.jsonl", ".replay.jsonl")
         report_path = output.with_suffix(".import.json")
         source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -111,11 +113,19 @@ def prepare_corpus(
                 raise ValueError(
                     f"incomplete prior import for {output}; remove that pair and retry"
                 )
-            report = import_trace(
-                source, output, python=python,
-                source_workspace=source_workspace,
-                target_workspace=target_workspace,
-            )
+            try:
+                report = import_trace(
+                    source, output, python=python,
+                    source_workspace=source_workspace,
+                    target_workspace=target_workspace,
+                )
+            except ValueError as exc:
+                skipped.append({
+                    "source_reference": str(source),
+                    "source_sha256": source_sha256,
+                    "reason": str(exc),
+                })
+                continue
         actions = load_trace(output)
         instance_id = str(report.get("instance_id") or "").strip()
         if not instance_id:
@@ -138,6 +148,12 @@ def prepare_corpus(
                 "recorded_duration_seconds": recorded_duration,
             },
         })
+    if count is not None and len(cases) < count:
+        raise ValueError(
+            f"requested {count} compatible unique traces but only {len(cases)} "
+            f"of {len(sources)} source traces could be imported; "
+            f"{len(skipped)} incompatible traces were skipped"
+        )
     manifest = {
         "schema_version": 1,
         "source": "swe_rebench",
@@ -146,6 +162,7 @@ def prepare_corpus(
         "selection": "preferred-project-round-robin-then-lexical",
         "unique": True,
         "tasks": cases,
+        "skipped": skipped,
     }
     manifest_path = output_root / "workload.json"
     temporary = manifest_path.with_suffix(".json.tmp")
@@ -158,5 +175,6 @@ def prepare_corpus(
         "source_root": str(source_root),
         "manifest": str(manifest_path),
         "trace_count": len(cases),
+        "skipped_count": len(skipped),
         "preferred_projects": list(preferred),
     }

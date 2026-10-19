@@ -337,7 +337,7 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--runtime-control", choices=("off", "no_control",
                            "phase_memcg", "release_cpu"),
                            help="optional pressure/progress control; suite deployment baseline stays off")
-    configure.add_argument("--prediction-mode", choices=("runtime", "frozen"),
+    configure.add_argument("--prediction-mode", choices=("runtime", "frozen", "cold-start"),
                            help="query trained ClawTune KB per command, or replay frozen command predictions")
     configure.add_argument("--prediction-reservation-scale", type=float,
                            help="positive multiplier on calibrated host growth; default 1")

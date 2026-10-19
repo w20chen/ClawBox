@@ -109,6 +109,48 @@ def test_corpus_import_prefers_projects_and_writes_unique_replay_cases(tmp_path)
     assert prepare_corpus(source_root, tmp_path / "output", count=2)["trace_count"] == 2
 
 
+def test_corpus_import_skips_incompatible_traces_and_fills_requested_count(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+
+    def write_trace(name, instance_id, tool_call=None):
+        message = {"role": "assistant", "content": "done"}
+        if tool_call is not None:
+            message["tool_calls"] = [tool_call]
+        rows = [
+            {"type": "trace_metadata", "trace_format_version": 5,
+             "benchmark": "swe-rebench", "scaffold": "openclaw",
+             "model": "recorded-model", "instance_id": instance_id},
+            {"type": "action", "action_type": "llm_call",
+             "action_id": "llm-0", "instance_id": instance_id,
+             "ts_start": 1, "ts_end": 2,
+             "data": {"messages_in": [{"role": "user", "content": instance_id}],
+                      "raw_response": {"choices": [{"message": message}]}}},
+        ]
+        (source_root / name).write_text(
+            ''.join(json.dumps(row) + '\n' for row in rows)
+        )
+
+    write_trace(
+        "pennylane-1.trace.jsonl", "PennyLaneAI__pennylane-1",
+        call("edit_file", path="/testbed/a", old_text="x", new_text="y",
+             replace_all=True),
+    )
+    write_trace("sqlglot-2.trace.jsonl", "tobymao__sqlglot-2")
+    write_trace("sqlglot-3.trace.jsonl", "tobymao__sqlglot-3")
+
+    report = prepare_corpus(source_root, tmp_path / "output", count=2)
+    manifest = json.loads(Path(report["manifest"]).read_text())
+    assert [case["case_id"] for case in manifest["tasks"]] == [
+        "tobymao__sqlglot-2", "tobymao__sqlglot-3",
+    ]
+    assert report["skipped_count"] == 1
+    assert manifest["skipped"][0]["source_reference"].endswith(
+        "pennylane-1.trace.jsonl"
+    )
+    assert "replace_all=true" in manifest["skipped"][0]["reason"]
+
+
 def test_failed_import_does_not_publish_partial_trace(tmp_path):
     source = tmp_path/'bad.jsonl'
     source.write_text(json.dumps({'schema_version': 6}))

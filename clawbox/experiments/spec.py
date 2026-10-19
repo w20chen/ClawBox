@@ -256,7 +256,7 @@ class ResourcesSpec(StrictFrozenModel):
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
     non_command_tool_memory_mib: int | None = Field(default=None, ge=1)
     prediction_artifact: str | None = None
-    prediction_mode: Literal["runtime", "frozen"] = "frozen"
+    prediction_mode: Literal["runtime", "frozen", "cold-start"] = "frozen"
     observe_predictions: bool = False
     prediction_reservation_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     runtime_poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)

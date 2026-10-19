@@ -121,6 +121,17 @@ bash scripts/clawbox experiment configure --help
 bash scripts/clawbox experiment describe --help
 ```
 
+For predicted admission, `--prediction-mode runtime` uses the immutable trained
+KB for its matching repository and Tool image. `--prediction-mode cold-start`
+uses one immutable ClawTune bootstrap KB for every workload repository; its
+artifact must declare `prediction_scope: clawtune_cold_start` and
+`repository: "*"`. The cold-start mode still verifies the KB hash, validated
+host-memory calibration, Tool image digest, architecture, and vCPU shape. A
+template may be resized without retraining because admission predicts an
+increment over the VM baseline; the calibration and evaluation identities are
+both retained in run provenance. Changing the mode or artifact requires a new
+run ID, not an image rebuild.
+
 ### Resident capacity baselines
 
 `--recipe resident-capacity` generates three supported arms:
@@ -264,7 +275,10 @@ python -m clawbox.cli experiment import-corpus `
 
 The command imports schema-5 recordings to replay schema 6, writes relocatable
 paths in `workload.json`, and round-robins PennyLane and SQLGlot before appending
-the remaining projects lexically. Configure `workload.source: swe_rebench`, set
+the remaining projects lexically. Traces whose tool interface cannot be adapted
+are skipped without changing their calls; `workload.json` records each skipped
+source, hash, and reason, and the command fails if it cannot fill `--count` with
+compatible unique traces. Configure `workload.source: swe_rebench`, set
 `workload.input` to that manifest, and set `session_assignment: unique`, or use
 `clawbox experiment configure BASE --workload-manifest PATH/workload.json ...`;
 that option applies all three settings and removes the base spec's inline cases. The

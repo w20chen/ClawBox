@@ -193,20 +193,38 @@ class FrozenPredictionProvider:
 class P50PredictionProvider(FrozenPredictionProvider):
     """Frozen, pre-evaluation native model predictions, keyed by exact command."""
 
-    def __init__(self, path: Path, *, repository: str, sandbox_identity: dict | None = None) -> None:
+    def __init__(self, path: Path, *, repository: str, sandbox_identity: dict | None = None,
+                 global_cold_start: bool = False) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("schema") != "clawbox_prediction_v2" or payload.get("repository") != repository:
+        repository_matches = payload.get("repository") == repository
+        if global_cold_start:
+            repository_matches = (
+                payload.get("repository") == "*"
+                and payload.get("prediction_scope") == "clawtune_cold_start"
+            )
+        if payload.get("schema") != "clawbox_prediction_v2" or not repository_matches:
             raise ValueError("P50 artifact schema or repository mismatch")
         if payload.get("training_validated") is not True:
             raise ValueError("P50 artifact requires a validated Cube training run")
         if sandbox_identity is not None and payload.get("sandbox_identity") != sandbox_identity:
-            raise ValueError("P50 training and evaluation Tool environments differ")
+            if not global_cold_start or not _same_cold_start_environment(
+                payload.get("sandbox_identity"), sandbox_identity,
+            ):
+                raise ValueError("P50 training and evaluation Tool environments differ")
         super().__init__(path, repository=repository, prediction_source="frozen_clawbox_p50")
+        self.evaluation_sandbox_identity = sandbox_identity
+        self.global_cold_start = global_cold_start
 
     def provenance(self, observed: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         selected = [row for row in observed or []
                     if row.get("prediction_source") == self.prediction_source]
         result = super().provenance(selected)
+        if self.global_cold_start:
+            result.update(
+                prediction_scope="clawtune_cold_start",
+                calibration_sandbox_identity=self.payload.get("sandbox_identity"),
+                evaluation_sandbox_identity=self.evaluation_sandbox_identity,
+            )
         result["observed_fallback_rate"] = (
             sum(row.get("fallback_level") != "lattice" for row in selected) / len(selected)
             if selected else None
@@ -345,5 +363,30 @@ class RuntimePredictionProvider(P50PredictionProvider):
         raise PredictionUnavailable("runtime prediction requires command text, not a frozen digest lookup")
 
 
+def _same_cold_start_environment(calibration: Any, evaluation: Any) -> bool:
+    """Permit a resized template only when the executable image is unchanged.
+
+    Host calibration maps incremental guest memory to incremental cgroup memory.
+    Template identity and the configured memory ceiling do not change that
+    mapping; image, architecture and vCPU shape do.
+    """
+    if not isinstance(calibration, dict) or not isinstance(evaluation, dict):
+        return False
+    return all(calibration.get(key) == evaluation.get(key)
+               for key in ("image_digest", "architecture", "vcpu"))
+
+
+class ColdStartPredictionProvider(RuntimePredictionProvider):
+    """Query one immutable ClawTune bootstrap KB for any trace repository."""
+
+    def __init__(self, path: Path, **kwargs):
+        super().__init__(path, global_cold_start=True, **kwargs)
+        self.prediction_source = "runtime_clawtune_cold_start_kb"
+
+
 def prediction_provider_type(mode: str):
-    return RuntimePredictionProvider if mode == "runtime" else P50PredictionProvider
+    if mode == "runtime":
+        return RuntimePredictionProvider
+    if mode == "cold-start":
+        return ColdStartPredictionProvider
+    return P50PredictionProvider

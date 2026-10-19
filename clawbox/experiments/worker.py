@@ -1144,7 +1144,9 @@ def summarize_tool_execution_observations(
     ]
     prediction_records = [
         item for item in records
-        if item.get("prediction_source") == "runtime_clawtune_immutable_kb"
+        if item.get("prediction_source") in {
+            "runtime_clawtune_immutable_kb", "runtime_clawtune_cold_start_kb",
+        }
     ]
     fallback_records = [
         item for item in prediction_records
@@ -2896,7 +2898,7 @@ class ExperimentWorker:
                                 raise PredictionUnavailable(
                                     "predicted command admission requires a prediction provider"
                                 )
-                            if arm.resources.prediction_mode == "runtime":
+                            if arm.resources.prediction_mode in {"runtime", "cold-start"}:
                                 from .prediction import command_sha256
                                 command = request.get("command")
                                 if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:

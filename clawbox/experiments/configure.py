@@ -560,8 +560,8 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
     artifact = spec.resources.prediction_artifact
     if artifact is None:
         return {"error": "prediction artifact is not configured"}
-    if spec.resources.prediction_mode == "runtime":
-        return {"path": str(artifact), "mode": "runtime",
+    if spec.resources.prediction_mode in {"runtime", "cold-start"}:
+        return {"path": str(artifact), "mode": spec.resources.prediction_mode,
                 "kb_path": str(Path(artifact).with_suffix(".kb.json")),
                 "reservation_scale": spec.resources.prediction_reservation_scale}
     try:

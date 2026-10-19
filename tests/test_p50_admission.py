@@ -42,6 +42,33 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
         RuntimePredictionProvider(path, repository='r')
 
 
+def test_cold_start_prediction_accepts_any_repo_but_requires_same_image(tmp_path, monkeypatch):
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
+    from tool_time.lattice_kb import LatticeTimeKB
+    from tool_resource.runtime_kb import RuntimeToolResourceKB
+    from clawbox.experiments.prediction import ColdStartPredictionProvider
+    path = tmp_path / 'cold-start.json'
+    kb = json.dumps({'lattice': LatticeTimeKB().to_json_obj(),
+                     'tool': RuntimeToolResourceKB().to_json_obj()}).encode()
+    path.with_suffix('.kb.json').write_bytes(kb)
+    identity = {'template_id': 'training', 'image_digest': 'sha256:image',
+                'vcpu': 2, 'memory_mib': 4096, 'architecture': 'arm64'}
+    path.write_text(json.dumps({'schema': 'clawbox_prediction_v2', 'repository': '*',
+        'prediction_scope': 'clawtune_cold_start', 'training_validated': True,
+        'kb_sha256': hashlib.sha256(kb).hexdigest(), 'sandbox_identity': identity,
+        'host_calibration': {'target': 'host_cgroup_memory_current_increment',
+                            'sample_count': 3, 'scale': 2, 'offset_bytes': 0}}))
+    resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
+    provider = ColdStartPredictionProvider(path, repository='another/repo',
+                                           sandbox_identity=resized)
+    assert provider.repository == 'another/repo'
+    assert provider.prediction_source == 'runtime_clawtune_cold_start_kb'
+    with pytest.raises(ValueError, match='environments differ'):
+        ColdStartPredictionProvider(path, repository='another/repo',
+                                    sandbox_identity={**resized, 'image_digest': 'sha256:other'})
+
+
 def test_reservation_scale_does_not_change_model_prediction():
     from clawbox.experiments.spec import ExperimentSpec, expand_matrix
     from clawbox.experiments.worker import ExperimentWorker
