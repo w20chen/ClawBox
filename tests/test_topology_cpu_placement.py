@@ -218,6 +218,35 @@ def test_c2_delays_affinity_and_skips_short_calls(monkeypatch, tmp_path):
     ]
 
 
+@pytest.mark.parametrize('pending', [False, True])
+def test_c2_timeout_quiesces_before_vm_destruction(monkeypatch, tmp_path, pending):
+    domain, _leaf, events, applied = c2_domain(monkeypatch, tmp_path)
+    domain.topology_min_duration_seconds = 1.0 if pending else 0.0
+    domain.acquire_tool_call(0, 'cancelled', vcpus=2)
+    domain.begin_teardown(cancel_calls=True)
+    before = list(applied)
+    monkeypatch.setattr(domain, '_apply_thread_affinity',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('VM destroyed')))
+    assert domain.sample_topology_placement() == []
+    assert domain.release_tool_call('cancelled') is None
+    assert domain.active_tool_call_ids() == ()
+    assert applied == before
+    assert events[-1]['action'] == 'cancel_for_teardown'
+    assert events[-1]['execution_ids'] == ['cancelled']
+    with pytest.raises(RuntimeError, match='stopping'):
+        domain.acquire_tool_call(0, 'late', vcpus=2)
+    domain.begin_teardown(cancel_calls=True)
+    assert sum(e.get('action') == 'cancel_for_teardown' for e in events) == 1
+
+
+def test_c2_normal_teardown_does_not_hide_unreleased_calls(monkeypatch, tmp_path):
+    domain, _leaf, _events, _applied = c2_domain(monkeypatch, tmp_path)
+    domain.acquire_tool_call(0, 'unreleased', vcpus=2)
+    domain.begin_teardown()
+    assert domain.sample_topology_placement() == []
+    assert domain.active_tool_call_ids() == ('unreleased',)
+
+
 def test_c2_delayed_call_stays_tracked_after_capacity_bypass(monkeypatch, tmp_path):
     domain, _leaf, _events, _applied = c2_domain(monkeypatch, tmp_path)
     domain.topology_min_duration_seconds = 1.0

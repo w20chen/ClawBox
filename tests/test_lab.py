@@ -197,9 +197,9 @@ def test_snapshot_storage_refresh_requires_target_node_and_writable_mode(
     monkeypatch, writable_mode,
 ):
     import clawbox.lab as lab
-
-    monkeypatch.setattr(lab.Path, "is_file", lambda self: True)
-    monkeypatch.setattr(lab, "command", lambda *args, **kwargs: json.dumps({
+    from io import BytesIO
+    from types import SimpleNamespace
+    payload = {
         "ret": {"ret_code": 200, "ret_msg": "success"},
         "data": [{
             "node_id": "node-a",
@@ -207,14 +207,26 @@ def test_snapshot_storage_refresh_requires_target_node_and_writable_mode(
             "usage_pct": 70,
             "mode": writable_mode,
         }],
-    }))
+    }
+    def open_storage(url, timeout):
+        assert url == 'http://127.0.0.1:8089/cube/snapshot/storage?refresh=true'
+        assert timeout == 10
+        return BytesIO(json.dumps(payload).encode())
+    monkeypatch.setattr(lab, 'build_opener', lambda *args: SimpleNamespace(open=open_storage))
+    monkeypatch.setattr(lab, 'command', lambda *a, **kw: pytest.fail('must not spawn CLI'))
     assert lab.refresh_snapshot_storage({"node": "node-a"}) is True
-
-    monkeypatch.setattr(lab, "command", lambda *args, **kwargs: json.dumps({
-        "ret": {"ret_code": 200, "ret_msg": "success"},
-        "data": [{"node_id": "node-a", "mode": "delete_only"}],
-    }))
+    assert lab.refresh_snapshot_storage({"node": "other-node"}) is False
+    payload['data'][0]['mode'] = 'delete_only'
     assert lab.refresh_snapshot_storage({"node": "node-a"}) is False
+
+
+def test_snapshot_storage_refresh_reports_connection_failure(monkeypatch):
+    import clawbox.lab as lab
+    from types import SimpleNamespace
+    def unavailable(*args, **kwargs):
+        raise TimeoutError('control-plane timed out')
+    monkeypatch.setattr(lab, 'build_opener', lambda *a: SimpleNamespace(open=unavailable))
+    assert lab.refresh_snapshot_storage({'node': 'node-a'}) is False
 
 
 def test_snapshot_sdk_ready_checkout_is_inferred(tmp_path, monkeypatch):

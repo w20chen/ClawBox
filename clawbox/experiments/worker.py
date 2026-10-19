@@ -1752,6 +1752,8 @@ class ExperimentWorker:
             for future in futures:
                 future.cancel()
             pool.shutdown(wait=False, cancel_futures=True)
+            if self._priority_domain is not None:
+                self._priority_domain.begin_teardown(cancel_calls=True)
             try:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception:
@@ -1765,6 +1767,8 @@ class ExperimentWorker:
             for future in futures:
                 future.cancel()
             pool.shutdown(wait=False, cancel_futures=True)
+            if self._priority_domain is not None:
+                self._priority_domain.begin_teardown(cancel_calls=True)
             try:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception:
@@ -1792,6 +1796,8 @@ class ExperimentWorker:
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
+            if self._priority_domain is not None:
+                self._priority_domain.begin_teardown()
             try:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception as exc:

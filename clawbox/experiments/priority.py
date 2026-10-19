@@ -175,6 +175,7 @@ class PriorityDomain:
         self.topology_include_smt = topology_include_smt
         self.emit = emit or (lambda event: None)
         self._topology_lock = RLock()
+        self._topology_stopping = False
         self._group_load: dict[str, int] = {}
         self._groups_by_pool: dict[tuple[str, int, bool], tuple[str, ...]] = {}
         self._preferred_groups: dict[tuple[int, str], str] = {}
@@ -273,6 +274,8 @@ class PriorityDomain:
             raise RuntimeError(f'duplicate Tool-call CPU assignment: {execution_id}')
         key = index, 'tool'
         with self._topology_lock:
+            if self._topology_stopping:
+                raise RuntimeError('Tool-call CPU placement is stopping for VM teardown')
             active = self._active_calls.get(key)
             if active:
                 active.add(execution_id)
@@ -408,12 +411,36 @@ class PriorityDomain:
         with self._topology_lock:
             return tuple(sorted(self._call_keys))
 
+    def begin_teardown(self, *, cancel_calls: bool = False) -> None:
+        """Quiesce C2 before destroying VMs, retaining explicit cancellation evidence."""
+        with self._topology_lock:
+            self._topology_stopping = True
+            if cancel_calls and self._call_keys:
+                event = {
+                    'event': 'tool_call_cpu_placement', 'action': 'cancel_for_teardown',
+                    'execution_ids': sorted(self._call_keys), 'mode': self.topology_mode,
+                }
+                self.topology_events.append(event); self.emit(event)
+                self._call_keys.clear()
+                self._active_calls.clear()
+                self._pending_started.clear()
+                self._pending_vcpus.clear()
+                self._capacity_bypassed.clear()
+                self._full_masks.clear()
+                self._fine_masks.clear()
+                self._group_load.clear()
+                self._expanded.clear()
+                self._pressure_previous.clear()
+                self._pressure_streak.clear()
+
     def release_tool_call(self, execution_id: str) -> dict | None:
         if self.topology_mode == 'c0':
             return None
         with self._topology_lock:
             key = self._call_keys.get(execution_id)
             if key is None:
+                if self._topology_stopping:
+                    return None
                 raise RuntimeError(f'no Tool-call CPU assignment for completion: {execution_id}')
             active = self._active_calls[key]
             if len(active) > 1:
@@ -517,6 +544,8 @@ class PriorityDomain:
         now = time.monotonic()
         changes = []
         with self._topology_lock:
+            if self._topology_stopping:
+                return []
             for key, started in tuple(self._pending_started.items()):
                 if now-started < self.topology_min_duration_seconds:
                     continue

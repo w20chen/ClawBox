@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib.error import URLError
+from urllib.request import ProxyHandler, build_opener
 
 import yaml
 
@@ -170,15 +172,16 @@ def service_setting(unit: str, key: str) -> str | None:
 
 def refresh_snapshot_storage(profile: dict) -> bool:
     """Refresh CubeMaster's node storage cache and require a writable mode."""
-    cli = Path("/usr/local/services/cubetoolbox/CubeMaster/bin/cubemastercli")
-    if not cli.is_file():
-        return False
     try:
-        payload = json.loads(command(
-            str(cli), "--address", "127.0.0.1", "--timeout", "10s",
-            "storage", "status", "--refresh", "--json", timeout=15,
-        ))
-    except (json.JSONDecodeError, RuntimeError, subprocess.TimeoutExpired):
+        # Use the same local endpoint as `storage status --refresh`. Starting
+        # cubemastercli enumerates host interfaces before its RPC timeout starts;
+        # with thousands of TAPs this can consume the entire subprocess timeout.
+        # Loopback control-plane traffic must not use a machine HTTP proxy.
+        with build_opener(ProxyHandler({})).open(
+            "http://127.0.0.1:8089/cube/snapshot/storage?refresh=true", timeout=10,
+        ) as response:
+            payload = json.load(response)
+    except (ValueError, URLError, OSError):
         return False
     if not isinstance(payload, dict):
         return False
