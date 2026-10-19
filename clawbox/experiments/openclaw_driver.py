@@ -43,32 +43,18 @@ def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
 
 
 def native_tool_workspace_setup_command(tool_workspace: str) -> str:
-    """Expose the image-owned repository at OpenClaw's canonical workspace."""
+    """Initialize SSH in the image-owned workspace without copying the repo.
+
+    Keep the agent, absolute replay paths and post-run validation on the same
+    mutable tree. The marker prevents OpenClaw from copying Runtime files in.
+    """
     source = str(tool_workspace or "").strip()
     if not source.startswith("/"):
         raise ValueError("Tool workspace must be an absolute POSIX path")
-    # The SSH backend executes directly in workspaceRoot.  Its per-scope
-    # runtime directory is only an initialization marker: when it already
-    # exists, OpenClaw deliberately skips copying the Runtime VM's local
-    # workspace over the Tool-owned repository.
-    runtime_dir = openclaw_shared_ssh_runtime_directory(OPENCLAW_SSH_RUNTIME_ROOT)
-    target = OPENCLAW_SSH_RUNTIME_ROOT
-    if source == target:
-        return (
-            f"set -eu; test -d {shlex.quote(target)}; "
-            f"mkdir -p -- {shlex.quote(runtime_dir)}"
-        )
-    if source.startswith(target.rstrip("/") + "/"):
-        raise ValueError("Tool workspace source cannot be inside /workspace")
+    runtime_dir = openclaw_shared_ssh_runtime_directory(source)
     return (
-        "set -eu; "
-        f"test -d {shlex.quote(source)}; "
-        f"if test -L {shlex.quote(target)}; then rm -- {shlex.quote(target)}; "
-        f"elif test -e {shlex.quote(target)}; then rm -rf -- {shlex.quote(target)}; fi; "
-        f"mkdir -p -- {shlex.quote(target)}; "
-        f"cp -a --reflink=auto -- {shlex.quote(source)}/. {shlex.quote(target)}/; "
-        f"mkdir -p -- {shlex.quote(runtime_dir)}; "
-        f"test ! -L {shlex.quote(target)}; test -d {shlex.quote(runtime_dir)}"
+        f"set -eu; test -d {shlex.quote(source)}; "
+        f"mkdir -p -- {shlex.quote(runtime_dir)}"
     )
 
 

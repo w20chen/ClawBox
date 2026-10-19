@@ -484,7 +484,7 @@ class PriorityDomain:
                     name = next(line.split(':', 1)[1].strip()
                                 for line in Path(f'/proc/{tid}/status').read_text().splitlines()
                                 if line.startswith('Name:'))
-                except (FileNotFoundError, StopIteration):
+                except (FileNotFoundError, ProcessLookupError, StopIteration):
                     continue
                 if name.startswith('vcpu'):
                     discovered.append((tid, name))
@@ -768,7 +768,7 @@ class PriorityDomain:
         for tid in (actual/'cgroup.threads').read_text().split():
             try:
                 status = dict(line.split(':', 1) for line in Path(f'/proc/{tid}/status').read_text().splitlines() if ':' in line)
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue  # auxiliary I/O threads may exit during observation
             allowed = status['Cpus_allowed_list'].strip()
             if not parse_cpu_list(allowed) <= parse_cpu_list(cpus):

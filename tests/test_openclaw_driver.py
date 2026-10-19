@@ -32,17 +32,18 @@ def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
         "/workspace/openclaw-ssh-shared-8198076c"
     )
     assert OPENCLAW_SSH_RUNTIME_ROOT == "/workspace"
-    workspace_setup = native_tool_workspace_setup_command('/testbed')
-    assert 'rm -rf -- /workspace' in workspace_setup
-    assert 'cp -a --reflink=auto -- /testbed/. /workspace/' in workspace_setup
-    assert 'mkdir -p -- /workspace/openclaw-ssh-shared-8198076c' in workspace_setup
-    assert 'ln -s' not in workspace_setup
+    assert native_tool_workspace_setup_command('/testbed') == (
+        'set -eu; test -d /testbed; '
+        'mkdir -p -- /testbed/openclaw-ssh-shared-8198076c'
+    )
     assert native_tool_workspace_setup_command('/workspace') == (
         'set -eu; test -d /workspace; '
         'mkdir -p -- /workspace/openclaw-ssh-shared-8198076c'
     )
-    with pytest.raises(ValueError, match="inside /workspace"):
-        native_tool_workspace_setup_command('/workspace/repository')
+    assert '/workspace/repository/openclaw-ssh-shared-' in (
+        native_tool_workspace_setup_command('/workspace/repository'))
+    with pytest.raises(ValueError, match="absolute POSIX"):
+        native_tool_workspace_setup_command('relative')
     assert openclaw_real_ssh_path("session-a") == (
         "/state/openclaw/session-a/bin/ssh.real"
     )
@@ -85,9 +86,10 @@ def test_native_ssh_route_requires_cube_mapped_port() -> None:
         )
 
 
+@pytest.mark.parametrize("workspace", ["/workspace", "/testbed"])
 @pytest.mark.parametrize("gateway_mode", [None, "api", "replay"])
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
-    monkeypatch, tmp_path: Path, gateway_mode,
+    monkeypatch, tmp_path: Path, gateway_mode, workspace,
 ) -> None:
     commands = []
 
@@ -123,6 +125,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
             identity_private_key="PRIVATE KEY\n",
             host_public_key="ssh-ed25519 AAAATEST",
             sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
+            workspace_root=workspace,
         ),
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=60,
@@ -134,7 +137,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     sandbox = config["agents"]["defaults"]["sandbox"]
     assert sandbox["backend"] == "ssh"
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
-    assert sandbox["ssh"]["workspaceRoot"] == OPENCLAW_SSH_RUNTIME_ROOT
+    assert sandbox["ssh"]["workspaceRoot"] == workspace
     assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
     assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
     assert config["tools"]["exec"]["backgroundMs"] == 120000

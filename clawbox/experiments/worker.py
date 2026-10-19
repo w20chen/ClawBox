@@ -46,7 +46,6 @@ from .memory_actions import MemoryActionCostModel
 from .openclaw_driver import (
     NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
     native_tool_bridge_setup_command, openclaw_real_ssh_path,
-    OPENCLAW_SSH_RUNTIME_ROOT,
     native_tool_workspace_setup_command,
     run_openclaw,
 )
@@ -176,6 +175,7 @@ def collect_session_results(futures, *, timeout, sessions, failures, events,
                 "event": "session_failed",
                 "session_id": f"{arm_id}-{futures[future]:04d}",
                 "error": str(exc), "error_type": type(exc).__name__,
+                "traceback": traceback.format_exc(),
             }
             failures.append(record)
             events.write(record)
@@ -3290,7 +3290,7 @@ class ExperimentWorker:
                     target=ssh_target,
                     identity_private_key=ssh_credentials.client_private,
                     host_public_key=ssh_credentials.host_public,
-                    workspace_root=OPENCLAW_SSH_RUNTIME_ROOT,
+                    workspace_root=arm.sandbox.workspace,
                     sandbox_id=setup_route.sandbox_id,
                     host_key_alias=native_ssh_host_key_alias(setup_route.sandbox_id),
                 )

@@ -45,6 +45,7 @@ def test_failed_agent_does_not_cancel_running_or_queued_siblings(error):
     assert {s["agent"] for s in sessions} == {"running", "queued"}
     assert failures == records
     assert failures[0]["session_id"] == "arm-0001"
+    assert "raise error" in failures[0]["traceback"]
     assert not any(f.cancelled() for f in (running, failed, queued))
 
 
