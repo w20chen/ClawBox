@@ -146,8 +146,8 @@ def emit_overview(value: dict[str, Any]) -> None:
     if p50:
         if p50.get("error"):
             print(f"Predicted admission: unavailable ({p50['error']})")
-        elif p50.get("mode") == "runtime":
-            print(f"Predicted admission: runtime ClawTune KB={p50['kb_path']}, reservation scale={p50['reservation_scale']:g}")
+        elif p50.get("mode") in {"runtime", "cold-start"}:
+            print(f"Predicted admission: {p50['mode']} ClawTune KB={p50['kb_path']}, reservation scale={p50['reservation_scale']:g}")
         else:
             print(
                 "Predicted admission: calibrated host growth range="

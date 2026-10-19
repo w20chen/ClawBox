@@ -54,6 +54,7 @@ htmlcov/
 *.err
 *.pid
 *.pid.lock
+output/
 
 # Local agent instructions, research plans and prompt material
 /AGENTS.md
