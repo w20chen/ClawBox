@@ -178,7 +178,7 @@ The helper registers both templates, waits for READY, verifies kernel binding,
 and updates `machine.env` only after both succeed. Use a new output directory and
 new template aliases when changing an image or VM size.
 
-Verify CubeSandbox's semantic TCP endpoint instead of guessing guest IPs:
+Verify CubeSandbox's per-VM TCP endpoint instead of guessing guest IPs:
 
 ```bash
 python scripts/validate-cubesandbox-tcp-endpoints.py \
@@ -224,7 +224,7 @@ python scripts/validate-tiered-storage.py \
 ```
 
 This proves the storage path, not the full experiment workflow. Finish with a
-schema-4 smoke run from the guide.
+smoke run using the current configuration format from the guide.
 
 ## After reboot
 

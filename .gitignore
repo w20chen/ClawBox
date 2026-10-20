@@ -59,6 +59,32 @@ output/
 # Local agent instructions, research plans and prompt material
 /AGENTS.md
 /LLC.md
+/docs/experiment-validation.md
+
+# Host-specific placement-study helpers (retained locally, not project assets)
+/clawbox/experiments/placement_replica.py
+/clawbox/experiments/pointer_chase.c
+/clawbox/experiments/pointer_chase_runner.py
+/clawbox/experiments/sequential_stream.c
+/scripts/analyze_placement_trials.py
+/scripts/analyze_terminal_placement.py
+/scripts/build_all_placement_case_summary.py
+/scripts/build_cache_pressure_plan.py
+/scripts/build_discovery_outputs.py
+/scripts/build_extra_candidate_plan.py
+/scripts/build_llc_audit_report.py
+/scripts/build_real_tool_screening_plan.py
+/scripts/build_swe_runner_plan.py
+/scripts/build_terminal_placement_plan.py
+/scripts/build_terminal_runner_plan.py
+/scripts/build_working_set_plan.py
+/scripts/current_selected_slices.json
+/scripts/discover_cache_pressure_workloads.py
+/scripts/discover_terminal_workloads.py
+/scripts/export_all_tested_case_metrics.py
+/scripts/prepare_swe_checkpoint.py
+/scripts/prepare_terminal_checkpoint.py
+/scripts/probe_kunpeng_topology.py
 
 # OS/editor metadata
 .DS_Store

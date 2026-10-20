@@ -12,24 +12,18 @@ before `experiment` for privileged operations.
 | `~/.config/clawbox/machine.env` | API addresses, source paths, immutable image references, template IDs, and default output paths |
 | `~/.config/clawbox/host.yaml` | Editable NUMA, CPU, memory, storage, and host-network plan |
 | `~/.config/clawbox/host.json` | Applied profile written by `host apply`; use it as `configure --profile`, do not edit it as the plan |
-| Experiment YAML | Workload, VM identities, evidence, mechanisms, comparison arms, concurrency, and timeouts |
+| Experiment YAML | Workload, VM identities, policies to compare, concurrency, and timeouts |
 | `RUN/experiment.yaml` | Frozen specification for one run ID; never edit it in place |
 
 Host capacities use GiB. Experiment VM memory, reservations, and watermarks use
 MiB. Result names ending in `_bytes` use bytes. Relative paths resolve from the
 current directory; use absolute paths for traces, prediction files, and results.
 
-The installed CubeSandbox SDK must include both `sdk-control-timeouts.patch`
-and `sdk-lifecycle-timeouts.patch`. Its `Config.request_timeout` is a per-request
-connect/read timeout in seconds (default 30), including create, resume, pause,
-status and destroy; it is not the whole experiment deadline. SDK-only updates
-require a fresh worker/new run ID, not a VM image rebuild or retraining.
-
-If create loses its response (transport failure or HTTP 408/502/503/504),
-ClawBox checks the exact run/attempt/session ownership before recovering the
-VM; it does not repeat the create POST. Unresolved or ambiguous ownership fails
-the session. Preserve its logs and use `experiment abort RUN_ID` to clean up
-before starting another run; a failed cleanup is not permission to reuse the host.
+The installed CubeSandbox SDK must include `sdk-control-timeouts.patch` and
+`sdk-lifecycle-timeouts.patch`. Its request timeout defaults to 30 seconds per
+create, resume, pause, status, or destroy request; it is not the experiment
+deadline. After an ambiguous create failure, preserve the run directory and use
+`experiment abort RUN_ID` before starting a different run.
 
 ## Configure or recover a host
 
@@ -72,11 +66,6 @@ after service, storage, and real-VM probes succeed.
 `host check` also verifies that the installed Python SDK bounds create and
 inventory HTTP requests. An SDK-only timeout repair requires reinstalling the
 patched SDK and starting a new run ID; it does not require rebuilding VM images.
-
-Admission uses FIFO among runnable requests when the next VM creation fits its
-memory budget. Existing tools can bypass a creation blocked by memory pressure.
-Placement scores use conservative nominal outstanding reservations; admission
-checks measured demand when that upper bound would block a request.
 
 For high-density runs, check Cube's separate configured-VM quotas as well as
 ClawBox's measured admission limits. `launch` checks a conservative envelope of
@@ -134,6 +123,7 @@ bash scripts/clawbox experiment validate "$HOME/clawbox-specs/eval.yaml" --input
 `configure` never resizes registered templates. Register new templates before
 changing VM vCPU, RAM, disk size, image, guest dependencies, or workspace
 contents. Use `--force` only to replace an output YAML, never to reuse a run ID.
+Each policy variant is stored as a comparison `arm` in the YAML and results.
 
 The schema has six mechanism dimensions plus deployment and coordination:
 
@@ -141,19 +131,18 @@ The schema has six mechanism dimensions plus deployment and coordination:
 | --- | --- | --- |
 | `admission` | `off`, `fixed`, `predicted` | Whether a tool command may start; reservations do not resize guest RAM |
 | `runtime` | memory protection, CPU release boost, proactive reclaim | Per-VM reaction to measured host contention |
-| `placement` | round-robin, explicit, OS default, load-aware, optional C2 | Session NUMA placement and eligible tool-call CPU affinity |
+| `placement` | round-robin, explicit, OS default, load-aware, optional one-cache-cluster mode (`c2`) | Session NUMA placement and eligible tool-call CPU affinity |
 | `idle_reclaim` | `off`, `wait`; tool or agent-and-tool scope | Checkpointing while a real model request is outstanding |
 | `shared_memory` | `off`, `hard`, `pressure` | Temporary placement of running VM memory in the shared NUMA pool |
 | `checkpoint` | full-copy or incremental CoW; disk, WARM, or tiered | Snapshot encoding, storage, and residency |
 | `deployment` | `managed`, `os-default` | Managed lifecycle accounting versus the guarded OS baseline |
 | `coordination` | `reclaim_first`, `measured_cost` | Choice between safe reclaim and borrowing actions |
 
-Use `configure --fixed-methods --recipe FAMILY` for a controlled single-family
-comparison. It resets unrelated mechanism switches while retaining the workload,
-host resources, measurements, and numeric tuning. Inspect `describe` because arm
-names and recipe labels never select runtime behavior. Fixed-method comparisons reset
-tool-call CPU placement to C0. The integrated recipe also uses C0 for its two
-control arms while preserving the configured design's CPU policy.
+Use `configure --fixed-methods --recipe FAMILY` to compare one policy family
+while keeping the workload, host resources, measurements, and numeric settings
+fixed. Always inspect `describe`: names and labels do not change runtime behavior.
+These comparisons use the full selected NUMA CPU pool (`c0`) unless the generated
+configuration explicitly says otherwise.
 
 `comparison.arms[].override` accepts dotted mechanism fields. Environment,
 workload, hardware limits, and evidence remain common across arms. Arm overrides
@@ -169,9 +158,10 @@ bash scripts/clawbox experiment configure --help
 bash scripts/clawbox experiment describe --help
 ```
 
-For predicted admission, `--prediction-mode runtime` uses the immutable trained
-KB for its matching repository and Tool image. `--prediction-mode cold-start`
-uses one immutable ClawTune bootstrap KB for every workload repository; its
+For predicted admission, `--prediction-mode runtime` uses an immutable trained
+knowledge base (KB) for the matching repository and Tool image.
+`--prediction-mode cold-start` uses one immutable ClawTune bootstrap KB for
+every workload repository; its
 artifact must declare `prediction_scope: clawtune_cold_start` and
 `repository: "*"`. The cold-start mode still verifies the KB hash, validated
 host-memory calibration, and the complete Tool environment identity, including
@@ -179,7 +169,7 @@ VM size. The bootstrap KB must contain compatible memory observations; a
 time-only seed cannot support predicted memory admission. Changing the mode or
 artifact requires a new run ID, not an image rebuild.
 
-### Resident capacity baselines
+### Compare fixed memory charges
 
 `--recipe resident-capacity` generates three supported arms:
 
@@ -189,26 +179,17 @@ artifact requires a new run ID, not an image rebuild.
 | `resident-capacity-0-8` | configured RAM * 0.8 |
 | `resident-capacity-0-75` | configured RAM * 0.75 |
 
-These arms keep both VMs resident, disable runtime checkpointing, tool-call
-admission, runtime optimizations, shared-memory borrowing and template affinity,
-and use round-robin placement with C0 CPU scheduling. All generated recipes currently set
-`placement.placement_cpu_overcommit` to 1024, also the global default, keeping the
-CPU slot mechanism available but making it unlikely to limit these experiments. This does not
-change the allowed host CPU lists or VM vCPU counts. Edit the arm override to
-choose another multiplier. VM RAM is unchanged.
+These arms keep both VMs resident, disable checkpointing and adaptive memory
+policies, and use round-robin placement over the full selected NUMA CPU pool.
+The multiplier changes only the accounting charge; it does not resize VM memory,
+change CPU lists, or change vCPU counts.
 Each VM's charge is rounded up separately to MiB; a session reserves the sum of
 its Agent and Tool charges until cleanup, including model waits. For example,
-a 6144 MiB VM is charged 4916 MiB at 0.8 or 4608 MiB at 0.75. Failed creation
-releases the charge during cleanup. Admission uses only the persistent nominal
-ledger: existing charges plus the new pair's charge must fit the configured
-per-domain budget. For this mode the budget equals each compute node's
-`memory_capacity_mib`; the aggregate budget is the sum of those capacities.
-With no compute nodes, it uses `local_memory_capacity_mib` when present, otherwise
-`pool_memory_budget_mib`. LOW/HIGH remain host-profile fields for measured modes
-but do not determine the pure-ledger budget. RSS, in-flight physical growth, free-memory floors, congestion
-and LOW/HIGH hysteresis do not veto admission in this mode. Memory samples remain
-available as observations; VM creation and kernel memory failures remain real
-experiment outcomes.
+a 6144 MiB VM is charged 4916 MiB at 0.8 or 4608 MiB at 0.75. Existing charges
+plus the new pair's charge must fit the configured per-domain budget. This recipe
+does not use measured RSS or LOW/HIGH watermarks to admit work, although those
+measurements remain in the results. VM creation and kernel memory failures are
+still experiment outcomes.
 
 ```bash
 bash scripts/clawbox experiment configure \
@@ -229,55 +210,31 @@ Use a host-configured workload and registered VM templates of the desired sizes.
 To run only the discounted arms, remove `resident-capacity-1` from the generated
 `comparison.arms` before validation and launch.
 
-`execution.sandbox_create_concurrency` is the maximum number of Runtime/Tool VM
-pairs being created at once (default `8`, unit: session pairs). It is a startup
-transport limit, not tool admission: a session releases its creation slot as soon
-as both VMs are ready and then continues at the offered concurrency. Set it no
-higher than `max(execution.concurrency_levels)`. A lower value deliberately queues
-pair startup and therefore changes time-to-full-concurrency; changing it requires
-validation, qualification, and a new run ID. It replaces the former undocumented
-`CLAWBOX_SANDBOX_CREATE_CONCURRENCY` host environment variable. Increase it only
-after a short run at the target host and VM density confirms that Cube remains
-responsive and sandbox creation has no failures; available CPU and memory alone
-do not establish a safe lifecycle-control concurrency.
+`execution.sandbox_create_concurrency` limits how many Runtime/Tool VM pairs are
+created at once (default `8`; unit: session pairs). It does not limit tool calls.
+Set it no higher than the largest `execution.concurrency_levels` value. Changing
+it requires validation, qualification, and a new run ID.
 
-`execution.worker_thread_switch_interval_seconds` controls the Python worker's
-interpreter thread handoff interval (seconds; default `0.001`, positive and at
-most `0.1`). It reduces scheduling delay when control requests performing short
-I/O compete with Python computation; it is not an admission or CPU-capacity
-limit. Use the same value for every baseline. Changing it requires a new run ID
-and qualification, but no host apply, image rebuild or prediction retraining.
-The effective value is recorded in `cube_runtime_settings`. For a scheduling
-comparison with CPython's usual interval, explicitly configure `0.005`.
-
-For live throughput, `model-gateway/*.deliveries.jsonl` records the first successful
-HTTP delivery of each logical model request without conversation contents. Count
-only `status_code: 200`, deduplicate by session and `request_id`, and combine with
-completed Agent-tool operations (not backend maintenance) for Steps/s. Do not add
-these records a second time to matching entries in the final JSON ledger. The
-delivery journal is automatic for new workers; no image rebuild or host apply is
-needed. Older running workers still require final ledgers and can lose model-step
-counts if forcibly stopped before finalization.
-
-The worker raises its soft file-descriptor limit to `512 + 16 * max_concurrency`
-before starting an arm and fails before VM creation if the host hard limit is
-smaller. This covers live Agent, model, SSH, and Cube streams; the Cube client
-also closes idle per-sandbox control connections after endpoint discovery.
+`execution.worker_thread_switch_interval_seconds` controls Python thread handoff
+(default `0.001` seconds; valid range above zero through `0.1`). Keep it identical
+across comparisons. Changing it requires qualification and a new run ID, but not
+host apply, image rebuild, or prediction retraining.
 
 For custom arms, the explicit fields are
 `deployment.resident_capacity_accounting: true` and
 `deployment.lifecycle_reservation_scale` (greater than zero and at most one).
-Discounting requires managed resident capacity accounting. Pure ledger mode
+Discounting requires managed resident capacity accounting. Fixed-charge mode
 requires tool admission off and rejects shared-memory borrowing and proactive
 memory reclaim, whose execution paths are incompatible with this mode. Existing experiments
 retain their original accounting unless this mode is enabled. Results include
 `resource_scope.session_capacity_charge_mib` and the scale for auditing.
 
-### C0 and C2 tool-call CPU placement
+### Tool-call CPU placement
 
-`mechanisms.placement.tool_call_cpu_policy: c0` keeps the Tool VM on the full
-selected-NUMA CPU mask and leaves scheduling to Linux. `c2` applies only to
-`agent-tool` `exec` calls:
+`mechanisms.placement.tool_call_cpu_policy: c0` means that Linux schedules the
+Tool VM over the full CPU list of the selected NUMA node. The alternative value,
+`c2`, may temporarily limit an eligible `agent-tool` `exec` call to one
+last-level-cache (LLC) cluster:
 
 - A new call starts on the full NUMA mask.
 - After `tool_call_cpu_min_duration_seconds` (default 1 second), it may narrow to
@@ -290,15 +247,16 @@ selected-NUMA CPU mask and leaves scheduling to Linux. `c2` applies only to
   selected cluster. The default is `false`.
 - Completion, failure, or response loss restores the full NUMA mask.
 
-C2 requires readable Linux cache/cluster/SMT topology and at least two eligible
-LLC clusters in the selected NUMA CPU pool. Filesystem calls, backend maintenance,
-unknown operations, and short `exec` calls retain C0 behavior. Compare C0 and C2
-with identical VM resources, CPU pools, workload, admission, and memory policy.
+The `c2` mode requires readable Linux cache/cluster/SMT topology and at least two
+eligible LLC clusters in the selected NUMA CPU pool. Filesystem calls, backend
+maintenance, unknown operations, and short `exec` calls retain full-pool behavior.
+Compare the two modes with identical VM resources, CPU pools, workload,
+admission, and memory policy.
 
 ### Workloads and replay
 
 The supported path uses `agent.driver: openclaw` and replay inference. A replay
-trace contains paired schema-6 `span_start` and `span_end` records. Model
+trace pairs `span_start` and `span_end` records for each model or tool call. Model
 responses request real tools; recorded tool output is not substituted for actual
 execution.
 
@@ -338,38 +296,16 @@ do not end at exactly their expected time. A rate sweep needs a new run ID per
 point and a failure deadline beyond the realized arrival span plus execution
 time; no host apply, image rebuild or prediction retraining is needed.
 
-For the repeated SQLGlot pilot, `scripts/run-sqlglot-study.py` prepares a serial
-matrix around an existing Full-1280 reference. Use project Python with
-`--base-spec FULL.yaml --ledger-spec LEDGER.yaml --host HOST.yaml --reference RUN_DIRECTORY --output STUDY_DIRECTORY`
-to write `matrix.json` without launching anything. Review the matrix first.
-Adding `--execute` waits for the reference to terminate, runs Full-2560, chooses
-pool sizes from the Full-2560 measured peaks, then uses only public `host apply` and `experiment launch`
-commands. It preserves existing run IDs, never retries failed measurements,
-and stops if VM cleanup is incomplete. Logs and partial summaries remain in
-the study directory. The impractically long 1280-task arrival-rate sweep is not
-generated. Full-1280 shared-pool ablations are skipped when that reference has no
-material shared-pool use. The runner performs the shared-pool ablations at 2560
-only if Full-2560 records checkpoint occupancy, memory borrowing, or at least 1 GiB
-of shared live memory; inactive mechanisms are recorded as deferred rather than
-measured with an uninformative repeat. After the 2560 shared-pool, c128, and c64 points, the runner derives
-three 64-task arrival rates from measured Full-c64 successful throughput. It
-reports a population P90 only when all 64 tasks complete; otherwise those rows
-are deferred instead of substituting a completed-only P90. Deferred rows remain
-deferred on restart. Zero-pool disables borrowing and in-memory checkpoint
-storage but retains disk checkpoints. Round-robin disables adaptive/template
-placement, not NUMA CPU/memory binding. All plots must distinguish these scopes.
-
 Prepare the default unique SWE-rebench corpus on the machine holding the raw
 recordings, then copy the entire output directory to the experiment host:
 
 ```powershell
 python -m clawbox.cli experiment import-corpus `
-  "C:\Users\29068\Desktop\swe-rebench-original-flat-644-20260904\swe-rebench-original-flat-644-20260904" `
-  --output .artifacts/swe-rebench-replay --count 332
+  C:\path\to\recordings --output C:\path\to\replay-corpus --count 332
 ```
 
-The command imports schema-5 recordings to replay schema 6, writes relocatable
-paths in `workload.json`, and round-robins PennyLane and SQLGlot before appending
+The command converts older recordings to the current replay format, writes
+relocatable paths in `workload.json`, and alternates PennyLane and SQLGlot before appending
 the remaining projects lexically. Traces whose tool interface cannot be adapted
 are skipped without changing their calls; `workload.json` records each skipped
 source, hash, and reason, and the command fails if it cannot fill `--count` with
@@ -418,22 +354,19 @@ concurrency does not prove full-density performance. After interruption, restore
 the host, retain the result directory, and launch the frozen spec with the same
 run ID. Use a new run ID for any configuration change.
 
-## Reproduce the shared-LLC C0/C2 experiment
+## Reproduce the shared-cache CPU-placement experiment
 
-This repository includes the frozen specifications, traces, and prediction
-artifact from the 2026-10-19 SQLGlot experiment. On a configured compatible
-ARM64 host, reproduce both arm orders with one command:
+The repository includes frozen specifications, traces, and prediction data for
+a SQLGlot comparison between full-pool (`c0`) and one-cache-cluster (`c2`) CPU
+placement. On a compatible ARM64 host, run both comparison orders with:
 
 ```bash
 bash scripts/run-llc-shared-reproduction.sh
 ```
 
-The command verifies every frozen asset by SHA-256, verifies the original VM
-image digests and memory configuration in the applied host profile, selects two
-8-logical-CPU LLC clusters on each of two NUMA nodes, and runs the 16-session
-C0/C2 comparison sequentially in both arm orders. It forces a fresh real-VM
-qualification for each order and prints both reports. The reference runs measured
-`+4.12%` and `+5.95%`; the mean C2 throughput gain was `+5.03%`.
+The command checks the frozen files, VM image digests, memory settings, and CPU
+topology before it starts VMs. It qualifies and runs each order separately, then
+prints both reports.
 
 Check compatibility and generated inputs without starting a VM:
 
@@ -469,19 +402,6 @@ placement wait, tool time, CPU pressure, memory residency, checkpoint cost, and
 prediction error explain the result but do not replace it. Empty or `null`
 measurements are unavailable, not zero. NUMA allocation-event counters are pages,
 not cross-NUMA traffic bytes; do not infer traffic without a qualified host PMU.
-
-Creation retains its FIFO position while earlier requests run. NUMA placement
-reconsiders a node after 0.2 seconds of blocking at the front of the queue, not
-after 0.2 seconds of ordinary queue residence. Memory safety is rechecked before
-every admission; this behavior takes effect on a new run without rebuilding VMs.
-
-`tool_admitted.control_stage_seconds` reports non-overlapping host callback
-stages in seconds: prediction/queue bookkeeping, lifecycle-lock acquisition,
-memory preparation, restore readiness/routing, memory-baseline capture, CPU
-placement, sampler startup, and final bookkeeping. Memory preparation already
-includes `admission_blocked_seconds`; do not add that wait again. The breakdown
-excludes HTTP transit and event serialization, and is available on new runs
-without host apply, image rebuild, or retraining.
 
 ## When changes take effect
 

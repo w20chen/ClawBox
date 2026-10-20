@@ -6,21 +6,16 @@ collection remain supported.
 
 The former service-based control plane is deprecated: `clawbox.api`, `managed`,
 `scheduler`, `controller`, `allocator`, `node_agent`, `tool_agent`, `ingester`, and
-orchestration in `cell`. Their source is retained for reference, not as
-supported deployment entry points. Future changes need not preserve these
-modules' behavior, historical APIs, schemas, aliases, or stored-state formats.
-Do not deploy these services for the current experiment workflow.
+orchestration in `cell`. Their source remains for reference, but these modules
+are not deployment entry points and do not have compatibility guarantees.
 
 The parallel `scripts/lab` command-line interface is also deprecated. Its shared
 host setup and image helpers are still called by `clawbox experiment setup` and
 `clawbox experiment images`; use the public experiment commands for new runs.
 
-New experiments use schema version 4 and the six-dimensional recipes printed by
-`clawbox experiment recipes`; see the [experiment guide](guide.md).
-Use `configure --recipe` to create explicit comparison arms. Schema-3 inputs
-and their suite/baseline selectors are outside the supported contract.
-Deprecated verification scripts and control-plane workflows retain their source
-but do not constrain current experiment tests.
+New experiments use schema version 4 and the recipes printed by
+`clawbox experiment recipes`; see the [experiment guide](guide.md). Version 3
+inputs and their suite/baseline selectors are not supported.
 
 This does not deprecate shared functionality still used by current commands:
 

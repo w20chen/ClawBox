@@ -66,9 +66,9 @@ use, scheduling pressure when available, offered vCPU commitments, memory
 residency, and outstanding claims. It does not use memory bandwidth as an input.
 
 CPU lists restrict where vCPUs may run; they do not reserve cores or change the
-template vCPU quota. C2 may temporarily narrow an eligible tool call to one LLC
-cluster, but it restores the full selected-NUMA mask when the call ends or CPU
-pressure requires expansion.
+template vCPU quota. The optional `c2` policy may temporarily narrow an eligible
+tool call to one last-level-cache (LLC) cluster, but it restores the full NUMA CPU
+list when the call ends or CPU pressure requires expansion.
 
 Changing `cpuset.mems` requests a new allocation policy and may migrate pages,
 but it does not prove complete migration. Physical residency comes from cgroup

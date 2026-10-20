@@ -1,9 +1,9 @@
 # ClawBox
 
-ClawBox is a research system for controlled experiments on coding-agent VM
-scheduling. It runs standalone CubeSandbox sessions, uses ClawTune predictions
-and measurements, and compares admission, runtime control, CPU placement, idle
-checkpointing, shared-memory borrowing, and checkpoint storage policies.
+ClawBox runs controlled experiments on virtual machines used by coding agents.
+It starts standalone CubeSandbox sessions, uses ClawTune predictions and
+measurements, and compares when work starts, where it runs, and when VM state is
+saved or restored.
 
 Each session contains an agent VM and a tool VM. The supported interface is
 `clawbox experiment`; the legacy service-based control plane is not supported.
@@ -12,10 +12,10 @@ Each session contains an agent VM and a tool VM. The supported interface is
 
 - [Install a host](docs/installation.md): install CubeSandbox, import images,
   register templates, and verify the VM path.
-- [Run experiments](docs/guide.md): configure a host, create a schema-4
-  experiment, validate, qualify, launch, recover, and read results.
-- [Understand the model](docs/design.md): execution, accounting, NUMA,
-  checkpoint, PMU, and measurement semantics.
+- [Run experiments](docs/guide.md): configure a host, create an experiment,
+  validate it, run or resume it, and read the results.
+- [Understand measurements](docs/design.md): VM execution, memory accounting,
+  CPU and NUMA placement, snapshots, and hardware counters.
 - [Deprecated components](docs/deprecated.md): code retained for reference but
   excluded from the supported workflow.
 

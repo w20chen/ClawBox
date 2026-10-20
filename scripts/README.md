@@ -17,24 +17,16 @@ point in new terminals to avoid repeating environment and privilege setup.
 | Register a Runtime/Tool pair and save IDs after both become READY | [register-machine-templates.sh](register-machine-templates.sh) |
 | Inspect/configure the host or preview/apply crash-dump cleanup | [clawbox](clawbox), `experiment host` |
 | Configure, validate, launch, train, report or recover an experiment | [clawbox](clawbox), `experiment` |
-| Reproduce the frozen shared-LLC C0/C2 experiment in both arm orders | [run-llc-shared-reproduction.sh](run-llc-shared-reproduction.sh) |
+| Reproduce the frozen full-pool versus one-cache-cluster CPU-placement experiment | [run-llc-shared-reproduction.sh](run-llc-shared-reproduction.sh) |
 
 The installation helpers support `--help`. Complete command sequences are in
 the installation guide. Keep generated bundles, registration records and logs
 outside this directory; store machine settings under `~/.config/clawbox/`.
 
-Keep local verification outputs in `.verification/`, generated experiment outputs
-in `results/`, and collected traces in the root `traces/` directory. These paths
-are ignored by Git and excluded from Docker build contexts; example traces under
-`examples/traces/` remain versioned. Ignoring a directory does not make its data
-disposable: preserve measurements and logs needed to audit results.
-
-After tests/builds have stopped, Python caches, `build/`, `*.egg-info/`, and old
-`.pytest-tmp*` directories can be regenerated and removed. Do not use blanket
-`git clean -fdx`: ignored directories also contain environments, results and source
-checkouts with local changes. Keep deprecated source as described in
-[project scope](../docs/deprecated.md). For host crash dumps, use the documented
-`experiment host` cleanup preview/apply commands instead of deleting storage by size.
+Local verification, result, and collected-trace directories are ignored by Git;
+checked-in examples under `examples/` remain versioned. Preserve any ignored
+measurements needed to audit a result, and do not use `git clean -fdx`. For host
+crash dumps, use the documented `experiment host clean` preview/apply commands.
 
 The other scripts support
 installation, image preparation, integration checks, or analysis; they are not
