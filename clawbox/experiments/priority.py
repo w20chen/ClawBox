@@ -760,9 +760,12 @@ class PriorityDomain:
         if (leaf/'cgroup.procs').read_text().strip():
             raise RuntimeError(f'priority VM leaf is already populated: {leaf}')
         cpus, node = self.placements.get(index, (None, None))
-        if cpus is not None:
+        # Even an unchanged cpuset write flushes the kernel's migration work
+        # queue. Preallocated LOCAL leaves need no rewrite on ordinary create;
+        # a borrowed/restored leaf must still be reset when its value differs.
+        if cpus is not None and (leaf/'cpuset.cpus').read_text().strip() != cpus:
             (leaf/'cpuset.cpus').write_text(cpus)
-        if node is not None:
+        if node is not None and (leaf/'cpuset.mems').read_text().strip() != str(node):
             (leaf/'cpuset.mems').write_text(str(node))
 
     def verify(self, index: int, role: str, sandbox_id: str) -> dict:

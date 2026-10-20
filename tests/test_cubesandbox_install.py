@@ -57,6 +57,10 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "TIER_API_PATCH_FILE" in helper
     assert "CONTROL_TIMEOUT_PATCH_FILE" in helper
     assert "timeout=cfg.request_timeout" in control_timeouts
+    lifecycle_timeouts = (ROOT / "deploy/cubesandbox/sdk-lifecycle-timeouts.patch").read_text()
+    assert "timeout=cfg.request_timeout" in lifecycle_timeouts
+    assert "timeout=self._config.request_timeout" in lifecycle_timeouts
+    assert 'apply_once "$LIFECYCLE_TIMEOUT_PATCH_FILE"' in helper
     assert '"phase":       "snapshot_create"' in lifecycle_timing
     assert '"phase":       "swap_out"' in lifecycle_timing
     assert '"duration_ms"' in lifecycle_timing

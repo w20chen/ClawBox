@@ -249,6 +249,13 @@ def test_managed_gateway_retries_do_not_create_logical_steps(tmp_path: Path) -> 
         second_status, second_type, second_body, retry_id = session.gateway.complete_http(payload)
         session.mark_delivery(request_id, delivered=True)
         assert (first_status, first_type, first_body) == (second_status, second_type, second_body)
+        session.mark_delivery(request_id, delivered=True)
+        journal = [json.loads(line) for line in
+                   (tmp_path/'store.deliveries.jsonl').read_text().splitlines()]
+        assert len(journal) == 1
+        assert journal[0]['request_id'] == request_id
+        assert journal[0]['status_code'] == 200
+        assert journal[0]['delivered_unix_s'] > 0
         assert request_id == retry_id
         assert session.gateway.logical_model_steps() == 1
         assert len(started) == 1

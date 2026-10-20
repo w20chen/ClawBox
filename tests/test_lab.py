@@ -262,7 +262,9 @@ def test_snapshot_sdk_applies_only_sdk_hunks_and_reinstalls(tmp_path, monkeypatc
 
     assert lab.ensure_snapshot_sdk(source) == source.resolve()
     apply_calls = [argv for argv, _ in calls if argv[:3] == ("git", "-C", str(source.resolve()))]
-    assert len(apply_calls) == 4
+    assert len(apply_calls) == 8
+    assert any("sdk-control-timeouts.patch" in argv[-1] for argv in apply_calls)
+    assert any("sdk-lifecycle-timeouts.patch" in argv[-1] for argv in apply_calls)
     assert all("--include=sdk/python/cubesandbox/sandbox.py" in argv for argv in apply_calls)
     assert calls[-1][0][:5] == (
         os.sys.executable, "-m", "pip", "install", "--no-deps",

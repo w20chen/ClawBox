@@ -173,6 +173,8 @@ class ExecutionSpec(StrictFrozenModel):
     # Limit only concurrent VM-pair creation. Once a pair is ready, its
     # session releases this slot and remains active at offered concurrency.
     sandbox_create_concurrency: int = Field(default=8, ge=1)
+    worker_thread_switch_interval_seconds: float = Field(
+        default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     randomized_order: bool = True
     random_seed: int = 0
     # Every supported run is supervised at the process boundary.  An
@@ -190,7 +192,7 @@ class ExecutionSpec(StrictFrozenModel):
     # trace's recorded wall span. 2.0 keeps VM demand below the measured
     # high-density creation rate while retaining substantial execution overlap.
     poisson_arrival_window_fraction: float = Field(
-        default=2.0, gt=0, le=10, allow_inf_nan=False,
+        default=2.0, gt=0, allow_inf_nan=False,
     )
 
     @field_validator("concurrency_levels")

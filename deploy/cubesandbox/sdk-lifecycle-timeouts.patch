@@ -1,0 +1,22 @@
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -360,7 +360,8 @@ class Sandbox:
+         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
+                       json=({"snapshot_mechanism": snapshot_mechanism}
+                             if snapshot_mechanism else {}),
+-                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
++                      headers={"Content-Type": "application/json", **_auth_headers(cfg)},
++                      timeout=cfg.request_timeout)
+         _check_response(resp)
+         return cls(resp.json(), config=cfg)
+ 
+@@ -965,4 +966,8 @@ class Sandbox:
+     def _build_session(self) -> requests.Session:
++        from functools import partial
+         s = requests.Session()
++        # Bound pause, info, destroy and snapshot-control requests as well.
++        s.request = partial(s.request, timeout=self._config.request_timeout)
++        # Explicit per-request timeout arguments override this default.
+         s.headers.update({"Content-Type": "application/json", **_auth_headers(self._config)})
+         return s

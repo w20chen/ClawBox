@@ -19,6 +19,18 @@ Host capacities use GiB. Experiment VM memory, reservations, and watermarks use
 MiB. Result names ending in `_bytes` use bytes. Relative paths resolve from the
 current directory; use absolute paths for traces, prediction files, and results.
 
+The installed CubeSandbox SDK must include both `sdk-control-timeouts.patch`
+and `sdk-lifecycle-timeouts.patch`. Its `Config.request_timeout` is a per-request
+connect/read timeout in seconds (default 30), including create, resume, pause,
+status and destroy; it is not the whole experiment deadline. SDK-only updates
+require a fresh worker/new run ID, not a VM image rebuild or retraining.
+
+If create loses its response (transport failure or HTTP 408/502/503/504),
+ClawBox checks the exact run/attempt/session ownership before recovering the
+VM; it does not repeat the create POST. Unresolved or ambiguous ownership fails
+the session. Preserve its logs and use `experiment abort RUN_ID` to clean up
+before starting another run; a failed cleanup is not permission to reuse the host.
+
 ## Configure or recover a host
 
 Inspect the real topology before creating a plan:
@@ -44,6 +56,7 @@ file before applying it. Important host fields are:
 | `tcp_tw_reuse` | `null` preserves the host value; `0`, `1`, and `2` request Linux's documented modes |
 | `cubelet_tap_init_num` | Optional pre-created TAP count; cover both VMs for every simultaneous session |
 | `cube_scheduler_overcommit` | Optional map from Cube node `InstanceType` to positive `cpu_ratio` and `mem_ratio`; `null` preserves Cube's settings. These multiply Cube's reported configured-VM quotas, not physical CPU/RAM allocations. |
+| `cube_scheduler_vm_count_ratio` | Optional positive per-instance multiplier over Cube's node-reported VM-count limit; `null` preserves Cube's setting. This is a scheduler limit, not physical capacity. |
 
 Check without mutation, then apply on an idle host:
 
@@ -55,6 +68,15 @@ bash scripts/clawbox --sudo experiment host apply "$HOME/.config/clawbox/host.ya
 Apply again after reboot or after changing topology, CPU lists, memory capacity,
 mounts, or host networking. `host apply` writes the adjacent `host.json` only
 after service, storage, and real-VM probes succeed.
+
+`host check` also verifies that the installed Python SDK bounds create and
+inventory HTTP requests. An SDK-only timeout repair requires reinstalling the
+patched SDK and starting a new run ID; it does not require rebuilding VM images.
+
+Admission uses FIFO among runnable requests when the next VM creation fits its
+memory budget. Existing tools can bypass a creation blocked by memory pressure.
+Placement scores use conservative nominal outstanding reservations; admission
+checks measured demand when that upper bound would block a request.
 
 For high-density runs, check Cube's separate configured-VM quotas as well as
 ClawBox's measured admission limits. `launch` checks a conservative envelope of
@@ -68,6 +90,8 @@ cube_scheduler_overcommit:
   cubebox:
     cpu_ratio: 10.0
     mem_ratio: 3.0
+cube_scheduler_vm_count_ratio:
+  cubebox: 1.05
 ```
 
 Choose multipliers from the reported node quotas and requested VM specifications,
@@ -217,6 +241,24 @@ after a short run at the target host and VM density confirms that Cube remains
 responsive and sandbox creation has no failures; available CPU and memory alone
 do not establish a safe lifecycle-control concurrency.
 
+`execution.worker_thread_switch_interval_seconds` controls the Python worker's
+interpreter thread handoff interval (seconds; default `0.001`, positive and at
+most `0.1`). It reduces scheduling delay when control requests performing short
+I/O compete with Python computation; it is not an admission or CPU-capacity
+limit. Use the same value for every baseline. Changing it requires a new run ID
+and qualification, but no host apply, image rebuild or prediction retraining.
+The effective value is recorded in `cube_runtime_settings`. For a scheduling
+comparison with CPython's usual interval, explicitly configure `0.005`.
+
+For live throughput, `model-gateway/*.deliveries.jsonl` records the first successful
+HTTP delivery of each logical model request without conversation contents. Count
+only `status_code: 200`, deduplicate by session and `request_id`, and combine with
+completed Agent-tool operations (not backend maintenance) for Steps/s. Do not add
+these records a second time to matching entries in the final JSON ledger. The
+delivery journal is automatic for new workers; no image rebuild or host apply is
+needed. Older running workers still require final ledgers and can lose model-step
+counts if forcibly stopped before finalization.
+
 The worker raises its soft file-descriptor limit to `512 + 16 * max_concurrency`
 before starting an arm and fails before VM creation if the host hard limit is
 smaller. This covers live Agent, model, SSH, and Cube streams; the Cube client
@@ -286,6 +328,36 @@ Set `arrival_schedule: burst` only for an explicit burst experiment, or
 The default `execution.arm_timeout_seconds` is `3600` seconds. This is a failure
 deadline, not an added delay; increase it for traces whose expected arrival
 window plus maximum trace duration can exceed one hour.
+
+For a fixed task count `N > 1` and target Poisson rate `lambda` in tasks/second,
+set `poisson_arrival_window_fraction = (N - 1) / (lambda * D)`, where `D` is the
+median selected trace span after replay time scaling. The fraction must be finite
+and positive; it has no upper limit. Keep the seed, cases and task count fixed
+across rate points. Report the realized rate separately: exponential arrivals
+do not end at exactly their expected time. A rate sweep needs a new run ID per
+point and a failure deadline beyond the realized arrival span plus execution
+time; no host apply, image rebuild or prediction retraining is needed.
+
+For the repeated SQLGlot pilot, `scripts/run-sqlglot-study.py` prepares a serial
+matrix around an existing Full-1280 reference. Use project Python with
+`--base-spec FULL.yaml --ledger-spec LEDGER.yaml --host HOST.yaml --reference RUN_DIRECTORY --output STUDY_DIRECTORY`
+to write `matrix.json` without launching anything. Review the matrix first.
+Adding `--execute` waits for the reference to terminate, runs Full-2560, chooses
+pool sizes from the Full-2560 measured peaks, then uses only public `host apply` and `experiment launch`
+commands. It preserves existing run IDs, never retries failed measurements,
+and stops if VM cleanup is incomplete. Logs and partial summaries remain in
+the study directory. The impractically long 1280-task arrival-rate sweep is not
+generated. Full-1280 shared-pool ablations are skipped when that reference has no
+material shared-pool use. The runner performs the shared-pool ablations at 2560
+only if Full-2560 records checkpoint occupancy, memory borrowing, or at least 1 GiB
+of shared live memory; inactive mechanisms are recorded as deferred rather than
+measured with an uninformative repeat. After the 2560 shared-pool, c128, and c64 points, the runner derives
+three 64-task arrival rates from measured Full-c64 successful throughput. It
+reports a population P90 only when all 64 tasks complete; otherwise those rows
+are deferred instead of substituting a completed-only P90. Deferred rows remain
+deferred on restart. Zero-pool disables borrowing and in-memory checkpoint
+storage but retains disk checkpoints. Round-robin disables adaptive/template
+placement, not NUMA CPU/memory binding. All plots must distinguish these scopes.
 
 Prepare the default unique SWE-rebench corpus on the machine holding the raw
 recordings, then copy the entire output directory to the experiment host:
@@ -397,6 +469,19 @@ placement wait, tool time, CPU pressure, memory residency, checkpoint cost, and
 prediction error explain the result but do not replace it. Empty or `null`
 measurements are unavailable, not zero. NUMA allocation-event counters are pages,
 not cross-NUMA traffic bytes; do not infer traffic without a qualified host PMU.
+
+Creation retains its FIFO position while earlier requests run. NUMA placement
+reconsiders a node after 0.2 seconds of blocking at the front of the queue, not
+after 0.2 seconds of ordinary queue residence. Memory safety is rechecked before
+every admission; this behavior takes effect on a new run without rebuilding VMs.
+
+`tool_admitted.control_stage_seconds` reports non-overlapping host callback
+stages in seconds: prediction/queue bookkeeping, lifecycle-lock acquisition,
+memory preparation, restore readiness/routing, memory-baseline capture, CPU
+placement, sampler startup, and final bookkeeping. Memory preparation already
+includes `admission_blocked_seconds`; do not add that wait again. The breakdown
+excludes HTTP transit and event serialization, and is available on new runs
+without host apply, image rebuild, or retraining.
 
 ## When changes take effect
 

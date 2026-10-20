@@ -367,9 +367,18 @@ class ModelGateway:
             if request is None:
                 raise KeyError(f"unknown gateway request {request_id}")
             if delivered:
-                request.delivered = True
                 if request.delivered_unix_s <= 0:
-                    request.delivered_unix_s = time.time()
+                    delivered_at = time.time()
+                    # Small append-only evidence survives a worker cutoff without
+                    # rewriting the full conversation ledger on the response path.
+                    path = self.store_path.with_suffix('.deliveries.jsonl')
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with path.open('a', encoding='utf-8') as stream:
+                        stream.write(json.dumps({'request_id': request_id,
+                            'status_code': request.status_code,
+                            'delivered_unix_s': delivered_at}) + '\n')
+                    request.delivered_unix_s = delivered_at
+                request.delivered = True
             else:
                 request.delivery_failures += 1
             self._persist()

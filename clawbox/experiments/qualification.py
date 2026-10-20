@@ -88,6 +88,7 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
     tools = [case.sandbox or spec.sandbox for case in load_workload_cases(spec.workload)]
     count = max(spec.execution.concurrency_levels)
     demand = dict(
+        vm_count=count * 2,
         cpu_milli=count * (spec.runtime.vcpu + max(t.vcpu for t in tools)) * 1000,
         memory_mib=count * (spec.runtime.memory_mib + max(t.memory_mib for t in tools)),
         max_vm_cpu_milli=max(spec.runtime.vcpu, *(t.vcpu for t in tools)) * 1000,

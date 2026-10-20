@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from requests import Timeout as RequestsTimeout
+from requests import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 from trace_fixtures import llm_spans, write_spans
 
 from clawbox.cube import (
@@ -154,18 +154,27 @@ def test_cube_client_pins_node_disables_automatic_lifecycle_and_journals(tmp_pat
     assert journal.sandbox_ids(task_uid="task") == [sandbox.sandbox_id]
 
 
+@pytest.mark.parametrize("failure", [RequestsTimeout("lost"), RequestsConnectionError("lost"),
+                                     408, 502, 503, 504])
 def test_cube_client_reconciles_a_timed_out_create_by_unique_ownership(
-    tmp_path: Path,
+    tmp_path: Path, failure,
 ) -> None:
     class TimedOutSandbox(_Sandbox):
+        create_calls = 0
+
         @classmethod
         def create(cls, **kwargs):
+            cls.create_calls += 1
             item = cls({
                 "sandboxID": "sb-recovered", "templateID": kwargs["template"],
                 "metadata": kwargs["metadata"],
             })
             cls.items[item.sandbox_id] = item
-            raise RequestsTimeout("create response was lost")
+            if isinstance(failure, int):
+                error = RuntimeError("SDK HTTP failure")
+                error.status_code = failure
+                raise error
+            raise failure
 
     TimedOutSandbox.items = {}
     journal = OwnedSandboxJournal(tmp_path / "owned-sandboxes.jsonl")
@@ -177,6 +186,53 @@ def test_cube_client_reconciles_a_timed_out_create_by_unique_ownership(
 
     assert sandbox.sandbox_id == "sb-recovered"
     assert journal.sandbox_ids(task_uid="task") == ["sb-recovered"]
+    assert TimedOutSandbox.create_calls == 1
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, None])
+def test_create_definite_rejection_does_not_reconcile(status):
+    error = RuntimeError("rejected")
+    error.status_code = status
+
+    class RejectedSandbox:
+        @classmethod
+        def create(cls, **kwargs):
+            raise error
+
+        @classmethod
+        def list_v2(cls, **kwargs):
+            pytest.fail("definite rejection must not be hidden by reconciliation")
+
+    with pytest.raises(RuntimeError) as caught:
+        CubeSandboxClient(sandbox_class=RejectedSandbox).create_sandbox(
+            template="tpl", node_name="node", ownership=_owner(),
+        )
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("matching", [0, 2])
+def test_create_reconciliation_rejects_missing_or_ambiguous_ownership(monkeypatch, matching):
+    import clawbox.cube.client as module
+    monkeypatch.setattr(module, "read_with_backoff", lambda operation, **kwargs: operation())
+
+    class AmbiguousSandbox:
+        calls = 0
+
+        @classmethod
+        def create(cls, **kwargs):
+            cls.calls += 1
+            raise RequestsTimeout("lost response")
+
+        @classmethod
+        def list_v2(cls, **kwargs):
+            return [{"sandboxID": str(i), "metadata": _owner().metadata()}
+                    for i in range(matching)] + [{"sandboxID": "unrelated", "metadata": {}}]
+
+    with pytest.raises(RuntimeError, match="ownership reconciliation failed"):
+        CubeSandboxClient(sandbox_class=AmbiguousSandbox).create_sandbox(
+            template="tpl", node_name="node", ownership=_owner(),
+        )
+    assert AmbiguousSandbox.calls == 1
 
 
 def test_cube_client_adds_only_explicit_narrow_egress_allowlist() -> None:
@@ -1140,6 +1196,15 @@ def test_cleanup_uses_journal_and_metadata_fallback(tmp_path: Path) -> None:
 def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> None:
     class PartiallyFailingSandbox(_Sandbox):
         failed = False
+        constructed = 0
+        closed = 0
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            type(self).constructed += 1
+
+        def close(self):
+            type(self).closed += 1
 
         def kill(self):
             if not type(self).failed:
@@ -1155,6 +1220,8 @@ def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> Non
     assert second.sandbox_id not in PartiallyFailingSandbox.items
     assert first.sandbox_id not in PartiallyFailingSandbox.items
     assert PartiallyFailingSandbox.items == {}
+    assert PartiallyFailingSandbox.constructed == 3  # two creates and one retry
+    assert PartiallyFailingSandbox.closed == 3
 
 
 @pytest.mark.parametrize("capacity,borrowed,expected", [(1536, 0, False), (2048, 1024, False), (2048, 0, True)])

@@ -11,6 +11,43 @@ from clawbox.experiments.spec import PolicySpec
 from clawbox.experiments.spec_types import SnapshotTier
 
 
+def test_placement_retry_timeout_does_not_cancel_a_queued_fifo_ticket():
+    from clawbox.experiments.policy import AdmissionRequest
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (0, 100*1024**2))
+    with c._condition:
+        c._waiters.append('older')
+        c._waiter_requests['older'] = AdmissionRequest('older', 1024**2, 'tool_admission', False)
+        c._progress_waiters.add('older')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(c.acquire, 'new', 1, 2, wait_class='create',
+                              blocked_head_timeout_s=.02)
+        time.sleep(.25)
+        assert not waiting.done()
+        with c._condition:
+            c._waiters.remove('older')
+            c._waiter_requests.pop('older')
+            c._progress_waiters.remove('older')
+            c._condition.notify_all()
+        assert waiting.result(timeout=1) >= .2
+    assert ('new', 'create') in c.demand.claims
+
+
+def test_placement_reconsiders_a_genuinely_memory_blocked_head():
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (9*1024**2, 100*1024**2))
+    with pytest.raises(AdmissionTimeout, match='placement head remains blocked'):
+        c.acquire('new', 4, 2, wait_class='create', blocked_head_timeout_s=.02)
+    assert not c._waiters
+    assert not c.demand.claims
+
+
 class Lifecycle:
     def __init__(self) -> None:
         self._resident = True
@@ -24,6 +61,22 @@ class Lifecycle:
         self._resident = False
         self.pauses += 1
         return 0.01
+
+
+@pytest.mark.parametrize('used_mib, expected', [(0, 'create'), (8, 'tool')])
+def test_progress_bypasses_only_memory_blocked_creation(used_mib, expected):
+    from clawbox.experiments.policy import AdmissionRequest
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (used_mib*1024**2, 100*1024**2))
+    with c._condition:
+        c._waiters.extend(['create', 'tool'])
+        c._waiter_requests['create'] = AdmissionRequest('new', 4*1024**2, 'create', False)
+        c._waiter_requests['tool'] = AdmissionRequest('running', 1024**2, 'tool_admission', False)
+        c._progress_waiters.add('tool')
+        assert c._admission_head_locked() == expected
 
 
 def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
@@ -558,7 +611,7 @@ def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
 
     assert order == ["second", "third"]
     metrics = coordinator.admission_metrics()
-    assert metrics["discipline"] == "runnable_progress_before_create_fifo"
+    assert metrics["discipline"] == "feasible_fifo_progress_bypasses_blocked_create"
     assert metrics["admission_count"] == 3
     assert metrics["max_queue_depth"] == 2
     assert metrics["wait_p95_seconds"] is not None

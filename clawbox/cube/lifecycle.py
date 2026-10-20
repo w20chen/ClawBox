@@ -161,7 +161,11 @@ class CubeSandboxLifecycle:
 
     @property
     def resident(self) -> bool:
-        return self.state is SandboxState.RUNNING
+        # A single-state observation is not a transition guard. Admission and
+        # victim selection call this while holding their global condition;
+        # waiting for a slow cpuset rebind/RPC here stalls unrelated sessions.
+        # Lifecycle operations still acquire _lock and recheck their state.
+        return self._state is SandboxState.RUNNING
 
     @property
     def tier(self) -> SnapshotTier:

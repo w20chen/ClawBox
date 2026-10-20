@@ -55,6 +55,16 @@ def test_reporting_kernel_reads_do_not_hold_admission_lock():
         assert report.result()['n0']['outstanding_bytes']==MIB
 
 
+def test_low_pressure_placement_does_not_sample_live_claims():
+    s, ledger, events = scheduler()
+    with ledger.condition:
+        ledger.add(('old', 'tool_admission'), scope='n0', amount=MIB, local_amount=MIB)
+        ledger.claims['old', 'tool_admission'].sample = lambda: pytest.fail(
+            'placement must not read every live VM when nominal demand fits')
+    assert s.acquire('new', vcpus=1, memory_mib=1, timeout=.2) in s.domains
+    assert events[-1]['outstanding_bytes_kind'] == 'nominal_upper_bound'
+
+
 @pytest.mark.parametrize('used,cpu', [((8,0),(0.,0.)),((0,0),(.9,.1))])
 def test_load_aware_selects_lower_pressure_and_reserves_once(used,cpu):
     s,ledger,events=scheduler(used=used,cpu=cpu)

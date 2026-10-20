@@ -85,6 +85,18 @@ and builds Cubelet and Shim. It does not install or restart services. Repeating 
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
 
+For an existing SDK already carrying `sdk-control-timeouts.patch`, add the
+lifecycle timeout patch without rebuilding VM images or restarting services:
+
+```bash
+git -C "$CUBE_SOURCE_DIR" apply --check "$PWD/deploy/cubesandbox/sdk-lifecycle-timeouts.patch"
+git -C "$CUBE_SOURCE_DIR" apply "$PWD/deploy/cubesandbox/sdk-lifecycle-timeouts.patch"
+python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
+```
+
+If already applied, verify with `git apply --reverse --check` instead of applying
+it again. Start a new run ID; existing workers keep their loaded SDK code.
+
 `--mirror cn` selects China package and Go mirrors; `--direct-network` bypasses
 inherited host proxies. These options do not solve inaccessible GitHub release
 assets. Confirm the build network before retrying a failed build.

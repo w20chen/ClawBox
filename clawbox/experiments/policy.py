@@ -461,7 +461,7 @@ class PolicyCoordinator:
         return False
 
     def _admission_head_locked(self):
-        """Keep FIFO among runnable requests, prioritizing existing progress."""
+        """Use FIFO when creation fits; let progress bypass blocked creation."""
         first = None
         for ticket in self._waiters:
             request = self._waiter_requests[ticket]
@@ -470,12 +470,23 @@ class PolicyCoordinator:
             if first is None:
                 first = ticket
             if ticket in self._progress_waiters:
+                oldest = self._waiter_requests[first]
+                if first is not ticket and oldest.wait_class == 'create':
+                    extra = (self.startup_headroom_bytes
+                             if self._startup_headroom_needed(oldest.session_id) else 0)
+                    blocked = (self._new_session_admission_blocked
+                               and not self.resident_capacity_accounting)
+                    if not blocked and not self._pressure_reasons(
+                            oldest.amount_bytes + extra,
+                            capacity_claim=oldest.capacity_claim):
+                        return first
                 return ticket
         return first
 
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
-                capacity_claim: bool = False, total_mib: int | None = None) -> float:
+                capacity_claim: bool = False, total_mib: int | None = None,
+                blocked_head_timeout_s: float | None = None) -> float:
         started = time.monotonic()
         amount = amount_mib * MIB
         total = (amount_mib if total_mib is None else total_mib) * MIB
@@ -493,6 +504,7 @@ class PolicyCoordinator:
                 self._record_wait_locked(wait_class, elapsed)
             return elapsed
         deadline = None if timeout_s is None else started + timeout_s
+        blocked_head_since = None
         ticket = object()
         with self._condition:
             self._waiters.append(ticket)
@@ -536,6 +548,23 @@ class PolicyCoordinator:
                         safety_reasons = (*safety_reasons, "local_high_hysteresis")
                     if at_head and not safety_reasons:
                         break
+                    # Placement may reconsider a memory-blocked node, but must
+                    # retain its FIFO ticket while merely waiting behind work.
+                    # Restarting every 200 ms otherwise starves all creations
+                    # whenever the ordinary progress queue takes longer to drain.
+                    blocked_oldest_create = (
+                        wait_class == 'create' and not at_head
+                        and self._waiters[0] is ticket
+                    )  # Progress bypassed this oldest creation because it cannot fit.
+                    if (at_head and safety_reasons) or blocked_oldest_create:
+                        now = time.monotonic()
+                        if blocked_head_since is None:
+                            blocked_head_since = now
+                        if (blocked_head_timeout_s is not None
+                                and now - blocked_head_since >= blocked_head_timeout_s):
+                            raise AdmissionTimeout(f"placement head remains blocked for {session_id}")
+                    else:
+                        blocked_head_since = None
                     # Admission stops below memory.max, so the kernel may never
                     # experience pressure that would reclaim clean file cache.
                     # Request real, cgroup-scoped reclamation before evicting VMs.
@@ -643,7 +672,7 @@ class PolicyCoordinator:
         count = len(samples)
         total = sum(samples)
         return {
-            "discipline": "runnable_progress_before_create_fifo",
+            "discipline": "feasible_fifo_progress_bypasses_blocked_create",
             "admission_count": count,
             "max_queue_depth": max_queue_depth,
             "wait_total_seconds": total,

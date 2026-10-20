@@ -17,7 +17,8 @@ def scheduler_settings() -> dict:
     script = """
 import json,sys,yaml
 s=yaml.safe_load(open(sys.argv[1])).get('scheduler',{})
-print(json.dumps({k:s.get(k) for k in ('overcommit_ratio','overcommit_ratio_conf','ignore_redis_allocation')}))
+print(json.dumps({k:s.get(k) for k in ('overcommit_ratio','overcommit_ratio_conf','ignore_redis_allocation',
+                                      'node_max_mvm_num_reserve_num_percent','node_max_mvm_num_conf')}))
 """
     return json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG)))
 
@@ -48,10 +49,20 @@ def capacity_report(node: dict, settings: dict, demand: dict) -> dict:
     # Cube rejects equality too. Ignore-allocation mode tests each individual VM.
     cpu_need = demand['max_vm_cpu_milli'] if ignored else demand['cpu_milli']
     mem_need = demand['max_vm_memory_mib'] if ignored else demand['memory_mib']
-    return dict(ready=cpu_free > cpu_need and mem_free > mem_need,
+    vm_conf = (settings.get('node_max_mvm_num_conf') or {}).get(node['InstanceType']) or {}
+    vm_ratio = float(vm_conf.get('mvm_num_reserve_num_percent') or
+                     settings.get('node_max_mvm_num_reserve_num_percent') or 1)
+    if not math.isfinite(vm_ratio) or vm_ratio <= 0:
+        vm_ratio = 1
+    vm_limit = math.ceil(int(node.get('MaxMvmLimit') or 3000) * vm_ratio)
+    vm_free = vm_limit - int(node.get('mvm_num', 0))
+    vm_need = demand['vm_count']
+    return dict(ready=cpu_free > cpu_need and mem_free > mem_need and vm_free >= vm_need,
                 cpu_ratio=cpu_ratio, mem_ratio=mem_ratio, instance_type=node['InstanceType'],
                 free_cpu_milli=cpu_free, free_memory_mib=mem_free,
                 required_cpu_milli=cpu_need, required_memory_mib=mem_need,
+                vm_count_ratio=vm_ratio, vm_limit=vm_limit, free_vm_count=vm_free,
+                required_vm_count=vm_need,
                 ignore_redis_allocation=ignored,
                 accounting='configured VM quotas, not actual CPU or RAM consumption')
 
@@ -86,4 +97,29 @@ print(json.dumps({'changed':changed}))
     result = json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG), json.dumps(ratios)))
     if any((scheduler_settings().get('overcommit_ratio_conf') or {}).get(k) != v for k,v in ratios.items()):
         raise RuntimeError('Cube scheduler ratios were not saved; inspect CubeMaster configuration permissions')
+    return result['changed']
+
+
+def apply_vm_count_ratios(ratios: dict[str, float]) -> bool:
+    """Set Cube's per-instance multiplier over its node-reported VM limit."""
+    from .host import _run
+    script = """
+import json,pathlib,shutil,sys,time,yaml
+p=pathlib.Path(sys.argv[1]); desired=json.loads(sys.argv[2])
+data=yaml.safe_load(p.read_text()); scheduler=data.setdefault('scheduler',{})
+current=scheduler.setdefault('node_max_mvm_num_conf',{})
+changed=False
+for kind, ratio in desired.items():
+    entry=current.setdefault(kind,{})
+    if entry.get('mvm_num_reserve_num_percent') != ratio:
+        entry['mvm_num_reserve_num_percent']=ratio; changed=True
+if changed:
+    shutil.copy2(p,p.with_name(p.name+'.pre-clawbox-vm-count-'+str(time.time_ns())))
+    p.write_text(yaml.safe_dump(data,sort_keys=False))
+print(json.dumps({'changed':changed}))
+"""
+    result = json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG), json.dumps(ratios)))
+    saved = scheduler_settings().get('node_max_mvm_num_conf') or {}
+    if any((saved.get(k) or {}).get('mvm_num_reserve_num_percent') != v for k, v in ratios.items()):
+        raise RuntimeError('Cube scheduler VM-count ratios were not saved; inspect CubeMaster configuration permissions')
     return result['changed']

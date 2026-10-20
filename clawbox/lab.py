@@ -58,13 +58,18 @@ required_pause = {
     "snapshot_tier", "memory_snapshot_path", "snapshot_generation",
     "snapshot_mechanism",
 }
+bounded_control = all(
+    "timeout=cfg.request_timeout" in inspect.getsource(method)
+    for method in (Sandbox.create, Sandbox.list_v2, Sandbox.connect)
+) and "timeout=self._config.request_timeout" in inspect.getsource(Sandbox._build_session)
 print(json.dumps({
     "file": str(Path(inspect.getfile(module)).resolve()),
     "pause": sorted(pause),
     "connect": sorted(connect),
     "relocate": hasattr(Sandbox, "relocate_snapshot"),
+    "bounded_control": bounded_control,
     "ready": required_pause <= pause and "snapshot_mechanism" in connect
-             and hasattr(Sandbox, "relocate_snapshot"),
+             and hasattr(Sandbox, "relocate_snapshot") and bounded_control,
 }))
 """
     result = subprocess.run(
@@ -116,6 +121,10 @@ def ensure_snapshot_sdk(cube_source: str | Path | None = None) -> Path | None:
     patches = (
         ("def relocate_snapshot", ROOT / "deploy/cubesandbox/tiered-memory-api.patch"),
         ("snapshot_mechanism: str | None", ROOT / "deploy/cubesandbox/incremental-cow-snapshot.patch"),
+        ('headers={"Content-Type": "application/json", **_auth_headers(cfg)},\n                      timeout=cfg.request_timeout)',
+         ROOT / "deploy/cubesandbox/sdk-control-timeouts.patch"),
+        ('timeout=self._config.request_timeout',
+         ROOT / "deploy/cubesandbox/sdk-lifecycle-timeouts.patch"),
     )
     for marker, patch in patches:
         if marker in source_text:
@@ -525,6 +534,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
     profile['tcp_tw_reuse'] = getattr(args, 'tcp_tw_reuse', None)
     profile['cubelet_tap_init_num'] = getattr(args, 'cubelet_tap_init_num', None)
     profile['cube_scheduler_overcommit'] = getattr(args, 'cube_scheduler_overcommit', None)
+    profile['cube_scheduler_vm_count_ratio'] = getattr(args, 'cube_scheduler_vm_count_ratio', None)
     _write_json_atomic(args.profile, profile)
     print(f"Saved host profile: {args.profile}")
     return profile

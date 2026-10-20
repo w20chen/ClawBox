@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from requests import Timeout as RequestsTimeout
+from requests import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
 from .api_retry import read_with_backoff, retry_with_backoff
 
@@ -132,7 +132,15 @@ class CubeSandboxClient:
                 network=network or None,
                 **self._sdk_kwargs(),
             )
-        except RequestsTimeout as create_error:
+        except Exception as create_error:
+            # The SDK raises ApiError (not requests.Timeout) for an HTTP
+            # timeout/gateway failure. A dropped connection is ambiguous too.
+            # Definite rejections and programming errors must still propagate.
+            if not (
+                isinstance(create_error, (RequestsTimeout, RequestsConnectionError))
+                or getattr(create_error, "status_code", None) in {408, 502, 503, 504}
+            ):
+                raise
             # A read timeout does not prove that CubeAPI rejected the create.
             # Never repeat this non-idempotent POST. Resolve its unique
             # ownership identity until the bounded reconciliation window ends.
@@ -468,8 +476,9 @@ class CubeSandboxClient:
                 # Constructing an SDK handle from list data lets kill use the
                 # official API without unnecessarily resuming a paused VM.
                 handle = self._sandbox_class(info, self._config)
+            attempt_handle = handle
             try:
-                handle.kill()
+                attempt_handle.kill()
             except Exception:
                 # A lost delete response is successful if a fresh semantic
                 # list proves the exact sandbox identity is already absent.
@@ -482,10 +491,11 @@ class CubeSandboxClient:
                 handle = None
                 raise
             finally:
-                if handle is not None:
-                    close = getattr(handle, "close", None)
-                    if callable(close):
-                        close()
+                # The retry path clears handle. Close the actual attempted
+                # handle regardless, or each failed DELETE leaks its client.
+                close = getattr(attempt_handle, "close", None)
+                if callable(close):
+                    close()
 
         retry_with_backoff(
             kill_once, label=f"kill sandbox {sandbox_id}", attempts=10,
@@ -515,9 +525,8 @@ class CubeSandboxClient:
             metadata = item.get("metadata") or {}
             if sandbox_id in journal_ids or metadata.get("clawbox.task-uid") == owner_id:
                 ids.append(sandbox_id)
-                self._handles.setdefault(
-                    sandbox_id, self._sandbox_class(item, self._config)
-                )
+                if sandbox_id not in self._handles:
+                    self._handles[sandbox_id] = self._sandbox_class(item, self._config)
         errors: list[str] = []
         for sandbox_id in dict.fromkeys(filter(None, ids)):
             try:

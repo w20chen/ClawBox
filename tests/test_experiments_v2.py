@@ -456,6 +456,12 @@ def test_arrival_schedule_is_explicit_and_validated() -> None:
         ExperimentSpec.model_validate(raw)
 
 
+def test_light_load_poisson_window_can_exceed_ten_trace_spans() -> None:
+    raw = raw_spec()
+    raw['execution']['poisson_arrival_window_fraction'] = 100.0
+    assert ExperimentSpec.model_validate(raw).execution.poisson_arrival_window_fraction == 100.0
+
+
 def test_poisson_arrivals_are_deterministic_fair_and_trace_scaled() -> None:
     raw = raw_spec()
     raw["workload"].update(
@@ -821,6 +827,21 @@ def test_worker_uses_explicit_pair_creation_concurrency() -> None:
     assert ExperimentWorker._sandbox_create_limit(2, 3) == 2
     with pytest.raises(ValidationError, match="sandbox_create_concurrency"):
         ExecutionSpec(sandbox_create_concurrency=0)
+
+
+def test_worker_thread_scheduling_is_configured_and_restored():
+    import sys
+    from clawbox.experiments.worker import worker_thread_scheduling
+    assert ExecutionSpec().worker_thread_switch_interval_seconds == .001
+    for invalid in (0, -.01, float('nan'), float('inf'), .2):
+        with pytest.raises(ValidationError):
+            ExecutionSpec(worker_thread_switch_interval_seconds=invalid)
+    original = sys.getswitchinterval()
+    with pytest.raises(RuntimeError):
+        with worker_thread_scheduling(.002):
+            assert sys.getswitchinterval() == pytest.approx(.002)
+            raise RuntimeError('restore even on failed run')
+    assert sys.getswitchinterval() == original
 
 
 def test_vm_startup_headroom_matches_the_arm_admission_policy() -> None:

@@ -88,7 +88,11 @@ class SessionPlacement:
         cached = self._memory_feedback.get(cache_key)
         if cached is None or now-cached[0] >= .2:
             c = self.domains[key].coordinator
-            cached = (now, c.physical_sample()[0], c.demand.pending(c.demand_scope),
+            # Ranking needs a conservative pressure estimate, not a second
+            # exact scan of every VM's kernel counters under the global lock.
+            # _pressure_reasons resolves exact demand when the upper bound
+            # would block; c.acquire rechecks atomically before committing.
+            cached = (now, c.physical_sample()[0], c.demand.pending_upper_bound(c.demand_scope),
                       c._pressure_reasons(memory_mib*MIB+c.startup_headroom_bytes))
             self._memory_feedback[cache_key] = cached
         return cached
@@ -159,6 +163,7 @@ class SessionPlacement:
                                     resident_bytes=used, outstanding_bytes=pending,
                                     memory_budget_bytes=c.budget_bytes, safety_reasons=list(reasons),
                                     feedback_sample_age_seconds=max(0,time.monotonic()-sampled_at))
+                    evidence['outstanding_bytes_kind'] = 'nominal_upper_bound'
                     evidence.update(
                         template_id=template_id,
                         same_template_peers=same_template_peers,
@@ -199,7 +204,8 @@ class SessionPlacement:
                 if affinity_applied and evidence["same_template_peers"]:
                     self.template_cache_hits += 1
             try:
-                c.acquire(session_id, memory_mib, min(.2, remaining), wait_class='create')
+                c.acquire(session_id, memory_mib, remaining, wait_class='create',
+                          blocked_head_timeout_s=.2)
             except AdmissionTimeout:
                 with self.condition:
                     self.sessions.pop(session_id)

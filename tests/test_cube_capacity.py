@@ -11,11 +11,11 @@ from clawbox.experiments.host import HostConfig
 
 def node():
     return dict(InstanceType='cubebox', QuotaCpu=640000, QuotaMem=2577974,
-                QuotaCpuUsage=0, QuotaMemUsage=0)
+                QuotaCpuUsage=0, QuotaMemUsage=0, MaxMvmLimit=5035, mvm_num=0)
 
 
 def demand(count):
-    return dict(cpu_milli=count*4000, memory_mib=count*5120,
+    return dict(vm_count=count*2, cpu_milli=count*4000, memory_mib=count*5120,
                 max_vm_cpu_milli=2000, max_vm_memory_mib=4096)
 
 
@@ -39,6 +39,16 @@ def test_explicit_ratios_cover_1280_without_changing_physical_capacity():
     assert node()['QuotaCpu'] == 640000
     settings['overcommit_ratio_conf']['cubebox']['mem_ratio'] = 2
     assert not capacity.capacity_report(node(), settings, demand(1280))['ready']
+
+
+def test_vm_count_multiplier_covers_2560_pairs_with_headroom():
+    settings = {'overcommit_ratio_conf': {'cubebox': {'cpu_ratio': 20, 'mem_ratio': 6}},
+                'node_max_mvm_num_conf': {'cubebox': {'mvm_num_reserve_num_percent': 1.05}}}
+    report = capacity.capacity_report(node(), settings, demand(2560))
+    assert report['ready']
+    assert report['vm_limit'] == 5287
+    assert not capacity.capacity_report(node(), settings | {
+        'node_max_mvm_num_conf': {'cubebox': {'mvm_num_reserve_num_percent': 1.0}}}, demand(2560))['ready']
 
 
 def test_type_override_and_current_allocations_are_honored():
@@ -78,6 +88,19 @@ def test_config_update_preserves_other_settings_and_is_idempotent(tmp_path, monk
     assert updated['scheduler']['overcommit_ratio_conf']['other'] == original['scheduler']['overcommit_ratio_conf']['other']
     assert len(list(tmp_path.glob('conf.yaml.pre-clawbox-quota-*'))) == 1
     assert 'password' not in json.dumps(capacity.scheduler_settings())
+
+
+def test_vm_count_config_update_preserves_other_scheduler_fields(tmp_path, monkeypatch):
+    from clawbox.experiments import host
+    path = tmp_path/'conf.yaml'
+    path.write_text(yaml.safe_dump({'scheduler': {'filter': {'enable_filters':['cpu']}}}))
+    monkeypatch.setattr(capacity, 'CONFIG', path)
+    monkeypatch.setattr(host, '_run', lambda *args: subprocess.check_output(args[2:], text=True))
+    assert capacity.apply_vm_count_ratios({'cubebox':1.05})
+    assert not capacity.apply_vm_count_ratios({'cubebox':1.05})
+    updated=yaml.safe_load(path.read_text())
+    assert updated['scheduler']['filter']=={'enable_filters':['cpu']}
+    assert updated['scheduler']['node_max_mvm_num_conf']['cubebox']['mvm_num_reserve_num_percent']==1.05
 
 
 def test_insufficient_capacity_fails_with_remedy(monkeypatch):

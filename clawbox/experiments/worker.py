@@ -308,6 +308,17 @@ def ensure_worker_fd_limit(concurrency: int) -> tuple[int | None, int | None]:
 
 
 @contextmanager
+def worker_thread_scheduling(interval_seconds):
+    """Bound interpreter handoff latency without changing admission policy."""
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(interval_seconds)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(previous)
+
+
+@contextmanager
 def creation_slot(gate, events, session_id):
     """Queue before reserving memory; release at pair readiness, not task end."""
     started = time.time()
@@ -1296,6 +1307,12 @@ class ExperimentWorker:
 
     def run(self, *, arm_ids: set[str] | None = None,
             write_summary: bool = True) -> list[ResultEnvelope]:
+        with worker_thread_scheduling(
+                self.spec.execution.worker_thread_switch_interval_seconds):
+            return self._run(arm_ids=arm_ids, write_summary=write_summary)
+
+    def _run(self, *, arm_ids: set[str] | None = None,
+             write_summary: bool = True) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
         control_host = os.environ.get("CLAWBOX_CONTROL_HOST", "").strip()
         policy_port = int(os.environ.get("CLAWBOX_POLICY_PORT", "18080"))
@@ -2888,6 +2905,7 @@ class ExperimentWorker:
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     nonlocal admitted_route, admitted_route_identity_verified
+                    control_marks = {"started": time.monotonic()}
                     execution_id = str(request["execution_id"])
                     if progress_control:
                         progress_control.execution_ready(session_id, execution_id,
@@ -2939,7 +2957,9 @@ class ExperimentWorker:
                                   'execution_id': execution_id,
                                   'execution_scope': execution_scope,
                                   'operation': request.get('operation')})
+                    control_marks["prediction_and_queue"] = time.monotonic()
                     with wait_lock:
+                        control_marks["lifecycle_lock"] = time.monotonic()
                         try:
                             # Claim the session before routing memory. Otherwise
                             # checkpoint/restore can reset a just-borrowed VM to
@@ -2959,6 +2979,7 @@ class ExperimentWorker:
                                 ),
                             )
                             reservation_acquired = True
+                            control_marks["memory_prepare"] = time.monotonic()
                             if restored_tool:
                                 admitted_route = None
                                 admitted_route_identity_verified = False
@@ -3086,7 +3107,9 @@ class ExperimentWorker:
                                     "attempts": identity_attempt,
                                     "service_seconds": time.monotonic() - identity_started,
                                 })
+                            control_marks["restore_and_route"] = time.monotonic()
                             coordinator.bind_tool_memory(session_id)
+                            control_marks["memory_baseline"] = time.monotonic()
                             if (arm.execution.tool_call_cpu_policy == 'c2'
                                     and c2_applies(execution_scope, request.get('operation'))):
                                 placement_event = priority_domain.acquire_tool_call(
@@ -3096,10 +3119,12 @@ class ExperimentWorker:
                                     placement_event
                                     and placement_event.get('release_required', True)
                                 )
+                            control_marks["cpu_placement"] = time.monotonic()
                             host_sampler = SandboxRSSSampler(route.sandbox_id,
                                 cgroup=(priority_domain.leaves[index, 'tool'] if priority_domain is not None
                                         else locate_cgroup(route.sandbox_id, Path(arm.resources.local_memory_cgroup))))
                             host_sampler.start()
+                            control_marks["sampler_start"] = time.monotonic()
                             if progress_control:
                                 progress_control.execution_admitted(session_id, execution_id,
                                                                     host_sampler.charge_baseline)
@@ -3162,8 +3187,16 @@ class ExperimentWorker:
                                  "admission_blocked_seconds": admission_wait,
                     })
                     prediction_records.append(prediction_record)
+                    control_marks["bookkeeping"] = time.monotonic()
+                    control_stages = {
+                        name: end - start
+                        for (_, start), (name, end) in zip(
+                            control_marks.items(), list(control_marks.items())[1:]
+                        )
+                    }
                     events.write({
                         "event": "tool_admitted", "session_id": session_id,
+                        "control_stage_seconds": control_stages,
                         "execution_id": execution_id,
                         "execution_scope": execution_scope,
                         "operation": request.get("operation"),
@@ -3900,6 +3933,7 @@ class ExperimentWorker:
             ),
             "measurement_scope": "absolute VM cgroup charge; host MemAvailable estimate reported separately",
             "cube_runtime_settings": {
+                "worker_thread_switch_interval_seconds": sys.getswitchinterval(),
                 "status": "unverified",
                 "cpu_overcommit_ratio": None, "memory_overcommit_ratio": None,
                 "paused_resource_release_ratio": None,
