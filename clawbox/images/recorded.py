@@ -6,8 +6,10 @@ evidence for a native rebuild; it is not a claim of cross-architecture identity.
 from __future__ import annotations
 
 import email.parser
+from contextlib import ExitStack
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -33,44 +35,79 @@ def installed_metadata_path(name: str) -> bool:
         r'opt/conda/envs/testbed/lib/python[^/]+/site-packages/[^/]+\.(?:dist|egg)-info/(?:METADATA|PKG-INFO)', name))
 
 
+def apply_metadata_whiteouts(records: dict, names: list[str]) -> None:
+    """Apply OCI deletions to metadata inherited from earlier layers."""
+    for name in names:
+        parent, _, basename = name.rpartition('/')
+        if not basename.startswith('.wh.'):
+            continue
+        target = parent + '/' + basename.removeprefix('.wh.')
+        if basename == '.wh..wh..opq':
+            target = parent
+        for key in list(records):
+            if key == target or key.startswith(target + '/'):
+                del records[key]
+
+
 def download_layer(image: str, digest: str, destination: Path, proxy: str) -> None:
-    """Verify every downloaded blob before it is used or cached."""
+    """Use configured direct mirrors, then Docker Hub; verify every blob.
+
+    CLAWBOX_REGISTRY_MIRRORS is a comma-separated list of HTTPS origins.
+    Mirrors receive no Docker Hub credentials. The digest must come from the
+    independently resolved official manifest, never from the mirror itself.
+    """
+    from urllib.parse import urlsplit
+    import requests
+
+    mirrors = [value.strip().rstrip('/') for value in
+               os.environ.get('CLAWBOX_REGISTRY_MIRRORS', '').split(',') if value.strip()]
+    for mirror in mirrors:
+        parsed = urlsplit(mirror)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username
+                or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError('registry mirrors must be HTTPS origins without credentials')
+    routes = mirrors + [None, None]
     partial = destination.with_suffix('.part')
     if destination.exists():
         with destination.open('rb') as stream:
             if 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest() == digest:
                 return
         destination.unlink()
-    for attempt in range(4):
+    for attempt in range(max(4, len(routes))):
         try:
             repository, _ = _docker_hub_reference(image)
             url = f"https://registry-1.docker.io/v2/{repository}/blobs/{digest}"
-            with _registry_session(proxy) as session:
-                with _REGISTRY_REQUESTS:
-                    token = session.get('https://auth.docker.io/token', params={
-                        'service': 'registry.docker.io', 'scope': f'repository:{repository}:pull'}, timeout=60)
-                token.raise_for_status()
+            with ExitStack() as stack:
+                direct = stack.enter_context(requests.Session())
+                direct.trust_env = False
                 offset = partial.stat().st_size if partial.exists() else 0
-                headers = {'Authorization': 'Bearer ' + token.json()['token']}
-                if offset:
-                    headers['Range'] = f'bytes={offset}-'
-                with _REGISTRY_REQUESTS:
-                    response = session.get(url, headers=headers, stream=True,
-                                           allow_redirects=False, timeout=(60, 600))
-                if response.is_redirect:
-                    location = response.headers['Location']
-                    response.close()
-                    # Only the registry's signed blob URL is requested directly;
-                    # never forward the registry bearer token to the CDN.
-                    import requests
-                    with requests.Session() as direct:
-                        direct.trust_env = False
+                range_headers = {'Range': f'bytes={offset}-'} if offset else {}
+                mirror = routes[min(attempt, len(routes) - 1)]
+                if mirror:
+                    response = direct.get(f'{mirror}/v2/{repository}/blobs/{digest}',
+                                          headers=range_headers, stream=True, timeout=(15, 90))
+                else:
+                    session = stack.enter_context(_registry_session(proxy))
+                    with _REGISTRY_REQUESTS:
+                        token = session.get('https://auth.docker.io/token', params={
+                            'service': 'registry.docker.io', 'scope': f'repository:{repository}:pull'}, timeout=60)
+                    with token:
+                        token.raise_for_status()
+                        headers = {**range_headers, 'Authorization': 'Bearer ' + token.json()['token']}
+                    with _REGISTRY_REQUESTS:
+                        response = session.get(url, headers=headers, stream=True,
+                                               allow_redirects=False, timeout=(60, 600))
+                    if response.is_redirect:
+                        location = response.headers['Location']
+                        response.close()
+                        # Never forward the registry bearer token to the CDN.
                         try:
-                            response = direct.get(location, headers={'Range': f'bytes={offset}-'} if offset else {},
+                            response = direct.get(location, headers=range_headers,
                                                   stream=True, timeout=(8, 60))
                             response.raise_for_status()
                         except requests.RequestException:
-                            response = session.get(location, headers={'Range': f'bytes={offset}-'} if offset else {},
+                            response.close()
+                            response = session.get(location, headers=range_headers,
                                                    stream=True, timeout=(60, 600))
                 with response:
                     response.raise_for_status()
@@ -94,7 +131,7 @@ def download_layer(image: str, digest: str, destination: Path, proxy: str) -> No
             partial.replace(destination)
             return
         except Exception:
-            if attempt == 3:
+            if attempt == max(4, len(routes)) - 1:
                 raise
             time.sleep(2 ** attempt)
 
@@ -108,7 +145,8 @@ def prepare_task(source: dict[str, Any], root: Path, proxy: str,
     receipt_path = directory / 'prepared.json'
     if receipt_path.is_file():
         previous = json.loads(receipt_path.read_text())
-        if previous['manifest_digest'] == source['manifest_digest'] and previous.get('inventory_version') == 2:
+        if (previous['manifest_digest'] == source['manifest_digest'] and previous.get('inventory_version') == 2
+                and (len(previous.get('layers', [])) == 1 or previous.get('metadata_overlay_version') == 1)):
             return previous
     if shutil.disk_usage(root).free < min_free_gib * 1024**3:
         raise RuntimeError('insufficient disk space for a new task layer')
@@ -133,12 +171,18 @@ def prepare_task(source: dict[str, Any], root: Path, proxy: str,
         unpack.mkdir()
         packages: dict[str, str] = {}
         conda: dict[str, str] = {}
+        package_records: dict[str, tuple[str, str]] = {}
+        conda_records: dict[str, tuple[str, str]] = {}
         evidence: dict[str, str] = {}
         editable = []
         for index, layer, blob in sorted(candidates):
             with tarfile.open(blob) as archive:
                 members = []
-                for member in archive.getmembers():
+                layer_members = archive.getmembers()
+                names = [m.name.removeprefix('./') for m in layer_members]
+                apply_metadata_whiteouts(package_records, names)
+                apply_metadata_whiteouts(conda_records, names)
+                for member in layer_members:
                     name = member.name
                     while name.startswith('./'):
                         name = name[2:]
@@ -149,16 +193,16 @@ def prepare_task(source: dict[str, Any], root: Path, proxy: str,
                             # markers as ordinary checkout files.
                             raise RuntimeError(f'testbed overlay whiteout requires reconstruction: {name}')
                         members.append(member)
-                    if not member.isfile() or member.size > 4 * 1024 * 1024:
+                    if '/.wh.' in name or not member.isfile() or member.size > 4 * 1024 * 1024:
                         continue
                     if installed_metadata_path(name):
                         data = archive.extractfile(member).read().decode('utf-8', errors='replace')
                         metadata = email.parser.Parser().parsestr(data, headersonly=True)
                         if metadata.get('Name') and metadata.get('Version'):
-                            packages[canonical_package(metadata['Name'])] = metadata['Version']
+                            package_records[name] = (canonical_package(metadata['Name']), metadata['Version'])
                     elif name.startswith('opt/conda/envs/testbed/conda-meta/') and name.endswith('.json'):
                         data = json.load(archive.extractfile(member))
-                        conda[data['name']] = data['version']
+                        conda_records[name] = (data['name'], data['version'])
                     elif '/envs/testbed/' in name and name.endswith('.egg-link'):
                         editable.append({'name': name, 'target': archive.extractfile(member).read().decode().strip()})
                     elif name in ('root/.bashrc', 'root/.profile', 'tmp/_build_script.sh',
@@ -166,6 +210,8 @@ def prepare_task(source: dict[str, Any], root: Path, proxy: str,
                         evidence[name] = archive.extractfile(member).read().decode('utf-8', errors='replace')
                 archive.extractall(unpack, members=members, filter=_testbed_member_filter)
             blob.unlink()
+        packages = dict(package_records.values())
+        conda = dict(conda_records.values())
         workspace = unpack / 'testbed'
         subprocess.run(['git', '-C', str(workspace), 'fsck', '--connectivity-only', '--no-dangling'],
                        check=True, capture_output=True, text=True)
@@ -194,6 +240,7 @@ def prepare_task(source: dict[str, Any], root: Path, proxy: str,
             'layers': [layer['digest'] for _, layer, _ in sorted(candidates)],
             'python_version': conda['python'], 'packages': packages,
             'project_packages': project_packages, 'inventory_version': 2,
+            'metadata_overlay_version': 1,
             'conda_packages': conda, 'editable': editable, 'image_files': evidence,
             'source_config': source['config']['config'],
             'recording_time_digest_available': source['recording_time_digest_available'],
