@@ -128,3 +128,16 @@ validation, execution-ID joins, telemetry coverage, OOMs, timeouts, cleanup, and
 arm order. Report throughput and completion latency with repeat uncertainty.
 Admission wait, tool time, memory, placement, checkpoint cost, and PMU records
 are explanatory evidence, not substitutes for the end-to-end result.
+
+Memory samples split the admission queue by `create`, `restore`, and
+`tool_admission`, and report unique queued tasks and their resident VMs separately.
+The queue excludes tasks still waiting for a VM creation slot; reconstruct that
+queue from `sandbox_create_gate_wait_started`, `sandbox_create_gate_acquired`,
+and `sandbox_create_gate_released` events. A task owns two VMs, but may have zero,
+one, or two resident while queued. Last-observed blockers and oldest wait age
+describe outstanding waits, including waits that never finish.
+
+`tool_admitted.control_total_seconds` covers the worker admission callback,
+including lifecycle-lock wait, memory admission, restore, routing, and bookkeeping.
+`admission_blocked_seconds` covers memory admission only. Neither includes the
+HTTP transport before the callback; use the guest/control journal for that.

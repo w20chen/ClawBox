@@ -322,18 +322,22 @@ def worker_thread_scheduling(interval_seconds):
 def creation_slot(gate, events, session_id):
     """Queue before reserving memory; release at pair readiness, not task end."""
     started = time.time()
+    started_monotonic = time.monotonic()
     events.write({'event':'sandbox_create_gate_wait_started','session_id':session_id})
     gate.acquire()
     acquired = time.time()
+    acquired_monotonic = time.monotonic()
     held = True
     def release():
         nonlocal held
         if held:
             held = False
             gate.release()
+            events.write({'event': 'sandbox_create_gate_released', 'session_id': session_id,
+                          'held_seconds': time.monotonic()-acquired_monotonic})
     try:
         events.write({'event':'sandbox_create_gate_acquired','session_id':session_id,
-                      'wait_seconds':acquired-started})
+                      'wait_seconds':acquired_monotonic-started_monotonic})
         yield started, acquired, release
     finally:
         release()
@@ -3197,6 +3201,7 @@ class ExperimentWorker:
                     events.write({
                         "event": "tool_admitted", "session_id": session_id,
                         "control_stage_seconds": control_stages,
+                        "control_total_seconds": control_marks['bookkeeping']-control_marks['started'],
                         "execution_id": execution_id,
                         "execution_scope": execution_scope,
                         "operation": request.get("operation"),

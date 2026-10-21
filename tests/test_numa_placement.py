@@ -55,6 +55,31 @@ def test_reporting_kernel_reads_do_not_hold_admission_lock():
         assert report.result()['n0']['outstanding_bytes']==MIB
 
 
+def test_queue_snapshot_separates_requests_tasks_and_resident_vms():
+    from clawbox.experiments.policy import AdmissionRequest
+    s, ledger, _ = scheduler()
+    c = s.domains['n0'].coordinator
+    c.register('tool-task', SimpleNamespace(resident=True))
+    c.register_runtime('tool-task', SimpleNamespace(resident=True))
+    c.register('restore-task', SimpleNamespace(resident=False))
+    c.register_runtime('restore-task', SimpleNamespace(resident=True))
+    requests = [AdmissionRequest('new-task', MIB, 'create', False),
+                AdmissionRequest('tool-task', MIB, 'tool_admission', False),
+                AdmissionRequest('tool-task', MIB, 'tool_admission', False),
+                AdmissionRequest('restore-task', MIB, 'restore', False)]
+    with ledger.condition:
+        for ticket, request in enumerate(requests):
+            c._waiters.append(ticket)
+            c._waiter_requests[ticket] = request
+    row = s.sample()['n0']
+    assert row['admission_queue_depth'] == 4
+    assert row['admission_queue_depth_by_class'] == {'create': 1, 'tool_admission': 2, 'restore': 1}
+    assert row['admission_queue_tasks'] == 3
+    assert row['tool_admission_queue_tasks'] == 1
+    assert row['admission_queue_resident_vms'] == 3
+    assert row['admission_queue_oldest_seconds'] >= 0
+
+
 def test_low_pressure_placement_does_not_sample_live_claims():
     s, ledger, events = scheduler()
     with ledger.condition:

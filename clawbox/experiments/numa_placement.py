@@ -246,7 +246,6 @@ class SessionPlacement:
             sessions = {key: tuple(d.coordinator._sessions.values()) for key,d in self.domains.items()}
             counters = {key: dict(
                     waiting_sessions_global=len(self.waiting),
-                    admission_queue_depth=len(d.coordinator._waiters),
                     admitted_sessions=sum(item[0] == key for item in self.sessions.values()),
                 ) for key,d in self.domains.items()}
         # Reporting must not hold admission while kernel reads or a lifecycle
@@ -256,7 +255,7 @@ class SessionPlacement:
             c = domain.coordinator
             resident = c.physical_sample()[0]
             pending = sum(claim.remaining()[1] for claim in claims if claim.scope==c.demand_scope)
-            result[key] = dict(cpu[key], **counters[key], resident_bytes=resident,
+            result[key] = dict(cpu[key], **counters[key], **c.queue_snapshot(), resident_bytes=resident,
                 outstanding_bytes=pending, remaining_budget_bytes=c.budget_bytes-resident-pending,
                 cpu_psi=None, bandwidth_utilization=None,
                 running_vms=sum(int(s.lifecycle.resident)+int(s.runtime_lifecycle is not None and s.runtime_lifecycle.resident)

@@ -36,6 +36,9 @@ def test_creation_slot_precedes_reservation_but_does_not_limit_running_tasks():
     assert gate.acquire(blocking=False)
     assert not gate.acquire(blocking=False)  # no double release at task completion
     assert sum(e['event']=='sandbox_create_gate_wait_started' for e in records)==2
+    releases = [e for e in records if e['event']=='sandbox_create_gate_released']
+    assert len(releases) == 2
+    assert all(e['held_seconds'] >= 0 for e in releases)
 
 
 def test_pre_vm_failure_releases_creation_slot():

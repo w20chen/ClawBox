@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
 from threading import Condition, Thread
 from typing import Protocol
@@ -44,6 +44,7 @@ class AdmissionRequest:
     amount_bytes: int
     wait_class: str
     capacity_claim: bool
+    queued_monotonic_s: float = field(default_factory=time.monotonic)
 
 
 class AdmissionTimeout(RuntimeError):
@@ -144,6 +145,7 @@ class PolicyCoordinator:
         self._capacity_claims: dict[str, int] = {}
         self._waiters: deque[object] = deque()
         self._waiter_requests: dict[object, AdmissionRequest] = {}
+        self._waiter_blockers: dict[object, tuple[str, ...]] = {}
         self._progress_waiters: set[object] = set()
         self._sessions: dict[str, SessionState] = {}
         self.blocked_seconds = 0.0
@@ -519,7 +521,9 @@ class PolicyCoordinator:
             recorded_safety_reasons: set[str] = set()
             if wait_class == "tool_admission":
                 self.max_admission_queue_depth = max(
-                    self.max_admission_queue_depth, len(self._waiters),
+                    self.max_admission_queue_depth,
+                    sum(r.wait_class == 'tool_admission'
+                        for r in self._waiter_requests.values()),
                 )
             try:
                 while True:
@@ -548,6 +552,9 @@ class PolicyCoordinator:
                         safety_reasons = (*safety_reasons, "local_high_hysteresis")
                     if at_head and not safety_reasons:
                         break
+                    self._waiter_blockers[ticket] = (
+                        tuple(safety_reasons) if at_head else ('fifo_predecessor',)
+                    )
                     # Placement may reconsider a memory-blocked node, but must
                     # retain its FIFO ticket while merely waiting behind work.
                     # Restarting every 200 ms otherwise starves all creations
@@ -600,6 +607,7 @@ class PolicyCoordinator:
                     self._condition.wait(min(0.2, remaining))
                 self._waiters.remove(ticket)
                 self._waiter_requests.pop(ticket, None)
+                self._waiter_blockers.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
                 self.demand.add((session_id, wait_class), scope=self.demand_scope,
                     amount=total, local_amount=amount,
@@ -618,6 +626,7 @@ class PolicyCoordinator:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
                 self._waiter_requests.pop(ticket, None)
+                self._waiter_blockers.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
                 self._condition.notify_all()
                 waited = time.monotonic() - started
@@ -649,6 +658,37 @@ class PolicyCoordinator:
         if wait_class not in self._lifecycle_wait_samples:
             raise ValueError(f"unknown reservation wait class {wait_class!r}")
         self._lifecycle_wait_samples[wait_class].append(waited)
+
+    def queue_snapshot(self) -> dict:
+        """Separate requests, unique tasks and resident VMs without kernel reads.
+
+        Blockers are the reasons observed on each waiter's last admission check;
+        they are not a new pressure decision made by the reporting thread.
+        """
+        with self._condition:
+            now = time.monotonic()
+            requests = tuple(self._waiter_requests.items())
+            by_class = Counter(r.wait_class for _, r in requests)
+            task_ids = {r.session_id for _, r in requests}
+            tool_ids = {r.session_id for _, r in requests if r.wait_class == 'tool_admission'}
+            states = tuple(self._sessions[sid] for sid in task_ids if sid in self._sessions)
+            blockers = Counter(reason for ticket, _ in requests
+                               for reason in self._waiter_blockers.get(ticket, ('not_checked',)))
+            result = {
+                'admission_queue_depth': len(requests),
+                'admission_queue_depth_by_class': dict(by_class),
+                'admission_queue_tasks': len(task_ids),
+                'tool_admission_queue_tasks': len(tool_ids),
+                'admission_queue_oldest_seconds': max(
+                    (now-r.queued_monotonic_s for _, r in requests), default=0.),
+                'admission_queue_last_blockers': dict(blockers),
+            }
+        # Lifecycle properties must never be evaluated with the admission lock.
+        result['admission_queue_resident_vms'] = sum(
+            int(s.lifecycle.resident) + int(s.runtime_lifecycle is not None
+                                           and s.runtime_lifecycle.resident)
+            for s in states)
+        return result
 
     def admission_metrics(self) -> dict[str, float | int | None]:
         """Return immutable aggregate metrics for the FIFO admission ledger."""
