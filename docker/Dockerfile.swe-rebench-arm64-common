@@ -1,0 +1,13 @@
+ARG BASE_IMAGE=sweb.base.py.arm64:v1
+FROM ${BASE_IMAGE}
+
+# Shared native build prerequisites for Python packages which have x86_64
+# wheels in the recorded environment but must compile on ARM64.
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      cargo cmake default-libmysqlclient-dev gdal-bin gfortran \
+      libffi-dev libgdal-dev libgeos-dev libhdf5-dev libjpeg-dev \
+      libopenblas-dev libpq-dev libproj-dev libsqlite3-dev libssl-dev \
+      libxml2-dev libxslt1-dev ninja-build pkg-config rustc zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*

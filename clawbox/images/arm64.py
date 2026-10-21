@@ -162,7 +162,15 @@ def push_immutable(image: str) -> str:
         raise RuntimeError(f"registry did not return an immutable digest for {image}")
     repository = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
     immutable = next((str(item) for item in digests if str(item).split("@", 1)[0] == repository), str(digests[0]))
-    inspected = _run(["docker", "buildx", "imagetools", "inspect", immutable], capture=True).stdout
+    try:
+        inspected = _run(
+            ["docker", "buildx", "imagetools", "inspect", immutable], capture=True
+        ).stdout
+    except subprocess.CalledProcessError:
+        # buildx refuses plain-HTTP registries unless its builder is configured
+        # separately.  `docker push` has already returned the registry digest;
+        # retain the existing exact-digest/local-architecture proof below.
+        inspected = ""
     if re.search(r"(?i)(platform:\s*linux/arm64|linux/arm64)", inspected):
         return immutable
     # buildx imagetools only prints a platform line for multi-arch manifest

@@ -318,6 +318,50 @@ manifest preserves each original source path and SHA-256. It does not guess Tool
 template identities: use one Tool template containing every selected repository,
 or add a complete case-level `sandbox` for each repository before validation.
 
+On an ARM64 experiment host, build the selected Tool images from the prepared
+`/testbed` directories in the original SWE-ReBench images. The host needs a
+native ARM64 Docker daemon, the pinned SWE-bench checkout and its Python
+dependencies, a built Tool Bridge binary, and an immutable Cube Tool base-image
+digest:
+
+```bash
+python -m pip install -e '.[images]'
+python scripts/build-swe-rebench-arm64.py \
+  --dataset /path/to/filtered.parquet \
+  --selection /path/to/selection.json --expected-count 539 \
+  --swebench-root /path/to/pinned/SWE-bench \
+  --registry 127.0.0.1:5000/clawbox \
+  --mapping /path/to/task-image-mapping.json \
+  --tool-bridge-binary /path/to/tool-bridge \
+  --cube-tool-base-image '127.0.0.1:5000/clawbox/tool-cube-arm64@sha256:DIGEST' \
+  --workspace-root /path/to/temporary-workspaces \
+  --registry-proxy socks5h://127.0.0.1:1080 \
+  --workers 4 --min-free-gib 150 --push
+```
+
+The command resolves each original image to an immutable digest, downloads its
+task layer, verifies the blob digest, and copies its existing Git checkout. It
+does not clone or reset the repository. Before starting the task pipelines, it
+uses the pinned SWE-bench harness to build the stock `v1` ARM64 base and layers
+the shared native build packages from
+`docker/Dockerfile.swe-rebench-arm64-common` into `v2`. Architecture-specific
+Python dependencies and the editable project install are then rebuilt on the
+ARM64 environment layer. The recorded `rasterio 1.4.3` has no PyPI ARM64 wheel
+and requires a newer GDAL than the Ubuntu base provides, so the ARM64 recipe
+uses the nearest compatible maintenance release, `rasterio 1.3.11`.
+`--common-base-dockerfile` selects a different shared base recipe and requires
+rebuilding the affected task images.
+
+The default is four concurrent task pipelines; `--workers` changes only
+build-time concurrency. `--min-free-gib` is the free-space floor, in GiB,
+checked before each download. Temporary compressed layers and workspaces are
+removed after each task unless `--keep-workspaces` is set. Repeating the command
+reuses supported mapping entries and Docker environment layers. A changed
+dataset environment, original image digest, common-base recipe, Tool base image,
+bridge, or entrypoint produces a new recipe revision and requires rebuilding
+that task image. The mapping records current failures before `--fail-fast`
+terminates, so reruns retain the actionable cause and retry failed entries.
+
 Training uses separate successful runs with complete measurements, final task
 validation, and verified cleanup. Missing observations remain unavailable; they
 are never replaced with zero. Keep the generated JSON and `.kb.json` together.

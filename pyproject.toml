@@ -31,8 +31,8 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
-images = ["datasets>=3.0"]
-dev = ["pytest>=8", "httpx2"]
+images = ["datasets>=3.0", "pyarrow>=15", "requests[socks]>=2.32"]
+dev = ["pytest>=8", "httpx2", "pyarrow>=15"]
 
 [project.scripts]
 clawbox = "clawbox.cli:main"
