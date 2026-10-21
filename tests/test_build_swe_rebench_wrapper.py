@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -128,7 +129,8 @@ def test_prepare_common_base_builds_stock_once_and_layers_native_dependencies(
     assert set(specs) == {"task-1", "task-2"}
     assert set(base_calls[0]) == {"sweb.base.py.arm64:v1"}
     assert len(image_calls) == 1
-    assert image_calls[0]["tag"] == "sweb.base.py.arm64:v2"
+    recipe_digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
+    assert image_calls[0]["tag"] == f"sweb.base.py.arm64:v2-{recipe_digest}"
     assert image_calls[0]["buildargs"] == {"BASE_IMAGE": "sweb.base.py.arm64:v1"}
 
 

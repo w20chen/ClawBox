@@ -94,7 +94,9 @@ class WorkloadSpec(StrictFrozenModel):
     def cases_match_source(self) -> "WorkloadSpec":
         if mismatched := [case.case_id for case in self.cases if case.source is not self.source]:
             raise ValueError("workload.cases source mismatch: " + ", ".join(mismatched))
-        if self.session_assignment is SessionAssignment.ROUND_ROBIN and len(self.cases) < 2:
+        if (self.session_assignment is SessionAssignment.ROUND_ROBIN
+                and len(self.cases) < 2
+                and (self.cases or self.source is WorkloadSource.RECORDED_TRACE)):
             raise ValueError("round_robin session assignment requires at least two cases")
         return self
 
@@ -798,6 +800,10 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
                 "source_reference", "replay_trace_reference", "sandbox", "metadata"}
             } | (record.get("metadata") or {}),
         ))
+    if not cases:
+        raise ValueError("workload manifest contains no cases")
+    if workload.session_assignment is SessionAssignment.ROUND_ROBIN and len(cases) < 2:
+        raise ValueError("round_robin session assignment requires at least two cases")
     return tuple(cases)
 
 

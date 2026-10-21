@@ -574,7 +574,7 @@ def configure_design(raw, options):
     if options.get('workload_manifest') is not None:
         workload.update(
             source='swe_rebench', input=options['workload_manifest'],
-            session_assignment='unique',
+            session_assignment=options.get('session_assignment') or 'unique',
         )
         workload.pop('cases', None)
     elif any(options.get(k) is not None for k in single_case_keys):

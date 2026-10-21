@@ -1,0 +1,22 @@
+# ARM64 counterpart of the Miniconda base recorded in the official task images.
+ARG BASE_IMAGE=continuumio/miniconda3@sha256:f37f8c7db26ae7ec0098df530e96c9cde139026b9faf3914800d1522c47a49b1
+FROM ${BASE_IMAGE} AS portable-base
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+# Match the benchmark's common build recipe. Extra native build prerequisites
+# live in a separate descendant image, not in this recorded runtime base.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl gcc openjdk-17-jdk locales jq g++ make build-essential sudo \
+ && /opt/conda/bin/python -m pip install flake8==5.0.4 GitPython==3.1.44 \
+ && echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
+ && locale-gen en_US.UTF-8 \
+ && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/lib/jvm/java-17-openjdk-arm64
+ENV PATH=/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/lib/jvm/java-17-openjdk-arm64/bin
+RUN /usr/bin/python3 --version | grep -Fx 'Python 3.11.2'
+LABEL org.clawbox.fidelity="provisional: ytsaurus-yson 0.4.5 native port pending; OS package versions require comparison"
+
+# Default builds remain strict: the intermediate stage can prepare task
+# environments, but must never be reported as a faithful recorded environment.
+FROM portable-base AS recorded-base
+RUN /opt/conda/bin/python -m pip install ytsaurus-yson==0.4.5

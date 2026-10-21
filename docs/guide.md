@@ -344,7 +344,9 @@ task layer, verifies the blob digest, and copies its existing Git checkout. It
 does not clone or reset the repository. Before starting the task pipelines, it
 uses the pinned SWE-bench harness to build the stock `v1` ARM64 base and layers
 the shared native build packages from
-`docker/Dockerfile.swe-rebench-arm64-common` into `v2`. Architecture-specific
+`docker/Dockerfile.swe-rebench-arm64-common` into a `v2-<recipe-sha256>` image.
+The common-base recipe hash also versions environment and instance image tags,
+so changing the recipe invalidates cached environments. Architecture-specific
 Python dependencies and the editable project install are then rebuilt on the
 ARM64 environment layer. The recorded `rasterio 1.4.3` has no PyPI ARM64 wheel
 and requires a newer GDAL than the Ubuntu base provides, so the ARM64 recipe
@@ -355,12 +357,18 @@ rebuilding the affected task images.
 The default is four concurrent task pipelines; `--workers` changes only
 build-time concurrency. `--min-free-gib` is the free-space floor, in GiB,
 checked before each download. Temporary compressed layers and workspaces are
-removed after each task unless `--keep-workspaces` is set. Repeating the command
+removed after each task unless `--keep-workspaces` is set. Failed extractions
+are cleaned up, and retries discard incomplete workspaces left by interrupted
+processes. Extraction rejects paths and links escaping the checkout and special
+device files. Shared Docker environment images remain cached across tasks and
+runs; tasks sharing an environment serialize its creation. Repeating the command
 reuses supported mapping entries and Docker environment layers. A changed
 dataset environment, original image digest, common-base recipe, Tool base image,
 bridge, or entrypoint produces a new recipe revision and requires rebuilding
 that task image. The mapping records current failures before `--fail-fast`
 terminates, so reruns retain the actionable cause and retry failed entries.
+The updated recipe version also rebuilds mappings produced before these cache
+and extraction checks were introduced.
 
 Training uses separate successful runs with complete measurements, final task
 validation, and verified cleanup. Missing observations remain unavailable; they

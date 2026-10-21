@@ -16,7 +16,7 @@ import tempfile
 import tarfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from clawbox.images.arm64 import (
@@ -31,7 +31,7 @@ from clawbox.images.arm64 import (
 
 DEFAULT_DATASET_REVISION = "4ece23ba02fe8b68858e430134adddfd64d6f0f4"
 DEFAULT_HARNESS_REVISION = "980d0cca8aa4e73f1d9f894e906370bef8c4de8a"
-PORTABLE_ENV_VERSION = "swe-rebench-original-testbed-v4-gdal-compatible-rasterio"
+PORTABLE_ENV_VERSION = "swe-rebench-original-testbed-v5-safe-extraction-base-cache"
 STOCK_BASE_IMAGE_TAG = "v1"
 COMMON_BASE_IMAGE_TAG = "v2"
 
@@ -303,10 +303,14 @@ def prepare_common_base_images(
     stock_specs: list[Any] = []
     common_specs: dict[str, Any] = {}
     base_pairs: dict[str, str] = {}
+    common_recipe = common_base_dockerfile.read_bytes()
+    # The harness caches environments by script hash and tag, without checking
+    # their base image. Version every derived tag with the common-base recipe.
+    common_tag = f"{COMMON_BASE_IMAGE_TAG}-{hashlib.sha256(common_recipe).hexdigest()}"
     for task_id in selection:
         record = records[task_id]
         stock = _make_spec(make_test_spec, record, STOCK_BASE_IMAGE_TAG)
-        common = _make_spec(make_test_spec, record, COMMON_BASE_IMAGE_TAG)
+        common = _make_spec(make_test_spec, record, common_tag)
         stock_specs.append(stock)
         common_specs[task_id] = common
         base_pairs[str(common.base_image_key)] = str(stock.base_image_key)
@@ -318,7 +322,7 @@ def prepare_common_base_images(
     build_base_images(client, stock_specs, **options)
     with tempfile.TemporaryDirectory(prefix="clawbox-swe-common-base-") as directory:
         context = Path(directory)
-        shutil.copy2(common_base_dockerfile, context / "Dockerfile")
+        (context / "Dockerfile").write_bytes(common_recipe)
         for common_image, stock_image in sorted(base_pairs.items()):
             image, logs = client.images.build(
                 path=str(context), dockerfile="Dockerfile", tag=common_image,
@@ -355,6 +359,7 @@ def _registry_session(proxy: str) -> Any:
 
     session = requests.Session()
     if proxy:
+        session.trust_env = False
         session.proxies.update({"http": proxy, "https": proxy})
     retries = Retry(
         total=4, connect=4, read=4, status=4, backoff_factor=2,
@@ -411,8 +416,27 @@ def resolve_original_image(image: str, proxy: str) -> dict[str, Any]:
     return {
         "repository": repository, "manifest_digest": digest,
         "layers": [{"digest": x["digest"], "size": int(x["size"])} for x in layers],
+        "manifest": manifest,
         "token": headers["Authorization"],
     }
+
+
+def _testbed_member_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo:
+    # Do not normalize away traversal before checking it. The data filter also
+    # rejects devices, absolute link targets, and links escaping the destination.
+    if ".." in PurePosixPath(member.name).parts or "\\" in member.name:
+        raise tarfile.FilterError(f"unsafe testbed path: {member.name}")
+    filtered = tarfile.data_filter(member, destination)
+    workspace = (Path(destination) / "testbed").resolve()
+    target = Path(destination) / filtered.name
+    if not target.resolve().is_relative_to(workspace):
+        raise tarfile.FilterError(f"path escapes testbed: {member.name}")
+    if filtered.issym() or filtered.islnk():
+        link_base = target.parent if filtered.issym() else Path(destination)
+        link = (link_base / filtered.linkname).resolve()
+        if not link.is_relative_to(workspace):
+            raise tarfile.FilterError(f"link escapes testbed: {member.name}")
+    return filtered
 
 
 def extract_original_testbed(
@@ -428,15 +452,36 @@ def extract_original_testbed(
         raise RuntimeError(
             f"only {free / 1024**3:.1f} GiB free; need at least {required / 1024**3:.1f} GiB"
         )
-    task_root = root / safe_tag(task_id)
+    task_root = root.resolve() / safe_tag(task_id)
+    if task_root.resolve().parent != root.resolve():
+        raise RuntimeError(f"workspace path escapes its root: {task_root}")
     complete = task_root / "receipt.json"
     workspace = task_root / "testbed"
     if complete.is_file() and workspace.is_dir():
-        receipt = json.loads(complete.read_text(encoding="utf-8"))
+        try:
+            receipt = json.loads(complete.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            receipt = {}
         if receipt.get("manifest_digest") == resolved["manifest_digest"]:
             return workspace, receipt
+    # A killed process may leave a partial unpack, checkout, or receipt. Only a
+    # matching completed receipt above is reusable.
+    if task_root.exists():
         shutil.rmtree(task_root)
-    task_root.mkdir(parents=True, exist_ok=True)
+    task_root.mkdir(parents=True)
+    try:
+        return _extract_testbed_layer(image, resolved, session, task_root)
+    except BaseException:
+        # Also clean failures before a workspace can be returned to the caller.
+        shutil.rmtree(task_root, ignore_errors=True)
+        raise
+
+
+def _extract_testbed_layer(
+    image: str, resolved: dict[str, Any], session: Any, task_root: Path,
+) -> tuple[Path, dict[str, Any]]:
+    workspace = task_root / "testbed"
+    complete = task_root / "receipt.json"
     staging = task_root / "unpack"
     digest = ""
     layer_size = 0
@@ -466,21 +511,22 @@ def extract_original_testbed(
                     raise
                 time.sleep(2 ** attempt)
         with tarfile.open(blob, mode="r:*") as archive:
-            names = {member.name.lstrip("./") for member in archive.getmembers()}
-            if "testbed/.git/HEAD" not in names:
-                blob.unlink()
-                continue
-            staging.mkdir()
             members = []
             for member in archive.getmembers():
-                name = member.name.lstrip("./")
+                name = member.name
+                while name.startswith("./"):
+                    name = name[2:]
                 if name == "testbed" or name.startswith("testbed/"):
                     member.name = name
                     members.append(member)
-            archive.extractall(staging, members=members)
-        layer_size = layer["size"]
+            has_checkout = any(member.name == "testbed/.git/HEAD" for member in members)
+            if has_checkout:
+                staging.mkdir()
+                archive.extractall(staging, members=members, filter=_testbed_member_filter)
         blob.unlink()
-        break
+        if has_checkout:
+            layer_size = layer["size"]
+            break
     if not digest or not (staging / "testbed" / ".git" / "HEAD").is_file():
         raise RuntimeError(f"no image layer in {image} contains a complete /testbed Git checkout")
     os.replace(staging / "testbed", workspace)
@@ -554,6 +600,7 @@ def build_selected(
         build_base_images=build_base_images, client=docker.from_env(),
         common_base_dockerfile=common_base_dockerfile,
     )
+    environment_locks: dict[str, Any] = {}
 
     def build_one(task_id: str, selected: dict[str, str]) -> None:
         record = by_id[task_id]
@@ -595,9 +642,17 @@ def build_selected(
             )
             spec = specs[task_id]
             client = docker.from_env()
-            harness_build(build_env_images, spec, client)
+            with mapping_lock:
+                environment_lock = environment_locks.setdefault(
+                    str(spec.env_image_key), threading.Lock()
+                )
+            # Tasks with identical scripts share both an image and harness log
+            # directory. Serialize their environment creation and retain the
+            # cached environment for all consumers and subsequent runs.
+            with environment_lock:
+                harness_build(build_env_images, spec, client)
             local_image = build_workspace_image(spec, workspace, client)
-            cleanup_images.extend((local_image, str(spec.env_image_key)))
+            cleanup_images.append(local_image)
             architecture = client.images.get(local_image).attrs.get("Architecture")
             if architecture not in {"arm64", "aarch64"}:
                 raise RuntimeError(f"harness image architecture is {architecture}")

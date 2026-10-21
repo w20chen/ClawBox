@@ -77,6 +77,29 @@ def test_missing_trace_is_rejected_before_worker_creation(tmp_path, monkeypatch,
     assert "missing.jsonl" in capsys.readouterr().err
 
 
+def test_manifest_round_robin_keeps_concurrency_independent_of_pool_size(tmp_path):
+    from clawbox.experiments.spec import expand_matrix
+    manifest = tmp_path / "workload.json"
+    manifest.write_text(json.dumps({"tasks": [
+        {"case_id": f"task-{i}", "replay_trace_reference": "trace.jsonl"}
+        for i in range(501)
+    ]}), encoding="utf-8")
+    spec = configure_experiment(EXAMPLE, workload_manifest=str(manifest),
+                                session_assignment="round_robin", concurrency="1280")
+    arms = expand_matrix(spec)
+    assert spec.workload.session_assignment.value == "round_robin"
+    assert all(arm.concurrency == 1280 and len(arm.session_cases) == 501 for arm in arms)
+
+
+def test_round_robin_rejects_single_case_manifest_when_loaded(tmp_path):
+    from clawbox.experiments.spec import WorkloadSpec, load_workload_cases
+    manifest = tmp_path / "workload.json"
+    manifest.write_text(json.dumps({"tasks": [{"case_id": "only"}]}))
+    spec = WorkloadSpec(source="swe_rebench", input=str(manifest), session_assignment="round_robin")
+    with pytest.raises(ValueError, match="at least two cases"):
+        load_workload_cases(spec)
+
+
 def test_missing_openclaw_model_is_rejected_before_worker_creation(
     tmp_path, monkeypatch, capsys,
 ):
