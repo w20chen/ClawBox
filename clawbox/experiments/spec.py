@@ -175,6 +175,7 @@ class ExecutionSpec(StrictFrozenModel):
     # Limit only concurrent VM-pair creation. Once a pair is ready, its
     # session releases this slot and remains active at offered concurrency.
     sandbox_create_concurrency: int = Field(default=8, ge=1)
+    cube_request_timeout_seconds: float = Field(default=130, gt=0, allow_inf_nan=False)
     worker_thread_switch_interval_seconds: float = Field(
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     randomized_order: bool = True

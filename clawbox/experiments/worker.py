@@ -1289,7 +1289,9 @@ class ExperimentWorker:
         output_base = Path(os.environ.get("CLAWBOX_OUTPUT_ROOT", spec.output.directory))
         self.output_root = output_root or output_base / run_id
         journal = OwnedSandboxJournal(self.output_root / "owned-sandboxes.jsonl")
-        self.client = client or CubeSandboxClient(journal=journal)
+        self.client = client or CubeSandboxClient(
+            journal=journal, request_timeout_s=spec.execution.cube_request_timeout_seconds,
+        )
         if self.client.journal is None:
             self.client.journal = journal
         self.results: list[ResultEnvelope] = []
@@ -3524,10 +3526,19 @@ class ExperimentWorker:
                 # correctness remains enforced by the Tool-VM validation.
                 agent_tool_failures = outcome.get("agent_tool_failures")
                 if agent_tool_failures is not None and agent_tool_failures > 0:
-                    raise RuntimeError(
-                        f"OpenClaw reported {agent_tool_failures} failed Tool result(s); "
-                        "inspect final-answer.json and agent.stderr.log"
+                    if trace_path is None:
+                        raise RuntimeError(
+                            f"OpenClaw reported {agent_tool_failures} failed Tool result(s); "
+                            "inspect final-answer.json and agent.stderr.log"
+                        )
+                    from clawbox.replay.tool_outcomes import match_recorded_tool_failures
+                    from .native_artifacts import _runtime_spans
+                    matched_failures = match_recorded_tool_failures(
+                        trace_path, _runtime_spans(outcome["runtime_traces"]),
+                        session_id=session_id, reported_failures=agent_tool_failures,
                     )
+                    events.write({"event": "recorded_tool_failures_matched",
+                                  "session_id": session_id, "matches": matched_failures})
                 if not tool_latencies:
                     raise RuntimeError(
                         "OpenClaw completed without using a required native Tool operation"

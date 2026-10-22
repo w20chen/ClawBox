@@ -286,6 +286,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     tool_timeout_seconds = int(configuration.get("command_timeout_seconds") or 300)
     if tool_timeout_seconds < 1:
         raise ValueError("command_timeout_seconds must be positive")
+    startup_value = configuration.get("runtime_startup_timeout_seconds", 60)
+    if (isinstance(startup_value, bool) or not isinstance(startup_value, int)
+            or not 1 <= startup_value <= 3600):
+        raise ValueError("runtime_startup_timeout_seconds must be an integer from 1 to 3600")
+    startup_timeout_seconds = startup_value
     exec_yield_value = configuration.get("openclaw_exec_yield_ms")
     exec_yield_ms: int | None = None
     exec_yield_export = ""
@@ -522,16 +527,36 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     if setup.exit_code:
         raise RuntimeError(f"ClawTune sidecar setup failed: {setup.stderr[-2000:]}")
     relay_ready = (
-        f"curl -fsS http://127.0.0.1:{RELAY_PORT}/healthz >/dev/null 2>&1 && "
+        f"curl --max-time 2 -fsS http://127.0.0.1:{RELAY_PORT}/healthz >/dev/null 2>&1 && "
         if checkpoint_relay else ""
     )
-    ready = runtime_executor.execute(
-        prefix + "for i in $(seq 1 120); do " + relay_ready
-        + "curl -fsS http://127.0.0.1:8765/health/ready "
-        + ">/dev/null 2>&1 && exit 0; sleep 0.5; done; exit 1", 70,
-    )
-    if ready.exit_code:
-        raise RuntimeError("ClawTune sidecar did not become ready in the Runtime VM")
+    try:
+        ready = runtime_executor.execute(
+            prefix + f"deadline=$(( $(date +%s) + {startup_timeout_seconds} )); "
+            + "while [ $(date +%s) -lt $deadline ]; do " + relay_ready
+            + "curl --max-time 2 -fsS http://127.0.0.1:8765/health/ready "
+            + ">/dev/null 2>&1 && exit 0; sleep 0.5; done; exit 1",
+            startup_timeout_seconds + 10,
+        )
+        if ready.exit_code:
+            raise RuntimeError("ClawTune sidecar did not become ready in the Runtime VM")
+    except Exception:
+        failure_home = output_dir / "openclaw" / session_id
+        failure_home.mkdir(parents=True, exist_ok=True)
+        # Keep the original startup failure even when the guest is too unhealthy
+        # to return its log. Capture this before session cleanup destroys the VM.
+        try:
+            diagnostic = runtime_executor.execute(
+                prefix + f"tail -c 65536 {shlex.quote(home + '/logs/sidecar.log')}", 10,
+            )
+            (failure_home / "sidecar-startup.log").write_text(
+                diagnostic.stdout + diagnostic.stderr, encoding="utf-8",
+            )
+        except Exception as diagnostic_error:
+            (failure_home / "sidecar-startup-unavailable.txt").write_text(
+                str(diagnostic_error), encoding="utf-8",
+            )
+        raise
     invoke(["plugins", "install", "--link", clawtune_plugin])
     invoke(["plugins", "enable", "clawtune"])
     exec_tool_config: dict[str, object] = {

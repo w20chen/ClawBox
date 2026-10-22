@@ -67,6 +67,43 @@ class PolicySession:
         }}]
 
 
+@pytest.mark.parametrize("diagnostic_available", [True, False])
+def test_sidecar_readiness_failure_preserves_log_and_original_error(
+    monkeypatch, tmp_path, diagnostic_available,
+):
+    original = TimeoutError("sidecar startup deadline")
+
+    class RuntimeExecutor:
+        def execute(self, command, timeout):
+            if "/health/ready" in command:
+                assert timeout == 310
+                raise original
+            if "tail -c 65536" in command:
+                if not diagnostic_available:
+                    raise RuntimeError("guest unreachable")
+                return CommandResult(0, "sidecar startup traceback\n", "", 0.01)
+            return CommandResult(0, "", "", 0.01)
+
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    with pytest.raises(TimeoutError) as caught:
+        run_openclaw(
+            prompt="test", session_id="session-a",
+            configuration={"base_url": "http://model.test/v1", "model": "test-model",
+                           "runtime_startup_timeout_seconds": 300},
+            ssh=NativeSSHConfig(target="executor@192.0.2.20:2222",
+                identity_private_key="PRIVATE KEY\n", host_public_key="ssh-ed25519 AAAATEST",
+                sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a"),
+            policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+            output_dir=tmp_path, timeout_seconds=600,
+        )
+    assert caught.value is original
+    directory = tmp_path / "openclaw/session-a"
+    if diagnostic_available:
+        assert (directory / "sidecar-startup.log").read_text() == "sidecar startup traceback\n"
+    else:
+        assert (directory / "sidecar-startup-unavailable.txt").read_text() == "guest unreachable"
+
+
 def test_native_ssh_route_has_an_explicit_epoch_and_stable_tool_alias() -> None:
     route = NativeSSHRoute("tool-a", 2222, 7, "192.0.2.10", 20010)
     assert route.target == "executor@192.0.2.10:20010"

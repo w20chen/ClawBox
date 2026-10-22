@@ -1,0 +1,27 @@
+diff --git a/deploy/one-click/systemd/cube-sandbox-cube-egress.service b/deploy/one-click/systemd/cube-sandbox-cube-egress.service
+index 226db42..b1f9db7 100644
+--- a/deploy/one-click/systemd/cube-sandbox-cube-egress.service
++++ b/deploy/one-click/systemd/cube-sandbox-cube-egress.service
+@@ -1,7 +1,8 @@
+ [Unit]
+ Description=Cube Sandbox cube-egress (transparent MITM proxy)
+-After=docker.service network-online.target cube-sandbox-cube-egress-net.service cube-sandbox-cubelet.service
+-Requires=docker.service cube-sandbox-cubelet.service
++After=docker.service network-online.target cube-sandbox-cube-egress-net.service
++Before=cube-sandbox-cubelet.service
++Requires=docker.service
+ Wants=network-online.target cube-sandbox-cube-egress-net.service
+ ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
+ PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+@@ -14,6 +15,11 @@ PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+ # Cubelet; without TPROXY rules, no sandbox traffic reaches us anyway,
+ # which is the correct state until the first sandbox lands.
+ 
++# Cubelet startup can recover stale TAPs by deleting their egress policies.
++# Keep the loopback admin API available before Cubelet starts; requiring or
++# ordering cube-egress after Cubelet creates a startup cycle during recovery.
++# The net.service may still finish later when cube-dev appears.
++
+ [Service]
+ Type=simple
+ User=root

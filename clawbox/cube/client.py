@@ -79,13 +79,18 @@ class CubeSandboxClient:
     def __init__(self, *, journal: OwnedSandboxJournal | None = None,
                  sandbox_class: type | None = None, template_class: type | None = None,
                  config: Any = None,
+                 request_timeout_s: float = 130.0,
                  command_stream_grace_s: float = 15.0,
                  tcp_endpoint_attempts: int = 10,
                  tcp_endpoint_initial_delay_s: float = 0.25,
                  tcp_endpoint_max_delay_s: float = 2.0) -> None:
+        if request_timeout_s <= 0:
+            raise ValueError("Cube API request timeout must be positive")
         if sandbox_class is None:
-            from cubesandbox import Sandbox
+            from cubesandbox import Config, Sandbox
             sandbox_class = Sandbox
+            if config is None:
+                config = Config(request_timeout=request_timeout_s)
         self._sandbox_class = sandbox_class
         self._template_class = template_class
         self._config = config
@@ -171,6 +176,22 @@ class CubeSandboxClient:
                     f"failed for {ownership.session_id}"
                 ) from reconciliation_error
             sandbox = self._sandbox_class(recovered, self._config)
+            # Listing proves ownership, not readiness: CubeAPI can list a
+            # sandbox while its VM is still being restored. Journal it before
+            # probing so failed recovery remains eligible for owned cleanup.
+            if self.journal is not None:
+                self.journal.record(self.sandbox_id(sandbox), ownership)
+
+            def verify_recovered_guest() -> None:
+                result = sandbox.commands.run("/bin/true", timeout=5)
+                if result.exit_code != 0:
+                    raise RuntimeError("recovered sandbox guest is not ready")
+
+            read_with_backoff(
+                verify_recovered_guest,
+                label=f"guest readiness after timed-out create for {ownership.session_id}",
+                attempts=10, initial_delay_s=0.25, max_delay_s=2.0,
+            )
         sandbox_id = self.sandbox_id(sandbox)
         self._handles[sandbox_id] = sandbox
         if self.journal is not None:

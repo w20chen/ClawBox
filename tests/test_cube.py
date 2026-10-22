@@ -187,6 +187,51 @@ def test_cube_client_reconciles_a_timed_out_create_by_unique_ownership(
     assert sandbox.sandbox_id == "sb-recovered"
     assert journal.sandbox_ids(task_uid="task") == ["sb-recovered"]
     assert TimedOutSandbox.create_calls == 1
+    assert sandbox.command_calls == [("/bin/true", {"timeout": 5})]
+
+
+@pytest.mark.parametrize("becomes_ready", [True, False])
+def test_create_recovery_requires_guest_readiness_and_preserves_cleanup(
+    tmp_path, monkeypatch, becomes_ready,
+):
+    import clawbox.cube.api_retry as retry_module
+    monkeypatch.setattr(retry_module.time, "sleep", lambda _: None)
+
+    class RestoringSandbox(_Sandbox):
+        probes = 0
+        creates = 0
+
+        def __init__(self, data=None, config=None):
+            super().__init__(data, config)
+            self.commands = SimpleNamespace(run=self.probe)
+
+        def probe(self, command, **kwargs):
+            type(self).probes += 1
+            assert command == "/bin/true"
+            if not becomes_ready or type(self).probes == 1:
+                raise RequestsConnectionError("guest still restoring")
+            return SimpleNamespace(exit_code=0)
+
+        @classmethod
+        def create(cls, **kwargs):
+            cls.creates += 1
+            cls.items = {"sb-restoring": cls({
+                "sandboxID": "sb-restoring", "metadata": kwargs["metadata"],
+            })}
+            raise RequestsTimeout("response deadline")
+
+    journal = OwnedSandboxJournal(tmp_path / "owned.jsonl")
+    client = CubeSandboxClient(sandbox_class=RestoringSandbox, journal=journal)
+    if becomes_ready:
+        assert client.create_sandbox(
+            template="tpl", node_name="node", ownership=_owner(),
+        ).sandbox_id == "sb-restoring"
+        assert RestoringSandbox.probes == 2
+    else:
+        with pytest.raises(RuntimeError, match="guest readiness"):
+            client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
+    assert RestoringSandbox.creates == 1
+    assert journal.sandbox_ids(task_uid="task") == ["sb-restoring"]
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 429, None])

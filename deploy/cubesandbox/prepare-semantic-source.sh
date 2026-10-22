@@ -22,6 +22,7 @@ NETWORK_PATCH_FILE=$SCRIPT_DIR/build-network.patch
 BASE_REUSE_PATCH_FILE=$SCRIPT_DIR/cold-base-reuse.patch
 CONTROL_TIMEOUT_PATCH_FILE=$SCRIPT_DIR/sdk-control-timeouts.patch
 LIFECYCLE_TIMEOUT_PATCH_FILE=$SCRIPT_DIR/sdk-lifecycle-timeouts.patch
+EGRESS_STARTUP_PATCH_FILE=$SCRIPT_DIR/egress-before-cubelet.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -40,6 +41,7 @@ PATCH_FILES=(
   "$INCREMENTAL_PATCH_FILE" "$TEMPLATE_BASE_PATCH_FILE"
   "$PRIORITY_PATCH_FILE" "$NETWORK_PATCH_FILE" "$BASE_REUSE_PATCH_FILE"
   "$CONTROL_TIMEOUT_PATCH_FILE" "$LIFECYCLE_TIMEOUT_PATCH_FILE"
+  "$EGRESS_STARTUP_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -84,6 +86,10 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$LIFECYCLE_TIMEOUT_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$LIFECYCLE_TIMEOUT_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$LIFECYCLE_TIMEOUT_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$EGRESS_STARTUP_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$EGRESS_STARTUP_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$EGRESS_STARTUP_PATCH_FILE"
   fi
   git -C "$SOURCE_DIR" diff --check
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
@@ -137,6 +143,10 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
     git -C "$SOURCE_DIR" apply --check "$LIFECYCLE_TIMEOUT_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$LIFECYCLE_TIMEOUT_PATCH_FILE"
   fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$EGRESS_STARTUP_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$EGRESS_STARTUP_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$EGRESS_STARTUP_PATCH_FILE"
+  fi
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -188,6 +198,7 @@ apply_once "$NETWORK_PATCH_FILE" "configurable Go build module proxy"
 apply_once "$BASE_REUSE_PATCH_FILE" "owned COLD template base references"
 apply_once "$CONTROL_TIMEOUT_PATCH_FILE" "bounded SDK control RPCs"
 apply_once "$LIFECYCLE_TIMEOUT_PATCH_FILE" "bounded SDK pause and resume RPCs"
+apply_once "$EGRESS_STARTUP_PATCH_FILE" "egress-before-Cubelet startup ordering"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"

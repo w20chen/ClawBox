@@ -215,6 +215,21 @@ created at once (default `8`; unit: session pairs). It does not limit tool calls
 Set it no higher than the largest `execution.concurrency_levels` value. Changing
 it requires validation, qualification, and a new run ID.
 
+For large simultaneous Runtime startups, set
+`inference.configuration.runtime_startup_timeout_seconds` in the experiment YAML
+to the sidecar readiness budget in seconds (default `60`, integer `1`–`3600`).
+For example, `300` allows five minutes while still requiring the health endpoint
+to succeed. Use a new run ID and qualification after changing it; no image rebuild
+or host apply is needed. Failed readiness checks preserve `openclaw/SESSION/sidecar-startup.log`
+when the VM remains reachable, or `sidecar-startup-unavailable.txt` otherwise.
+
+`execution.cube_request_timeout_seconds` sets the Cube SDK HTTP request timeout
+(default `130` seconds, positive). The CubeAPI server must also allow long VM
+creation requests; use a server with creation on its 120-second lifecycle budget.
+Changing this experiment setting requires qualification and a new run ID, without
+rebuilding guest images. After an ambiguous creation timeout, ClawBox verifies a
+guest command before accepting a recovered VM; a listed VM alone is insufficient.
+
 `execution.worker_thread_switch_interval_seconds` controls Python thread handoff
 (default `0.001` seconds; valid range above zero through `0.1`). Keep it identical
 across comparisons. Changing it requires qualification and a new run ID, but not
@@ -254,6 +269,11 @@ Compare the two modes with identical VM resources, CPU pools, workload,
 admission, and memory policy.
 
 ### Workloads and replay
+
+Recorded nonzero shell results are accepted only when the Runtime call identity,
+command, exit code, and error match the original trace. They remain recorded as
+Tool failures and do not establish task correctness. New errors, timeouts, or
+missing comparison evidence fail the run; final validation still applies.
 
 The supported path uses `agent.driver: openclaw` and replay inference. A replay
 trace pairs `span_start` and `span_end` records for each model or tool call. Model
