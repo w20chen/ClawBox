@@ -1269,6 +1269,39 @@ def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> Non
     assert PartiallyFailingSandbox.closed == 3
 
 
+def test_cleanup_bounds_parallel_destroy_requests() -> None:
+    class SlowSandbox(_Sandbox):
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def kill(self):
+            with type(self).lock:
+                type(self).active += 1
+                type(self).peak = max(type(self).peak, type(self).active)
+            try:
+                time.sleep(0.02)
+                return super().kill()
+            finally:
+                with type(self).lock:
+                    type(self).active -= 1
+
+    SlowSandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=SlowSandbox, cleanup_workers=2)
+    for _ in range(6):
+        client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
+
+    client.kill_owned_sandboxes("task")
+
+    assert SlowSandbox.items == {}
+    assert SlowSandbox.peak == 2
+
+
+def test_cleanup_rejects_non_positive_worker_count() -> None:
+    with pytest.raises(ValueError, match="cleanup_workers must be positive"):
+        CubeSandboxClient(sandbox_class=_Sandbox, cleanup_workers=0)
+
+
 @pytest.mark.parametrize("capacity,borrowed,expected", [(1536, 0, False), (2048, 1024, False), (2048, 0, True)])
 def test_idle_pair_reserves_both_snapshots_before_either_pause(tmp_path, capacity, borrowed, expected):
     from clawbox.experiments.policy import PolicyCoordinator

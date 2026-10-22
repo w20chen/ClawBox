@@ -5,6 +5,7 @@ import os
 import queue
 import threading
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
@@ -83,7 +84,8 @@ class CubeSandboxClient:
                  command_stream_grace_s: float = 15.0,
                  tcp_endpoint_attempts: int = 10,
                  tcp_endpoint_initial_delay_s: float = 0.25,
-                 tcp_endpoint_max_delay_s: float = 2.0) -> None:
+                 tcp_endpoint_max_delay_s: float = 2.0,
+                 cleanup_workers: int = 8) -> None:
         if request_timeout_s <= 0:
             raise ValueError("Cube API request timeout must be positive")
         if sandbox_class is None:
@@ -102,10 +104,13 @@ class CubeSandboxClient:
             raise ValueError("tcp_endpoint_attempts must be positive")
         if tcp_endpoint_initial_delay_s < 0 or tcp_endpoint_max_delay_s < 0:
             raise ValueError("TCP endpoint retry delays must be non-negative")
+        if cleanup_workers < 1:
+            raise ValueError("cleanup_workers must be positive")
         self.command_stream_grace_s = float(command_stream_grace_s)
         self.tcp_endpoint_attempts = int(tcp_endpoint_attempts)
         self.tcp_endpoint_initial_delay_s = float(tcp_endpoint_initial_delay_s)
         self.tcp_endpoint_max_delay_s = float(tcp_endpoint_max_delay_s)
+        self.cleanup_workers = int(cleanup_workers)
 
     def _sdk_kwargs(self) -> dict[str, Any]:
         return {} if self._config is None else {"config": self._config}
@@ -548,20 +553,35 @@ class CubeSandboxClient:
                 ids.append(sandbox_id)
                 if sandbox_id not in self._handles:
                     self._handles[sandbox_id] = self._sandbox_class(item, self._config)
+        owned_ids = list(dict.fromkeys(filter(None, ids)))
         errors: list[str] = []
-        for sandbox_id in dict.fromkeys(filter(None, ids)):
-            try:
-                self.kill_sandbox(sandbox_id)
-            except Exception as exc:
-                # A single stale/broken handle must not prevent cleanup of the
-                # other sandboxes in this task.  Continue through the complete
-                # ownership set, then fail closed after a fresh list check.
-                errors.append(f"{sandbox_id}: {type(exc).__name__}: {exc}")
+        workers = min(self.cleanup_workers, len(owned_ids))
+        if workers:
+            # Cube destroy requests can each occupy the SDK lifecycle timeout.
+            # Bound concurrency so dense-run cleanup is not serialized without
+            # flooding the control plane with every owned VM at once.
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="cube-cleanup",
+            ) as pool:
+                futures = {
+                    pool.submit(self.kill_sandbox, sandbox_id): sandbox_id
+                    for sandbox_id in owned_ids
+                }
+                for future in as_completed(futures):
+                    sandbox_id = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        # A single stale/broken handle must not prevent cleanup
+                        # of the other sandboxes. Fail closed after a fresh list.
+                        errors.append(
+                            f"{sandbox_id}: {type(exc).__name__}: {exc}"
+                        )
         remaining = self.list_owned_sandboxes(owner_id)
         if errors or remaining:
             details = []
             if errors:
-                details.append("kill errors=" + repr(errors))
+                details.append("kill errors=" + repr(sorted(errors)))
             if remaining:
                 details.append(
                     "remaining=" + repr([self._info_id(item) for item in remaining])

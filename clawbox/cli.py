@@ -298,6 +298,15 @@ def parser() -> argparse.ArgumentParser:
     for name in ("status", "collect", "report", "abort", "destroy"):
         command = sub.add_parser(name)
         command.add_argument("run_id")
+        if name in {"abort", "destroy"}:
+            command.add_argument(
+                "--cleanup-workers", type=int, default=8,
+                help="maximum concurrent Cube destroy requests (default: 8)",
+            )
+            command.add_argument(
+                "--cleanup-timeout-seconds", type=float, default=180.0,
+                help="deadline for owned-VM cleanup in seconds (default: 180)",
+            )
     trace = sub.add_parser("trace", help="inspect a JSONL recording without starting VMs")
     trace.add_argument("path", type=Path)
     describe = sub.add_parser(
@@ -1032,12 +1041,20 @@ def main(argv: list[str] | None = None) -> int:
                 emit(status_for_run(run_root))
                 return 0
             if args.command == "abort":
-                emit(abort_run(run_root))
+                emit(abort_run(
+                    run_root, cleanup_workers=args.cleanup_workers,
+                    cleanup_timeout_seconds=args.cleanup_timeout_seconds,
+                ))
                 return 0
             state = status_for_run(run_root)
             emit(
-                abort_run(run_root) if state["supervisor_alive"]
-                else cleanup_run(run_root)
+                abort_run(
+                    run_root, cleanup_workers=args.cleanup_workers,
+                    cleanup_timeout_seconds=args.cleanup_timeout_seconds,
+                ) if state["supervisor_alive"] else cleanup_run(
+                    run_root, cleanup_workers=args.cleanup_workers,
+                    cleanup_timeout_seconds=args.cleanup_timeout_seconds,
+                )
             )
             return 0
         if args.command == "report":

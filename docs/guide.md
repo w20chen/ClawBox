@@ -420,6 +420,14 @@ Useful commands:
 | `status`, `report`, `collect` | Inspect progress or regenerate reports without rerunning work |
 | `abort`, `destroy` | Stop owned VMs or clean them up while retaining result files |
 
+`abort` and `destroy` issue at most 8 concurrent Cube destroy requests and wait
+180 seconds by default. For a dense interrupted run, set
+`--cleanup-workers N` and `--cleanup-timeout-seconds S`; these change only the
+bounded cleanup operation, in requests and seconds respectively. They do not
+rebuild images, retrain predictions, alter the frozen experiment, or require a
+new run ID. Cleanup still exits nonzero unless a fresh Cube inventory proves
+that no VM owned by the run remains.
+
 A qualification receipt is bound to the exact spec, implementation, templates,
 images, nodes, concurrency, and referenced file hashes. A lower qualification
 concurrency does not prove full-density performance. After interruption, restore

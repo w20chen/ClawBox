@@ -553,8 +553,12 @@ class ExperimentSupervisor:
         return self.results
 
 
-def cleanup_owned_sandboxes(journal: Path, task_uid: str) -> None:
-    client = CubeSandboxClient(journal=OwnedSandboxJournal(journal))
+def cleanup_owned_sandboxes(
+    journal: Path, task_uid: str, *, cleanup_workers: int = 8,
+) -> None:
+    client = CubeSandboxClient(
+        journal=OwnedSandboxJournal(journal), cleanup_workers=cleanup_workers,
+    )
     client.kill_owned_sandboxes(task_uid)
     from .priority import cleanup_priority_domains
     directory=journal.parent/'priority-domains'
@@ -562,7 +566,14 @@ def cleanup_owned_sandboxes(journal: Path, task_uid: str) -> None:
         cleanup_priority_domains(directory)
 
 
-def cleanup_run(run_root: Path) -> dict[str, Any]:
+def cleanup_run(
+    run_root: Path, *, cleanup_workers: int = 8,
+    cleanup_timeout_seconds: float = 180.0,
+) -> dict[str, Any]:
+    if cleanup_workers < 1:
+        raise ValueError("cleanup_workers must be positive")
+    if cleanup_timeout_seconds <= 0:
+        raise ValueError("cleanup_timeout_seconds must be positive")
     state = read_run_state(run_root)
     failures: list[str] = []
     cleaned: list[str] = []
@@ -579,14 +590,17 @@ def cleanup_run(run_root: Path) -> dict[str, Any]:
                 sys.executable, "-m", "clawbox.experiments.supervisor", "cleanup",
                 "--journal", str(artifact_path / "owned-sandboxes.jsonl"),
                 "--task-uid", str(task_uid),
+                "--workers", str(cleanup_workers),
             ]
             with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
                 process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
                 try:
-                    return_code = process.wait(timeout=180)
+                    return_code = process.wait(timeout=cleanup_timeout_seconds)
                 except subprocess.TimeoutExpired as exc:
                     terminate_process_tree(process.pid)
-                    raise RuntimeError("cleanup timed out after 180 seconds") from exc
+                    raise RuntimeError(
+                        f"cleanup timed out after {cleanup_timeout_seconds:g} seconds"
+                    ) from exc
             if return_code:
                 raise RuntimeError(f"cleanup process exited with status {return_code}")
             cleaned.append(arm_id)
@@ -605,12 +619,18 @@ def cleanup_run(run_root: Path) -> dict[str, Any]:
     return {"run_id": state["run_id"], "cleaned_arms": cleaned, "state": state["state"]}
 
 
-def abort_run(run_root: Path) -> dict[str, Any]:
+def abort_run(
+    run_root: Path, *, cleanup_workers: int = 8,
+    cleanup_timeout_seconds: float = 180.0,
+) -> dict[str, Any]:
     state = read_run_state(run_root)
     identity = state.get("supervisor")
     if process_is_alive(identity):
         terminate_process_tree(int(identity["pid"]))
-    result = cleanup_run(run_root)
+    result = cleanup_run(
+        run_root, cleanup_workers=cleanup_workers,
+        cleanup_timeout_seconds=cleanup_timeout_seconds,
+    )
     state = read_run_state(run_root)
     state["state"] = "cancelled"
     state["failure"] = "cancelled by user"
@@ -626,10 +646,13 @@ def main(argv: list[str] | None = None) -> int:
     cleanup = sub.add_parser("cleanup")
     cleanup.add_argument("--journal", type=Path, required=True)
     cleanup.add_argument("--task-uid", required=True)
+    cleanup.add_argument("--workers", type=int, default=8)
     args = parser.parse_args(argv)
     if args.command == "cleanup":
         try:
-            cleanup_owned_sandboxes(args.journal, args.task_uid)
+            cleanup_owned_sandboxes(
+                args.journal, args.task_uid, cleanup_workers=args.workers,
+            )
         except Exception as exc:
             print(f"cleanup failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
