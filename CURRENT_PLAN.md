@@ -2,6 +2,64 @@
 
 Updated: 2026-10-22
 
+## 环境、镜像位置与共享边界（2026-10-22 20:50 中国时间核对）
+
+**503 个任务环境已准备好；环境内容验证、并发功能验收、存储性能验证是三件独立的事。** 官方镜像源码/依赖适配 ARM、生成 ext4 模板、Cube 用 CoW 创建独立 VM，都是正常的环境交付形式。额外按磁盘压力分批做的跨模板块去重是临时容量优化，不是环境运行的必要步骤，也尚未建立性能中性的证据。
+
+**最新并发状态纠正（20:52:30 中国时间 / 12:52:30 UTC）：本轮已出现失败，不再是零失败运行，不能通过释放屏障将它认作成功。** 事件记录有 1279 个环境检查和 1279 份原生工具采集，2558 台 VM 创建、252 台销毁、126 个 `session_failed`；125 个 `session_complete` 均为 `valid=false`，不是成功数。监控记录的完整 VM 对峰值为 1178，未证明 1280 同时存活。屏障累计 arrivals 为 1279，但 arrivals 不会扣除随后失败/销毁的任务，不能当成当前活跃数。前两个验证失败样本在屏障 HTTP 请求收到 `ConnectionResetError: [Errno 104]`，另有 1 个 ApiError 尚未定位。不能把这些失败归因于 ext4 去重，亦不能据此推翻已完成的 503 环境一致性检查。
+
+CLI 目前仍为 `running`、`cleanup_verified=false`，存在剩余 VM；goal 保持暂停且未完成。本次仅记录，没有释放、重试或改配置。**接续时应先保留证据并用下文 CLI abort 清理此失败运行，再排查屏障连接与 API 失败；不要照旧交接节等待 1280 后释放。** 21:55 的等待上限不再是唯一阻碍，提前出现的失败已经使本轮不能通过验收。
+
+### 准备状态与任务身份
+
+- 当前 catalog 确认为 503 accepted images、503 registered templates、503 VM-smoke verified、503 parser-loaded、pending 0。全量一致性审计和原始 trace 首轮原生工具资格验证均已通过；不代表完整长 trace replay 已通过。
+- 源码直接来自原 Benchmark 镜像 `/testbed`；保留原 Git HEAD、工作区文件及依赖版本，不用 clone/reset/checkout 重建。宿主是 ARM/openEuler，接受的任务用户态为 Debian 12 系列；宿主发行版不要求 guest 使用同一发行版。ARM 二进制及架构相关系统包差异有记录，录制时镜像 digest 缺失的限制仍然存在。
+- 用 catalog 的 `manifest` 和 `workload` 字段定位确切任务清单，不通过目录数量猜就绪数。`final-state.json` 包含历史尝试（当前 546 条），不是 546 个接受环境；接受集合以 503 条 collector/Cube 状态与 catalog 为准。成功条目可能保留历史 `error`，应结合最终 status 和验证回执判断。
+- 每条 trace 的映射是：`case_id -> 原镜像 manifest / 原 testbed -> ARM image_id -> 注册用 pinned_image digest -> template_id -> Cube artifact_id -> ext4`。镜像 ID、registry manifest digest、模板 ID 和 artifact ID 不是同一个标识。需要查具体 ext4 时，通过 `Template.get(template_id).replicas` 的 `artifact_id` 定位，不能把 `tpl-*` 当成 `rfs-*` 文件名。
+
+### 文件和镜像在哪里（以下均为 kunpeng 路径）
+
+| 内容 | 位置及使用方式 |
+| --- | --- |
+| 接受集合、任务到镜像/模板的映射 | `/mnt/clawbox-data/artifacts/swe-readiness-20261021/environment-catalog-20261022/latest.json`；读取其中 `manifest`、`workload` 指向的冻结文件 |
+| 环境准备根目录 | `/home/weitianc/clawbox-swe-images-20261021/` |
+| 原镜像提取的仓库和清单 | 准备根下 `workspaces/<规范化任务名>/testbed/`、`prepared.json`、`source-file-manifest.json`；保留作为来源证据 |
+| ARM Docker 镜像身份 | 准备根下 `build/final-state.json`、`build/collector-state.json`；最终 collector 镜像如 `clawbox-swe-collector:armmbed__mbed-tools-285`，执行/审计以保存的不可变 `image_id` 为准 |
+| Docker 本地镜像层 | `docker info` 确认 `DockerRootDir=/var/lib/docker`；由 Docker 管理，不是一任务一个 `.ext4` 或 `.tar`，不要直接编辑内部文件 |
+| Cube 注册使用的 OCI 镜像 | `build/cube-collector-state.json` 的 `pinned_image`，形如 `127.0.0.1:5000/clawbox/swe-traces@sha256:...`；同条目给出 `template_id` |
+| 本机 registry 数据 | `clawbox-registry` / `clawbox-registry-podnet` 共享 volume，宿主为 `/var/lib/docker/volumes/263663430d5263294332fc2cd199929b83791dffebef7c455df9b192d7a1b2f5/_data`，容器内为 `/var/lib/registry`；由 registry 管理 |
+| Cubelet 模板缓存服务路径 | 配置 `cubetool_base_dir=/home/weitianc/clawbox-storage/cubelet-cache`，其 `cubebox_os_image/` 即 `/mnt/clawbox-data/cubelet-cache/cubebox_os_image/`；模板文件通常为 `<artifact_id>/<artifact_id>.ext4` |
+| Cubelet 新缓存的实际写入位置 | 上述 `cubebox_os_image` 是扩容后根盘目录 `/data/clawbox-preparation-storage/cubelet-cache` 的 bind mount。旧条目有链接，示例解析到 `/mnt/clawbox-data/cubelet-cache/cubebox_os_image-before-root-routing/`；对具体条目用 `readlink -f` / `findmnt -T` 确认，不能假定全部已搬迁 |
+| CubeMaster 模板存储服务路径 | `/data/CubeMaster/storage/`，bind 到根盘 `/data/clawbox-preparation-storage/master/`；新文件写根盘，旧条目仍链接到 `/mnt/clawbox-data/cubemaster-storage-active/` |
+| 较早参与去重的另一缓存位置 | `/usr/local/services/cubetoolbox/cubebox_os_image/<artifact_id>/<artifact_id>.ext4`；仍保留，不应误当成唯一的当前缓存根或直接删除 |
+| 运行中 VM 的独立磁盘/CoW 存储 | `/data/cubelet/storage/`；当前 Cubelet `storage_backend=cubecow`，位于扩容后的根盘；由 Cube 生命周期管理 |
+| 一致性审计证据 | `/data/clawbox-acceptance-20261022T102744Z/fidelity/summary.json`、`fidelity/cases/` |
+| 当前并发运行证据 | `/data/clawbox-acceptance-20261022T102744Z/current-run.json` 指向的 run；输入、trace、代码、事件和清理证据均保留 |
+
+`/home/weitianc/clawbox-storage` 指向独立数据盘 `/mnt/clawbox-data`，但其中部分子目录又 bind 到扩容后根盘。路径前缀不等于物理磁盘归属；移动、删除前必须检查最终目标。当前不需要重新搬盘、清理镜像或重建 503 个模板。
+
+### 实际做过的共享
+
+1. **Docker 层复用**：多个镜像可以引用相同的只读层；每个容器另有可写层。不是自动对所有不同镜像内部的相同文件做块去重。
+2. **Cube 原生 CoW**：当前 `cubecow` 从模板创建独立 VM 磁盘时使用 reflink/写时复制。取消额外跨模板去重，并不等于关闭 Cube 自身的 CoW。
+3. **额外跨模板 ext4 块去重**：自编批处理使用 `duperemove` 以 4 KiB 建索引，再调用 Linux `FIDEDUPERANGE`，由内核确认字节相同后共享物理块；操作前后校验整文件 SHA-256。处理对象是 ext4 磁盘文件，不是 VM RAM 页，不是 NUMA 共享池。
+
+额外去重的证据位于 `/mnt/clawbox-data/artifacts/swe-readiness-20261021/block-sharing-20261022/`，范围清单为相邻 `environment-catalog-20261022/sharing-scope.json`。核对到 32 份完成回执，覆盖 316 个不同 ext4 文件名，在缓存/Master 两处共 632 个文件路径，32 份均记录前后哈希一致。这些是操作历史，**不等于当前 503 个任务全部共享，也不等于所有相同块都已找到并共享**。
+
+这些 316 个缓存 ext4 的逻辑大小为 5.25–7.25 GiB，中位 5.5 GiB，合计约 1.77 TiB；不能将逻辑大小或逐文件 `st_blocks`/`du` 相加当作独占物理空间，共享块可能重复计数。批次期间磁盘空闲量还受其他写入/清理影响，不能把回执的空闲增量直接当精确净节省量。
+
+额外去重采用磁盘压力触发、最多 40 个文件一批的临时处理；“哪些块可以共享”按内容相同判定，“哪些模板被处理”受当时完成时间和批次选择影响。因此它不是全量统一的镜像准备规则。用户要求优先完成环境后已停止；核查发现旧 sudo 监督进程处于 stopped、Python 子进程 defunct，并非仍在扫描去重。保留已完成的共享；本次仅记录，不恢复处理，也不解除共享。
+
+### 性能实验的限制和下一步
+
+- **内容哈希一致只能证明内容不变，不能证明性能不变。** 共享块的写入涉及 CoW 分配和映射/引用计数更新；4 KiB 去重可能改变区段数量与布局，进而影响冷读、磁盘克隆和写入。方向和幅度尚未测量，不能把当前启动慢直接归因于去重。
+- 当前功能/并发验收可以证明所记录条件下环境能否运行；它不建立“与完全不共享一样快”的结论。部分模板去重、部分没有，是需要记录和控制的存储实验条件；不应直接把不同 trace 的耗时差归因于调度策略。
+- 正式策略性能对照应冻结相同模板集合、trace/会话分配、磁盘创建方式和共享状态，并控制缓存/运行顺序。若需量化额外去重影响，应选同一任务做独立、同配置、可重复的共享/不共享对照；区分“无跨模板去重但保留 Cube CoW”和“每台 VM 全物理复制”两个基线。
+- **未执行的性能验证**：上述共享/不共享 A/B；当前没有完成的实测结果或既有验收命令，不得引用环境审计或 1280 首轮运行代替。记录缺口，不自动展开新实验或批量重写模板。
+- 当前并发运行使用 OS-default、CPU 0–319 / NUMA0–3、1800 GiB VM 上限；NUMA2 从开始即可直接分配内存，未启用 LOCAL→共享池借用。磁盘块共享与此无关。
+
+以下接续节的并发数字是带时间戳的历史快照。本次更新只核对和记录环境/存储情况，不恢复已暂停 goal、不释放屏障、不改冻结实验配置；继续运行前应读取远端最新状态。
+
 ## 当前接续点：2026-10-22 20:14 中国时间（12:14 UTC）
 
 **环境准备已完成；1280 并发验收仍在后台运行，尚未通过，goal 未完成。** 用户要求停止当前 session 的等待，换 session 接续；不要重新构建环境、重新注册模板或另起重复实验。本节覆盖下文较早的运行状态；下文“全部 VM 已清理”只指旧实验，不适用于当前运行。
