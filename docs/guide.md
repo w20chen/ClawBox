@@ -160,34 +160,49 @@ bash scripts/clawbox experiment describe --help
 
 For predicted admission, `--prediction-mode runtime` uses an immutable trained
 knowledge base (KB) for the matching repository and Tool image.
-`--prediction-mode cold-start` uses one immutable ClawTune bootstrap KB for
-every workload repository; its
-artifact must declare `prediction_scope: clawtune_cold_start` and
-`repository: "*"`. The cold-start mode still verifies the KB hash, validated
-host-memory calibration, and membership in the artifact's exact
-`sandbox_identities` list, including template, image, VM size, and architecture.
-Use `scripts/export-cold-start-calibration.py` to create that artifact from a
-successful real-VM environment-calibration run covering the workload catalog;
-the command never changes the ClawTune bootstrap KB:
+`--prediction-mode cold-start` directly uses one immutable ClawTune seed
+directory for every workload repository. The seed manifest and every KB file
+are hash-verified. Its provenance must contain validated host-memory
+calibration and the exact `sandbox_identities` set, including template, image,
+VM size, and architecture.
+
+First export observations from a successful real-VM environment-calibration
+run that covers the workload catalog:
 
 ```bash
 python scripts/export-cold-start-calibration.py \
   --result <successful-arm-result.json> \
   --receipt <matching-qualification-receipt.json> \
   --workload <exact-workload-catalog.json> \
-  --seed-dir <validated-clawtune-bootstrap-v1-directory> \
-  --output <new-cold-start-artifact.json>
+  --output <new-clawbox-observations.json>
 ```
 
-The receipt must report successful qualification and verified cleanup. The
-exporter derives ClawTune's public, cross-repository Tool-class prior from
-trusted completed agent Tool calls in that qualification and records their
-count and source hashes. It keeps repository and exact-command identities out
-of that public prior, retains the bootstrap Lattice snapshot, and writes a
-matching `.kb.json` next to the requested output. A calibration with no valid
-Cube environment-memory labels is rejected; unavailable measurements are not
-converted to zero. Changing the mode or artifact requires a new run ID, not an
-image rebuild.
+Then, in the matching ClawTune checkout, build a new seed; the output directory
+must not already exist:
+
+```bash
+python scripts/build_clawbox_seed.py \
+  --observations <new-clawbox-observations.json> \
+  --base-seed seeds/bootstrap-v1 \
+  --output seeds/bootstrap-v2
+```
+
+Set `resources.prediction_artifact` to that `bootstrap-v2` directory. ClawBox
+exports only validated call/clause evidence and calibration; ClawTune owns KB
+training and seed publication. The builder retains the base Lattice history,
+adds Cube guest-memory clause labels, and builds public ClauseKB and ToolKB
+layers. Cold-start admission selects guest extra-memory from LatticeKB first,
+then its sampled-RSS proxy, then ToolKB guest extra-memory and its sampled-RSS
+proxy. Each proxy retains its original target and is converted to host demand
+only through its own paired calibration; it is never relabeled as guest extra
+memory. For a multi-clause command, Lattice memory and RSS predictions may use
+the clauses that have evidence even when another retained clause is missing;
+the prediction records `partial_clause_evidence` and its covered-clause count.
+Other resource targets still require complete clause evidence. The ToolKB
+public layer omits repository and exact-command identity.
+Missing measurements remain unavailable and are never converted to zero.
+Rebuilding the seed or changing the configured directory requires a new run ID
+and qualification, but not an image rebuild or host apply.
 
 ### Compare fixed memory charges
 

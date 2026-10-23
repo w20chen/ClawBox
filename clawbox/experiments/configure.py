@@ -564,9 +564,13 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
     if artifact is None:
         return {"error": "prediction artifact is not configured"}
     if spec.resources.prediction_mode in {"runtime", "cold-start"}:
-        return {"path": str(artifact), "mode": spec.resources.prediction_mode,
-                "kb_path": str(Path(artifact).with_suffix(".kb.json")),
-                "reservation_scale": spec.resources.prediction_reservation_scale}
+        result = {"path": str(artifact), "mode": spec.resources.prediction_mode,
+                  "reservation_scale": spec.resources.prediction_reservation_scale}
+        if spec.resources.prediction_mode == "runtime":
+            result["kb_path"] = str(Path(artifact).with_suffix(".kb.json"))
+        else:
+            result["seed_manifest"] = str(Path(artifact) / "manifest.json")
+        return result
     try:
         payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

@@ -22,6 +22,21 @@ _IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {
 _IMMUTABLE_PREDICTION_CACHE_LOCK = Lock()
 
 
+def prediction_input_paths(path: Path, mode: str) -> list[Path]:
+    """Return the immutable files that define one prediction input."""
+    if mode == "cold-start":
+        from clawbox.clawtune_integration import use_clawtune
+        use_clawtune()
+        from clawtune_kb import validate_seed
+        manifest = validate_seed(path)
+        return [path / "manifest.json", *(
+            path / name for name in sorted(manifest["snapshots"])
+        )]
+    if mode == "runtime":
+        return [path, path.with_suffix(".kb.json")]
+    return [path]
+
+
 def _immutable_artifact(path: Path) -> tuple[str, dict[str, Any]]:
     data = path.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
@@ -41,47 +56,80 @@ class PredictionUnavailable(RuntimeError):
     """Raised when a managed Tool call has no command-specific prediction."""
 
 
-def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert ClawTune's tool-call memory increment to a reservation."""
+def _clawtune_memory_signal(
+    prediction: dict[str, Any] | None,
+    *,
+    target_name: str,
+    measurement: str | None,
+    semantics: str,
+) -> dict[str, Any]:
+    """Project one named ClawTune memory signal without changing its meaning."""
     if not isinstance(prediction, dict):
         raise PredictionUnavailable("ClawTune call prediction is missing")
     if (prediction.get("schema_version") != "call_load.v2"
             or prediction.get("scope") != "tool_call"):
         raise PredictionUnavailable("ClawTune call prediction has an incompatible schema")
-    measurement = prediction.get("memory_measurement")
-    if measurement != "guest_memtotal_minus_memavailable":
+    query_measurement = prediction.get("memory_measurement")
+    if measurement is not None and query_measurement != measurement:
         raise PredictionUnavailable(
-            "ClawTune memory prediction does not use the Cube guest environment measurement"
+            f"ClawTune memory prediction uses {query_measurement!r}, not {measurement!r}"
         )
     targets = prediction.get("targets")
-    target = targets.get("memory_extra_peak_bytes") if isinstance(targets, dict) else None
+    target = targets.get(target_name) if isinstance(targets, dict) else None
     if isinstance(target, dict) and target.get("backend") not in {"lattice", "runtime"}:
         raise PredictionUnavailable("ClawBox scheduling requires a LatticeKB or ToolKB memory prediction")
+    definitions = {
+        "memory_extra_peak_bytes": "environment_memory_peak_minus_baseline",
+        "sampled_peak_rss_bytes": "ebpf_sampled_distinct_mm_rss_peak",
+    }
+    definition = definitions.get(target_name)
+    if definition is None:
+        raise PredictionUnavailable(f"unsupported ClawTune memory target {target_name}")
     if (not isinstance(target, dict) or target.get("status") != "available"
             or target.get("unit") != "bytes"
-            or target.get("metric_definition") != "environment_memory_peak_minus_baseline"):
+            or target.get("metric_definition") != definition):
         reason = target.get("unavailable_reason") if isinstance(target, dict) else "missing target"
         raise PredictionUnavailable(
-            f"ClawTune extra memory peak is unavailable ({reason}); "
-            "provide Cube environment-memory observations or select a fixed/capacity baseline"
+            f"ClawTune {target_name} is unavailable ({reason})"
         )
     value = target.get("p50")
     if isinstance(value, bool) or not isinstance(value, (int, float)) \
             or not math.isfinite(value) or value < 0:
-        raise PredictionUnavailable("ClawTune extra memory peak has no valid estimate")
+        raise PredictionUnavailable(f"ClawTune {target_name} has no valid estimate")
     return {
         "prediction_source": f"clawtune_{target.get('backend')}_p50",
         "prediction_quantile": 0.5,
-        "admission_prediction_target": "environment_memory_peak_minus_baseline",
+        "prediction_signal_target": target_name,
+        "prediction_signal_definition": definition,
+        "prediction_semantics": semantics,
         # Preserve the canonical prediction for the ClawTune trace writer;
         # the derived fields below are the admission-facing projection.
         "call_prediction": prediction,
-        "predicted_incremental_memory_mib": value / (1024 * 1024),
-        "clawtune_memory_extra_peak_bytes": value,
+        "predicted_signal_memory_mib": value / (1024 * 1024),
+        "clawtune_memory_signal_bytes": value,
         "clawtune_memory_backend": target.get("backend"),
         "clawtune_memory_method": target.get("method"),
         "clawtune_memory_sample_count": target.get("sample_count"),
-        "clawtune_memory_measurement": measurement,
+        "clawtune_query_memory_measurement": query_measurement,
+        "clawtune_memory_measurement": (
+            query_measurement if target_name.startswith("memory_") else definition
+        ),
+    }
+
+
+def clawtune_extra_peak(prediction: dict[str, Any] | None) -> dict[str, Any]:
+    """Convert ClawTune's exact Cube guest-memory increment to a reservation."""
+    result = _clawtune_memory_signal(
+        prediction,
+        target_name="memory_extra_peak_bytes",
+        measurement="guest_memtotal_minus_memavailable",
+        semantics="exact",
+    )
+    return {
+        **result,
+        "admission_prediction_target": "environment_memory_peak_minus_baseline",
+        "predicted_incremental_memory_mib": result["predicted_signal_memory_mib"],
+        "clawtune_memory_extra_peak_bytes": result["clawtune_memory_signal_bytes"],
     }
 
 
@@ -108,6 +156,49 @@ def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = Non
             raise PredictionUnavailable(f"{name} prediction backend mismatch")
         return {**result, "fallback_level": name, "unavailable_models": missing}
     raise PredictionUnavailable(f"No P50 memory estimate (short duration does not establish zero memory): {missing}")
+
+
+def select_cold_start_p50(
+    models: dict[str, Any], policy: list[dict[str, Any]],
+    calibrations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply the seed-declared Lattice-first memory fallback policy."""
+    missing = {}
+    for row in policy:
+        if not isinstance(row, dict):
+            raise PredictionUnavailable("cold-start seed has an invalid fallback policy")
+        model_name = row.get("model")
+        level = row.get("level")
+        target = row.get("target")
+        semantics = row.get("semantics")
+        calibration_key = row.get("host_calibration")
+        if not all(isinstance(value, str) and value for value in (
+            model_name, level, target, semantics, calibration_key,
+        )):
+            raise PredictionUnavailable("cold-start seed has an incomplete fallback entry")
+        if calibration_key not in calibrations:
+            missing[level] = f"missing host calibration {calibration_key}"
+            continue
+        try:
+            result = _clawtune_memory_signal(
+                models.get(model_name), target_name=target,
+                measurement=(row.get("measurement") if target.startswith("memory_") else None),
+                semantics=semantics,
+            )
+        except PredictionUnavailable as exc:
+            missing[level] = str(exc)
+            continue
+        expected_backend = "lattice" if model_name == "lattice" else "runtime"
+        if result["clawtune_memory_backend"] != expected_backend:
+            raise PredictionUnavailable(f"{level} prediction backend mismatch")
+        return {
+            **result,
+            "fallback_level": level,
+            "fallback_model": model_name,
+            "host_calibration_key": calibration_key,
+            "unavailable_models": missing,
+        }
+    raise PredictionUnavailable(f"No cold-start P50 memory estimate: {missing}")
 
 
 class FrozenPredictionProvider:
@@ -257,9 +348,13 @@ class P50PredictionProvider(FrozenPredictionProvider):
                 ),
                 evaluation_sandbox_identity=self.evaluation_sandbox_identity,
             )
+        primary_level = (
+            self.admission_prediction_policy[0]["level"]
+            if hasattr(self, "admission_prediction_policy") else "lattice"
+        )
         result["observed_fallback_rate"] = (
-            sum(row.get("fallback_level") != "lattice" for row in selected) / len(selected)
-            if selected else None
+            sum(row.get("fallback_level") != primary_level for row in selected)
+            / len(selected) if selected else None
         )
         return result
 
@@ -379,6 +474,31 @@ class RuntimePredictionProvider(P50PredictionProvider):
     def manifest(self):
         return {}
 
+    def _prediction_models(self, command: str, query_ts: float) -> dict[str, Any]:
+        from tool_resource.runtime_kb import ToolCallQuery
+        from clawbox.tuning.clawtune import predict_native_call_load_models
+        query = ToolCallQuery(
+            repo=self.repository, tool_name="exec", command=command,
+            ts_start=query_ts,
+            memory_measurement="guest_memtotal_minus_memavailable",
+        )
+        result = predict_native_call_load_models(
+            self.runtime, query, lattice=self.lattice,
+        )
+        models = {
+            key: result[key].model_dump(mode="json")
+            for key in ("lattice", "tool")
+        }
+        tool_class_query = ToolCallQuery(
+            repo=self.repository, tool_name="exec", command=None,
+            ts_start=query_ts,
+            memory_measurement="guest_memtotal_minus_memavailable",
+        )
+        models["tool_class"] = predict_native_call_load_models(
+            self.runtime, tool_class_query, lattice=self.lattice,
+        )["tool"].model_dump(mode="json")
+        return models
+
     def resolve(self, command, runtime_metadata):
         if not isinstance(command, str) or not command.strip():
             raise PredictionUnavailable("runtime prediction requires the actual Tool command")
@@ -393,22 +513,8 @@ class RuntimePredictionProvider(P50PredictionProvider):
                 **deepcopy(cached),
                 "session_runtime_metadata": dict(runtime_metadata),
             }
-        from tool_resource.runtime_kb import ToolCallQuery
-        from clawbox.tuning.clawtune import predict_native_call_load_models
-        query = ToolCallQuery(repo=self.repository, tool_name="exec", command=command,
-                             ts_start=time.time(), memory_measurement="guest_memtotal_minus_memavailable")
         with self._query_lock:
-            result = predict_native_call_load_models(self.runtime, query, lattice=self.lattice)
-            models = {key: result[key].model_dump(mode="json") for key in ("lattice", "tool")}
-            tool_class_query = ToolCallQuery(
-                repo=self.repository, tool_name="exec", command=None,
-                ts_start=query.ts_start,
-                memory_measurement="guest_memtotal_minus_memavailable",
-            )
-            tool_class = predict_native_call_load_models(
-                self.runtime, tool_class_query, lattice=self.lattice,
-            )["tool"]
-            models["tool_class"] = tool_class.model_dump(mode="json")
+            models = self._prediction_models(command, time.time())
             prediction = self._metadata({"models": models}, command, digest)
         with _IMMUTABLE_PREDICTION_CACHE_LOCK:
             prediction = _IMMUTABLE_PREDICTION_CACHE.setdefault(
@@ -424,11 +530,121 @@ class RuntimePredictionProvider(P50PredictionProvider):
 
 
 class ColdStartPredictionProvider(RuntimePredictionProvider):
-    """Query one immutable ClawTune bootstrap KB for any trace repository."""
+    """Query one standard immutable ClawTune seed for any trace repository."""
 
-    def __init__(self, path: Path, **kwargs):
-        super().__init__(path, global_cold_start=True, **kwargs)
+    def __init__(self, path: Path, *, repository: str,
+                 sandbox_identity: dict | None = None) -> None:
+        from clawbox.clawtune_integration import use_clawtune
+        use_clawtune()
+        from clawtune_kb import validate_seed
+        from tool_time.lattice_kb import LatticeTimeKB
+        from tool_resource.runtime_kb import RuntimeToolResourceKB
+
+        path = path.resolve(strict=True)
+        manifest = validate_seed(path)
+        provenance = manifest.get("provenance") or {}
+        if provenance.get("kind") != "clawbox-qualified-observation-import":
+            raise ValueError(
+                "cold-start prediction requires a ClawTune seed built from "
+                "validated ClawBox observations"
+            )
+        admission = provenance.get("admission") or {}
+        identities = admission.get("sandbox_identities")
+        calibrations = admission.get("host_calibrations")
+        policy = provenance.get("admission_prediction_policy")
+        if (not isinstance(identities, list) or not identities
+                or not isinstance(calibrations, dict) or not calibrations
+                or not isinstance(policy, list) or not policy):
+            raise ValueError("ClawTune seed lacks ClawBox admission provenance")
+        if sandbox_identity is not None and sandbox_identity not in identities:
+            raise ValueError("P50 training and evaluation Tool environments differ")
+
+        manifest_bytes = (path / "manifest.json").read_bytes()
+        seed_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        self.path = path
+        self.repository = repository
         self.prediction_source = "runtime_clawtune_cold_start_kb"
+        self.sha256 = seed_sha256
+        self.payload = {
+            **manifest,
+            "sandbox_identities": identities,
+            "sandbox_identities_sha256": admission.get(
+                "sandbox_identities_sha256"
+            ),
+            "kb_sha256": seed_sha256,
+        }
+        self._by_digest = {}
+        self._fallback_counts = {}
+        self._lock = Lock()
+        self.evaluation_sandbox_identity = sandbox_identity
+        self.global_cold_start = True
+        self.host_calibrations = calibrations
+        self.admission_prediction_policy = policy
+
+        cache_key = (str(path), seed_sha256)
+        with _IMMUTABLE_KB_CACHE_LOCK:
+            cached = _IMMUTABLE_KB_CACHE.get(cache_key)
+            if cached is None:
+                try:
+                    lattice = LatticeTimeKB.from_json_obj(json.loads(
+                        (path / "clause-lattice-time-kb.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ))
+                    runtime = RuntimeToolResourceKB.from_json_obj(json.loads(
+                        (path / "runtime-tool-resource-kb.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ))
+                    lattice.freeze()
+                    runtime.freeze()
+                except (KeyError, ValueError) as exc:
+                    raise ValueError(
+                        "cold-start seed cannot be loaded by the selected "
+                        f"ClawTune: {exc}"
+                    ) from exc
+                cached = (lattice, runtime)
+                _IMMUTABLE_KB_CACHE[cache_key] = cached
+        self.lattice, self.runtime = cached
+        self._query_lock = Lock()
+
+    def _metadata(self, item: dict, command: str, digest: str) -> dict:
+        if digest != command_sha256(command):
+            raise ValueError("P50 artifact command digest mismatch")
+        selected = select_cold_start_p50(
+            item.get("models") or {}, self.admission_prediction_policy,
+            self.host_calibrations,
+        )
+        calibration = self.host_calibrations[selected["host_calibration_key"]]
+        if (calibration.get("target") != "host_cgroup_memory_current_increment"
+                or calibration.get("sample_count", 0) <= 0):
+            raise PredictionUnavailable("cold-start signal lacks measured host calibration")
+        scale, offset = calibration.get("scale"), calibration.get("offset_bytes")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) or value < 0 for value in (scale, offset)):
+            raise PredictionUnavailable("invalid cold-start host calibration")
+        signal_mib = selected["predicted_signal_memory_mib"]
+        exact_guest = (
+            selected["prediction_semantics"] == "exact"
+            and selected["prediction_signal_target"] == "memory_extra_peak_bytes"
+            and selected["clawtune_memory_measurement"]
+            == "guest_memtotal_minus_memavailable"
+        )
+        return {
+            **selected,
+            "predicted_guest_extra_memory_mib": signal_mib if exact_guest else None,
+            "predicted_incremental_memory_mib": (
+                signal_mib * scale + offset / 1024**2
+            ),
+            "admission_prediction_target": "host_cgroup_memory_current_increment",
+            "host_calibration": calibration,
+            "model_prediction_source": selected["prediction_source"],
+            "prediction_source": self.prediction_source,
+            "raw_command_sha256": digest,
+            "canonical_prediction_key": digest,
+            "models": item.get("models"),
+            "kb_sha256": self.payload.get("kb_sha256"),
+        }
 
 
 def prediction_provider_type(mode: str):

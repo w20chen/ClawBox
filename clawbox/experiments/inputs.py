@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
-from .prediction import prediction_provider_type
+from .prediction import prediction_input_paths, prediction_provider_type
 from clawbox.replay.trace import load_trace
 
 
@@ -114,7 +114,7 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
                     missing = [c for c in commands if command_sha256(c) not in provider.manifest]
                     if missing:
                         raise ValueError(f"P50 artifact missing {len(missing)} replay commands")
-        files.append(str(path))
-        if spec.resources.prediction_mode in {"runtime", "cold-start"}:
-            files.append(str(path.with_suffix(".kb.json")))
+        files.extend(str(value) for value in prediction_input_paths(
+            path, spec.resources.prediction_mode,
+        ))
     return {"traces": traces, "prediction_files": files}

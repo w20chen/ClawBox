@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Export a multi-environment ClawTune cold-start admission artifact."""
+"""Export validated ClawBox observations for a ClawTune cold-start seed."""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import hashlib
 import json
 import math
@@ -25,30 +26,28 @@ def quantile(values: list[float], q: float) -> float:
 
 
 def export(result_path: Path, receipt_path: Path, workload_path: Path,
-           seed_dir: Path, output: Path) -> dict:
+           output: Path) -> dict:
     from clawbox.clawtune_integration import use_clawtune
     from clawbox.tuning.__main__ import find_run_datasets
     from clawbox.tuning.clawtune import observation_to_completed_call
     from clawbox.tuning.dataset import build_joined_dataset
+    from clawbox.tuning.native import native_clause_observations
 
     use_clawtune()
-    from tool_resource.runtime_kb import RuntimeToolResourceKB
+    from tool_resource.sdk import _validate_artifact as validate_artifact
 
     result_path = result_path.resolve()
     receipt_path = receipt_path.resolve()
     workload_path = workload_path.resolve()
-    seed_dir = seed_dir.resolve()
     output = output.resolve()
-    if output.exists() or output.with_suffix(".kb.json").exists():
-        raise ValueError("output artifact or matching KB already exists; use a new path")
+    if output.exists():
+        raise ValueError("output observation bundle already exists; use a new path")
 
     result_bytes = result_path.read_bytes()
     result = json.loads(result_bytes)
     receipt_bytes = receipt_path.read_bytes()
     receipt = json.loads(receipt_bytes)
     workload = json.loads(workload_path.read_text(encoding="utf-8"))
-    manifest_path = seed_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if result.get("status") != "succeeded":
         raise ValueError("environment calibration result did not succeed")
     arm_id = (result.get("arm") or {}).get("arm_id")
@@ -63,10 +62,6 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
         raise ValueError("environment calibration did not cleanly complete every workload case")
     if correctness.get("native_tool_telemetry_loss_total") != 0:
         raise ValueError("environment calibration has Tool telemetry loss")
-    if (manifest.get("schema") != "clawtune.seed.v1"
-            or not manifest["provenance"]["validation"]["passed"]):
-        raise ValueError("ClawTune cold-start seed is not validated")
-
     tasks = {task["case_id"]: task for task in workload["tasks"]}
     assignments = result["performance"]["session_trace_assignment"]
     covered_cases = {row["case_id"] for row in assignments}
@@ -127,6 +122,7 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
         if row.get("execution_scope") == "agent-tool" and row.get("operation") == "exec"
     }
     completed_calls = []
+    clause_observations = []
     observed_execution_ids = set()
     artifact_root = result_path.parent.parent
     for traces, bridge, resources in find_run_datasets(artifact_root):
@@ -134,47 +130,81 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
         for item in trusted:
             host_row = agent_rows.get(item.execution_id)
             if (host_row is None or item.execution_id in observed_execution_ids
-                    or not item.command or not item.complete or item.exit_code != 0):
+                    or item.cgroup is None or not item.command
+                    or not item.complete or item.exit_code != 0):
                 continue
             case_id = session_cases.get(host_row.get("session_id"))
             task = tasks.get(case_id)
             if task is None or not task.get("repository"):
                 raise ValueError(f"{item.execution_id}: cannot resolve workload repository")
-            observed_execution_ids.add(item.execution_id)
-            completed_calls.append(
-                observation_to_completed_call(item, task["repository"])
+            cgroup_path = resources / f"cgroup-resource-{item.execution_id}.json"
+            clause_path = resources / f"clause-telemetry-{item.execution_id}.json"
+            if not cgroup_path.is_file() or not clause_path.is_file():
+                raise ValueError(
+                    f"{item.execution_id}: trusted observation is missing its raw artifacts"
+                )
+            raw_cgroup = json.loads(cgroup_path.read_text(encoding="utf-8"))
+            raw_clause = json.loads(clause_path.read_text(encoding="utf-8"))
+            validate_artifact(
+                clause_path, raw_clause, expected_repo=task["repository"]
             )
+            matching_calls = [
+                call for call in raw_clause.get("calls", [])
+                if call.get("tool_call_id") == item.execution_id
+                and call.get("eligible_for_kb") is True
+            ]
+            if len(matching_calls) != 1:
+                raise ValueError(
+                    f"{item.execution_id}: expected one eligible native clause call, "
+                    f"found {len(matching_calls)}"
+                )
+            observed_execution_ids.add(item.execution_id)
+            host_increment = host_row.get("host_cgroup_execution_increment_bytes")
+            if (isinstance(host_increment, bool)
+                    or not isinstance(host_increment, (int, float))
+                    or not math.isfinite(host_increment) or host_increment < 0):
+                host_increment = None
+            completed_calls.append({
+                "execution_id": item.execution_id,
+                "host_cgroup_execution_increment_bytes": host_increment,
+                "call": asdict(observation_to_completed_call(item, task["repository"])),
+            })
+            for index, observation in enumerate(native_clause_observations(
+                task["repository"], matching_calls[0], raw_cgroup,
+            )):
+                clause_observations.append({
+                    "execution_id": item.execution_id,
+                    "clause_index": index,
+                    "observation": asdict(observation),
+                })
     if not completed_calls:
         raise ValueError("calibration result has no trusted completed agent Tool calls")
-    memory_calls = [call for call in completed_calls if call.memory_eligible]
+    memory_calls = [row for row in completed_calls if row["call"]["memory_eligible"]]
     if not memory_calls:
         raise ValueError("calibration result has no valid Cube environment-memory labels")
-
-    # ClawTune's shipped ToolKB intentionally has no cross-repository public
-    # prior.  Fit its official immutable public layer from this workload-wide
-    # qualification so unseen commands have measured evidence rather than an
-    # invented zero.  Repository and exact-command identities are deliberately
-    # omitted from this layer; the Full run remains a cold-command evaluation.
-    runtime = RuntimeToolResourceKB.fit_public(completed_calls)
-    runtime.freeze()
-    tool = runtime.to_json_obj()
-    RuntimeToolResourceKB.from_json_obj(tool)
-    lattice = json.loads(
-        (seed_dir / "clause-lattice-time-kb.json").read_text(encoding="utf-8")
-    )
-    kb_bytes = json.dumps({"lattice": lattice, "tool": tool}, sort_keys=True).encode()
+    memory_clauses = [
+        row for row in clause_observations
+        if row["observation"]["memory_eligible"]
+    ]
+    if not memory_clauses:
+        raise ValueError("calibration result has no valid Cube clause-memory labels")
+    completed_calls.sort(key=lambda row: row["execution_id"])
+    clause_observations.sort(key=lambda row: (
+        row["execution_id"], row["clause_index"],
+        row["observation"]["ts_start"], row["observation"]["ts_end"],
+    ))
     identities_digest = hashlib.sha256(
         json.dumps(unique_identities, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     p99_maintenance = quantile(maintenance_host, 0.99)
     payload = {
-        "schema": "clawbox_prediction_v2",
-        "repository": "*",
-        "prediction_scope": "clawtune_cold_start",
-        "training_validated": True,
-        "training_validation": {
-            "cold_start_seed_manifest": str(manifest_path),
-            "cold_start_seed_validation": manifest["provenance"]["validation"],
+        "schema": "clawtune.seed_observations.v1",
+        "producer": {
+            "name": "ClawBox",
+            "clawtune_revision": next(iter(clawtune_revisions)),
+            "exporter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        },
+        "validation": {
             "environment_calibration_result": str(result_path),
             "environment_calibration_result_sha256": hashlib.sha256(result_bytes).hexdigest(),
             "qualification_receipt": str(receipt_path),
@@ -187,39 +217,44 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
             "public_prior_scope": "cross_repository_tool_class",
             "public_prior_completed_call_count": len(completed_calls),
             "public_prior_memory_label_count": len(memory_calls),
-            "public_prior_repository_count": len({call.repo for call in completed_calls}),
+            "lattice_clause_observation_count": len(clause_observations),
+            "lattice_memory_label_count": len(memory_clauses),
+            "public_prior_repository_count": len({
+                row["call"]["repo"] for row in completed_calls
+            }),
             "public_prior_execution_ids_sha256": hashlib.sha256(
                 "\n".join(sorted(observed_execution_ids)).encode()
             ).hexdigest(),
-            "exporter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         },
-        "sandbox_identities": unique_identities,
-        "sandbox_identities_sha256": identities_digest,
-        "host_calibration": host_calibration,
-        "non_command_tool_memory_calibration": {
-            "target": "host_cgroup_memory_current_increment",
-            "sample_count": len(maintenance_host),
-            "p90_bytes": quantile(maintenance_host, 0.9),
-            "p99_bytes": p99_maintenance,
-            "recommended_mib": max(1, math.ceil(p99_maintenance / MIB)),
+        "admission": {
+            "sandbox_identities": unique_identities,
+            "sandbox_identities_sha256": identities_digest,
+            "host_calibration": host_calibration,
+            "non_command_tool_memory_calibration": {
+                "target": "host_cgroup_memory_current_increment",
+                "sample_count": len(maintenance_host),
+                "p90_bytes": quantile(maintenance_host, 0.9),
+                "p99_bytes": p99_maintenance,
+                "recommended_mib": max(1, math.ceil(p99_maintenance / MIB)),
+            },
         },
-        "kb_sha256": hashlib.sha256(kb_bytes).hexdigest(),
-        "clawtune_revision": next(iter(clawtune_revisions)),
-        "cold_start_seed_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        "tool_kb_source": "validated_heterogeneous_qualification_public_prior",
-        "commands": [],
+        "observations": {
+            "completed_calls": completed_calls,
+            "clauses": clause_observations,
+        },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.with_suffix(".kb.json").write_bytes(kb_bytes)
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return {
-        "artifact": str(output),
-        "artifact_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-        "kb": str(output.with_suffix(".kb.json")),
-        "kb_sha256": payload["kb_sha256"],
+        "observation_bundle": str(output),
+        "observation_bundle_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         "identity_count": len(unique_identities),
+        "completed_call_count": len(completed_calls),
+        "call_memory_label_count": len(memory_calls),
+        "clause_observation_count": len(clause_observations),
+        "clause_memory_label_count": len(memory_clauses),
         "host_calibration": host_calibration,
-        "non_command_tool_memory_calibration": payload[
+        "non_command_tool_memory_calibration": payload["admission"][
             "non_command_tool_memory_calibration"
         ],
     }
@@ -233,13 +268,11 @@ def main() -> int:
                         help="matching successful qualification receipt with verified cleanup")
     parser.add_argument("--workload", required=True, type=Path,
                         help="workload catalog whose exact Tool identities were measured")
-    parser.add_argument("--seed-dir", required=True, type=Path,
-                        help="validated ClawTune bootstrap-v1 directory")
     parser.add_argument("--output", required=True, type=Path,
-                        help="new artifact .json path; a sibling .kb.json is also written")
+                        help="new ClawTune observation-bundle JSON path")
     args = parser.parse_args()
     print(json.dumps(export(
-        args.result, args.receipt, args.workload, args.seed_dir, args.output,
+        args.result, args.receipt, args.workload, args.output,
     ), indent=2))
     return 0
 

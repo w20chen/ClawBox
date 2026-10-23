@@ -24,6 +24,7 @@ from clawbox.replay.trace import load_trace
 
 from .results import RunStatus
 from .inputs import validate_inputs
+from .prediction import prediction_input_paths
 from .snapshot_pool import WarmSnapshotPool
 from .numa_borrow import SandboxNumaBorrower, read_numa_lru_bytes
 from .spec import (
@@ -113,9 +114,7 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
             )
         ):
             path = Path(spec.resources.prediction_artifact)
-            paths = [path]
-            if spec.resources.prediction_mode in {"runtime", "cold-start"}:
-                paths.append(path.with_suffix(".kb.json"))
+            paths = prediction_input_paths(path, spec.resources.prediction_mode)
             prediction_files = [
                 {
                     "path": str(value),

@@ -2,7 +2,10 @@ import json
 import pytest
 import hashlib
 from types import SimpleNamespace
-from clawbox.experiments.prediction import select_p50, P50PredictionProvider, PredictionUnavailable
+from clawbox.experiments.prediction import (
+    select_cold_start_p50, select_p50, P50PredictionProvider,
+    PredictionUnavailable,
+)
 
 
 def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path, monkeypatch):
@@ -54,23 +57,38 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
 def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tmp_path):
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
+    from clawtune_kb import FILES, create_seed
     from tool_time.lattice_kb import LatticeTimeKB
-    from tool_resource.runtime_kb import RuntimeToolResourceKB
-    from clawbox.experiments.prediction import ColdStartPredictionProvider
-    path = tmp_path / 'cold-start.json'
-    kb = json.dumps({'lattice': LatticeTimeKB().to_json_obj(),
-                     'tool': RuntimeToolResourceKB().to_json_obj()}).encode()
-    path.with_suffix('.kb.json').write_bytes(kb)
+    from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB
+    from clawbox.experiments.prediction import (
+        ColdStartPredictionProvider, prediction_input_paths,
+    )
+    path = tmp_path / 'bootstrap-v2'
     identity = {'template_id': 'training', 'image_digest': 'sha256:image',
                 'vcpu': 2, 'memory_mib': 4096, 'architecture': 'arm64'}
     second_identity = {**identity, 'template_id': 'second', 'image_digest': 'sha256:second'}
-    path.write_text(json.dumps({'schema': 'clawbox_prediction_v2', 'repository': '*',
-        'prediction_scope': 'clawtune_cold_start', 'training_validated': True,
-        'kb_sha256': hashlib.sha256(kb).hexdigest(),
-        'sandbox_identities': [identity, second_identity],
-        'sandbox_identities_sha256': 'calibrated-environment-set',
-        'host_calibration': {'target': 'host_cgroup_memory_current_increment',
-                            'sample_count': 3, 'scale': 2, 'offset_bytes': 0}}))
+    create_seed(path, dict(zip(FILES, (
+        ClauseResourceKB().to_json_obj(), RuntimeToolResourceKB().to_json_obj(),
+        LatticeTimeKB().to_json_obj(),
+    ))), provenance={
+        'kind': 'clawbox-qualified-observation-import',
+        'admission': {
+            'sandbox_identities': [identity, second_identity],
+            'sandbox_identities_sha256': 'calibrated-environment-set',
+            'host_calibrations': {
+                'guest': {
+                    'target': 'host_cgroup_memory_current_increment',
+                    'sample_count': 3, 'scale': 2, 'offset_bytes': 0,
+                },
+            },
+        },
+        'admission_prediction_policy': [{
+            'model': 'lattice', 'level': 'lattice_guest_extra',
+            'target': 'memory_extra_peak_bytes',
+            'measurement': 'guest_memtotal_minus_memavailable',
+            'semantics': 'exact', 'host_calibration': 'guest',
+        }],
+    })
     resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
     provider = ColdStartPredictionProvider(path, repository='another/repo',
                                            sandbox_identity=identity)
@@ -84,6 +102,10 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tm
     with pytest.raises(ValueError, match='environments differ'):
         ColdStartPredictionProvider(path, repository='another/repo',
                                     sandbox_identity={**resized, 'image_digest': 'sha256:other'})
+    assert prediction_input_paths(path, 'cold-start') == [
+        path / 'manifest.json',
+        *(path / name for name in sorted(FILES)),
+    ]
 
 
 def test_reservation_scale_does_not_change_model_prediction():
@@ -134,11 +156,56 @@ def model(backend, value):
               'p50': value, 'p90': value*10, 'sample_count': 3}}}
 
 
+def rss_model(backend, value):
+    result = model(backend, value)
+    result['targets']['memory_extra_peak_bytes'] = {
+        'backend': backend, 'status': 'unavailable', 'unit': 'bytes',
+        'metric_definition': 'environment_memory_peak_minus_baseline',
+        'unavailable_reason': 'missing_clause_evidence',
+    }
+    result['targets']['sampled_peak_rss_bytes'] = {
+        'backend': backend, 'status': 'available', 'unit': 'bytes',
+        'metric_definition': 'ebpf_sampled_distinct_mm_rss_peak',
+        'p50': value, 'p90': value * 10, 'sample_count': 3,
+    }
+    return result
+
+
 def test_p50_prefers_lattice_even_when_toolkb_is_smaller():
     result = select_p50({'lattice': model('lattice', 2**20), 'tool': model('runtime', 0)})
     assert result['predicted_incremental_memory_mib'] == 1
     assert result['fallback_level'] == 'lattice'
     assert result['prediction_quantile'] == .5
+
+
+def test_cold_start_uses_lattice_rss_proxy_before_exact_tool_memory():
+    policy = [
+        {'model': 'lattice', 'level': 'lattice_guest_extra',
+         'target': 'memory_extra_peak_bytes',
+         'measurement': 'guest_memtotal_minus_memavailable',
+         'semantics': 'exact', 'host_calibration': 'guest'},
+        {'model': 'lattice', 'level': 'lattice_rss_proxy',
+         'target': 'sampled_peak_rss_bytes',
+         'measurement': 'ebpf_sampled_distinct_mm_rss_peak',
+         'semantics': 'proxy', 'host_calibration': 'lattice_rss'},
+        {'model': 'tool', 'level': 'tool_guest_extra',
+         'target': 'memory_extra_peak_bytes',
+         'measurement': 'guest_memtotal_minus_memavailable',
+         'semantics': 'exact', 'host_calibration': 'guest'},
+    ]
+    calibrations = {
+        key: {'target': 'host_cgroup_memory_current_increment',
+              'sample_count': 3, 'scale': 1, 'offset_bytes': 0}
+        for key in ('guest', 'lattice_rss')
+    }
+    selected = select_cold_start_p50({
+        'lattice': rss_model('lattice', 5 * 2**20),
+        'tool': model('runtime', 1 * 2**20),
+    }, policy, calibrations)
+    assert selected['fallback_level'] == 'lattice_rss_proxy'
+    assert selected['prediction_semantics'] == 'proxy'
+    assert selected['prediction_signal_target'] == 'sampled_peak_rss_bytes'
+    assert selected['predicted_signal_memory_mib'] == 5
 
 
 def test_toolkb_fallback_keeps_measurement_contract():
