@@ -56,6 +56,36 @@ def test_tool_bootstrap_uses_the_same_python_hash_seed_for_record_and_replay():
     assert "PYTHONHASHSEED=0 " in command
 
 
+def test_tool_bootstrap_installs_only_the_configured_apt_proxy() -> None:
+    default = native_tool_bridge_setup_command()
+    assert "01clawbox-package-cache" not in default
+
+    configured = native_tool_bridge_setup_command(
+        apt_cache_proxy_url="http://193.124.7.2:3142",
+    )
+    assert "/etc/apt/apt.conf.d/01clawbox-package-cache" in configured
+    assert 'Acquire::http::Proxy "http://193.124.7.2:3142";' in configured
+    assert "http_proxy=" not in configured
+    assert "https_proxy=" not in configured
+
+
+def test_tool_bridge_inherits_only_the_configured_pypi_index() -> None:
+    default = native_tool_bridge_setup_command()
+    assert "PIP_INDEX_URL=" not in default
+    assert "PIP_TRUSTED_HOST=" not in default
+
+    configured = native_tool_bridge_setup_command(
+        pypi_cache_index_url="http://193.124.7.2:3141/root/pypi/+simple/",
+    )
+    assert (
+        "PIP_INDEX_URL=http://193.124.7.2:3141/root/pypi/+simple/"
+        in configured
+    )
+    assert "PIP_TRUSTED_HOST=193.124.7.2" in configured
+    assert "http_proxy=" not in configured
+    assert "https_proxy=" not in configured
+
+
 class PolicySession:
     url = "http://192.0.2.10:18080"
     token = "policy-token"
@@ -129,6 +159,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     monkeypatch, tmp_path: Path, gateway_mode, workspace,
 ) -> None:
     commands = []
+    startup_events = []
+    startup_begins = []
+    startup_waits = []
 
     class Gateway:
         url = "http://model.test/v1"
@@ -167,6 +200,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=60,
         model_gateway=Gateway() if gateway_mode else None,
+        startup_begin=lambda: startup_begins.append(len(commands)),
+        startup_wait=lambda: startup_waits.append(len(commands)),
+        startup_event=startup_events.append,
     )
     patch_command = next(command for command in commands if "config patch" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
@@ -179,6 +215,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
     assert config["tools"]["exec"]["backgroundMs"] == 120000
     assert config["tools"]["exec"]["timeoutSec"] == 120
+    assert config["plugins"]["load"]["paths"] == [
+        "/opt/clawtune/packages/clawtune-plugin"
+    ]
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
     assert clawtune["trace"]["redact_sensitive_data"] is False
@@ -204,10 +243,16 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "command" not in sandbox["ssh"]
     assert config["agents"]["defaults"]["workspace"] == "/workspace"
     assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
-    assert any("config unset models.providers.vllm.models.0.reasoning" in command
-               for command in commands)
-    assert any("config set models.providers.vllm.timeoutSeconds 120" in command
-               for command in commands)
+    provider = config["models"]["providers"]["vllm"]
+    assert provider["timeoutSeconds"] == 120
+    assert provider["models"][0]["id"] == "test-model"
+    assert "reasoning" not in provider["models"][0]
+    assert not any("config unset" in command or "config set" in command
+                   for command in commands)
+    assert not any("plugins install" in command or "plugins enable" in command
+                   for command in commands)
+    assert "clawtune-kb.tar.gz" not in "\n".join(commands)
+    assert "clawtune-extra" not in "\n".join(commands)
     assert any(b'"command": profile_command' in base64.b64decode(encoded)
                for command in commands
                for encoded in re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", command))
@@ -231,6 +276,14 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert result["tool_calls"] == 1
     assert result["tool_latencies"] == [0.25]
     assert result["agent_tool_failures"] == 0
+    assert [item["stage"] for item in startup_events] == [
+        "runtime_setup", "sidecar_ready", "openclaw_onboard", "openclaw_config",
+    ]
+    assert all(item["status"] == "ok" for item in startup_events)
+    assert len(startup_begins) == 1
+    assert len(startup_waits) == 1
+    assert startup_begins[0] < startup_waits[0]
+    assert startup_waits[0] == commands.index(agent_command)
     assert (tmp_path / "openclaw/session-a/sidecar.log").read_text() == (
         "sidecar evidence\n"
     )

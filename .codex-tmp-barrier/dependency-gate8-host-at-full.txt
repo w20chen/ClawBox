@@ -1,0 +1,39 @@
+2026-10-23T00:03:47Z
+ 00:03:47 up  4:42,  0 user,  load average: 189.98, 217.77, 129.31
+               total        used        free      shared  buff/cache   available
+Mem:           2.0Ti       368Gi       193Gi       381Mi       1.4Ti       1.6Ti
+Swap:             0B          0B          0B
+/proc/pressure/cpu
+some avg10=1.21 avg60=4.75 avg300=4.97 total=670376099
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+/proc/pressure/io
+some avg10=0.01 avg60=10.54 avg300=14.50 total=1290896609
+full avg10=0.00 avg60=5.51 avg300=7.98 total=898523136
+/proc/pressure/memory
+some avg10=0.00 avg60=0.00 avg300=0.00 total=2176129
+full avg10=0.00 avg60=0.00 avg300=0.00 total=2052679
+top - 00:03:48 up  4:42,  0 user,  load average: 189.98, 217.77, 129.31
+Tasks: 3690 total,   2 running, 3688 sleeping,   0 stopped,   0 zombie
+%Cpu(s): 14.1 us,  2.3 sy,  0.0 ni, 82.7 id,  0.0 wa,  0.6 hi,  0.2 si,  0.0 st 
+MiB Mem : 2062378.+total, 198477.7 free, 377619.0 used, 1496308.+buff/cache     
+MiB Swap:      0.0 total,      0.0 free,      0.0 used. 1684759.+avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+  36834 root      20   0   18.3g 577172 300920 R 177.8   0.0      9,01 reactor+
+2926824 root      20   0   59.8g   3.0g  31272 S 105.6   0.2   5:08.67 python
+  22154 root      20   0 8680148 682672  42192 S 100.0   0.0 141:07.03 cubelet
+3002515 root      20   0 5101380   1.0g 282352 S  94.4   0.1   1:11.91 contain+
+2929521 root      20   0 5101380   1.1g 301292 S  83.3   0.1   1:35.26 contain+
+2932933 root      20   0 5101380   1.1g 298652 S  61.1   0.1   1:25.81 contain+
+2990171 root      20   0 5101380   1.0g 273184 S  61.1   0.1   1:14.81 contain+
+3002483 root      20   0   10.4g 389908 156296 S  38.9   0.0   0:25.14 contain+
+2929959 root      20   0   10.4g 774536 515324 S  27.8   0.0   0:34.45 contain+
+2930481 root      20   0   10.6g 826984 572892 S  27.8   0.0   0:32.62 contain+
+2938253 root      20   0   10.3g 741324 497472 S  27.8   0.0   0:36.04 contain+
+2946829 root      20   0   10.3g 415748 174456 S  27.8   0.0   0:26.91 contain+
+3083173 weitianc  20   0   32576  17936  11360 R  27.8   0.0   0:00.13 top
+2930989 root      20   0   10.6g 858212 599000 S  22.2   0.0   0:35.46 contain+
+2931314 root      20   0   10.9g 459852 210880 S  22.2   0.0   0:35.88 contain+
+2935828 root      20   0   10.9g 845284 601432 S  22.2   0.0   0:34.94 contain+
+2939289 root      20   0   10.1g 387456 148728 S  22.2   0.0   0:29.72 contain+
+2951872 root      20   0   10.3g 395120 151268 S  22.2   0.0   0:25.84 contain+

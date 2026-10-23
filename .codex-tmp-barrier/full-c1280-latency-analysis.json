@@ -1,0 +1,498 @@
+{
+  "event_counts": [
+    [
+      "tool_execution_progress",
+      120320
+    ],
+    [
+      "tool_admission_queued",
+      61521
+    ],
+    [
+      "tool_admitted",
+      60327
+    ],
+    [
+      "tool_completed",
+      60144
+    ],
+    [
+      "pressure_execution_release",
+      59548
+    ],
+    [
+      "tool_call_cpu_placement",
+      13624
+    ],
+    [
+      "sandbox_create_gate_wait_started",
+      1280
+    ],
+    [
+      "pressure_vm_generation",
+      1251
+    ],
+    [
+      "runtime_memory_placement",
+      1251
+    ],
+    [
+      "sandbox_created",
+      1251
+    ],
+    [
+      "tool_admission_failed",
+      1184
+    ],
+    [
+      "memory_sample",
+      1024
+    ],
+    [
+      "sandbox_destroyed",
+      1019
+    ],
+    [
+      "topology_cpu_group_load",
+      873
+    ],
+    [
+      "sandbox_create_gate_acquired",
+      636
+    ],
+    [
+      "session_placement",
+      636
+    ],
+    [
+      "task_environment_checked",
+      622
+    ],
+    [
+      "native_ssh_endpoint_resolved",
+      622
+    ],
+    [
+      "native_ssh_identity_ready",
+      607
+    ],
+    [
+      "session_timing",
+      509
+    ],
+    [
+      "model_gateway_session_discarded",
+      66
+    ],
+    [
+      "policy_session_discarded",
+      52
+    ],
+    [
+      "session_failed",
+      6
+    ],
+    [
+      "runtime_memory_started",
+      1
+    ]
+  ],
+  "execution_transitions": {
+    "admitted_to_completed": {
+      "max": 166.22807788848877,
+      "mean": 2.9711262594871806,
+      "n": 60144,
+      "p50": 1.6617504358291626,
+      "p90": 5.474771237373353,
+      "p95": 6.744213557243347,
+      "p99": 10.511642353534691
+    },
+    "admitted_to_completed|agent-tool:exec": {
+      "max": 166.22807788848877,
+      "mean": 7.294274708346638,
+      "n": 6256,
+      "p50": 2.536431074142456,
+      "p90": 6.403441309928894,
+      "p95": 8.862758815288544,
+      "p99": 140.89065854549406
+    },
+    "admitted_to_completed|agent-tool:filesystem": {
+      "max": 15.505398511886597,
+      "mean": 2.5520288443294334,
+      "n": 10204,
+      "p50": 1.6326582431793213,
+      "p90": 5.635741043090821,
+      "p95": 6.781303930282593,
+      "p99": 9.57013674497604
+    },
+    "admitted_to_completed|backend-maintenance:ssh_backend_maintenance": {
+      "max": 18.40307378768921,
+      "mean": 2.4499023177282964,
+      "n": 43684,
+      "p50": 1.5390102863311768,
+      "p90": 5.335125207901001,
+      "p95": 6.538347995281219,
+      "p99": 9.42914696931839
+    },
+    "admitted_to_execution_start": {
+      "max": 10.668668985366821,
+      "mean": 0.6462408507298869,
+      "n": 60161,
+      "p50": 0.1924905776977539,
+      "p90": 1.785609483718872,
+      "p95": 2.2962327003479004,
+      "p99": 3.7631760120391857
+    },
+    "admitted_to_execution_start|agent-tool:exec": {
+      "max": 7.899598121643066,
+      "mean": 0.6732676698042609,
+      "n": 6256,
+      "p50": 0.2685185670852661,
+      "p90": 1.7757283449172974,
+      "p95": 2.2240169644355774,
+      "p99": 3.293363940715784
+    },
+    "admitted_to_execution_start|agent-tool:filesystem": {
+      "max": 9.748915433883667,
+      "mean": 0.6509617342048859,
+      "n": 10209,
+      "p50": 0.17883086204528809,
+      "p90": 1.8903293132781995,
+      "p95": 2.4534545421600344,
+      "p99": 3.977883348464966
+    },
+    "admitted_to_execution_start|backend-maintenance:ssh_backend_maintenance": {
+      "max": 10.668668985366821,
+      "mean": 0.6412684212277461,
+      "n": 43696,
+      "p50": 0.18772602081298828,
+      "p90": 1.7688260078430176,
+      "p95": 2.2806856632232666,
+      "p99": 3.7393706083297773
+    },
+    "execution_start_to_end": {
+      "max": 160.90971398353577,
+      "mean": 0.8366531631323122,
+      "n": 60159,
+      "p50": 0.04125404357910156,
+      "p90": 1.363598346710205,
+      "p95": 2.017132139205932,
+      "p99": 4.735919446945187
+    },
+    "execution_start_to_end|agent-tool:exec": {
+      "max": 160.90971398353577,
+      "mean": 5.097864359807785,
+      "n": 6256,
+      "p50": 0.3506087064743042,
+      "p90": 2.3014109134674072,
+      "p95": 5.571706652641296,
+      "p99": 138.37661961317062
+    },
+    "execution_start_to_end|agent-tool:filesystem": {
+      "max": 8.808136940002441,
+      "mean": 0.33302861732375283,
+      "n": 10208,
+      "p50": 0.045065879821777344,
+      "p90": 1.1480966329574587,
+      "p95": 1.8696791768074035,
+      "p99": 3.210094835758218
+    },
+    "execution_start_to_end|backend-maintenance:ssh_backend_maintenance": {
+      "max": 9.234511137008667,
+      "mean": 0.34421380204321766,
+      "n": 43695,
+      "p50": 0.02978825569152832,
+      "p90": 1.224430418014526,
+      "p95": 1.8858548641204806,
+      "p99": 2.887769355773921
+    },
+    "queued_to_admitted": {
+      "max": 221.40474772453308,
+      "mean": 16.667505364005667,
+      "n": 60327,
+      "p50": 5.700442790985107,
+      "p90": 46.932880353927615,
+      "p95": 55.014652276039115,
+      "p99": 82.26305826663955
+    },
+    "queued_to_admitted|agent-tool:exec": {
+      "max": 111.70018911361694,
+      "mean": 15.236638960135563,
+      "n": 6256,
+      "p50": 4.282496690750122,
+      "p90": 47.10144376754761,
+      "p95": 55.001573383808136,
+      "p99": 71.20079278945917
+    },
+    "queued_to_admitted|agent-tool:filesystem": {
+      "max": 115.36585211753845,
+      "mean": 17.408051141748007,
+      "n": 10253,
+      "p50": 6.685774564743042,
+      "p90": 46.5686489582062,
+      "p95": 54.09927287101743,
+      "p99": 72.60189001083357
+    },
+    "queued_to_admitted|backend-maintenance:ssh_backend_maintenance": {
+      "max": 221.40474772453308,
+      "mean": 16.698512812164395,
+      "n": 43818,
+      "p50": 5.610493183135986,
+      "p90": 46.9530237197876,
+      "p95": 55.2823122382164,
+      "p99": 85.96513340711618
+    }
+  },
+  "numeric_event_fields": {
+    "native_ssh_identity_ready.service_seconds": {
+      "max": 28.353580066002905,
+      "mean": 13.38048887374152,
+      "n": 607,
+      "p50": 11.297755886000232,
+      "p90": 23.475123192204045,
+      "p95": 25.667932344300787,
+      "p99": 27.820505669012196
+    },
+    "pressure_execution_release.duration_seconds": {
+      "max": 165.24680709838867,
+      "mean": 1.483498276136813,
+      "n": 59548,
+      "p50": 0.4444197416305542,
+      "p90": 2.971052861213685,
+      "p95": 3.541117775440215,
+      "p99": 5.665266535282132
+    },
+    "runtime_memory_started.action_window_seconds": {
+      "max": 2.0,
+      "mean": 2.0,
+      "n": 1,
+      "p50": 2.0,
+      "p90": 2.0,
+      "p95": 2.0,
+      "p99": 2.0
+    },
+    "runtime_memory_started.cooldown_seconds": {
+      "max": 5.0,
+      "mean": 5.0,
+      "n": 1,
+      "p50": 5.0,
+      "p90": 5.0,
+      "p95": 5.0,
+      "p99": 5.0
+    },
+    "runtime_memory_started.exit_hysteresis_seconds": {
+      "max": 1.0,
+      "mean": 1.0,
+      "n": 1,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "p99": 1.0
+    },
+    "sandbox_create_gate_acquired.wait_seconds": {
+      "max": 2548.100245952606,
+      "mean": 404.02207462030384,
+      "n": 636,
+      "p50": 282.2722212076187,
+      "p90": 964.906094789505,
+      "p95": 1014.2206559181213,
+      "p99": 2542.7207855939864
+    },
+    "sandbox_created.materialization_reservation_wait_seconds": {
+      "max": 0.0,
+      "mean": 0.0,
+      "n": 1251,
+      "p50": 0.0,
+      "p90": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "sandbox_created.service_seconds": {
+      "max": 35.411320108993095,
+      "mean": 6.033725886031315,
+      "n": 1251,
+      "p50": 2.800939357999596,
+      "p90": 18.386473267994006,
+      "p95": 21.476013854000485,
+      "p99": 29.478752472496126
+    },
+    "sandbox_destroyed.service_seconds": {
+      "max": 11.561104198000976,
+      "mean": 1.434895101602862,
+      "n": 1019,
+      "p50": 0.775519291011733,
+      "p90": 2.3883323019981626,
+      "p95": 6.734631117701064,
+      "p99": 11.041535688364235
+    },
+    "session_placement.feedback_sample_age_seconds": {
+      "max": 1.527145923988428,
+      "mean": 0.04867491856861787,
+      "n": 636,
+      "p50": 0.0189827520007384,
+      "p90": 0.09128890950523783,
+      "p95": 0.1535780535050435,
+      "p99": 0.5756037213031958
+    },
+    "session_placement.wait_seconds": {
+      "max": 1514.9685379370057,
+      "mean": 19.59343963115936,
+      "n": 636,
+      "p50": 0.18874168949696468,
+      "p90": 2.1041618480012403,
+      "p95": 3.3133322925023094,
+      "p99": 1493.8769989296532
+    },
+    "tool_admitted.admission_blocked_seconds": {
+      "max": 213.87382045500271,
+      "mean": 13.809627810489635,
+      "n": 60327,
+      "p50": 0.01671255899418611,
+      "p90": 45.388021155202296,
+      "p95": 53.40712533719343,
+      "p99": 79.56301217921788
+    },
+    "tool_call_cpu_placement.minimum_duration_seconds": {
+      "max": 1.0,
+      "mean": 1.0,
+      "n": 6256,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "p99": 1.0
+    }
+  },
+  "resource_samples": {
+    "cpu_average_cores": {
+      "max": 144.25653650620905,
+      "mean": 75.69666370031742,
+      "n": 1024,
+      "p50": 73.84914157940032,
+      "p90": 107.1599136670898,
+      "p95": 124.41676513584126,
+      "p99": 137.55530231579772
+    },
+    "local_used_gib": {
+      "max": 810.6980667114258,
+      "mean": 707.8499940857291,
+      "n": 1024,
+      "p50": 778.3557739257812,
+      "p90": 801.9545673370361,
+      "p95": 806.8016366958618,
+      "p99": 809.7820259475708
+    },
+    "shared_live_used_gib": {
+      "max": 0.04395294189453125,
+      "mean": 0.020919382572174072,
+      "n": 1024,
+      "p50": 0.01074981689453125,
+      "p90": 0.04395294189453125,
+      "p95": 0.04395294189453125,
+      "p99": 0.04395294189453125
+    }
+  },
+  "selected_event_keys": {
+    "memory_sample": [
+      "cgroup_cpu",
+      "cgroup_memory",
+      "combined_live_used_bytes",
+      "compute_pressure",
+      "event",
+      "host_available_bytes",
+      "host_used_bytes",
+      "host_used_delta_bytes",
+      "local_used_bytes",
+      "monotonic_time_ns",
+      "numa_residency",
+      "schema_version",
+      "sequence_no",
+      "shared_borrow_reserved_bytes",
+      "shared_live_used_bytes",
+      "tool_call_cpu_placement_changes",
+      "wall_time",
+      "wall_time_ns",
+      "warm_allocated_bytes",
+      "warm_committed_bytes",
+      "warm_reserved_bytes"
+    ],
+    "sandbox_create_gate_acquired": [
+      "event",
+      "monotonic_time_ns",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wait_seconds",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_admission_queued": [
+      "event",
+      "execution_id",
+      "execution_scope",
+      "monotonic_time_ns",
+      "operation",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_admitted": [
+      "admission_blocked_seconds",
+      "admission_memory_tier",
+      "admitted_memory_mib",
+      "command_sha256",
+      "endpoint_epoch",
+      "endpoint_host",
+      "endpoint_port",
+      "endpoint_sandbox_id",
+      "event",
+      "execution_id",
+      "execution_scope",
+      "fallback_level",
+      "local_admitted_memory_mib",
+      "monotonic_time_ns",
+      "operation",
+      "predicted_memory_mib",
+      "prediction_key",
+      "prediction_source",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_completed": [
+      "endpoint_epoch",
+      "event",
+      "execution_id",
+      "exit_code",
+      "monotonic_time_ns",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "ssh_reaped_at",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_execution_progress": [
+      "event",
+      "execution_id",
+      "monotonic_time_ns",
+      "phase",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "source",
+      "wall_time",
+      "wall_time_ns"
+    ]
+  },
+  "session_coverage": {
+    "sandbox_create_gate_acquired": 636,
+    "sandbox_create_gate_wait_started": 1280,
+    "tool_admission_queued": 607,
+    "tool_admitted": 607,
+    "tool_completed": 607
+  }
+}

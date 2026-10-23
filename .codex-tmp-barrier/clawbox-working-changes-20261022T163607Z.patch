@@ -1,0 +1,540 @@
+diff --git a/clawbox/experiments/policy.py b/clawbox/experiments/policy.py
+index 0f1708d..4ecc14b 100644
+--- a/clawbox/experiments/policy.py
++++ b/clawbox/experiments/policy.py
+@@ -672,6 +672,7 @@ class PolicyCoordinator:
+             task_ids = {r.session_id for _, r in requests}
+             tool_ids = {r.session_id for _, r in requests if r.wait_class == 'tool_admission'}
+             states = tuple(self._sessions[sid] for sid in task_ids if sid in self._sessions)
++            session_states = tuple(self._sessions.values())
+             blockers = Counter(reason for ticket, _ in requests
+                                for reason in self._waiter_blockers.get(ticket, ('not_checked',)))
+             result = {
+@@ -682,6 +683,17 @@ class PolicyCoordinator:
+                 'admission_queue_oldest_seconds': max(
+                     (now-r.queued_monotonic_s for _, r in requests), default=0.),
+                 'admission_queue_last_blockers': dict(blockers),
++                'registered_sessions': len(session_states),
++                'model_waiting_sessions': sum(
++                    state.wait_id is not None and not state.response_ready
++                    for state in session_states
++                ),
++                'tool_active_sessions': sum(
++                    state.tool_active for state in session_states
++                ),
++                'eviction_in_progress_sessions': sum(
++                    state.eviction_in_progress for state in session_states
++                ),
+             }
+         # Lifecycle properties must never be evaluated with the admission lock.
+         result['admission_queue_resident_vms'] = sum(
+diff --git a/clawbox/experiments/qualification.py b/clawbox/experiments/qualification.py
+index 4882480..7e67fa8 100644
+--- a/clawbox/experiments/qualification.py
++++ b/clawbox/experiments/qualification.py
+@@ -32,7 +32,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
+ from .worker import atomic_json
+ 
+ 
+-QUALIFICATION_SCHEMA_VERSION = 10
++QUALIFICATION_SCHEMA_VERSION = 11
+ 
+ 
+ def qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
+@@ -669,12 +669,15 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None)
+         "configuration": {
+             **spec.inference.configuration,
+             "max_model_steps": 1,
++            "qualification_max_parallel_sessions": level,
+         },
+     })
+     workload = spec.workload.model_copy(update={
+         "cases": tuple(cases), "repetitions": 1,
+     })
+     execution = spec.execution.model_copy(update={
++        # One session per case proves heterogeneous coverage. The worker-pool
++        # bound above limits how many of those sessions are live at once.
+         "concurrency_levels": (max(level, len(cases)),),
+         "randomized_order": False,
+         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
+@@ -880,7 +883,11 @@ def qualify(
+         "implementation_digest": implementation_digest(),
+         "qualification_spec_digest": spec_digest(qualified),
+         "qualified_unix_s": time.time(),
+-        "concurrency": max(qualified.execution.concurrency_levels),
++        "concurrency": int(
++            qualified.inference.configuration["qualification_max_parallel_sessions"]
++        ),
++        "qualified_session_count": max(qualified.execution.concurrency_levels),
++        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
+         "target_concurrency": max(spec.execution.concurrency_levels),
+         "scope": "capability_smoke",
+         "policy_names": [policy.name for policy in qualified.policies],
+@@ -937,12 +944,16 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
+     mismatches = [
+         key for key, value in expected.items() if receipt.get(key) != value
+     ]
+-    # Concurrency is the actual executed smoke size, not evidence of target
+-    # performance. Explicit --qualification-concurrency may bound this gate;
+-    # every workload case must still execute, and all real mechanism probes
+-    # and exact source/input/spec checks remain mandatory.
+-    if receipt.get("concurrency", 0) < len(load_workload_cases(spec.workload)):
++    # Concurrency is the maximum simultaneous smoke size, not the number of
++    # covered cases or evidence of target performance. Separate receipt fields
++    # prove that one qualification session executed for every workload case.
++    if receipt.get("concurrency", 0) < 1:
+         mismatches.append("concurrency")
++    cases = load_workload_cases(spec.workload)
++    if receipt.get("qualified_session_count", 0) < len(cases):
++        mismatches.append("qualified_session_count")
++    if receipt.get("qualified_case_ids") != [case.case_id for case in cases]:
++        mismatches.append("qualified_case_ids")
+     if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
+         mismatches.append("policy_names")
+     if spec.schema_version == 4:
+diff --git a/clawbox/experiments/worker.py b/clawbox/experiments/worker.py
+index e4b7e6a..8931bc6 100644
+--- a/clawbox/experiments/worker.py
++++ b/clawbox/experiments/worker.py
+@@ -18,6 +18,7 @@ import sys
+ import time
+ import traceback
+ import urllib.parse
++from collections import Counter
+ from contextlib import contextmanager, nullcontext
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from dataclasses import asdict, replace
+@@ -244,6 +245,16 @@ def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
+     return cases[session_index % len(cases)]
+ 
+ 
++def session_worker_count(arm: ExperimentArm) -> int:
++    """Bound qualification residency without reducing covered sessions."""
++    value = arm.inference.configuration.get("qualification_max_parallel_sessions")
++    if value is None:
++        return arm.concurrency
++    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
++        raise ValueError("qualification_max_parallel_sessions must be a positive integer")
++    return min(arm.concurrency, value)
++
++
+ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
+     """Return deterministic offered-arrival offsets shared by compared policies."""
+     count = arm.concurrency
+@@ -1256,21 +1267,196 @@ def summarize_tool_execution_observations(
+     }
+ 
+ 
++class ArmActivityTracker:
++    """In-memory task/queue state derived from existing transition events."""
++
++    def __init__(self, total_sessions: int) -> None:
++        self.total_sessions = total_sessions
++        self.started_monotonic = time.monotonic()
++        self.lock = Lock()
++        self.offered: set[str] = set()
++        self.vm_create_waiting: dict[str, float] = {}
++        self.vm_creating: dict[str, float] = {}
++        self.activated: set[str] = set()
++        self.ever_activated: set[str] = set()
++        self.llm_waiting: dict[str, float] = {}
++        self.tool_admission_waiting: dict[str, tuple[str, float]] = {}
++        self.tool_admitted_waiting_start: dict[str, tuple[str, float]] = {}
++        self.tool_executing: dict[str, tuple[str, float]] = {}
++        self.completed: set[str] = set()
++        self.failed: set[str] = set()
++
++    @staticmethod
++    def _oldest(values: Any, now: float) -> float:
++        starts = [
++            value[1] if isinstance(value, tuple) else value
++            for value in values
++        ]
++        return max(0.0, now - min(starts)) if starts else 0.0
++
++    def _drop_session_operations(self, session_id: str) -> None:
++        for operations in (
++            self.tool_admission_waiting,
++            self.tool_admitted_waiting_start,
++            self.tool_executing,
++        ):
++            for execution_id in [
++                key for key, value in operations.items() if value[0] == session_id
++            ]:
++                operations.pop(execution_id, None)
++
++    def observe(self, event: dict[str, Any], *, now: float | None = None) -> None:
++        now = time.monotonic() if now is None else now
++        name = str(event.get("event") or "")
++        session_id = str(event.get("session_id") or "")
++        execution_id = str(event.get("execution_id") or "")
++        if not session_id:
++            return
++        with self.lock:
++            if name == "sandbox_create_gate_wait_started":
++                self.offered.add(session_id)
++                self.vm_create_waiting[session_id] = now
++            elif name == "sandbox_create_gate_acquired":
++                self.vm_create_waiting.pop(session_id, None)
++                self.vm_creating[session_id] = now
++            elif name == "sandbox_created" and event.get("role") == "runtime":
++                self.vm_creating.pop(session_id, None)
++                self.activated.add(session_id)
++                self.ever_activated.add(session_id)
++            elif name == "model_wait_started":
++                self.llm_waiting[session_id] = now
++            elif name == "model_response_ready":
++                self.llm_waiting.pop(session_id, None)
++            elif name == "tool_admission_queued" and execution_id:
++                self.tool_admission_waiting[execution_id] = (session_id, now)
++            elif name == "tool_admitted" and execution_id:
++                self.tool_admission_waiting.pop(execution_id, None)
++                self.tool_admitted_waiting_start[execution_id] = (session_id, now)
++            elif name == "tool_execution_progress" and execution_id:
++                if event.get("phase") == "start":
++                    self.tool_admission_waiting.pop(execution_id, None)
++                    self.tool_admitted_waiting_start.pop(execution_id, None)
++                    self.tool_executing[execution_id] = (session_id, now)
++                elif event.get("phase") == "end":
++                    self.tool_executing.pop(execution_id, None)
++            elif name in {"tool_completed", "tool_admission_abandoned"} and execution_id:
++                self.tool_admission_waiting.pop(execution_id, None)
++                self.tool_admitted_waiting_start.pop(execution_id, None)
++                self.tool_executing.pop(execution_id, None)
++            elif name in {"session_complete", "session_failed"}:
++                self.vm_create_waiting.pop(session_id, None)
++                self.vm_creating.pop(session_id, None)
++                self.llm_waiting.pop(session_id, None)
++                self.activated.discard(session_id)
++                self._drop_session_operations(session_id)
++                if name == "session_complete" and event.get("valid") is True:
++                    self.completed.add(session_id)
++                    self.failed.discard(session_id)
++                else:
++                    self.failed.add(session_id)
++                    self.completed.discard(session_id)
++
++    def snapshot(self) -> dict[str, Any]:
++        now = time.monotonic()
++        with self.lock:
++            elapsed = max(now - self.started_monotonic, 1e-9)
++            terminal = self.completed | self.failed
++            active = self.activated - terminal
++            return {
++                "total_sessions": self.total_sessions,
++                "not_yet_offered_sessions": max(
++                    0, self.total_sessions - len(self.offered)
++                ),
++                "offered_sessions": len(self.offered),
++                "offered_not_activated_sessions": len(
++                    self.offered - self.ever_activated - terminal
++                ),
++                "vm_create_waiting_sessions": len(self.vm_create_waiting),
++                "vm_create_wait_oldest_seconds": self._oldest(
++                    self.vm_create_waiting.values(), now
++                ),
++                "vm_creating_sessions": len(self.vm_creating),
++                "activated_running_sessions": len(active),
++                "idle_at_llm_sessions": len(set(self.llm_waiting) & active),
++                "agent_active_sessions": len(active - set(self.llm_waiting)),
++                "tool_admission_waiting_operations": len(
++                    self.tool_admission_waiting
++                ),
++                "tool_admission_waiting_tasks": len({
++                    value[0] for value in self.tool_admission_waiting.values()
++                }),
++                "tool_admission_wait_oldest_seconds": self._oldest(
++                    self.tool_admission_waiting.values(), now
++                ),
++                "tool_admitted_waiting_start_operations": len(
++                    self.tool_admitted_waiting_start
++                ),
++                "tool_executing_operations": len(self.tool_executing),
++                "tool_executing_tasks": len({
++                    value[0] for value in self.tool_executing.values()
++                }),
++                "completed_sessions": len(self.completed),
++                "failed_sessions": len(self.failed),
++                "offered_rate_per_second": len(self.offered) / elapsed,
++                "activation_rate_per_second": (
++                    len(self.ever_activated) / elapsed
++                ),
++                "completion_rate_per_second": len(terminal) / elapsed,
++            }
++
++
++def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, Any]:
++    """Combine disjoint per-NUMA queues without re-reading kernel state."""
++    per_domain = {
++        name: domain.coordinator.queue_snapshot()
++        for name, domain in domains.items()
++    }
++    by_class: Counter[str] = Counter()
++    blockers: Counter[str] = Counter()
++    summed = Counter()
++    for snapshot in per_domain.values():
++        by_class.update(snapshot.get("admission_queue_depth_by_class", {}))
++        blockers.update(snapshot.get("admission_queue_last_blockers", {}))
++        for field in (
++            "admission_queue_depth", "admission_queue_tasks",
++            "tool_admission_queue_tasks", "admission_queue_resident_vms",
++            "registered_sessions", "model_waiting_sessions",
++            "tool_active_sessions", "eviction_in_progress_sessions",
++        ):
++            summed[field] += int(snapshot.get(field, 0))
++    return {
++        **dict(summed),
++        "admission_queue_depth_by_class": dict(by_class),
++        "admission_queue_last_blockers": dict(blockers),
++        "admission_queue_oldest_seconds": max(
++            (float(value.get("admission_queue_oldest_seconds", 0.0))
++             for value in per_domain.values()),
++            default=0.0,
++        ),
++        "per_domain": per_domain,
++    }
++
++
+ class EventWriter:
+-    def __init__(self, path: Path) -> None:
++    def __init__(self, path: Path, *,
++                 activity_tracker: ArmActivityTracker | None = None) -> None:
+         path.parent.mkdir(parents=True, exist_ok=True)
+         self.path = path
+         self.lock = Lock()
+         self.sequence = 0
++        self.activity_tracker = activity_tracker
+ 
+     def write(self, event: dict[str, Any]) -> None:
+         with self.lock, self.path.open("a", encoding="utf-8") as stream:
++            monotonic_ns = time.monotonic_ns()
++            if self.activity_tracker is not None:
++                self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
+             row = {
+                 "schema_version": 1,
+                 "sequence_no": self.sequence,
+                 "wall_time": utcnow().isoformat(),
+                 "wall_time_ns": str(time.time_ns()),
+-                "monotonic_time_ns": str(time.monotonic_ns()),
++                "monotonic_time_ns": str(monotonic_ns),
+                 **event,
+             }
+             self.sequence += 1
+@@ -1398,7 +1584,11 @@ class ExperimentWorker:
+                 self.client.validate_template_image(
+                     sandbox.template, sandbox.image_digest,
+                 )
+-        events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
++        activity_tracker = ArmActivityTracker(arm.concurrency)
++        events = EventWriter(
++            self.output_root / "events" / f"{arm.arm_id}.jsonl",
++            activity_tracker=activity_tracker,
++        )
+         shared_borrow_mib = arm.resources.shared_memory_borrow_limit_mib
+         sampler = (
+             NumaCgroupMemorySampler(
+@@ -1589,6 +1779,10 @@ class ExperimentWorker:
+                     warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+                 events.write({
+                     "event": "memory_sample", "local_used_bytes": used,
++                    "queue_activity_snapshot": activity_tracker.snapshot(),
++                    "admission_queue_snapshot": aggregate_admission_queue_snapshots(
++                        domains
++                    ),
+                     "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
+                     "numa_residency": sampler.node_usage() if isinstance(sampler, NumaCgroupMemorySampler) else None,
+                     "combined_live_used_bytes": sampler.tier_usage()[2] if isinstance(sampler, NumaCgroupMemorySampler) else used,
+@@ -1669,7 +1863,7 @@ class ExperimentWorker:
+         arm_started_wall = time.time()
+         arm_started_monotonic = time.monotonic()
+         pool = ThreadPoolExecutor(
+-            max_workers=arm.concurrency, thread_name_prefix="agent"
++            max_workers=session_worker_count(arm), thread_name_prefix="agent"
+         )
+         offer_offsets = session_offer_offsets(arm)
+         futures: dict[Any, int] = {}
+@@ -2523,6 +2717,11 @@ class ExperimentWorker:
+                                       request_started_at=event.get("request_started_at"))
+                     if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+                         coordinator.begin_model_wait(session_id, request_id)
++                events.write({
++                    "event": "model_wait_started",
++                    "session_id": session_id,
++                    "request_id": request_id,
++                })
+                 if arm.policy.reclamation is not ReclamationPolicy.RESIDENT:
+                     submit_policy_event(pause_for_model_wait, event)
+ 
+@@ -2536,6 +2735,12 @@ class ExperimentWorker:
+                 with generated_model_requests_lock:
+                     generated_model_requests.add(request_id)
+                 coordinator.complete_model_wait(session_id, request_id)
++                events.write({
++                    "event": "model_response_ready",
++                    "session_id": session_id,
++                    "request_id": request_id,
++                    "model_step": step,
++                })
+                 # A paused Runtime cannot receive the pending HTTP response.
+                 # Restore it synchronously in the gateway producer before the
+                 # response becomes visible to OpenClaw. Tool restore remains
+diff --git a/docs/guide.md b/docs/guide.md
+index c564cd3..f6a1519 100644
+--- a/docs/guide.md
++++ b/docs/guide.md
+@@ -430,7 +430,9 @@ that no VM owned by the run remains.
+ 
+ A qualification receipt is bound to the exact spec, implementation, templates,
+ images, nodes, concurrency, and referenced file hashes. A lower qualification
+-concurrency does not prove full-density performance. After interruption, restore
++concurrency bounds the qualification worker pool while one session still executes
++every workload case. The receipt records both values; this capability smoke does
++not prove full-density performance. After interruption, restore
+ the host, retain the result directory, and launch the frozen spec with the same
+ run ID. Use a new run ID for any configuration change.
+ 
+diff --git a/tests/test_experiments_v2.py b/tests/test_experiments_v2.py
+index 5bad9da..3d1d857 100644
+--- a/tests/test_experiments_v2.py
++++ b/tests/test_experiments_v2.py
+@@ -13,7 +13,8 @@ from clawbox.experiments.audit import audit_experiments
+ from clawbox.experiments.baselines import BASELINES, resolve_baseline
+ from clawbox.replay.trace import load_trace
+ from clawbox.experiments.worker import (
+-    EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
++    ArmActivityTracker, EventWriter, ExperimentWorker, _execute_idempotent,
++    _runtime_network_deny_out, build_time_spans,
+     WatermarkController, policy_event_workers, policy_operation_headroom_mib,
+     policy_progress_budget_mib,
+     read_priority_memory_charge, session_case_for, session_offer_offsets,
+@@ -621,6 +622,37 @@ def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: P
+     assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
+ 
+ 
++def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) -> None:
++    tracker = ArmActivityTracker(2)
++    writer = EventWriter(tmp_path / "events.jsonl", activity_tracker=tracker)
++    session = "arm-0000"
++    writer.write({"event": "sandbox_create_gate_wait_started", "session_id": session})
++    writer.write({"event": "sandbox_create_gate_acquired", "session_id": session})
++    writer.write({"event": "sandbox_created", "session_id": session, "role": "tool"})
++    assert tracker.snapshot()["vm_creating_sessions"] == 1
++    writer.write({"event": "sandbox_created", "session_id": session, "role": "runtime"})
++    writer.write({"event": "model_wait_started", "session_id": session})
++    assert tracker.snapshot()["idle_at_llm_sessions"] == 1
++    writer.write({"event": "model_response_ready", "session_id": session})
++    writer.write({"event": "tool_admission_queued", "session_id": session,
++                  "execution_id": "exec-1"})
++    snapshot = tracker.snapshot()
++    assert snapshot["tool_admission_waiting_tasks"] == 1
++    assert snapshot["offered_not_activated_sessions"] == 0
++    writer.write({"event": "tool_admitted", "session_id": session,
++                  "execution_id": "exec-1"})
++    writer.write({"event": "tool_execution_progress", "session_id": session,
++                  "execution_id": "exec-1", "phase": "start"})
++    assert tracker.snapshot()["tool_executing_tasks"] == 1
++    writer.write({"event": "tool_execution_progress", "session_id": session,
++                  "execution_id": "exec-1", "phase": "end"})
++    writer.write({"event": "session_complete", "session_id": session, "valid": True})
++    snapshot = tracker.snapshot()
++    assert snapshot["completed_sessions"] == 1
++    assert snapshot["activated_running_sessions"] == 0
++    assert snapshot["not_yet_offered_sessions"] == 1
++
++
+ def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:
+     monkeypatch.setattr("clawbox.experiments.worker.time.sleep", lambda _: None)
+ 
+diff --git a/tests/test_policy_v2.py b/tests/test_policy_v2.py
+index 7cc8010..a53f87f 100644
+--- a/tests/test_policy_v2.py
++++ b/tests/test_policy_v2.py
+@@ -697,6 +697,26 @@ def idle_pair_coordinator():
+     return c, tool, runtime
+ 
+ 
++def test_queue_snapshot_includes_lock_local_session_activity() -> None:
++    c = PolicyCoordinator(
++        PolicySpec(name="wait", admission="off", reclamation="snapshot_pause",
++                   eviction="wait_aware_pressure", restore="reactive"),
++        budget_mib=32, emergency_free_mib=0, operation_headroom_mib=0,
++    )
++    c.register("model", Lifecycle())
++    c.register_runtime("model", Lifecycle())
++    c.begin_model_wait("model", "request-1")
++    c.register("tool", Lifecycle())
++    c.set_tool_active("tool", True)
++
++    snapshot = c.queue_snapshot()
++
++    assert snapshot["registered_sessions"] == 2
++    assert snapshot["model_waiting_sessions"] == 1
++    assert snapshot["tool_active_sessions"] == 1
++    assert snapshot["eviction_in_progress_sessions"] == 0
++
++
+ def test_restore_409_recovery_honors_pair_scope():
+     c, tool, runtime = idle_pair_coordinator()
+     calls = []
+diff --git a/tests/test_qualification.py b/tests/test_qualification.py
+index c380ae7..948fa3a 100644
+--- a/tests/test_qualification.py
++++ b/tests/test_qualification.py
+@@ -12,8 +12,11 @@ from clawbox.experiments.qualification import (
+     live_borrow_roundtrip_test, qualification_spec, snapshot_roundtrip_test,
+     qualification_input_manifest, validate_receipt,
+ )
++from clawbox.experiments.worker import session_worker_count
+ from clawbox.experiments.numa_borrow import NumaBorrowRecord
+-from clawbox.experiments.spec import load_experiment, spec_digest
++from clawbox.experiments.spec import (
++    expand_matrix, load_experiment, load_workload_cases, spec_digest,
++)
+ 
+ 
+ EXAMPLE = Path("examples/experiments/getting-started.yaml")
+@@ -70,7 +73,11 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
+         "implementation_digest": implementation_digest(),
+         "qualification_spec_digest": spec_digest(qualified),
+         "qualified_unix_s": 1.0,
+-        "concurrency": max(qualified.execution.concurrency_levels),
++        "concurrency": qualified.inference.configuration[
++            "qualification_max_parallel_sessions"
++        ],
++        "qualified_session_count": max(qualified.execution.concurrency_levels),
++        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
+         "target_concurrency": max(spec.execution.concurrency_levels),
+         "scope": "capability_smoke",
+         "policy_names": [policy.name for policy in qualified.policies],
+@@ -155,8 +162,16 @@ def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
+ 
+ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
+     spec = load_experiment(EXAMPLE)
+-    spec = spec.model_copy(update={"execution": spec.execution.model_copy(
+-        update={"concurrency_levels": (320, 640, 1280)})})
++    case = spec.workload.cases[0]
++    cases = tuple(
++        case.model_copy(update={"case_id": f"qualification-case-{index}"})
++        for index in range(3)
++    )
++    spec = spec.model_copy(update={
++        "workload": spec.workload.model_copy(update={"cases": cases}),
++        "execution": spec.execution.model_copy(
++            update={"concurrency_levels": (320, 640, 1280)}),
++    })
+     path = tmp_path / 'bounded.json'
+     receipt = _receipt(spec, concurrency=1)
+     path.write_text(json.dumps(receipt))
+@@ -164,6 +179,12 @@ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
+     assert verified['concurrency'] == 1
+     assert verified['target_concurrency'] == 1280
+     assert verified['scope'] == 'capability_smoke'
++    qualified = qualification_spec(spec, concurrency=1)
++    assert qualified.execution.concurrency_levels == (3,)
++    assert len(qualified.workload.cases) == 3
++    assert session_worker_count(expand_matrix(qualified)[0]) == 1
++    assert verified['qualified_session_count'] == 3
++    assert verified['qualified_case_ids'] == [case.case_id for case in cases]
+     receipt['concurrency'] = 0
+     path.write_text(json.dumps(receipt))
+     with pytest.raises(ValueError, match='concurrency'):

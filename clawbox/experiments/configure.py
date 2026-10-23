@@ -111,6 +111,7 @@ def configure_experiment(
     template_aware_placement: bool | None = None,
     snapshot_aware_residency: bool | None = None,
     template_base_sharing: str | None = None,
+    template_base_sharing_artifact: str | None = None,
     warm_restore_seconds_per_gib: float | None = None,
     cold_restore_seconds_per_gib: float | None = None,
     snapshot_cost_provenance: str | None = None,
@@ -428,6 +429,8 @@ def configure_experiment(
         }
     if prediction_artifact is not None:
         resources["prediction_artifact"] = prediction_artifact
+    if template_base_sharing_artifact is not None:
+        resources["template_base_sharing_artifact"] = template_base_sharing_artifact
     for key, value in (("prediction_mode", prediction_mode),
                        ("prediction_reservation_scale", prediction_reservation_scale),
                        ("admission_margin_mib", admission_margin_mib),

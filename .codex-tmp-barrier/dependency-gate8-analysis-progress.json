@@ -1,0 +1,817 @@
+{
+  "active": [
+    {
+      "acquired_unix_s": 1792713940.7467513,
+      "execution_id": "exec-af2308e9-19af-4375-9dc9-6d97f0e88721",
+      "session_id": "069be45219928bc808461ac8-0109",
+      "wait_seconds": 37.88984142700065,
+      "wait_started_unix_s": 1792713902.9266899
+    },
+    {
+      "acquired_unix_s": 1792713952.403434,
+      "execution_id": "exec-c2a9ba9f-740c-41fe-ba30-3ec9d2ed3b71",
+      "session_id": "069be45219928bc808461ac8-0086",
+      "wait_seconds": 34.09984539799916,
+      "wait_started_unix_s": 1792713918.3008862
+    },
+    {
+      "acquired_unix_s": 1792713960.1233108,
+      "execution_id": "exec-09d5a0aa-22fd-4f90-9018-b6c9558505c4",
+      "session_id": "069be45219928bc808461ac8-0021",
+      "wait_seconds": 27.300889129001007,
+      "wait_started_unix_s": 1792713932.823779
+    },
+    {
+      "acquired_unix_s": 1792713967.33176,
+      "execution_id": "exec-ade93005-caa3-4580-acea-9ec5ca7b8835",
+      "session_id": "069be45219928bc808461ac8-0095",
+      "wait_seconds": 28.251204336997034,
+      "wait_started_unix_s": 1792713939.0907528
+    },
+    {
+      "acquired_unix_s": 1792713987.227476,
+      "execution_id": "exec-5d29dec8-1806-40b3-9ae9-dea3fbb13025",
+      "session_id": "069be45219928bc808461ac8-0086",
+      "wait_seconds": 44.900505762998364,
+      "wait_started_unix_s": 1792713942.3613827
+    },
+    {
+      "acquired_unix_s": 1792713990.3970613,
+      "execution_id": "exec-be3108bd-b38e-4075-b140-8a0b444f1357",
+      "session_id": "069be45219928bc808461ac8-0029",
+      "wait_seconds": 47.733420452001155,
+      "wait_started_unix_s": 1792713942.6437364
+    },
+    {
+      "acquired_unix_s": 1792713998.3923721,
+      "execution_id": "exec-f12b3414-38b2-4980-82d8-b01065247fd5",
+      "session_id": "069be45219928bc808461ac8-0089",
+      "wait_seconds": 55.535593519998656,
+      "wait_started_unix_s": 1792713942.8643765
+    },
+    {
+      "acquired_unix_s": 1792714021.3523884,
+      "execution_id": "exec-c146ea5d-7812-4fe5-975c-1ec5450d22f5",
+      "session_id": "069be45219928bc808461ac8-0108",
+      "wait_seconds": 73.21184600199922,
+      "wait_started_unix_s": 1792713948.1922503
+    }
+  ],
+  "active_at_eof": 8,
+  "completed": 88,
+  "event_path": "/data/clawbox-performance-20261022T154600Z/runs/dependency-gate8-poisson-c256-v1-20261023t074500cst/attempts/attempt-dependency-gate8-poisson-c256-v1-20261023t074500cst/069be45219928bc808461ac8/events/069be45219928bc808461ac8.jsonl",
+  "held_seconds": {
+    "max": 124.33229521099929,
+    "mean": 18.843946825249862,
+    "n": 88,
+    "p50": 3.2265667069987103,
+    "p90": 121.942886171001,
+    "p95": 123.12667341120031,
+    "p99": 123.91694198948221
+  },
+  "operations": 200,
+  "release_reasons": {
+    "completed": 88
+  },
+  "schema_version": 1,
+  "slowest_completed": [
+    {
+      "acquired_unix_s": 1792713772.4116728,
+      "execution_id": "exec-6f41702c-83a7-4445-8ea2-a7c3a9bac731",
+      "held_seconds": 124.33229521099929,
+      "release_reason": "completed",
+      "released_unix_s": 1792713896.7028925,
+      "session_id": "069be45219928bc808461ac8-0067",
+      "wait_seconds": 0.04478837100032251,
+      "wait_started_unix_s": 1792713772.363984
+    },
+    {
+      "acquired_unix_s": 1792713857.9684281,
+      "execution_id": "exec-464ae14e-2701-4547-89a1-9baf4e199993",
+      "held_seconds": 123.85487771500266,
+      "release_reason": "completed",
+      "released_unix_s": 1792713981.8204167,
+      "session_id": "069be45219928bc808461ac8-0015",
+      "wait_seconds": 0.0016918909968808293,
+      "wait_started_unix_s": 1792713857.9651456
+    },
+    {
+      "acquired_unix_s": 1792713751.969387,
+      "execution_id": "exec-4d816990-70d8-4cd3-b370-00f36911100d",
+      "held_seconds": 123.83693622500141,
+      "release_reason": "completed",
+      "released_unix_s": 1792713875.8002963,
+      "session_id": "069be45219928bc808461ac8-0080",
+      "wait_seconds": 0.01275234099739464,
+      "wait_started_unix_s": 1792713751.962771
+    },
+    {
+      "acquired_unix_s": 1792713866.732525,
+      "execution_id": "exec-a4ee60fb-524f-463a-912e-6f55421b6266",
+      "held_seconds": 123.63122639899666,
+      "release_reason": "completed",
+      "released_unix_s": 1792713990.3959029,
+      "session_id": "069be45219928bc808461ac8-0124",
+      "wait_seconds": 2.568566658999771,
+      "wait_started_unix_s": 1792713864.1634881
+    },
+    {
+      "acquired_unix_s": 1792713826.4969633,
+      "execution_id": "exec-39704ea1-aced-4ec0-b87c-5ed8e1025094",
+      "held_seconds": 123.16310165899995,
+      "release_reason": "completed",
+      "released_unix_s": 1792713949.609287,
+      "session_id": "069be45219928bc808461ac8-0093",
+      "wait_seconds": 0.003051869000046281,
+      "wait_started_unix_s": 1792713826.445468
+    },
+    {
+      "acquired_unix_s": 1792713892.1606603,
+      "execution_id": "exec-be41b0ba-35b0-4172-aac1-36289eaa4641",
+      "held_seconds": 123.059020951001,
+      "release_reason": "completed",
+      "released_unix_s": 1792714015.2139788,
+      "session_id": "069be45219928bc808461ac8-0056",
+      "wait_seconds": 17.525726914998813,
+      "wait_started_unix_s": 1792713874.6290777
+    },
+    {
+      "acquired_unix_s": 1792713829.4053426,
+      "execution_id": "exec-8fe19085-7ac3-4803-ae28-c35fc11f3465",
+      "held_seconds": 123.0012399719999,
+      "release_reason": "completed",
+      "released_unix_s": 1792713952.4018238,
+      "session_id": "069be45219928bc808461ac8-0098",
+      "wait_seconds": 0.00906627199947252,
+      "wait_started_unix_s": 1792713829.3989224
+    },
+    {
+      "acquired_unix_s": 1792713758.7229834,
+      "command": "apt-get update -qq && apt-get install -y -qq python3-pip python3-pytest 2>&1 | tail -5",
+      "execution_completed_at": 1792713881.4309242,
+      "execution_id": "exec-5ebd3a64-bfa4-4b78-996f-9c4b6f27625e",
+      "execution_started_at": 1792713761.25232,
+      "exit_code": 124,
+      "held_seconds": 122.81320501899972,
+      "operation": "exec",
+      "release_reason": "completed",
+      "released_unix_s": 1792713881.511825,
+      "session_id": "069be45219928bc808461ac8-0009",
+      "wait_seconds": 0.04364405600063037,
+      "wait_started_unix_s": 1792713758.688652
+    },
+    {
+      "acquired_unix_s": 1792713875.8023143,
+      "execution_id": "exec-d60b4558-30ae-4579-8f09-f49ccc0c8592",
+      "held_seconds": 122.59233951400165,
+      "release_reason": "completed",
+      "released_unix_s": 1792713998.3922899,
+      "session_id": "069be45219928bc808461ac8-0094",
+      "wait_seconds": 8.242001423001057,
+      "wait_started_unix_s": 1792713867.6000507
+    },
+    {
+      "acquired_unix_s": 1792713711.5085042,
+      "execution_id": "exec-ad21bd0b-13d3-4440-b953-c3d569c8cc3f",
+      "held_seconds": 121.66454902400073,
+      "release_reason": "completed",
+      "released_unix_s": 1792713833.1773405,
+      "session_id": "069be45219928bc808461ac8-0066",
+      "wait_seconds": 0.003846310999506386,
+      "wait_started_unix_s": 1792713711.50843
+    },
+    {
+      "acquired_unix_s": 1792713683.1905901,
+      "execution_id": "exec-a05ae488-901a-48d9-9108-846a33b74ece",
+      "held_seconds": 121.05127894800171,
+      "release_reason": "completed",
+      "released_unix_s": 1792713804.241788,
+      "session_id": "069be45219928bc808461ac8-0011",
+      "wait_seconds": 0.0003865849976136815,
+      "wait_started_unix_s": 1792713683.1903856
+    },
+    {
+      "acquired_unix_s": 1792713875.3762312,
+      "execution_id": "exec-c6dc0b6b-b7ba-4ee4-af58-0ec1a7a32fa6",
+      "held_seconds": 62.46838566700171,
+      "release_reason": "completed",
+      "released_unix_s": 1792713937.8436284,
+      "session_id": "069be45219928bc808461ac8-0007",
+      "wait_seconds": 8.52610451199871,
+      "wait_started_unix_s": 1792713866.8564053
+    },
+    {
+      "acquired_unix_s": 1792713791.1432662,
+      "execution_id": "exec-acf0953f-7ab3-45a8-8a9c-49d1b697ab9f",
+      "held_seconds": 5.230638895998709,
+      "release_reason": "completed",
+      "released_unix_s": 1792713796.3561475,
+      "session_id": "069be45219928bc808461ac8-0091",
+      "wait_seconds": 0.028609706001589075,
+      "wait_started_unix_s": 1792713791.1247742
+    },
+    {
+      "acquired_unix_s": 1792713906.8365607,
+      "execution_id": "exec-c42f6f81-fd48-441e-a788-f92d048f1997",
+      "held_seconds": 5.167842520000704,
+      "release_reason": "completed",
+      "released_unix_s": 1792713912.0012991,
+      "session_id": "069be45219928bc808461ac8-0032",
+      "wait_seconds": 24.505807666999317,
+      "wait_started_unix_s": 1792713882.3301964
+    },
+    {
+      "acquired_unix_s": 1792713844.9100626,
+      "execution_id": "exec-1ca6c24f-05ba-4f0a-9410-42deaef99470",
+      "held_seconds": 4.494917962998443,
+      "release_reason": "completed",
+      "released_unix_s": 1792713849.3984265,
+      "session_id": "069be45219928bc808461ac8-0124",
+      "wait_seconds": 1.284263347999513,
+      "wait_started_unix_s": 1792713843.6240954
+    },
+    {
+      "acquired_unix_s": 1792713738.576558,
+      "execution_id": "exec-3e1b079b-1bad-45ae-b0cb-9df28f0b1b82",
+      "held_seconds": 4.328319346997887,
+      "release_reason": "completed",
+      "released_unix_s": 1792713742.8707142,
+      "session_id": "069be45219928bc808461ac8-0109",
+      "wait_seconds": 0.05334535899964976,
+      "wait_started_unix_s": 1792713738.5405078
+    },
+    {
+      "acquired_unix_s": 1792713881.5132346,
+      "execution_id": "exec-664322d0-fa49-46e6-b8f8-4888f6f4ce57",
+      "held_seconds": 4.269835012997646,
+      "release_reason": "completed",
+      "released_unix_s": 1792713885.7815275,
+      "session_id": "069be45219928bc808461ac8-0162",
+      "wait_seconds": 12.804327721001755,
+      "wait_started_unix_s": 1792713868.7154188
+    },
+    {
+      "acquired_unix_s": 1792713858.6645498,
+      "execution_id": "exec-456ba2cc-b512-4b4b-9d21-010dffd7e180",
+      "held_seconds": 4.222253699997964,
+      "release_reason": "completed",
+      "released_unix_s": 1792713862.8581765,
+      "session_id": "069be45219928bc808461ac8-0137",
+      "wait_seconds": 0.031162732000666438,
+      "wait_started_unix_s": 1792713858.6333048
+    },
+    {
+      "acquired_unix_s": 1792713817.9728303,
+      "execution_id": "exec-18c598ca-c7b0-4fda-ba7b-135d84742f8e",
+      "held_seconds": 4.143570407999505,
+      "release_reason": "completed",
+      "released_unix_s": 1792713822.107339,
+      "session_id": "069be45219928bc808461ac8-0094",
+      "wait_seconds": 0.015073203001520596,
+      "wait_started_unix_s": 1792713817.9631526
+    },
+    {
+      "acquired_unix_s": 1792713861.8318555,
+      "execution_id": "exec-4995efc9-be82-4769-9137-0f782f0c40a3",
+      "held_seconds": 4.052363458999025,
+      "release_reason": "completed",
+      "released_unix_s": 1792713865.8839395,
+      "session_id": "069be45219928bc808461ac8-0154",
+      "wait_seconds": 2.16660707399933,
+      "wait_started_unix_s": 1792713859.6730158
+    }
+  ],
+  "timed_out": 0,
+  "wait_seconds": {
+    "max": 73.21184600199922,
+    "mean": 15.615990577448088,
+    "n": 96,
+    "p50": 2.7028733080005622,
+    "p90": 37.90337113900205,
+    "p95": 45.60873443524906,
+    "p99": 72.99285103869897
+  },
+  "waiting": [
+    {
+      "execution_id": "exec-edde6952-dce6-4426-b05f-be6f6931cf24",
+      "session_id": "069be45219928bc808461ac8-0195",
+      "wait_started_unix_s": 1792713948.7076793
+    },
+    {
+      "execution_id": "exec-fbcf7115-882f-4723-8450-fbd35f67a42f",
+      "session_id": "069be45219928bc808461ac8-0153",
+      "wait_started_unix_s": 1792713949.275492
+    },
+    {
+      "execution_id": "exec-0a440822-dce1-4691-994b-7ecd291378d1",
+      "session_id": "069be45219928bc808461ac8-0021",
+      "wait_started_unix_s": 1792713956.256885
+    },
+    {
+      "execution_id": "exec-3bcd810f-b37f-4556-97d1-3ddc79608a30",
+      "session_id": "069be45219928bc808461ac8-0093",
+      "wait_started_unix_s": 1792713956.8527107
+    },
+    {
+      "execution_id": "exec-4f42b829-a7e7-4d71-af40-6f4c34788d86",
+      "session_id": "069be45219928bc808461ac8-0098",
+      "wait_started_unix_s": 1792713958.599436
+    },
+    {
+      "execution_id": "exec-1054ca14-e997-4b92-b6d7-235fa420579f",
+      "session_id": "069be45219928bc808461ac8-0249",
+      "wait_started_unix_s": 1792713961.4684703
+    },
+    {
+      "execution_id": "exec-7cb54a4c-5e49-4a8a-b138-1e6df8ec0df7",
+      "session_id": "069be45219928bc808461ac8-0029",
+      "wait_started_unix_s": 1792713962.8212137
+    },
+    {
+      "execution_id": "exec-c2c08bc6-0e76-4da2-9a0d-5bf36e93a1cf",
+      "session_id": "069be45219928bc808461ac8-0016",
+      "wait_started_unix_s": 1792713963.2753587
+    },
+    {
+      "execution_id": "exec-1ff2eee3-2945-4ebb-9b41-270e656dbeae",
+      "session_id": "069be45219928bc808461ac8-0095",
+      "wait_started_unix_s": 1792713964.5204704
+    },
+    {
+      "execution_id": "exec-1d4f8189-6865-4dfd-8531-67aeb71121e6",
+      "session_id": "069be45219928bc808461ac8-0089",
+      "wait_started_unix_s": 1792713964.8117993
+    },
+    {
+      "execution_id": "exec-a43be19f-be2a-4ed5-8000-0dc412727ba1",
+      "session_id": "069be45219928bc808461ac8-0007",
+      "wait_started_unix_s": 1792713965.6107564
+    },
+    {
+      "execution_id": "exec-49be1e10-3d38-435c-9e33-e2e61374fde7",
+      "session_id": "069be45219928bc808461ac8-0137",
+      "wait_started_unix_s": 1792713966.0356703
+    },
+    {
+      "execution_id": "exec-9a2b482f-64d0-45d7-93ab-5c281ec90f34",
+      "session_id": "069be45219928bc808461ac8-0017",
+      "wait_started_unix_s": 1792713966.051972
+    },
+    {
+      "execution_id": "exec-25acbb00-400f-4c91-93b0-2b2948ed9da4",
+      "session_id": "069be45219928bc808461ac8-0239",
+      "wait_started_unix_s": 1792713966.8530378
+    },
+    {
+      "execution_id": "exec-789d3bc6-e2a6-4751-bc73-2b607f3d00df",
+      "session_id": "069be45219928bc808461ac8-0091",
+      "wait_started_unix_s": 1792713972.570037
+    },
+    {
+      "execution_id": "exec-8e3864b1-70cc-4d63-a4e2-f8a344c6a567",
+      "session_id": "069be45219928bc808461ac8-0153",
+      "wait_started_unix_s": 1792713973.1208901
+    },
+    {
+      "execution_id": "exec-c56ead55-9fbe-478e-aef1-8165886833c0",
+      "session_id": "069be45219928bc808461ac8-0108",
+      "wait_started_unix_s": 1792713973.201517
+    },
+    {
+      "execution_id": "exec-a43c321a-da8d-4441-9b69-6e3287588b73",
+      "session_id": "069be45219928bc808461ac8-0250",
+      "wait_started_unix_s": 1792713976.2278044
+    },
+    {
+      "execution_id": "exec-6864ddd9-a539-401e-a326-5fa6bee1d62a",
+      "session_id": "069be45219928bc808461ac8-0067",
+      "wait_started_unix_s": 1792713978.1688979
+    },
+    {
+      "execution_id": "exec-bebb7d86-c39f-47ca-abbb-3716af0a556b",
+      "session_id": "069be45219928bc808461ac8-0189",
+      "wait_started_unix_s": 1792713978.1771996
+    },
+    {
+      "execution_id": "exec-6a36f1d9-edd9-49cd-8f75-3a704e0710ea",
+      "session_id": "069be45219928bc808461ac8-0151",
+      "wait_started_unix_s": 1792713979.0591495
+    },
+    {
+      "execution_id": "exec-32dcd88e-9694-4514-b5ce-3643c0e87656",
+      "session_id": "069be45219928bc808461ac8-0099",
+      "wait_started_unix_s": 1792713979.9986944
+    },
+    {
+      "execution_id": "exec-4f161b05-cddb-466b-8a52-23ff1c77943a",
+      "session_id": "069be45219928bc808461ac8-0186",
+      "wait_started_unix_s": 1792713980.384418
+    },
+    {
+      "execution_id": "exec-5e3f5a96-63c1-4947-8cbc-a58dc0f3539c",
+      "session_id": "069be45219928bc808461ac8-0097",
+      "wait_started_unix_s": 1792713980.6232724
+    },
+    {
+      "execution_id": "exec-64013bb6-c9e8-41e2-996f-e17e4309e79d",
+      "session_id": "069be45219928bc808461ac8-0093",
+      "wait_started_unix_s": 1792713980.9777124
+    },
+    {
+      "execution_id": "exec-0ca13cf3-ea65-4c14-9cd1-ab9b9aa3094d",
+      "session_id": "069be45219928bc808461ac8-0001",
+      "wait_started_unix_s": 1792713981.2999773
+    },
+    {
+      "execution_id": "exec-2598315e-f42e-4e45-9aa3-d6c1d9b9e2f2",
+      "session_id": "069be45219928bc808461ac8-0020",
+      "wait_started_unix_s": 1792713981.7644894
+    },
+    {
+      "execution_id": "exec-c6887a52-91a8-47ae-b36a-355d030c8dfd",
+      "session_id": "069be45219928bc808461ac8-0098",
+      "wait_started_unix_s": 1792713983.7508283
+    },
+    {
+      "execution_id": "exec-30461932-adb5-4e11-a93d-dcee1abbec9d",
+      "session_id": "069be45219928bc808461ac8-0249",
+      "wait_started_unix_s": 1792713984.4524875
+    },
+    {
+      "execution_id": "exec-75bb8c35-cf98-46e4-845d-543dd53fa017",
+      "session_id": "069be45219928bc808461ac8-0100",
+      "wait_started_unix_s": 1792713984.7227626
+    },
+    {
+      "execution_id": "exec-b2ce86cf-926b-47ff-b450-ac81304ded7c",
+      "session_id": "069be45219928bc808461ac8-0016",
+      "wait_started_unix_s": 1792713984.9103394
+    },
+    {
+      "execution_id": "exec-8e9e5f0e-5479-4e44-a604-51d642badd3c",
+      "session_id": "069be45219928bc808461ac8-0181",
+      "wait_started_unix_s": 1792713985.925576
+    },
+    {
+      "execution_id": "exec-8172f3cb-e45c-4e31-b885-b41e05c41dad",
+      "session_id": "069be45219928bc808461ac8-0015",
+      "wait_started_unix_s": 1792713988.0656955
+    },
+    {
+      "execution_id": "exec-0618f082-91b2-4a33-9ff9-7c72887eb1a3",
+      "session_id": "069be45219928bc808461ac8-0089",
+      "wait_started_unix_s": 1792713988.7485552
+    },
+    {
+      "execution_id": "exec-f7cc6922-1edc-4ae4-b6c6-6f4262d3fd68",
+      "session_id": "069be45219928bc808461ac8-0137",
+      "wait_started_unix_s": 1792713989.0840788
+    },
+    {
+      "execution_id": "exec-01b81364-4130-4619-b651-b993f545e3ec",
+      "session_id": "069be45219928bc808461ac8-0195",
+      "wait_started_unix_s": 1792713989.7480469
+    },
+    {
+      "execution_id": "exec-d6cde72d-8dd3-4f68-a421-a82e3e3beb9f",
+      "session_id": "069be45219928bc808461ac8-0063",
+      "wait_started_unix_s": 1792713993.2886133
+    },
+    {
+      "execution_id": "exec-fa61fa82-eba0-46fb-a232-9463eb940e1b",
+      "session_id": "069be45219928bc808461ac8-0108",
+      "wait_started_unix_s": 1792713995.5768368
+    },
+    {
+      "execution_id": "exec-6acf7359-d3fb-4918-8d71-71f415f01cbe",
+      "session_id": "069be45219928bc808461ac8-0157",
+      "wait_started_unix_s": 1792713995.9331632
+    },
+    {
+      "execution_id": "exec-9649b790-bd69-4323-ad4e-1bf89d9080f7",
+      "session_id": "069be45219928bc808461ac8-0091",
+      "wait_started_unix_s": 1792713996.1113799
+    },
+    {
+      "execution_id": "exec-4c59c627-6223-43a4-9fb0-642d4a13ca6c",
+      "session_id": "069be45219928bc808461ac8-0196",
+      "wait_started_unix_s": 1792713996.2052646
+    },
+    {
+      "execution_id": "exec-9c7814c4-e773-472f-94af-1c3c47d73407",
+      "session_id": "069be45219928bc808461ac8-0124",
+      "wait_started_unix_s": 1792713997.4292314
+    },
+    {
+      "execution_id": "exec-202ee03d-8d83-4959-ac88-19f17935ef16",
+      "session_id": "069be45219928bc808461ac8-0221",
+      "wait_started_unix_s": 1792713997.738395
+    },
+    {
+      "execution_id": "exec-fa032ab1-ce85-433c-83f8-b7031c94c5c8",
+      "session_id": "069be45219928bc808461ac8-0250",
+      "wait_started_unix_s": 1792713998.7238872
+    },
+    {
+      "execution_id": "exec-766a2c6e-d70e-4d5e-8e55-369cfb7ae778",
+      "session_id": "069be45219928bc808461ac8-0189",
+      "wait_started_unix_s": 1792713999.9368954
+    },
+    {
+      "execution_id": "exec-efcc8d79-ab73-4fab-9871-392b8d026a3b",
+      "session_id": "069be45219928bc808461ac8-0022",
+      "wait_started_unix_s": 1792713999.9947128
+    },
+    {
+      "execution_id": "exec-bfa5e069-82a8-4471-97ba-1e11b91ef680",
+      "session_id": "069be45219928bc808461ac8-0186",
+      "wait_started_unix_s": 1792714001.1195261
+    },
+    {
+      "execution_id": "exec-734b42ab-d2db-4d37-88a2-76c4e6299df2",
+      "session_id": "069be45219928bc808461ac8-0017",
+      "wait_started_unix_s": 1792714003.4425244
+    },
+    {
+      "execution_id": "exec-49354644-348a-4a8c-a567-e25ad0f6a6db",
+      "session_id": "069be45219928bc808461ac8-0116",
+      "wait_started_unix_s": 1792714003.4453702
+    },
+    {
+      "execution_id": "exec-4d230e28-0c4f-4cac-9a94-3f9f43299eda",
+      "session_id": "069be45219928bc808461ac8-0001",
+      "wait_started_unix_s": 1792714003.6751313
+    },
+    {
+      "execution_id": "exec-d841dce6-f4c9-41dc-9800-4fe5ee237c04",
+      "session_id": "069be45219928bc808461ac8-0093",
+      "wait_started_unix_s": 1792714004.1754901
+    },
+    {
+      "execution_id": "exec-eff9a997-af2f-45c8-85ba-6a1edd409fb4",
+      "session_id": "069be45219928bc808461ac8-0094",
+      "wait_started_unix_s": 1792714004.7970824
+    },
+    {
+      "execution_id": "exec-cc0c8857-0063-4726-9b88-c3fc18e6af26",
+      "session_id": "069be45219928bc808461ac8-0058",
+      "wait_started_unix_s": 1792714006.1814368
+    },
+    {
+      "execution_id": "exec-c09f0b02-ce94-4009-bfbe-7508456b8fd8",
+      "session_id": "069be45219928bc808461ac8-0020",
+      "wait_started_unix_s": 1792714006.5309858
+    },
+    {
+      "execution_id": "exec-09464c9c-5e3f-4f5a-a84f-4e107c4ed331",
+      "session_id": "069be45219928bc808461ac8-0181",
+      "wait_started_unix_s": 1792714007.7625308
+    },
+    {
+      "execution_id": "exec-c341e9ea-f81c-4213-a1ad-d8b23a4702db",
+      "session_id": "069be45219928bc808461ac8-0016",
+      "wait_started_unix_s": 1792714007.9790676
+    },
+    {
+      "execution_id": "exec-7d7d986d-086d-4506-aa57-1c0ea7b42d6f",
+      "session_id": "069be45219928bc808461ac8-0255",
+      "wait_started_unix_s": 1792714008.6616755
+    },
+    {
+      "execution_id": "exec-bb7a6b35-2ac1-4b9a-87cc-4a1bf4aca386",
+      "session_id": "069be45219928bc808461ac8-0153",
+      "wait_started_unix_s": 1792714009.0477965
+    },
+    {
+      "execution_id": "exec-522e76e8-1025-4e67-88d3-7216347f5901",
+      "session_id": "069be45219928bc808461ac8-0031",
+      "wait_started_unix_s": 1792714009.7465708
+    },
+    {
+      "execution_id": "exec-001b7ed7-3b7e-440a-a7a4-de486ee8797f",
+      "session_id": "069be45219928bc808461ac8-0162",
+      "wait_started_unix_s": 1792714010.8542671
+    },
+    {
+      "execution_id": "exec-79b5e694-09d3-4ee9-bf2c-6fb586eefc41",
+      "session_id": "069be45219928bc808461ac8-0137",
+      "wait_started_unix_s": 1792714011.0006053
+    },
+    {
+      "execution_id": "exec-5b3f1f31-4c86-408a-bb1f-1be880427fe7",
+      "session_id": "069be45219928bc808461ac8-0251",
+      "wait_started_unix_s": 1792714012.897671
+    },
+    {
+      "execution_id": "exec-711ce1a5-49df-41ea-804b-0c06b725d667",
+      "session_id": "069be45219928bc808461ac8-0253",
+      "wait_started_unix_s": 1792714013.295634
+    },
+    {
+      "execution_id": "exec-486d6b3e-0438-4331-94dc-e001dd213d3a",
+      "session_id": "069be45219928bc808461ac8-0253",
+      "wait_started_unix_s": 1792714013.3149304
+    },
+    {
+      "execution_id": "exec-c4699fd2-f9b2-4fa5-bec3-b187f08d6a03",
+      "session_id": "069be45219928bc808461ac8-0063",
+      "wait_started_unix_s": 1792714016.4086108
+    },
+    {
+      "execution_id": "exec-2bc7e5bb-75e4-4cd7-9a6d-d610abaaadc6",
+      "session_id": "069be45219928bc808461ac8-0112",
+      "wait_started_unix_s": 1792714017.3185167
+    },
+    {
+      "execution_id": "exec-d763eb23-e7bf-4a8b-bbf4-23063048111d",
+      "session_id": "069be45219928bc808461ac8-0131",
+      "wait_started_unix_s": 1792714017.753771
+    },
+    {
+      "execution_id": "exec-2e284013-1e2e-488e-8de7-a0bfa089258b",
+      "session_id": "069be45219928bc808461ac8-0196",
+      "wait_started_unix_s": 1792714018.3712256
+    },
+    {
+      "execution_id": "exec-aed2c52d-fcf7-4c61-afaf-a067eefd5316",
+      "session_id": "069be45219928bc808461ac8-0194",
+      "wait_started_unix_s": 1792714018.5600152
+    },
+    {
+      "execution_id": "exec-816a8bda-90c8-4f1a-9e08-00ca6263d767",
+      "session_id": "069be45219928bc808461ac8-0056",
+      "wait_started_unix_s": 1792714018.8635821
+    },
+    {
+      "execution_id": "exec-5bc0afe5-d4ef-4067-a88f-5e278be46e39",
+      "session_id": "069be45219928bc808461ac8-0091",
+      "wait_started_unix_s": 1792714019.400243
+    },
+    {
+      "execution_id": "exec-eb47ce79-517f-4c62-8dfc-a1524c337b5f",
+      "session_id": "069be45219928bc808461ac8-0124",
+      "wait_started_unix_s": 1792714019.582113
+    },
+    {
+      "execution_id": "exec-fbcadbbe-be22-4b4c-9b0a-6b2e97fd4744",
+      "session_id": "069be45219928bc808461ac8-0221",
+      "wait_started_unix_s": 1792714019.8253987
+    },
+    {
+      "execution_id": "exec-0ca79050-fd7d-406b-aba2-7e7137bd94ce",
+      "session_id": "069be45219928bc808461ac8-0097",
+      "wait_started_unix_s": 1792714020.4288926
+    },
+    {
+      "execution_id": "exec-86489929-478f-456e-9315-8065ab625bae",
+      "session_id": "069be45219928bc808461ac8-0250",
+      "wait_started_unix_s": 1792714020.66233
+    },
+    {
+      "execution_id": "exec-f03e4978-1ee6-4494-8b1c-ed38e8da9af3",
+      "session_id": "069be45219928bc808461ac8-0038",
+      "wait_started_unix_s": 1792714022.223074
+    },
+    {
+      "execution_id": "exec-909bb51a-7dcf-4f76-8f10-9c668698e908",
+      "session_id": "069be45219928bc808461ac8-0098",
+      "wait_started_unix_s": 1792714022.965039
+    },
+    {
+      "execution_id": "exec-4ba9ddce-1fca-4272-8589-2ace6fc5f7a7",
+      "session_id": "069be45219928bc808461ac8-0022",
+      "wait_started_unix_s": 1792714023.3093817
+    },
+    {
+      "execution_id": "exec-60c55479-8291-4055-a550-f11da686a39d",
+      "session_id": "069be45219928bc808461ac8-0094",
+      "wait_started_unix_s": 1792714026.2175648
+    },
+    {
+      "execution_id": "exec-daaca9af-8519-4bf0-8bd6-d03b7f0c4fde",
+      "session_id": "069be45219928bc808461ac8-0017",
+      "wait_started_unix_s": 1792714026.7996109
+    },
+    {
+      "execution_id": "exec-0e0dd10b-6f4a-41f0-b753-74e3ec5e4111",
+      "session_id": "069be45219928bc808461ac8-0195",
+      "wait_started_unix_s": 1792714027.5945616
+    },
+    {
+      "execution_id": "exec-72b4d981-0df1-4b5f-92f5-55d9e406df12",
+      "session_id": "069be45219928bc808461ac8-0181",
+      "wait_started_unix_s": 1792714028.7527153
+    },
+    {
+      "execution_id": "exec-daf2af00-6118-4a61-8506-2c71aaae1e6f",
+      "session_id": "069be45219928bc808461ac8-0246",
+      "wait_started_unix_s": 1792714028.792327
+    },
+    {
+      "execution_id": "exec-631be73f-7cc4-4199-92fb-acb20a176645",
+      "session_id": "069be45219928bc808461ac8-0015",
+      "wait_started_unix_s": 1792714029.3981807
+    },
+    {
+      "execution_id": "exec-6627d6ce-1b14-4a71-98c3-e474a811e99a",
+      "session_id": "069be45219928bc808461ac8-0111",
+      "wait_started_unix_s": 1792714029.6710727
+    },
+    {
+      "execution_id": "exec-a58153a7-c414-489d-9134-fd7a710dacce",
+      "session_id": "069be45219928bc808461ac8-0000",
+      "wait_started_unix_s": 1792714030.317823
+    },
+    {
+      "execution_id": "exec-38b62969-f338-407d-af1b-752c3cada212",
+      "session_id": "069be45219928bc808461ac8-0020",
+      "wait_started_unix_s": 1792714030.6893191
+    },
+    {
+      "execution_id": "exec-5cc5cdb7-7ae2-45cc-8a77-6f2cf9b73765",
+      "session_id": "069be45219928bc808461ac8-0255",
+      "wait_started_unix_s": 1792714031.3159096
+    },
+    {
+      "execution_id": "exec-d6053152-1ce5-42ec-83a7-95731da1d953",
+      "session_id": "069be45219928bc808461ac8-0016",
+      "wait_started_unix_s": 1792714031.8031201
+    },
+    {
+      "execution_id": "exec-73a78d46-b4f4-4267-afde-931878a67954",
+      "session_id": "069be45219928bc808461ac8-0083",
+      "wait_started_unix_s": 1792714034.8253322
+    },
+    {
+      "execution_id": "exec-7f4bd36b-8b15-43bf-854c-2a749e28ff21",
+      "session_id": "069be45219928bc808461ac8-0137",
+      "wait_started_unix_s": 1792714034.8634992
+    },
+    {
+      "execution_id": "exec-4c9c889e-cfbb-4f67-af6a-3589f7cb4d38",
+      "session_id": "069be45219928bc808461ac8-0154",
+      "wait_started_unix_s": 1792714036.3023937
+    },
+    {
+      "execution_id": "exec-531c33a9-7878-4494-95c0-f9ab83a626e1",
+      "session_id": "069be45219928bc808461ac8-0239",
+      "wait_started_unix_s": 1792714036.425834
+    },
+    {
+      "execution_id": "exec-e566df2b-9c77-41a2-bcc9-e6691a515c92",
+      "session_id": "069be45219928bc808461ac8-0206",
+      "wait_started_unix_s": 1792714036.6122353
+    },
+    {
+      "execution_id": "exec-7c5aabf0-6b9b-4ed5-8c1b-b0f5243a3d90",
+      "session_id": "069be45219928bc808461ac8-0085",
+      "wait_started_unix_s": 1792714036.6146674
+    },
+    {
+      "execution_id": "exec-7c8d3d5a-1a37-44dd-9af8-008f735a4fe9",
+      "session_id": "069be45219928bc808461ac8-0157",
+      "wait_started_unix_s": 1792714036.8572628
+    },
+    {
+      "execution_id": "exec-05ae719e-7287-4fb3-b363-b450914b5694",
+      "session_id": "069be45219928bc808461ac8-0099",
+      "wait_started_unix_s": 1792714037.3542295
+    },
+    {
+      "execution_id": "exec-bfb570e0-f53e-417d-9400-99a867672ef6",
+      "session_id": "069be45219928bc808461ac8-0162",
+      "wait_started_unix_s": 1792714037.9373524
+    },
+    {
+      "execution_id": "exec-34602bf7-2ef3-433d-a1e1-91576781b9ad",
+      "session_id": "069be45219928bc808461ac8-0251",
+      "wait_started_unix_s": 1792714038.1192207
+    },
+    {
+      "execution_id": "exec-d905db86-18cb-4de6-88ec-9f761d3849e3",
+      "session_id": "069be45219928bc808461ac8-0189",
+      "wait_started_unix_s": 1792714038.5447917
+    },
+    {
+      "execution_id": "exec-bae01a19-ce5e-4d7e-a43e-ee6bdd5014d2",
+      "session_id": "069be45219928bc808461ac8-0031",
+      "wait_started_unix_s": 1792714040.6109054
+    },
+    {
+      "execution_id": "exec-3e2f9bc1-1f68-481a-bdfb-87d4665e86e5",
+      "session_id": "069be45219928bc808461ac8-0105",
+      "wait_started_unix_s": 1792714041.6046736
+    },
+    {
+      "execution_id": "exec-8cb4c5a8-db5f-41d8-b6d1-377ebc562267",
+      "session_id": "069be45219928bc808461ac8-0194",
+      "wait_started_unix_s": 1792714042.620704
+    },
+    {
+      "execution_id": "exec-2e505921-a7ba-4b59-ac18-e51a685745fc",
+      "session_id": "069be45219928bc808461ac8-0030",
+      "wait_started_unix_s": 1792714043.6244757
+    }
+  ],
+  "waiting_at_eof": 104
+}

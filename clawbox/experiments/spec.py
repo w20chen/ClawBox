@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import random
+import urllib.parse
 from pathlib import Path
 from typing import Literal, Any
 
@@ -175,6 +176,15 @@ class ExecutionSpec(StrictFrozenModel):
     # Limit only concurrent VM-pair creation. Once a pair is ready, its
     # session releases this slot and remains active at offered concurrency.
     sandbox_create_concurrency: int = Field(default=8, ge=1)
+    # Optionally bound concurrent package-manager commands across an arm. This
+    # protects the shared outbound package path without limiting other tools.
+    dependency_install_concurrency: int | None = Field(default=None, ge=1)
+    # Optional host-local apt-cacher-ng endpoint installed into Tool VMs only.
+    # It changes package transport, not the recorded trace command or package
+    # source identity.
+    apt_cache_proxy_url: str | None = Field(default=None, min_length=1)
+    # Optional host-local devpi caching index inherited by Tool commands.
+    pypi_cache_index_url: str | None = Field(default=None, min_length=1)
     cube_request_timeout_seconds: float = Field(default=130, gt=0, allow_inf_nan=False)
     worker_thread_switch_interval_seconds: float = Field(
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
@@ -206,6 +216,49 @@ class ExecutionSpec(StrictFrozenModel):
         if len(value) != len(set(value)):
             raise ValueError("execution.concurrency_levels must not contain duplicates")
         return value
+
+    @field_validator("apt_cache_proxy_url")
+    @classmethod
+    def valid_apt_cache_proxy_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "http"
+            or not parsed.hostname
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "apt_cache_proxy_url must be an unauthenticated http://host:port URL"
+            )
+        return value.rstrip("/")
+
+    @field_validator("pypi_cache_index_url")
+    @classmethod
+    def valid_pypi_cache_index_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "http"
+            or not parsed.hostname
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or not parsed.path.endswith("/+simple/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "pypi_cache_index_url must be an unauthenticated "
+                "http://host:port/.../+simple/ URL"
+            )
+        return value.rstrip("/") + "/"
 
     @model_validator(mode="after")
     def valid_arrival_schedule(self) -> "ExecutionSpec":
@@ -285,6 +338,7 @@ class ResourcesSpec(StrictFrozenModel):
     snapshot_residency_costs: SnapshotResidencyCostSpec | None = None
     idle_reclaim_costs: IdleReclaimCostSpec | None = None
     template_base_sharing: Literal["disabled", "required"] = "disabled"
+    template_base_sharing_artifact: str | None = None
 
     def compute_node_budget_mib(self, node: ComputeNode) -> int:
         """Static ledgers use capacity; measured admission uses HIGH."""
@@ -361,9 +415,9 @@ class ResourcesSpec(StrictFrozenModel):
                 raise ValueError("shared borrowing requires LOCAL and shared NUMA nodes")
             if self.warm_numa_node == self.local_numa_node:
                 raise ValueError("LOCAL and shared NUMA nodes must differ")
-            if borrow * 2 > self.warm_memory_capacity_mib:
+            if borrow > self.warm_memory_capacity_mib:
                 raise ValueError(
-                    "live borrow limit cannot exceed 50% of the shared NUMA pool"
+                    "live borrow limit cannot exceed the shared NUMA pool"
                 )
             if self.pool_memory_budget_mib != high:
                 raise ValueError("pool_memory_budget_mib must equal the HIGH watermark")
@@ -795,10 +849,12 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
             ),
             validation=record.get("validation_command") or record.get("validation"),
             sandbox=record.get("sandbox"),
+            snapshot_reuse_probability=record.get("snapshot_reuse_probability"),
             metadata={key: value for key, value in record.items() if key not in {
                 "instance_id", "task_id", "case_id", "id", "problem_statement", "problem",
                 "prompt", "repo", "repository", "base_commit", "validation_command", "validation",
-                "source_reference", "replay_trace_reference", "sandbox", "metadata"}
+                "source_reference", "replay_trace_reference", "sandbox",
+                "snapshot_reuse_probability", "metadata"}
             } | (record.get("metadata") or {}),
         ))
     if not cases:

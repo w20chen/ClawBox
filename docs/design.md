@@ -137,7 +137,15 @@ and `sandbox_create_gate_released` events. A task owns two VMs, but may have zer
 one, or two resident while queued. Last-observed blockers and oldest wait age
 describe outstanding waits, including waits that never finish.
 
+When `execution.dependency_install_concurrency` is set, package downloads have a
+separate arm-wide queue. `dependency_install_gate_wait_started`,
+`dependency_install_gate_acquired`, and `dependency_install_gate_released` mark
+each transition. The periodic queue activity snapshot reports waiting and active
+operations/tasks plus the oldest wait. A permit remains active until the Tool's
+SSH command has been reaped, not merely until memory admission succeeds.
+
 `tool_admitted.control_total_seconds` covers the worker admission callback,
-including lifecycle-lock wait, memory admission, restore, routing, and bookkeeping.
+including any dependency-install wait, lifecycle-lock wait, memory admission,
+restore, routing, and bookkeeping.
 `admission_blocked_seconds` covers memory admission only. Neither includes the
 HTTP transport before the callback; use the guest/control journal for that.

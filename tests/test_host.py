@@ -11,7 +11,7 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"local_node": 1}, {"low_gib": 35, "high_gib": 32},
     {"warm_root": "/data", "cold_root": "/data/cold"},
     {"warm_root": "/data/../warm"}, {"warm_gib": -1},
-    {"warm_gbi": 100}, {"local_node": "0"}, {"shared_borrow_percent": 51},
+    {"warm_gbi": 100}, {"local_node": "0"}, {"shared_borrow_percent": 101},
     {"tcp_tw_reuse": 3}, {"tcp_tw_reuse": True},
     {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
 ])

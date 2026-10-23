@@ -56,6 +56,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
         "baselines", "configure", "describe", "validate", "plan", "run", "status",
         "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
         "trace", "import-trace", "import-corpus", "train", "images", "report", "launch", "host", "recipes", "schema",
+        "prove-template-sharing",
     }
 
 
@@ -108,6 +109,32 @@ def test_launch_qualifies_when_needed_then_starts_run(
             "--qualification", str(receipt), "--detach",
         ],
     )
+
+
+def test_qualify_cli_delegates_preflight_and_input_validation_to_qualify(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    import clawbox.experiments.qualification as qualification
+
+    calls = []
+    receipt = tmp_path / "qualification.json"
+    monkeypatch.setattr(
+        qualification,
+        "qualify",
+        lambda spec, **kwargs: calls.append(kwargs) or {"status": "succeeded"},
+    )
+
+    assert cli.main([
+        "--output-root", str(tmp_path), "experiment", "qualify",
+        "examples/experiments/getting-started.yaml",
+        "--concurrency", "2", "--receipt", str(receipt),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "succeeded"
+    assert calls == [{
+        "output_base": tmp_path,
+        "receipt_path": receipt,
+        "concurrency": 2,
+    }]
 
 
 def test_launch_host_apply_failure_stops_before_qualification(monkeypatch, tmp_path):

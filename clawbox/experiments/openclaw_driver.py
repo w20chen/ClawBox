@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import re
 import shlex
-import sysconfig
-import tarfile
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -196,7 +194,9 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
 
 def native_tool_bridge_setup_command(*, restart: bool = False,
                                      require_progress_events: bool = False,
-                                     command_timeout_seconds: int = 300) -> str:
+                                     command_timeout_seconds: int = 300,
+                                     apt_cache_proxy_url: str | None = None,
+                                     pypi_cache_index_url: str | None = None) -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
     Cube restores a template snapshot before applying per-sandbox environment
@@ -218,9 +218,27 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "/usr/local/bin/tool-bridge --self-test | grep -q '\"progress_events\":true' || "
         "{ echo 'Toolbridge lacks execution progress events; rebuild the Tool image with clawbox experiment images' >&2; exit 1; }; "
     ) if require_progress_events else ""
+    apt_proxy_setup = ""
+    if apt_cache_proxy_url:
+        directive = f'Acquire::http::Proxy "{apt_cache_proxy_url}";\n'
+        apt_proxy_setup = (
+            "mkdir -p /etc/apt/apt.conf.d; "
+            f"printf %s {shlex.quote(directive)} "
+            "> /etc/apt/apt.conf.d/01clawbox-package-cache; "
+        )
+    pypi_environment = ""
+    if pypi_cache_index_url:
+        pypi_host = urllib.parse.urlsplit(pypi_cache_index_url).hostname
+        if not pypi_host:
+            raise ValueError("PyPI cache index URL has no host")
+        pypi_environment = (
+            f"PIP_INDEX_URL={shlex.quote(pypi_cache_index_url)} "
+            f"PIP_TRUSTED_HOST={shlex.quote(pypi_host)} "
+        )
     return (
         "set -eu; "
         + progress_check
+        + apt_proxy_setup
         + "mkdir -p /etc/profile.d; "
         "printf 'export PYTHONHASHSEED=0\\n' > /etc/profile.d/clawbox-experiment.sh; "
         "mkdir -p /run/clawbox-ssh; "
@@ -236,7 +254,8 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
         f"TOOL_EXEC_TIMEOUT_SECONDS={int(command_timeout_seconds)} "
-        "PYTHONHASHSEED=0 "
+        + pypi_environment
+        + "PYTHONHASHSEED=0 "
         "CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py "
         "CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python "
         "PYTHONPATH=/opt/clawtune-guest/services/sidecar/src "
@@ -260,7 +279,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
                  resident_wait: Callable[[str, float], CommandResult | None] | None = None,
-                 checkpoint_relay: bool = False) -> dict:
+                 checkpoint_relay: bool = False,
+                 startup_begin: Callable[[], None] | None = None,
+                 startup_wait: Callable[[], None] | None = None,
+                 startup_event: Callable[[dict[str, Any]], None] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -357,8 +379,21 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
 
+    def emit_startup_stage(
+        stage: str, started: float, *, status: str = "ok",
+    ) -> None:
+        if startup_event is not None:
+            startup_event({
+                "event": "openclaw_startup_stage",
+                "session_id": session_id,
+                "stage": stage,
+                "status": status,
+                "duration_seconds": max(0.0, time.monotonic() - started),
+            })
+
     def invoke(args: list[str], *, input_value: str | None = None,
-               pid_file: str | None = None) -> CommandResult:
+               pid_file: str | None = None,
+               startup_stage: str | None = None) -> CommandResult:
         if input_value is not None and pid_file is not None:
             raise ValueError("pid_file cannot be combined with stdin input")
         argv = " ".join(
@@ -372,7 +407,18 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             command = prefix + f"printf '%s\\n' $$ > {shlex.quote(pid_file)}; exec {argv}"
         else:
             command = prefix + argv
-        result = runtime_executor.execute(command, timeout_seconds or 300)
+        started = time.monotonic()
+        try:
+            result = runtime_executor.execute(command, timeout_seconds or 300)
+        except BaseException:
+            if startup_stage is not None:
+                emit_startup_stage(startup_stage, started, status="error")
+            raise
+        if startup_stage is not None:
+            emit_startup_stage(
+                startup_stage, started,
+                status="ok" if result.exit_code == 0 else "error",
+            )
         if result.exit_code:
             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
         return result
@@ -385,50 +431,6 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     init_state_file = f"{home}/initialize-clawtune-state.py"
     init_state_source = Path(__file__).resolve().parents[2] / "scripts" / "initialize-clawtune-state.py"
     init_state_b64 = base64.b64encode(init_state_source.read_bytes()).decode()
-    # The deployed Runtime image may contain an older sidecar wheel without
-    # the main-branch clawtune_kb package.  Inject that small native package
-    # from the selected ClawTune source so the initializer and sidecar share
-    # the current StateStore contract.
-    sidecar_src_value = os.getenv("CLAWTUNE_SIDECAR_SRC", "")
-    sidecar_src = Path(sidecar_src_value) if sidecar_src_value else None
-    if sidecar_src is None or not sidecar_src.is_dir():
-        clawtune_root = Path(os.getenv(
-            "CLAWTUNE_ROOT", str(Path(__file__).resolve().parents[3] / "ClawTune"),
-        ))
-        sidecar_src = clawtune_root / "services" / "sidecar" / "src"
-    kb_source = sidecar_src / "clawtune_kb"
-    if not kb_source.is_dir():
-        raise RuntimeError(f"ClawTune KB source does not exist: {kb_source}")
-    clawtune_root = sidecar_src.parents[2]
-    from clawbox.clawtune_integration import seed_directory
-    seed_source = seed_directory()
-    contracts_source = clawtune_root / "contracts"
-    if not seed_source.is_dir() or not contracts_source.is_dir():
-        raise RuntimeError("ClawTune bootstrap seed/contracts are unavailable")
-    kb_archive = io.BytesIO()
-    with tarfile.open(fileobj=kb_archive, mode="w:gz") as archive:
-        archive.add(kb_source, arcname="clawtune_kb")
-        archive.add(seed_source, arcname="clawtune_kb/_data/seeds/bootstrap-v1")
-        archive.add(contracts_source, arcname="clawtune_kb/_data/contracts")
-        # The Runtime image's venv is intentionally small.  Include the
-        # pure-Python JSON-schema stack (and rpds' matching extension) used by
-        # ClawTune contracts so native seed validation works on that image.
-        site_candidates = [
-            Path(os.getenv("CLAWTUNE_RUNTIME_SITE_PACKAGES", "")),
-            Path("/home/weitianc/.local/lib/python3.11/site-packages"),
-            Path(sysconfig.get_paths()["purelib"]),
-        ]
-        site_packages = next(
-            (candidate for candidate in site_candidates if (candidate / "rpds").is_dir()),
-            Path(sysconfig.get_paths()["purelib"]),
-        )
-        for dependency in ("jsonschema", "referencing", "attrs", "attr", "jsonschema_specifications", "rpds"):
-            dependency_path = site_packages / dependency
-            if dependency_path.exists():
-                archive.add(dependency_path, arcname=dependency_path.name)
-    kb_archive_b64 = base64.b64encode(kb_archive.getvalue()).decode()
-    kb_extra_dir = f"{home}/clawtune-extra"
-    kb_archive_file = f"{home}/clawtune-kb.tar.gz"
     _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
@@ -466,27 +468,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     encoded_predictions = base64.b64encode(json.dumps(
         prediction_manifest or {}, sort_keys=True, separators=(",", ":"),
     ).encode()).decode()
-    # CubeSandbox limits one command's argument size.  Transfer the native
-    # ClawTune support archive in bounded chunks before the setup command.
-    archive_init = runtime_executor.execute(
-        prefix + f"mkdir -p {shlex.quote(home)}; : > {shlex.quote(kb_archive_file)}",
-        30,
-    )
-    if archive_init.exit_code:
-        raise RuntimeError(f"Runtime ClawTune archive setup failed: {archive_init.stderr[-2000:]}")
-    for offset in range(0, len(kb_archive_b64), 48 * 1024):
-        chunk = kb_archive_b64[offset:offset + 48 * 1024]
-        transferred = runtime_executor.execute(
-            prefix + f"printf %s {shlex.quote(chunk)} | base64 -d >> {shlex.quote(kb_archive_file)}",
-            30,
-        )
-        if transferred.exit_code:
-            raise RuntimeError(
-                f"Runtime ClawTune archive transfer failed at offset {offset}: "
-                f"{transferred.stderr[-2000:]}"
-            )
-    setup = runtime_executor.execute(
-        prefix
+    setup_started = time.monotonic()
+    try:
+        setup = runtime_executor.execute(
+            prefix
         + f"mkdir -p {shlex.quote(runtime_workspace)} {shlex.quote(trace_dir + '/tool-resource')} "
         + f"{shlex.quote(launcher_dir)} "
         + f"{shlex.quote(home + '/logs')} {shlex.quote(ssh_dir)}; "
@@ -502,12 +487,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/local/bin/ssh; "
         + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/bin/ssh; "
         + f"printf %s {shlex.quote(init_state_b64)} | base64 -d > {shlex.quote(init_state_file)}; "
-        + f"mkdir -p {shlex.quote(kb_extra_dir)}; tar -xzf {shlex.quote(kb_archive_file)} -C {shlex.quote(kb_extra_dir)}; "
+        + f"test -d {shlex.quote(clawtune_plugin)}; "
         + relay_setup
         + f"chmod 700 {shlex.quote(ssh_launcher)} {shlex.quote(init_state_file)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
-        + f"PYTHONPATH={shlex.quote(kb_extra_dir)}:${{PYTHONPATH:-}} /opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
+        + f"/opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
         + "export CLAWTUNE_POLICY=observe-only "
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
@@ -520,16 +505,26 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
-        + f"PYTHONPATH={shlex.quote(kb_extra_dir)}:${{PYTHONPATH:-}} /opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
+        + "/opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
         + f"--host 127.0.0.1 --port 8765 >{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
         + f"echo $! >{shlex.quote(home + '/sidecar.pid')}", 30,
+        )
+    except BaseException:
+        emit_startup_stage("runtime_setup", setup_started, status="error")
+        raise
+    emit_startup_stage(
+        "runtime_setup", setup_started,
+        status="ok" if setup.exit_code == 0 else "error",
     )
     if setup.exit_code:
         raise RuntimeError(f"ClawTune sidecar setup failed: {setup.stderr[-2000:]}")
+    if startup_begin is not None:
+        startup_begin()
     relay_ready = (
         f"curl --max-time 2 -fsS http://127.0.0.1:{RELAY_PORT}/healthz >/dev/null 2>&1 && "
         if checkpoint_relay else ""
     )
+    ready_started = time.monotonic()
     try:
         ready = runtime_executor.execute(
             prefix + f"deadline=$(( $(date +%s) + {startup_timeout_seconds} )); "
@@ -541,6 +536,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         if ready.exit_code:
             raise RuntimeError("ClawTune sidecar did not become ready in the Runtime VM")
     except Exception:
+        emit_startup_stage("sidecar_ready", ready_started, status="error")
         failure_home = output_dir / "openclaw" / session_id
         failure_home.mkdir(parents=True, exist_ok=True)
         # Keep the original startup failure even when the guest is too unhealthy
@@ -557,8 +553,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 str(diagnostic_error), encoding="utf-8",
             )
         raise
-    invoke(["plugins", "install", "--link", clawtune_plugin])
-    invoke(["plugins", "enable", "clawtune"])
+    emit_startup_stage("sidecar_ready", ready_started)
     exec_tool_config: dict[str, object] = {
         "host": "sandbox", "security": "full", "ask": "off",
     }
@@ -572,6 +567,25 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # a load-dependent fallback to its 10-second default in long-lived or
         # restored Runtime processes.
         exec_tool_config["backgroundMs"] = exec_yield_ms
+    provider_patch: dict[str, object] = {
+        # OpenClaw's onboard command adds reasoning=false.  The validated
+        # recordings predate that request-envelope field, so replace the
+        # one-model array without it in the same patch as the sandbox config.
+        "models": [{
+            "id": openclaw_model,
+            "name": openclaw_model,
+            "input": ["text"],
+            "cost": {
+                "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+            },
+            "contextWindow": 128000,
+            "maxTokens": 8192,
+        }],
+    }
+    if transport_timeout_seconds is not None:
+        # Admission control can intentionally hold an already-issued model
+        # request while earlier Tools release their memory reservations.
+        provider_patch["timeoutSeconds"] = transport_timeout_seconds
     patch = {
         "agents": {"defaults": {"workspace": runtime_workspace, "sandbox": {
             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
@@ -590,7 +604,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             }},
         },
-        "plugins": {"entries": {"clawtune": {"enabled": True, "config": {
+        "models": {"providers": {"vllm": provider_patch}},
+        "plugins": {
+            "load": {"paths": [clawtune_plugin]},
+            "entries": {"clawtune": {"enabled": True, "config": {
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
             "sandboxExecPredictionModel": "lattice",
@@ -611,24 +628,16 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                       "trace_dir": trace_dir},
         }}}},
     }
-    invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
-            "--custom-api-key", f"clawtune-runtime.{session_id}", "--custom-model-id", openclaw_model])
-    # Preserve the request envelope used by the validated recording. Apply this
-    # to live recording too, rather than keeping a replay-only configuration.
-    invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
-    if timeout_seconds is not None:
-        # Admission control can intentionally hold an already-issued model
-        # request while earlier Tools release their memory reservations.  The
-        # provider's 120-second idle default must not turn that policy wait
-        # into a false model failure before the arm-level deadline expires.
-        assert transport_timeout_seconds is not None
-        provider_timeout_seconds = transport_timeout_seconds
-        invoke([
-            "config", "set", "models.providers.vllm.timeoutSeconds",
-            str(provider_timeout_seconds),
-        ])
+            "--custom-api-key", f"clawtune-runtime.{session_id}", "--custom-model-id", openclaw_model],
+           startup_stage="openclaw_onboard")
+    invoke(
+        ["config", "patch", "--stdin"], input_value=json.dumps(patch),
+        startup_stage="openclaw_config",
+    )
+    if startup_wait is not None:
+        startup_wait()
     instruction = prompt
     agent_args = [
         "agent", "--local", "--agent", "main", "--session-id", session_id,

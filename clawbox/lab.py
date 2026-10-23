@@ -402,8 +402,8 @@ def setup(args) -> dict:
             raise ValueError("WARM capacity must be positive and use a distinct non-negative NUMA node")
         if not Path(args.warm_root).is_absolute() or Path(args.warm_root) == Path("/"):
             raise ValueError("WARM root must be an absolute dedicated directory")
-    if not 0 <= args.shared_borrow_percent <= 50:
-        raise ValueError("--shared-borrow-percent must be between 0 and 50")
+    if not 0 <= args.shared_borrow_percent <= 100:
+        raise ValueError("--shared-borrow-percent must be between 0 and 100")
     if not Path("/dev/kvm").exists():
         raise ValueError("Run setup on the Linux KVM host, not the Windows client")
     if shutil.disk_usage(ROOT).free < 5 * 1024**3:

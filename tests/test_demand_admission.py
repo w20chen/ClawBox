@@ -39,29 +39,62 @@ def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
     assert replacement.baseline == (0, 0)
 
 
-def test_same_vm_inflight_waiter_does_not_block_another_vm():
+def test_same_vm_concurrent_tool_reservations_share_one_aggregate_claim():
     c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     c.acquire('busy', 10, .1)
-    entered = threading.Event()
-    def same_vm():
-        entered.set()
-        return c.acquire('busy', 10, 2)
-    with ThreadPoolExecutor(2) as workers:
-        pending = workers.submit(same_vm)
-        assert entered.wait(.5)
-        with c._condition:
-            assert c._condition.wait_for(lambda: bool(c._waiters), .5)
-            assert c.resource_feedback()['memory_blocked'] is False
-        try:
-            unrelated = workers.submit(c.acquire, 'other', 10, .2)
-            unrelated.result(timeout=.5)
-            assert not pending.done()  # One in-flight operation per VM still holds.
-            c.release('other', 10)
-        finally:
-            c.release('busy', 10)
-        pending.result(timeout=.5)
+    c.acquire('busy', 15, .1, total_mib=20)
+    claim = c.demand.claims['busy', 'tool_admission']
+    assert claim.amount == 30 * MIB
+    assert claim.local_amount == 25 * MIB
+    assert c._reservations['busy'] == 25 * MIB
+
     c.release('busy', 10)
+    claim = c.demand.claims['busy', 'tool_admission']
+    assert claim.amount == 20 * MIB
+    assert claim.local_amount == 15 * MIB
+    c.release('busy', 15, total_mib=20)
+    assert ('busy', 'tool_admission') not in c.demand.claims
+    assert 'busy' not in c._reservations
+
+
+def test_aggregate_tool_claim_keeps_first_memory_baseline():
+    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    samples = [(10 * MIB, 10 * MIB)]
+    c.register_memory('busy', tool=lambda: samples[-1], lifecycle=lambda: (0, 0))
+    c.acquire('busy', 10, .1)
+    c.bind_tool_memory('busy')
+    claim = c.demand.claims['busy', 'tool_admission']
+    assert claim.baseline == samples[-1]
+    samples.append((13 * MIB, 13 * MIB))
+    c.acquire('busy', 10, .1)
+    c.bind_tool_memory('busy')
+    assert claim.baseline == (10 * MIB, 10 * MIB)
+    assert claim.remaining() == (17 * MIB, 17 * MIB)
+    c.release('busy', 10)
+    c.release('busy', 10)
+
+
+def test_concurrent_same_vm_admissions_commit_without_an_inflight_convoy():
+    count = 24
+    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    barrier = threading.Barrier(count)
+
+    def admit():
+        barrier.wait()
+        return c.acquire('busy', 1, 1)
+
+    with ThreadPoolExecutor(count) as workers:
+        waits = list(workers.map(lambda _index: admit(), range(count)))
+    assert max(waits) < 1
+    claim = c.demand.claims['busy', 'tool_admission']
+    assert claim.amount == count * MIB
+    assert claim.local_amount == count * MIB
+    for _index in range(count):
+        c.release('busy', 1)
+    assert not c.demand.claims
 
 
 def test_realized_growth_is_not_reserved_twice_and_retained_pages_still_count():
@@ -122,9 +155,55 @@ def test_policy_uses_exact_claim_growth_when_upper_bound_nears_capacity():
         assert coordinator._pressure_reasons(4*MIB) == ()
         assert not coordinator.local_commitment_exceeds(4,10*MIB)
         assert coordinator.local_commitment_exceeds(6,10*MIB)
-    assert calls[0] == 5  # baseline, local/global checks, and two exact borrow guards.
+    assert calls[0] == 4  # baseline, one policy scan, and two exact borrow guards.
     assert ledger.pending_upper_bound_fast_path_count == 0
-    assert ledger.pending_exact_count == 4
+    assert ledger.pending_exact_count == 3
+
+
+def test_exact_claim_reads_do_not_hold_the_admission_condition():
+    entered = threading.Event()
+    finish = threading.Event()
+    calls = [0]
+
+    def slow_sample():
+        calls[0] += 1
+        entered.set()
+        assert finish.wait(2)
+        return 6 * MIB, 6 * MIB
+
+    ledger = DemandLedger(sample=lambda: (5 * MIB, 1000 * MIB), capacity=10 * MIB)
+    coordinator = PolicyCoordinator(
+        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        demand_ledger=ledger, physical_sample=ledger.sample,
+    )
+    with ledger.condition:
+        ledger.add(('slow', 'tool_admission'), scope='local',
+                   amount=6 * MIB, local_amount=6 * MIB, sample=lambda: (0, 0))
+        ledger.claims['slow', 'tool_admission'].sample = slow_sample
+
+    def exact_check():
+        with coordinator._condition:
+            return coordinator._pressure_reasons(4 * MIB)
+
+    with ThreadPoolExecutor(3) as workers:
+        exact = workers.submit(exact_check)
+        assert entered.wait(1)
+        coalesced = workers.submit(exact_check)
+        try:
+            # A release must be publishable while the slow cgroup read is in
+            # flight; this was blocked by the former lock convoy.
+            def release_claim():
+                with coordinator._condition:
+                    ledger.release(('slow', 'tool_admission'))
+
+            released = workers.submit(release_claim)
+            released.result(timeout=.5)
+        finally:
+            finish.set()
+        assert exact.result(timeout=1) == ()
+        assert coalesced.result(timeout=1) == ()
+    assert calls[0] == 1
 
 
 def test_global_claims_are_shared_but_local_claims_do_not_spend_other_nodes():

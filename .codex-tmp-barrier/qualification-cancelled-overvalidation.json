@@ -1,0 +1,9 @@
+{
+  "status": "cancelled",
+  "exit_status": 143,
+  "reason": "snapshot capability probe was redundantly checkpointing all 503 task-specific templates on both compute NUMA nodes before the all-template replay",
+  "completed_snapshot_node_results_before_cancel": 15,
+  "cleanup": "CubeAPI reported zero live sandboxes after termination",
+  "replacement_source": "/home/weitianc/clawbox-performance-source-20261022T202400Z",
+  "replacement_behavior": "one snapshot round-trip per distinct memory_mib-vcpu-architecture shape; every template remains covered by the 503-case qualification replay"
+}

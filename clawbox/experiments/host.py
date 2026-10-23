@@ -61,7 +61,7 @@ class HostConfig(BaseModel):
     warm: bool = True
     warm_node: int = Field(default=1, ge=0)
     warm_gib: int = Field(default=128, gt=0)
-    shared_borrow_percent: int = Field(default=50, ge=0, le=50)
+    shared_borrow_percent: int = Field(default=50, ge=0, le=100)
     warm_root: str = "/mnt/clawbox-warm"
     cold_root: str = "/data/clawbox-cold"
     cubelet_data_root: str = "/data/cubelet"

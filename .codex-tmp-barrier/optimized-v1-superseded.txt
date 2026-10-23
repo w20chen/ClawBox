@@ -1,0 +1,2 @@
+Superseded before qualification or formal execution by full-c1280-optimized-v2-public-20261022t212200z.
+Reason: live baseline timestamps exposed a second result-affecting control-plane delay: concurrent pressure-triggered tool preparation queued behind an in-flight NUMA rebind. V2 preserves V1 artifacts and adds nonblocking re-evaluation after the active borrow completes.

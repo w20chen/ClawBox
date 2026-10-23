@@ -59,6 +59,20 @@ def test_joint_borrows_at_high_when_no_safe_idle_victim():
     assert events[-1]['cost_model'] == 'uncalibrated_deterministic_fallback'
 
 
+def test_concurrent_pressure_does_not_queue_behind_slow_borrow():
+    c, calls, events = controller('joint')
+    lifecycle = SimpleNamespace()
+    c._borrow_lock.acquire()
+    try:
+        assert c._joint_relieve_pressure(
+            preferred_borrow=lifecycle, reason='test-pressure',
+        ) == 'wait'
+    finally:
+        c._borrow_lock.release()
+    assert calls == ['reclaim']
+    assert events[-1]['reason'] == 'borrow_in_progress'
+
+
 def test_snapshot_only_never_borrows():
     c, calls, _ = controller('snapshot_only')
     c._sample_once(.2, False)

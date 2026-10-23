@@ -35,6 +35,15 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
     assert result['predicted_incremental_memory_mib'] == 7
     assert result['prediction_source'] == 'runtime_clawtune_immutable_kb'
     assert not provider.manifest  # No exact-command replay table is needed.
+    second = RuntimePredictionProvider(path, repository='r')
+    assert second.runtime is provider.runtime
+    assert second.lattice is provider.lattice
+    assert second.runtime._frozen is True
+    assert second.lattice._frozen is True
+    assert second.resolve(
+        command, {'raw_command_sha256': command_sha256(command)},
+    )['predicted_incremental_memory_mib'] == 7
+    assert seen == [command, None]  # immutable result was memoized
     with pytest.raises(PredictionUnavailable, match='identity mismatch'):
         provider.resolve(command, {'raw_command_sha256': command_sha256('different')})
     path.with_suffix('.kb.json').write_bytes(kb + b' ')
@@ -54,9 +63,12 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tm
     path.with_suffix('.kb.json').write_bytes(kb)
     identity = {'template_id': 'training', 'image_digest': 'sha256:image',
                 'vcpu': 2, 'memory_mib': 4096, 'architecture': 'arm64'}
+    second_identity = {**identity, 'template_id': 'second', 'image_digest': 'sha256:second'}
     path.write_text(json.dumps({'schema': 'clawbox_prediction_v2', 'repository': '*',
         'prediction_scope': 'clawtune_cold_start', 'training_validated': True,
-        'kb_sha256': hashlib.sha256(kb).hexdigest(), 'sandbox_identity': identity,
+        'kb_sha256': hashlib.sha256(kb).hexdigest(),
+        'sandbox_identities': [identity, second_identity],
+        'sandbox_identities_sha256': 'calibrated-environment-set',
         'host_calibration': {'target': 'host_cgroup_memory_current_increment',
                             'sample_count': 3, 'scale': 2, 'offset_bytes': 0}}))
     resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
@@ -64,6 +76,9 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tm
                                            sandbox_identity=identity)
     assert provider.repository == 'another/repo'
     assert provider.prediction_source == 'runtime_clawtune_cold_start_kb'
+    assert ColdStartPredictionProvider(
+        path, repository='third/repo', sandbox_identity=second_identity,
+    ).provenance()['calibration_sandbox_identity_count'] == 2
     with pytest.raises(ValueError, match='environments differ'):
         ColdStartPredictionProvider(path, repository='another/repo', sandbox_identity=resized)
     with pytest.raises(ValueError, match='environments differ'):

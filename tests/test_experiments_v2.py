@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,9 @@ from clawbox.experiments.audit import audit_experiments
 from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
-    EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
+    ArmActivityTracker, DependencyInstallGate, EventWriter, ExperimentWorker,
+    _execute_idempotent, dependency_install_command,
+    _runtime_network_deny_out, build_time_spans,
     WatermarkController, policy_event_workers, policy_operation_headroom_mib,
     policy_progress_budget_mib,
     read_priority_memory_charge, session_case_for, session_offer_offsets,
@@ -21,7 +24,9 @@ from clawbox.experiments.worker import (
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.numa_borrow import NumaBorrowRecord
 from clawbox.replay.lifecycle import CommandResult
-from clawbox.experiments.spec import ExecutionSpec, ReclamationPolicy
+from clawbox.experiments.spec import (
+    ExecutionSpec, ReclamationPolicy, WorkloadSpec, load_workload_cases,
+)
 
 
 def test_explicit_null_disables_arm_deadline() -> None:
@@ -80,9 +85,9 @@ def test_shared_memory_watermarks_are_ordered_and_use_half_pool() -> None:
         ).__class__.model_validate(
             resources.model_dump() | {"local_memory_low_watermark_mib": 32768}
         )
-    with pytest.raises(ValidationError, match="50%"):
+    with pytest.raises(ValidationError, match="shared NUMA pool"):
         resources.__class__.model_validate(
-            resources.model_dump() | {"shared_memory_borrow_limit_mib": 65537}
+            resources.model_dump() | {"shared_memory_borrow_limit_mib": 131073}
         )
 
 
@@ -414,6 +419,25 @@ def test_round_robin_cases_keep_complete_tool_templates_and_reuse_inputs() -> No
     assert [case.snapshot_reuse_probability for case in selected] == [0.75, 0.25] * 2
 
 
+def test_file_workload_keeps_snapshot_reuse_probability(tmp_path: Path) -> None:
+    manifest = tmp_path / "workload.json"
+    manifest.write_text(json.dumps({"tasks": [{
+        "instance_id": "case-a",
+        "replay_trace_reference": "trace.jsonl",
+        "snapshot_reuse_probability": 0.75,
+        "metadata": {"origin": "qualification"},
+    }]}), encoding="utf-8")
+
+    cases = load_workload_cases(WorkloadSpec(
+        source="swe_rebench",
+        input=str(manifest),
+        session_assignment="single_case",
+    ))
+
+    assert cases[0].snapshot_reuse_probability == 0.75
+    assert cases[0].metadata == {"origin": "qualification"}
+
+
 def test_round_robin_requires_multiple_explicit_cases() -> None:
     raw = raw_spec()
     raw["workload"]["session_assignment"] = "round_robin"
@@ -619,6 +643,46 @@ def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: P
     assert all(row["session_id"] == "session-a" for row in rows)
     assert all(int(row["wall_time_ns"]) > 0 for row in rows)
     assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
+
+
+def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) -> None:
+    tracker = ArmActivityTracker(2)
+    writer = EventWriter(tmp_path / "events.jsonl", activity_tracker=tracker)
+    session = "arm-0000"
+    writer.write({"event": "sandbox_create_gate_wait_started", "session_id": session})
+    writer.write({"event": "sandbox_create_gate_acquired", "session_id": session})
+    writer.write({"event": "sandbox_created", "session_id": session, "role": "tool"})
+    assert tracker.snapshot()["vm_creating_sessions"] == 1
+    writer.write({"event": "sandbox_created", "session_id": session, "role": "runtime"})
+    writer.write({"event": "model_wait_started", "session_id": session})
+    assert tracker.snapshot()["idle_at_llm_sessions"] == 1
+    writer.write({"event": "model_response_ready", "session_id": session})
+    writer.write({"event": "tool_admission_queued", "session_id": session,
+                  "execution_id": "exec-1"})
+    writer.write({"event": "dependency_install_gate_wait_started",
+                  "session_id": session, "execution_id": "exec-1"})
+    snapshot = tracker.snapshot()
+    assert snapshot["tool_admission_waiting_tasks"] == 1
+    assert snapshot["dependency_install_waiting_tasks"] == 1
+    assert snapshot["offered_not_activated_sessions"] == 0
+    writer.write({"event": "dependency_install_gate_acquired",
+                  "session_id": session, "execution_id": "exec-1"})
+    assert tracker.snapshot()["dependency_install_active_operations"] == 1
+    writer.write({"event": "tool_admitted", "session_id": session,
+                  "execution_id": "exec-1"})
+    writer.write({"event": "tool_execution_progress", "session_id": session,
+                  "execution_id": "exec-1", "phase": "start"})
+    assert tracker.snapshot()["tool_executing_tasks"] == 1
+    writer.write({"event": "tool_execution_progress", "session_id": session,
+                  "execution_id": "exec-1", "phase": "end"})
+    writer.write({"event": "dependency_install_gate_released",
+                  "session_id": session, "execution_id": "exec-1"})
+    assert tracker.snapshot()["dependency_install_active_operations"] == 0
+    writer.write({"event": "session_complete", "session_id": session, "valid": True})
+    snapshot = tracker.snapshot()
+    assert snapshot["completed_sessions"] == 1
+    assert snapshot["activated_running_sessions"] == 0
+    assert snapshot["not_yet_offered_sessions"] == 1
 
 
 def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:
@@ -827,6 +891,103 @@ def test_worker_uses_explicit_pair_creation_concurrency() -> None:
     assert ExperimentWorker._sandbox_create_limit(2, 3) == 2
     with pytest.raises(ValidationError, match="sandbox_create_concurrency"):
         ExecutionSpec(sandbox_create_concurrency=0)
+
+
+def test_dependency_install_concurrency_is_optional_and_positive() -> None:
+    assert ExecutionSpec().dependency_install_concurrency is None
+    assert ExecutionSpec(dependency_install_concurrency=8).dependency_install_concurrency == 8
+    with pytest.raises(ValidationError, match="dependency_install_concurrency"):
+        ExecutionSpec(dependency_install_concurrency=0)
+
+
+def test_apt_cache_proxy_is_optional_and_requires_plain_http_host_port() -> None:
+    assert ExecutionSpec().apt_cache_proxy_url is None
+    configured = ExecutionSpec(
+        apt_cache_proxy_url="http://193.124.7.2:3142/",
+    )
+    assert configured.apt_cache_proxy_url == "http://193.124.7.2:3142"
+    for invalid in (
+        "https://cache.example:3142",
+        "http://cache.example",
+        "http://user:secret@cache.example:3142",
+        "http://cache.example:3142/path",
+    ):
+        with pytest.raises(ValidationError, match="apt_cache_proxy_url"):
+            ExecutionSpec(apt_cache_proxy_url=invalid)
+
+
+def test_pypi_cache_index_is_optional_and_requires_devpi_simple_url() -> None:
+    assert ExecutionSpec().pypi_cache_index_url is None
+    configured = ExecutionSpec(
+        pypi_cache_index_url="http://193.124.7.2:3141/root/pypi/+simple/",
+    )
+    assert configured.pypi_cache_index_url == (
+        "http://193.124.7.2:3141/root/pypi/+simple/"
+    )
+    for invalid in (
+        "https://cache.example:3141/root/pypi/+simple/",
+        "http://cache.example/root/pypi/+simple/",
+        "http://user:secret@cache.example:3141/root/pypi/+simple/",
+        "http://cache.example:3141/root/pypi/",
+    ):
+        with pytest.raises(ValidationError, match="pypi_cache_index_url"):
+            ExecutionSpec(pypi_cache_index_url=invalid)
+
+
+@pytest.mark.parametrize("command", [
+    "apt-get update && apt-get install -y pytest",
+    "cd /testbed && sudo -n apt install python3-pip",
+    "DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -qq install git",
+    "pip3 install pytest",
+    "/opt/venv/bin/python3 -m pip install -e .",
+    "bash -lc 'python -m pip install numpy'",
+])
+def test_dependency_install_command_matches_package_downloads(command: str) -> None:
+    assert dependency_install_command(command)
+
+
+@pytest.mark.parametrize("command", [
+    "pytest -q",
+    "echo apt-get install pytest",
+    "python -m pytest",
+    "pip list",
+    "apt-cache show pytest",
+])
+def test_dependency_install_command_ignores_other_tools(command: str) -> None:
+    assert not dependency_install_command(command)
+
+
+def test_dependency_install_gate_holds_permit_until_release() -> None:
+    records: list[dict] = []
+    second_waiting = Event()
+    second_acquired = Event()
+
+    def emit(event: dict) -> None:
+        records.append(event)
+        if (event["event"] == "dependency_install_gate_wait_started"
+                and event["execution_id"] == "exec-2"):
+            second_waiting.set()
+
+    gate = DependencyInstallGate(1, emit)
+    gate.acquire("exec-1", "session-1", timeout_seconds=1)
+
+    def acquire_second() -> None:
+        gate.acquire("exec-2", "session-2", timeout_seconds=1)
+        second_acquired.set()
+
+    thread = Thread(target=acquire_second)
+    thread.start()
+    assert second_waiting.wait(1)
+    assert not second_acquired.is_set()
+    assert gate.release("exec-1", reason="completed")
+    assert second_acquired.wait(1)
+    assert gate.release("exec-2", reason="completed")
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert sum(
+        event["event"] == "dependency_install_gate_acquired"
+        for event in records
+    ) == 2
 
 
 def test_worker_thread_scheduling_is_configured_and_restored():

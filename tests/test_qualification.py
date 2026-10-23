@@ -8,12 +8,16 @@ import pytest
 import clawbox.experiments.qualification as qualification_module
 from clawbox.experiments.baselines import BASELINES
 from clawbox.experiments.qualification import (
-    QUALIFICATION_SCHEMA_VERSION, implementation_digest,
+    QUALIFICATION_SCHEMA_VERSION, current_qualification_input_manifest,
+    implementation_digest,
     live_borrow_roundtrip_test, qualification_spec, snapshot_roundtrip_test,
-    qualification_input_manifest, validate_receipt,
+    qualification_input_manifest, template_base_sharing_test, validate_receipt,
 )
+from clawbox.experiments.worker import session_worker_count
 from clawbox.experiments.numa_borrow import NumaBorrowRecord
-from clawbox.experiments.spec import load_experiment, spec_digest
+from clawbox.experiments.spec import (
+    expand_matrix, load_experiment, load_workload_cases, spec_digest,
+)
 
 
 EXAMPLE = Path("examples/experiments/getting-started.yaml")
@@ -47,6 +51,166 @@ def test_template_sharing_evidence_excludes_shared_root_filesystems():
     assert not qualification_module._same_template_ram_mapping(rootfs, dict(rootfs))
 
 
+def test_snapshot_probe_uses_one_template_per_vm_shape() -> None:
+    spec = load_experiment(EXAMPLE)
+    cases = []
+    for index, memory_mib in enumerate((3072, 3072, 4096)):
+        sandbox = spec.sandbox.model_copy(update={
+            "template_alias": f"tool-{index}",
+            "image_digest": "sha256:" + f"{index + 1:064x}",
+            "memory_mib": memory_mib,
+        })
+        cases.append(spec.workload.cases[0].model_copy(update={
+            "case_id": f"case-{index}", "sandbox": sandbox,
+        }))
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": tuple(cases)}),
+    })
+
+    observed, representatives = (
+        qualification_module._snapshot_sandbox_representatives(spec)
+    )
+
+    assert observed == 3
+    assert list(representatives) == ["tool-0", "tool-2"]
+
+
+def test_qualification_rejects_populated_vm_domain_before_expensive_work(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "cgroup.events").write_text(
+        "populated 1\nfrozen 0\n", encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="populated before qualification"):
+        qualification_module.require_empty_vm_domain(tmp_path)
+
+    (tmp_path / "cgroup.events").write_text(
+        "populated 0\nfrozen 0\n", encoding="utf-8",
+    )
+    qualification_module.require_empty_vm_domain(tmp_path)
+
+
+def test_template_sharing_probe_releases_each_pair_before_next_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = load_experiment(EXAMPLE)
+    cases = []
+    for index in range(3):
+        sandbox = spec.sandbox.model_copy(update={
+            "template_alias": f"tool-{index}",
+            "image_digest": "sha256:" + f"{index + 1:064x}",
+        })
+        cases.append(spec.workload.cases[0].model_copy(update={
+            "case_id": f"case-{index}", "sandbox": sandbox,
+        }))
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": tuple(cases)}),
+        "execution": spec.execution.model_copy(update={"sandbox_create_concurrency": 1}),
+        "resources": spec.resources.model_copy(update={"template_base_sharing": "required"}),
+    })
+    active = 0
+    peak = 0
+    template_by_id = {}
+    cleanup_calls = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def kill_owned_sandboxes(self, owner_id):
+            cleanup_calls.append(owner_id)
+
+    class Lifecycle:
+        def __init__(self, _client, *, template, **_kwargs):
+            self.template = template
+            self.sandbox_id = f"sandbox-{template}-{len(template_by_id)}"
+
+        def start(self):
+            nonlocal active, peak
+            template_by_id[self.sandbox_id] = self.template
+            active += 1
+            peak = max(peak, active)
+
+        def close(self):
+            nonlocal active
+            active -= 1
+
+    def mappings(sandbox_id):
+        template = template_by_id[sandbox_id]
+        return {("00:01", 7): {
+            "path": f"/data/cubelet/volumes/{template}-memory/{template}-memory",
+            "size_kib": 3 * 1024 * 1024,
+            "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 1,
+        }}
+
+    monkeypatch.setattr(qualification_module, "CubeSandboxClient", Client)
+    monkeypatch.setattr(qualification_module, "CubeSandboxLifecycle", Lifecycle)
+    monkeypatch.setattr(qualification_module, "_sandbox_file_mappings", mappings)
+
+    result = template_base_sharing_test(spec, artifact_root=tmp_path / "probe")
+
+    assert result["passed"] is True
+    assert result["template_count"] == 3
+    assert result["max_parallel_templates"] == 1
+    assert result["live_probe_vm_bound"] == 2
+    assert result["peak_live_probe_vms"] == 2
+    assert peak == 2 and active == 0
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0].startswith("qualification-base-")
+
+
+def test_template_sharing_artifact_reuses_exact_templates_and_raw_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = load_experiment(EXAMPLE)
+    spec = spec.model_copy(update={
+        "resources": spec.resources.model_copy(update={
+            "template_base_sharing": "required",
+        }),
+    })
+    template = spec.sandbox.template
+    proof_root = tmp_path / "raw"
+    proof_root.mkdir()
+    (proof_root / "result.json").write_text('{"passed":true}', encoding="utf-8")
+    result = {
+        "required": True,
+        "passed": True,
+        "templates": {template: [{"mapping": "measured"}]},
+        "template_count": 1,
+        "max_parallel_templates": 1,
+        "live_probe_vm_bound": 2,
+        "peak_live_probe_vms": 2,
+        "metric": "test mapping",
+    }
+    monkeypatch.setattr(
+        qualification_module, "_template_sharing_backend_identity",
+        lambda: {"files": {"cubelet": "a" * 64}},
+    )
+    artifact = tmp_path / "sharing.json"
+    qualification_module.write_template_base_sharing_artifact(
+        spec, result, artifact_root=proof_root, output=artifact,
+    )
+    reused = spec.model_copy(update={
+        "resources": spec.resources.model_copy(update={
+            "template_base_sharing_artifact": str(artifact),
+        }),
+    })
+
+    verified = template_base_sharing_test(reused, artifact_root=tmp_path / "unused")
+
+    assert verified["passed"] is True and verified["reused"] is True
+    assert verified["template_count"] == 1
+    manifest = qualification_input_manifest(reused)
+    assert manifest["template_base_sharing_artifact"]["path"] == str(artifact)
+
+    changed = reused.model_copy(update={
+        "sandbox": reused.sandbox.model_copy(update={"memory_mib": 4096}),
+    })
+    with pytest.raises(ValueError, match="exact Tool templates"):
+        template_base_sharing_test(changed, artifact_root=tmp_path / "changed")
+
+
 def test_dense_multi_numa_qualification_does_not_require_shared_memory(tmp_path):
     from clawbox.experiments.topology import ComputeNode
     spec = load_experiment(EXAMPLE)
@@ -70,7 +234,11 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": 1.0,
-        "concurrency": max(qualified.execution.concurrency_levels),
+        "concurrency": qualified.inference.configuration[
+            "qualification_max_parallel_sessions"
+        ],
+        "qualified_session_count": max(qualified.execution.concurrency_levels),
+        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
         "target_concurrency": max(spec.execution.concurrency_levels),
         "scope": "capability_smoke",
         "policy_names": [policy.name for policy in qualified.policies],
@@ -97,6 +265,8 @@ def test_qualification_uses_all_policies_at_target_concurrency() -> None:
     qualified = qualification_spec(spec, concurrency=3)
 
     assert qualified.inference.configuration["max_model_steps"] == 1
+    assert qualified.inference.configuration["time_scale"] == 0.0
+    assert spec.inference.configuration["time_scale"] == 1.0
     assert qualified.execution.concurrency_levels == (3,)
     assert qualified.execution.randomized_order is False
     assert qualified.execution.arm_timeout_seconds == 1800
@@ -129,6 +299,28 @@ def test_receipt_is_bound_to_exact_spec_and_required_concurrency(tmp_path: Path)
         validate_receipt(spec, path)
 
 
+def test_receipt_reuse_rehashes_inputs_without_repeating_semantic_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = load_experiment(EXAMPLE)
+    semantic_manifest = qualification_input_manifest(spec)
+    assert current_qualification_input_manifest(spec) == semantic_manifest
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(_receipt(spec)), encoding="utf-8")
+    monkeypatch.setattr(
+        qualification_module,
+        "validate_inputs",
+        lambda _spec: pytest.fail("receipt reuse repeated semantic validation"),
+    )
+
+    assert validate_receipt(spec, path)["status"] == "succeeded"
+
+
+def test_receipt_fast_manifest_matches_semantic_manifest_for_design_spec() -> None:
+    spec = load_experiment(Path("examples/experiments/six-dimension.yaml"))
+    assert current_qualification_input_manifest(spec) == qualification_input_manifest(spec)
+
+
 def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
     spec = load_experiment(EXAMPLE)
     source = Path(spec.workload.cases[0].replay_trace_reference)
@@ -155,8 +347,16 @@ def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
 
 def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
     spec = load_experiment(EXAMPLE)
-    spec = spec.model_copy(update={"execution": spec.execution.model_copy(
-        update={"concurrency_levels": (320, 640, 1280)})})
+    case = spec.workload.cases[0]
+    cases = tuple(
+        case.model_copy(update={"case_id": f"qualification-case-{index}"})
+        for index in range(3)
+    )
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": cases}),
+        "execution": spec.execution.model_copy(
+            update={"concurrency_levels": (320, 640, 1280)}),
+    })
     path = tmp_path / 'bounded.json'
     receipt = _receipt(spec, concurrency=1)
     path.write_text(json.dumps(receipt))
@@ -164,6 +364,12 @@ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
     assert verified['concurrency'] == 1
     assert verified['target_concurrency'] == 1280
     assert verified['scope'] == 'capability_smoke'
+    qualified = qualification_spec(spec, concurrency=1)
+    assert qualified.execution.concurrency_levels == (3,)
+    assert len(qualified.workload.cases) == 3
+    assert session_worker_count(expand_matrix(qualified)[0]) == 1
+    assert verified['qualified_session_count'] == 3
+    assert verified['qualified_case_ids'] == [case.case_id for case in cases]
     receipt['concurrency'] = 0
     path.write_text(json.dumps(receipt))
     with pytest.raises(ValueError, match='concurrency'):

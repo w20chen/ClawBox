@@ -48,6 +48,18 @@ class DemandLedger:
         self.claims: dict[tuple[str, str], Claim] = {}
         self.pending_upper_bound_fast_path_count = 0
         self.pending_exact_count = 0
+        # Exact claim reads can touch hundreds of VM cgroup files.  The policy
+        # condition protects admission decisions, but holding it across those
+        # reads prevents completed tools from releasing their claims and turns
+        # a conservative near-capacity check into a global lock convoy.  One
+        # caller samples while concurrent exact checks share that result; the
+        # policy condition is reacquired before the result is reconciled with
+        # claims added or removed during the read.
+        self._exact_sample_condition = Condition()
+        self._exact_sample_inflight = False
+        self._exact_sample_result: dict[
+            tuple[str, str], tuple[Claim, tuple[int, int] | BaseException]
+        ] = {}
 
     def pending_upper_bound(self, scope=None):
         """Return the safe nominal bound without sampling every live claim."""
@@ -60,6 +72,70 @@ class DemandLedger:
         self.pending_exact_count += 1
         return sum(c.remaining()[0 if scope is None else 1]
                    for c in self.claims.values() if scope is None or c.scope == scope)
+
+    def pending_breakdown_without_condition(self, scope: str) -> tuple[int, int]:
+        """Return global and scoped pending demand without pinning admission.
+
+        The caller must hold ``self.condition``.  Claims created while the
+        filesystem reads are in flight are charged at their full nominal
+        amount; removed or replaced claims are ignored.  This preserves the
+        same safe reservation semantics while allowing tool completion and
+        unrelated fast-path admissions to publish progress.
+        """
+        snapshot = dict(self.claims)
+        self.pending_exact_count += 1
+        leader = False
+        measured: dict[
+            tuple[str, str], tuple[Claim, tuple[int, int] | BaseException]
+        ]
+        self.condition.release()
+        try:
+            with self._exact_sample_condition:
+                if self._exact_sample_inflight:
+                    self._exact_sample_condition.wait_for(
+                        lambda: not self._exact_sample_inflight
+                    )
+                    measured = dict(self._exact_sample_result)
+                else:
+                    self._exact_sample_inflight = True
+                    leader = True
+                    measured = {}
+            if leader:
+                for key, claim in snapshot.items():
+                    try:
+                        value: tuple[int, int] | BaseException = claim.remaining()
+                    except BaseException as exc:
+                        value = exc
+                    measured[key] = (claim, value)
+                with self._exact_sample_condition:
+                    self._exact_sample_result = measured
+                    self._exact_sample_inflight = False
+                    self._exact_sample_condition.notify_all()
+        finally:
+            if leader:
+                # Never strand followers if an unexpected interpreter-level
+                # failure occurs outside an individual claim read.
+                with self._exact_sample_condition:
+                    if self._exact_sample_inflight:
+                        self._exact_sample_inflight = False
+                        self._exact_sample_condition.notify_all()
+            self.condition.acquire()
+
+        global_pending = 0
+        scoped_pending = 0
+        for key, claim in self.claims.items():
+            sampled = measured.get(key)
+            if sampled is None or sampled[0] is not claim:
+                remaining = (claim.amount, claim.local_amount)
+            else:
+                value = sampled[1]
+                if isinstance(value, BaseException):
+                    raise value
+                remaining = value
+            global_pending += remaining[0]
+            if claim.scope == scope:
+                scoped_pending += remaining[1]
+        return global_pending, scoped_pending
 
     def reasons(self, additional: int, margin: int = 0, *,
                 pending: int | None = None,
@@ -118,6 +194,29 @@ class DemandLedger:
             raise RuntimeError(f'duplicate demand claim: {key}')
         self.claims[key] = Claim(scope, amount, local_amount, sample,
                                  sample() if sample else (0, 0))
+
+    def extend(self, key, *, amount, local_amount):
+        """Add one execution reservation to an existing aggregate claim."""
+        claim = self.claims.get(key)
+        if claim is None:
+            raise RuntimeError(f'missing demand claim: {key}')
+        claim.amount += amount
+        claim.local_amount += local_amount
+
+    def release_amount(self, key, *, amount, local_amount):
+        """Release one execution without dropping sibling reservations."""
+        claim = self.claims.get(key)
+        if claim is None:
+            raise RuntimeError(f'missing demand claim: {key}')
+        if amount < 0 or local_amount < 0:
+            raise ValueError('released demand must not be negative')
+        if amount > claim.amount or local_amount > claim.local_amount:
+            raise RuntimeError(f'demand release exceeds claim: {key}')
+        claim.amount -= amount
+        claim.local_amount -= local_amount
+        if claim.amount == 0 and claim.local_amount == 0:
+            self.claims.pop(key, None)
+        self.condition.notify_all()
 
     def release(self, key):
         self.claims.pop(key, None)

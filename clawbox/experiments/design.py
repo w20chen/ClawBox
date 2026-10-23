@@ -34,7 +34,8 @@ RESOURCE_FIELDS = {
     'shared_memory': ('borrow_cooldown_seconds', 'return_cooldown_seconds'),
     'checkpoint': ('pool_transfer_concurrency', 'pool_transfer_timeout_seconds'),
 }
-EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs', 'idle_reclaim_costs')
+EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs',
+                   'idle_reclaim_costs', 'template_base_sharing_artifact')
 DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
                   'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim',

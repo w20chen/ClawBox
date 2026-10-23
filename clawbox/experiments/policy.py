@@ -44,6 +44,7 @@ class AdmissionRequest:
     amount_bytes: int
     wait_class: str
     capacity_claim: bool
+    total_bytes: int | None = None
     queued_monotonic_s: float = field(default_factory=time.monotonic)
 
 
@@ -311,13 +312,14 @@ class PolicyCoordinator:
         with self._condition:
             claim = self.demand.claims.get(key)
             sample = self._memory_samples.get(session_id, {}).get('tool_admission')
-        if claim is None or sample is None:
+            already_bound = claim is not None and claim.sample is not None
+        if claim is None or sample is None or already_bound:
             return
         # Kernel NUMA accounting can block. Keep the nominal reservation
         # charged while reading, so other sessions can still make progress.
         baseline = sample()
         with self._condition:
-            if self.demand.claims.get(key) is claim:
+            if self.demand.claims.get(key) is claim and claim.sample is None:
                 claim.baseline = baseline
                 claim.sample = sample
 
@@ -437,8 +439,24 @@ class PolicyCoordinator:
             global_pending = global_upper
             self.demand.pending_upper_bound_fast_path_count += 1
         else:
-            incremental = self.demand.pending(self.demand_scope)
-            global_pending = self.demand.pending()
+            global_pending, incremental = (
+                self.demand.pending_breakdown_without_condition(self.demand_scope)
+            )
+            # Exact cgroup reads deliberately release the admission condition.
+            # Refresh every mutable aggregate used by the decision after it is
+            # reacquired; new claims were reconciled at their nominal amount.
+            used, available = self.physical_sample()
+            capacity = sum(self._capacity_claims.values())
+            if capacity_claim:
+                capacity += additional_bytes
+            global_used, global_available = self.demand.sample()
+            effective_budget = (
+                self.progress_budget_bytes
+                if existing_progress and (
+                    used >= self.budget_bytes or not self._reservations
+                )
+                else self.budget_bytes
+            )
         if not capacity_claim:
             incremental += additional_bytes
         charged = max(used, capacity) + incremental + self.operation_headroom_bytes
@@ -467,7 +485,8 @@ class PolicyCoordinator:
         first = None
         for ticket in self._waiters:
             request = self._waiter_requests[ticket]
-            if (request.session_id, request.wait_class) in self.demand.claims:
+            if (request.session_id, request.wait_class) in self.demand.claims \
+                    and request.wait_class != "tool_admission":
                 continue  # Same-VM polling must not stall unrelated VMs.
             if first is None:
                 first = ticket
@@ -484,6 +503,42 @@ class PolicyCoordinator:
                         return first
                 return ticket
         return first
+
+    def _feasible_progress_prefix_locked(
+        self, ticket: object, head: object | None,
+    ) -> tuple[int, int] | None:
+        """Return the LOCAL/global charge for a batchable Tool prefix.
+
+        A later existing-session Tool request may reserve before the first
+        request's thread is scheduled only when the conservative charge for
+        every runnable Tool request ahead of it also fits.  The caller still
+        commits just its own claim under the shared condition, so limits stay
+        atomic while an abundant-capacity queue drains without a notify-all
+        convoy.  Creation and same-session successors keep their existing FIFO
+        behavior.
+        """
+        if head is None or ticket not in self._progress_waiters:
+            return None
+        head_request = self._waiter_requests[head]
+        if head_request.wait_class != "tool_admission":
+            return None
+        local_bytes = 0
+        total_bytes = 0
+        for queued in self._waiters:
+            request = self._waiter_requests[queued]
+            if (request.session_id, request.wait_class) in self.demand.claims \
+                    and request.wait_class != "tool_admission":
+                continue
+            if queued not in self._progress_waiters:
+                continue
+            local_bytes += request.amount_bytes
+            total_bytes += (
+                request.amount_bytes
+                if request.total_bytes is None else request.total_bytes
+            )
+            if queued is ticket:
+                return local_bytes, total_bytes
+        return None
 
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
@@ -515,6 +570,7 @@ class PolicyCoordinator:
                 amount_bytes=amount,
                 wait_class=wait_class,
                 capacity_claim=capacity_claim,
+                total_bytes=total,
             )
             if wait_class != "create" and not capacity_claim:
                 self._progress_waiters.add(ticket)
@@ -533,16 +589,34 @@ class PolicyCoordinator:
                     # while a new VM pair is waiting for capacity.
                     head = self._admission_head_locked()
                     at_head = head is ticket
+                    same_session_inflight = (
+                        session_id, wait_class
+                    ) in self.demand.claims and wait_class != "tool_admission"
+                    progress_prefix = (
+                        None
+                        if at_head or same_session_inflight
+                        else self._feasible_progress_prefix_locked(ticket, head)
+                    )
+                    can_attempt = at_head or progress_prefix is not None
+                    checked_amount = (
+                        amount if progress_prefix is None else progress_prefix[0]
+                    )
+                    checked_total = (
+                        total if progress_prefix is None else progress_prefix[1]
+                    )
                     safety_reasons = self._pressure_reasons(
-                        amount + (self.startup_headroom_bytes
+                        checked_amount + (self.startup_headroom_bytes
                                   if wait_class == "create"
                                   and self._startup_headroom_needed(session_id) else 0),
                         capacity_claim=capacity_claim,
                         existing_progress=(wait_class == "tool_admission"),
-                        total_bytes=total + (self.startup_headroom_bytes if wait_class == "create"
-                                            and self._startup_headroom_needed(session_id) else 0),
-                    ) if at_head else ()
-                    if (session_id, wait_class) in self.demand.claims:
+                        total_bytes=checked_total + (
+                            self.startup_headroom_bytes
+                            if wait_class == "create"
+                            and self._startup_headroom_needed(session_id) else 0
+                        ),
+                    ) if can_attempt else ()
+                    if same_session_inflight:
                         safety_reasons = (*safety_reasons, 'execution_already_inflight')
                     if (
                         at_head and wait_class == "create"
@@ -550,10 +624,10 @@ class PolicyCoordinator:
                         and not self.resident_capacity_accounting
                     ):
                         safety_reasons = (*safety_reasons, "local_high_hysteresis")
-                    if at_head and not safety_reasons:
+                    if can_attempt and not safety_reasons:
                         break
                     self._waiter_blockers[ticket] = (
-                        tuple(safety_reasons) if at_head else ('fifo_predecessor',)
+                        tuple(safety_reasons) if can_attempt else ('fifo_predecessor',)
                     )
                     # Placement may reconsider a memory-blocked node, but must
                     # retain its FIFO ticket while merely waiting behind work.
@@ -609,10 +683,16 @@ class PolicyCoordinator:
                 self._waiter_requests.pop(ticket, None)
                 self._waiter_blockers.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
-                self.demand.add((session_id, wait_class), scope=self.demand_scope,
-                    amount=total, local_amount=amount,
-                    sample=(self._memory_samples.get(session_id, {}).get(wait_class)
-                            if wait_class != 'tool_admission' else None))
+                claim_key = (session_id, wait_class)
+                if wait_class == "tool_admission" and claim_key in self.demand.claims:
+                    self.demand.extend(
+                        claim_key, amount=total, local_amount=amount,
+                    )
+                else:
+                    self.demand.add(claim_key, scope=self.demand_scope,
+                        amount=total, local_amount=amount,
+                        sample=(self._memory_samples.get(session_id, {}).get(wait_class)
+                                if wait_class != 'tool_admission' else None))
                 if self.resident_capacity_accounting and wait_class == "create":
                     self._resident_capacity_claims[session_id] = amount
                 ledger = self._capacity_claims if capacity_claim else self._reservations
@@ -672,6 +752,7 @@ class PolicyCoordinator:
             task_ids = {r.session_id for _, r in requests}
             tool_ids = {r.session_id for _, r in requests if r.wait_class == 'tool_admission'}
             states = tuple(self._sessions[sid] for sid in task_ids if sid in self._sessions)
+            session_states = tuple(self._sessions.values())
             blockers = Counter(reason for ticket, _ in requests
                                for reason in self._waiter_blockers.get(ticket, ('not_checked',)))
             result = {
@@ -682,6 +763,17 @@ class PolicyCoordinator:
                 'admission_queue_oldest_seconds': max(
                     (now-r.queued_monotonic_s for _, r in requests), default=0.),
                 'admission_queue_last_blockers': dict(blockers),
+                'registered_sessions': len(session_states),
+                'model_waiting_sessions': sum(
+                    state.wait_id is not None and not state.response_ready
+                    for state in session_states
+                ),
+                'tool_active_sessions': sum(
+                    state.tool_active for state in session_states
+                ),
+                'eviction_in_progress_sessions': sum(
+                    state.eviction_in_progress for state in session_states
+                ),
             }
         # Lifecycle properties must never be evaluated with the admission lock.
         result['admission_queue_resident_vms'] = sum(
@@ -712,7 +804,7 @@ class PolicyCoordinator:
         count = len(samples)
         total = sum(samples)
         return {
-            "discipline": "feasible_fifo_progress_bypasses_blocked_create",
+            "discipline": "feasible_fifo_progress_with_aggregate_per_vm_tool_claims",
             "admission_count": count,
             "max_queue_depth": max_queue_depth,
             "wait_total_seconds": total,
@@ -736,10 +828,19 @@ class PolicyCoordinator:
             ),
         }
 
-    def release(self, session_id: str, amount_mib: int, *, wait_class='tool_admission') -> None:
+    def release(self, session_id: str, amount_mib: int, *, wait_class='tool_admission',
+                total_mib: int | None = None) -> None:
         with self._condition:
             self._release_from(self._reservations, session_id, amount_mib)
-            self.demand.release((session_id, wait_class))
+            key = (session_id, wait_class)
+            if wait_class == 'tool_admission':
+                self.demand.release_amount(
+                    key,
+                    amount=(amount_mib if total_mib is None else total_mib) * MIB,
+                    local_amount=amount_mib * MIB,
+                )
+            else:
+                self.demand.release(key)
 
     def release_resident_capacity(self, session_id: str) -> None:
         with self._condition:

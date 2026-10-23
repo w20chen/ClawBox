@@ -1,0 +1,965 @@
+{
+  "control_stages": {
+    "bookkeeping": {
+      "max": 1.6569637950015021,
+      "mean": 0.004594076662833435,
+      "n": 15343,
+      "p50": 1.5211000572890043e-05,
+      "p90": 0.004965914001513741,
+      "p95": 0.016011248801078175,
+      "p99": 0.08791086344113863
+    },
+    "cpu_placement": {
+      "max": 0.28218591299810214,
+      "mean": 0.00029292187742522457,
+      "n": 15343,
+      "p50": 2.5599983928259462e-06,
+      "p90": 3.459997969912365e-06,
+      "p95": 0.0001914969994686541,
+      "p99": 0.003883767379375058
+    },
+    "dependency_install_gate": {
+      "max": 0.1126134340011049,
+      "mean": 0.03839400557738442,
+      "n": 26,
+      "p50": 0.02192222949997813,
+      "p90": 0.08844925899938971,
+      "p95": 0.08995715700257279,
+      "p99": 0.1070531290015424
+    },
+    "lifecycle_lock": {
+      "max": 2.3900608170006308,
+      "mean": 0.03368434684272694,
+      "n": 15343,
+      "p50": 9.299983503296971e-07,
+      "p90": 0.05302186400222127,
+      "p95": 0.24325691739977615,
+      "p99": 0.6790934488211496
+    },
+    "memory_baseline": {
+      "max": 1.4662394059996586,
+      "mean": 0.08899522379346582,
+      "n": 15343,
+      "p50": 0.054850757001986494,
+      "p90": 0.18891647080090482,
+      "p95": 0.2978874167012688,
+      "p99": 0.6443317373598253
+    },
+    "memory_prepare": {
+      "max": 105.98941553300028,
+      "mean": 1.1638951834222098,
+      "n": 15343,
+      "p50": 0.4820624090025376,
+      "p90": 2.862249776601675,
+      "p95": 3.171770928000841,
+      "p99": 4.127362327740193
+    },
+    "prediction_and_queue": {
+      "max": 1.9138180870031647,
+      "mean": 0.044814534202303094,
+      "n": 15343,
+      "p50": 0.010984597000060603,
+      "p90": 0.11356544659865923,
+      "p95": 0.21146371969844038,
+      "p99": 0.39557002258065005
+    },
+    "restore_and_route": {
+      "max": 0.00018497199926059693,
+      "mean": 2.239835089758755e-05,
+      "n": 15343,
+      "p50": 2.1730997104896232e-05,
+      "p90": 2.584200046840124e-05,
+      "p95": 2.7072001103078946e-05,
+      "p99": 3.1471998227061704e-05
+    },
+    "sampler_start": {
+      "max": 0.9787436920014443,
+      "mean": 0.010917880771927096,
+      "n": 15343,
+      "p50": 0.006162991998280631,
+      "p90": 0.018224789800297028,
+      "p95": 0.0293078320013592,
+      "p99": 0.0707943722191703
+    }
+  },
+  "event_counts": [
+    [
+      "tool_execution_progress",
+      30663
+    ],
+    [
+      "tool_admission_queued",
+      15536
+    ],
+    [
+      "tool_admitted",
+      15343
+    ],
+    [
+      "tool_completed",
+      15310
+    ],
+    [
+      "pressure_execution_release",
+      15261
+    ],
+    [
+      "tool_call_cpu_placement",
+      1831
+    ],
+    [
+      "model_wait_started",
+      1516
+    ],
+    [
+      "model_response_ready",
+      1477
+    ],
+    [
+      "openclaw_startup_stage",
+      1024
+    ],
+    [
+      "pressure_vm_generation",
+      512
+    ],
+    [
+      "runtime_memory_placement",
+      512
+    ],
+    [
+      "sandbox_created",
+      512
+    ],
+    [
+      "sandbox_create_gate_wait_started",
+      256
+    ],
+    [
+      "sandbox_create_gate_acquired",
+      256
+    ],
+    [
+      "session_placement",
+      256
+    ],
+    [
+      "sandbox_create_gate_released",
+      256
+    ],
+    [
+      "task_environment_checked",
+      256
+    ],
+    [
+      "native_ssh_endpoint_resolved",
+      256
+    ],
+    [
+      "memory_sample",
+      256
+    ],
+    [
+      "native_ssh_identity_ready",
+      256
+    ],
+    [
+      "topology_cpu_group_load",
+      196
+    ],
+    [
+      "dependency_install_gate_wait_started",
+      30
+    ],
+    [
+      "dependency_install_gate_acquired",
+      30
+    ],
+    [
+      "dependency_install_gate_released",
+      22
+    ],
+    [
+      "runtime_memory_started",
+      1
+    ]
+  ],
+  "execution_transitions": {
+    "admitted_to_completed": {
+      "max": 120.94914126396179,
+      "mean": 0.9069350672326255,
+      "n": 15380,
+      "p50": 0.5783884525299072,
+      "p90": 2.0215184688568115,
+      "p95": 2.5726640462875365,
+      "p99": 3.6085296249389613
+    },
+    "admitted_to_completed|agent-tool:exec": {
+      "max": 120.94914126396179,
+      "mean": 1.034662746168949,
+      "n": 864,
+      "p50": 0.6125141382217407,
+      "p90": 1.984382629394532,
+      "p95": 2.5081355929374687,
+      "p99": 3.7956897878646854
+    },
+    "admitted_to_completed|agent-tool:filesystem": {
+      "max": 5.097530364990234,
+      "mean": 0.9003495358062836,
+      "n": 4284,
+      "p50": 0.5718415975570679,
+      "p90": 2.035315489768983,
+      "p95": 2.5886893272399902,
+      "p99": 3.672110152244568
+    },
+    "admitted_to_completed|backend-maintenance:ssh_backend_maintenance": {
+      "max": 4.782037973403931,
+      "mean": 0.8989068911213536,
+      "n": 10232,
+      "p50": 0.5796127319335938,
+      "p90": 2.020166969299316,
+      "p95": 2.5683326959609976,
+      "p99": 3.597174532413488
+    },
+    "admitted_to_execution_start": {
+      "max": 2.7734215259552,
+      "mean": 0.3387842465765722,
+      "n": 15404,
+      "p50": 0.16904747486114502,
+      "p90": 0.8068656206130986,
+      "p95": 1.0791264891624448,
+      "p99": 1.7683246278762805
+    },
+    "admitted_to_execution_start|agent-tool:exec": {
+      "max": 2.2972965240478516,
+      "mean": 0.311320293360743,
+      "n": 870,
+      "p50": 0.16652166843414307,
+      "p90": 0.7250402927398685,
+      "p95": 1.024722349643707,
+      "p99": 1.6918919086456279
+    },
+    "admitted_to_execution_start|agent-tool:filesystem": {
+      "max": 2.602701425552368,
+      "mean": 0.33743980036470994,
+      "n": 4290,
+      "p50": 0.1644759178161621,
+      "p90": 0.8123949289321899,
+      "p95": 1.0792687654495237,
+      "p99": 1.7797688913345266
+    },
+    "admitted_to_execution_start|backend-maintenance:ssh_backend_maintenance": {
+      "max": 2.7734215259552,
+      "mean": 0.3416797281801119,
+      "n": 10244,
+      "p50": 0.1718689203262329,
+      "p90": 0.8103457212448126,
+      "p95": 1.0837907552719122,
+      "p99": 1.7692307424545284
+    },
+    "execution_start_to_end": {
+      "max": 120.27787327766418,
+      "mean": 0.11042422160333012,
+      "n": 15397,
+      "p50": 0.024834394454956055,
+      "p90": 0.30568308830261226,
+      "p95": 0.47648630142211895,
+      "p99": 1.1091743564605714
+    },
+    "execution_start_to_end|agent-tool:exec": {
+      "max": 120.27787327766418,
+      "mean": 0.26509423476423144,
+      "n": 865,
+      "p50": 0.0379328727722168,
+      "p90": 0.33803486824035667,
+      "p95": 0.4942069530487058,
+      "p99": 1.0519895172119145
+    },
+    "execution_start_to_end|agent-tool:filesystem": {
+      "max": 1.8262512683868408,
+      "mean": 0.1039007584457771,
+      "n": 4289,
+      "p50": 0.032808542251586914,
+      "p90": 0.2943994522094728,
+      "p95": 0.481974983215332,
+      "p99": 1.0952252006530745
+    },
+    "execution_start_to_end|backend-maintenance:ssh_backend_maintenance": {
+      "max": 1.921510934829712,
+      "mean": 0.10009419837757257,
+      "n": 10243,
+      "p50": 0.02171921730041504,
+      "p90": 0.3035964488983159,
+      "p95": 0.4672559499740593,
+      "p99": 1.109795880317688
+    },
+    "queued_to_admitted": {
+      "max": 106.1732325553894,
+      "mean": 1.3139044921830696,
+      "n": 15412,
+      "p50": 0.6957197189331055,
+      "p90": 3.032019209861755,
+      "p95": 3.3568277597427345,
+      "p99": 4.4972088623046815
+    },
+    "queued_to_admitted|agent-tool:exec": {
+      "max": 5.68675422668457,
+      "mean": 1.3997606244580498,
+      "n": 870,
+      "p50": 0.9262412786483765,
+      "p90": 3.1745147705078125,
+      "p95": 3.5765788435935972,
+      "p99": 4.590159037113188
+    },
+    "queued_to_admitted|agent-tool:filesystem": {
+      "max": 9.760679483413696,
+      "mean": 1.4444670810472873,
+      "n": 4293,
+      "p50": 0.8662528991699219,
+      "p90": 3.1929415225982667,
+      "p95": 3.6481841087341302,
+      "p99": 5.023835649490355
+    },
+    "queued_to_admitted|backend-maintenance:ssh_backend_maintenance": {
+      "max": 106.1732325553894,
+      "mean": 1.2519277111241056,
+      "n": 10249,
+      "p50": 0.6148552894592285,
+      "p90": 2.9501041889190676,
+      "p95": 3.2185984134674075,
+      "p99": 4.049793605804444
+    }
+  },
+  "numeric_event_fields": {
+    "dependency_install_gate_acquired.wait_seconds": {
+      "max": 0.05753850300243357,
+      "mean": 0.021260479500415385,
+      "n": 30,
+      "p50": 0.014851643501970102,
+      "p90": 0.05018356989967288,
+      "p95": 0.0547612119005862,
+      "p99": 0.05706903186212003
+    },
+    "dependency_install_gate_released.held_seconds": {
+      "max": 121.05127894800171,
+      "mean": 8.396551649545389,
+      "n": 22,
+      "p50": 3.0635388850005256,
+      "p90": 4.309844453098049,
+      "p95": 5.185522918548667,
+      "p99": 96.72894453708098
+    },
+    "native_ssh_identity_ready.critical_path_wait_seconds": {
+      "max": 1.4240999007597566e-05,
+      "mean": 4.881035110315679e-06,
+      "n": 256,
+      "p50": 4.610999894794077e-06,
+      "p90": 5.824998879688792e-06,
+      "p95": 6.465000296884682e-06,
+      "p99": 1.0516501970414536e-05
+    },
+    "native_ssh_identity_ready.service_seconds": {
+      "max": 43.56921589800186,
+      "mean": 30.542146409706945,
+      "n": 256,
+      "p50": 29.144613703998402,
+      "p90": 37.71765457199945,
+      "p95": 40.54440218624859,
+      "p99": 42.82710186435088
+    },
+    "openclaw_startup_stage.duration_seconds": {
+      "max": 18.126013804998365,
+      "mean": 7.833230936764679,
+      "n": 1024,
+      "p50": 9.087274669998806,
+      "p90": 12.752980044800642,
+      "p95": 14.026846815751375,
+      "p99": 16.169195806039863
+    },
+    "pressure_execution_release.duration_seconds": {
+      "max": 120.55176043510437,
+      "mean": 0.5920156821863389,
+      "n": 15261,
+      "p50": 0.3460819721221924,
+      "p90": 1.2795255184173584,
+      "p95": 1.699181079864502,
+      "p99": 2.392947959899902
+    },
+    "runtime_memory_started.action_window_seconds": {
+      "max": 2.0,
+      "mean": 2.0,
+      "n": 1,
+      "p50": 2.0,
+      "p90": 2.0,
+      "p95": 2.0,
+      "p99": 2.0
+    },
+    "runtime_memory_started.cooldown_seconds": {
+      "max": 5.0,
+      "mean": 5.0,
+      "n": 1,
+      "p50": 5.0,
+      "p90": 5.0,
+      "p95": 5.0,
+      "p99": 5.0
+    },
+    "runtime_memory_started.exit_hysteresis_seconds": {
+      "max": 1.0,
+      "mean": 1.0,
+      "n": 1,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "p99": 1.0
+    },
+    "sandbox_create_gate_acquired.wait_seconds": {
+      "max": 88.8163803690004,
+      "mean": 18.582419272925563,
+      "n": 256,
+      "p50": 13.58564777850188,
+      "p90": 44.03629700499914,
+      "p95": 64.71095487999901,
+      "p99": 87.77874242709841
+    },
+    "sandbox_create_gate_released.held_seconds": {
+      "max": 38.482666939999035,
+      "mean": 8.102199280527344,
+      "n": 256,
+      "p50": 6.731472378001854,
+      "p90": 15.91268904449862,
+      "p95": 23.32719212199936,
+      "p99": 35.48464352765076
+    },
+    "sandbox_created.materialization_reservation_wait_seconds": {
+      "max": 0.0,
+      "mean": 0.0,
+      "n": 512,
+      "p50": 0.0,
+      "p90": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "sandbox_created.service_seconds": {
+      "max": 22.12322837800093,
+      "mean": 3.8066634861034103,
+      "n": 512,
+      "p50": 2.5536839735013928,
+      "p90": 9.077907961498573,
+      "p95": 11.675807232549595,
+      "p99": 19.878766626551474
+    },
+    "session_placement.feedback_sample_age_seconds": {
+      "max": 0.19137416100056726,
+      "mean": 0.014090187726623071,
+      "n": 256,
+      "p50": 0.002400045999820577,
+      "p90": 0.03207910250057466,
+      "p95": 0.07882625324873516,
+      "p99": 0.1615158948490716
+    },
+    "session_placement.wait_seconds": {
+      "max": 3.1169101300001785,
+      "mean": 0.2618131000311763,
+      "n": 256,
+      "p50": 0.021054243499747827,
+      "p90": 0.7519071284987149,
+      "p95": 1.5721099760003199,
+      "p99": 2.6644969004997607
+    },
+    "tool_admitted.admission_blocked_seconds": {
+      "max": 105.6580142089988,
+      "mean": 0.9931713759998037,
+      "n": 15343,
+      "p50": 0.16771487799996976,
+      "p90": 2.6649989900004587,
+      "p95": 2.9871065960993293,
+      "p99": 3.8690562927994323
+    },
+    "tool_admitted.control_total_seconds": {
+      "max": 106.17438899600165,
+      "mean": 1.3472816277855508,
+      "n": 15343,
+      "p50": 0.7386488339980133,
+      "p90": 3.0571957762011155,
+      "p95": 3.4143374824998314,
+      "p99": 4.572197327420581
+    },
+    "tool_call_cpu_placement.minimum_duration_seconds": {
+      "max": 1.0,
+      "mean": 1.0,
+      "n": 865,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "p99": 1.0
+    }
+  },
+  "queue_activity": {
+    "field_statistics": {
+      "activated_running_sessions": {
+        "max": 256.0,
+        "mean": 157.83984375,
+        "n": 256,
+        "p50": 151.0,
+        "p90": 256.0,
+        "p95": 256.0,
+        "p99": 256.0
+      },
+      "activation_rate_per_second": {
+        "max": 1.4915822009882096,
+        "mean": 1.0655091699049888,
+        "n": 256,
+        "p50": 1.061898262506168,
+        "p90": 1.4150751243137576,
+        "p95": 1.4509440510860374,
+        "p99": 1.465006316455842
+      },
+      "agent_active_sessions": {
+        "max": 234.0,
+        "mean": 137.640625,
+        "n": 256,
+        "p50": 130.5,
+        "p90": 224.5,
+        "p95": 228.0,
+        "p99": 233.0
+      },
+      "completed_sessions": {
+        "max": 0.0,
+        "mean": 0.0,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      },
+      "completion_rate_per_second": {
+        "max": 0.0,
+        "mean": 0.0,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      },
+      "dependency_install_active_operations": {
+        "max": 7.0,
+        "mean": 1.27734375,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 5.0,
+        "p95": 6.0,
+        "p99": 6.449999999999989
+      },
+      "dependency_install_active_tasks": {
+        "max": 7.0,
+        "mean": 1.27734375,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 5.0,
+        "p95": 6.0,
+        "p99": 6.449999999999989
+      },
+      "dependency_install_wait_oldest_seconds": {
+        "max": 0.009504670000751503,
+        "mean": 3.712761719043556e-05,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      },
+      "dependency_install_waiting_operations": {
+        "max": 1.0,
+        "mean": 0.00390625,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      },
+      "dependency_install_waiting_tasks": {
+        "max": 1.0,
+        "mean": 0.00390625,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      },
+      "failed_sessions": {
+        "max": 0.0,
+        "mean": 0.0,
+        "n": 256,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      },
+      "idle_at_llm_sessions": {
+        "max": 50.0,
+        "mean": 20.19921875,
+        "n": 256,
+        "p50": 21.5,
+        "p90": 35.0,
+        "p95": 37.25,
+        "p99": 41.44999999999999
+      },
+      "not_yet_offered_sessions": {
+        "max": 254.0,
+        "mean": 78.51953125,
+        "n": 256,
+        "p50": 45.0,
+        "p90": 207.5,
+        "p95": 235.25,
+        "p99": 251.45
+      },
+      "offered_not_activated_sessions": {
+        "max": 71.0,
+        "mean": 19.640625,
+        "n": 256,
+        "p50": 14.5,
+        "p90": 52.0,
+        "p95": 60.5,
+        "p99": 65.44999999999999
+      },
+      "offered_rate_per_second": {
+        "max": 1.537880305401505,
+        "mean": 1.202355233198798,
+        "n": 256,
+        "p50": 1.335574090518492,
+        "p90": 1.4532000822631794,
+        "p95": 1.4749468828629624,
+        "p99": 1.5042354196996288
+      },
+      "offered_sessions": {
+        "max": 256.0,
+        "mean": 177.48046875,
+        "n": 256,
+        "p50": 211.0,
+        "p90": 256.0,
+        "p95": 256.0,
+        "p99": 256.0
+      },
+      "tool_admission_wait_oldest_seconds": {
+        "max": 106.13199918200189,
+        "mean": 19.971967343519665,
+        "n": 256,
+        "p50": 1.7413138760002767,
+        "p90": 81.38388071100053,
+        "p95": 90.74032478949903,
+        "p99": 102.39903215599988
+      },
+      "tool_admission_waiting_operations": {
+        "max": 217.0,
+        "mean": 57.296875,
+        "n": 256,
+        "p50": 21.0,
+        "p90": 190.0,
+        "p95": 199.25,
+        "p99": 212.0
+      },
+      "tool_admission_waiting_tasks": {
+        "max": 202.0,
+        "mean": 53.2109375,
+        "n": 256,
+        "p50": 19.0,
+        "p90": 178.0,
+        "p95": 187.25,
+        "p99": 200.0
+      },
+      "tool_admitted_waiting_start_operations": {
+        "max": 80.0,
+        "mean": 12.203125,
+        "n": 256,
+        "p50": 7.0,
+        "p90": 33.0,
+        "p95": 43.25,
+        "p99": 61.0
+      },
+      "tool_executing_operations": {
+        "max": 72.0,
+        "mean": 6.79296875,
+        "n": 256,
+        "p50": 4.0,
+        "p90": 17.0,
+        "p95": 31.25,
+        "p99": 48.349999999999966
+      },
+      "tool_executing_tasks": {
+        "max": 72.0,
+        "mean": 6.79296875,
+        "n": 256,
+        "p50": 4.0,
+        "p90": 17.0,
+        "p95": 31.25,
+        "p99": 48.349999999999966
+      },
+      "total_sessions": {
+        "max": 256.0,
+        "mean": 256.0,
+        "n": 256,
+        "p50": 256.0,
+        "p90": 256.0,
+        "p95": 256.0,
+        "p99": 256.0
+      },
+      "vm_create_wait_oldest_seconds": {
+        "max": 88.40101253000103,
+        "mean": 17.195511061172027,
+        "n": 256,
+        "p50": 3.931313600500289,
+        "p90": 49.956382410000515,
+        "p95": 67.74645094874813,
+        "p99": 84.22251819339816
+      },
+      "vm_create_waiting_sessions": {
+        "max": 62.0,
+        "mean": 13.7109375,
+        "n": 256,
+        "p50": 4.5,
+        "p90": 42.0,
+        "p95": 50.5,
+        "p99": 55.44999999999999
+      },
+      "vm_creating_sessions": {
+        "max": 10.0,
+        "mean": 5.9296875,
+        "n": 256,
+        "p50": 10.0,
+        "p90": 10.0,
+        "p95": 10.0,
+        "p99": 10.0
+      }
+    },
+    "max": {
+      "activated_running_sessions": 256.0,
+      "activation_rate_per_second": 1.4915822009882096,
+      "agent_active_sessions": 234.0,
+      "completed_sessions": 0.0,
+      "completion_rate_per_second": 0.0,
+      "dependency_install_active_operations": 7.0,
+      "dependency_install_active_tasks": 7.0,
+      "dependency_install_wait_oldest_seconds": 0.009504670000751503,
+      "dependency_install_waiting_operations": 1.0,
+      "dependency_install_waiting_tasks": 1.0,
+      "failed_sessions": 0.0,
+      "idle_at_llm_sessions": 50.0,
+      "not_yet_offered_sessions": 254.0,
+      "offered_not_activated_sessions": 71.0,
+      "offered_rate_per_second": 1.537880305401505,
+      "offered_sessions": 256.0,
+      "tool_admission_wait_oldest_seconds": 106.13199918200189,
+      "tool_admission_waiting_operations": 217.0,
+      "tool_admission_waiting_tasks": 202.0,
+      "tool_admitted_waiting_start_operations": 80.0,
+      "tool_executing_operations": 72.0,
+      "tool_executing_tasks": 72.0,
+      "total_sessions": 256.0,
+      "vm_create_wait_oldest_seconds": 88.40101253000103,
+      "vm_create_waiting_sessions": 62.0,
+      "vm_creating_sessions": 10.0
+    },
+    "samples": 256
+  },
+  "resource_samples": {
+    "cpu_average_cores": {
+      "max": 143.463497547829,
+      "mean": 81.83311919515911,
+      "n": 256,
+      "p50": 82.95980507485987,
+      "p90": 120.5131406450775,
+      "p95": 131.2385287804065,
+      "p99": 142.28869093495624
+    },
+    "local_used_gib": {
+      "max": 707.9429473876953,
+      "mean": 576.0622988641262,
+      "n": 256,
+      "p50": 571.5077362060547,
+      "p90": 703.3247928619385,
+      "p95": 707.3562622070312,
+      "p99": 707.900881576538
+    },
+    "shared_live_used_gib": {
+      "max": 1.12078857421875,
+      "mean": 1.1060227751731873,
+      "n": 256,
+      "p50": 1.104888916015625,
+      "p90": 1.114480972290039,
+      "p95": 1.1207809448242188,
+      "p99": 1.12078857421875
+    }
+  },
+  "selected_event_keys": {
+    "memory_sample": [
+      "admission_queue_snapshot",
+      "cgroup_cpu",
+      "cgroup_memory",
+      "combined_live_used_bytes",
+      "compute_pressure",
+      "event",
+      "host_available_bytes",
+      "host_used_bytes",
+      "host_used_delta_bytes",
+      "local_used_bytes",
+      "monotonic_time_ns",
+      "numa_residency",
+      "queue_activity_snapshot",
+      "schema_version",
+      "sequence_no",
+      "shared_borrow_reserved_bytes",
+      "shared_live_used_bytes",
+      "tool_call_cpu_placement_changes",
+      "wall_time",
+      "wall_time_ns",
+      "warm_allocated_bytes",
+      "warm_committed_bytes",
+      "warm_reserved_bytes"
+    ],
+    "sandbox_create_gate_acquired": [
+      "event",
+      "monotonic_time_ns",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wait_seconds",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "sandbox_create_gate_released": [
+      "event",
+      "held_seconds",
+      "monotonic_time_ns",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_admission_queued": [
+      "event",
+      "execution_id",
+      "execution_scope",
+      "monotonic_time_ns",
+      "operation",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_admitted": [
+      "admission_blocked_seconds",
+      "admission_memory_tier",
+      "admitted_memory_mib",
+      "command_sha256",
+      "control_stage_seconds",
+      "control_total_seconds",
+      "dependency_install_limited",
+      "endpoint_epoch",
+      "endpoint_host",
+      "endpoint_port",
+      "endpoint_sandbox_id",
+      "event",
+      "execution_id",
+      "execution_scope",
+      "fallback_level",
+      "local_admitted_memory_mib",
+      "monotonic_time_ns",
+      "operation",
+      "predicted_memory_mib",
+      "prediction_key",
+      "prediction_source",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_completed": [
+      "endpoint_epoch",
+      "event",
+      "execution_id",
+      "exit_code",
+      "monotonic_time_ns",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "ssh_reaped_at",
+      "wall_time",
+      "wall_time_ns"
+    ],
+    "tool_execution_progress": [
+      "event",
+      "execution_id",
+      "monotonic_time_ns",
+      "phase",
+      "schema_version",
+      "sequence_no",
+      "session_id",
+      "source",
+      "wall_time",
+      "wall_time_ns"
+    ]
+  },
+  "session_coverage": {
+    "sandbox_create_gate_acquired": 256,
+    "sandbox_create_gate_released": 256,
+    "sandbox_create_gate_wait_started": 256,
+    "tool_admission_queued": 256,
+    "tool_admitted": 256,
+    "tool_completed": 256
+  },
+  "session_spans": {},
+  "shared_pool_utilization_diagnosis": {
+    "interpretation": "A wait with a concrete borrow candidate and logged capacity is an actionable shared-pool utilization defect. Memory-blocked samples with headroom are suspects until correlated with a decision. VM-create backlog alone is a create/control-plane bottleneck, not proof that borrowing should occur.",
+    "memory_blocked_samples": 206,
+    "memory_blocked_with_configured_pool_headroom_samples": 206,
+    "memory_scheduling_action_reasons": {},
+    "memory_scheduling_actions": {},
+    "tool_admitted_waiting_start_below_80pct_cpu_samples": 186,
+    "tool_admitted_waiting_start_samples": 203,
+    "vm_create_backlog_samples_not_itself_shared_pool_eligible": 139,
+    "wait_with_borrow_candidate": 0,
+    "wait_with_borrow_candidate_and_logged_capacity": 0,
+    "wait_with_borrow_candidate_and_logged_capacity_reasons": {}
+  },
+  "startup_stages": {
+    "openclaw_config": {
+      "max": 15.277424264000729,
+      "mean": 9.428403071046787,
+      "n": 256,
+      "p50": 9.114700883501428,
+      "p90": 11.259335484499388,
+      "p95": 13.124569834501017,
+      "p99": 14.43814098199891
+    },
+    "openclaw_onboard": {
+      "max": 18.126013804998365,
+      "mean": 10.44199678459779,
+      "n": 256,
+      "p50": 10.082970303001275,
+      "p90": 12.620479211498605,
+      "p95": 14.946776541499275,
+      "p99": 16.940431160149636
+    },
+    "runtime_setup": {
+      "max": 2.062103978001687,
+      "mean": 0.8446545526796285,
+      "n": 256,
+      "p50": 0.8012147989993537,
+      "p90": 1.225839922999512,
+      "p95": 1.392780742499781,
+      "p99": 1.7156696391995843
+    },
+    "sidecar_ready": {
+      "max": 16.84933276100128,
+      "mean": 10.617869338734508,
+      "n": 256,
+      "p50": 9.822219592499096,
+      "p90": 14.296025823497985,
+      "p95": 15.398243936250765,
+      "p99": 16.41043509334867
+    }
+  }
+}

@@ -79,6 +79,59 @@ def test_progress_bypasses_only_memory_blocked_creation(used_mib, expected):
         assert c._admission_head_locked() == expected
 
 
+def test_feasible_tool_prefix_does_not_wait_for_each_predecessor_thread():
+    from clawbox.experiments.policy import AdmissionRequest, MIB
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (0, 100*MIB))
+    older = object()
+    with c._condition:
+        c._waiters.append(older)
+        c._waiter_requests[older] = AdmissionRequest(
+            'older', MIB, 'tool_admission', False, total_bytes=MIB,
+        )
+        c._progress_waiters.add(older)
+
+    # The older request's callback thread has not run yet.  Both conservative
+    # charges fit, so this later thread may commit its own atomic claim instead
+    # of waiting for a notify-all/FIFO scheduling round.
+    assert c.acquire('new', 1, .1) >= 0
+    assert ('new', 'tool_admission') in c.demand.claims
+
+    c.release('new', 1)
+    with c._condition:
+        c._waiters.remove(older)
+        c._waiter_requests.pop(older)
+        c._progress_waiters.remove(older)
+
+
+def test_tool_prefix_stays_fifo_when_the_whole_prefix_cannot_fit():
+    from clawbox.experiments.policy import AdmissionRequest, MIB
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (0, 100*MIB))
+    older = object()
+    with c._condition:
+        c._waiters.append(older)
+        c._waiter_requests[older] = AdmissionRequest(
+            'older', 0, 'tool_admission', False, total_bytes=9*MIB,
+        )
+        c._progress_waiters.add(older)
+
+    with pytest.raises(AdmissionTimeout):
+        c.acquire('new', 0, .02, total_mib=2)
+    assert ('new', 'tool_admission') not in c.demand.claims
+
+    with c._condition:
+        c._waiters.remove(older)
+        c._waiter_requests.pop(older)
+        c._progress_waiters.remove(older)
+
+
 def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
     used = [9 * 1024**2]
     calls = []
@@ -92,7 +145,7 @@ def test_admission_reclaims_real_cache_before_pausing_a_vm() -> None:
                                     physical_sample=lambda: (used[0], 100 * 1024**2))
     coordinator.acquire("restore", 4, 1, wait_class="restore")
     assert calls == [True]
-    coordinator.release("restore", 4)
+    coordinator.release("restore", 4, wait_class="restore")
 
 
 def test_unbounded_admission_waits_until_capacity_is_available() -> None:
@@ -135,7 +188,7 @@ def test_slow_kernel_reclaim_does_not_hold_the_admission_head() -> None:
     try:
         coordinator.acquire("restore", 4, 1, wait_class="restore")
         assert coordinator._cache_reclaim_running
-        coordinator.release("restore", 4)
+        coordinator.release("restore", 4, wait_class="restore")
     finally:
         finish.set()
 
@@ -243,7 +296,7 @@ def test_high_hysteresis_blocks_only_new_session_creation() -> None:
     coordinator.release("existing", 1)
     coordinator.set_new_session_admission_blocked(False)
     coordinator.acquire("new", 1, 0, wait_class="create")
-    coordinator.release("new", 1)
+    coordinator.release("new", 1, wait_class="create")
 
 
 def test_new_pair_leaves_room_for_a_tool_to_make_progress() -> None:
@@ -611,7 +664,9 @@ def test_admission_is_fifo_and_exports_overhead_metrics() -> None:
 
     assert order == ["second", "third"]
     metrics = coordinator.admission_metrics()
-    assert metrics["discipline"] == "feasible_fifo_progress_bypasses_blocked_create"
+    assert metrics["discipline"] == (
+        "feasible_fifo_progress_with_aggregate_per_vm_tool_claims"
+    )
     assert metrics["admission_count"] == 3
     assert metrics["max_queue_depth"] == 2
     assert metrics["wait_p95_seconds"] is not None
@@ -695,6 +750,26 @@ def idle_pair_coordinator():
     c.register("idle", tool); c.register_runtime("idle", runtime)
     c.begin_model_wait("idle", "request")
     return c, tool, runtime
+
+
+def test_queue_snapshot_includes_lock_local_session_activity() -> None:
+    c = PolicyCoordinator(
+        PolicySpec(name="wait", admission="off", reclamation="snapshot_pause",
+                   eviction="wait_aware_pressure", restore="reactive"),
+        budget_mib=32, emergency_free_mib=0, operation_headroom_mib=0,
+    )
+    c.register("model", Lifecycle())
+    c.register_runtime("model", Lifecycle())
+    c.begin_model_wait("model", "request-1")
+    c.register("tool", Lifecycle())
+    c.set_tool_active("tool", True)
+
+    snapshot = c.queue_snapshot()
+
+    assert snapshot["registered_sessions"] == 2
+    assert snapshot["model_waiting_sessions"] == 1
+    assert snapshot["tool_active_sessions"] == 1
+    assert snapshot["eviction_in_progress_sessions"] == 0
 
 
 def test_restore_409_recovery_honors_pair_scope():

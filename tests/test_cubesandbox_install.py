@@ -40,6 +40,9 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     control_timeouts = (
         ROOT / "deploy" / "cubesandbox" / "sdk-control-timeouts.patch"
     ).read_text(encoding="utf-8")
+    create_timeout = (
+        ROOT / "deploy" / "cubesandbox" / "cube-api-create-timeout.patch"
+    ).read_text(encoding="utf-8")
 
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
     assert "apply --check" in helper
@@ -57,6 +60,10 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "TIER_API_PATCH_FILE" in helper
     assert "CONTROL_TIMEOUT_PATCH_FILE" in helper
     assert "timeout=cfg.request_timeout" in control_timeouts
+    assert "CREATE_TIMEOUT_PATCH_FILE" in helper
+    assert 'apply_once "$CREATE_TIMEOUT_PATCH_FILE"' in helper
+    assert '.route("/sandboxes", post(sandboxes::create_sandbox))' in create_timeout
+    assert "Create / Pause / Resume / Connect use the 120s lifecycle budget" in create_timeout
     lifecycle_timeouts = (ROOT / "deploy/cubesandbox/sdk-lifecycle-timeouts.patch").read_text()
     assert "timeout=cfg.request_timeout" in lifecycle_timeouts
     assert "timeout=self._config.request_timeout" in lifecycle_timeouts

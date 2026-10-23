@@ -44,7 +44,7 @@ file before applying it. Important host fields are:
 | `compute_nodes[].numa_node`, `cpus` | NUMA node and logical CPU list; compute domains must not overlap |
 | `memory_gib`, `low_gib`, `high_gib` | Per-domain capacity and watermarks; require `0 < low < high < memory` |
 | `warm`, `warm_node`, `warm_gib` | Shared in-memory checkpoint/borrow pool |
-| `shared_borrow_percent` | Maximum live-VM share of the common pool, from 0 to 50 |
+| `shared_borrow_percent` | Maximum live-VM share of the common pool, from 0 to 100. Borrow and WARM-snapshot reservations still share one hard `warm_gib` capacity; 100 lets live VMs use otherwise-idle capacity, while tiered snapshots fall back to COLD when the common pool is full. |
 | `warm_root`, `cold_root`, `output_root` | Dedicated WARM tmpfs, COLD snapshot, and result paths |
 | `minimum_disk_free_gib` | Required free space; CubeSandbox also rejects snapshot writes above 85% filesystem use |
 | `tcp_tw_reuse` | `null` preserves the host value; `0`, `1`, and `2` request Linux's documented modes |
@@ -164,10 +164,30 @@ knowledge base (KB) for the matching repository and Tool image.
 every workload repository; its
 artifact must declare `prediction_scope: clawtune_cold_start` and
 `repository: "*"`. The cold-start mode still verifies the KB hash, validated
-host-memory calibration, and the complete Tool environment identity, including
-VM size. The bootstrap KB must contain compatible memory observations; a
-time-only seed cannot support predicted memory admission. Changing the mode or
-artifact requires a new run ID, not an image rebuild.
+host-memory calibration, and membership in the artifact's exact
+`sandbox_identities` list, including template, image, VM size, and architecture.
+Use `scripts/export-cold-start-calibration.py` to create that artifact from a
+successful real-VM environment-calibration run covering the workload catalog;
+the command never changes the ClawTune bootstrap KB:
+
+```bash
+python scripts/export-cold-start-calibration.py \
+  --result <successful-arm-result.json> \
+  --receipt <matching-qualification-receipt.json> \
+  --workload <exact-workload-catalog.json> \
+  --seed-dir <validated-clawtune-bootstrap-v1-directory> \
+  --output <new-cold-start-artifact.json>
+```
+
+The receipt must report successful qualification and verified cleanup. The
+exporter derives ClawTune's public, cross-repository Tool-class prior from
+trusted completed agent Tool calls in that qualification and records their
+count and source hashes. It keeps repository and exact-command identities out
+of that public prior, retains the bootstrap Lattice snapshot, and writes a
+matching `.kb.json` next to the requested output. A calibration with no valid
+Cube environment-memory labels is rejected; unavailable measurements are not
+converted to zero. Changing the mode or artifact requires a new run ID, not an
+image rebuild.
 
 ### Compare fixed memory charges
 
@@ -211,9 +231,72 @@ To run only the discounted arms, remove `resident-capacity-1` from the generated
 `comparison.arms` before validation and launch.
 
 `execution.sandbox_create_concurrency` limits how many Runtime/Tool VM pairs are
-created at once (default `8`; unit: session pairs). It does not limit tool calls.
+created at once (default `8`; unit: session pairs). The two VMs in each admitted
+pair start concurrently, so maximum Cube create-request concurrency is twice this
+value. It does not limit tool calls.
 Set it no higher than the largest `execution.concurrency_levels` value. Changing
 it requires validation, qualification, and a new run ID.
+
+`execution.dependency_install_concurrency` optionally limits concurrent `apt`,
+`apt-get`, and Python `pip install` commands across an experiment arm (default:
+unset/unlimited; unit: commands). Other tool commands are unaffected. Use it when
+many traces would otherwise saturate the shared package-download path. Changing
+it requires validation, qualification, and a new run ID; it does not require host
+apply, image rebuild, or ClawTune retraining.
+
+For a repeated Debian/Ubuntu workload, a host-local APT cache avoids downloading
+the same repository indexes and packages for every Tool VM. Start it on the
+physical host address that CubeSandbox VMs can reach (port `3142` is the
+default; cache data persists under `/var/lib/clawbox/apt-cache`):
+
+```bash
+sudo bash scripts/clawbox-package-cache start \
+  --bind-address 193.124.7.2 \
+  --port 3142 \
+  --data-root /var/lib/clawbox/apt-cache
+sudo bash scripts/clawbox-package-cache status
+```
+
+Then set the editable experiment field:
+
+```yaml
+execution:
+  apt_cache_proxy_url: http://193.124.7.2:3142
+```
+
+The Worker writes this endpoint only to the Tool VM's APT configuration; it
+does not proxy pip/HTTPS or rewrite recorded commands. The default is unset.
+Changing the URL or enabling the cache requires qualification and a new run ID,
+but not host apply, an image rebuild, or ClawTune retraining. The cache container
+must be running before the experiment. `sudo bash scripts/clawbox-package-cache
+stop` stops it without deleting the cached packages or container.
+
+For repeated Python package installs, run a host-local devpi caching index on
+the physical address reachable from CubeSandbox VMs (port `3141` is the
+default; cache data persists under `/var/lib/clawbox/pypi-cache`):
+
+```bash
+sudo bash scripts/clawbox-pypi-cache start \
+  --bind-address 193.124.7.2 \
+  --port 3141 \
+  --data-root /var/lib/clawbox/pypi-cache
+sudo bash scripts/clawbox-pypi-cache status
+```
+
+Then set the editable experiment field:
+
+```yaml
+execution:
+  pypi_cache_index_url: http://193.124.7.2:3141/root/pypi/+simple/
+```
+
+The Worker exports this URL only in the Tool bridge environment as pip's index
+and trusted host. It does not add a global HTTP/HTTPS proxy or rewrite recorded
+commands. The default is unset. Enabling or changing it requires qualification
+and a new run ID, but not host apply, image rebuild, or ClawTune retraining. The
+cache container must be running before the experiment. `sudo bash
+scripts/clawbox-pypi-cache stop` stops it without deleting cached files or the
+container.
 
 For large simultaneous Runtime startups, set
 `inference.configuration.runtime_startup_timeout_seconds` in the experiment YAML
@@ -414,6 +497,7 @@ Useful commands:
 | --- | --- |
 | `trace`, `validate --inputs`, `describe`, `plan` | Read-only inspection; no VMs |
 | `doctor SPEC --probe-vm` | Check services, templates, resources, revisions, and optionally one real VM |
+| `prove-template-sharing SPEC --output FILE` | Check physical Base sharing once for every exact Tool template and freeze reusable evidence |
 | `qualify SPEC` | Run preflight separately and write `SPEC.qualification.json` |
 | `launch SPEC --run-id ID` | Preferred validate/qualify/run/resume workflow |
 | `run SPEC`, `resume ID` | Lower-level execution requiring a valid qualification receipt |
@@ -430,9 +514,35 @@ that no VM owned by the run remains.
 
 A qualification receipt is bound to the exact spec, implementation, templates,
 images, nodes, concurrency, and referenced file hashes. A lower qualification
-concurrency does not prove full-density performance. After interruption, restore
+concurrency bounds the qualification worker pool while one session still executes
+every workload case. The receipt records both values; this capability smoke does
+not prove full-density performance. After interruption, restore
 the host, retain the result directory, and launch the frozen spec with the same
 run ID. Use a new run ID for any configuration change.
+
+Template-aware placement additionally proves that two VMs from each Tool
+template physically share Cube's file-backed RAM Base. For a heterogeneous
+corpus, create that evidence once instead of recreating two probe VMs per
+template during every qualification:
+
+```bash
+bash scripts/clawbox --sudo experiment prove-template-sharing eval.yaml \
+  --output /data/clawbox-evidence/template-sharing.json \
+  --artifact-root /data/clawbox-evidence/template-sharing-raw
+bash scripts/clawbox experiment configure base.yaml eval-with-proof.yaml \
+  --template-base-sharing-artifact /data/clawbox-evidence/template-sharing.json
+```
+
+In editable schema-4 YAML the corresponding field is
+`evidence.template_base_sharing_artifact`; schema 3 uses
+`resources.template_base_sharing_artifact`. Reuse verifies the exact template
+IDs, image digests, VM sizes and architecture, target node, Cubelet binary and
+configuration hashes, and the retained raw proof hashes. A changed Tool
+template/image, VM shape, target node, Cubelet installation, or missing raw
+proof requires running `prove-template-sharing` again. Changing the artifact
+path requires a new run ID and qualification receipt, but not an image rebuild.
+This evidence skips only the repeated sharing probe; it never substitutes for
+the experiment's own VM creation or full-density measurement.
 
 ## Reproduce the shared-cache CPU-placement experiment
 

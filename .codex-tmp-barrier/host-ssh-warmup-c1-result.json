@@ -1,0 +1,1322 @@
+{
+  "arm": {
+    "agent": {
+      "driver": "openclaw"
+    },
+    "arm_id": "5a21bf54da7cec5025a7fe0b",
+    "case": {
+      "base_commit": "ff2da40abec773902b6fda86d36de154d83a7d9f",
+      "case_id": "ARMmbed__mbed-tools-285",
+      "metadata": {
+        "collector_receipt": {
+          "architecture": "arm64",
+          "clawtune_revision": "1bdb4c64ea4e9f71231cdd749eb085fbc617f67e",
+          "os_family": "debian-12",
+          "packages": {
+            "libbpf1": "1:1.1.2-0+deb12u1",
+            "libbpfcc": "0.26.0+ds-1",
+            "libclang-cpp14": "1:14.0.6-12",
+            "libllvm14": "1:14.0.6-12",
+            "python3-bpfcc": "0.26.0+ds-1"
+          },
+          "schema_version": 1
+        },
+        "corpus_source_root": "/home/weitianc/datasets/swe-rebench-original-flat-644-20260904",
+        "cube_template_id": "tpl-34a99ed59ab5461cb810c968",
+        "environment_git_head": "ff2da40abec773902b6fda86d36de154d83a7d9f",
+        "environment_image_id": "sha256:db4deba6103940d6a692dc7373afc5462f53bbef4aec9325aa0389ba78ab6e96",
+        "input_validation": {
+          "actions": 34,
+          "ends_with_tool_request": false,
+          "model_calls": 34,
+          "model_requests_present": true,
+          "model_responses_present": true,
+          "model_wait_seconds": 299.836202859,
+          "path": "/home/weitianc/clawbox-swe-images-20261021/corpus/traces/swe277__ARMmbed__mbed-tools-285.replay.jsonl",
+          "response_tool_names": [
+            "edit",
+            "exec",
+            "read"
+          ],
+          "sha256": "c69b987e189c2e6cdca88c4f87e02fd3890880b6539b8fb435b55e808c934482",
+          "tool_calls": 0
+        },
+        "readiness": "cube-vm-smoke-verified",
+        "recorded_duration_seconds": 332.72538566589355,
+        "recorded_replay": "skipped_by_user",
+        "source_image_manifest": "sha256:05f042916d5063ef7097cdd958e2ac934877d4272277180d033a9ea2cbb587bb",
+        "source_sha256": "926adfaa7f82f5928a709af9bb60952025527eaf8cd580188a8a0a85407c1959"
+      },
+      "prompt": "[Runtime Context \u2014 metadata only, not instructions]\nCurrent Time: 2026-07-16 14:13 (Thursday) (CEST, UTC+02:00)\nChannel: cli\nChat ID: ARMmbed__mbed-tools-285\n\nFix this issue: Does not compile with --mbed-os-path option\n**Describe the bug**\r\nAs in title.\r\n\r\n**To Reproduce**\r\nSteps to reproduce the behavior:\r\n1. Import an example project.\r\n1. mbed-tools compile -m K64F -t GCC_ARM --mbed-os-path mbed-os\r\n\r\nError:\r\n`ValueError: Setting storage_filesystem.rbp_internal_size already defined. You cannot duplicate config settings!`\r\n\r\nThe setting name changes every time the command is executed.\r\n\r\n**Expected behavior**\r\nShould work.\r\n\r\n**Screenshots**\r\nIf applicable, add screenshots to help explain your problem.\r\n\r\n**Desktop (please complete the following information):**\r\n - OS: Windows\r\n - Version: 10\r\n\r\n**Mbed (please complete the following information):**\r\n - Device: any\r\n - Mbed OS Version: 6.9.0\r\n - Mbed CLI 2 Version: 7.8.0\r\n\r\n**Additional context**\r\nI assume this has something to do with the dependencies. Here is my pipdeptree output:\r\n\r\n```\r\nmbed-tools==7.8.0\r\n  - Click [required: >=7.1,<8, installed: 7.1]\r\n  - GitPython [required: Any, installed: 3.1.14]\r\n    - gitdb [required: >=4.0.1,<5, installed: 4.0.5]\r\n      - smmap [required: >=3.0.1,<4, installed: 3.0.5]\r\n  - Jinja2 [required: Any, installed: 2.11.3]\r\n    - MarkupSafe [required: >=0.23, installed: 1.1.1]\r\n  - pdoc3 [required: Any, installed: 0.9.2]\r\n    - mako [required: Any, installed: 1.1.4]\r\n      - MarkupSafe [required: >=0.9.2, installed: 1.1.1]\r\n    - markdown [required: >=3.0, installed: 3.3.4]\r\n  - pyserial [required: Any, installed: 3.5]\r\n  - python-dotenv [required: Any, installed: 0.15.0]\r\n  - pywin32 [required: Any, installed: 300]\r\n  - requests [required: >=2.20, installed: 2.25.1]\r\n    - certifi [required: >=2017.4.17, installed: 2020.12.5]\r\n    - chardet [required: >=3.0.2,<5, installed: 4.0.0]\r\n    - idna [required: >=2.5,<3, installed: 2.10]\r\n    - urllib3 [required: >=1.21.1,<1.27, installed: 1.26.4]\r\n  - tabulate [required: Any, installed: 0.8.9]\r\n  - tqdm [required: Any, installed: 4.59.0]\r\n  - typing-extensions [required: Any, installed: 3.7.4.3]\r\n```\n\nIMPORTANT: You must complete the FULL workflow:\n1. Read and understand the issue thoroughly\n2. Explore the codebase to find relevant files\n3. Implement the fix\n4. Run the test suite to verify your fix\n5. If ANY test fails, analyze the error and fix it\n6. Repeat steps 4-5 until ALL tests pass\n7. Only stop when tests are passing\n\nDO NOT stop until you have:\n- Made code changes that fix the issue\n- Run the tests and confirmed they pass\n- Shown the final git diff\n\nIf you encounter test failures, debug and fix them. Keep trying until successful.\n\nCRITICAL REQUIREMENTS FOR TESTING:\n- You MUST run the project's ORIGINAL test suite (pytest, unittest, tox, etc.)\n- Do NOT write custom test scripts or verification scripts to bypass tests\n- Do NOT claim success based on your own \"All checks passed\" output\n- The test output MUST show real pytest format: \"X passed, Y failed in Z seconds\"\n- If tests fail with ImportError or collection errors, fix the environment/import issue first\n- Success means the project's actual test suite passes, not custom verification\n\nWHAT COUNTS AS SUCCESS:\n- Real pytest/unittest output showing tests passed\n- Example: \"===== 150 passed, 0 failed in 10.5s =====\"\n\nWHAT DOES NOT COUNT:\n- Your own verification scripts saying \"All checks passed\"\n- Manual testing or print statements\n- Skipping tests due to import errors\n\nIn the output, you need to summary your change and\nsummary how your test the application to check the fix,\nand what's the test status.\n\nWhen you are done, submit your changes as a git patch using these SEPARATE commands:\n\n  Step 1 \u2013 create patch:   git diff -- path/to/changed_file > patch.txt\n  Step 2 \u2013 verify patch:   cat patch.txt\n  Step 3 \u2013 submit (EXACT): echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt\n\nYou CANNOT continue working after submitting.\n",
+      "replay_trace_reference": "/home/weitianc/clawbox-swe-images-20261021/corpus/traces/swe277__ARMmbed__mbed-tools-285.replay.jsonl",
+      "repository": "ARMmbed/mbed-tools",
+      "sandbox": {
+        "allow_internet_access": false,
+        "architecture": "arm64",
+        "image_digest": "sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+        "memory_mib": 3072,
+        "preflight_command": "cd /testbed && test \"$(git rev-parse HEAD)\" = ff2da40abec773902b6fda86d36de154d83a7d9f && test -x /opt/conda/envs/testbed/bin/python",
+        "source_image_reference": "127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+        "template_alias": null,
+        "template_id": "tpl-34a99ed59ab5461cb810c968",
+        "vcpu": 2,
+        "workspace": "/testbed"
+      },
+      "snapshot_reuse_probability": null,
+      "source": "swe_rebench",
+      "source_reference": "/home/weitianc/datasets/swe-rebench-original-flat-644-20260904/swe277__ARMmbed__mbed-tools-285.trace.jsonl",
+      "validation": "cd /testbed && test \"$(git rev-parse HEAD)\" = ff2da40abec773902b6fda86d36de154d83a7d9f && test -x /opt/conda/envs/testbed/bin/python"
+    },
+    "concurrency": 1,
+    "execution": {
+      "arm_finalization_timeout_seconds": 300,
+      "arm_timeout_seconds": 3600,
+      "arrival_schedule": "burst",
+      "command_timeout_seconds": 1200,
+      "concurrency_levels": [
+        1
+      ],
+      "cube_request_timeout_seconds": 130.0,
+      "memory_sample_interval_seconds": 0.2,
+      "placement_cpu_overcommit": 1024.0,
+      "placement_policy": "load_aware",
+      "poisson_arrival_window_fraction": 2.0,
+      "random_seed": 20261023,
+      "randomized_order": false,
+      "sandbox_create_concurrency": 20,
+      "session_compute_nodes": [],
+      "stabilization_seconds": 1.0,
+      "stagger_interval_seconds": 0.0,
+      "template_balance_slack": 0.1,
+      "tool_call_cpu_group_max_active": 2,
+      "tool_call_cpu_include_smt": false,
+      "tool_call_cpu_min_duration_seconds": 1.0,
+      "tool_call_cpu_policy": "c0",
+      "tool_call_cpu_pressure_ratio": 0.1,
+      "tool_call_cpu_pressure_samples": 2,
+      "worker_thread_switch_interval_seconds": 0.001
+    },
+    "inference": {
+      "backend": "replay",
+      "configuration": {
+        "max_model_steps": 1,
+        "model": "example-model",
+        "qualification_max_parallel_sessions": 1,
+        "time_scale": 0.0
+      }
+    },
+    "policy": {
+      "admission": "off",
+      "cpu_release_boost": false,
+      "deployment": "managed",
+      "eviction": "none",
+      "execution_overrides": {
+        "placement_cpu_overcommit": 1024.0,
+        "placement_policy": "load_aware",
+        "session_compute_nodes": [],
+        "template_balance_slack": 0.1,
+        "tool_call_cpu_group_max_active": 2,
+        "tool_call_cpu_include_smt": false,
+        "tool_call_cpu_min_duration_seconds": 1.0,
+        "tool_call_cpu_policy": "c0",
+        "tool_call_cpu_pressure_ratio": 0.1,
+        "tool_call_cpu_pressure_samples": 2
+      },
+      "idle_release_ranking": false,
+      "mechanisms": {
+        "admission": {
+          "admission_margin_mib": 256,
+          "non_command_tool_memory_mib": null,
+          "prediction_reservation_scale": 1.0,
+          "startup_headroom_mib": 256,
+          "static_tool_memory_mib": null,
+          "tool": "off"
+        },
+        "checkpoint": {
+          "mechanism": "incremental-cow",
+          "pool_transfer_concurrency": 1,
+          "pool_transfer_timeout_seconds": 120.0,
+          "residency": "lru",
+          "storage": "disk"
+        },
+        "coordination": {
+          "action_selection": "reclaim_first"
+        },
+        "deployment": {
+          "lifecycle_reservation_scale": 1.0,
+          "mode": "managed",
+          "resident_capacity_accounting": false
+        },
+        "idle_reclaim": {
+          "checkpoint_restore_headroom_mib": 1024,
+          "policy": "off",
+          "scope": "tool"
+        },
+        "placement": {
+          "placement_cpu_overcommit": 1024.0,
+          "policy": "load_aware",
+          "session_compute_nodes": [],
+          "template_affinity": true,
+          "template_balance_slack": 0.1,
+          "tool_call_cpu_group_max_active": 2,
+          "tool_call_cpu_include_smt": false,
+          "tool_call_cpu_min_duration_seconds": 1.0,
+          "tool_call_cpu_policy": "c0",
+          "tool_call_cpu_pressure_ratio": 0.1,
+          "tool_call_cpu_pressure_samples": 2
+        },
+        "runtime": {
+          "cpu_release_boost": false,
+          "memory_protection": false,
+          "pressure_control": {
+            "action_window_seconds": 2.0,
+            "amortization_factor": 2.0,
+            "boost_cpu_weight": 200,
+            "cooldown_seconds": 10.0,
+            "exit_hysteresis_seconds": 1.0,
+            "max_boosted_vms": 1,
+            "min_release_mib": 64,
+            "protection_budget_mib": 256,
+            "psi_ratio": 0.1,
+            "release_forecast_ttl_factor": 3.0,
+            "release_history_samples": 3
+          },
+          "proactive_memory_reclaim": false,
+          "runtime_poll_interval_seconds": 0.5
+        },
+        "shared_memory": {
+          "borrow": "off",
+          "borrow_cooldown_seconds": 5.0,
+          "return_cooldown_seconds": 5.0
+        }
+      },
+      "memory_protection": false,
+      "name": "configured-design",
+      "reclamation": "resident",
+      "resource_overrides": {
+        "admission_margin_mib": 256,
+        "borrow_cooldown_seconds": 5.0,
+        "checkpoint_restore_headroom_mib": 1024,
+        "cold_snapshot_root": "/data/clawbox-performance-20261022T154600Z/repairs/host-ssh-warmup-c1-20261022T182400Z/cold",
+        "compute_nodes": [
+          {
+            "cpus": "0-79",
+            "high_watermark_mib": 491520,
+            "low_watermark_mib": 458752,
+            "memory_capacity_mib": 512000,
+            "node_id": "node0",
+            "numa_node": 0
+          },
+          {
+            "cpus": "80-159",
+            "high_watermark_mib": 491520,
+            "low_watermark_mib": 458752,
+            "memory_capacity_mib": 512000,
+            "node_id": "node1",
+            "numa_node": 1
+          }
+        ],
+        "emergency_free_memory_mib": 1024,
+        "idle_reclaim_costs": null,
+        "lazy_restore": true,
+        "lifecycle_admission": "configured-capacity",
+        "lifecycle_reservation_scale": 1.0,
+        "local_memory_capacity_mib": 1024000,
+        "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+        "local_memory_high_watermark_mib": 983040,
+        "local_memory_low_watermark_mib": 917504,
+        "local_numa_node": null,
+        "memory_action_costs": null,
+        "memory_scheduling": "local_only",
+        "non_command_tool_memory_mib": null,
+        "observe_predictions": false,
+        "physical_live_limit_mib": 1075200,
+        "pool_memory_budget_mib": 983040,
+        "pool_transfer_concurrency": 1,
+        "pool_transfer_timeout_seconds": 120.0,
+        "prediction_artifact": null,
+        "prediction_mode": "runtime",
+        "prediction_reservation_scale": 1.0,
+        "pressure_control": {
+          "action_window_seconds": 2.0,
+          "amortization_factor": 2.0,
+          "boost_cpu_weight": 200,
+          "cooldown_seconds": 10.0,
+          "exit_hysteresis_seconds": 1.0,
+          "max_boosted_vms": 1,
+          "min_release_mib": 64,
+          "protection_budget_mib": 256,
+          "psi_ratio": 0.1,
+          "release_forecast_ttl_factor": 3.0,
+          "release_history_samples": 3
+        },
+        "proactive_cache_reclaim": false,
+        "resident_capacity_accounting": false,
+        "return_cooldown_seconds": 5.0,
+        "runtime_poll_interval_seconds": 0.5,
+        "shared_memory_borrow_limit_mib": null,
+        "snapshot_destination": "cold",
+        "snapshot_mechanism": "full-copy",
+        "snapshot_residency_costs": null,
+        "snapshot_storage": "tiered",
+        "startup_headroom_mib": 256,
+        "static_tool_memory_mib": null,
+        "target_node": "193.124.7.2",
+        "template_base_sharing": "required",
+        "template_base_sharing_artifact": null,
+        "warm_memory_capacity_mib": 102400,
+        "warm_numa_node": 2,
+        "warm_snapshot_root": "/mnt/clawbox-pool"
+      },
+      "restore": "none",
+      "runtime_control": "off",
+      "runtime_snapshot": false,
+      "snapshot_aware_residency": false,
+      "template_aware_placement": true
+    },
+    "repetition": 0,
+    "resources": {
+      "admission_margin_mib": 256,
+      "borrow_cooldown_seconds": 5.0,
+      "checkpoint_restore_headroom_mib": 1024,
+      "cold_snapshot_root": "/data/clawbox-performance-20261022T154600Z/repairs/host-ssh-warmup-c1-20261022T182400Z/cold",
+      "compute_nodes": [
+        {
+          "cpus": "0-79",
+          "high_watermark_mib": 491520,
+          "low_watermark_mib": 458752,
+          "memory_capacity_mib": 512000,
+          "node_id": "node0",
+          "numa_node": 0
+        },
+        {
+          "cpus": "80-159",
+          "high_watermark_mib": 491520,
+          "low_watermark_mib": 458752,
+          "memory_capacity_mib": 512000,
+          "node_id": "node1",
+          "numa_node": 1
+        }
+      ],
+      "emergency_free_memory_mib": 1024,
+      "idle_reclaim_costs": null,
+      "lazy_restore": true,
+      "lifecycle_admission": "configured-capacity",
+      "lifecycle_reservation_scale": 1.0,
+      "local_memory_capacity_mib": 1024000,
+      "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+      "local_memory_high_watermark_mib": 983040,
+      "local_memory_low_watermark_mib": 917504,
+      "local_numa_node": null,
+      "memory_action_costs": null,
+      "memory_scheduling": "local_only",
+      "non_command_tool_memory_mib": null,
+      "observe_predictions": false,
+      "physical_live_limit_mib": 1075200,
+      "pool_memory_budget_mib": 983040,
+      "pool_transfer_concurrency": 1,
+      "pool_transfer_timeout_seconds": 120.0,
+      "prediction_artifact": null,
+      "prediction_mode": "runtime",
+      "prediction_reservation_scale": 1.0,
+      "pressure_control": {
+        "action_window_seconds": 2.0,
+        "amortization_factor": 2.0,
+        "boost_cpu_weight": 200,
+        "cooldown_seconds": 10.0,
+        "exit_hysteresis_seconds": 1.0,
+        "max_boosted_vms": 1,
+        "min_release_mib": 64,
+        "protection_budget_mib": 256,
+        "psi_ratio": 0.1,
+        "release_forecast_ttl_factor": 3.0,
+        "release_history_samples": 3
+      },
+      "proactive_cache_reclaim": false,
+      "resident_capacity_accounting": false,
+      "return_cooldown_seconds": 5.0,
+      "runtime_poll_interval_seconds": 0.5,
+      "shared_memory_borrow_limit_mib": null,
+      "snapshot_destination": "cold",
+      "snapshot_mechanism": "full-copy",
+      "snapshot_residency_costs": null,
+      "snapshot_storage": "tiered",
+      "startup_headroom_mib": 256,
+      "static_tool_memory_mib": null,
+      "target_node": "193.124.7.2",
+      "template_base_sharing": "required",
+      "template_base_sharing_artifact": null,
+      "warm_memory_capacity_mib": 102400,
+      "warm_numa_node": 2,
+      "warm_snapshot_root": "/mnt/clawbox-pool"
+    },
+    "runtime": {
+      "allow_internet_access": true,
+      "architecture": "arm64",
+      "image_digest": "sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "memory_mib": 1024,
+      "preflight_command": null,
+      "source_image_reference": "127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+      "template_alias": null,
+      "template_id": "tpl-9c41283c66174a24bf0c6814",
+      "vcpu": 2,
+      "workspace": "/workspace"
+    },
+    "sandbox": {
+      "allow_internet_access": false,
+      "architecture": "arm64",
+      "image_digest": "sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+      "memory_mib": 3072,
+      "preflight_command": "cd /testbed && test \"$(git rev-parse HEAD)\" = ff2da40abec773902b6fda86d36de154d83a7d9f && test -x /opt/conda/envs/testbed/bin/python",
+      "source_image_reference": "127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+      "template_alias": null,
+      "template_id": "tpl-34a99ed59ab5461cb810c968",
+      "vcpu": 2,
+      "workspace": "/testbed"
+    },
+    "session_assignment": "unique",
+    "session_cases": [
+      {
+        "base_commit": "ff2da40abec773902b6fda86d36de154d83a7d9f",
+        "case_id": "ARMmbed__mbed-tools-285",
+        "metadata": {
+          "collector_receipt": {
+            "architecture": "arm64",
+            "clawtune_revision": "1bdb4c64ea4e9f71231cdd749eb085fbc617f67e",
+            "os_family": "debian-12",
+            "packages": {
+              "libbpf1": "1:1.1.2-0+deb12u1",
+              "libbpfcc": "0.26.0+ds-1",
+              "libclang-cpp14": "1:14.0.6-12",
+              "libllvm14": "1:14.0.6-12",
+              "python3-bpfcc": "0.26.0+ds-1"
+            },
+            "schema_version": 1
+          },
+          "corpus_source_root": "/home/weitianc/datasets/swe-rebench-original-flat-644-20260904",
+          "cube_template_id": "tpl-34a99ed59ab5461cb810c968",
+          "environment_git_head": "ff2da40abec773902b6fda86d36de154d83a7d9f",
+          "environment_image_id": "sha256:db4deba6103940d6a692dc7373afc5462f53bbef4aec9325aa0389ba78ab6e96",
+          "input_validation": {
+            "actions": 34,
+            "ends_with_tool_request": false,
+            "model_calls": 34,
+            "model_requests_present": true,
+            "model_responses_present": true,
+            "model_wait_seconds": 299.836202859,
+            "path": "/home/weitianc/clawbox-swe-images-20261021/corpus/traces/swe277__ARMmbed__mbed-tools-285.replay.jsonl",
+            "response_tool_names": [
+              "edit",
+              "exec",
+              "read"
+            ],
+            "sha256": "c69b987e189c2e6cdca88c4f87e02fd3890880b6539b8fb435b55e808c934482",
+            "tool_calls": 0
+          },
+          "readiness": "cube-vm-smoke-verified",
+          "recorded_duration_seconds": 332.72538566589355,
+          "recorded_replay": "skipped_by_user",
+          "source_image_manifest": "sha256:05f042916d5063ef7097cdd958e2ac934877d4272277180d033a9ea2cbb587bb",
+          "source_sha256": "926adfaa7f82f5928a709af9bb60952025527eaf8cd580188a8a0a85407c1959"
+        },
+        "prompt": "[Runtime Context \u2014 metadata only, not instructions]\nCurrent Time: 2026-07-16 14:13 (Thursday) (CEST, UTC+02:00)\nChannel: cli\nChat ID: ARMmbed__mbed-tools-285\n\nFix this issue: Does not compile with --mbed-os-path option\n**Describe the bug**\r\nAs in title.\r\n\r\n**To Reproduce**\r\nSteps to reproduce the behavior:\r\n1. Import an example project.\r\n1. mbed-tools compile -m K64F -t GCC_ARM --mbed-os-path mbed-os\r\n\r\nError:\r\n`ValueError: Setting storage_filesystem.rbp_internal_size already defined. You cannot duplicate config settings!`\r\n\r\nThe setting name changes every time the command is executed.\r\n\r\n**Expected behavior**\r\nShould work.\r\n\r\n**Screenshots**\r\nIf applicable, add screenshots to help explain your problem.\r\n\r\n**Desktop (please complete the following information):**\r\n - OS: Windows\r\n - Version: 10\r\n\r\n**Mbed (please complete the following information):**\r\n - Device: any\r\n - Mbed OS Version: 6.9.0\r\n - Mbed CLI 2 Version: 7.8.0\r\n\r\n**Additional context**\r\nI assume this has something to do with the dependencies. Here is my pipdeptree output:\r\n\r\n```\r\nmbed-tools==7.8.0\r\n  - Click [required: >=7.1,<8, installed: 7.1]\r\n  - GitPython [required: Any, installed: 3.1.14]\r\n    - gitdb [required: >=4.0.1,<5, installed: 4.0.5]\r\n      - smmap [required: >=3.0.1,<4, installed: 3.0.5]\r\n  - Jinja2 [required: Any, installed: 2.11.3]\r\n    - MarkupSafe [required: >=0.23, installed: 1.1.1]\r\n  - pdoc3 [required: Any, installed: 0.9.2]\r\n    - mako [required: Any, installed: 1.1.4]\r\n      - MarkupSafe [required: >=0.9.2, installed: 1.1.1]\r\n    - markdown [required: >=3.0, installed: 3.3.4]\r\n  - pyserial [required: Any, installed: 3.5]\r\n  - python-dotenv [required: Any, installed: 0.15.0]\r\n  - pywin32 [required: Any, installed: 300]\r\n  - requests [required: >=2.20, installed: 2.25.1]\r\n    - certifi [required: >=2017.4.17, installed: 2020.12.5]\r\n    - chardet [required: >=3.0.2,<5, installed: 4.0.0]\r\n    - idna [required: >=2.5,<3, installed: 2.10]\r\n    - urllib3 [required: >=1.21.1,<1.27, installed: 1.26.4]\r\n  - tabulate [required: Any, installed: 0.8.9]\r\n  - tqdm [required: Any, installed: 4.59.0]\r\n  - typing-extensions [required: Any, installed: 3.7.4.3]\r\n```\n\nIMPORTANT: You must complete the FULL workflow:\n1. Read and understand the issue thoroughly\n2. Explore the codebase to find relevant files\n3. Implement the fix\n4. Run the test suite to verify your fix\n5. If ANY test fails, analyze the error and fix it\n6. Repeat steps 4-5 until ALL tests pass\n7. Only stop when tests are passing\n\nDO NOT stop until you have:\n- Made code changes that fix the issue\n- Run the tests and confirmed they pass\n- Shown the final git diff\n\nIf you encounter test failures, debug and fix them. Keep trying until successful.\n\nCRITICAL REQUIREMENTS FOR TESTING:\n- You MUST run the project's ORIGINAL test suite (pytest, unittest, tox, etc.)\n- Do NOT write custom test scripts or verification scripts to bypass tests\n- Do NOT claim success based on your own \"All checks passed\" output\n- The test output MUST show real pytest format: \"X passed, Y failed in Z seconds\"\n- If tests fail with ImportError or collection errors, fix the environment/import issue first\n- Success means the project's actual test suite passes, not custom verification\n\nWHAT COUNTS AS SUCCESS:\n- Real pytest/unittest output showing tests passed\n- Example: \"===== 150 passed, 0 failed in 10.5s =====\"\n\nWHAT DOES NOT COUNT:\n- Your own verification scripts saying \"All checks passed\"\n- Manual testing or print statements\n- Skipping tests due to import errors\n\nIn the output, you need to summary your change and\nsummary how your test the application to check the fix,\nand what's the test status.\n\nWhen you are done, submit your changes as a git patch using these SEPARATE commands:\n\n  Step 1 \u2013 create patch:   git diff -- path/to/changed_file > patch.txt\n  Step 2 \u2013 verify patch:   cat patch.txt\n  Step 3 \u2013 submit (EXACT): echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt\n\nYou CANNOT continue working after submitting.\n",
+        "replay_trace_reference": "/home/weitianc/clawbox-swe-images-20261021/corpus/traces/swe277__ARMmbed__mbed-tools-285.replay.jsonl",
+        "repository": "ARMmbed/mbed-tools",
+        "sandbox": {
+          "allow_internet_access": false,
+          "architecture": "arm64",
+          "image_digest": "sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+          "memory_mib": 3072,
+          "preflight_command": "cd /testbed && test \"$(git rev-parse HEAD)\" = ff2da40abec773902b6fda86d36de154d83a7d9f && test -x /opt/conda/envs/testbed/bin/python",
+          "source_image_reference": "127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+          "template_alias": null,
+          "template_id": "tpl-34a99ed59ab5461cb810c968",
+          "vcpu": 2,
+          "workspace": "/testbed"
+        },
+        "snapshot_reuse_probability": null,
+        "source": "swe_rebench",
+        "source_reference": "/home/weitianc/datasets/swe-rebench-original-flat-644-20260904/swe277__ARMmbed__mbed-tools-285.trace.jsonl",
+        "validation": "cd /testbed && test \"$(git rev-parse HEAD)\" = ff2da40abec773902b6fda86d36de154d83a7d9f && test -x /opt/conda/envs/testbed/bin/python"
+      }
+    ],
+    "spec_digest": "9be63990746d1928be66498aacb3bd02d3ebbcf6b5aaf7b601824d711ded121e",
+    "validation": {
+      "command": "true"
+    }
+  },
+  "artifacts": {
+    "events": "/data/clawbox-performance-20261022T154600Z/repairs/host-ssh-warmup-c1-20261022T182400Z/results/qualification-bbc7bda75a8c/attempts/attempt-6f5def8fb55a/5a21bf54da7cec5025a7fe0b/events/5a21bf54da7cec5025a7fe0b.jsonl"
+  },
+  "attempt_id": "attempt-6f5def8fb55a",
+  "completed_at": "2026-10-22T18:22:08.050211Z",
+  "correctness": {
+    "arm_interrupted": false,
+    "completed_sessions": 0,
+    "experiment_cgroup_oom_kill_events": 0,
+    "failed_sessions": 1,
+    "failure": "host native SSH warmup did not reach the intended Tool identity for 5a21bf54da7cec5025a7fe0b-0000: exit=255: ssh: connect to host 193.124.7.2 port 26216: Connection refused\n",
+    "infrastructure_failure": null,
+    "native_tool_exact_id_join_rate": null,
+    "native_tool_telemetry_loss_total": 0,
+    "session_failures": [
+      {
+        "error": "host native SSH warmup did not reach the intended Tool identity for 5a21bf54da7cec5025a7fe0b-0000: exit=255: ssh: connect to host 193.124.7.2 port 26216: Connection refused\n",
+        "error_type": "RuntimeError",
+        "event": "session_failed",
+        "session_id": "5a21bf54da7cec5025a7fe0b-0000",
+        "traceback": "Traceback (most recent call last):\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 223, in collect_session_results\n    result = future.result()\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 1939, in run_placed_session\n    return run_placed_session_impl(index, slot)\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 1976, in run_placed_session_impl\n    result = self._run_session(domain.arm, index, domain.coordinator, events,\n        policy_events, prediction_providers.get(session_case.case_id), None,\n    ...<3 lines>...\n        offered_offset_seconds=offer_offsets[index],\n        telemetry_warmup_pool=telemetry_warmup_pool)\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 3772, in _run_session\n    await_tool_telemetry_warmup()\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 3722, in await_tool_telemetry_warmup\n    attempts = route_warmup_future.result()\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 3748, in _run_session\n    outcome = run_openclaw(\n        prompt=arm.case.prompt, session_id=session_id,\n    ...<16 lines>...\n           if not runtime_snapshot_enabled else {}),\n    )\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/openclaw_driver.py\", line 615, in run_openclaw\n    startup_wait()\n    ~~~~~~~~~~~~^^\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 3722, in await_tool_telemetry_warmup\n    attempts = route_warmup_future.result()\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/weitianc/miniconda3/lib/python3.13/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n  File \"/home/weitianc/clawbox-performance-source-20261022T182002Z/clawbox/experiments/worker.py\", line 118, in warm_native_ssh_route\n    raise RuntimeError(\n    ...<2 lines>...\n    )\nRuntimeError: host native SSH warmup did not reach the intended Tool identity for 5a21bf54da7cec5025a7fe0b-0000: exit=255: ssh: connect to host 193.124.7.2 port 26216: Connection refused\n\n"
+      }
+    ],
+    "session_output_hashes": [],
+    "validation_passed": false
+  },
+  "experiment_id": "host-ssh-warmup-c1-20261022T182400Z-qualification",
+  "failure_category": "tool",
+  "memory": {
+    "admission_high_watermark_bytes": 1030792151040,
+    "baseline_used_bytes": 0,
+    "cross_numa_traffic_bytes": null,
+    "cross_numa_traffic_measurement": {
+      "allocation_proxy_field": "numa_allocation_event_deltas",
+      "allocation_proxy_unit": "pages",
+      "reason": "no qualified platform-specific host uncore PMU event maps cross-NUMA transactions to bytes",
+      "status": "unavailable"
+    },
+    "host_baseline_used_bytes": 124582195200,
+    "host_mean_used_delta_bytes": 483685571.3056061,
+    "host_memory_time_integral_byte_seconds": 9879499697.248955,
+    "host_min_used_delta_bytes": -13729792,
+    "host_oom_kill_events": 0,
+    "host_peak_used_delta_bytes": 748826624,
+    "local_hard_limit_bytes": 1073741824000,
+    "local_high_watermark_bytes": 1030792151040,
+    "local_high_watermark_exceeded": false,
+    "local_low_watermark_bytes": 962072674304,
+    "mean_used_delta_bytes": 376522198651.3234,
+    "mem_total_bytes": 1073741824000,
+    "memory_action_cost_model": null,
+    "memory_time_integral_byte_seconds": 7690638646801.714,
+    "minimum_available_bytes": 2037229318144,
+    "numa_allocation_event_deltas": {
+      "node0": {
+        "interleave_hit": 0,
+        "local_node": 12545,
+        "numa_foreign": 0,
+        "numa_hit": 12554,
+        "numa_miss": 0,
+        "other_node": 9
+      },
+      "node1": {
+        "interleave_hit": 0,
+        "local_node": 189739,
+        "numa_foreign": 0,
+        "numa_hit": 190430,
+        "numa_miss": 0,
+        "other_node": 691
+      },
+      "node2": {
+        "interleave_hit": 0,
+        "local_node": 28706,
+        "numa_foreign": 0,
+        "numa_hit": 28719,
+        "numa_miss": 0,
+        "other_node": 13
+      },
+      "node3": {
+        "interleave_hit": 0,
+        "local_node": 50610,
+        "numa_foreign": 0,
+        "numa_hit": 50610,
+        "numa_miss": 0,
+        "other_node": 0
+      }
+    },
+    "overshoot_seconds_scope": "sum_of_node_seconds",
+    "peak_combined_live_bytes": 488645353472,
+    "peak_commitment_bytes": null,
+    "peak_local_high_overshoot_bytes": 0,
+    "peak_local_tier_bytes": 376792018944,
+    "peak_shared_live_bytes": 41686749184,
+    "peak_shared_total_bytes": 41686749184,
+    "peak_used_delta_bytes": 376792018944,
+    "shared_memory_borrow_limit_bytes": 0,
+    "storage_used_delta_bytes": 937984,
+    "watermark_scope": "independent_compute_nodes"
+  },
+  "performance": {
+    "admission_control": {
+      "nodes": {
+        "node0": {
+          "admission_count": 0,
+          "demand_pending_exact_count": 0,
+          "demand_pending_upper_bound_fast_path_count": 3,
+          "discipline": "feasible_fifo_progress_bypasses_blocked_create",
+          "lifecycle_create_reservation_wait_seconds": 0,
+          "lifecycle_restore_reservation_wait_seconds": 0,
+          "max_queue_depth": 0,
+          "safety_intervention_count": 0,
+          "safety_interventions_by_reason": {},
+          "wait_max_seconds": null,
+          "wait_mean_seconds": null,
+          "wait_p50_seconds": null,
+          "wait_p95_seconds": null,
+          "wait_total_seconds": 0
+        },
+        "node1": {
+          "admission_count": 0,
+          "demand_pending_exact_count": 0,
+          "demand_pending_upper_bound_fast_path_count": 3,
+          "discipline": "feasible_fifo_progress_bypasses_blocked_create",
+          "lifecycle_create_reservation_wait_seconds": 0.00036718399496749043,
+          "lifecycle_restore_reservation_wait_seconds": 0,
+          "max_queue_depth": 0,
+          "safety_intervention_count": 0,
+          "safety_interventions_by_reason": {},
+          "wait_max_seconds": null,
+          "wait_mean_seconds": null,
+          "wait_p50_seconds": null,
+          "wait_p95_seconds": null,
+          "wait_total_seconds": 0
+        }
+      },
+      "scope": "per_compute_node"
+    },
+    "agents_per_minute": 0.0,
+    "blocked_admission_seconds": 0.0,
+    "compute_nodes": {
+      "node0": {
+        "admission_control": {
+          "admission_count": 0,
+          "demand_pending_exact_count": 0,
+          "demand_pending_upper_bound_fast_path_count": 3,
+          "discipline": "feasible_fifo_progress_bypasses_blocked_create",
+          "lifecycle_create_reservation_wait_seconds": 0,
+          "lifecycle_restore_reservation_wait_seconds": 0,
+          "max_queue_depth": 0,
+          "safety_intervention_count": 0,
+          "safety_interventions_by_reason": {},
+          "wait_max_seconds": null,
+          "wait_mean_seconds": null,
+          "wait_p50_seconds": null,
+          "wait_p95_seconds": null,
+          "wait_total_seconds": 0
+        },
+        "checkpoint_capacity_skips": 0,
+        "observed_peak_bytes": 194810892288,
+        "peak_commitment_bytes": 0,
+        "placements": [],
+        "resources": {
+          "admission_margin_mib": 256,
+          "borrow_cooldown_seconds": 5.0,
+          "checkpoint_restore_headroom_mib": 1024,
+          "cold_snapshot_root": "/data/clawbox-performance-20261022T154600Z/repairs/host-ssh-warmup-c1-20261022T182400Z/cold",
+          "compute_nodes": [],
+          "emergency_free_memory_mib": 1024,
+          "idle_reclaim_costs": null,
+          "lazy_restore": true,
+          "lifecycle_admission": "configured-capacity",
+          "lifecycle_reservation_scale": 1.0,
+          "local_memory_capacity_mib": 512000,
+          "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+          "local_memory_high_watermark_mib": 491520,
+          "local_memory_low_watermark_mib": 458752,
+          "local_numa_node": 0,
+          "memory_action_costs": null,
+          "memory_scheduling": "local_only",
+          "non_command_tool_memory_mib": null,
+          "observe_predictions": false,
+          "physical_live_limit_mib": 1075200,
+          "pool_memory_budget_mib": 491520,
+          "pool_transfer_concurrency": 1,
+          "pool_transfer_timeout_seconds": 120.0,
+          "prediction_artifact": null,
+          "prediction_mode": "runtime",
+          "prediction_reservation_scale": 1.0,
+          "pressure_control": {
+            "action_window_seconds": 2.0,
+            "amortization_factor": 2.0,
+            "boost_cpu_weight": 200,
+            "cooldown_seconds": 10.0,
+            "exit_hysteresis_seconds": 1.0,
+            "max_boosted_vms": 1,
+            "min_release_mib": 64,
+            "protection_budget_mib": 256,
+            "psi_ratio": 0.1,
+            "release_forecast_ttl_factor": 3.0,
+            "release_history_samples": 3
+          },
+          "proactive_cache_reclaim": false,
+          "resident_capacity_accounting": false,
+          "return_cooldown_seconds": 5.0,
+          "runtime_poll_interval_seconds": 0.5,
+          "shared_memory_borrow_limit_mib": null,
+          "snapshot_destination": "cold",
+          "snapshot_mechanism": "full-copy",
+          "snapshot_residency_costs": null,
+          "snapshot_storage": "tiered",
+          "startup_headroom_mib": 256,
+          "static_tool_memory_mib": null,
+          "target_node": "193.124.7.2",
+          "template_base_sharing": "required",
+          "template_base_sharing_artifact": null,
+          "warm_memory_capacity_mib": 102400,
+          "warm_numa_node": 2,
+          "warm_snapshot_root": "/mnt/clawbox-pool"
+        },
+        "watermarks": {
+          "borrow_count": 0,
+          "hard": 536870912000,
+          "hard_overshoot_byte_seconds": 0.0,
+          "hard_overshoot_seconds": 0.0,
+          "high": 515396075520,
+          "high_crossings": 0,
+          "high_overshoot_byte_seconds": 0.0,
+          "high_overshoot_seconds": 0.0,
+          "low": 481036337152,
+          "peak_local_bytes": 194822000640,
+          "return_count": 0,
+          "return_release_count": 0
+        }
+      },
+      "node1": {
+        "admission_control": {
+          "admission_count": 0,
+          "demand_pending_exact_count": 0,
+          "demand_pending_upper_bound_fast_path_count": 3,
+          "discipline": "feasible_fifo_progress_bypasses_blocked_create",
+          "lifecycle_create_reservation_wait_seconds": 0.00036718399496749043,
+          "lifecycle_restore_reservation_wait_seconds": 0,
+          "max_queue_depth": 0,
+          "safety_intervention_count": 0,
+          "safety_interventions_by_reason": {},
+          "wait_max_seconds": null,
+          "wait_mean_seconds": null,
+          "wait_p50_seconds": null,
+          "wait_p95_seconds": null,
+          "wait_total_seconds": 0
+        },
+        "checkpoint_capacity_skips": 0,
+        "observed_peak_bytes": 182006104064,
+        "peak_commitment_bytes": 4294967296,
+        "placements": [
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 6848512,
+              "2": 0,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-de96ea46420f48d09570b03cc25f8125-vm-0000-tool",
+            "compute_numa": 1,
+            "effective_cpus": "80-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              1
+            ],
+            "priority": "neutral",
+            "role": "tool",
+            "sandbox_id": "ffd6d0d965d64aeab80b0b356feacdfd",
+            "threads": [
+              {
+                "cpus_allowed": "80-159",
+                "name": "containerd-shim",
+                "tid": 307333
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307334
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307335
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307336
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307337
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307338
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vmm",
+                "tid": 307341
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "http-server",
+                "tid": 307342
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_ro_q0",
+                "tid": 307348
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vsock",
+                "tid": 307349
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_ro_q1",
+                "tid": 307350
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_rw_q0",
+                "tid": 307351
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_rw_q1",
+                "tid": 307352
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tap-0_ctrl",
+                "tid": 307353
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "pmem-cubebox-im",
+                "tid": 307354
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tap-0_qp0",
+                "tid": 307355
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "pmem-cube-os-im",
+                "tid": 307356
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "disk-0_q0",
+                "tid": 307357
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "__console",
+                "tid": 307358
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "__rng",
+                "tid": 307359
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "pmem-cube-agent",
+                "tid": 307360
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vcpu0",
+                "tid": 307361
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vcpu1",
+                "tid": 307362
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "cube-log",
+                "tid": 307363
+              }
+            ],
+            "tool_call_cpu_placement": null,
+            "unattributed_bytes": 2994176
+          },
+          {
+            "actual_residency_bytes": {
+              "0": 0,
+              "1": 7237632,
+              "2": 0,
+              "3": 0
+            },
+            "cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox/clawbox-de96ea46420f48d09570b03cc25f8125-vm-0000-runtime",
+            "compute_numa": 1,
+            "effective_cpus": "80-159",
+            "enforcement": "preallocation_cgroup",
+            "memory_nodes": [
+              1
+            ],
+            "priority": "neutral",
+            "role": "runtime",
+            "sandbox_id": "fe2332b6dd2c4ede9971056b5d93fe7b",
+            "threads": [
+              {
+                "cpus_allowed": "80-159",
+                "name": "containerd-shim",
+                "tid": 307366
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307367
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307368
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307369
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tokio-runtime-w",
+                "tid": 307370
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vmm",
+                "tid": 307372
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "http-server",
+                "tid": 307373
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vsock",
+                "tid": 307379
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tap-0_ctrl",
+                "tid": 307380
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "tap-0_qp0",
+                "tid": 307381
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "pmem-cubebox-im",
+                "tid": 307382
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_rw_q0",
+                "tid": 307383
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_rw_q1",
+                "tid": 307384
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_ro_q0",
+                "tid": 307385
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "virtio_ro_q1",
+                "tid": 307386
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "pmem-cube-os-im",
+                "tid": 307387
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "disk-0_q0",
+                "tid": 307388
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "__console",
+                "tid": 307389
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "__rng",
+                "tid": 307390
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "pmem-cube-agent",
+                "tid": 307391
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vcpu0",
+                "tid": 307392
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "vcpu1",
+                "tid": 307393
+              },
+              {
+                "cpus_allowed": "80-159",
+                "name": "cube-log",
+                "tid": 307394
+              }
+            ],
+            "tool_call_cpu_placement": null,
+            "unattributed_bytes": 4669440
+          }
+        ],
+        "resources": {
+          "admission_margin_mib": 256,
+          "borrow_cooldown_seconds": 5.0,
+          "checkpoint_restore_headroom_mib": 1024,
+          "cold_snapshot_root": "/data/clawbox-performance-20261022T154600Z/repairs/host-ssh-warmup-c1-20261022T182400Z/cold",
+          "compute_nodes": [],
+          "emergency_free_memory_mib": 1024,
+          "idle_reclaim_costs": null,
+          "lazy_restore": true,
+          "lifecycle_admission": "configured-capacity",
+          "lifecycle_reservation_scale": 1.0,
+          "local_memory_capacity_mib": 512000,
+          "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
+          "local_memory_high_watermark_mib": 491520,
+          "local_memory_low_watermark_mib": 458752,
+          "local_numa_node": 1,
+          "memory_action_costs": null,
+          "memory_scheduling": "local_only",
+          "non_command_tool_memory_mib": null,
+          "observe_predictions": false,
+          "physical_live_limit_mib": 1075200,
+          "pool_memory_budget_mib": 491520,
+          "pool_transfer_concurrency": 1,
+          "pool_transfer_timeout_seconds": 120.0,
+          "prediction_artifact": null,
+          "prediction_mode": "runtime",
+          "prediction_reservation_scale": 1.0,
+          "pressure_control": {
+            "action_window_seconds": 2.0,
+            "amortization_factor": 2.0,
+            "boost_cpu_weight": 200,
+            "cooldown_seconds": 10.0,
+            "exit_hysteresis_seconds": 1.0,
+            "max_boosted_vms": 1,
+            "min_release_mib": 64,
+            "protection_budget_mib": 256,
+            "psi_ratio": 0.1,
+            "release_forecast_ttl_factor": 3.0,
+            "release_history_samples": 3
+          },
+          "proactive_cache_reclaim": false,
+          "resident_capacity_accounting": false,
+          "return_cooldown_seconds": 5.0,
+          "runtime_poll_interval_seconds": 0.5,
+          "shared_memory_borrow_limit_mib": null,
+          "snapshot_destination": "cold",
+          "snapshot_mechanism": "full-copy",
+          "snapshot_residency_costs": null,
+          "snapshot_storage": "tiered",
+          "startup_headroom_mib": 256,
+          "static_tool_memory_mib": null,
+          "target_node": "193.124.7.2",
+          "template_base_sharing": "required",
+          "template_base_sharing_artifact": null,
+          "warm_memory_capacity_mib": 102400,
+          "warm_numa_node": 2,
+          "warm_snapshot_root": "/mnt/clawbox-pool"
+        },
+        "watermarks": {
+          "borrow_count": 0,
+          "hard": 536870912000,
+          "hard_overshoot_byte_seconds": 0.0,
+          "hard_overshoot_seconds": 0.0,
+          "high": 515396075520,
+          "high_crossings": 0,
+          "high_overshoot_byte_seconds": 0.0,
+          "high_overshoot_seconds": 0.0,
+          "low": 481036337152,
+          "peak_local_bytes": 182005317632,
+          "return_count": 0,
+          "return_release_count": 0
+        }
+      }
+    },
+    "duration_seconds": 20.46312948299601,
+    "experiment_cpu": {
+      "capacity_cores": 160,
+      "elapsed_seconds": 20.440018276000046,
+      "mean_cores": 1.1611455371283812,
+      "mean_utilization_fraction": 0.007257159607052382,
+      "measurement": "cgroup_v2_cpu_stat",
+      "nr_throttled_delta": 0,
+      "peak_interval_cores": 1.707589283853302,
+      "peak_interval_utilization_fraction": 0.010672433024083137,
+      "sample_count": 102,
+      "system_usec_delta": 1495439,
+      "throttled_usec_delta": 0,
+      "usage_usec_delta": 23733836,
+      "user_usec_delta": 22238398
+    },
+    "host_increment_prediction_coverage_fraction": null,
+    "host_increment_prediction_exceedance_rate": null,
+    "infrastructure_inclusive_duration_seconds": 20.46312948299601,
+    "jct_mean_seconds": null,
+    "jct_p50_seconds": null,
+    "jct_p90_seconds": null,
+    "jct_p95_seconds": null,
+    "jct_p99_seconds": null,
+    "local_hard_overshoot_byte_seconds": 0.0,
+    "local_hard_overshoot_seconds": 0.0,
+    "local_high_crossings": 0,
+    "local_high_overshoot_byte_seconds": 0.0,
+    "local_high_overshoot_seconds": 0.0,
+    "model_steps": 0,
+    "observed_agent_tool_concurrency": {
+      "clock_requirement": "synchronized_runtime_vm_wall_clocks",
+      "execution_scope": "agent-tool",
+      "interval_count": 0,
+      "mean_over_tool_window": null,
+      "peak": null,
+      "scope": "completed_tool_operation_intervals"
+    },
+    "observed_tool_concurrency": {
+      "clock_requirement": "synchronized_runtime_vm_wall_clocks",
+      "execution_scope": "all_admitted_operations_including_backend_maintenance",
+      "interval_count": 0,
+      "mean_over_tool_window": null,
+      "peak": null,
+      "scope": "completed_tool_operation_intervals"
+    },
+    "offered_to_completion_p50_seconds": null,
+    "offered_to_completion_p95_seconds": null,
+    "offered_to_completion_p99_seconds": null,
+    "p50_extra_memory_mae_mib": null,
+    "p50_extra_memory_measured_count": 0,
+    "p50_source_counts": {},
+    "pause_count": 0,
+    "pause_service_seconds": 0.0,
+    "placement_policy": "load_aware",
+    "placement_wait_total_seconds": 0,
+    "prediction_absolute_error_p90_mib": null,
+    "prediction_coverage_fraction": null,
+    "prediction_error_mean_mib": null,
+    "prediction_error_p90_mib": null,
+    "prediction_exceedance_rate": null,
+    "prediction_fallback_count": 0,
+    "prediction_fallback_level_distribution": {},
+    "prediction_fallback_rate": null,
+    "prediction_observation_count": 0,
+    "prediction_p90_pinball_loss_mean_mib": null,
+    "prediction_relative_absolute_error_mean": null,
+    "prediction_source_distribution": {},
+    "prediction_underestimate_p90_mib": null,
+    "priority_sessions": {
+      "high": {
+        "completed": 0,
+        "durations_seconds": [],
+        "offered": 0
+      },
+      "low": {
+        "completed": 0,
+        "durations_seconds": [],
+        "offered": 0
+      }
+    },
+    "reservation_over_actual_mean_ratio": null,
+    "resume_count": 0,
+    "resume_service_seconds": 0.0,
+    "runtime_memory_control": {
+      "action_window_seconds": 2.0,
+      "amortization_factor": 2.0,
+      "backend": "off",
+      "boost_cpu_weight": 200,
+      "cooldown_seconds": 10.0,
+      "cpu_boosts": 0,
+      "cpu_psi_available": true,
+      "cpu_release_boost_enabled": false,
+      "cpu_release_evidence": "required",
+      "exit_hysteresis_seconds": 1.0,
+      "mapping": "stable_flat_per_vm",
+      "max_boosted_vms": 1,
+      "memory_high": "disabled_no_safe_growth_control_evidence",
+      "memory_protection_enabled": false,
+      "memory_protections": 0,
+      "memory_psi_available": true,
+      "min_release_mib": 64,
+      "oom_kill_events": 0,
+      "poll_seconds": 0.0,
+      "polls": 0,
+      "priority_cpu_weights": {
+        "default": 100
+      },
+      "protection_budget_mib": 256,
+      "psi_ratio": 0.1,
+      "release_forecast_ttl_factor": 3.0,
+      "release_history_samples": 3,
+      "rollbacks": 0
+    },
+    "sandbox_create_mean_seconds": null,
+    "session_time_spans": [],
+    "session_timelines": [],
+    "session_trace_assignment": [],
+    "shared_memory_borrow_count": 0,
+    "shared_memory_borrow_service_seconds": 0.0,
+    "shared_memory_return_count": 0,
+    "shared_memory_return_release_count": 0,
+    "shared_memory_return_service_seconds": 0.0,
+    "snapshot_aware_residency": false,
+    "snapshot_pool": {
+      "active_transfers": {},
+      "bandwidth_measurement": "unavailable",
+      "borrow_capacity_bytes": 0,
+      "borrow_reservations": {},
+      "borrowed_bytes": 0,
+      "capacity_bytes": 107374182400,
+      "committed_bytes": 0,
+      "manifests": [],
+      "reservations": {},
+      "reserved_bytes": 0,
+      "residency_policy": "lru",
+      "shared_base_references": {},
+      "spill_count": 0,
+      "transfer_concurrency": 1,
+      "value_rejections_to_cold": 0,
+      "warm_admissions": 0
+    },
+    "steps_per_minute": 0.0,
+    "success_rate": 0.0,
+    "telemetry_invalid_count": 0,
+    "telemetry_valid_count": 0,
+    "template_affinity_decisions": 1,
+    "template_aware_placement": true,
+    "template_cache_hits": 0,
+    "tool_call_cpu_policy": {
+      "active_assignments": 0,
+      "active_expanded": 0,
+      "assignments": 0,
+      "capacity_bypasses": 0,
+      "events": [],
+      "group_max_active": 2,
+      "include_smt": false,
+      "latest_candidate_group_cpu_utilization": {},
+      "minimum_duration_seconds": 1.0,
+      "mode": "c0",
+      "pressure_ratio": 0.1,
+      "pressure_samples": 2,
+      "scope": "agent_tool_exec",
+      "short_call_bypasses": 0,
+      "total_expansions": 0
+    },
+    "tool_execution_observation_count": 0,
+    "tool_execution_observations": [],
+    "tool_latency_mean_seconds": null,
+    "tool_latency_p50_seconds": null,
+    "tool_latency_p90_seconds": null,
+    "tool_latency_p95_seconds": null,
+    "tool_latency_p99_seconds": null,
+    "tool_steps": 0,
+    "workload_window_seconds": null
+  },
+  "provenance": {
+    "architecture": "aarch64",
+    "arrival_schedule": {
+      "kind": "burst",
+      "poisson_arrival_window_fraction": 2.0,
+      "stagger_interval_seconds": 0.0
+    },
+    "clawbox_commit": "unknown",
+    "configured_trace_reference": "/home/weitianc/clawbox-swe-images-20261021/corpus/traces/swe277__ARMmbed__mbed-tools-285.replay.jsonl",
+    "configured_trace_sha256": "c69b987e189c2e6cdca88c4f87e02fd3890880b6539b8fb435b55e808c934482",
+    "configured_traces": [
+      {
+        "case_id": "ARMmbed__mbed-tools-285",
+        "reference": "/home/weitianc/clawbox-swe-images-20261021/corpus/traces/swe277__ARMmbed__mbed-tools-285.replay.jsonl",
+        "sha256": "c69b987e189c2e6cdca88c4f87e02fd3890880b6539b8fb435b55e808c934482"
+      }
+    ],
+    "cpu_model": "aarch64",
+    "cube_runtime_settings": {
+      "cpu_overcommit_ratio": null,
+      "memory_overcommit_ratio": null,
+      "paused_resource_release_ratio": null,
+      "reason": "SDK does not expose effective Cubelet capacity settings",
+      "status": "unverified",
+      "worker_thread_switch_interval_seconds": 0.001
+    },
+    "cubesandbox_commit": "unknown",
+    "cubesandbox_deployment": "standalone",
+    "cubesandbox_sdk": "0.7.0",
+    "cubesandbox_source_directory": "/home/weitianc/CubeSandbox-incremental-20260913",
+    "cubesandbox_tag": "unknown",
+    "evidence_class": "deterministic-managed-replay",
+    "kernel": "6.6.0-72.0.0.76.oe2403sp1.aarch64",
+    "measurement_scope": "absolute VM cgroup charge; host MemAvailable estimate reported separately",
+    "model_provenance": {
+      "backend": "replay",
+      "base_url": null,
+      "credential_environment": null,
+      "model": "example-model",
+      "time_scale": 0.0
+    },
+    "os_release": "Linux-6.6.0-72.0.0.76.oe2403sp1.aarch64-aarch64-with-glibc2.38",
+    "random_seed": 20261023,
+    "resource_scope": {
+      "configured_checkpoint_restore_headroom_mib": 1024,
+      "effective_checkpoint_restore_headroom_mib": 0,
+      "emergency_free_memory_mib": 1024,
+      "lifecycle_reservation_scale": 1.0,
+      "offered_provisioned_capacity_exceeds_policy_budget": false,
+      "offered_provisioned_memory_mib": 4096,
+      "offered_to_policy_pool_ratio": 0.004166666666666667,
+      "pair_memory_mib_per_agent": 4096,
+      "pool_memory_budget_mib": 983040,
+      "resident_capacity_accounting": false,
+      "runtime_memory_mib_per_agent": 1024,
+      "session_capacity_charge_mib": [
+        4096
+      ],
+      "session_pair_memory_mib": [
+        4096
+      ],
+      "session_tool_memory_mib": [
+        3072
+      ],
+      "target_node": "193.124.7.2",
+      "tool_memory_mib_by_case": {
+        "ARMmbed__mbed-tools-285": 3072
+      },
+      "tool_memory_mib_per_agent": 3072
+    },
+    "runtime_template_image_digest": "sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+    "runtime_template_reference": "tpl-9c41283c66174a24bf0c6814",
+    "runtime_template_source_image": "127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a",
+    "session_assignment": "unique",
+    "template_image_digest": "sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+    "template_reference": "tpl-34a99ed59ab5461cb810c968",
+    "template_source_image": "127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+    "tool_template_image_digest": "sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+    "tool_template_reference": "tpl-34a99ed59ab5461cb810c968",
+    "tool_template_source_image": "127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438",
+    "workload_case_ids": [
+      "ARMmbed__mbed-tools-285"
+    ]
+  },
+  "run_id": "qualification-bbc7bda75a8c",
+  "sandbox_task_uid": "clawbox-a0312ec8fe021a119849",
+  "schema_version": 2,
+  "started_at": "2026-10-22T18:21:47.577956Z",
+  "status": "failed"
+}

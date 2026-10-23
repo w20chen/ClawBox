@@ -238,6 +238,13 @@ def parser() -> argparse.ArgumentParser:
     qualify.add_argument("spec", type=Path)
     qualify.add_argument("--concurrency", type=int)
     qualify.add_argument("--receipt", type=Path)
+    sharing = sub.add_parser(
+        "prove-template-sharing",
+        help="verify every Tool template once and freeze reusable physical-sharing evidence",
+    )
+    sharing.add_argument("spec", type=Path)
+    sharing.add_argument("--output", required=True, type=Path)
+    sharing.add_argument("--artifact-root", type=Path)
     launch = sub.add_parser(
         "launch",
         help="validate, refresh host state, qualify when needed, and run or resume",
@@ -416,6 +423,10 @@ def parser() -> argparse.ArgumentParser:
         help="frozen clawbox_prediction_v2 file from a separate validated training run",
     )
     configure.add_argument(
+        "--template-base-sharing-artifact",
+        help="reusable proof from experiment prove-template-sharing for the exact Tool templates",
+    )
+    configure.add_argument(
         "--arrival-schedule", choices=("burst", "fixed_stagger", "poisson")
     )
     configure.add_argument("--stagger-seconds", type=float)
@@ -450,7 +461,6 @@ def parser() -> argparse.ArgumentParser:
 
 def launch_experiment(args: argparse.Namespace) -> int:
     """Run the complete safe path while making repeated invocations idempotent."""
-    from clawbox.experiments.inputs import validate_inputs
     from clawbox.experiments.qualification import (
         default_receipt_path, qualify, require_host_ready, validate_receipt,
     )
@@ -489,8 +499,21 @@ def launch_experiment(args: argparse.Namespace) -> int:
             return 0
         action = "resume"
 
-    validate_inputs(spec)
+    receipt_path = getattr(args, "qualification", None) or default_receipt_path(args.spec)
+    qualification_reused = False
+    if not getattr(args, "force_qualify", False):
+        try:
+            validate_receipt(spec, receipt_path)
+            qualification_reused = True
+        except (OSError, ValueError):
+            pass
+    validated_inputs = None
+    if not qualification_reused or getattr(args, 'apply_host', None) is not None:
+        from clawbox.experiments.inputs import validate_inputs
+        validated_inputs = validate_inputs(spec)
     if getattr(args, 'apply_host', None) is not None:
+        # Host mutation remains behind a complete input check. Normal receipt
+        # reuse takes the byte-hash fast path above.
         from clawbox.experiments.host import apply, load_config
         host_path = args.apply_host
         if host_path.suffix.lower() not in {'.yaml', '.yml'}:
@@ -498,19 +521,12 @@ def launch_experiment(args: argparse.Namespace) -> int:
         apply(load_config(host_path), host_path.with_suffix('.json'))
     require_host_ready(spec)
 
-    receipt_path = args.qualification or default_receipt_path(args.spec)
-    qualification_reused = False
-    if not args.force_qualify:
-        try:
-            validate_receipt(spec, receipt_path)
-            qualification_reused = True
-        except (OSError, ValueError):
-            pass
     if not qualification_reused:
         qualify(
             spec, output_base=args.output_root,
             receipt_path=receipt_path,
             concurrency=args.qualification_concurrency,
+            validated_inputs=validated_inputs,
         )
 
     if action == "run":
@@ -628,20 +644,50 @@ def main(argv: list[str] | None = None) -> int:
                   "vmProbe": bool(args.probe_vm)})
             return 0
         if args.command == "qualify":
-            from clawbox.experiments.inputs import validate_inputs
             from clawbox.experiments.qualification import (
                 default_receipt_path, qualify,
             )
 
             spec = load_experiment(args.spec)
             ensure_supported_experiment(spec)
-            validate_inputs(spec)
             receipt = qualify(
                 spec, output_base=args.output_root,
                 receipt_path=args.receipt or default_receipt_path(args.spec),
                 concurrency=args.concurrency,
             )
             emit(receipt)
+            return 0
+        if args.command == "prove-template-sharing":
+            from clawbox.experiments.qualification import (
+                require_host_ready, template_base_sharing_test,
+                write_template_base_sharing_artifact,
+            )
+
+            spec = load_experiment(args.spec)
+            ensure_supported_experiment(spec)
+            require_host_ready(spec)
+            spec = spec.model_copy(update={
+                "resources": spec.resources.model_copy(update={
+                    "template_base_sharing_artifact": None,
+                }),
+            })
+            artifact_root = args.artifact_root or args.output.with_name(
+                args.output.stem + "-raw"
+            )
+            if artifact_root.exists():
+                raise FileExistsError(
+                    f"refusing to replace template-sharing proof root {artifact_root}"
+                )
+            result = template_base_sharing_test(spec, artifact_root=artifact_root)
+            payload = write_template_base_sharing_artifact(
+                spec, result, artifact_root=artifact_root, output=args.output,
+            )
+            emit({
+                "output": str(args.output),
+                "artifact_root": str(artifact_root),
+                "template_count": payload["template_count"],
+                "backend_identity": payload["backend_identity"],
+            })
             return 0
         if args.command == "launch":
             return launch_experiment(args)
@@ -895,6 +941,7 @@ def main(argv: list[str] | None = None) -> int:
                 memory_scheduling=args.memory_scheduling,
                 static_tool_memory_mib=args.static_tool_memory_mib,
                 prediction_artifact=args.prediction_artifact,
+                template_base_sharing_artifact=args.template_base_sharing_artifact,
                 arrival_schedule=args.arrival_schedule,
                 workload_manifest=args.workload_manifest,
                 stagger_seconds=args.stagger_seconds,
@@ -972,8 +1019,6 @@ def main(argv: list[str] | None = None) -> int:
             spec_path = output / "experiment.yaml" if args.command == "resume" else args.spec
             spec = load_experiment(spec_path)
             ensure_supported_experiment(spec)
-            from clawbox.experiments.inputs import validate_inputs
-            validate_inputs(spec)
             require_host_ready(spec)
             receipt_path = (
                 output / "qualification.json"

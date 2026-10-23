@@ -150,13 +150,14 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_en
     route = SimpleNamespace(sandbox_id='tool', epoch=1, host='host', port=2222)
     environment = dict(
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
-        active_reservations={'exec': 512}, admitted_routes={'exec': route},
+        active_reservations={'exec': (512, 512)}, admitted_routes={'exec': route},
             active_cpu_placements=set(), priority_domain=None,
         pending_admissions=set(),
         progress_control=None,
+        dependency_install_gate=None,
         host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})}, prediction_records=[],
         lifecycle=SimpleNamespace(complete_first_tool_after_restore=lambda *args, **kwargs: None),
-        coordinator=SimpleNamespace(release=lambda *args: released.set(),
+        coordinator=SimpleNamespace(release=lambda *args, **kwargs: released.set(),
                                     set_tool_active=lambda *args: idle_updates.append(args)),
         session_id='session', timeline={}, _record_time_span=lambda *args, **kwargs: None,
         self=SimpleNamespace(_runtime_memory=(SimpleNamespace(

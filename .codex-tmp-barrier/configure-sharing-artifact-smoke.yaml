@@ -1,0 +1,156 @@
+schema_version: 4
+experiment_id: six-dimension-smoke
+environment:
+  runtime:
+    template_id: null
+    template_alias: runtime-example-arm64
+    source_image_reference: null
+    image_digest: null
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 1024
+    workspace: /workspace
+    preflight_command: null
+    allow_internet_access: true
+  sandbox:
+    template_id: null
+    template_alias: tool-example-arm64
+    source_image_reference: null
+    image_digest: null
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 3072
+    workspace: /workspace
+    preflight_command: null
+    allow_internet_access: true
+  resources:
+    compute_nodes: []
+    target_node: replace-with-your-cubesandbox-node
+    pool_memory_budget_mib: 16384
+    local_memory_low_watermark_mib: null
+    local_memory_high_watermark_mib: null
+    shared_memory_borrow_limit_mib: null
+    emergency_free_memory_mib: 1024
+    local_memory_capacity_mib: null
+    warm_memory_capacity_mib: 0
+    warm_snapshot_root: null
+    cold_snapshot_root: /data/clawbox/cold
+    local_numa_node: null
+    local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+    warm_numa_node: null
+workload:
+  source: recorded_trace
+  input: examples/traces/smoke.jsonl
+  repetitions: 1
+  cases:
+  - case_id: marker
+    prompt: Create /workspace/result.txt containing complete.
+    source: recorded_trace
+    source_reference: examples/traces/smoke.jsonl
+    repository: null
+    base_commit: null
+    replay_trace_reference: examples/traces/smoke.jsonl
+    validation: null
+    sandbox: null
+    snapshot_reuse_probability: null
+    metadata: {}
+  session_assignment: unique
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: example-model
+    time_scale: 1.0
+evidence:
+  prediction_artifact: null
+  memory_action_costs: null
+  snapshot_residency_costs: null
+  idle_reclaim_costs: null
+  template_base_sharing_artifact: C:\evidence\sharing.json
+measurement:
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1.0
+  observe_predictions: false
+  validation:
+    command: test "$(cat /workspace/result.txt)" = complete
+  output:
+    directory: /results
+mechanisms:
+  admission:
+    startup_headroom_mib: 256
+    admission_margin_mib: 256
+    static_tool_memory_mib: null
+    non_command_tool_memory_mib: null
+    prediction_reservation_scale: 1.0
+    tool: 'off'
+  runtime:
+    pressure_control:
+      release_history_samples: 3
+      release_forecast_ttl_factor: 3.0
+      psi_ratio: 0.1
+      exit_hysteresis_seconds: 1.0
+      cooldown_seconds: 10.0
+      action_window_seconds: 2.0
+      protection_budget_mib: 256
+      max_boosted_vms: 1
+      boost_cpu_weight: 200
+      min_release_mib: 64
+      amortization_factor: 2.0
+    runtime_poll_interval_seconds: 0.5
+    proactive_memory_reclaim: false
+    memory_protection: false
+    cpu_release_boost: false
+  placement:
+    placement_cpu_overcommit: 1024.0
+    template_balance_slack: 0.1
+    tool_call_cpu_policy: c0
+    tool_call_cpu_pressure_ratio: 0.1
+    tool_call_cpu_pressure_samples: 2
+    tool_call_cpu_group_max_active: 2
+    tool_call_cpu_min_duration_seconds: 1.0
+    tool_call_cpu_include_smt: false
+    session_compute_nodes: []
+    policy: round_robin
+    template_affinity: false
+  idle_reclaim:
+    checkpoint_restore_headroom_mib: 1024
+    policy: 'off'
+    scope: tool
+  shared_memory:
+    borrow_cooldown_seconds: 5.0
+    return_cooldown_seconds: 5.0
+    borrow: 'off'
+  checkpoint:
+    pool_transfer_concurrency: 1
+    pool_transfer_timeout_seconds: 120.0
+    mechanism: incremental-cow
+    storage: disk
+    residency: lru
+  deployment:
+    mode: managed
+    resident_capacity_accounting: false
+    lifecycle_reservation_scale: 1.0
+  coordination:
+    action_selection: reclaim_first
+conditions:
+  prediction_source: kb
+comparison:
+  recipe: custom
+  arms:
+  - name: managed-neutral
+    override: {}
+execution:
+  concurrency_levels:
+  - 1
+  sandbox_create_concurrency: 8
+  cube_request_timeout_seconds: 130.0
+  worker_thread_switch_interval_seconds: 0.001
+  randomized_order: true
+  random_seed: 0
+  arm_timeout_seconds: 300
+  arm_finalization_timeout_seconds: 300
+  command_timeout_seconds: 60
+  arrival_schedule: poisson
+  stagger_interval_seconds: 0.0
+  poisson_arrival_window_fraction: 2.0

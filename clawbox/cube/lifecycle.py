@@ -52,6 +52,7 @@ class LifecycleTiming:
     snapshot_path: str | None = None
     snapshot_metrics: dict[str, Any] | None = None
     host_memory_effect: dict[str, dict[str, int]] | None = None
+    stage_seconds: dict[str, float] | None = None
 
 
 class CubeSandboxLifecycle:
@@ -184,11 +185,19 @@ class CubeSandboxLifecycle:
                 tier_from: str | None = None, tier_to: str | None = None,
                 snapshot_generation: int | None = None,
                 snapshot_path: str | None = None,
-                snapshot_metrics: Mapping[str, Any] | None = None) -> float:
+                snapshot_metrics: Mapping[str, Any] | None = None,
+                stage_seconds: Mapping[str, float] | None = None) -> float:
         completed_wall = time.time()
         completed_mono = time.monotonic()
         duration = max(0.0, completed_mono - started_mono)
-        host_memory_after = self._observe_physical()
+        measured_stages = dict(stage_seconds or {})
+        observation_started = time.monotonic()
+        try:
+            host_memory_after = self._observe_physical()
+        finally:
+            measured_stages["physical_observation_after_s"] = max(
+                0.0, time.monotonic() - observation_started,
+            )
         before_used = self._host_used(host_memory_before)
         after_used = self._host_used(host_memory_after)
         reclaimed = growth = net_change = None
@@ -233,8 +242,17 @@ class CubeSandboxLifecycle:
             tier_from, tier_to, snapshot_generation, snapshot_path,
             dict(snapshot_metrics) if snapshot_metrics is not None else None,
             memory_effect or None,
+            measured_stages or None,
         ))
         return duration
+
+    @contextmanager
+    def _measure_stage(self, timings: dict[str, float], name: str):
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            timings[name] = max(0.0, time.monotonic() - started)
 
     def _observe_physical(self) -> Mapping[str, Any] | None:
         return self.physical_observation() if self.physical_observation is not None else None
@@ -253,37 +271,47 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.CREATING
             started_wall, started_mono = time.time(), time.monotonic()
-            host_memory_before = self._observe_physical()
+            stage_seconds: dict[str, float] = {}
+            with self._measure_stage(stage_seconds, "physical_observation_before_s"):
+                host_memory_before = self._observe_physical()
             try:
                 if self.prepare_cgroup is not None:
-                    self.prepare_cgroup()
-                self.sandbox = self.client.create_sandbox(
-                    template=self.template, node_name=self.node_name,
-                    ownership=self.ownership, env_vars=self.env_vars or None,
-                    allow_internet_access=self.allow_internet_access,
-                    network_allow_out=self.network_allow_out or None,
-                    network_deny_out=self.network_deny_out or None,
-                )
+                    with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
+                        self.prepare_cgroup()
+                with self._measure_stage(stage_seconds, "api_create_s"):
+                    self.sandbox = self.client.create_sandbox(
+                        template=self.template, node_name=self.node_name,
+                        ownership=self.ownership, env_vars=self.env_vars or None,
+                        allow_internet_access=self.allow_internet_access,
+                        network_allow_out=self.network_allow_out or None,
+                        network_deny_out=self.network_deny_out or None,
+                    )
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
-                verified = self.verify_cgroup(self.sandbox_id) if self.verify_cgroup is not None else None
+                verified = None
+                if self.verify_cgroup is not None:
+                    with self._measure_stage(stage_seconds, "verify_cgroup_s"):
+                        verified = self.verify_cgroup(self.sandbox_id)
                 if self.numa_borrower is not None:
-                    verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
-                    if verified_cgroup is None:
-                        self.numa_borrower.pin_local(self.sandbox_id)
-                    else:
-                        self.numa_borrower.pin_local(
-                            self.sandbox_id, verified_cgroup=verified_cgroup,
-                        )
+                    with self._measure_stage(stage_seconds, "pin_local_s"):
+                        verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
+                        if verified_cgroup is None:
+                            self.numa_borrower.pin_local(self.sandbox_id)
+                        else:
+                            self.numa_borrower.pin_local(
+                                self.sandbox_id, verified_cgroup=verified_cgroup,
+                            )
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
                                     started_wall, started_mono,
-                                    host_memory_before=host_memory_before)
+                                    host_memory_before=host_memory_before,
+                                    stage_seconds=stage_seconds)
             except Exception as exc:
                 self._state = before
                 self._record(
                     "create", before, before, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
                 )
                 raise
 

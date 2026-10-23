@@ -1,0 +1,2138 @@
+diff --git a/clawbox/cli.py b/clawbox/cli.py
+index 102feb4..f7a29e1 100644
+--- a/clawbox/cli.py
++++ b/clawbox/cli.py
+@@ -238,6 +238,13 @@ def parser() -> argparse.ArgumentParser:
+     qualify.add_argument("spec", type=Path)
+     qualify.add_argument("--concurrency", type=int)
+     qualify.add_argument("--receipt", type=Path)
++    sharing = sub.add_parser(
++        "prove-template-sharing",
++        help="verify every Tool template once and freeze reusable physical-sharing evidence",
++    )
++    sharing.add_argument("spec", type=Path)
++    sharing.add_argument("--output", required=True, type=Path)
++    sharing.add_argument("--artifact-root", type=Path)
+     launch = sub.add_parser(
+         "launch",
+         help="validate, refresh host state, qualify when needed, and run or resume",
+@@ -415,6 +422,10 @@ def parser() -> argparse.ArgumentParser:
+         "--prediction-artifact",
+         help="frozen clawbox_prediction_v2 file from a separate validated training run",
+     )
++    configure.add_argument(
++        "--template-base-sharing-artifact",
++        help="reusable proof from experiment prove-template-sharing for the exact Tool templates",
++    )
+     configure.add_argument(
+         "--arrival-schedule", choices=("burst", "fixed_stagger", "poisson")
+     )
+@@ -643,6 +654,38 @@ def main(argv: list[str] | None = None) -> int:
+             )
+             emit(receipt)
+             return 0
++        if args.command == "prove-template-sharing":
++            from clawbox.experiments.qualification import (
++                require_host_ready, template_base_sharing_test,
++                write_template_base_sharing_artifact,
++            )
++
++            spec = load_experiment(args.spec)
++            ensure_supported_experiment(spec)
++            require_host_ready(spec)
++            spec = spec.model_copy(update={
++                "resources": spec.resources.model_copy(update={
++                    "template_base_sharing_artifact": None,
++                }),
++            })
++            artifact_root = args.artifact_root or args.output.with_name(
++                args.output.stem + "-raw"
++            )
++            if artifact_root.exists():
++                raise FileExistsError(
++                    f"refusing to replace template-sharing proof root {artifact_root}"
++                )
++            result = template_base_sharing_test(spec, artifact_root=artifact_root)
++            payload = write_template_base_sharing_artifact(
++                spec, result, artifact_root=artifact_root, output=args.output,
++            )
++            emit({
++                "output": str(args.output),
++                "artifact_root": str(artifact_root),
++                "template_count": payload["template_count"],
++                "backend_identity": payload["backend_identity"],
++            })
++            return 0
+         if args.command == "launch":
+             return launch_experiment(args)
+         if args.command == 'schema':
+@@ -895,6 +938,7 @@ def main(argv: list[str] | None = None) -> int:
+                 memory_scheduling=args.memory_scheduling,
+                 static_tool_memory_mib=args.static_tool_memory_mib,
+                 prediction_artifact=args.prediction_artifact,
++                template_base_sharing_artifact=args.template_base_sharing_artifact,
+                 arrival_schedule=args.arrival_schedule,
+                 workload_manifest=args.workload_manifest,
+                 stagger_seconds=args.stagger_seconds,
+diff --git a/clawbox/experiments/configure.py b/clawbox/experiments/configure.py
+index dc821fa..2f7f760 100644
+--- a/clawbox/experiments/configure.py
++++ b/clawbox/experiments/configure.py
+@@ -111,6 +111,7 @@ def configure_experiment(
+     template_aware_placement: bool | None = None,
+     snapshot_aware_residency: bool | None = None,
+     template_base_sharing: str | None = None,
++    template_base_sharing_artifact: str | None = None,
+     warm_restore_seconds_per_gib: float | None = None,
+     cold_restore_seconds_per_gib: float | None = None,
+     snapshot_cost_provenance: str | None = None,
+@@ -428,6 +429,8 @@ def configure_experiment(
+         }
+     if prediction_artifact is not None:
+         resources["prediction_artifact"] = prediction_artifact
++    if template_base_sharing_artifact is not None:
++        resources["template_base_sharing_artifact"] = template_base_sharing_artifact
+     for key, value in (("prediction_mode", prediction_mode),
+                        ("prediction_reservation_scale", prediction_reservation_scale),
+                        ("admission_margin_mib", admission_margin_mib),
+diff --git a/clawbox/experiments/design.py b/clawbox/experiments/design.py
+index 6524812..0f52f2c 100644
+--- a/clawbox/experiments/design.py
++++ b/clawbox/experiments/design.py
+@@ -34,7 +34,8 @@ RESOURCE_FIELDS = {
+     'shared_memory': ('borrow_cooldown_seconds', 'return_cooldown_seconds'),
+     'checkpoint': ('pool_transfer_concurrency', 'pool_transfer_timeout_seconds'),
+ }
+-EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs', 'idle_reclaim_costs')
++EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs',
++                   'idle_reclaim_costs', 'template_base_sharing_artifact')
+ DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
+                   'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
+                   'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim',
+diff --git a/clawbox/experiments/openclaw_driver.py b/clawbox/experiments/openclaw_driver.py
+index 8afe93f..f0e12a7 100644
+--- a/clawbox/experiments/openclaw_driver.py
++++ b/clawbox/experiments/openclaw_driver.py
+@@ -2,13 +2,10 @@
+ from __future__ import annotations
+ 
+ import base64
+-import io
+ import json
+ import os
+ import re
+ import shlex
+-import sysconfig
+-import tarfile
+ import time
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -260,7 +257,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
+                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
+                  resident_wait: Callable[[str, float], CommandResult | None] | None = None,
+-                 checkpoint_relay: bool = False) -> dict:
++                 checkpoint_relay: bool = False,
++                 startup_begin: Callable[[], None] | None = None,
++                 startup_wait: Callable[[], None] | None = None,
++                 startup_event: Callable[[dict[str, Any]], None] | None = None) -> dict:
+     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
+     executable = str(configuration.get("openclaw_bin") or "openclaw")
+     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
+@@ -357,8 +357,21 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+         + f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
+     )
+ 
++    def emit_startup_stage(
++        stage: str, started: float, *, status: str = "ok",
++    ) -> None:
++        if startup_event is not None:
++            startup_event({
++                "event": "openclaw_startup_stage",
++                "session_id": session_id,
++                "stage": stage,
++                "status": status,
++                "duration_seconds": max(0.0, time.monotonic() - started),
++            })
++
+     def invoke(args: list[str], *, input_value: str | None = None,
+-               pid_file: str | None = None) -> CommandResult:
++               pid_file: str | None = None,
++               startup_stage: str | None = None) -> CommandResult:
+         if input_value is not None and pid_file is not None:
+             raise ValueError("pid_file cannot be combined with stdin input")
+         argv = " ".join(
+@@ -372,7 +385,18 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+             command = prefix + f"printf '%s\\n' $$ > {shlex.quote(pid_file)}; exec {argv}"
+         else:
+             command = prefix + argv
+-        result = runtime_executor.execute(command, timeout_seconds or 300)
++        started = time.monotonic()
++        try:
++            result = runtime_executor.execute(command, timeout_seconds or 300)
++        except BaseException:
++            if startup_stage is not None:
++                emit_startup_stage(startup_stage, started, status="error")
++            raise
++        if startup_stage is not None:
++            emit_startup_stage(
++                startup_stage, started,
++                status="ok" if result.exit_code == 0 else "error",
++            )
+         if result.exit_code:
+             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
+         return result
+@@ -385,50 +409,6 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+     init_state_file = f"{home}/initialize-clawtune-state.py"
+     init_state_source = Path(__file__).resolve().parents[2] / "scripts" / "initialize-clawtune-state.py"
+     init_state_b64 = base64.b64encode(init_state_source.read_bytes()).decode()
+-    # The deployed Runtime image may contain an older sidecar wheel without
+-    # the main-branch clawtune_kb package.  Inject that small native package
+-    # from the selected ClawTune source so the initializer and sidecar share
+-    # the current StateStore contract.
+-    sidecar_src_value = os.getenv("CLAWTUNE_SIDECAR_SRC", "")
+-    sidecar_src = Path(sidecar_src_value) if sidecar_src_value else None
+-    if sidecar_src is None or not sidecar_src.is_dir():
+-        clawtune_root = Path(os.getenv(
+-            "CLAWTUNE_ROOT", str(Path(__file__).resolve().parents[3] / "ClawTune"),
+-        ))
+-        sidecar_src = clawtune_root / "services" / "sidecar" / "src"
+-    kb_source = sidecar_src / "clawtune_kb"
+-    if not kb_source.is_dir():
+-        raise RuntimeError(f"ClawTune KB source does not exist: {kb_source}")
+-    clawtune_root = sidecar_src.parents[2]
+-    from clawbox.clawtune_integration import seed_directory
+-    seed_source = seed_directory()
+-    contracts_source = clawtune_root / "contracts"
+-    if not seed_source.is_dir() or not contracts_source.is_dir():
+-        raise RuntimeError("ClawTune bootstrap seed/contracts are unavailable")
+-    kb_archive = io.BytesIO()
+-    with tarfile.open(fileobj=kb_archive, mode="w:gz") as archive:
+-        archive.add(kb_source, arcname="clawtune_kb")
+-        archive.add(seed_source, arcname="clawtune_kb/_data/seeds/bootstrap-v1")
+-        archive.add(contracts_source, arcname="clawtune_kb/_data/contracts")
+-        # The Runtime image's venv is intentionally small.  Include the
+-        # pure-Python JSON-schema stack (and rpds' matching extension) used by
+-        # ClawTune contracts so native seed validation works on that image.
+-        site_candidates = [
+-            Path(os.getenv("CLAWTUNE_RUNTIME_SITE_PACKAGES", "")),
+-            Path("/home/weitianc/.local/lib/python3.11/site-packages"),
+-            Path(sysconfig.get_paths()["purelib"]),
+-        ]
+-        site_packages = next(
+-            (candidate for candidate in site_candidates if (candidate / "rpds").is_dir()),
+-            Path(sysconfig.get_paths()["purelib"]),
+-        )
+-        for dependency in ("jsonschema", "referencing", "attrs", "attr", "jsonschema_specifications", "rpds"):
+-            dependency_path = site_packages / dependency
+-            if dependency_path.exists():
+-                archive.add(dependency_path, arcname=dependency_path.name)
+-    kb_archive_b64 = base64.b64encode(kb_archive.getvalue()).decode()
+-    kb_extra_dir = f"{home}/clawtune-extra"
+-    kb_archive_file = f"{home}/clawtune-kb.tar.gz"
+     _user, host, port = split_native_ssh_target(ssh.target)
+     known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
+     known_b64 = base64.b64encode(known_host.encode()).decode()
+@@ -466,27 +446,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+     encoded_predictions = base64.b64encode(json.dumps(
+         prediction_manifest or {}, sort_keys=True, separators=(",", ":"),
+     ).encode()).decode()
+-    # CubeSandbox limits one command's argument size.  Transfer the native
+-    # ClawTune support archive in bounded chunks before the setup command.
+-    archive_init = runtime_executor.execute(
+-        prefix + f"mkdir -p {shlex.quote(home)}; : > {shlex.quote(kb_archive_file)}",
+-        30,
+-    )
+-    if archive_init.exit_code:
+-        raise RuntimeError(f"Runtime ClawTune archive setup failed: {archive_init.stderr[-2000:]}")
+-    for offset in range(0, len(kb_archive_b64), 48 * 1024):
+-        chunk = kb_archive_b64[offset:offset + 48 * 1024]
+-        transferred = runtime_executor.execute(
+-            prefix + f"printf %s {shlex.quote(chunk)} | base64 -d >> {shlex.quote(kb_archive_file)}",
+-            30,
+-        )
+-        if transferred.exit_code:
+-            raise RuntimeError(
+-                f"Runtime ClawTune archive transfer failed at offset {offset}: "
+-                f"{transferred.stderr[-2000:]}"
+-            )
+-    setup = runtime_executor.execute(
+-        prefix
++    setup_started = time.monotonic()
++    try:
++        setup = runtime_executor.execute(
++            prefix
+         + f"mkdir -p {shlex.quote(runtime_workspace)} {shlex.quote(trace_dir + '/tool-resource')} "
+         + f"{shlex.quote(launcher_dir)} "
+         + f"{shlex.quote(home + '/logs')} {shlex.quote(ssh_dir)}; "
+@@ -502,12 +465,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+         + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/local/bin/ssh; "
+         + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/bin/ssh; "
+         + f"printf %s {shlex.quote(init_state_b64)} | base64 -d > {shlex.quote(init_state_file)}; "
+-        + f"mkdir -p {shlex.quote(kb_extra_dir)}; tar -xzf {shlex.quote(kb_archive_file)} -C {shlex.quote(kb_extra_dir)}; "
++        + f"test -d {shlex.quote(clawtune_plugin)}; "
+         + relay_setup
+         + f"chmod 700 {shlex.quote(ssh_launcher)} {shlex.quote(init_state_file)}; "
+         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
+         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
+-        + f"PYTHONPATH={shlex.quote(kb_extra_dir)}:${{PYTHONPATH:-}} /opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
++        + f"/opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
+         + "export CLAWTUNE_POLICY=observe-only "
+         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
+         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
+@@ -520,16 +483,26 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
+         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
+         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
+-        + f"PYTHONPATH={shlex.quote(kb_extra_dir)}:${{PYTHONPATH:-}} /opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
++        + "/opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
+         + f"--host 127.0.0.1 --port 8765 >{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
+         + f"echo $! >{shlex.quote(home + '/sidecar.pid')}", 30,
++        )
++    except BaseException:
++        emit_startup_stage("runtime_setup", setup_started, status="error")
++        raise
++    emit_startup_stage(
++        "runtime_setup", setup_started,
++        status="ok" if setup.exit_code == 0 else "error",
+     )
+     if setup.exit_code:
+         raise RuntimeError(f"ClawTune sidecar setup failed: {setup.stderr[-2000:]}")
++    if startup_begin is not None:
++        startup_begin()
+     relay_ready = (
+         f"curl --max-time 2 -fsS http://127.0.0.1:{RELAY_PORT}/healthz >/dev/null 2>&1 && "
+         if checkpoint_relay else ""
+     )
++    ready_started = time.monotonic()
+     try:
+         ready = runtime_executor.execute(
+             prefix + f"deadline=$(( $(date +%s) + {startup_timeout_seconds} )); "
+@@ -541,6 +514,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+         if ready.exit_code:
+             raise RuntimeError("ClawTune sidecar did not become ready in the Runtime VM")
+     except Exception:
++        emit_startup_stage("sidecar_ready", ready_started, status="error")
+         failure_home = output_dir / "openclaw" / session_id
+         failure_home.mkdir(parents=True, exist_ok=True)
+         # Keep the original startup failure even when the guest is too unhealthy
+@@ -557,8 +531,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+                 str(diagnostic_error), encoding="utf-8",
+             )
+         raise
+-    invoke(["plugins", "install", "--link", clawtune_plugin])
+-    invoke(["plugins", "enable", "clawtune"])
++    emit_startup_stage("sidecar_ready", ready_started)
+     exec_tool_config: dict[str, object] = {
+         "host": "sandbox", "security": "full", "ask": "off",
+     }
+@@ -572,6 +545,25 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+         # a load-dependent fallback to its 10-second default in long-lived or
+         # restored Runtime processes.
+         exec_tool_config["backgroundMs"] = exec_yield_ms
++    provider_patch: dict[str, object] = {
++        # OpenClaw's onboard command adds reasoning=false.  The validated
++        # recordings predate that request-envelope field, so replace the
++        # one-model array without it in the same patch as the sandbox config.
++        "models": [{
++            "id": openclaw_model,
++            "name": openclaw_model,
++            "input": ["text"],
++            "cost": {
++                "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
++            },
++            "contextWindow": 128000,
++            "maxTokens": 8192,
++        }],
++    }
++    if transport_timeout_seconds is not None:
++        # Admission control can intentionally hold an already-issued model
++        # request while earlier Tools release their memory reservations.
++        provider_patch["timeoutSeconds"] = transport_timeout_seconds
+     patch = {
+         "agents": {"defaults": {"workspace": runtime_workspace, "sandbox": {
+             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
+@@ -590,7 +582,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+                 "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
+             }},
+         },
+-        "plugins": {"entries": {"clawtune": {"enabled": True, "config": {
++        "models": {"providers": {"vllm": provider_patch}},
++        "plugins": {
++            "load": {"paths": [clawtune_plugin]},
++            "entries": {"clawtune": {"enabled": True, "config": {
+             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
+             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
+             "sandboxExecPredictionModel": "lattice",
+@@ -611,24 +606,16 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
+                       "trace_dir": trace_dir},
+         }}}},
+     }
+-    invoke(["config", "patch", "--stdin"], input_value=json.dumps(patch))
+     invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
+             "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
+-            "--custom-api-key", f"clawtune-runtime.{session_id}", "--custom-model-id", openclaw_model])
+-    # Preserve the request envelope used by the validated recording. Apply this
+-    # to live recording too, rather than keeping a replay-only configuration.
+-    invoke(["config", "unset", "models.providers.vllm.models.0.reasoning"])
+-    if timeout_seconds is not None:
+-        # Admission control can intentionally hold an already-issued model
+-        # request while earlier Tools release their memory reservations.  The
+-        # provider's 120-second idle default must not turn that policy wait
+-        # into a false model failure before the arm-level deadline expires.
+-        assert transport_timeout_seconds is not None
+-        provider_timeout_seconds = transport_timeout_seconds
+-        invoke([
+-            "config", "set", "models.providers.vllm.timeoutSeconds",
+-            str(provider_timeout_seconds),
+-        ])
++            "--custom-api-key", f"clawtune-runtime.{session_id}", "--custom-model-id", openclaw_model],
++           startup_stage="openclaw_onboard")
++    invoke(
++        ["config", "patch", "--stdin"], input_value=json.dumps(patch),
++        startup_stage="openclaw_config",
++    )
++    if startup_wait is not None:
++        startup_wait()
+     instruction = prompt
+     agent_args = [
+         "agent", "--local", "--agent", "main", "--session-id", session_id,
+diff --git a/clawbox/experiments/policy.py b/clawbox/experiments/policy.py
+index 0f1708d..4ecc14b 100644
+--- a/clawbox/experiments/policy.py
++++ b/clawbox/experiments/policy.py
+@@ -672,6 +672,7 @@ class PolicyCoordinator:
+             task_ids = {r.session_id for _, r in requests}
+             tool_ids = {r.session_id for _, r in requests if r.wait_class == 'tool_admission'}
+             states = tuple(self._sessions[sid] for sid in task_ids if sid in self._sessions)
++            session_states = tuple(self._sessions.values())
+             blockers = Counter(reason for ticket, _ in requests
+                                for reason in self._waiter_blockers.get(ticket, ('not_checked',)))
+             result = {
+@@ -682,6 +683,17 @@ class PolicyCoordinator:
+                 'admission_queue_oldest_seconds': max(
+                     (now-r.queued_monotonic_s for _, r in requests), default=0.),
+                 'admission_queue_last_blockers': dict(blockers),
++                'registered_sessions': len(session_states),
++                'model_waiting_sessions': sum(
++                    state.wait_id is not None and not state.response_ready
++                    for state in session_states
++                ),
++                'tool_active_sessions': sum(
++                    state.tool_active for state in session_states
++                ),
++                'eviction_in_progress_sessions': sum(
++                    state.eviction_in_progress for state in session_states
++                ),
+             }
+         # Lifecycle properties must never be evaluated with the admission lock.
+         result['admission_queue_resident_vms'] = sum(
+diff --git a/clawbox/experiments/prediction.py b/clawbox/experiments/prediction.py
+index b7f7a9a..bb01bf7 100644
+--- a/clawbox/experiments/prediction.py
++++ b/clawbox/experiments/prediction.py
+@@ -206,8 +206,14 @@ class P50PredictionProvider(FrozenPredictionProvider):
+             raise ValueError("P50 artifact schema or repository mismatch")
+         if payload.get("training_validated") is not True:
+             raise ValueError("P50 artifact requires a validated Cube training run")
+-        if sandbox_identity is not None and payload.get("sandbox_identity") != sandbox_identity:
+-            raise ValueError("P50 training and evaluation Tool environments differ")
++        if sandbox_identity is not None:
++            calibrated_identities = (
++                payload.get("sandbox_identities") if global_cold_start
++                else [payload.get("sandbox_identity")]
++            )
++            if (not isinstance(calibrated_identities, list)
++                    or sandbox_identity not in calibrated_identities):
++                raise ValueError("P50 training and evaluation Tool environments differ")
+         super().__init__(path, repository=repository, prediction_source="frozen_clawbox_p50")
+         self.evaluation_sandbox_identity = sandbox_identity
+         self.global_cold_start = global_cold_start
+@@ -217,9 +223,13 @@ class P50PredictionProvider(FrozenPredictionProvider):
+                     if row.get("prediction_source") == self.prediction_source]
+         result = super().provenance(selected)
+         if self.global_cold_start:
++            calibrated_identities = self.payload.get("sandbox_identities") or []
+             result.update(
+                 prediction_scope="clawtune_cold_start",
+-                calibration_sandbox_identity=self.payload.get("sandbox_identity"),
++                calibration_sandbox_identity_count=len(calibrated_identities),
++                calibration_sandbox_identities_sha256=self.payload.get(
++                    "sandbox_identities_sha256"
++                ),
+                 evaluation_sandbox_identity=self.evaluation_sandbox_identity,
+             )
+         result["observed_fallback_rate"] = (
+diff --git a/clawbox/experiments/qualification.py b/clawbox/experiments/qualification.py
+index 4882480..882c179 100644
+--- a/clawbox/experiments/qualification.py
++++ b/clawbox/experiments/qualification.py
+@@ -7,10 +7,13 @@ import time
+ import uuid
+ import os
+ import hashlib
++import json
+ import shutil
+ import re
++from concurrent.futures import ThreadPoolExecutor, as_completed
+ from dataclasses import asdict
+ from pathlib import Path
++from threading import Lock
+ from typing import Any
+ 
+ from clawbox.cube import (
+@@ -32,12 +35,13 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
+ from .worker import atomic_json
+ 
+ 
+-QUALIFICATION_SCHEMA_VERSION = 10
++QUALIFICATION_SCHEMA_VERSION = 11
+ 
+ 
+ def qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
+     """Bind a receipt to the exact mutable files used by the specification."""
+     inputs = validate_inputs(spec)
++    sharing_artifact = spec.resources.template_base_sharing_artifact
+     return {
+         "traces": [
+             {
+@@ -54,6 +58,13 @@ def qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
+             }
+             for value in inputs["prediction_files"]
+         ],
++        "template_base_sharing_artifact": (
++            {
++                "path": sharing_artifact,
++                "sha256": hashlib.sha256(Path(sharing_artifact).read_bytes()).hexdigest(),
++            }
++            if sharing_artifact else None
++        ),
+     }
+ 
+ 
+@@ -668,13 +679,22 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None)
+     inference = spec.inference.model_copy(update={
+         "configuration": {
+             **spec.inference.configuration,
++            # Qualification proves that each environment can launch and
++            # execute its first native Tool call.  Replaying the recorded LLM
++            # delay before that call adds hours for a heterogeneous corpus but
++            # does not strengthen the capability proof.  Formal runs retain
++            # the configured time scale from the source spec.
++            "time_scale": 0.0,
+             "max_model_steps": 1,
++            "qualification_max_parallel_sessions": level,
+         },
+     })
+     workload = spec.workload.model_copy(update={
+         "cases": tuple(cases), "repetitions": 1,
+     })
+     execution = spec.execution.model_copy(update={
++        # One session per case proves heterogeneous coverage. The worker-pool
++        # bound above limits how many of those sessions are live at once.
+         "concurrency_levels": (max(level, len(cases)),),
+         "randomized_order": False,
+         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
+@@ -760,6 +780,130 @@ def _same_template_ram_mapping(left: dict[str, Any], right: dict[str, Any]) -> b
+     )
+ 
+ 
++def _template_sharing_identities(spec: ExperimentSpec) -> dict[str, dict[str, Any]]:
++    identities: dict[str, dict[str, Any]] = {}
++    for case in load_workload_cases(spec.workload):
++        sandbox = case.sandbox or spec.sandbox
++        identity = {
++            "template_id": sandbox.template,
++            "image_digest": sandbox.image_digest,
++            "source_image_reference": sandbox.source_image_reference,
++            "vcpu": sandbox.vcpu,
++            "memory_mib": sandbox.memory_mib,
++            "architecture": sandbox.architecture,
++        }
++        previous = identities.setdefault(sandbox.template, identity)
++        if previous != identity:
++            raise ValueError(
++                f"Tool template {sandbox.template} has conflicting immutable identities"
++            )
++    return dict(sorted(identities.items()))
++
++
++def _template_sharing_backend_identity() -> dict[str, Any]:
++    paths = (
++        Path("/usr/local/services/cubetoolbox/Cubelet/bin/cubelet"),
++        Path("/usr/local/services/cubetoolbox/Cubelet/config/config.toml"),
++        Path("/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml"),
++    )
++    files = {}
++    for path in paths:
++        if not path.is_file():
++            raise ValueError(f"template-sharing proof cannot identify Cube backend: missing {path}")
++        files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
++    return {"files": files}
++
++
++def write_template_base_sharing_artifact(
++    spec: ExperimentSpec, result: dict[str, Any], *, artifact_root: Path, output: Path,
++) -> dict[str, Any]:
++    """Freeze an all-template physical-sharing proof for reuse on this backend."""
++    expected = _template_sharing_identities(spec)
++    probes = list((result.get("probes") or {}).values()) or [result]
++    required = [probe for probe in probes if probe.get("required") is True]
++    if not required or any(probe.get("passed") is not True for probe in required):
++        raise ValueError("template-sharing artifact requires passed real-VM probes")
++    evidence_hashes = {}
++    for probe in required:
++        evidence = probe.get("templates") or {}
++        if set(evidence) != set(expected):
++            raise ValueError("template-sharing proof does not cover the exact Tool templates")
++        for template, rows in evidence.items():
++            digest = hashlib.sha256(json.dumps(
++                rows, sort_keys=True, separators=(",", ":"),
++            ).encode()).hexdigest()
++            previous = evidence_hashes.setdefault(template, digest)
++            if previous != digest:
++                raise ValueError(f"template-sharing probes disagree for {template}")
++    proof_files = []
++    for path in sorted(artifact_root.rglob("result.json")):
++        proof_files.append({
++            "path": str(path.resolve()),
++            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
++        })
++    if not proof_files:
++        raise ValueError("template-sharing proof has no persisted result.json")
++    payload = {
++        "schema": "clawbox_template_base_sharing_v1",
++        "passed": True,
++        "generated_unix_s": time.time(),
++        "target_node": spec.resources.target_node,
++        "backend_identity": _template_sharing_backend_identity(),
++        "templates": {
++            template: {**identity, "mapping_evidence_sha256": evidence_hashes[template]}
++            for template, identity in expected.items()
++        },
++        "template_count": len(expected),
++        "proof_files": proof_files,
++        "probe_summary": [{
++            key: probe.get(key) for key in (
++                "template_count", "max_parallel_templates", "live_probe_vm_bound",
++                "peak_live_probe_vms", "metric",
++            )
++        } for probe in required],
++    }
++    if output.exists():
++        raise FileExistsError(f"refusing to replace template-sharing artifact {output}")
++    atomic_json(output, payload)
++    return payload
++
++
++def validate_template_base_sharing_artifact(
++    spec: ExperimentSpec, path: Path,
++) -> dict[str, Any]:
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError) as exc:
++        raise ValueError(f"cannot read template-sharing artifact {path}: {exc}") from exc
++    if payload.get("schema") != "clawbox_template_base_sharing_v1" or payload.get("passed") is not True:
++        raise ValueError("template-sharing artifact schema/status mismatch")
++    if payload.get("target_node") != spec.resources.target_node:
++        raise ValueError("template-sharing artifact target node differs")
++    if payload.get("backend_identity") != _template_sharing_backend_identity():
++        raise ValueError("template-sharing artifact Cube backend differs; rerun prove-template-sharing")
++    expected = _template_sharing_identities(spec)
++    observed = payload.get("templates") or {}
++    stripped = {
++        template: {key: value for key, value in identity.items()
++                   if key != "mapping_evidence_sha256"}
++        for template, identity in observed.items()
++    }
++    if stripped != expected or payload.get("template_count") != len(expected):
++        raise ValueError("template-sharing artifact does not match the exact Tool templates")
++    for template, identity in observed.items():
++        digest = identity.get("mapping_evidence_sha256")
++        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
++            raise ValueError(f"template-sharing artifact lacks mapping evidence for {template}")
++    proof_files = payload.get("proof_files") or []
++    if not proof_files:
++        raise ValueError("template-sharing artifact has no raw proof files")
++    for item in proof_files:
++        proof = Path(item.get("path", ""))
++        if not proof.is_file() or hashlib.sha256(proof.read_bytes()).hexdigest() != item.get("sha256"):
++            raise ValueError(f"template-sharing raw proof differs or is missing: {proof}")
++    return payload
++
++
+ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> dict[str, Any]:
+     if spec.schema_version == 4:
+         return design_probes(spec, template_base_sharing_test, artifact_root=artifact_root)
+@@ -768,44 +912,60 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) ->
+     if not required:
+         return {"required": False, "passed": True, "supported": False,
+                 "reason": "resources.template_base_sharing=disabled"}
++    if spec.resources.template_base_sharing_artifact:
++        path = Path(spec.resources.template_base_sharing_artifact)
++        payload = validate_template_base_sharing_artifact(spec, path)
++        return {
++            "required": True, "passed": True, "supported": True, "reused": True,
++            "artifact": str(path),
++            "artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
++            "template_count": payload["template_count"],
++        }
+     artifact_root.mkdir(parents=True, exist_ok=False)
+     cases = load_workload_cases(spec.workload)
+     templates = {}
+     for case in cases:
+         sandbox = case.sandbox or spec.sandbox
+         templates.setdefault(sandbox.template, sandbox)
+-    client = CubeSandboxClient(
+-        journal=OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
+-    )
++    journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
+     run_id = "qualification-base-" + uuid.uuid4().hex[:12]
+     evidence = {}
+-    lifecycles = []
+     primary_error = None
+-    try:
+-        for template, sandbox in templates.items():
+-            pair = []
+-            for index in range(2):
++    worker_count = min(spec.execution.sandbox_create_concurrency, len(templates))
++    activity_lock = Lock()
++    active_probe_vms = 0
++    peak_probe_vms = 0
++
++    def verify_template(index: int, template: str, sandbox: Any) -> tuple[str, list[dict[str, Any]]]:
++        """Verify one template pair, then release it before another pair accumulates."""
++        nonlocal active_probe_vms, peak_probe_vms
++        session_prefix = f"{run_id}-{index}"
++        client = CubeSandboxClient(
++            journal=journal,
++            request_timeout_s=spec.execution.cube_request_timeout_seconds,
++        )
++        pair = []
++        failure: BaseException | None = None
++        common: list[dict[str, Any]] = []
++        try:
++            for pair_index in range(2):
+                 lifecycle = CubeSandboxLifecycle(
+                     client, template=template, node_name=spec.resources.target_node,
+                     ownership=Ownership(
+                         run_id, "template-base", run_id, spec.experiment_id,
+-                        f"{run_id}-{len(lifecycles)}", "qualification-template-base",
++                        f"{session_prefix}-{pair_index}", "qualification-template-base",
+                     ),
+                     allow_internet_access=sandbox.allow_internet_access,
+                 )
+                 lifecycle.start()
+-                lifecycles.append(lifecycle)
+                 pair.append(lifecycle)
+-            maps = []
+-            for lifecycle in pair:
+-                maps.append(_sandbox_file_mappings(lifecycle.sandbox_id))
+-            common = []
++                with activity_lock:
++                    active_probe_vms += 1
++                    peak_probe_vms = max(peak_probe_vms, active_probe_vms)
++            maps = [_sandbox_file_mappings(lifecycle.sandbox_id) for lifecycle in pair]
+             minimum_kib = sandbox.memory_mib * 1024 // 2
+             for identity in maps[0].keys() & maps[1].keys():
+                 left, right = maps[0][identity], maps[1][identity]
+-                # The immutable root filesystem is shared too, but it is not
+-                # evidence for cross-VM RAM Base sharing.  Cube template RAM
+-                # volumes have a dedicated *-memory object in the volume store.
+                 if not _same_template_ram_mapping(left, right):
+                     continue
+                 if min(left["size_kib"], right["size_kib"]) < minimum_kib:
+@@ -817,22 +977,50 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) ->
+                 raise RuntimeError(
+                     f"template {template} has no physically shared large file-backed RAM mapping"
+                 )
+-            evidence[template] = common
++        except BaseException as exc:
++            failure = exc
++        cleanup_errors = []
++        for lifecycle in reversed(pair):
++            try:
++                lifecycle.close()
++            except Exception as exc:
++                cleanup_errors.append(f"{type(exc).__name__}: {exc}")
++            finally:
++                with activity_lock:
++                    active_probe_vms -= 1
++        if failure is not None:
++            if cleanup_errors:
++                failure.add_note("template-pair cleanup: " + "; ".join(cleanup_errors))
++            raise failure
++        if cleanup_errors:
++            raise RuntimeError("template-pair cleanup failed: " + "; ".join(cleanup_errors))
++        return template, common
++
++    try:
++        with ThreadPoolExecutor(
++            max_workers=worker_count, thread_name_prefix="template-sharing",
++        ) as pool:
++            futures = {
++                pool.submit(verify_template, index, template, sandbox): template
++                for index, (template, sandbox) in enumerate(templates.items())
++            }
++            for future in as_completed(futures):
++                template, common = future.result()
++                evidence[template] = common
+     except BaseException as exc:
+         primary_error = exc
+     cleanup_errors = []
+-    for lifecycle in reversed(lifecycles):
+-        try:
+-            lifecycle.close()
+-        except Exception as exc:
+-            cleanup_errors.append(f"{type(exc).__name__}: {exc}")
+     try:
+-        client.kill_owned_sandboxes(run_id)
++        CubeSandboxClient(journal=journal).kill_owned_sandboxes(run_id)
+     except Exception as exc:
+         cleanup_errors.append(f"owned cleanup: {type(exc).__name__}: {exc}")
+     result = {
+         "required": True, "passed": primary_error is None and not cleanup_errors,
+         "supported": primary_error is None, "templates": evidence,
++        "template_count": len(templates),
++        "max_parallel_templates": worker_count,
++        "live_probe_vm_bound": worker_count * 2,
++        "peak_live_probe_vms": peak_probe_vms,
+         "metric": "Linux smaps Shared_Clean/Pss for common Cube *-memory device+inode mapping",
+         "failure": f"{type(primary_error).__name__}: {primary_error}" if primary_error else None,
+         "cleanup_errors": cleanup_errors,
+@@ -880,7 +1068,11 @@ def qualify(
+         "implementation_digest": implementation_digest(),
+         "qualification_spec_digest": spec_digest(qualified),
+         "qualified_unix_s": time.time(),
+-        "concurrency": max(qualified.execution.concurrency_levels),
++        "concurrency": int(
++            qualified.inference.configuration["qualification_max_parallel_sessions"]
++        ),
++        "qualified_session_count": max(qualified.execution.concurrency_levels),
++        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
+         "target_concurrency": max(spec.execution.concurrency_levels),
+         "scope": "capability_smoke",
+         "policy_names": [policy.name for policy in qualified.policies],
+@@ -937,12 +1129,16 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
+     mismatches = [
+         key for key, value in expected.items() if receipt.get(key) != value
+     ]
+-    # Concurrency is the actual executed smoke size, not evidence of target
+-    # performance. Explicit --qualification-concurrency may bound this gate;
+-    # every workload case must still execute, and all real mechanism probes
+-    # and exact source/input/spec checks remain mandatory.
+-    if receipt.get("concurrency", 0) < len(load_workload_cases(spec.workload)):
++    # Concurrency is the maximum simultaneous smoke size, not the number of
++    # covered cases or evidence of target performance. Separate receipt fields
++    # prove that one qualification session executed for every workload case.
++    if receipt.get("concurrency", 0) < 1:
+         mismatches.append("concurrency")
++    cases = load_workload_cases(spec.workload)
++    if receipt.get("qualified_session_count", 0) < len(cases):
++        mismatches.append("qualified_session_count")
++    if receipt.get("qualified_case_ids") != [case.case_id for case in cases]:
++        mismatches.append("qualified_case_ids")
+     if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
+         mismatches.append("policy_names")
+     if spec.schema_version == 4:
+@@ -1034,7 +1230,8 @@ def design_probes(spec, probe, *, artifact_root):
+                 'cold_snapshot_root', 'snapshot_mechanism', 'snapshot_storage',
+                 'snapshot_destination', 'lazy_restore', 'shared_memory_borrow_limit_mib',
+                 'pool_transfer_concurrency', 'pool_transfer_timeout_seconds',
+-                'template_base_sharing', 'runtime_poll_interval_seconds')
++                'template_base_sharing', 'template_base_sharing_artifact',
++                'runtime_poll_interval_seconds')
+         identity = {key: resources[key] for key in keys}
+         identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'
+         digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:16]
+diff --git a/clawbox/experiments/spec.py b/clawbox/experiments/spec.py
+index bc6a3f4..6c146e3 100644
+--- a/clawbox/experiments/spec.py
++++ b/clawbox/experiments/spec.py
+@@ -285,6 +285,7 @@ class ResourcesSpec(StrictFrozenModel):
+     snapshot_residency_costs: SnapshotResidencyCostSpec | None = None
+     idle_reclaim_costs: IdleReclaimCostSpec | None = None
+     template_base_sharing: Literal["disabled", "required"] = "disabled"
++    template_base_sharing_artifact: str | None = None
+ 
+     def compute_node_budget_mib(self, node: ComputeNode) -> int:
+         """Static ledgers use capacity; measured admission uses HIGH."""
+diff --git a/clawbox/experiments/worker.py b/clawbox/experiments/worker.py
+index e4b7e6a..a456171 100644
+--- a/clawbox/experiments/worker.py
++++ b/clawbox/experiments/worker.py
+@@ -18,6 +18,7 @@ import sys
+ import time
+ import traceback
+ import urllib.parse
++from collections import Counter
+ from contextlib import contextmanager, nullcontext
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from dataclasses import asdict, replace
+@@ -71,6 +72,47 @@ from .spec import (
+ )
+ 
+ 
++def native_ssh_identity_command(route: NativeSSHRoute, session_id: str) -> str:
++    """Build the strict identity probe used before Agent Tool execution."""
++    identity_file = f"/state/openclaw/{session_id}/ssh/id_ed25519"
++    known_hosts_file = f"/state/openclaw/{session_id}/ssh/known_hosts"
++    endpoint_host = f"[{route.host}]" if ":" in route.host else route.host
++    return shlex.join([
++        openclaw_real_ssh_path(session_id), "-i", identity_file,
++        "-o", f"UserKnownHostsFile={known_hosts_file}",
++        "-o", "StrictHostKeyChecking=yes",
++        "-o", "UpdateHostKeys=no",
++        "-o", f"HostKeyAlias={native_ssh_host_key_alias(route.sandbox_id)}",
++        "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
++        "-p", str(route.port), f"executor@{endpoint_host}",
++        'printf %s "$TASK_ID"',
++    ])
++
++
++def warm_runtime_ssh_route(
++    runtime_executor: Any, route: NativeSSHRoute, session_id: str,
++    *, attempt_limit: int = 120,
++) -> int:
++    """Warm the long-lived Tool bridge through the proven Runtime route."""
++    command = native_ssh_identity_command(route, session_id)
++    last_error = ""
++    for attempt in range(1, attempt_limit + 1):
++        try:
++            result = runtime_executor.execute(command, 30)
++        except Exception as exc:
++            last_error = f"{type(exc).__name__}: {exc}"
++        else:
++            if result.exit_code == 0 and result.stdout.strip() == session_id:
++                return attempt
++            last_error = f"exit={result.exit_code}: " + result.stderr[-1000:]
++        if attempt < attempt_limit:
++            time.sleep(0.5)
++    raise RuntimeError(
++        "Runtime native SSH warmup did not reach the intended Tool identity "
++        f"for {session_id}: {last_error}"
++    )
++
++
+ class CgroupCpuSampler:
+     """Measure actual CPU consumed by the experiment parent cgroup."""
+ 
+@@ -244,6 +286,16 @@ def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
+     return cases[session_index % len(cases)]
+ 
+ 
++def session_worker_count(arm: ExperimentArm) -> int:
++    """Bound qualification residency without reducing covered sessions."""
++    value = arm.inference.configuration.get("qualification_max_parallel_sessions")
++    if value is None:
++        return arm.concurrency
++    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
++        raise ValueError("qualification_max_parallel_sessions must be a positive integer")
++    return min(arm.concurrency, value)
++
++
+ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
+     """Return deterministic offered-arrival offsets shared by compared policies."""
+     count = arm.concurrency
+@@ -1256,21 +1308,196 @@ def summarize_tool_execution_observations(
+     }
+ 
+ 
++class ArmActivityTracker:
++    """In-memory task/queue state derived from existing transition events."""
++
++    def __init__(self, total_sessions: int) -> None:
++        self.total_sessions = total_sessions
++        self.started_monotonic = time.monotonic()
++        self.lock = Lock()
++        self.offered: set[str] = set()
++        self.vm_create_waiting: dict[str, float] = {}
++        self.vm_creating: dict[str, float] = {}
++        self.activated: set[str] = set()
++        self.ever_activated: set[str] = set()
++        self.llm_waiting: dict[str, float] = {}
++        self.tool_admission_waiting: dict[str, tuple[str, float]] = {}
++        self.tool_admitted_waiting_start: dict[str, tuple[str, float]] = {}
++        self.tool_executing: dict[str, tuple[str, float]] = {}
++        self.completed: set[str] = set()
++        self.failed: set[str] = set()
++
++    @staticmethod
++    def _oldest(values: Any, now: float) -> float:
++        starts = [
++            value[1] if isinstance(value, tuple) else value
++            for value in values
++        ]
++        return max(0.0, now - min(starts)) if starts else 0.0
++
++    def _drop_session_operations(self, session_id: str) -> None:
++        for operations in (
++            self.tool_admission_waiting,
++            self.tool_admitted_waiting_start,
++            self.tool_executing,
++        ):
++            for execution_id in [
++                key for key, value in operations.items() if value[0] == session_id
++            ]:
++                operations.pop(execution_id, None)
++
++    def observe(self, event: dict[str, Any], *, now: float | None = None) -> None:
++        now = time.monotonic() if now is None else now
++        name = str(event.get("event") or "")
++        session_id = str(event.get("session_id") or "")
++        execution_id = str(event.get("execution_id") or "")
++        if not session_id:
++            return
++        with self.lock:
++            if name == "sandbox_create_gate_wait_started":
++                self.offered.add(session_id)
++                self.vm_create_waiting[session_id] = now
++            elif name == "sandbox_create_gate_acquired":
++                self.vm_create_waiting.pop(session_id, None)
++                self.vm_creating[session_id] = now
++            elif name == "sandbox_created" and event.get("role") == "runtime":
++                self.vm_creating.pop(session_id, None)
++                self.activated.add(session_id)
++                self.ever_activated.add(session_id)
++            elif name == "model_wait_started":
++                self.llm_waiting[session_id] = now
++            elif name == "model_response_ready":
++                self.llm_waiting.pop(session_id, None)
++            elif name == "tool_admission_queued" and execution_id:
++                self.tool_admission_waiting[execution_id] = (session_id, now)
++            elif name == "tool_admitted" and execution_id:
++                self.tool_admission_waiting.pop(execution_id, None)
++                self.tool_admitted_waiting_start[execution_id] = (session_id, now)
++            elif name == "tool_execution_progress" and execution_id:
++                if event.get("phase") == "start":
++                    self.tool_admission_waiting.pop(execution_id, None)
++                    self.tool_admitted_waiting_start.pop(execution_id, None)
++                    self.tool_executing[execution_id] = (session_id, now)
++                elif event.get("phase") == "end":
++                    self.tool_executing.pop(execution_id, None)
++            elif name in {"tool_completed", "tool_admission_abandoned"} and execution_id:
++                self.tool_admission_waiting.pop(execution_id, None)
++                self.tool_admitted_waiting_start.pop(execution_id, None)
++                self.tool_executing.pop(execution_id, None)
++            elif name in {"session_complete", "session_failed"}:
++                self.vm_create_waiting.pop(session_id, None)
++                self.vm_creating.pop(session_id, None)
++                self.llm_waiting.pop(session_id, None)
++                self.activated.discard(session_id)
++                self._drop_session_operations(session_id)
++                if name == "session_complete" and event.get("valid") is True:
++                    self.completed.add(session_id)
++                    self.failed.discard(session_id)
++                else:
++                    self.failed.add(session_id)
++                    self.completed.discard(session_id)
++
++    def snapshot(self) -> dict[str, Any]:
++        now = time.monotonic()
++        with self.lock:
++            elapsed = max(now - self.started_monotonic, 1e-9)
++            terminal = self.completed | self.failed
++            active = self.activated - terminal
++            return {
++                "total_sessions": self.total_sessions,
++                "not_yet_offered_sessions": max(
++                    0, self.total_sessions - len(self.offered)
++                ),
++                "offered_sessions": len(self.offered),
++                "offered_not_activated_sessions": len(
++                    self.offered - self.ever_activated - terminal
++                ),
++                "vm_create_waiting_sessions": len(self.vm_create_waiting),
++                "vm_create_wait_oldest_seconds": self._oldest(
++                    self.vm_create_waiting.values(), now
++                ),
++                "vm_creating_sessions": len(self.vm_creating),
++                "activated_running_sessions": len(active),
++                "idle_at_llm_sessions": len(set(self.llm_waiting) & active),
++                "agent_active_sessions": len(active - set(self.llm_waiting)),
++                "tool_admission_waiting_operations": len(
++                    self.tool_admission_waiting
++                ),
++                "tool_admission_waiting_tasks": len({
++                    value[0] for value in self.tool_admission_waiting.values()
++                }),
++                "tool_admission_wait_oldest_seconds": self._oldest(
++                    self.tool_admission_waiting.values(), now
++                ),
++                "tool_admitted_waiting_start_operations": len(
++                    self.tool_admitted_waiting_start
++                ),
++                "tool_executing_operations": len(self.tool_executing),
++                "tool_executing_tasks": len({
++                    value[0] for value in self.tool_executing.values()
++                }),
++                "completed_sessions": len(self.completed),
++                "failed_sessions": len(self.failed),
++                "offered_rate_per_second": len(self.offered) / elapsed,
++                "activation_rate_per_second": (
++                    len(self.ever_activated) / elapsed
++                ),
++                "completion_rate_per_second": len(terminal) / elapsed,
++            }
++
++
++def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, Any]:
++    """Combine disjoint per-NUMA queues without re-reading kernel state."""
++    per_domain = {
++        name: domain.coordinator.queue_snapshot()
++        for name, domain in domains.items()
++    }
++    by_class: Counter[str] = Counter()
++    blockers: Counter[str] = Counter()
++    summed = Counter()
++    for snapshot in per_domain.values():
++        by_class.update(snapshot.get("admission_queue_depth_by_class", {}))
++        blockers.update(snapshot.get("admission_queue_last_blockers", {}))
++        for field in (
++            "admission_queue_depth", "admission_queue_tasks",
++            "tool_admission_queue_tasks", "admission_queue_resident_vms",
++            "registered_sessions", "model_waiting_sessions",
++            "tool_active_sessions", "eviction_in_progress_sessions",
++        ):
++            summed[field] += int(snapshot.get(field, 0))
++    return {
++        **dict(summed),
++        "admission_queue_depth_by_class": dict(by_class),
++        "admission_queue_last_blockers": dict(blockers),
++        "admission_queue_oldest_seconds": max(
++            (float(value.get("admission_queue_oldest_seconds", 0.0))
++             for value in per_domain.values()),
++            default=0.0,
++        ),
++        "per_domain": per_domain,
++    }
++
++
+ class EventWriter:
+-    def __init__(self, path: Path) -> None:
++    def __init__(self, path: Path, *,
++                 activity_tracker: ArmActivityTracker | None = None) -> None:
+         path.parent.mkdir(parents=True, exist_ok=True)
+         self.path = path
+         self.lock = Lock()
+         self.sequence = 0
++        self.activity_tracker = activity_tracker
+ 
+     def write(self, event: dict[str, Any]) -> None:
+         with self.lock, self.path.open("a", encoding="utf-8") as stream:
++            monotonic_ns = time.monotonic_ns()
++            if self.activity_tracker is not None:
++                self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
+             row = {
+                 "schema_version": 1,
+                 "sequence_no": self.sequence,
+                 "wall_time": utcnow().isoformat(),
+                 "wall_time_ns": str(time.time_ns()),
+-                "monotonic_time_ns": str(time.monotonic_ns()),
++                "monotonic_time_ns": str(monotonic_ns),
+                 **event,
+             }
+             self.sequence += 1
+@@ -1398,7 +1625,11 @@ class ExperimentWorker:
+                 self.client.validate_template_image(
+                     sandbox.template, sandbox.image_digest,
+                 )
+-        events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
++        activity_tracker = ArmActivityTracker(arm.concurrency)
++        events = EventWriter(
++            self.output_root / "events" / f"{arm.arm_id}.jsonl",
++            activity_tracker=activity_tracker,
++        )
+         shared_borrow_mib = arm.resources.shared_memory_borrow_limit_mib
+         sampler = (
+             NumaCgroupMemorySampler(
+@@ -1589,6 +1820,10 @@ class ExperimentWorker:
+                     warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+                 events.write({
+                     "event": "memory_sample", "local_used_bytes": used,
++                    "queue_activity_snapshot": activity_tracker.snapshot(),
++                    "admission_queue_snapshot": aggregate_admission_queue_snapshots(
++                        domains
++                    ),
+                     "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
+                     "numa_residency": sampler.node_usage() if isinstance(sampler, NumaCgroupMemorySampler) else None,
+                     "combined_live_used_bytes": sampler.tier_usage()[2] if isinstance(sampler, NumaCgroupMemorySampler) else used,
+@@ -1668,8 +1903,12 @@ class ExperimentWorker:
+         interrupted = False
+         arm_started_wall = time.time()
+         arm_started_monotonic = time.monotonic()
++        telemetry_warmup_pool = ThreadPoolExecutor(
++            max_workers=min(64, session_worker_count(arm)),
++            thread_name_prefix="tool-telemetry-warmup",
++        )
+         pool = ThreadPoolExecutor(
+-            max_workers=arm.concurrency, thread_name_prefix="agent"
++            max_workers=session_worker_count(arm), thread_name_prefix="agent"
+         )
+         offer_offsets = session_offer_offsets(arm)
+         futures: dict[Any, int] = {}
+@@ -1731,7 +1970,8 @@ class ExperimentWorker:
+                     domain.sampler.observe, arm_started_wall, arm_started_monotonic,
+                     snapshot_pool, domain.borrower, domain.controller,
+                     creation_reserved=placement is not None, creation_gate_info=slot,
+-                    offered_offset_seconds=offer_offsets[index])
++                    offered_offset_seconds=offer_offsets[index],
++                    telemetry_warmup_pool=telemetry_warmup_pool)
+                 result['placement_wait_seconds'] = waited if placement is not None else 0.
+                 offered = arm_started_wall + offer_offsets[index]
+                 result['offered_to_completion_seconds'] = max(0.,
+@@ -1799,6 +2039,9 @@ class ExperimentWorker:
+             failure = exc
+             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
+         finally:
++            telemetry_warmup_pool.shutdown(
++                wait=not interrupted, cancel_futures=interrupted,
++            )
+             policy_events.close(wait=not interrupted)
+             # Watermark threads call DemandLedger.check(), which delegates to
+             # the shared pressure controller. Stop those readers before
+@@ -2210,7 +2453,9 @@ class ExperimentWorker:
+                      watermark_controller: WatermarkController | None = None,
+                      creation_reserved: bool = False,
+                      creation_gate_info=None,
+-                     offered_offset_seconds: float | None = None) -> dict[str, Any]:
++                      offered_offset_seconds: float | None = None,
++                      telemetry_warmup_pool: ThreadPoolExecutor | None = None,
++                      ) -> dict[str, Any]:
+         session_case = session_case_for(arm, index)
+         tool_sandbox = session_case.sandbox or arm.sandbox
+         if session_case != arm.case or tool_sandbox != arm.sandbox:
+@@ -2523,6 +2768,11 @@ class ExperimentWorker:
+                                       request_started_at=event.get("request_started_at"))
+                     if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+                         coordinator.begin_model_wait(session_id, request_id)
++                events.write({
++                    "event": "model_wait_started",
++                    "session_id": session_id,
++                    "request_id": request_id,
++                })
+                 if arm.policy.reclamation is not ReclamationPolicy.RESIDENT:
+                     submit_policy_event(pause_for_model_wait, event)
+ 
+@@ -2536,6 +2786,12 @@ class ExperimentWorker:
+                 with generated_model_requests_lock:
+                     generated_model_requests.add(request_id)
+                 coordinator.complete_model_wait(session_id, request_id)
++                events.write({
++                    "event": "model_response_ready",
++                    "session_id": session_id,
++                    "request_id": request_id,
++                    "model_step": step,
++                })
+                 # A paused Runtime cannot receive the pending HTTP response.
+                 # Restore it synchronously in the gateway producer before the
+                 # response becomes visible to OpenClaw. Tool restore remains
+@@ -2825,14 +3081,14 @@ class ExperimentWorker:
+                 })
+                 return route
+ 
+-            # A running CubeSandbox keeps one published TCP mapping.  Resolve
+-            # and prove that mapping once, then reuse it until a restore says
+-            # the Tool generation changed.  Re-resolving and opening a second
+-            # SSH connection before every OpenClaw SSH invocation turns one
+-            # Agent tool into several control-plane round trips and collapses
+-            # throughput at hundreds of sessions.
++            # The initial Tool route is created with a fresh per-session host
++            # key and the actual Agent SSH enforces it strictly. Its expensive
++            # first collector initialization is warmed in parallel with the
++            # Runtime startup below. A restored Tool can publish a new route,
++            # so only post-restore generations need the synchronous identity
++            # and readiness preflight before admission.
+             admitted_route = setup_route
+-            admitted_route_identity_verified = False
++            admitted_route_requires_preflight = True
+ 
+             exit_mismatches = 0
+             model_steps = 0
+@@ -2910,7 +3166,7 @@ class ExperimentWorker:
+                 reservation_lock = Lock()
+ 
+                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
+-                    nonlocal admitted_route, admitted_route_identity_verified
++                    nonlocal admitted_route, admitted_route_requires_preflight
+                     control_marks = {"started": time.monotonic()}
+                     execution_id = str(request["execution_id"])
+                     if progress_control:
+@@ -2988,7 +3244,7 @@ class ExperimentWorker:
+                             control_marks["memory_prepare"] = time.monotonic()
+                             if restored_tool:
+                                 admitted_route = None
+-                                admitted_route_identity_verified = False
++                                admitted_route_requires_preflight = True
+                                 bridge_ready_started = time.monotonic()
+                                 bridge_error: Exception | None = None
+                                 bridge_result = None
+@@ -3042,35 +3298,22 @@ class ExperimentWorker:
+                             if (admitted_route is None
+                                     or admitted_route.sandbox_id != current_sandbox_id):
+                                 admitted_route = resolve_native_ssh_route("admit")
+-                                admitted_route_identity_verified = False
++                                admitted_route_requires_preflight = True
+                             route = admitted_route
+                             # Cube may publish a restored mapping slightly
+                             # before CubeProxy accepts its fresh route. Prove
+                             # reachability and the stable Tool identity from
+                             # the Runtime before returning ADMIT; the Agent's
+                             # actual SSH subprocess has not started yet.
+-                            identity_file = f"/state/openclaw/{session_id}/ssh/id_ed25519"
+-                            known_hosts_file = f"/state/openclaw/{session_id}/ssh/known_hosts"
+-                            endpoint_host = (
+-                                f"[{route.host}]" if ":" in route.host else route.host
+-                            )
+                             # The Runtime image's /usr/bin/ssh is the policy
+                             # shim while the Agent is active.  An admission
+                             # callback must use the per-session preserved
+                             # OpenSSH client or it recursively calls /admit
+                             # while holding this session's admission lock.
+-                            real_ssh = openclaw_real_ssh_path(session_id)
+-                            identity_command = shlex.join([
+-                                real_ssh, "-i", identity_file,
+-                                "-o", f"UserKnownHostsFile={known_hosts_file}",
+-                                "-o", "StrictHostKeyChecking=yes",
+-                                "-o", "UpdateHostKeys=no",
+-                                "-o", f"HostKeyAlias={native_ssh_host_key_alias(route.sandbox_id)}",
+-                                "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
+-                                "-p", str(route.port), f"executor@{endpoint_host}",
+-                                "printf %s \"$TASK_ID\"",
+-                            ])
+-                            if not admitted_route_identity_verified:
++                            identity_command = native_ssh_identity_command(
++                                route, session_id,
++                            )
++                            if admitted_route_requires_preflight:
+                                 identity_started = time.monotonic()
+                                 identity_result = None
+                                 identity_error: Exception | None = None
+@@ -3103,7 +3346,7 @@ class ExperimentWorker:
+                                         "native SSH endpoint did not present the intended Tool "
+                                         f"identity for {session_id} after {identity_attempt} attempts"
+                                     ) from identity_error
+-                                admitted_route_identity_verified = True
++                                admitted_route_requires_preflight = False
+                                 events.write({
+                                     "event": "native_ssh_identity_ready",
+                                     "session_id": session_id,
+@@ -3437,6 +3680,46 @@ class ExperimentWorker:
+                     sandbox_id=setup_route.sandbox_id,
+                     host_key_alias=native_ssh_host_key_alias(setup_route.sandbox_id),
+                 )
++                route_warmup_future = None
++                route_warmup_started = None
++                route_warmup_reported = False
++
++                def begin_tool_telemetry_warmup() -> None:
++                    nonlocal route_warmup_future, route_warmup_started
++                    if telemetry_warmup_pool is None or route_warmup_future is not None:
++                        return
++                    route_warmup_started = time.monotonic()
++                    route_warmup_future = telemetry_warmup_pool.submit(
++                        warm_runtime_ssh_route,
++                        runtime_executor,
++                        setup_route,
++                        session_id,
++                    )
++
++                def await_tool_telemetry_warmup() -> None:
++                    nonlocal route_warmup_reported
++                    nonlocal admitted_route_requires_preflight
++                    if route_warmup_future is None:
++                        return
++                    wait_started = time.monotonic()
++                    attempts = route_warmup_future.result()
++                    completed = time.monotonic()
++                    assert route_warmup_started is not None
++                    admitted_route_requires_preflight = False
++                    if not route_warmup_reported:
++                        route_warmup_reported = True
++                        events.write({
++                            "event": "native_ssh_identity_ready",
++                            "session_id": session_id,
++                            "execution_id": "startup-warmup",
++                            "sandbox_id": setup_route.sandbox_id,
++                            "endpoint_epoch": setup_route.epoch,
++                            "attempts": attempts,
++                            "phase": "startup",
++                            "service_seconds": completed - route_warmup_started,
++                            "critical_path_wait_seconds": completed - wait_started,
++                            "overlapped_with_runtime_startup": True,
++                        })
+ 
+                 poll_resident_runtime = RuntimeStatusPoller(
+                     lifecycle=runtime_lifecycle,
+@@ -3445,24 +3728,36 @@ class ExperimentWorker:
+                     snapshot_enabled=runtime_snapshot_enabled,
+                 )
+ 
+-                outcome = run_openclaw(
+-                    prompt=arm.case.prompt, session_id=session_id,
+-                    configuration={
+-                        **inference_configuration,
+-                        "command_timeout_seconds": arm.execution.command_timeout_seconds,
+-                    },
+-                    ssh=ssh_config,
+-                    policy_control=policy_session, runtime_executor=runtime_executor,
+-                    output_dir=self.output_root,
+-                    timeout_seconds=arm.execution.arm_timeout_seconds,
+-                    model_gateway=gateway_session,
+-                    prediction_manifest=(prediction_provider.manifest
+-                                         if prediction_provider is not None else None),
+-                    resident_poll=poll_resident_runtime,
+-                    checkpoint_relay=runtime_snapshot_enabled,
+-                    **({"resident_wait": poll_resident_runtime.wait_for_file}
+-                       if not runtime_snapshot_enabled else {}),
+-                )
++                try:
++                    outcome = run_openclaw(
++                        prompt=arm.case.prompt, session_id=session_id,
++                        configuration={
++                            **inference_configuration,
++                            "command_timeout_seconds": arm.execution.command_timeout_seconds,
++                        },
++                        ssh=ssh_config,
++                        policy_control=policy_session, runtime_executor=runtime_executor,
++                        output_dir=self.output_root,
++                        timeout_seconds=arm.execution.arm_timeout_seconds,
++                        model_gateway=gateway_session,
++                        prediction_manifest=(prediction_provider.manifest
++                                             if prediction_provider is not None else None),
++                        resident_poll=poll_resident_runtime,
++                        checkpoint_relay=runtime_snapshot_enabled,
++                        startup_begin=begin_tool_telemetry_warmup,
++                        startup_wait=await_tool_telemetry_warmup,
++                        startup_event=events.write,
++                        **({"resident_wait": poll_resident_runtime.wait_for_file}
++                           if not runtime_snapshot_enabled else {}),
++                    )
++                except BaseException:
++                    # Do not destroy the Tool VM while its bounded background
++                    # route/collector warmup is still using the SSH endpoint.
++                    try:
++                        await_tool_telemetry_warmup()
++                    except Exception:
++                        pass
++                    raise
+                 if outcome.get("agent_pid_file") != agent_pid_file:
+                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                 coordinator.set_tool_active(session_id, True)
+diff --git a/docs/guide.md b/docs/guide.md
+index c564cd3..c77ecb1 100644
+--- a/docs/guide.md
++++ b/docs/guide.md
+@@ -164,8 +164,12 @@ knowledge base (KB) for the matching repository and Tool image.
+ every workload repository; its
+ artifact must declare `prediction_scope: clawtune_cold_start` and
+ `repository: "*"`. The cold-start mode still verifies the KB hash, validated
+-host-memory calibration, and the complete Tool environment identity, including
+-VM size. The bootstrap KB must contain compatible memory observations; a
++host-memory calibration, and membership in the artifact's exact
++`sandbox_identities` list, including template, image, VM size, and architecture.
++Use `scripts/export-cold-start-calibration.py` to create that artifact from a
++successful real-VM environment-calibration run covering the workload catalog;
++the command never changes the ClawTune bootstrap KB. The bootstrap KB must
++contain compatible memory observations; a
+ time-only seed cannot support predicted memory admission. Changing the mode or
+ artifact requires a new run ID, not an image rebuild.
+ 
+@@ -414,6 +418,7 @@ Useful commands:
+ | --- | --- |
+ | `trace`, `validate --inputs`, `describe`, `plan` | Read-only inspection; no VMs |
+ | `doctor SPEC --probe-vm` | Check services, templates, resources, revisions, and optionally one real VM |
++| `prove-template-sharing SPEC --output FILE` | Check physical Base sharing once for every exact Tool template and freeze reusable evidence |
+ | `qualify SPEC` | Run preflight separately and write `SPEC.qualification.json` |
+ | `launch SPEC --run-id ID` | Preferred validate/qualify/run/resume workflow |
+ | `run SPEC`, `resume ID` | Lower-level execution requiring a valid qualification receipt |
+@@ -430,10 +435,36 @@ that no VM owned by the run remains.
+ 
+ A qualification receipt is bound to the exact spec, implementation, templates,
+ images, nodes, concurrency, and referenced file hashes. A lower qualification
+-concurrency does not prove full-density performance. After interruption, restore
++concurrency bounds the qualification worker pool while one session still executes
++every workload case. The receipt records both values; this capability smoke does
++not prove full-density performance. After interruption, restore
+ the host, retain the result directory, and launch the frozen spec with the same
+ run ID. Use a new run ID for any configuration change.
+ 
++Template-aware placement additionally proves that two VMs from each Tool
++template physically share Cube's file-backed RAM Base. For a heterogeneous
++corpus, create that evidence once instead of recreating two probe VMs per
++template during every qualification:
++
++```bash
++bash scripts/clawbox --sudo experiment prove-template-sharing eval.yaml \
++  --output /data/clawbox-evidence/template-sharing.json \
++  --artifact-root /data/clawbox-evidence/template-sharing-raw
++bash scripts/clawbox experiment configure base.yaml eval-with-proof.yaml \
++  --template-base-sharing-artifact /data/clawbox-evidence/template-sharing.json
++```
++
++In editable schema-4 YAML the corresponding field is
++`evidence.template_base_sharing_artifact`; schema 3 uses
++`resources.template_base_sharing_artifact`. Reuse verifies the exact template
++IDs, image digests, VM sizes and architecture, target node, Cubelet binary and
++configuration hashes, and the retained raw proof hashes. A changed Tool
++template/image, VM shape, target node, Cubelet installation, or missing raw
++proof requires running `prove-template-sharing` again. Changing the artifact
++path requires a new run ID and qualification receipt, but not an image rebuild.
++This evidence skips only the repeated sharing probe; it never substitutes for
++the experiment's own VM creation or full-density measurement.
++
+ ## Reproduce the shared-cache CPU-placement experiment
+ 
+ The repository includes frozen specifications, traces, and prediction data for
+diff --git a/scripts/export-cold-start-calibration.py b/scripts/export-cold-start-calibration.py
+new file mode 100644
+index 0000000..63b8304
+--- /dev/null
++++ b/scripts/export-cold-start-calibration.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python3
++"""Export a multi-environment ClawTune cold-start admission artifact."""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import math
++from pathlib import Path
++
++
++MIB = 1024**2
++IDENTITY_FIELDS = ("template_id", "image_digest", "vcpu", "memory_mib", "architecture")
++
++
++def quantile(values: list[float], q: float) -> float:
++    ordered = sorted(values)
++    position = (len(ordered) - 1) * q
++    lower = math.floor(position)
++    upper = math.ceil(position)
++    if lower == upper:
++        return ordered[lower]
++    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
++
++
++def export(result_path: Path, workload_path: Path, seed_dir: Path, output: Path) -> dict:
++    result_path = result_path.resolve()
++    workload_path = workload_path.resolve()
++    seed_dir = seed_dir.resolve()
++    output = output.resolve()
++    if output.exists() or output.with_suffix(".kb.json").exists():
++        raise ValueError("output artifact or matching KB already exists; use a new path")
++
++    result_bytes = result_path.read_bytes()
++    result = json.loads(result_bytes)
++    workload = json.loads(workload_path.read_text(encoding="utf-8"))
++    manifest_path = seed_dir / "manifest.json"
++    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    if result.get("status") != "succeeded":
++        raise ValueError("environment calibration result did not succeed")
++    correctness = result.get("correctness") or {}
++    task_count = len(workload.get("tasks") or [])
++    if (correctness.get("failed_sessions") != 0
++            or correctness.get("completed_sessions") != task_count
++            or correctness.get("cleanup_verified") is not True):
++        raise ValueError("environment calibration did not cleanly complete every workload case")
++    if correctness.get("native_tool_telemetry_loss_total") != 0:
++        raise ValueError("environment calibration has Tool telemetry loss")
++    if (manifest.get("schema") != "clawtune.seed.v1"
++            or not manifest["provenance"]["validation"]["passed"]):
++        raise ValueError("ClawTune cold-start seed is not validated")
++
++    tasks = {task["case_id"]: task for task in workload["tasks"]}
++    assignments = result["performance"]["session_trace_assignment"]
++    covered_cases = {row["case_id"] for row in assignments}
++    if covered_cases != set(tasks):
++        raise ValueError("environment calibration does not cover the workload catalog exactly")
++
++    identities = []
++    clawtune_revisions = set()
++    for case_id in sorted(tasks):
++        task = tasks[case_id]
++        identity = {key: task["sandbox"].get(key) for key in IDENTITY_FIELDS}
++        if any(value is None for value in identity.values()):
++            raise ValueError(f"{case_id}: incomplete sandbox identity")
++        identities.append(identity)
++        clawtune_revisions.add(
++            task["metadata"]["collector_receipt"]["clawtune_revision"]
++        )
++    if len(clawtune_revisions) != 1:
++        raise ValueError("workload cases use different ClawTune revisions")
++    unique_identities = list({
++        json.dumps(item, sort_keys=True): item for item in identities
++    }.values())
++
++    pairs: list[tuple[float, float]] = []
++    paired_sessions = set()
++    maintenance_host = []
++    for row in result["performance"]["tool_execution_observations"]:
++        host = row.get("host_cgroup_execution_increment_bytes")
++        if (not isinstance(host, (int, float)) or isinstance(host, bool)
++                or not math.isfinite(host) or host < 0):
++            continue
++        if row.get("execution_scope") == "backend-maintenance":
++            maintenance_host.append(float(host))
++        guest_mib = row.get("actual_extra_memory_mib")
++        if (row.get("execution_scope") == "agent-tool" and row.get("operation") == "exec"
++                and isinstance(guest_mib, (int, float)) and not isinstance(guest_mib, bool)
++                and math.isfinite(guest_mib) and guest_mib >= 0):
++            pairs.append((float(guest_mib) * MIB, float(host)))
++            paired_sessions.add(row["session_id"])
++    if not pairs or not maintenance_host:
++        raise ValueError("calibration result has no paired command or maintenance measurements")
++
++    ratios = [host / guest for guest, host in pairs if guest > 0]
++    scale = quantile(ratios, 0.9) if ratios else 0.0
++    offset = quantile([max(0.0, host - scale * guest) for guest, host in pairs], 0.9)
++    host_calibration = {
++        "target": "host_cgroup_memory_current_increment",
++        "method": "heterogeneous_environment_p90_ratio_plus_p90_residual",
++        "sample_count": len(pairs),
++        "scale": scale,
++        "offset_bytes": offset,
++    }
++
++    lattice = json.loads(
++        (seed_dir / "clause-lattice-time-kb.json").read_text(encoding="utf-8")
++    )
++    tool = json.loads(
++        (seed_dir / "runtime-tool-resource-kb.json").read_text(encoding="utf-8")
++    )
++    kb_bytes = json.dumps({"lattice": lattice, "tool": tool}, sort_keys=True).encode()
++    identities_digest = hashlib.sha256(
++        json.dumps(unique_identities, sort_keys=True, separators=(",", ":")).encode()
++    ).hexdigest()
++    p99_maintenance = quantile(maintenance_host, 0.99)
++    payload = {
++        "schema": "clawbox_prediction_v2",
++        "repository": "*",
++        "prediction_scope": "clawtune_cold_start",
++        "training_validated": True,
++        "training_validation": {
++            "cold_start_seed_manifest": str(manifest_path),
++            "cold_start_seed_validation": manifest["provenance"]["validation"],
++            "environment_calibration_result": str(result_path),
++            "environment_calibration_result_sha256": hashlib.sha256(result_bytes).hexdigest(),
++            "covered_case_count": len(covered_cases),
++            "paired_command_count": len(pairs),
++            "paired_session_count": len(paired_sessions),
++            "maintenance_measurement_count": len(maintenance_host),
++        },
++        "sandbox_identities": unique_identities,
++        "sandbox_identities_sha256": identities_digest,
++        "host_calibration": host_calibration,
++        "non_command_tool_memory_calibration": {
++            "target": "host_cgroup_memory_current_increment",
++            "sample_count": len(maintenance_host),
++            "p90_bytes": quantile(maintenance_host, 0.9),
++            "p99_bytes": p99_maintenance,
++            "recommended_mib": max(1, math.ceil(p99_maintenance / MIB)),
++        },
++        "kb_sha256": hashlib.sha256(kb_bytes).hexdigest(),
++        "clawtune_revision": next(iter(clawtune_revisions)),
++        "cold_start_seed_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
++        "commands": [],
++    }
++    output.parent.mkdir(parents=True, exist_ok=True)
++    output.with_suffix(".kb.json").write_bytes(kb_bytes)
++    output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
++    return {
++        "artifact": str(output),
++        "artifact_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
++        "kb": str(output.with_suffix(".kb.json")),
++        "kb_sha256": payload["kb_sha256"],
++        "identity_count": len(unique_identities),
++        "host_calibration": host_calibration,
++        "non_command_tool_memory_calibration": payload[
++            "non_command_tool_memory_calibration"
++        ],
++    }
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--result", required=True, type=Path,
++                        help="successful real-VM arm result JSON covering the workload")
++    parser.add_argument("--workload", required=True, type=Path,
++                        help="workload catalog whose exact Tool identities were measured")
++    parser.add_argument("--seed-dir", required=True, type=Path,
++                        help="validated ClawTune bootstrap-v1 directory")
++    parser.add_argument("--output", required=True, type=Path,
++                        help="new artifact .json path; a sibling .kb.json is also written")
++    args = parser.parse_args()
++    print(json.dumps(export(args.result, args.workload, args.seed_dir, args.output), indent=2))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index cbcce1f..8f2eb05 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -56,6 +56,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
+         "baselines", "configure", "describe", "validate", "plan", "run", "status",
+         "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
+         "trace", "import-trace", "import-corpus", "train", "images", "report", "launch", "host", "recipes", "schema",
++        "prove-template-sharing",
+     }
+ 
+ 
+diff --git a/tests/test_cube.py b/tests/test_cube.py
+index f94006c..3501ac9 100644
+--- a/tests/test_cube.py
++++ b/tests/test_cube.py
+@@ -25,6 +25,7 @@ from clawbox.cube import (
+ )
+ from clawbox.experiments import BASELINES, ExperimentSpec
+ import clawbox.experiments.worker as worker_module
++from clawbox.experiments.openclaw_driver import NativeSSHRoute
+ from clawbox.experiments.policy import PolicyCoordinator
+ from clawbox.experiments.snapshot_pool import WarmSnapshotPool
+ from clawbox.experiments.spec_types import SnapshotTier
+@@ -42,6 +43,29 @@ class _Files:
+         self.content[path] = data
+ 
+ 
++def test_runtime_native_ssh_warmup_verifies_the_tool_identity() -> None:
++    calls = []
++
++    class RuntimeExecutor:
++        def execute(self, command, timeout):
++            calls.append((command, timeout))
++            return SimpleNamespace(exit_code=0, stdout="session-1\n", stderr="")
++
++    attempts = worker_module.warm_runtime_ssh_route(
++        RuntimeExecutor(),
++        NativeSSHRoute("tool-1", 22, 1, "192.0.2.20", 22022),
++        "session-1",
++    )
++
++    assert attempts == 1
++    assert len(calls) == 1
++    command, timeout = calls[0]
++    assert "HostKeyAlias=clawbox-tool-tool-1" in command
++    assert "-p 22022 executor@192.0.2.20" in command
++    assert "/state/openclaw/session-1/ssh/id_ed25519" in command
++    assert timeout == 30
++
++
+ def test_snapshot_retention_value_uses_logical_state_not_private_delta() -> None:
+     lifecycle = object.__new__(CubeSandboxLifecycle)
+     lifecycle.snapshot_reuse_probability = 0.5
+@@ -801,6 +825,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
+             super().unregister(session_id)
+ 
+     monkeypatch.setattr(worker_module, "PolicyCoordinator", ObservedCoordinator)
++    monkeypatch.setattr(worker_module, "warm_runtime_ssh_route", lambda *_args: 1)
+ 
+     class SnapshotCommands(_Commands):
+         def run(self, command: str, **kwargs):
+@@ -924,7 +949,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
+     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
+                           policy_control, runtime_executor, output_dir,
+                           timeout_seconds, model_gateway, prediction_manifest=None,
+-                          resident_poll=None, checkpoint_relay=False):
++                          resident_poll=None, checkpoint_relay=False,
++                          startup_begin=None, startup_wait=None, startup_event=None):
+         # Pair creation must release its own claim before the Agent runs,
+         # even when demand-backed Guest RAM uses less than configured capacity.
+         # Otherwise the unused footprint remains pending until session teardown.
+@@ -932,6 +958,11 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
+         assert all((session_id, "create") not in c.demand.claims for c in coordinators)
+         assert resident_poll is not None
+         assert checkpoint_relay is True
++        assert callable(startup_wait)
++        assert callable(startup_begin)
++        assert callable(startup_event)
++        startup_begin()
++        startup_wait()
+         assert model_gateway.gateway.timeout_s == 120
+         assert (
+             SnapshotSandbox.created[1].create_kwargs["env_vars"]
+diff --git a/tests/test_experiments_v2.py b/tests/test_experiments_v2.py
+index 5bad9da..3d1d857 100644
+--- a/tests/test_experiments_v2.py
++++ b/tests/test_experiments_v2.py
+@@ -13,7 +13,8 @@ from clawbox.experiments.audit import audit_experiments
+ from clawbox.experiments.baselines import BASELINES, resolve_baseline
+ from clawbox.replay.trace import load_trace
+ from clawbox.experiments.worker import (
+-    EventWriter, ExperimentWorker, _execute_idempotent, _runtime_network_deny_out, build_time_spans,
++    ArmActivityTracker, EventWriter, ExperimentWorker, _execute_idempotent,
++    _runtime_network_deny_out, build_time_spans,
+     WatermarkController, policy_event_workers, policy_operation_headroom_mib,
+     policy_progress_budget_mib,
+     read_priority_memory_charge, session_case_for, session_offer_offsets,
+@@ -621,6 +622,37 @@ def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: P
+     assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
+ 
+ 
++def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) -> None:
++    tracker = ArmActivityTracker(2)
++    writer = EventWriter(tmp_path / "events.jsonl", activity_tracker=tracker)
++    session = "arm-0000"
++    writer.write({"event": "sandbox_create_gate_wait_started", "session_id": session})
++    writer.write({"event": "sandbox_create_gate_acquired", "session_id": session})
++    writer.write({"event": "sandbox_created", "session_id": session, "role": "tool"})
++    assert tracker.snapshot()["vm_creating_sessions"] == 1
++    writer.write({"event": "sandbox_created", "session_id": session, "role": "runtime"})
++    writer.write({"event": "model_wait_started", "session_id": session})
++    assert tracker.snapshot()["idle_at_llm_sessions"] == 1
++    writer.write({"event": "model_response_ready", "session_id": session})
++    writer.write({"event": "tool_admission_queued", "session_id": session,
++                  "execution_id": "exec-1"})
++    snapshot = tracker.snapshot()
++    assert snapshot["tool_admission_waiting_tasks"] == 1
++    assert snapshot["offered_not_activated_sessions"] == 0
++    writer.write({"event": "tool_admitted", "session_id": session,
++                  "execution_id": "exec-1"})
++    writer.write({"event": "tool_execution_progress", "session_id": session,
++                  "execution_id": "exec-1", "phase": "start"})
++    assert tracker.snapshot()["tool_executing_tasks"] == 1
++    writer.write({"event": "tool_execution_progress", "session_id": session,
++                  "execution_id": "exec-1", "phase": "end"})
++    writer.write({"event": "session_complete", "session_id": session, "valid": True})
++    snapshot = tracker.snapshot()
++    assert snapshot["completed_sessions"] == 1
++    assert snapshot["activated_running_sessions"] == 0
++    assert snapshot["not_yet_offered_sessions"] == 1
++
++
+ def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:
+     monkeypatch.setattr("clawbox.experiments.worker.time.sleep", lambda _: None)
+ 
+diff --git a/tests/test_openclaw_driver.py b/tests/test_openclaw_driver.py
+index 0d7a68f..f1b0e9a 100644
+--- a/tests/test_openclaw_driver.py
++++ b/tests/test_openclaw_driver.py
+@@ -129,6 +129,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
+     monkeypatch, tmp_path: Path, gateway_mode, workspace,
+ ) -> None:
+     commands = []
++    startup_events = []
++    startup_begins = []
++    startup_waits = []
+ 
+     class Gateway:
+         url = "http://model.test/v1"
+@@ -167,6 +170,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
+         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+         output_dir=tmp_path, timeout_seconds=60,
+         model_gateway=Gateway() if gateway_mode else None,
++        startup_begin=lambda: startup_begins.append(len(commands)),
++        startup_wait=lambda: startup_waits.append(len(commands)),
++        startup_event=startup_events.append,
+     )
+     patch_command = next(command for command in commands if "config patch" in command)
+     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
+@@ -179,6 +185,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
+     assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
+     assert config["tools"]["exec"]["backgroundMs"] == 120000
+     assert config["tools"]["exec"]["timeoutSec"] == 120
++    assert config["plugins"]["load"]["paths"] == [
++        "/opt/clawtune/packages/clawtune-plugin"
++    ]
+     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
+     assert clawtune["failOpen"] is False
+     assert clawtune["trace"]["redact_sensitive_data"] is False
+@@ -204,10 +213,16 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
+     assert "command" not in sandbox["ssh"]
+     assert config["agents"]["defaults"]["workspace"] == "/workspace"
+     assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
+-    assert any("config unset models.providers.vllm.models.0.reasoning" in command
+-               for command in commands)
+-    assert any("config set models.providers.vllm.timeoutSeconds 120" in command
+-               for command in commands)
++    provider = config["models"]["providers"]["vllm"]
++    assert provider["timeoutSeconds"] == 120
++    assert provider["models"][0]["id"] == "test-model"
++    assert "reasoning" not in provider["models"][0]
++    assert not any("config unset" in command or "config set" in command
++                   for command in commands)
++    assert not any("plugins install" in command or "plugins enable" in command
++                   for command in commands)
++    assert "clawtune-kb.tar.gz" not in "\n".join(commands)
++    assert "clawtune-extra" not in "\n".join(commands)
+     assert any(b'"command": profile_command' in base64.b64decode(encoded)
+                for command in commands
+                for encoded in re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", command))
+@@ -231,6 +246,14 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
+     assert result["tool_calls"] == 1
+     assert result["tool_latencies"] == [0.25]
+     assert result["agent_tool_failures"] == 0
++    assert [item["stage"] for item in startup_events] == [
++        "runtime_setup", "sidecar_ready", "openclaw_onboard", "openclaw_config",
++    ]
++    assert all(item["status"] == "ok" for item in startup_events)
++    assert len(startup_begins) == 1
++    assert len(startup_waits) == 1
++    assert startup_begins[0] < startup_waits[0]
++    assert startup_waits[0] == commands.index(agent_command)
+     assert (tmp_path / "openclaw/session-a/sidecar.log").read_text() == (
+         "sidecar evidence\n"
+     )
+diff --git a/tests/test_p50_admission.py b/tests/test_p50_admission.py
+index 7620f46..5c02037 100644
+--- a/tests/test_p50_admission.py
++++ b/tests/test_p50_admission.py
+@@ -54,9 +54,12 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tm
+     path.with_suffix('.kb.json').write_bytes(kb)
+     identity = {'template_id': 'training', 'image_digest': 'sha256:image',
+                 'vcpu': 2, 'memory_mib': 4096, 'architecture': 'arm64'}
++    second_identity = {**identity, 'template_id': 'second', 'image_digest': 'sha256:second'}
+     path.write_text(json.dumps({'schema': 'clawbox_prediction_v2', 'repository': '*',
+         'prediction_scope': 'clawtune_cold_start', 'training_validated': True,
+-        'kb_sha256': hashlib.sha256(kb).hexdigest(), 'sandbox_identity': identity,
++        'kb_sha256': hashlib.sha256(kb).hexdigest(),
++        'sandbox_identities': [identity, second_identity],
++        'sandbox_identities_sha256': 'calibrated-environment-set',
+         'host_calibration': {'target': 'host_cgroup_memory_current_increment',
+                             'sample_count': 3, 'scale': 2, 'offset_bytes': 0}}))
+     resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
+@@ -64,6 +67,9 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tm
+                                            sandbox_identity=identity)
+     assert provider.repository == 'another/repo'
+     assert provider.prediction_source == 'runtime_clawtune_cold_start_kb'
++    assert ColdStartPredictionProvider(
++        path, repository='third/repo', sandbox_identity=second_identity,
++    ).provenance()['calibration_sandbox_identity_count'] == 2
+     with pytest.raises(ValueError, match='environments differ'):
+         ColdStartPredictionProvider(path, repository='another/repo', sandbox_identity=resized)
+     with pytest.raises(ValueError, match='environments differ'):
+diff --git a/tests/test_policy_v2.py b/tests/test_policy_v2.py
+index 7cc8010..a53f87f 100644
+--- a/tests/test_policy_v2.py
++++ b/tests/test_policy_v2.py
+@@ -697,6 +697,26 @@ def idle_pair_coordinator():
+     return c, tool, runtime
+ 
+ 
++def test_queue_snapshot_includes_lock_local_session_activity() -> None:
++    c = PolicyCoordinator(
++        PolicySpec(name="wait", admission="off", reclamation="snapshot_pause",
++                   eviction="wait_aware_pressure", restore="reactive"),
++        budget_mib=32, emergency_free_mib=0, operation_headroom_mib=0,
++    )
++    c.register("model", Lifecycle())
++    c.register_runtime("model", Lifecycle())
++    c.begin_model_wait("model", "request-1")
++    c.register("tool", Lifecycle())
++    c.set_tool_active("tool", True)
++
++    snapshot = c.queue_snapshot()
++
++    assert snapshot["registered_sessions"] == 2
++    assert snapshot["model_waiting_sessions"] == 1
++    assert snapshot["tool_active_sessions"] == 1
++    assert snapshot["eviction_in_progress_sessions"] == 0
++
++
+ def test_restore_409_recovery_honors_pair_scope():
+     c, tool, runtime = idle_pair_coordinator()
+     calls = []
+diff --git a/tests/test_qualification.py b/tests/test_qualification.py
+index c380ae7..4fe79a0 100644
+--- a/tests/test_qualification.py
++++ b/tests/test_qualification.py
+@@ -10,10 +10,13 @@ from clawbox.experiments.baselines import BASELINES
+ from clawbox.experiments.qualification import (
+     QUALIFICATION_SCHEMA_VERSION, implementation_digest,
+     live_borrow_roundtrip_test, qualification_spec, snapshot_roundtrip_test,
+-    qualification_input_manifest, validate_receipt,
++    qualification_input_manifest, template_base_sharing_test, validate_receipt,
+ )
++from clawbox.experiments.worker import session_worker_count
+ from clawbox.experiments.numa_borrow import NumaBorrowRecord
+-from clawbox.experiments.spec import load_experiment, spec_digest
++from clawbox.experiments.spec import (
++    expand_matrix, load_experiment, load_workload_cases, spec_digest,
++)
+ 
+ 
+ EXAMPLE = Path("examples/experiments/getting-started.yaml")
+@@ -47,6 +50,126 @@ def test_template_sharing_evidence_excludes_shared_root_filesystems():
+     assert not qualification_module._same_template_ram_mapping(rootfs, dict(rootfs))
+ 
+ 
++def test_template_sharing_probe_releases_each_pair_before_next_template(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    spec = load_experiment(EXAMPLE)
++    cases = []
++    for index in range(3):
++        sandbox = spec.sandbox.model_copy(update={
++            "template_alias": f"tool-{index}",
++            "image_digest": "sha256:" + f"{index + 1:064x}",
++        })
++        cases.append(spec.workload.cases[0].model_copy(update={
++            "case_id": f"case-{index}", "sandbox": sandbox,
++        }))
++    spec = spec.model_copy(update={
++        "workload": spec.workload.model_copy(update={"cases": tuple(cases)}),
++        "execution": spec.execution.model_copy(update={"sandbox_create_concurrency": 1}),
++        "resources": spec.resources.model_copy(update={"template_base_sharing": "required"}),
++    })
++    active = 0
++    peak = 0
++    template_by_id = {}
++    cleanup_calls = []
++
++    class Client:
++        def __init__(self, **_kwargs):
++            pass
++
++        def kill_owned_sandboxes(self, owner_id):
++            cleanup_calls.append(owner_id)
++
++    class Lifecycle:
++        def __init__(self, _client, *, template, **_kwargs):
++            self.template = template
++            self.sandbox_id = f"sandbox-{template}-{len(template_by_id)}"
++
++        def start(self):
++            nonlocal active, peak
++            template_by_id[self.sandbox_id] = self.template
++            active += 1
++            peak = max(peak, active)
++
++        def close(self):
++            nonlocal active
++            active -= 1
++
++    def mappings(sandbox_id):
++        template = template_by_id[sandbox_id]
++        return {("00:01", 7): {
++            "path": f"/data/cubelet/volumes/{template}-memory/{template}-memory",
++            "size_kib": 3 * 1024 * 1024,
++            "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 1,
++        }}
++
++    monkeypatch.setattr(qualification_module, "CubeSandboxClient", Client)
++    monkeypatch.setattr(qualification_module, "CubeSandboxLifecycle", Lifecycle)
++    monkeypatch.setattr(qualification_module, "_sandbox_file_mappings", mappings)
++
++    result = template_base_sharing_test(spec, artifact_root=tmp_path / "probe")
++
++    assert result["passed"] is True
++    assert result["template_count"] == 3
++    assert result["max_parallel_templates"] == 1
++    assert result["live_probe_vm_bound"] == 2
++    assert result["peak_live_probe_vms"] == 2
++    assert peak == 2 and active == 0
++    assert len(cleanup_calls) == 1
++    assert cleanup_calls[0].startswith("qualification-base-")
++
++
++def test_template_sharing_artifact_reuses_exact_templates_and_raw_proof(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    spec = load_experiment(EXAMPLE)
++    spec = spec.model_copy(update={
++        "resources": spec.resources.model_copy(update={
++            "template_base_sharing": "required",
++        }),
++    })
++    template = spec.sandbox.template
++    proof_root = tmp_path / "raw"
++    proof_root.mkdir()
++    (proof_root / "result.json").write_text('{"passed":true}', encoding="utf-8")
++    result = {
++        "required": True,
++        "passed": True,
++        "templates": {template: [{"mapping": "measured"}]},
++        "template_count": 1,
++        "max_parallel_templates": 1,
++        "live_probe_vm_bound": 2,
++        "peak_live_probe_vms": 2,
++        "metric": "test mapping",
++    }
++    monkeypatch.setattr(
++        qualification_module, "_template_sharing_backend_identity",
++        lambda: {"files": {"cubelet": "a" * 64}},
++    )
++    artifact = tmp_path / "sharing.json"
++    qualification_module.write_template_base_sharing_artifact(
++        spec, result, artifact_root=proof_root, output=artifact,
++    )
++    reused = spec.model_copy(update={
++        "resources": spec.resources.model_copy(update={
++            "template_base_sharing_artifact": str(artifact),
++        }),
++    })
++
++    verified = template_base_sharing_test(reused, artifact_root=tmp_path / "unused")
++
++    assert verified["passed"] is True and verified["reused"] is True
++    assert verified["template_count"] == 1
++    manifest = qualification_input_manifest(reused)
++    assert manifest["template_base_sharing_artifact"]["path"] == str(artifact)
++
++    changed = reused.model_copy(update={
++        "sandbox": reused.sandbox.model_copy(update={"memory_mib": 4096}),
++    })
++    with pytest.raises(ValueError, match="exact Tool templates"):
++        template_base_sharing_test(changed, artifact_root=tmp_path / "changed")
++
++
+ def test_dense_multi_numa_qualification_does_not_require_shared_memory(tmp_path):
+     from clawbox.experiments.topology import ComputeNode
+     spec = load_experiment(EXAMPLE)
+@@ -70,7 +193,11 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
+         "implementation_digest": implementation_digest(),
+         "qualification_spec_digest": spec_digest(qualified),
+         "qualified_unix_s": 1.0,
+-        "concurrency": max(qualified.execution.concurrency_levels),
++        "concurrency": qualified.inference.configuration[
++            "qualification_max_parallel_sessions"
++        ],
++        "qualified_session_count": max(qualified.execution.concurrency_levels),
++        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
+         "target_concurrency": max(spec.execution.concurrency_levels),
+         "scope": "capability_smoke",
+         "policy_names": [policy.name for policy in qualified.policies],
+@@ -97,6 +224,8 @@ def test_qualification_uses_all_policies_at_target_concurrency() -> None:
+     qualified = qualification_spec(spec, concurrency=3)
+ 
+     assert qualified.inference.configuration["max_model_steps"] == 1
++    assert qualified.inference.configuration["time_scale"] == 0.0
++    assert spec.inference.configuration["time_scale"] == 1.0
+     assert qualified.execution.concurrency_levels == (3,)
+     assert qualified.execution.randomized_order is False
+     assert qualified.execution.arm_timeout_seconds == 1800
+@@ -155,8 +284,16 @@ def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
+ 
+ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
+     spec = load_experiment(EXAMPLE)
+-    spec = spec.model_copy(update={"execution": spec.execution.model_copy(
+-        update={"concurrency_levels": (320, 640, 1280)})})
++    case = spec.workload.cases[0]
++    cases = tuple(
++        case.model_copy(update={"case_id": f"qualification-case-{index}"})
++        for index in range(3)
++    )
++    spec = spec.model_copy(update={
++        "workload": spec.workload.model_copy(update={"cases": cases}),
++        "execution": spec.execution.model_copy(
++            update={"concurrency_levels": (320, 640, 1280)}),
++    })
+     path = tmp_path / 'bounded.json'
+     receipt = _receipt(spec, concurrency=1)
+     path.write_text(json.dumps(receipt))
+@@ -164,6 +301,12 @@ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
+     assert verified['concurrency'] == 1
+     assert verified['target_concurrency'] == 1280
+     assert verified['scope'] == 'capability_smoke'
++    qualified = qualification_spec(spec, concurrency=1)
++    assert qualified.execution.concurrency_levels == (3,)
++    assert len(qualified.workload.cases) == 3
++    assert session_worker_count(expand_matrix(qualified)[0]) == 1
++    assert verified['qualified_session_count'] == 3
++    assert verified['qualified_case_ids'] == [case.case_id for case in cases]
+     receipt['concurrency'] = 0
+     path.write_text(json.dumps(receipt))
+     with pytest.raises(ValueError, match='concurrency'):

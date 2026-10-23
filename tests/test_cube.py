@@ -25,6 +25,7 @@ from clawbox.cube import (
 )
 from clawbox.experiments import BASELINES, ExperimentSpec
 import clawbox.experiments.worker as worker_module
+from clawbox.experiments.openclaw_driver import NativeSSHRoute
 from clawbox.experiments.policy import PolicyCoordinator
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.spec_types import SnapshotTier
@@ -40,6 +41,50 @@ class _Files:
 
     def write(self, path: str, data: str) -> None:
         self.content[path] = data
+
+
+def test_runtime_native_ssh_warmup_verifies_the_tool_identity() -> None:
+    calls = []
+
+    class RuntimeExecutor:
+        def execute(self, command, timeout):
+            calls.append((command, timeout))
+            return SimpleNamespace(exit_code=0, stdout="session-1\n", stderr="")
+
+    attempts = worker_module.warm_runtime_ssh_route(
+        RuntimeExecutor(),
+        NativeSSHRoute("tool-1", 22, 1, "192.0.2.20", 22022),
+        "session-1",
+    )
+
+    assert attempts == 1
+    assert len(calls) == 1
+    command, timeout = calls[0]
+    assert "HostKeyAlias=clawbox-tool-tool-1" in command
+    assert "-p 22022 executor@192.0.2.20" in command
+    assert "/state/openclaw/session-1/ssh/id_ed25519" in command
+    assert timeout == 30
+
+
+def test_session_pair_starts_tool_and_runtime_concurrently() -> None:
+    barrier = threading.Barrier(2)
+
+    class Lifecycle:
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def start(self) -> float:
+            barrier.wait(timeout=1)
+            return self.value
+
+    tool, runtime = worker_module.start_sandbox_pair(
+        Lifecycle(1.25), Lifecycle(2.5),
+    )
+    assert tool[0] == 1.25
+    assert runtime[0] == 2.5
+    assert abs(tool[1] - runtime[1]) < 0.25
+    assert tool[1] <= tool[2]
+    assert runtime[1] <= runtime[2]
 
 
 def test_snapshot_retention_value_uses_logical_state_not_private_delta() -> None:
@@ -801,6 +846,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             super().unregister(session_id)
 
     monkeypatch.setattr(worker_module, "PolicyCoordinator", ObservedCoordinator)
+    monkeypatch.setattr(worker_module, "warm_runtime_ssh_route", lambda *_args: 1)
 
     class SnapshotCommands(_Commands):
         def run(self, command: str, **kwargs):
@@ -921,10 +967,17 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         except urllib.error.HTTPError as exc:
             pytest.fail(f"policy {path} returned {exc.code}: {exc.read().decode()}")
 
+    def created_vm(template_id: str):
+        return next(
+            item for item in SnapshotSandbox.created
+            if item.template_id == template_id
+        )
+
     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
-                          resident_poll=None, checkpoint_relay=False):
+                          resident_poll=None, checkpoint_relay=False,
+                          startup_begin=None, startup_wait=None, startup_event=None):
         # Pair creation must release its own claim before the Agent runs,
         # even when demand-backed Guest RAM uses less than configured capacity.
         # Otherwise the unused footprint remains pending until session teardown.
@@ -932,9 +985,14 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         assert all((session_id, "create") not in c.demand.claims for c in coordinators)
         assert resident_poll is not None
         assert checkpoint_relay is True
+        assert callable(startup_wait)
+        assert callable(startup_begin)
+        assert callable(startup_event)
+        startup_begin()
+        startup_wait()
         assert model_gateway.gateway.timeout_s == 120
         assert (
-            SnapshotSandbox.created[1].create_kwargs["env_vars"]
+            created_vm("runtime-tpl").create_kwargs["env_vars"]
             ["CLAWBOX_MODEL_GATEWAY_TOKEN"]
             == model_gateway.token
         )
@@ -946,7 +1004,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         assert status == 200
         # Response preparation restores only Runtime. Tool remains
         # swapped until the following Tool admission reserves memory for it.
-        assert SnapshotSandbox.created[0].resume_calls == 0
+        assert created_vm("tool-tpl").resume_calls == 0
         model_gateway.mark_delivery(request_id, delivered=True)
         command = "true"
         command_sha256 = hashlib.sha256(command.encode()).hexdigest()
@@ -970,10 +1028,10 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             "endpoint_host": admission["host"],
             "endpoint_port": admission["port"],
         })
-        endpoint_calls_after_first_admission = SnapshotSandbox.created[0].endpoint_calls
+        endpoint_calls_after_first_admission = created_vm("tool-tpl").endpoint_calls
         identity_checks_after_first_admission = sum(
             'printf %s "$TASK_ID"' in command
-            for command, _kwargs in SnapshotSandbox.created[1].command_calls
+            for command, _kwargs in created_vm("runtime-tpl").command_calls
         )
         admission2 = post_policy(policy_control, "/v1/tool/admit", {
             "session_id": session_id, "execution_id": "exec-2",
@@ -982,10 +1040,10 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         })
         assert admission2["sandbox_id"] == admission["sandbox_id"]
         assert admission2["epoch"] == admission["epoch"]
-        assert SnapshotSandbox.created[0].endpoint_calls == endpoint_calls_after_first_admission
+        assert created_vm("tool-tpl").endpoint_calls == endpoint_calls_after_first_admission
         assert sum(
             'printf %s "$TASK_ID"' in command
-            for command, _kwargs in SnapshotSandbox.created[1].command_calls
+            for command, _kwargs in created_vm("runtime-tpl").command_calls
         ) == identity_checks_after_first_admission
         started2 = time.time()
         post_policy(policy_control, "/v1/tool/complete", {
@@ -1144,6 +1202,42 @@ def test_lifecycle_records_failed_create_with_state_and_error_type() -> None:
     assert lifecycle.timings[-1]["error_type"] == "TimeoutError"
     assert lifecycle.timings[-1]["state_before"] == "new"
     assert lifecycle.timings[-1]["state_after"] == "new"
+    assert lifecycle.timings[-1]["stage_seconds"]["api_create_s"] >= 0
+    assert lifecycle.timings[-1]["stage_seconds"]["physical_observation_after_s"] >= 0
+
+
+def test_lifecycle_records_create_stage_breakdown() -> None:
+    _Sandbox.items = {}
+    prepared = []
+    verified = []
+    pinned = []
+
+    class Borrower:
+        def pin_local(self, sandbox_id, *, verified_cgroup=None):
+            pinned.append((sandbox_id, verified_cgroup))
+
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox), template="tpl",
+        node_name="node-a", ownership=_owner(),
+        physical_observation=lambda: {"host_used_bytes": 1},
+        prepare_cgroup=lambda: prepared.append(True),
+        verify_cgroup=lambda sandbox_id: (
+            verified.append(sandbox_id) or {"cgroup": "/sandbox/cgroup"}
+        ),
+        numa_borrower=Borrower(),
+    )
+
+    lifecycle.start()
+
+    assert prepared == [True]
+    assert len(verified) == 1
+    assert pinned == [(verified[0], "/sandbox/cgroup")]
+    stages = lifecycle.timings[-1]["stage_seconds"]
+    assert set(stages) == {
+        "physical_observation_before_s", "prepare_cgroup_s", "api_create_s",
+        "verify_cgroup_s", "pin_local_s", "physical_observation_after_s",
+    }
+    assert all(value >= 0 for value in stages.values())
 
 
 def test_lifecycle_records_host_physical_memory_reclamation() -> None:

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: sudo bash scripts/clawbox-pypi-cache {start|status|stop} [--bind-address IP] [--port PORT] [--data-root PATH]" >&2
+  exit 2
+}
+
+action=${1:-}
+[[ -n "$action" ]] || usage
+shift
+
+bind_address=""
+port=3141
+data_root=/var/lib/clawbox/pypi-cache
+container=clawbox-pypi-cache
+image=clawbox-pypi-cache:devpi-6.20.0
+while (($#)); do
+  case "$1" in
+    --bind-address) bind_address=${2:-}; shift 2 ;;
+    --port) port=${2:-}; shift 2 ;;
+    --data-root) data_root=${2:-}; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+if [[ $EUID -ne 0 ]]; then
+  echo "run this command with sudo so Docker and the cache directory are writable" >&2
+  exit 1
+fi
+if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+  echo "--port must be an integer from 1 to 65535" >&2
+  exit 2
+fi
+
+case "$action" in
+  start)
+    [[ -n "$bind_address" ]] || {
+      echo "start requires --bind-address with the host address reachable from CubeSandbox VMs" >&2
+      exit 2
+    }
+    if docker ps --format '{{.Names}}' | grep -Fxq "$container"; then
+      echo "$container is already running"
+      exit 0
+    fi
+    if docker ps -a --format '{{.Names}}' | grep -Fxq "$container"; then
+      echo "$container already exists but is stopped; inspect it, then run: sudo docker start $container" >&2
+      exit 1
+    fi
+    repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+    install -d -m 0750 "$data_root/data"
+    docker build -t "$image" "$repo_root/deploy/pypi-cache"
+    docker run -d --name "$container" --restart unless-stopped \
+      -p "$bind_address:$port:3141" \
+      -v "$data_root/data:/data" \
+      "$image"
+    sleep 1
+    docker ps --filter "name=^/$container$"
+    ;;
+  status)
+    docker ps -a --filter "name=^/$container$"
+    if ! docker ps --format '{{.Names}}' | grep -Fxq "$container"; then
+      echo "$container is not running" >&2
+      exit 1
+    fi
+    ;;
+  stop)
+    if docker ps --format '{{.Names}}' | grep -Fxq "$container"; then
+      docker stop "$container"
+    else
+      echo "$container is not running"
+    fi
+    ;;
+  *) usage ;;
+esac

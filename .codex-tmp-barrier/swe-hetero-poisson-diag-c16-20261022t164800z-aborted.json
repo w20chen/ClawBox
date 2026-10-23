@@ -1,0 +1,15 @@
+{
+  "run_id": "swe-hetero-poisson-diag-c16-20261022t164800z",
+  "status": "aborted_before_formal_arm",
+  "baseline_result": false,
+  "spec_sha256": "525e3e3ebe6309ec7ec37dc8a235fa1977f872ec0f4bc45ba9ad3706d1866816",
+  "spec_digest": "3d5f26cfcf9f0970654ea8b1dcf16d9abf08dd6a4d741422d43a29b2845c6cc6",
+  "observed_qualification_probe": "template_base_sharing",
+  "observed_owned_vms_before_stop": 554,
+  "cause": "The probe retained two VMs for each distinct Tool template until all 503 templates had been checked, creating an unnecessary 1006-VM peak.",
+  "cleanup": {
+    "owner_id": "qualification-base-3634e3322dd5",
+    "remaining_owned_vms": 0
+  },
+  "next_action": "Bound template verification by sandbox_create_concurrency and close each pair immediately, then rerun with a new run ID."
+}

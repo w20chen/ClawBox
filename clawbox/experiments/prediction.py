@@ -6,11 +6,35 @@ import hashlib
 import json
 import math
 import time
+from copy import deepcopy
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from clawbox.tuning.clawtune import shell_command_prefix_tokens
+
+
+_IMMUTABLE_KB_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
+_IMMUTABLE_KB_CACHE_LOCK = Lock()
+_IMMUTABLE_ARTIFACT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_IMMUTABLE_ARTIFACT_CACHE_LOCK = Lock()
+_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+_IMMUTABLE_PREDICTION_CACHE_LOCK = Lock()
+
+
+def _immutable_artifact(path: Path) -> tuple[str, dict[str, Any]]:
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    key = (str(path.resolve()), digest)
+    with _IMMUTABLE_ARTIFACT_CACHE_LOCK:
+        payload = _IMMUTABLE_ARTIFACT_CACHE.get(key)
+        if payload is None:
+            parsed = json.loads(data)
+            if not isinstance(parsed, dict):
+                raise ValueError("Prediction artifact must be an object")
+            payload = parsed
+            _IMMUTABLE_ARTIFACT_CACHE[key] = payload
+    return digest, payload
 
 
 class PredictionUnavailable(RuntimeError):
@@ -90,14 +114,12 @@ class FrozenPredictionProvider:
     """Load one immutable prediction artifact once and resolve exact commands."""
 
     def __init__(self, path: Path, *, repository: str | None = None,
-                 prediction_source: str = "runtime_clawtune_immutable_kb") -> None:
+                 prediction_source: str = "runtime_clawtune_immutable_kb",
+                 _artifact: tuple[str, dict[str, Any]] | None = None) -> None:
         self.path = path
         self.repository = repository
         self.prediction_source = prediction_source
-        self.sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("Prediction artifact must be an object")
+        self.sha256, payload = _artifact or _immutable_artifact(path)
         self.payload = payload
         self._by_digest: dict[str, dict[str, Any]] = {}
         self._load_entries(payload)
@@ -195,7 +217,8 @@ class P50PredictionProvider(FrozenPredictionProvider):
 
     def __init__(self, path: Path, *, repository: str, sandbox_identity: dict | None = None,
                  global_cold_start: bool = False) -> None:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        artifact = _immutable_artifact(path)
+        payload = artifact[1]
         repository_matches = payload.get("repository") == repository
         if global_cold_start:
             repository_matches = (
@@ -206,9 +229,17 @@ class P50PredictionProvider(FrozenPredictionProvider):
             raise ValueError("P50 artifact schema or repository mismatch")
         if payload.get("training_validated") is not True:
             raise ValueError("P50 artifact requires a validated Cube training run")
-        if sandbox_identity is not None and payload.get("sandbox_identity") != sandbox_identity:
-            raise ValueError("P50 training and evaluation Tool environments differ")
-        super().__init__(path, repository=repository, prediction_source="frozen_clawbox_p50")
+        if sandbox_identity is not None:
+            calibrated_identities = (
+                payload.get("sandbox_identities") if global_cold_start
+                else [payload.get("sandbox_identity")]
+            )
+            if (not isinstance(calibrated_identities, list)
+                    or sandbox_identity not in calibrated_identities):
+                raise ValueError("P50 training and evaluation Tool environments differ")
+        super().__init__(path, repository=repository,
+                         prediction_source="frozen_clawbox_p50",
+                         _artifact=artifact)
         self.evaluation_sandbox_identity = sandbox_identity
         self.global_cold_start = global_cold_start
 
@@ -217,9 +248,13 @@ class P50PredictionProvider(FrozenPredictionProvider):
                     if row.get("prediction_source") == self.prediction_source]
         result = super().provenance(selected)
         if self.global_cold_start:
+            calibrated_identities = self.payload.get("sandbox_identities") or []
             result.update(
                 prediction_scope="clawtune_cold_start",
-                calibration_sandbox_identity=self.payload.get("sandbox_identity"),
+                calibration_sandbox_identity_count=len(calibrated_identities),
+                calibration_sandbox_identities_sha256=self.payload.get(
+                    "sandbox_identities_sha256"
+                ),
                 evaluation_sandbox_identity=self.evaluation_sandbox_identity,
             )
         result["observed_fallback_rate"] = (
@@ -315,12 +350,25 @@ class RuntimePredictionProvider(P50PredictionProvider):
         use_clawtune()
         from tool_time.lattice_kb import LatticeTimeKB
         from tool_resource.runtime_kb import RuntimeToolResourceKB
-        snapshot = json.loads(data)
-        try:
-            self.lattice = LatticeTimeKB.from_json_obj(snapshot["lattice"])
-            self.runtime = RuntimeToolResourceKB.from_json_obj(snapshot["tool"])
-        except (KeyError, ValueError) as exc:
-            raise ValueError("training KB cannot be loaded by the selected ClawTune; use the matching ClawTune environment or retrain: " + str(exc)) from exc
+        cache_key = (str(self.kb_path.resolve()), self.payload["kb_sha256"])
+        with _IMMUTABLE_KB_CACHE_LOCK:
+            cached = _IMMUTABLE_KB_CACHE.get(cache_key)
+            if cached is None:
+                snapshot = json.loads(data)
+                try:
+                    lattice = LatticeTimeKB.from_json_obj(snapshot["lattice"])
+                    runtime = RuntimeToolResourceKB.from_json_obj(snapshot["tool"])
+                    # The experiment artifact is immutable.  Finalize the
+                    # native readers once so hundreds of repository-scoped
+                    # views do not rebuild identical Lattice nodes or retain
+                    # hundreds of duplicate KBs.
+                    lattice.freeze()
+                    runtime.freeze()
+                except (KeyError, ValueError) as exc:
+                    raise ValueError("training KB cannot be loaded by the selected ClawTune; use the matching ClawTune environment or retrain: " + str(exc)) from exc
+                cached = (lattice, runtime)
+                _IMMUTABLE_KB_CACHE[cache_key] = cached
+        self.lattice, self.runtime = cached
         self._query_lock = Lock()
 
     def _load_entries(self, payload):
@@ -337,6 +385,14 @@ class RuntimePredictionProvider(P50PredictionProvider):
         digest = command_sha256(command)
         if not isinstance(runtime_metadata, dict) or runtime_metadata.get("raw_command_sha256") != digest:
             raise PredictionUnavailable("Runtime prediction command identity mismatch")
+        cache_key = (self.sha256, self.prediction_source, self.repository or "", digest)
+        with _IMMUTABLE_PREDICTION_CACHE_LOCK:
+            cached = _IMMUTABLE_PREDICTION_CACHE.get(cache_key)
+        if cached is not None:
+            return {
+                **deepcopy(cached),
+                "session_runtime_metadata": dict(runtime_metadata),
+            }
         from tool_resource.runtime_kb import ToolCallQuery
         from clawbox.tuning.clawtune import predict_native_call_load_models
         query = ToolCallQuery(repo=self.repository, tool_name="exec", command=command,
@@ -354,7 +410,14 @@ class RuntimePredictionProvider(P50PredictionProvider):
             )["tool"]
             models["tool_class"] = tool_class.model_dump(mode="json")
             prediction = self._metadata({"models": models}, command, digest)
-        return {**prediction, "session_runtime_metadata": dict(runtime_metadata)}
+        with _IMMUTABLE_PREDICTION_CACHE_LOCK:
+            prediction = _IMMUTABLE_PREDICTION_CACHE.setdefault(
+                cache_key, deepcopy(prediction),
+            )
+        return {
+            **deepcopy(prediction),
+            "session_runtime_metadata": dict(runtime_metadata),
+        }
 
     def resolve_digest(self, digest, runtime_metadata):
         raise PredictionUnavailable("runtime prediction requires command text, not a frozen digest lookup")

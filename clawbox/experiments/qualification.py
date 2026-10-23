@@ -7,10 +7,13 @@ import time
 import uuid
 import os
 import hashlib
+import json
 import shutil
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from clawbox.cube import (
@@ -27,17 +30,20 @@ from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, expand_matrix,
     load_workload_cases, spec_digest,
 )
-from .spec_types import ArrivalSchedule
+from .spec_types import AdmissionPolicy, ArrivalSchedule
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 10
+QUALIFICATION_SCHEMA_VERSION = 11
 
 
-def qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
+def qualification_input_manifest(
+    spec: ExperimentSpec, *, validated_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Bind a receipt to the exact mutable files used by the specification."""
-    inputs = validate_inputs(spec)
+    inputs = validated_inputs if validated_inputs is not None else validate_inputs(spec)
+    sharing_artifact = spec.resources.template_base_sharing_artifact
     return {
         "traces": [
             {
@@ -54,6 +60,80 @@ def qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
             }
             for value in inputs["prediction_files"]
         ],
+        "template_base_sharing_artifact": (
+            {
+                "path": sharing_artifact,
+                "sha256": hashlib.sha256(Path(sharing_artifact).read_bytes()).hexdigest(),
+            }
+            if sharing_artifact else None
+        ),
+    }
+
+
+def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]:
+    """Hash receipt-bound inputs without repeating semantic prediction checks.
+
+    A successful receipt already records that the same implementation parsed
+    every trace and resolved every command.  Reuse only needs to prove that the
+    specification and each mutable input byte are unchanged.
+    """
+    if spec.schema_version == 4:
+        from .spec import effective_spec
+
+        manifests = [
+            current_qualification_input_manifest(effective_spec(spec, policy))
+            for policy in spec.policies
+        ]
+        traces = manifests[0]["traces"]
+        prediction_files = sorted(
+            {
+                item["path"]: item
+                for manifest in manifests
+                for item in manifest["prediction_files"]
+            }.values(),
+            key=lambda item: item["path"],
+        )
+    else:
+        traces = []
+        if spec.inference.backend is InferenceBackend.REPLAY:
+            for case in load_workload_cases(spec.workload):
+                path = Path(case.replay_trace_reference or case.source_reference)
+                traces.append({
+                    "case_id": case.case_id,
+                    "path": str(path),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                })
+        prediction_files = []
+        admissions = {policy.admission for policy in spec.policies}
+        if (
+            spec.resources.prediction_artifact
+            and (
+                AdmissionPolicy.PREDICTED in admissions
+                or spec.resources.observe_predictions
+            )
+        ):
+            path = Path(spec.resources.prediction_artifact)
+            paths = [path]
+            if spec.resources.prediction_mode in {"runtime", "cold-start"}:
+                paths.append(path.with_suffix(".kb.json"))
+            prediction_files = [
+                {
+                    "path": str(value),
+                    "sha256": hashlib.sha256(value.read_bytes()).hexdigest(),
+                }
+                for value in paths
+            ]
+    sharing_artifact = spec.resources.template_base_sharing_artifact
+    return {
+        "traces": traces,
+        "prediction_files": prediction_files,
+        "template_base_sharing_artifact": (
+            {
+                "path": sharing_artifact,
+                "sha256": hashlib.sha256(Path(sharing_artifact).read_bytes()).hexdigest(),
+            }
+            if sharing_artifact else None
+        ),
     }
 
 
@@ -122,7 +202,27 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
     }
 
 
+def require_empty_vm_domain(path: str | Path) -> None:
+    """Fail early when stale Cube processes would invalidate a new arm."""
+    root = Path(path)
+    events_path = root / "cgroup.events"
+    if not events_path.is_file():
+        return
+    events = dict(
+        line.split(maxsplit=1)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if len(line.split(maxsplit=1)) == 2
+    )
+    if events.get("populated") != "0":
+        raise RuntimeError(
+            f"physical VM domain {root} is populated before qualification; "
+            "inspect CubeAPI sandboxes and descendant cgroup.procs, clean only "
+            "the owning stale run, verify cgroup.events populated=0, then retry"
+        )
+
+
 def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> None:
+    require_empty_vm_domain(spec.resources.local_memory_cgroup)
     from .pressure import PressureControl
     # Check all requested arms before any VM qualification probes or trial runs.
     for policy in spec.policies:
@@ -189,17 +289,39 @@ def _node_spec(spec, node):
     })})
 
 
+def _snapshot_sandbox_representatives(
+    spec: ExperimentSpec,
+) -> tuple[int, dict[str, Any]]:
+    """Pick one Tool template for each snapshot-relevant VM shape.
+
+    Qualification later creates and executes every workload template. Repeating
+    the same backend checkpoint round-trip for hundreds of task-specific images
+    adds no mechanism coverage; memory size, CPU shape, and architecture are the
+    relevant configured differences.
+    """
+    by_template: dict[str, Any] = {}
+    for case in load_workload_cases(spec.workload):
+        sandbox = case.sandbox or spec.sandbox
+        by_template.setdefault(sandbox.template, sandbox)
+    representatives: dict[tuple[int, int, str], tuple[str, Any]] = {}
+    for template, sandbox in sorted(by_template.items()):
+        shape = (sandbox.memory_mib, sandbox.vcpu, sandbox.architecture)
+        representatives.setdefault(shape, (template, sandbox))
+    return len(by_template), {
+        template: sandbox for template, sandbox in representatives.values()
+    }
+
+
 def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=None,
                             _template: str | None = None) -> dict[str, Any]:
     if spec.schema_version == 4:
         return design_probes(spec, snapshot_roundtrip_test, artifact_root=artifact_root)
     """Exercise checkpoint/restore and placement on every compute node."""
     if _template is None:
-        sandboxes = {}
-        for case in load_workload_cases(spec.workload):
-            sandbox = case.sandbox or spec.sandbox
-            sandboxes.setdefault(sandbox.template, sandbox)
-        if len(sandboxes) > 1:
+        observed_template_count, sandboxes = _snapshot_sandbox_representatives(spec)
+        if observed_template_count > 1 or (
+            sandboxes and next(iter(sandboxes)) != spec.sandbox.template
+        ):
             templates = {
                 template: snapshot_roundtrip_test(
                     spec.model_copy(update={"sandbox": sandbox}),
@@ -212,6 +334,12 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 "required": any(item["required"] for item in templates.values()),
                 "passed": all(item["passed"] for item in templates.values()),
                 "templates": templates,
+                "observed_template_count": observed_template_count,
+                "representative_template_count": len(templates),
+                "representative_basis": [
+                    "memory_mib", "vcpu", "architecture",
+                ],
+                "all_templates_exercised_by_qualification_replay": True,
                 "mechanism": spec.resources.snapshot_mechanism,
                 "storage": spec.resources.snapshot_storage,
                 "incremental_delta_verified": all(
@@ -668,13 +796,22 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
     inference = spec.inference.model_copy(update={
         "configuration": {
             **spec.inference.configuration,
+            # Qualification proves that each environment can launch and
+            # execute its first native Tool call.  Replaying the recorded LLM
+            # delay before that call adds hours for a heterogeneous corpus but
+            # does not strengthen the capability proof.  Formal runs retain
+            # the configured time scale from the source spec.
+            "time_scale": 0.0,
             "max_model_steps": 1,
+            "qualification_max_parallel_sessions": level,
         },
     })
     workload = spec.workload.model_copy(update={
         "cases": tuple(cases), "repetitions": 1,
     })
     execution = spec.execution.model_copy(update={
+        # One session per case proves heterogeneous coverage. The worker-pool
+        # bound above limits how many of those sessions are live at once.
         "concurrency_levels": (max(level, len(cases)),),
         "randomized_order": False,
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
@@ -760,6 +897,130 @@ def _same_template_ram_mapping(left: dict[str, Any], right: dict[str, Any]) -> b
     )
 
 
+def _template_sharing_identities(spec: ExperimentSpec) -> dict[str, dict[str, Any]]:
+    identities: dict[str, dict[str, Any]] = {}
+    for case in load_workload_cases(spec.workload):
+        sandbox = case.sandbox or spec.sandbox
+        identity = {
+            "template_id": sandbox.template,
+            "image_digest": sandbox.image_digest,
+            "source_image_reference": sandbox.source_image_reference,
+            "vcpu": sandbox.vcpu,
+            "memory_mib": sandbox.memory_mib,
+            "architecture": sandbox.architecture,
+        }
+        previous = identities.setdefault(sandbox.template, identity)
+        if previous != identity:
+            raise ValueError(
+                f"Tool template {sandbox.template} has conflicting immutable identities"
+            )
+    return dict(sorted(identities.items()))
+
+
+def _template_sharing_backend_identity() -> dict[str, Any]:
+    paths = (
+        Path("/usr/local/services/cubetoolbox/Cubelet/bin/cubelet"),
+        Path("/usr/local/services/cubetoolbox/Cubelet/config/config.toml"),
+        Path("/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml"),
+    )
+    files = {}
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"template-sharing proof cannot identify Cube backend: missing {path}")
+        files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {"files": files}
+
+
+def write_template_base_sharing_artifact(
+    spec: ExperimentSpec, result: dict[str, Any], *, artifact_root: Path, output: Path,
+) -> dict[str, Any]:
+    """Freeze an all-template physical-sharing proof for reuse on this backend."""
+    expected = _template_sharing_identities(spec)
+    probes = list((result.get("probes") or {}).values()) or [result]
+    required = [probe for probe in probes if probe.get("required") is True]
+    if not required or any(probe.get("passed") is not True for probe in required):
+        raise ValueError("template-sharing artifact requires passed real-VM probes")
+    evidence_hashes = {}
+    for probe in required:
+        evidence = probe.get("templates") or {}
+        if set(evidence) != set(expected):
+            raise ValueError("template-sharing proof does not cover the exact Tool templates")
+        for template, rows in evidence.items():
+            digest = hashlib.sha256(json.dumps(
+                rows, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            previous = evidence_hashes.setdefault(template, digest)
+            if previous != digest:
+                raise ValueError(f"template-sharing probes disagree for {template}")
+    proof_files = []
+    for path in sorted(artifact_root.rglob("result.json")):
+        proof_files.append({
+            "path": str(path.resolve()),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    if not proof_files:
+        raise ValueError("template-sharing proof has no persisted result.json")
+    payload = {
+        "schema": "clawbox_template_base_sharing_v1",
+        "passed": True,
+        "generated_unix_s": time.time(),
+        "target_node": spec.resources.target_node,
+        "backend_identity": _template_sharing_backend_identity(),
+        "templates": {
+            template: {**identity, "mapping_evidence_sha256": evidence_hashes[template]}
+            for template, identity in expected.items()
+        },
+        "template_count": len(expected),
+        "proof_files": proof_files,
+        "probe_summary": [{
+            key: probe.get(key) for key in (
+                "template_count", "max_parallel_templates", "live_probe_vm_bound",
+                "peak_live_probe_vms", "metric",
+            )
+        } for probe in required],
+    }
+    if output.exists():
+        raise FileExistsError(f"refusing to replace template-sharing artifact {output}")
+    atomic_json(output, payload)
+    return payload
+
+
+def validate_template_base_sharing_artifact(
+    spec: ExperimentSpec, path: Path,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read template-sharing artifact {path}: {exc}") from exc
+    if payload.get("schema") != "clawbox_template_base_sharing_v1" or payload.get("passed") is not True:
+        raise ValueError("template-sharing artifact schema/status mismatch")
+    if payload.get("target_node") != spec.resources.target_node:
+        raise ValueError("template-sharing artifact target node differs")
+    if payload.get("backend_identity") != _template_sharing_backend_identity():
+        raise ValueError("template-sharing artifact Cube backend differs; rerun prove-template-sharing")
+    expected = _template_sharing_identities(spec)
+    observed = payload.get("templates") or {}
+    stripped = {
+        template: {key: value for key, value in identity.items()
+                   if key != "mapping_evidence_sha256"}
+        for template, identity in observed.items()
+    }
+    if stripped != expected or payload.get("template_count") != len(expected):
+        raise ValueError("template-sharing artifact does not match the exact Tool templates")
+    for template, identity in observed.items():
+        digest = identity.get("mapping_evidence_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"template-sharing artifact lacks mapping evidence for {template}")
+    proof_files = payload.get("proof_files") or []
+    if not proof_files:
+        raise ValueError("template-sharing artifact has no raw proof files")
+    for item in proof_files:
+        proof = Path(item.get("path", ""))
+        if not proof.is_file() or hashlib.sha256(proof.read_bytes()).hexdigest() != item.get("sha256"):
+            raise ValueError(f"template-sharing raw proof differs or is missing: {proof}")
+    return payload
+
+
 def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> dict[str, Any]:
     if spec.schema_version == 4:
         return design_probes(spec, template_base_sharing_test, artifact_root=artifact_root)
@@ -768,44 +1029,60 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> 
     if not required:
         return {"required": False, "passed": True, "supported": False,
                 "reason": "resources.template_base_sharing=disabled"}
+    if spec.resources.template_base_sharing_artifact:
+        path = Path(spec.resources.template_base_sharing_artifact)
+        payload = validate_template_base_sharing_artifact(spec, path)
+        return {
+            "required": True, "passed": True, "supported": True, "reused": True,
+            "artifact": str(path),
+            "artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "template_count": payload["template_count"],
+        }
     artifact_root.mkdir(parents=True, exist_ok=False)
     cases = load_workload_cases(spec.workload)
     templates = {}
     for case in cases:
         sandbox = case.sandbox or spec.sandbox
         templates.setdefault(sandbox.template, sandbox)
-    client = CubeSandboxClient(
-        journal=OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
-    )
+    journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
     run_id = "qualification-base-" + uuid.uuid4().hex[:12]
     evidence = {}
-    lifecycles = []
     primary_error = None
-    try:
-        for template, sandbox in templates.items():
-            pair = []
-            for index in range(2):
+    worker_count = min(spec.execution.sandbox_create_concurrency, len(templates))
+    activity_lock = Lock()
+    active_probe_vms = 0
+    peak_probe_vms = 0
+
+    def verify_template(index: int, template: str, sandbox: Any) -> tuple[str, list[dict[str, Any]]]:
+        """Verify one template pair, then release it before another pair accumulates."""
+        nonlocal active_probe_vms, peak_probe_vms
+        session_prefix = f"{run_id}-{index}"
+        client = CubeSandboxClient(
+            journal=journal,
+            request_timeout_s=spec.execution.cube_request_timeout_seconds,
+        )
+        pair = []
+        failure: BaseException | None = None
+        common: list[dict[str, Any]] = []
+        try:
+            for pair_index in range(2):
                 lifecycle = CubeSandboxLifecycle(
                     client, template=template, node_name=spec.resources.target_node,
                     ownership=Ownership(
                         run_id, "template-base", run_id, spec.experiment_id,
-                        f"{run_id}-{len(lifecycles)}", "qualification-template-base",
+                        f"{session_prefix}-{pair_index}", "qualification-template-base",
                     ),
                     allow_internet_access=sandbox.allow_internet_access,
                 )
                 lifecycle.start()
-                lifecycles.append(lifecycle)
                 pair.append(lifecycle)
-            maps = []
-            for lifecycle in pair:
-                maps.append(_sandbox_file_mappings(lifecycle.sandbox_id))
-            common = []
+                with activity_lock:
+                    active_probe_vms += 1
+                    peak_probe_vms = max(peak_probe_vms, active_probe_vms)
+            maps = [_sandbox_file_mappings(lifecycle.sandbox_id) for lifecycle in pair]
             minimum_kib = sandbox.memory_mib * 1024 // 2
             for identity in maps[0].keys() & maps[1].keys():
                 left, right = maps[0][identity], maps[1][identity]
-                # The immutable root filesystem is shared too, but it is not
-                # evidence for cross-VM RAM Base sharing.  Cube template RAM
-                # volumes have a dedicated *-memory object in the volume store.
                 if not _same_template_ram_mapping(left, right):
                     continue
                 if min(left["size_kib"], right["size_kib"]) < minimum_kib:
@@ -817,22 +1094,50 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> 
                 raise RuntimeError(
                     f"template {template} has no physically shared large file-backed RAM mapping"
                 )
-            evidence[template] = common
+        except BaseException as exc:
+            failure = exc
+        cleanup_errors = []
+        for lifecycle in reversed(pair):
+            try:
+                lifecycle.close()
+            except Exception as exc:
+                cleanup_errors.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                with activity_lock:
+                    active_probe_vms -= 1
+        if failure is not None:
+            if cleanup_errors:
+                failure.add_note("template-pair cleanup: " + "; ".join(cleanup_errors))
+            raise failure
+        if cleanup_errors:
+            raise RuntimeError("template-pair cleanup failed: " + "; ".join(cleanup_errors))
+        return template, common
+
+    try:
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="template-sharing",
+        ) as pool:
+            futures = {
+                pool.submit(verify_template, index, template, sandbox): template
+                for index, (template, sandbox) in enumerate(templates.items())
+            }
+            for future in as_completed(futures):
+                template, common = future.result()
+                evidence[template] = common
     except BaseException as exc:
         primary_error = exc
     cleanup_errors = []
-    for lifecycle in reversed(lifecycles):
-        try:
-            lifecycle.close()
-        except Exception as exc:
-            cleanup_errors.append(f"{type(exc).__name__}: {exc}")
     try:
-        client.kill_owned_sandboxes(run_id)
+        CubeSandboxClient(journal=journal).kill_owned_sandboxes(run_id)
     except Exception as exc:
         cleanup_errors.append(f"owned cleanup: {type(exc).__name__}: {exc}")
     result = {
         "required": True, "passed": primary_error is None and not cleanup_errors,
         "supported": primary_error is None, "templates": evidence,
+        "template_count": len(templates),
+        "max_parallel_templates": worker_count,
+        "live_probe_vm_bound": worker_count * 2,
+        "peak_live_probe_vms": peak_probe_vms,
         "metric": "Linux smaps Shared_Clean/Pss for common Cube *-memory device+inode mapping",
         "failure": f"{type(primary_error).__name__}: {primary_error}" if primary_error else None,
         "cleanup_errors": cleanup_errors,
@@ -848,8 +1153,12 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> 
 def qualify(
     spec: ExperimentSpec, *, output_base: Path, receipt_path: Path,
     concurrency: int | None = None,
+    validated_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     require_host_ready(spec)
+    validated_inputs = (
+        validated_inputs if validated_inputs is not None else validate_inputs(spec)
+    )
     fault_test = supervision_fault_test()
     qualified = qualification_spec(spec, concurrency=concurrency)
     run_id = f"qualification-{uuid.uuid4().hex[:12]}"
@@ -876,11 +1185,17 @@ def qualify(
     receipt = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
-        "input_manifest": qualification_input_manifest(spec),
+        "input_manifest": qualification_input_manifest(
+            spec, validated_inputs=validated_inputs,
+        ),
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": time.time(),
-        "concurrency": max(qualified.execution.concurrency_levels),
+        "concurrency": int(
+            qualified.inference.configuration["qualification_max_parallel_sessions"]
+        ),
+        "qualified_session_count": max(qualified.execution.concurrency_levels),
+        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
         "target_concurrency": max(spec.execution.concurrency_levels),
         "scope": "capability_smoke",
         "policy_names": [policy.name for policy in qualified.policies],
@@ -920,7 +1235,7 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     expected = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
-        "input_manifest": qualification_input_manifest(spec),
+        "input_manifest": current_qualification_input_manifest(spec),
         "implementation_digest": implementation_digest(),
         "target_node": spec.resources.target_node,
         "runtime_image_digest": spec.runtime.image_digest,
@@ -937,12 +1252,16 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     mismatches = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
-    # Concurrency is the actual executed smoke size, not evidence of target
-    # performance. Explicit --qualification-concurrency may bound this gate;
-    # every workload case must still execute, and all real mechanism probes
-    # and exact source/input/spec checks remain mandatory.
-    if receipt.get("concurrency", 0) < len(load_workload_cases(spec.workload)):
+    # Concurrency is the maximum simultaneous smoke size, not the number of
+    # covered cases or evidence of target performance. Separate receipt fields
+    # prove that one qualification session executed for every workload case.
+    if receipt.get("concurrency", 0) < 1:
         mismatches.append("concurrency")
+    cases = load_workload_cases(spec.workload)
+    if receipt.get("qualified_session_count", 0) < len(cases):
+        mismatches.append("qualified_session_count")
+    if receipt.get("qualified_case_ids") != [case.case_id for case in cases]:
+        mismatches.append("qualified_case_ids")
     if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
         mismatches.append("policy_names")
     if spec.schema_version == 4:
@@ -1034,7 +1353,8 @@ def design_probes(spec, probe, *, artifact_root):
                 'cold_snapshot_root', 'snapshot_mechanism', 'snapshot_storage',
                 'snapshot_destination', 'lazy_restore', 'shared_memory_borrow_limit_mib',
                 'pool_transfer_concurrency', 'pool_transfer_timeout_seconds',
-                'template_base_sharing', 'runtime_poll_interval_seconds')
+                'template_base_sharing', 'template_base_sharing_artifact',
+                'runtime_poll_interval_seconds')
         identity = {key: resources[key] for key in keys}
         identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'
         digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:16]

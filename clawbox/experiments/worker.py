@@ -18,6 +18,7 @@ import sys
 import time
 import traceback
 import urllib.parse
+from collections import Counter
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
@@ -69,6 +70,63 @@ from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
     ReclamationPolicy, RestorePolicy, expand_matrix, load_experiment,
 )
+
+
+def native_ssh_identity_command(route: NativeSSHRoute, session_id: str) -> str:
+    """Build the strict identity probe used before Agent Tool execution."""
+    identity_file = f"/state/openclaw/{session_id}/ssh/id_ed25519"
+    known_hosts_file = f"/state/openclaw/{session_id}/ssh/known_hosts"
+    endpoint_host = f"[{route.host}]" if ":" in route.host else route.host
+    return shlex.join([
+        openclaw_real_ssh_path(session_id), "-i", identity_file,
+        "-o", f"UserKnownHostsFile={known_hosts_file}",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "UpdateHostKeys=no",
+        "-o", f"HostKeyAlias={native_ssh_host_key_alias(route.sandbox_id)}",
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
+        "-p", str(route.port), f"executor@{endpoint_host}",
+        'printf %s "$TASK_ID"',
+    ])
+
+
+def start_sandbox_pair(tool_lifecycle: CubeSandboxLifecycle,
+                       runtime_lifecycle: CubeSandboxLifecycle):
+    """Start one Tool/Runtime pair concurrently and retain per-VM timings."""
+    def start_one(lifecycle: CubeSandboxLifecycle):
+        started = time.time()
+        service_seconds = lifecycle.start()
+        return service_seconds, started, time.time()
+
+    # The public create limit is expressed in session pairs. Starting both VMs
+    # here turns gate=10 into the Cube-recommended 20 concurrent creates.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sandbox-pair") as pool:
+        tool = pool.submit(start_one, tool_lifecycle)
+        runtime = pool.submit(start_one, runtime_lifecycle)
+        return tool.result(), runtime.result()
+
+
+def warm_runtime_ssh_route(
+    runtime_executor: Any, route: NativeSSHRoute, session_id: str,
+    *, attempt_limit: int = 120,
+) -> int:
+    """Warm the long-lived Tool bridge through the proven Runtime route."""
+    command = native_ssh_identity_command(route, session_id)
+    last_error = ""
+    for attempt in range(1, attempt_limit + 1):
+        try:
+            result = runtime_executor.execute(command, 30)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        else:
+            if result.exit_code == 0 and result.stdout.strip() == session_id:
+                return attempt
+            last_error = f"exit={result.exit_code}: " + result.stderr[-1000:]
+        if attempt < attempt_limit:
+            time.sleep(0.5)
+    raise RuntimeError(
+        "Runtime native SSH warmup did not reach the intended Tool identity "
+        f"for {session_id}: {last_error}"
+    )
 
 
 class CgroupCpuSampler:
@@ -242,6 +300,16 @@ def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
             raise IndexError("unique session assignment exhausted workload cases")
         return cases[session_index]
     return cases[session_index % len(cases)]
+
+
+def session_worker_count(arm: ExperimentArm) -> int:
+    """Bound qualification residency without reducing covered sessions."""
+    value = arm.inference.configuration.get("qualification_max_parallel_sessions")
+    if value is None:
+        return arm.concurrency
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("qualification_max_parallel_sessions must be a positive integer")
+    return min(arm.concurrency, value)
 
 
 def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
@@ -452,7 +520,16 @@ class WatermarkController:
             raise RuntimeError(f"memory watermark controller failed: {self._error}") from self._error
 
     def _record_borrow(self, lifecycle: CubeSandboxLifecycle, *, reason: str) -> bool:
-        with self._borrow_lock:
+        # Rebinding a populated VM can spend seconds in the kernel.  A borrow
+        # already in flight is pressure relief for this NUMA domain; making
+        # every concurrent tool request queue behind the same mutex only moves
+        # the admission queue into memory preparation and creates a long tail.
+        # Let those callers return to the ordinary admission wait, which
+        # rechecks capacity after the in-flight rebind publishes its relief.
+        if not self._borrow_lock.acquire(blocking=False):
+            self._last_borrow_rejection = 'borrow_in_progress'
+            return False
+        try:
             self._last_borrow_rejection = None
             if self.borrower is None or self.memory_scheduling in {'local_only', 'snapshot_only'}:
                 self._last_borrow_rejection = 'borrowing_disabled'
@@ -482,6 +559,8 @@ class WatermarkController:
                 **asdict(record),
             })
             return True
+        finally:
+            self._borrow_lock.release()
 
     def _decision(self, action: str, reason: str, *,
                   candidates: dict[str, Any] | None = None,
@@ -524,11 +603,14 @@ class WatermarkController:
         self._last_borrow_rejection = None
         borrowing_enabled = (self.borrower is not None
                              and self.memory_scheduling not in {'local_only', 'snapshot_only'})
+        borrow_available = borrowing_enabled and not self._borrow_lock.locked()
+        if borrowing_enabled and not borrow_available:
+            self._last_borrow_rejection = 'borrow_in_progress'
         if self.action_cost_model is None:
             if self.coordinator.evict_one_for_watermark():
                 self._decision('reclaim', reason)
                 return 'reclaim'
-            borrowed = borrowing_enabled and (
+            borrowed = borrow_available and (
                 self._record_borrow(preferred_borrow, reason=reason)
                 if preferred_borrow is not None else self._borrow_one()
             )
@@ -540,7 +622,7 @@ class WatermarkController:
             return action
 
         borrow_candidate = ((preferred_borrow or self._next_borrow_candidate())
-                            if borrowing_enabled else None)
+                            if borrow_available else None)
         reclaim_candidate_fn = getattr(
             self.coordinator, 'watermark_reclaim_candidate', None,
         )
@@ -1256,21 +1338,385 @@ def summarize_tool_execution_observations(
     }
 
 
+def dependency_install_command(command: object) -> bool:
+    """Return whether a shell command uses a shared package download path."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in {"&&", "||", ";", "|"}:
+            if segments[-1]:
+                segments.append([])
+        else:
+            segments[-1].append(token)
+
+    def is_assignment(token: str) -> bool:
+        name, separator, _ = token.partition("=")
+        return bool(separator and name.isidentifier())
+
+    def executable_index(segment: list[str]) -> int | None:
+        index = 0
+        while index < len(segment):
+            while index < len(segment) and is_assignment(segment[index]):
+                index += 1
+            if index >= len(segment):
+                return None
+            executable = os.path.basename(segment[index]).lower()
+            if executable not in {"sudo", "env", "command", "time", "nohup"}:
+                return index
+            index += 1
+            while index < len(segment) and (
+                segment[index].startswith("-") or is_assignment(segment[index])
+            ):
+                index += 1
+        return None
+
+    for segment in segments:
+        index = executable_index(segment)
+        if index is None:
+            continue
+        executable = os.path.basename(segment[index]).lower()
+        arguments = [item.lower() for item in segment[index + 1:]]
+        if executable in {"apt", "apt-get"} and any(
+            action in {"update", "install", "upgrade", "dist-upgrade", "full-upgrade"}
+            for action in arguments
+        ):
+            return True
+        pip_executable = executable == "pip" or (
+            executable.startswith("pip")
+            and executable[3:].replace(".", "").isdigit()
+        )
+        if pip_executable and "install" in arguments:
+            return True
+        python_executable = executable == "python" or (
+            executable.startswith("python")
+            and executable[6:].replace(".", "").isdigit()
+        )
+        if python_executable:
+            for offset in range(len(arguments) - 2):
+                if (
+                    arguments[offset] == "-m"
+                    and arguments[offset + 1].startswith("pip")
+                    and arguments[offset + 2] == "install"
+                ):
+                    return True
+        if executable in {"bash", "sh"}:
+            for offset, argument in enumerate(arguments[:-1]):
+                if argument in {"-c", "-lc"} and dependency_install_command(
+                    segment[index + 2 + offset]
+                ):
+                    return True
+    return False
+
+
+class DependencyInstallGate:
+    """Arm-wide permit gate held for the full package command execution."""
+
+    def __init__(self, limit: int, emit: Callable[[dict[str, Any]], None]) -> None:
+        self.limit = limit
+        self.emit = emit
+        self.semaphore = Semaphore(limit)
+        self.lock = Lock()
+        self.active: dict[str, tuple[str, float]] = {}
+
+    def acquire(
+        self, execution_id: str, session_id: str, *, timeout_seconds: float,
+    ) -> float:
+        with self.lock:
+            if execution_id in self.active:
+                raise RuntimeError(
+                    f"dependency install permit already active for {execution_id}"
+                )
+        started = time.monotonic()
+        self.emit({
+            "event": "dependency_install_gate_wait_started",
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "limit": self.limit,
+        })
+        if not self.semaphore.acquire(timeout=timeout_seconds):
+            waited = time.monotonic() - started
+            self.emit({
+                "event": "dependency_install_gate_wait_timed_out",
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "limit": self.limit,
+                "wait_seconds": waited,
+            })
+            raise TimeoutError(
+                "dependency install concurrency wait exceeded "
+                f"{timeout_seconds:.3f} seconds"
+            )
+        acquired = time.monotonic()
+        with self.lock:
+            self.active[execution_id] = (session_id, acquired)
+        waited = acquired - started
+        self.emit({
+            "event": "dependency_install_gate_acquired",
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "limit": self.limit,
+            "wait_seconds": waited,
+        })
+        return waited
+
+    def release(self, execution_id: str, *, reason: str) -> bool:
+        with self.lock:
+            entry = self.active.pop(execution_id, None)
+        if entry is None:
+            return False
+        session_id, acquired = entry
+        self.semaphore.release()
+        self.emit({
+            "event": "dependency_install_gate_released",
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "limit": self.limit,
+            "held_seconds": time.monotonic() - acquired,
+            "reason": reason,
+        })
+        return True
+
+    def release_session(self, session_id: str, *, reason: str) -> int:
+        with self.lock:
+            execution_ids = [
+                execution_id
+                for execution_id, (owner, _) in self.active.items()
+                if owner == session_id
+            ]
+        return sum(
+            self.release(execution_id, reason=reason)
+            for execution_id in execution_ids
+        )
+
+
+class ArmActivityTracker:
+    """In-memory task/queue state derived from existing transition events."""
+
+    def __init__(self, total_sessions: int) -> None:
+        self.total_sessions = total_sessions
+        self.started_monotonic = time.monotonic()
+        self.lock = Lock()
+        self.offered: set[str] = set()
+        self.vm_create_waiting: dict[str, float] = {}
+        self.vm_creating: dict[str, float] = {}
+        self.activated: set[str] = set()
+        self.ever_activated: set[str] = set()
+        self.llm_waiting: dict[str, float] = {}
+        self.dependency_install_waiting: dict[str, tuple[str, float]] = {}
+        self.dependency_install_active: dict[str, tuple[str, float]] = {}
+        self.tool_admission_waiting: dict[str, tuple[str, float]] = {}
+        self.tool_admitted_waiting_start: dict[str, tuple[str, float]] = {}
+        self.tool_executing: dict[str, tuple[str, float]] = {}
+        self.completed: set[str] = set()
+        self.failed: set[str] = set()
+
+    @staticmethod
+    def _oldest(values: Any, now: float) -> float:
+        starts = [
+            value[1] if isinstance(value, tuple) else value
+            for value in values
+        ]
+        return max(0.0, now - min(starts)) if starts else 0.0
+
+    def _drop_session_operations(self, session_id: str) -> None:
+        for operations in (
+            self.dependency_install_waiting,
+            self.dependency_install_active,
+            self.tool_admission_waiting,
+            self.tool_admitted_waiting_start,
+            self.tool_executing,
+        ):
+            for execution_id in [
+                key for key, value in operations.items() if value[0] == session_id
+            ]:
+                operations.pop(execution_id, None)
+
+    def observe(self, event: dict[str, Any], *, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        name = str(event.get("event") or "")
+        session_id = str(event.get("session_id") or "")
+        execution_id = str(event.get("execution_id") or "")
+        if not session_id:
+            return
+        with self.lock:
+            if name == "sandbox_create_gate_wait_started":
+                self.offered.add(session_id)
+                self.vm_create_waiting[session_id] = now
+            elif name == "sandbox_create_gate_acquired":
+                self.vm_create_waiting.pop(session_id, None)
+                self.vm_creating[session_id] = now
+            elif name == "sandbox_created" and event.get("role") == "runtime":
+                self.vm_creating.pop(session_id, None)
+                self.activated.add(session_id)
+                self.ever_activated.add(session_id)
+            elif name == "model_wait_started":
+                self.llm_waiting[session_id] = now
+            elif name == "model_response_ready":
+                self.llm_waiting.pop(session_id, None)
+            elif name == "dependency_install_gate_wait_started" and execution_id:
+                self.dependency_install_waiting[execution_id] = (session_id, now)
+            elif name == "dependency_install_gate_acquired" and execution_id:
+                self.dependency_install_waiting.pop(execution_id, None)
+                self.dependency_install_active[execution_id] = (session_id, now)
+            elif name in {
+                "dependency_install_gate_released",
+                "dependency_install_gate_wait_timed_out",
+            } and execution_id:
+                self.dependency_install_waiting.pop(execution_id, None)
+                self.dependency_install_active.pop(execution_id, None)
+            elif name == "tool_admission_queued" and execution_id:
+                self.tool_admission_waiting[execution_id] = (session_id, now)
+            elif name == "tool_admitted" and execution_id:
+                self.tool_admission_waiting.pop(execution_id, None)
+                self.tool_admitted_waiting_start[execution_id] = (session_id, now)
+            elif name == "tool_execution_progress" and execution_id:
+                if event.get("phase") == "start":
+                    self.tool_admission_waiting.pop(execution_id, None)
+                    self.tool_admitted_waiting_start.pop(execution_id, None)
+                    self.tool_executing[execution_id] = (session_id, now)
+                elif event.get("phase") == "end":
+                    self.tool_executing.pop(execution_id, None)
+            elif name in {
+                "tool_completed", "tool_admission_abandoned", "tool_admission_failed",
+            } and execution_id:
+                self.tool_admission_waiting.pop(execution_id, None)
+                self.tool_admitted_waiting_start.pop(execution_id, None)
+                self.tool_executing.pop(execution_id, None)
+            elif name in {"session_complete", "session_failed"}:
+                self.vm_create_waiting.pop(session_id, None)
+                self.vm_creating.pop(session_id, None)
+                self.llm_waiting.pop(session_id, None)
+                self.activated.discard(session_id)
+                self._drop_session_operations(session_id)
+                if name == "session_complete" and event.get("valid") is True:
+                    self.completed.add(session_id)
+                    self.failed.discard(session_id)
+                else:
+                    self.failed.add(session_id)
+                    self.completed.discard(session_id)
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self.lock:
+            elapsed = max(now - self.started_monotonic, 1e-9)
+            terminal = self.completed | self.failed
+            active = self.activated - terminal
+            return {
+                "total_sessions": self.total_sessions,
+                "not_yet_offered_sessions": max(
+                    0, self.total_sessions - len(self.offered)
+                ),
+                "offered_sessions": len(self.offered),
+                "offered_not_activated_sessions": len(
+                    self.offered - self.ever_activated - terminal
+                ),
+                "vm_create_waiting_sessions": len(self.vm_create_waiting),
+                "vm_create_wait_oldest_seconds": self._oldest(
+                    self.vm_create_waiting.values(), now
+                ),
+                "vm_creating_sessions": len(self.vm_creating),
+                "activated_running_sessions": len(active),
+                "idle_at_llm_sessions": len(set(self.llm_waiting) & active),
+                "agent_active_sessions": len(active - set(self.llm_waiting)),
+                "dependency_install_waiting_operations": len(
+                    self.dependency_install_waiting
+                ),
+                "dependency_install_waiting_tasks": len({
+                    value[0] for value in self.dependency_install_waiting.values()
+                }),
+                "dependency_install_wait_oldest_seconds": self._oldest(
+                    self.dependency_install_waiting.values(), now
+                ),
+                "dependency_install_active_operations": len(
+                    self.dependency_install_active
+                ),
+                "dependency_install_active_tasks": len({
+                    value[0] for value in self.dependency_install_active.values()
+                }),
+                "tool_admission_waiting_operations": len(
+                    self.tool_admission_waiting
+                ),
+                "tool_admission_waiting_tasks": len({
+                    value[0] for value in self.tool_admission_waiting.values()
+                }),
+                "tool_admission_wait_oldest_seconds": self._oldest(
+                    self.tool_admission_waiting.values(), now
+                ),
+                "tool_admitted_waiting_start_operations": len(
+                    self.tool_admitted_waiting_start
+                ),
+                "tool_executing_operations": len(self.tool_executing),
+                "tool_executing_tasks": len({
+                    value[0] for value in self.tool_executing.values()
+                }),
+                "completed_sessions": len(self.completed),
+                "failed_sessions": len(self.failed),
+                "offered_rate_per_second": len(self.offered) / elapsed,
+                "activation_rate_per_second": (
+                    len(self.ever_activated) / elapsed
+                ),
+                "completion_rate_per_second": len(terminal) / elapsed,
+            }
+
+
+def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, Any]:
+    """Combine disjoint per-NUMA queues without re-reading kernel state."""
+    per_domain = {
+        name: domain.coordinator.queue_snapshot()
+        for name, domain in domains.items()
+    }
+    by_class: Counter[str] = Counter()
+    blockers: Counter[str] = Counter()
+    summed = Counter()
+    for snapshot in per_domain.values():
+        by_class.update(snapshot.get("admission_queue_depth_by_class", {}))
+        blockers.update(snapshot.get("admission_queue_last_blockers", {}))
+        for field in (
+            "admission_queue_depth", "admission_queue_tasks",
+            "tool_admission_queue_tasks", "admission_queue_resident_vms",
+            "registered_sessions", "model_waiting_sessions",
+            "tool_active_sessions", "eviction_in_progress_sessions",
+        ):
+            summed[field] += int(snapshot.get(field, 0))
+    return {
+        **dict(summed),
+        "admission_queue_depth_by_class": dict(by_class),
+        "admission_queue_last_blockers": dict(blockers),
+        "admission_queue_oldest_seconds": max(
+            (float(value.get("admission_queue_oldest_seconds", 0.0))
+             for value in per_domain.values()),
+            default=0.0,
+        ),
+        "per_domain": per_domain,
+    }
+
+
 class EventWriter:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *,
+                 activity_tracker: ArmActivityTracker | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.lock = Lock()
         self.sequence = 0
+        self.activity_tracker = activity_tracker
 
     def write(self, event: dict[str, Any]) -> None:
         with self.lock, self.path.open("a", encoding="utf-8") as stream:
+            monotonic_ns = time.monotonic_ns()
+            if self.activity_tracker is not None:
+                self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
             row = {
                 "schema_version": 1,
                 "sequence_no": self.sequence,
                 "wall_time": utcnow().isoformat(),
                 "wall_time_ns": str(time.time_ns()),
-                "monotonic_time_ns": str(time.monotonic_ns()),
+                "monotonic_time_ns": str(monotonic_ns),
                 **event,
             }
             self.sequence += 1
@@ -1398,7 +1844,11 @@ class ExperimentWorker:
                 self.client.validate_template_image(
                     sandbox.template, sandbox.image_digest,
                 )
-        events = EventWriter(self.output_root / "events" / f"{arm.arm_id}.jsonl")
+        activity_tracker = ArmActivityTracker(arm.concurrency)
+        events = EventWriter(
+            self.output_root / "events" / f"{arm.arm_id}.jsonl",
+            activity_tracker=activity_tracker,
+        )
         shared_borrow_mib = arm.resources.shared_memory_borrow_limit_mib
         sampler = (
             NumaCgroupMemorySampler(
@@ -1589,6 +2039,10 @@ class ExperimentWorker:
                     warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
                 events.write({
                     "event": "memory_sample", "local_used_bytes": used,
+                    "queue_activity_snapshot": activity_tracker.snapshot(),
+                    "admission_queue_snapshot": aggregate_admission_queue_snapshots(
+                        domains
+                    ),
                     "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
                     "numa_residency": sampler.node_usage() if isinstance(sampler, NumaCgroupMemorySampler) else None,
                     "combined_live_used_bytes": sampler.tier_usage()[2] if isinstance(sampler, NumaCgroupMemorySampler) else used,
@@ -1619,6 +2073,13 @@ class ExperimentWorker:
         sandbox_create_gate = Semaphore(self._sandbox_create_limit(
             arm.concurrency, arm.execution.sandbox_create_concurrency,
         ))
+        dependency_install_gate = (
+            DependencyInstallGate(
+                arm.execution.dependency_install_concurrency, events.write,
+            )
+            if arm.execution.dependency_install_concurrency is not None
+            else None
+        )
         self._runtime_memory = None
         self._priority_domain = None
         if arm.resources.local_memory_cgroup:
@@ -1668,8 +2129,12 @@ class ExperimentWorker:
         interrupted = False
         arm_started_wall = time.time()
         arm_started_monotonic = time.monotonic()
+        telemetry_warmup_pool = ThreadPoolExecutor(
+            max_workers=min(64, session_worker_count(arm)),
+            thread_name_prefix="tool-telemetry-warmup",
+        )
         pool = ThreadPoolExecutor(
-            max_workers=arm.concurrency, thread_name_prefix="agent"
+            max_workers=session_worker_count(arm), thread_name_prefix="agent"
         )
         offer_offsets = session_offer_offsets(arm)
         futures: dict[Any, int] = {}
@@ -1731,7 +2196,9 @@ class ExperimentWorker:
                     domain.sampler.observe, arm_started_wall, arm_started_monotonic,
                     snapshot_pool, domain.borrower, domain.controller,
                     creation_reserved=placement is not None, creation_gate_info=slot,
-                    offered_offset_seconds=offer_offsets[index])
+                    offered_offset_seconds=offer_offsets[index],
+                    telemetry_warmup_pool=telemetry_warmup_pool,
+                    dependency_install_gate=dependency_install_gate)
                 result['placement_wait_seconds'] = waited if placement is not None else 0.
                 offered = arm_started_wall + offer_offsets[index]
                 result['offered_to_completion_seconds'] = max(0.,
@@ -1799,6 +2266,9 @@ class ExperimentWorker:
             failure = exc
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
+            telemetry_warmup_pool.shutdown(
+                wait=not interrupted, cancel_futures=interrupted,
+            )
             policy_events.close(wait=not interrupted)
             # Watermark threads call DemandLedger.check(), which delegates to
             # the shared pressure controller. Stop those readers before
@@ -2210,7 +2680,10 @@ class ExperimentWorker:
                      watermark_controller: WatermarkController | None = None,
                      creation_reserved: bool = False,
                      creation_gate_info=None,
-                     offered_offset_seconds: float | None = None) -> dict[str, Any]:
+                      offered_offset_seconds: float | None = None,
+                      telemetry_warmup_pool: ThreadPoolExecutor | None = None,
+                      dependency_install_gate: DependencyInstallGate | None = None,
+                      ) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         tool_sandbox = session_case.sandbox or arm.sandbox
         if session_case != arm.case or tool_sandbox != arm.sandbox:
@@ -2523,6 +2996,11 @@ class ExperimentWorker:
                                       request_started_at=event.get("request_started_at"))
                     if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
                         coordinator.begin_model_wait(session_id, request_id)
+                events.write({
+                    "event": "model_wait_started",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                })
                 if arm.policy.reclamation is not ReclamationPolicy.RESIDENT:
                     submit_policy_event(pause_for_model_wait, event)
 
@@ -2536,6 +3014,12 @@ class ExperimentWorker:
                 with generated_model_requests_lock:
                     generated_model_requests.add(request_id)
                 coordinator.complete_model_wait(session_id, request_id)
+                events.write({
+                    "event": "model_response_ready",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "model_step": step,
+                })
                 # A paused Runtime cannot receive the pending HTTP response.
                 # Restore it synchronously in the gateway producer before the
                 # response becomes visible to OpenClaw. Tool restore remains
@@ -2697,12 +3181,12 @@ class ExperimentWorker:
                     )
                     pair_reservation = pair_amount
                 timeline["sandbox_create_start"] = time.time()
-                timeline["tool_create_start"] = time.time()
-                if lifetime:
-                    tool_create_s, tool_create_reservation_wait = lifecycle.start(), 0.0
-                else:
-                    tool_create_s, tool_create_reservation_wait = lifecycle.start(), pair_wait
-                timeline["tool_ready"] = time.time()
+                (
+                    (tool_create_s, timeline["tool_create_start"], timeline["tool_ready"]),
+                    (runtime_create_s, timeline["runtime_create_start"], timeline["runtime_ready"]),
+                ) = start_sandbox_pair(lifecycle, runtime_lifecycle)
+                tool_create_reservation_wait = 0.0 if lifetime else pair_wait
+                runtime_create_reservation_wait = 0.0
                 events.write({"event": "sandbox_created", "session_id": session_id,
                               "role": "tool", "service_seconds": tool_create_s,
                               "materialization_reservation_mib": arm.resources.lifecycle_reservation_mib(arm.sandbox.memory_mib),
@@ -2723,13 +3207,9 @@ class ExperimentWorker:
                     runtime_lifecycle.ensure_network_allow_out(
                         f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
                     )
-                timeline["runtime_create_start"] = time.time()
-                if lifetime:
-                    runtime_create_s, runtime_create_reservation_wait = runtime_lifecycle.start(), 0.0
-                else:
-                    runtime_create_s, runtime_create_reservation_wait = runtime_lifecycle.start(), 0.0
-                timeline["runtime_ready"] = time.time()
-                timeline["sandbox_ready"] = timeline["runtime_ready"]
+                timeline["sandbox_ready"] = max(
+                    timeline["tool_ready"], timeline["runtime_ready"], time.time(),
+                )
                 events.write({"event": "sandbox_created", "session_id": session_id,
                               "role": "runtime", "service_seconds": runtime_create_s,
                               "materialization_reservation_mib": arm.resources.lifecycle_reservation_mib(arm.runtime.memory_mib),
@@ -2747,7 +3227,9 @@ class ExperimentWorker:
                     sandbox_create_gate.release()
                 if creation_gate_info is not None:
                     creation_gate_info[2]()
-            create_s = runtime_create_s + tool_create_s
+            create_s = max(
+                0.0, timeline["sandbox_ready"] - timeline["sandbox_create_start"],
+            )
             runtime_executor = CubeCommandExecutor(
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
             )
@@ -2825,14 +3307,14 @@ class ExperimentWorker:
                 })
                 return route
 
-            # A running CubeSandbox keeps one published TCP mapping.  Resolve
-            # and prove that mapping once, then reuse it until a restore says
-            # the Tool generation changed.  Re-resolving and opening a second
-            # SSH connection before every OpenClaw SSH invocation turns one
-            # Agent tool into several control-plane round trips and collapses
-            # throughput at hundreds of sessions.
+            # The initial Tool route is created with a fresh per-session host
+            # key and the actual Agent SSH enforces it strictly. Its expensive
+            # first collector initialization is warmed in parallel with the
+            # Runtime startup below. A restored Tool can publish a new route,
+            # so only post-restore generations need the synchronous identity
+            # and readiness preflight before admission.
             admitted_route = setup_route
-            admitted_route_identity_verified = False
+            admitted_route_requires_preflight = True
 
             exit_mismatches = 0
             model_steps = 0
@@ -2902,7 +3384,8 @@ class ExperimentWorker:
             native_artifacts = None
             policy_control_path: Path | None = None
             if arm.agent.driver is AgentDriver.OPENCLAW:
-                active_reservations: dict[str, int] = {}
+                # execution_id -> (LOCAL reservation MiB, global reservation MiB)
+                active_reservations: dict[str, tuple[int, int]] = {}
                 admitted_routes: dict[str, NativeSSHRoute] = {}
                 host_rss_samplers: dict[str, SandboxRSSSampler] = {}
                 active_cpu_placements: set[str] = set()
@@ -2910,7 +3393,7 @@ class ExperimentWorker:
                 reservation_lock = Lock()
 
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
-                    nonlocal admitted_route, admitted_route_identity_verified
+                    nonlocal admitted_route, admitted_route_requires_preflight
                     control_marks = {"started": time.monotonic()}
                     execution_id = str(request["execution_id"])
                     if progress_control:
@@ -2919,6 +3402,7 @@ class ExperimentWorker:
                     execution_scope = str(
                         request.get("execution_scope") or "agent-tool"
                     )
+                    command = request.get("command")
                     managed_command = (execution_scope == "agent-tool"
                                        and request.get("operation") != "filesystem")
                     prediction = None
@@ -2930,7 +3414,6 @@ class ExperimentWorker:
                                 )
                             if arm.resources.prediction_mode in {"runtime", "cold-start"}:
                                 from .prediction import command_sha256
-                                command = request.get("command")
                                 if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:
                                     raise PredictionUnavailable("runtime prediction command text/digest mismatch; update the SSH shim")
                                 prediction = prediction_provider.resolve(command, request.get('prediction'))
@@ -2956,6 +3439,12 @@ class ExperimentWorker:
                     admission_memory_tier = "local"
                     reservation_acquired = False
                     cpu_placement_acquired = False
+                    dependency_permit_acquired = False
+                    dependency_limited = bool(
+                        managed_command
+                        and dependency_install_gate is not None
+                        and dependency_install_command(command)
+                    )
                     with reservation_lock:
                         pending_admissions.add(execution_id)
                     events.write({'event': 'tool_admission_queued',
@@ -2964,6 +3453,30 @@ class ExperimentWorker:
                                   'execution_scope': execution_scope,
                                   'operation': request.get('operation')})
                     control_marks["prediction_and_queue"] = time.monotonic()
+                    if dependency_limited:
+                        try:
+                            dependency_install_gate.acquire(
+                                execution_id,
+                                session_id,
+                                timeout_seconds=arm.execution.arm_timeout_seconds,
+                            )
+                            dependency_permit_acquired = True
+                            control_marks["dependency_install_gate"] = time.monotonic()
+                        except Exception as exc:
+                            progress_event('complete', execution_id)
+                            with reservation_lock:
+                                pending_admissions.discard(execution_id)
+                            events.write({
+                                "event": "tool_admission_failed",
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "reservation_acquired": False,
+                                "cpu_placement_acquired": False,
+                                "dependency_install_gate": True,
+                            })
+                            raise
                     with wait_lock:
                         control_marks["lifecycle_lock"] = time.monotonic()
                         try:
@@ -2988,7 +3501,7 @@ class ExperimentWorker:
                             control_marks["memory_prepare"] = time.monotonic()
                             if restored_tool:
                                 admitted_route = None
-                                admitted_route_identity_verified = False
+                                admitted_route_requires_preflight = True
                                 bridge_ready_started = time.monotonic()
                                 bridge_error: Exception | None = None
                                 bridge_result = None
@@ -3006,6 +3519,12 @@ class ExperimentWorker:
                                                 restart=bridge_attempt in (2, 10, 20),
                                                 command_timeout_seconds=(
                                                     arm.execution.command_timeout_seconds
+                                                ),
+                                                apt_cache_proxy_url=(
+                                                    arm.execution.apt_cache_proxy_url
+                                                ),
+                                                pypi_cache_index_url=(
+                                                    arm.execution.pypi_cache_index_url
                                                 ),
                                             ),
                                             60,
@@ -3042,35 +3561,22 @@ class ExperimentWorker:
                             if (admitted_route is None
                                     or admitted_route.sandbox_id != current_sandbox_id):
                                 admitted_route = resolve_native_ssh_route("admit")
-                                admitted_route_identity_verified = False
+                                admitted_route_requires_preflight = True
                             route = admitted_route
                             # Cube may publish a restored mapping slightly
                             # before CubeProxy accepts its fresh route. Prove
                             # reachability and the stable Tool identity from
                             # the Runtime before returning ADMIT; the Agent's
                             # actual SSH subprocess has not started yet.
-                            identity_file = f"/state/openclaw/{session_id}/ssh/id_ed25519"
-                            known_hosts_file = f"/state/openclaw/{session_id}/ssh/known_hosts"
-                            endpoint_host = (
-                                f"[{route.host}]" if ":" in route.host else route.host
-                            )
                             # The Runtime image's /usr/bin/ssh is the policy
                             # shim while the Agent is active.  An admission
                             # callback must use the per-session preserved
                             # OpenSSH client or it recursively calls /admit
                             # while holding this session's admission lock.
-                            real_ssh = openclaw_real_ssh_path(session_id)
-                            identity_command = shlex.join([
-                                real_ssh, "-i", identity_file,
-                                "-o", f"UserKnownHostsFile={known_hosts_file}",
-                                "-o", "StrictHostKeyChecking=yes",
-                                "-o", "UpdateHostKeys=no",
-                                "-o", f"HostKeyAlias={native_ssh_host_key_alias(route.sandbox_id)}",
-                                "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
-                                "-p", str(route.port), f"executor@{endpoint_host}",
-                                "printf %s \"$TASK_ID\"",
-                            ])
-                            if not admitted_route_identity_verified:
+                            identity_command = native_ssh_identity_command(
+                                route, session_id,
+                            )
+                            if admitted_route_requires_preflight:
                                 identity_started = time.monotonic()
                                 identity_result = None
                                 identity_error: Exception | None = None
@@ -3103,7 +3609,7 @@ class ExperimentWorker:
                                         "native SSH endpoint did not present the intended Tool "
                                         f"identity for {session_id} after {identity_attempt} attempts"
                                     ) from identity_error
-                                admitted_route_identity_verified = True
+                                admitted_route_requires_preflight = False
                                 events.write({
                                     "event": "native_ssh_identity_ready",
                                     "session_id": session_id,
@@ -3136,7 +3642,7 @@ class ExperimentWorker:
                                                                     host_sampler.charge_baseline)
                             with reservation_lock:
                                 pending_admissions.discard(execution_id)
-                                active_reservations[execution_id] = local_amount
+                                active_reservations[execution_id] = (local_amount, amount)
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
                                 if cpu_placement_acquired:
@@ -3159,7 +3665,13 @@ class ExperimentWorker:
                             if cpu_placement_acquired:
                                 priority_domain.release_tool_call(execution_id)
                             if reservation_acquired:
-                                coordinator.release(session_id, local_amount)
+                                coordinator.release(
+                                    session_id, local_amount, total_mib=amount,
+                                )
+                            if dependency_permit_acquired:
+                                dependency_install_gate.release(
+                                    execution_id, reason="admission_failed",
+                                )
                             with reservation_lock:
                                 coordinator.set_tool_active(
                                     session_id,
@@ -3218,6 +3730,7 @@ class ExperimentWorker:
                         "local_admitted_memory_mib": local_amount,
                         "admission_memory_tier": admission_memory_tier,
                         "admission_blocked_seconds": admission_wait,
+                        "dependency_install_limited": dependency_limited,
                         "endpoint_sandbox_id": route.sandbox_id,
                         "endpoint_epoch": route.epoch,
                         "endpoint_host": route.host,
@@ -3260,11 +3773,12 @@ class ExperimentWorker:
                     # memory. Completion must release its finished command's
                     # reservation without that lock, or both requests deadlock.
                     with reservation_lock:
-                        amount = active_reservations.get(execution_id)
+                        reservation = active_reservations.get(execution_id)
                         admitted_route = admitted_routes.get(execution_id)
                         host_sampler = host_rss_samplers.get(execution_id)
-                        if amount is None or admitted_route is None or host_sampler is None:
+                        if reservation is None or admitted_route is None or host_sampler is None:
                             raise RuntimeError(f"completion has no active admission for {execution_id}")
+                        local_amount, total_amount = reservation
                         completion_route = (
                             request.get("endpoint_sandbox_id"),
                             request.get("endpoint_epoch"),
@@ -3299,7 +3813,9 @@ class ExperimentWorker:
                                     if isinstance(increment, int) else None
                                 )
                                 break
-                        coordinator.release(session_id, amount)
+                        coordinator.release(
+                            session_id, local_amount, total_mib=total_amount,
+                        )
                         if execution_id in active_cpu_placements:
                             priority_domain.release_tool_call(execution_id)
                             active_cpu_placements.remove(execution_id)
@@ -3324,6 +3840,10 @@ class ExperimentWorker:
                             ),
                         )
 
+                    if dependency_install_gate is not None:
+                        dependency_install_gate.release(
+                            execution_id, reason="completed",
+                        )
                     # Keep lifecycle/idle transitions serialized with admission.
                     # Never hold reservation_lock while waiting for wait_lock.
                     with wait_lock, reservation_lock:
@@ -3347,22 +3867,29 @@ class ExperimentWorker:
                     progress_event('complete', str(request['execution_id']))
                     execution_id = str(request["execution_id"])
                     with reservation_lock:
-                        amount = active_reservations.pop(execution_id, None)
+                        reservation = active_reservations.pop(execution_id, None)
                         admitted_routes.pop(execution_id, None)
                         host_sampler = host_rss_samplers.pop(execution_id, None)
-                        if amount is None or host_sampler is None:
+                        if reservation is None or host_sampler is None:
                             raise RuntimeError(
                                 f"abandoned admission has no active reservation for {execution_id}"
                             )
+                        local_amount, total_amount = reservation
                         host_sampler.stop()
                         report = lifecycle.complete_first_tool_after_restore(
                             execution_id, tool_seconds=0.0,
                             status="admission_response_lost",
                         )
-                        coordinator.release(session_id, amount)
+                        coordinator.release(
+                            session_id, local_amount, total_mib=total_amount,
+                        )
                         if execution_id in active_cpu_placements:
                             priority_domain.release_tool_call(execution_id)
                             active_cpu_placements.remove(execution_id)
+                    if dependency_install_gate is not None:
+                        dependency_install_gate.release(
+                            execution_id, reason="admission_abandoned",
+                        )
                     with wait_lock, reservation_lock:
                         coordinator.set_tool_active_if_registered(
                             session_id,
@@ -3378,7 +3905,7 @@ class ExperimentWorker:
                         "session_id": session_id,
                         "execution_id": execution_id,
                         "reason": "response_connection_lost",
-                        "released_memory_mib": amount,
+                        "released_memory_mib": total_amount,
                     })
 
                 if self.policy_control is None:
@@ -3412,6 +3939,8 @@ class ExperimentWorker:
                 tool_bridge_result = executor.execute(native_tool_bridge_setup_command(
                     require_progress_events=arm.policy.runtime_control.adaptive,
                     command_timeout_seconds=arm.execution.command_timeout_seconds,
+                    apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
+                    pypi_cache_index_url=arm.execution.pypi_cache_index_url,
                 ), 60)
                 if tool_bridge_result.exit_code != 0:
                     raise RuntimeError(
@@ -3437,6 +3966,46 @@ class ExperimentWorker:
                     sandbox_id=setup_route.sandbox_id,
                     host_key_alias=native_ssh_host_key_alias(setup_route.sandbox_id),
                 )
+                route_warmup_future = None
+                route_warmup_started = None
+                route_warmup_reported = False
+
+                def begin_tool_telemetry_warmup() -> None:
+                    nonlocal route_warmup_future, route_warmup_started
+                    if telemetry_warmup_pool is None or route_warmup_future is not None:
+                        return
+                    route_warmup_started = time.monotonic()
+                    route_warmup_future = telemetry_warmup_pool.submit(
+                        warm_runtime_ssh_route,
+                        runtime_executor,
+                        setup_route,
+                        session_id,
+                    )
+
+                def await_tool_telemetry_warmup() -> None:
+                    nonlocal route_warmup_reported
+                    nonlocal admitted_route_requires_preflight
+                    if route_warmup_future is None:
+                        return
+                    wait_started = time.monotonic()
+                    attempts = route_warmup_future.result()
+                    completed = time.monotonic()
+                    assert route_warmup_started is not None
+                    admitted_route_requires_preflight = False
+                    if not route_warmup_reported:
+                        route_warmup_reported = True
+                        events.write({
+                            "event": "native_ssh_identity_ready",
+                            "session_id": session_id,
+                            "execution_id": "startup-warmup",
+                            "sandbox_id": setup_route.sandbox_id,
+                            "endpoint_epoch": setup_route.epoch,
+                            "attempts": attempts,
+                            "phase": "startup",
+                            "service_seconds": completed - route_warmup_started,
+                            "critical_path_wait_seconds": completed - wait_started,
+                            "overlapped_with_runtime_startup": True,
+                        })
 
                 poll_resident_runtime = RuntimeStatusPoller(
                     lifecycle=runtime_lifecycle,
@@ -3445,24 +4014,36 @@ class ExperimentWorker:
                     snapshot_enabled=runtime_snapshot_enabled,
                 )
 
-                outcome = run_openclaw(
-                    prompt=arm.case.prompt, session_id=session_id,
-                    configuration={
-                        **inference_configuration,
-                        "command_timeout_seconds": arm.execution.command_timeout_seconds,
-                    },
-                    ssh=ssh_config,
-                    policy_control=policy_session, runtime_executor=runtime_executor,
-                    output_dir=self.output_root,
-                    timeout_seconds=arm.execution.arm_timeout_seconds,
-                    model_gateway=gateway_session,
-                    prediction_manifest=(prediction_provider.manifest
-                                         if prediction_provider is not None else None),
-                    resident_poll=poll_resident_runtime,
-                    checkpoint_relay=runtime_snapshot_enabled,
-                    **({"resident_wait": poll_resident_runtime.wait_for_file}
-                       if not runtime_snapshot_enabled else {}),
-                )
+                try:
+                    outcome = run_openclaw(
+                        prompt=arm.case.prompt, session_id=session_id,
+                        configuration={
+                            **inference_configuration,
+                            "command_timeout_seconds": arm.execution.command_timeout_seconds,
+                        },
+                        ssh=ssh_config,
+                        policy_control=policy_session, runtime_executor=runtime_executor,
+                        output_dir=self.output_root,
+                        timeout_seconds=arm.execution.arm_timeout_seconds,
+                        model_gateway=gateway_session,
+                        prediction_manifest=(prediction_provider.manifest
+                                             if prediction_provider is not None else None),
+                        resident_poll=poll_resident_runtime,
+                        checkpoint_relay=runtime_snapshot_enabled,
+                        startup_begin=begin_tool_telemetry_warmup,
+                        startup_wait=await_tool_telemetry_warmup,
+                        startup_event=events.write,
+                        **({"resident_wait": poll_resident_runtime.wait_for_file}
+                           if not runtime_snapshot_enabled else {}),
+                    )
+                except BaseException:
+                    # Do not destroy the Tool VM while its bounded background
+                    # route/collector warmup is still using the SSH endpoint.
+                    try:
+                        await_tool_telemetry_warmup()
+                    except Exception:
+                        pass
+                    raise
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
                 coordinator.set_tool_active(session_id, True)
@@ -3778,6 +4359,13 @@ class ExperimentWorker:
                     "role": "runtime", "service_seconds": runtime_destroy_s,
                     "lifecycle_timing": runtime_lifecycle.timings[-1],
                 }))
+            if dependency_install_gate is not None:
+                cleanup_step(
+                    "dependency install permits",
+                    lambda: dependency_install_gate.release_session(
+                        session_id, reason="session_cleanup",
+                    ),
+                )
             if discard_failed_gateway_session:
                 cleanup_step("failed model gateway event", lambda: events.write({
                     "event": "model_gateway_session_discarded",

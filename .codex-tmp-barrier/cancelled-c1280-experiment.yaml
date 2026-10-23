@@ -1,0 +1,235 @@
+schema_version: 4
+experiment_id: swe-all503-c1280-barrier-v2-20261022t144407z
+environment:
+  runtime:
+    template_id: tpl-9c41283c66174a24bf0c6814
+    template_alias: null
+    source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+    image_digest: sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 1024
+    workspace: /workspace
+    preflight_command: null
+    allow_internet_access: true
+  sandbox:
+    template_id: tpl-34a99ed59ab5461cb810c968
+    template_alias: null
+    source_image_reference: 127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438
+    image_digest: sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 3072
+    workspace: /testbed
+    preflight_command: "/usr/bin/python3 -c 'BARRIER_HEALTH='\"'\"'http://193.124.7.2:14713/health'\"\
+      '\"'\nBARRIER_HEADERS={'\"'\"'Authorization'\"'\"': '\"'\"'4b28fdf45d43d47a8c1358b82d7f80e2a85f142dc4613f80'\"\
+      '\"', '\"'\"'Content-Type'\"'\"': '\"'\"'application/json'\"'\"'}\nimport http.client,time,urllib.error,urllib.request\n\
+      for barrier_probe_attempt in range(12):\n try:\n  with urllib.request.urlopen(urllib.request.Request(BARRIER_HEALTH,headers=BARRIER_HEADERS),timeout=15)\
+      \ as response:\n   assert response.status==200\n  break\n except urllib.error.HTTPError\
+      \ as exc:\n  if exc.code < 500 and exc.code != 429:raise\n  if barrier_probe_attempt\
+      \ == 11:raise\n except (urllib.error.URLError,http.client.HTTPException,OSError):\n\
+      \  if barrier_probe_attempt == 11:raise\n time.sleep(min(0.25*(2**barrier_probe_attempt),5.0))\n\
+      expected={'\"'\"'git_head'\"'\"': '\"'\"'ff2da40abec773902b6fda86d36de154d83a7d9f'\"\
+      '\"', '\"'\"'source_sha256'\"'\"': '\"'\"'a6d3dbb6655e3f9e927361ee8b4cb24feda9519b4f6ca7edc68c8aabeab4c4d4'\"\
+      '\"', '\"'\"'task_inventory_sha256'\"'\"': '\"'\"'f8e36a4c41d0c9e4de0910648e548ccb559c5b81515cb8f412252ed918c6538d'\"\
+      '\"', '\"'\"'os_inventory_sha256'\"'\"': '\"'\"'813258c6128355881a8e61738017b3411718d404556944ac33b338dc54808adb'\"\
+      '\"', '\"'\"'uid'\"'\"': 0, '\"'\"'arch'\"'\"': '\"'\"'aarch64'\"'\"', '\"'\"\
+      'system_python'\"'\"': '\"'\"'3.11.2'\"'\"', '\"'\"'cwd'\"'\"': '\"'\"'/testbed'\"\
+      '\"'}\ninventory_code=\"import glob,json,platform,re\\ntry:\\n import importlib.metadata\
+      \ as m\\n packages={re.sub(r'\"'\"'[-_.]+'\"'\"','\"'\"'-'\"'\"',d.metadata['\"\
+      '\"'Name'\"'\"']).lower():d.version for d in m.distributions()}\\nexcept ImportError:\\\
+      n import pkg_resources\\n packages={re.sub(r'\"'\"'[-_.]+'\"'\"','\"'\"'-'\"\
+      '\"',d.project_name).lower():d.version for d in pkg_resources.working_set}\\\
+      nconda={}\\nfor p in glob.glob('\"'\"'/opt/conda/envs/testbed/conda-meta/*.json'\"\
+      '\"'):\\n d=json.load(open(p));conda[d['\"'\"'name'\"'\"']]=d['\"'\"'version'\"\
+      '\"']\\nprint(json.dumps({'\"'\"'conda'\"'\"':conda,'\"'\"'packages'\"'\"':packages,'\"\
+      '\"'python'\"'\"':platform.python_version()}))\\n\"\nimport hashlib,json,os,pathlib,platform,subprocess,uuid\n\
+      def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()\n\
+      root=pathlib.Path('\"'\"'/testbed'\"'\"');files={}\nfor name in subprocess.check_output(['\"\
+      '\"'git'\"'\"','\"'\"'-C'\"'\"',str(root),'\"'\"'ls-files'\"'\"','\"'\"'-z'\"\
+      '\"'],text=True).split('\"'\"'\\0'\"'\"'):\n if not name:continue\n p=root/name\n\
+      \ if p.is_symlink():files[name]={'\"'\"'symlink'\"'\"':os.readlink(p)}\n elif\
+      \ p.is_file():\n  with p.open('\"'\"'rb'\"'\"') as f:files[name]={'\"'\"'sha256'\"\
+      '\"':hashlib.file_digest(f,'\"'\"'sha256'\"'\"').hexdigest()}\n else:files[name]=None\n\
+      actual_inventory=json.loads(subprocess.check_output(['\"'\"'/opt/conda/envs/testbed/bin/python'\"\
+      '\"','\"'\"'-c'\"'\"',inventory_code],text=True))\ndpkg=dict(line.split('\"\
+      '\"'\\t'\"'\"',1) for line in subprocess.check_output(['\"'\"'dpkg-query'\"\
+      '\"','\"'\"'-W'\"'\"','\"'\"'-f'\"'\"','\"'\"'${Package}\\t${Version}\\n'\"\
+      '\"'],text=True).splitlines())\nactual={'\"'\"'git_head'\"'\"':subprocess.check_output(['\"\
+      '\"'git'\"'\"','\"'\"'-C'\"'\"',str(root),'\"'\"'rev-parse'\"'\"','\"'\"'HEAD'\"\
+      '\"'],text=True).strip(),\n '\"'\"'source_sha256'\"'\"':digest(files),'\"'\"\
+      'task_inventory_sha256'\"'\"':digest(actual_inventory),'\"'\"'os_inventory_sha256'\"\
+      '\"':digest(dpkg),\n '\"'\"'uid'\"'\"':os.getuid(),'\"'\"'arch'\"'\"':platform.machine(),'\"\
+      '\"'system_python'\"'\"':platform.python_version(),'\"'\"'cwd'\"'\"':os.getcwd()}\n\
+      assert actual==expected,json.dumps({'\"'\"'expected'\"'\"':expected,'\"'\"'actual'\"\
+      '\"':actual})\nmarker=pathlib.Path('\"'\"'/tmp/clawbox-env-acceptance-20261022-token'\"\
+      '\"')\nassert not marker.exists(),'\"'\"'writable workspace isolation failed:\
+      \ inherited another session marker'\"'\"'\ntoken=uuid.uuid4().hex;marker.write_text(token)\n\
+      print(json.dumps({'\"'\"'environment_verified'\"'\"':True,'\"'\"'isolation_token'\"\
+      '\"':token,**actual}))\n'"
+    allow_internet_access: false
+  resources:
+    compute_nodes:
+    - node_id: node0
+      numa_node: 0
+      cpus: 0-79
+      memory_capacity_mib: 460800
+      low_watermark_mib: 409600
+      high_watermark_mib: 440320
+    - node_id: node1
+      numa_node: 1
+      cpus: 80-159
+      memory_capacity_mib: 460800
+      low_watermark_mib: 409600
+      high_watermark_mib: 440320
+    - node_id: node2
+      numa_node: 2
+      cpus: 160-239
+      memory_capacity_mib: 460800
+      low_watermark_mib: 409600
+      high_watermark_mib: 440320
+    - node_id: node3
+      numa_node: 3
+      cpus: 240-319
+      memory_capacity_mib: 460800
+      low_watermark_mib: 409600
+      high_watermark_mib: 440320
+    target_node: 193.124.7.2
+    pool_memory_budget_mib: 1761280
+    local_memory_low_watermark_mib: 1638400
+    local_memory_high_watermark_mib: 1761280
+    shared_memory_borrow_limit_mib: null
+    emergency_free_memory_mib: 1024
+    local_memory_capacity_mib: 1843200
+    warm_memory_capacity_mib: 0
+    warm_snapshot_root: null
+    cold_snapshot_root: /data/clawbox-acceptance-20261022T102744Z/runs/swe-all503-c1280-barrier-v2-20261022t144407z/cold
+    local_numa_node: null
+    local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+    warm_numa_node: null
+workload:
+  source: swe_rebench
+  input: /data/clawbox-acceptance-20261022T102744Z/runs/swe-all503-c1280-barrier-v2-20261022t144407z/workload.json
+  repetitions: 1
+  cases: []
+  session_assignment: round_robin
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: example-model
+    time_scale: 0.0
+    max_model_steps: 1
+    runtime_startup_timeout_seconds: 300
+evidence:
+  prediction_artifact: null
+  memory_action_costs: null
+  snapshot_residency_costs: null
+  idle_reclaim_costs: null
+measurement:
+  memory_sample_interval_seconds: 1.0
+  stabilization_seconds: 1.0
+  observe_predictions: false
+  validation:
+    command: "/usr/bin/python3 -c 'URL='\"'\"'http://193.124.7.2:14713'\"'\"'\nHEADERS={'\"\
+      '\"'Authorization'\"'\"': '\"'\"'4b28fdf45d43d47a8c1358b82d7f80e2a85f142dc4613f80'\"\
+      '\"', '\"'\"'Content-Type'\"'\"': '\"'\"'application/json'\"'\"'}\nTARGET=1280\n\
+      import hashlib,http.client,json,os,pathlib,time,urllib.error,urllib.request\n\
+      token=pathlib.Path('\"'\"'/tmp/clawbox-env-acceptance-20261022-token'\"'\"').read_text()\n\
+      sid=os.environ['\"'\"'TASK_ID'\"'\"']\npayload=json.dumps({'\"'\"'session_id'\"\
+      '\"':sid,'\"'\"'token'\"'\"':token}).encode()\nphase=int(hashlib.sha256(sid.encode()).hexdigest()[:8],16)/0xffffffff\n\
+      deadline=time.monotonic()+7200\narrived=False\nfailures=0\ntime.sleep(phase*2.0)\n\
+      while time.monotonic()<deadline:\n request=urllib.request.Request(URL+('\"'\"\
+      '/health'\"'\"' if arrived else '\"'\"'/arrive'\"'\"'),data=None if arrived\
+      \ else payload,headers=HEADERS)\n try:\n  with urllib.request.urlopen(request,timeout=15)\
+      \ as response:result=json.load(response)\n  arrived=True;failures=0\n except\
+      \ urllib.error.HTTPError as exc:\n  if exc.code < 500 and exc.code != 429:raise\n\
+      \  result=None;failures+=1\n except (urllib.error.URLError,http.client.HTTPException,OSError,json.JSONDecodeError):\n\
+      \  result=None;failures+=1\n if result and result['\"'\"'released'\"'\"']:\n\
+      \  assert result['\"'\"'arrived'\"'\"']==TARGET\n  assert pathlib.Path('\"'\"\
+      '/testbed/.git'\"'\"').exists()\n  print(json.dumps({'\"'\"'barrier_verified'\"\
+      '\"':True,'\"'\"'session_id'\"'\"':sid,'\"'\"'token'\"'\"':token}));break\n\
+      \ delay=(4.0+phase*2.0) if result else (min(0.25*(2**min(failures,5)),8.0)+phase)\n\
+      \ time.sleep(min(delay,max(0.0,deadline-time.monotonic())))\nelse:raise TimeoutError(str(TARGET)+'\"\
+      '\"'-task validation barrier was not released'\"'\"')\n'"
+  output:
+    directory: /results
+mechanisms:
+  admission:
+    startup_headroom_mib: 256
+    admission_margin_mib: 256
+    static_tool_memory_mib: null
+    non_command_tool_memory_mib: null
+    prediction_reservation_scale: 1.0
+    tool: 'off'
+  runtime:
+    pressure_control:
+      release_history_samples: 3
+      release_forecast_ttl_factor: 3.0
+      psi_ratio: 0.1
+      exit_hysteresis_seconds: 1.0
+      cooldown_seconds: 10.0
+      action_window_seconds: 2.0
+      protection_budget_mib: 256
+      max_boosted_vms: 1
+      boost_cpu_weight: 200
+      min_release_mib: 64
+      amortization_factor: 2.0
+    runtime_poll_interval_seconds: 0.5
+    proactive_memory_reclaim: false
+    memory_protection: false
+    cpu_release_boost: false
+  placement:
+    placement_cpu_overcommit: 1024.0
+    template_balance_slack: 0.1
+    tool_call_cpu_policy: c0
+    tool_call_cpu_pressure_ratio: 0.1
+    tool_call_cpu_pressure_samples: 2
+    tool_call_cpu_group_max_active: 2
+    tool_call_cpu_min_duration_seconds: 1.0
+    tool_call_cpu_include_smt: false
+    session_compute_nodes: []
+    policy: os_default
+    template_affinity: false
+  idle_reclaim:
+    checkpoint_restore_headroom_mib: 1024
+    policy: 'off'
+    scope: tool
+  shared_memory:
+    borrow_cooldown_seconds: 5.0
+    return_cooldown_seconds: 5.0
+    borrow: 'off'
+  checkpoint:
+    pool_transfer_concurrency: 1
+    pool_transfer_timeout_seconds: 120.0
+    mechanism: incremental-cow
+    storage: disk
+    residency: lru
+  deployment:
+    mode: os-default
+    resident_capacity_accounting: false
+    lifecycle_reservation_scale: 1.0
+  coordination:
+    action_selection: reclaim_first
+conditions:
+  prediction_source: kb
+comparison:
+  recipe: custom
+  arms:
+  - name: environment-acceptance
+    override: {}
+execution:
+  concurrency_levels:
+  - 1280
+  sandbox_create_concurrency: 8
+  cube_request_timeout_seconds: 130.0
+  worker_thread_switch_interval_seconds: 0.001
+  randomized_order: false
+  random_seed: 0
+  arm_timeout_seconds: 10800
+  arm_finalization_timeout_seconds: 600
+  command_timeout_seconds: 7300
+  arrival_schedule: burst
+  stagger_interval_seconds: 0.0
+  poisson_arrival_window_fraction: 2.0

@@ -1,0 +1,2 @@
+Superseded before qualification or formal execution by full-c1280-optimized-v3-public-20261022t212900z.
+Reason: the live baseline reached 41 GiB of the 50 GiB borrow sub-limit while shared physical residency was only 12.9 GB and WARM snapshots used 19.8 GB. V3 lets live-borrow and WARM-snapshot reservations dynamically compete for the full 100 GiB common pool; the pool's combined hard capacity remains enforced and tiered snapshots can fall back to COLD.

@@ -1,0 +1,33 @@
+diff --git a/CubeAPI/src/routes.rs b/CubeAPI/src/routes.rs
+--- a/CubeAPI/src/routes.rs
++++ b/CubeAPI/src/routes.rs
+@@ -25,7 +25,7 @@ use crate::{
+ 
+ const DEFAULT_ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
+ 
+-/// Pause / Resume / Connect share Master↔Cubelet Pause budget
++/// Create / Pause / Resume / Connect share Master↔Cubelet Pause budget
+ /// (`pauseCubeletRPCTimeout` = 120s).
+ const PAUSE_RESUME_ROUTE_TIMEOUT: Duration = Duration::from_secs(120);
+ 
+@@ -86,7 +86,6 @@ fn build_e2b_snapshot_long_router(state: &AppState, auth_configured: bool) -> Ro
+ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+     let routes = Router::new()
+         .route("/sandboxes", get(sandboxes::list_sandboxes))
+-        .route("/sandboxes", post(sandboxes::create_sandbox))
+         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
+         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
+         .route(
+@@ -117,10 +116,11 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
+     with_auth_and_rate_limit(routes, state, auth_configured)
+ }
+ 
+-/// Pause / Resume / Connect use the 120s lifecycle budget; keep them off the
++/// Create / Pause / Resume / Connect use the 120s lifecycle budget; keep them off the
+ /// default 30s TimeoutLayer.
+ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Router<AppState> {
+     let routes = Router::new()
++        .route("/sandboxes", post(sandboxes::create_sandbox))
+         .route(
+             "/sandboxes/:sandboxID/pause",
+             post(sandboxes::pause_sandbox),

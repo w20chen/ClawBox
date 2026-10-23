@@ -1,0 +1,157 @@
+schema_version: 4
+experiment_id: swe-hetero-poisson-diag-c16-20261022t164800z
+environment:
+  runtime:
+    template_id: tpl-9c41283c66174a24bf0c6814
+    template_alias: null
+    source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+    image_digest: sha256:104cf38eaf2cf470e7f84adae126c17c0cd0adf6705a0a2a582969225524984a
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 1024
+    workspace: /workspace
+    preflight_command: null
+    allow_internet_access: true
+  sandbox:
+    template_id: tpl-34a99ed59ab5461cb810c968
+    template_alias: null
+    source_image_reference: 127.0.0.1:5000/clawbox/swe-traces@sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438
+    image_digest: sha256:002cfd776788f495f8fc6f3c075d14f38e76374faa55b4b31be20195fb4ab438
+    architecture: arm64
+    vcpu: 2
+    memory_mib: 3072
+    workspace: /workspace
+    preflight_command: null
+    allow_internet_access: true
+  resources:
+    compute_nodes:
+    - node_id: node0
+      numa_node: 0
+      cpus: 0-79
+      memory_capacity_mib: 512000
+      low_watermark_mib: 458752
+      high_watermark_mib: 491520
+    - node_id: node1
+      numa_node: 1
+      cpus: 80-159
+      memory_capacity_mib: 512000
+      low_watermark_mib: 458752
+      high_watermark_mib: 491520
+    target_node: 193.124.7.2
+    pool_memory_budget_mib: 983040
+    local_memory_low_watermark_mib: 917504
+    local_memory_high_watermark_mib: 983040
+    shared_memory_borrow_limit_mib: 51200
+    emergency_free_memory_mib: 1024
+    local_memory_capacity_mib: 1024000
+    warm_memory_capacity_mib: 102400
+    warm_snapshot_root: /mnt/clawbox-pool
+    cold_snapshot_root: /data/clawbox-cold
+    local_numa_node: null
+    local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+    warm_numa_node: 2
+workload:
+  source: swe_rebench
+  input: /mnt/clawbox-data/artifacts/swe-readiness-20261021/environment-catalog-20261022/snapshot-20261022T104346.199284Z/workload-ready.json
+  repetitions: 1
+  cases: []
+  session_assignment: round_robin
+agent:
+  driver: openclaw
+inference:
+  backend: replay
+  configuration:
+    model: example-model
+    time_scale: 1.0
+evidence:
+  prediction_artifact: null
+  memory_action_costs: null
+  snapshot_residency_costs: null
+  idle_reclaim_costs: null
+measurement:
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1.0
+  observe_predictions: false
+  validation:
+    command: test "$(cat /workspace/result.txt)" = complete
+  output:
+    directory: /results
+mechanisms:
+  admission:
+    startup_headroom_mib: 256
+    admission_margin_mib: 256
+    static_tool_memory_mib: null
+    non_command_tool_memory_mib: null
+    prediction_reservation_scale: 1.0
+    tool: 'off'
+  runtime:
+    pressure_control:
+      release_history_samples: 3
+      release_forecast_ttl_factor: 3.0
+      psi_ratio: 0.1
+      exit_hysteresis_seconds: 1.0
+      cooldown_seconds: 10.0
+      action_window_seconds: 2.0
+      protection_budget_mib: 256
+      max_boosted_vms: 1
+      boost_cpu_weight: 200
+      min_release_mib: 64
+      amortization_factor: 2.0
+    runtime_poll_interval_seconds: 0.5
+    proactive_memory_reclaim: false
+    memory_protection: false
+    cpu_release_boost: false
+  placement:
+    placement_cpu_overcommit: 1024.0
+    template_balance_slack: 0.1
+    tool_call_cpu_policy: c0
+    tool_call_cpu_pressure_ratio: 0.1
+    tool_call_cpu_pressure_samples: 2
+    tool_call_cpu_group_max_active: 2
+    tool_call_cpu_min_duration_seconds: 1.0
+    tool_call_cpu_include_smt: false
+    session_compute_nodes: []
+    policy: load_aware
+    template_affinity: true
+  idle_reclaim:
+    checkpoint_restore_headroom_mib: 1024
+    policy: 'off'
+    scope: tool
+  shared_memory:
+    borrow_cooldown_seconds: 5.0
+    return_cooldown_seconds: 5.0
+    borrow: 'off'
+  checkpoint:
+    pool_transfer_concurrency: 1
+    pool_transfer_timeout_seconds: 120.0
+    mechanism: incremental-cow
+    storage: disk
+    residency: lru
+  deployment:
+    mode: managed
+    resident_capacity_accounting: false
+    lifecycle_reservation_scale: 1.0
+  coordination:
+    action_selection: reclaim_first
+conditions:
+  prediction_source: kb
+comparison:
+  recipe: custom
+  arms:
+  - name: configured-design
+    override:
+      placement.placement_cpu_overcommit: 1024.0
+execution:
+  concurrency_levels:
+  - 16
+  sandbox_create_concurrency: 20
+  cube_request_timeout_seconds: 130.0
+  worker_thread_switch_interval_seconds: 0.001
+  randomized_order: true
+  random_seed: 20261023
+  arm_timeout_seconds: 3600
+  arm_finalization_timeout_seconds: 300
+  command_timeout_seconds: 1200
+  arrival_schedule: poisson
+  stagger_interval_seconds: 0.0
+  poisson_arrival_window_fraction: 2.0
