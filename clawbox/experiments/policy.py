@@ -482,27 +482,47 @@ class PolicyCoordinator:
 
     def _admission_head_locked(self):
         """Use FIFO when creation fits; let progress bypass blocked creation."""
-        first = None
-        for ticket in self._waiters:
-            request = self._waiter_requests[ticket]
-            if (request.session_id, request.wait_class) in self.demand.claims \
-                    and request.wait_class != "tool_admission":
-                continue  # Same-VM polling must not stall unrelated VMs.
-            if first is None:
-                first = ticket
-            if ticket in self._progress_waiters:
-                oldest = self._waiter_requests[first]
-                if first is not ticket and oldest.wait_class == 'create':
-                    extra = (self.startup_headroom_bytes
-                             if self._startup_headroom_needed(oldest.session_id) else 0)
-                    blocked = (self._new_session_admission_blocked
-                               and not self.resident_capacity_accounting)
-                    if not blocked and not self._pressure_reasons(
+        while True:
+            # The exact pending-demand path in _pressure_reasons deliberately
+            # releases this condition while it reads cgroups.  A waiter can
+            # finish or time out during that interval, so never resume a live
+            # deque iterator or return a ticket selected before the release.
+            snapshot = tuple(self._waiters)
+            first = None
+            retry = False
+            for ticket in snapshot:
+                request = self._waiter_requests.get(ticket)
+                if request is None:
+                    retry = True
+                    break
+                if (request.session_id, request.wait_class) in self.demand.claims \
+                        and request.wait_class != "tool_admission":
+                    continue  # Same-VM polling must not stall unrelated VMs.
+                if first is None:
+                    first = ticket
+                if ticket in self._progress_waiters:
+                    oldest = self._waiter_requests.get(first)
+                    if oldest is None:
+                        retry = True
+                        break
+                    if first is not ticket and oldest.wait_class == 'create':
+                        extra = (self.startup_headroom_bytes
+                                 if self._startup_headroom_needed(oldest.session_id) else 0)
+                        blocked = (self._new_session_admission_blocked
+                                   and not self.resident_capacity_accounting)
+                        creation_fits = not blocked and not self._pressure_reasons(
                             oldest.amount_bytes + extra,
-                            capacity_claim=oldest.capacity_claim):
-                        return first
-                return ticket
-        return first
+                            capacity_claim=oldest.capacity_claim,
+                        )
+                        if tuple(self._waiters) != snapshot:
+                            retry = True
+                            break
+                        if creation_fits:
+                            return first
+                    return ticket
+            if retry:
+                continue
+            return first
 
     def _feasible_progress_prefix_locked(
         self, ticket: object, head: object | None,

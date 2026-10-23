@@ -187,17 +187,31 @@ python scripts/build_clawbox_seed.py \
   --output seeds/bootstrap-v2
 ```
 
+Before starting VMs, measure command coverage for the exact workload catalog:
+
+```bash
+CLAWTUNE_ROOT=/path/to/ClawTune python scripts/evaluate-cold-start-coverage.py \
+  --seed /path/to/ClawTune/seeds/bootstrap-v2 \
+  --workload /path/to/workload.json \
+  --output /path/to/cold-start-coverage.json
+```
+
+The report counts fallback levels and partial-clause predictions. It is a
+corpus replay coverage check, not a held-out accuracy result, and starts no VMs.
+
 Set `resources.prediction_artifact` to that `bootstrap-v2` directory. ClawBox
 exports only validated call/clause evidence and calibration; ClawTune owns KB
 training and seed publication. The builder retains the base Lattice history,
 adds Cube guest-memory clause labels, and builds public ClauseKB and ToolKB
 layers. Cold-start admission selects guest extra-memory from LatticeKB first,
-then its sampled-RSS proxy, then ToolKB guest extra-memory and its sampled-RSS
-proxy. Each proxy retains its original target and is converted to host demand
-only through its own paired calibration; it is never relabeled as guest extra
-memory. For a multi-clause command, Lattice memory and RSS predictions may use
-the clauses that have evidence even when another retained clause is missing;
-the prediction records `partial_clause_evidence` and its covered-clause count.
+then its sampled-RSS proxy, then ToolKB guest extra-memory and its tool-class
+guest extra-memory fallback. The RSS proxy retains its original target and is
+converted to host demand only through its own paired calibration; it is never
+relabeled as guest extra memory. The imported artifacts do not provide a
+call-level RSS label for ToolKB. For a multi-clause command, Lattice memory and RSS predictions may use
+the clauses that have evidence even when another retained clause is missing or
+a dynamic structure is only partly representable; the prediction records its
+partial-evidence assumption and covered-clause count.
 Other resource targets still require complete clause evidence. The ToolKB
 public layer omits repository and exact-command identity.
 Missing measurements remain unavailable and are never converted to zero.

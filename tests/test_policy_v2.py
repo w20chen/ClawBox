@@ -79,6 +79,48 @@ def test_progress_bypasses_only_memory_blocked_creation(used_mib, expected):
         assert c._admission_head_locked() == expected
 
 
+def test_resource_feedback_reselects_head_removed_during_exact_sampling():
+    """Exact cgroup reads may release admission while the head completes."""
+    from clawbox.experiments.policy import AdmissionRequest, MIB
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (9*MIB, 100*MIB))
+    create = object()
+    tool = object()
+    with c._condition:
+        c._waiters.extend((create, tool))
+        c._waiter_requests[create] = AdmissionRequest(
+            'create', 4*MIB, 'create', False,
+        )
+        c._waiter_requests[tool] = AdmissionRequest(
+            'tool', MIB, 'tool_admission', False,
+        )
+        c._progress_waiters.add(tool)
+
+    removed = False
+
+    def sample_while_head_completes(scope):
+        nonlocal removed
+        c._condition.release()
+        try:
+            if not removed:
+                c._waiters.remove(create)
+                c._waiter_requests.pop(create)
+                removed = True
+            return 0, 0
+        finally:
+            c._condition.acquire()
+
+    c.demand.pending_breakdown_without_condition = sample_while_head_completes
+
+    feedback = c.resource_feedback()
+    assert removed
+    assert feedback['waiters'] == 1
+    assert feedback['reasons'] == []
+
+
 def test_feasible_tool_prefix_does_not_wait_for_each_predecessor_thread():
     from clawbox.experiments.policy import AdmissionRequest, MIB
     policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
