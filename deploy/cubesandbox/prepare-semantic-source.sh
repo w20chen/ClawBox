@@ -20,6 +20,7 @@ TEMPLATE_BASE_PATCH_FILE=$SCRIPT_DIR/template-base-lineage.patch
 PRIORITY_PATCH_FILE=$SCRIPT_DIR/agentcgroup-priority.patch
 VGIC_STATE_PATCH_FILE=$SCRIPT_DIR/vgic-state-save.patch
 NETWORK_PATCH_FILE=$SCRIPT_DIR/build-network.patch
+RUSTUP_URL_PATCH_FILE=$SCRIPT_DIR/builder-rustup-url.patch
 BASE_REUSE_PATCH_FILE=$SCRIPT_DIR/cold-base-reuse.patch
 CONTROL_TIMEOUT_PATCH_FILE=$SCRIPT_DIR/sdk-control-timeouts.patch
 LIFECYCLE_TIMEOUT_PATCH_FILE=$SCRIPT_DIR/sdk-lifecycle-timeouts.patch
@@ -27,9 +28,13 @@ FILESYSTEM_TIMEOUT_PATCH_FILE=$SCRIPT_DIR/sdk-filesystem-timeouts.patch
 FILESYSTEM_WATCH_PATCH_FILE=$SCRIPT_DIR/sdk-filesystem-watch-timeouts.patch
 EGRESS_STARTUP_PATCH_FILE=$SCRIPT_DIR/egress-before-cubelet.patch
 CREATE_TIMEOUT_PATCH_FILE=$SCRIPT_DIR/cube-api-create-timeout.patch
+ENVD_INIT_RETRY_PATCH_FILE=$SCRIPT_DIR/envd-init-retry.patch
 GUEST_RECONNECT_PATCH_FILE=$SCRIPT_DIR/guest-agent-reconnect.patch
 NUMA_MIGRATION_PATCH_FILE=$SCRIPT_DIR/numa-migration-pause.patch
+CGROUP_RECLAIM_PATCH_FILE=$SCRIPT_DIR/cgroup-reuse-reclaim.patch
+NETWORK_ASYNC_GC_PATCH_FILE=$SCRIPT_DIR/network-startup-async-gc.patch
 IRQ_ROUTING_PATCH_FILE=$SCRIPT_DIR/irq-routing-batch.patch
+IRQ_ACTIVE_PATCH_FILE=$SCRIPT_DIR/irq-routing-active-legacy.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -46,14 +51,18 @@ PATCH_FILES=(
   "$PATCH_FILE" "$HAIRPIN_PATCH_FILE" "$PROVENANCE_PATCH_FILE"
   "$TIER_API_PATCH_FILE" "$TIER_ISOLATION_PATCH_FILE" "$TIMING_PATCH_FILE"
   "$INCREMENTAL_PATCH_FILE" "$TEMPLATE_BASE_PATCH_FILE"
-  "$PRIORITY_PATCH_FILE" "$VGIC_STATE_PATCH_FILE" "$NETWORK_PATCH_FILE"
+  "$PRIORITY_PATCH_FILE" "$VGIC_STATE_PATCH_FILE" "$NETWORK_PATCH_FILE" "$RUSTUP_URL_PATCH_FILE"
   "$BASE_REUSE_PATCH_FILE"
   "$CONTROL_TIMEOUT_PATCH_FILE" "$LIFECYCLE_TIMEOUT_PATCH_FILE"
   "$FILESYSTEM_TIMEOUT_PATCH_FILE" "$FILESYSTEM_WATCH_PATCH_FILE"
   "$EGRESS_STARTUP_PATCH_FILE" "$CREATE_TIMEOUT_PATCH_FILE"
+  "$ENVD_INIT_RETRY_PATCH_FILE"
   "$GUEST_RECONNECT_PATCH_FILE"
   "$NUMA_MIGRATION_PATCH_FILE"
+  "$CGROUP_RECLAIM_PATCH_FILE"
+  "$NETWORK_ASYNC_GC_PATCH_FILE"
   "$IRQ_ROUTING_PATCH_FILE"
+  "$IRQ_ACTIVE_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -90,6 +99,14 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$NETWORK_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$NETWORK_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$NETWORK_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$RUSTUP_URL_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$RUSTUP_URL_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$RUSTUP_URL_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$ENVD_INIT_RETRY_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$ENVD_INIT_RETRY_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$ENVD_INIT_RETRY_PATCH_FILE"
   fi
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$BASE_REUSE_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$BASE_REUSE_PATCH_FILE"
@@ -128,9 +145,21 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
     git -C "$SOURCE_DIR" apply --check "$NUMA_MIGRATION_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$NUMA_MIGRATION_PATCH_FILE"
   fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$CGROUP_RECLAIM_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$CGROUP_RECLAIM_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$CGROUP_RECLAIM_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$NETWORK_ASYNC_GC_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$NETWORK_ASYNC_GC_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$NETWORK_ASYNC_GC_PATCH_FILE"
+  fi
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$IRQ_ROUTING_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$IRQ_ROUTING_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$IRQ_ROUTING_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$IRQ_ACTIVE_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$IRQ_ACTIVE_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$IRQ_ACTIVE_PATCH_FILE"
   fi
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
@@ -175,6 +204,14 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
     git -C "$SOURCE_DIR" apply --check "$NETWORK_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$NETWORK_PATCH_FILE"
   fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$RUSTUP_URL_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$RUSTUP_URL_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$RUSTUP_URL_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$ENVD_INIT_RETRY_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$ENVD_INIT_RETRY_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$ENVD_INIT_RETRY_PATCH_FILE"
+  fi
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$BASE_REUSE_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$BASE_REUSE_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$BASE_REUSE_PATCH_FILE"
@@ -207,9 +244,25 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
     git -C "$SOURCE_DIR" apply --check "$GUEST_RECONNECT_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$GUEST_RECONNECT_PATCH_FILE"
   fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$NUMA_MIGRATION_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$NUMA_MIGRATION_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$NUMA_MIGRATION_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$CGROUP_RECLAIM_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$CGROUP_RECLAIM_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$CGROUP_RECLAIM_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$NETWORK_ASYNC_GC_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$NETWORK_ASYNC_GC_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$NETWORK_ASYNC_GC_PATCH_FILE"
+  fi
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$IRQ_ROUTING_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$IRQ_ROUTING_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$IRQ_ROUTING_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$IRQ_ACTIVE_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$IRQ_ACTIVE_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$IRQ_ACTIVE_PATCH_FILE"
   fi
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
@@ -260,6 +313,7 @@ apply_once "$TEMPLATE_BASE_PATCH_FILE" "template RAM external base lineage"
 apply_once "$PRIORITY_PATCH_FILE" "stable AgentCgroup priority domains"
 apply_once "$VGIC_STATE_PATCH_FILE" "upstream ARM VGIC state save"
 apply_once "$NETWORK_PATCH_FILE" "configurable Go build module proxy"
+apply_once "$RUSTUP_URL_PATCH_FILE" "configurable rustup bootstrap URL"
 apply_once "$BASE_REUSE_PATCH_FILE" "owned COLD template base references"
 apply_once "$CONTROL_TIMEOUT_PATCH_FILE" "bounded SDK control RPCs"
 apply_once "$LIFECYCLE_TIMEOUT_PATCH_FILE" "bounded SDK pause and resume RPCs"
@@ -267,9 +321,13 @@ apply_once "$FILESYSTEM_TIMEOUT_PATCH_FILE" "bounded native filesystem polling"
 apply_once "$FILESYSTEM_WATCH_PATCH_FILE" "bounded native filesystem notifications"
 apply_once "$EGRESS_STARTUP_PATCH_FILE" "egress-before-Cubelet startup ordering"
 apply_once "$CREATE_TIMEOUT_PATCH_FILE" "bounded CubeAPI create request"
+apply_once "$ENVD_INIT_RETRY_PATCH_FILE" "bounded guest envd initialization under load"
 apply_once "$GUEST_RECONNECT_PATCH_FILE" "upstream bounded guest-agent reconnect"
 apply_once "$NUMA_MIGRATION_PATCH_FILE" "paused NUMA migration with retained checkpoint dirty bits"
+apply_once "$CGROUP_RECLAIM_PATCH_FILE" "reclaim file cache when returning native cgroups to Cube's reuse pool"
+apply_once "$NETWORK_ASYNC_GC_PATCH_FILE" "run stale network-policy GC outside Cubelet readiness"
 apply_once "$IRQ_ROUTING_PATCH_FILE" "batched and deferred interrupt routing"
+apply_once "$IRQ_ACTIVE_PATCH_FILE" "activate only attached legacy IRQ routes"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"

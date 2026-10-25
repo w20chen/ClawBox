@@ -1,0 +1,58 @@
+diff --git a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
+--- a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
++++ b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
+@@ -319,6 +319,43 @@ func (h *handler) cleanProc(ctx context.Context, group string) error {
+ 	return fmt.Errorf("unable to kill proc of group %q: %w", group, err)
+ }
+ 
++func (h *handler) reclaimFileCache(group string) error {
++	groupPath := path.Join(h.root, group)
++	raw, err := os.ReadFile(path.Join(groupPath, "memory.stat"))
++	if err != nil {
++		return fmt.Errorf("read memory.stat for reusable cgroup %q: %w", group, err)
++	}
++	var fileBytes uint64
++	var shmemBytes uint64
++	for _, line := range strings.Split(string(raw), "\n") {
++		fields := strings.Fields(line)
++		if len(fields) != 2 || (fields[0] != "file" && fields[0] != "shmem") {
++			continue
++		}
++		value, parseErr := strconv.ParseUint(fields[1], 10, 64)
++		if parseErr != nil {
++			return fmt.Errorf("parse %s for reusable cgroup %q: %w", fields[0], group, parseErr)
++		}
++		if fields[0] == "file" {
++			fileBytes = value
++		} else {
++			shmemBytes = value
++		}
++	}
++	if fileBytes <= shmemBytes {
++		return nil
++	}
++	reclaimBytes := fileBytes - shmemBytes
++	if err := os.WriteFile(path.Join(groupPath, "memory.reclaim"),
++		[]byte(strconv.FormatUint(reclaimBytes, 10)), defaultFilePerm); err != nil &&
++		!errors.Is(err, syscall.EAGAIN) {
++		return fmt.Errorf("reclaim %d file-cache bytes from reusable cgroup %q: %w", reclaimBytes, group, err)
++	}
++	// EAGAIN means the kernel reclaimed less than requested. That best-effort
++	// progress is sufficient here; the next reuse cycle can reclaim again.
++	return nil
++}
++
+ func (h *handler) CleanForReuse(ctx context.Context, group string) error {
+ 	exists := h.IsExist(ctx, group)
+ 	if !exists {
+@@ -333,6 +370,10 @@ func (h *handler) CleanForReuse(ctx context.Context, group string) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	err = h.reclaimFileCache(group)
++	if err != nil {
++		return err
++	}
+ 	err = h.RemoveLimit(ctx, group)
+ 	if err != nil {
+ 		return err

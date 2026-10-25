@@ -155,3 +155,13 @@ def test_completion_watch_closes_idle_stream_and_does_not_hide_permission_errors
     with pytest.raises(OSError, match="permission denied"):
         CubeSandboxClient.wait_file_nonempty(sandbox, "/state/agent.exit", timeout_s=10)
     assert len(closed) == 2
+
+
+def test_completion_watch_treats_initial_stat_read_timeout_as_not_ready(native_filesystem):
+    sandbox = SimpleNamespace(files=SimpleNamespace(
+        stat=lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("busy guest")),
+        watch_dir=lambda *args, **kwargs: pytest.fail("deadline was consumed by stat"),
+    ))
+    assert not CubeSandboxClient.wait_file_nonempty(
+        sandbox, "/state/agent.exit", timeout_s=10,
+    )

@@ -432,18 +432,29 @@ class CubeSandboxClient:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         deadline = time.monotonic() + timeout_s
+        stat_timed_out = False
 
         def ready() -> bool:
+            nonlocal stat_timed_out
             try:
                 entry = sandbox.files.stat(
                     path, timeout=max(0.001, deadline - time.monotonic()),
                 )
             except FilesystemNotFoundError:
                 return False
+            except httpx.ReadTimeout:
+                # Under Full load, a bounded Stat can consume the remaining
+                # watch window before response headers arrive. That is the
+                # normal "not ready within this window" outcome; the caller
+                # rechecks cancellation/residency and may wait again.
+                stat_timed_out = True
+                return False
             return int(entry.get("size", 0)) > 0
 
         if ready():
             return True
+        if stat_timed_out:
+            return False
         # Subscribe, then stat again: the file may have been written between
         # the first stat and establishment of the notification stream.
         try:
@@ -456,6 +467,8 @@ class CubeSandboxClient:
                 for event in watcher:
                     if PurePosixPath(event.name).name == PurePosixPath(path).name and ready():
                         return True
+                    if stat_timed_out:
+                        break
                     if time.monotonic() >= deadline:
                         break
         except httpx.ReadTimeout:

@@ -1,6 +1,8 @@
 """Editable host plans and read-only prerequisite checks for standalone hosts."""
 from __future__ import annotations
 
+import base64
+import errno
 import json
 import math
 import os
@@ -68,6 +70,7 @@ class HostConfig(BaseModel):
     output_root: str = "/data/clawbox-results"
     minimum_disk_free_gib: int = Field(default=20, gt=0)
     tcp_tw_reuse: int | None = Field(default=None, ge=0, le=2)
+    cube_proxy_connect_timeout_seconds: int | None = Field(default=None, ge=3, le=300)
     cubelet_tap_init_num: int | None = Field(default=None, ge=1)
     cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
     cube_scheduler_vm_count_ratio: dict[str, float] | None = Field(default=None, min_length=1)
@@ -139,7 +142,153 @@ def apply_network(config: HostConfig) -> None:
         raise RuntimeError('tcp_tw_reuse did not take effect; inspect sysctl permissions and rerun host apply')
 
 
+def reclaim_idle_cube_file_cache(
+    root: Path = Path("/sys/fs/cgroup/cube_sandbox/sandbox"),
+) -> dict[str, int]:
+    """Release cache left in Cube's empty reusable VM cgroups before a run."""
+    if "populated 0" not in (root / "cgroup.events").read_text().splitlines():
+        raise RuntimeError("Cube VM cgroup became active; finish/abort the run and retry host apply")
+
+    def reclaimable(path: Path) -> int:
+        values = {}
+        for line in (path / "memory.stat").read_text().splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[0] in {"file", "shmem"}:
+                values[fields[0]] = int(fields[1])
+        return max(0, values.get("file", 0) - values.get("shmem", 0))
+
+    before = reclaimable(root)
+    requested = partial = leaves = 0
+    for leaf in sorted(
+        (path for path in root.iterdir() if path.is_dir() and path.name.isdecimal()),
+        key=lambda path: int(path.name),
+    ):
+        if "populated 0" not in (leaf / "cgroup.events").read_text().splitlines():
+            raise RuntimeError(f"Cube cgroup {leaf} became active; retry host apply while idle")
+        amount = reclaimable(leaf)
+        if not amount:
+            continue
+        leaves += 1
+        requested += amount
+        try:
+            (leaf / "memory.reclaim").write_text(str(amount))
+        except OSError as exc:
+            # cgroup v2 reports EAGAIN after making best-effort progress when
+            # fewer bytes than requested were immediately reclaimable.
+            if exc.errno != errno.EAGAIN:
+                raise RuntimeError(f"could not reclaim stale Cube cache in {leaf}: {exc}") from exc
+            partial += 1
+    after = reclaimable(root)
+    return {
+        "before_bytes": before,
+        "after_bytes": after,
+        "released_bytes": max(0, before - after),
+        "requested_bytes": requested,
+        "leaves": leaves,
+        "partial_reclaims": partial,
+    }
+
+
 CUBELET_CONFIG = Path("/usr/local/services/cubetoolbox/Cubelet/config/config.toml")
+CUBE_PROXY_CONFIG = Path("/usr/local/services/cubetoolbox/cubeproxy/nginx.conf")
+CUBE_PROXY_TEMPLATE = Path("/usr/local/services/cubetoolbox/cubeproxy/nginx.conf.template")
+
+
+def _without_sidecar_locations(text: str) -> str:
+    return re.sub(r"(?ms)^\s*location = /_sidecar_resume \{.*?^\s*\}", "", text)
+
+
+def _cube_proxy_timeout_status() -> dict:
+    text = _run("sudo", "-n", "cat", str(CUBE_PROXY_CONFIG))
+    guest_routes = _without_sidecar_locations(text)
+    values = [int(value) for value in re.findall(
+        r"(?:proxy|grpc)_connect_timeout\s+(\d+)s\s*;", guest_routes
+    )]
+    if not values:
+        raise ValueError(f"{CUBE_PROXY_CONFIG}: no guest connect timeouts found")
+    unresolved = re.findall(
+        r"(?m)^\s*include\s+.*/envd_streaming_(?:path|host)_route\.inc\s*;",
+        guest_routes,
+    )
+    return {"seconds": sorted(set(values)), "route_directives": len(values),
+            "unexpanded_streaming_includes": len(unresolved)}
+
+
+def _render_cube_proxy_timeout(text: str, seconds: int,
+                               streaming_includes: dict[str, str]) -> str:
+    """Set guest-route timeouts while retaining the internal sidecar's 2 seconds."""
+    for name, include_text in streaming_includes.items():
+        pattern = re.compile(rf"(?m)^(\s*)include\s+.*/{re.escape(name)};\s*$")
+
+        def expand(match, body=include_text, filename=name):
+            indent = match.group(1)
+            rows = [f"{indent}# ClawBox: expanded {filename} for configurable guest connect timeout."]
+            rows.extend(indent + row if row else "" for row in body.rstrip().splitlines())
+            return "\n".join(rows)
+
+        text = pattern.sub(expand, text)
+
+    sidecars: list[str] = []
+
+    def protect(match):
+        sidecars.append(match.group(0))
+        return f"__CLAWBOX_SIDECAR_{len(sidecars) - 1}__"
+
+    text = re.sub(r"(?ms)^\s*location = /_sidecar_resume \{.*?^\s*\}", protect, text)
+    text = re.sub(r"(?m)^(\s*)(proxy|grpc)_connect_timeout\s+\d+s\s*;",
+                  rf"\1\2_connect_timeout {seconds}s;", text)
+    for index, block in enumerate(sidecars):
+        text = text.replace(f"__CLAWBOX_SIDECAR_{index}__", block)
+    return text
+
+
+def apply_cube_proxy_connect_timeout(config: HostConfig) -> bool:
+    """Persist the explicit guest connect timeout and restart only CubeProxy."""
+    desired = config.cube_proxy_connect_timeout_seconds
+    if desired is None:
+        return False
+    before = {path: _run("sudo", "-n", "cat", str(path))
+              for path in (CUBE_PROXY_CONFIG, CUBE_PROXY_TEMPLATE)}
+    include_names = ("envd_streaming_path_route.inc", "envd_streaming_host_route.inc")
+    includes = {
+        name: _run("docker", "exec", "cube-proxy", "cat",
+                   f"/usr/local/openresty/nginx/conf/includes/{name}")
+        for name in include_names
+    }
+    after = {path: _render_cube_proxy_timeout(text, desired, includes)
+             for path, text in before.items()}
+    if after == before:
+        status = _cube_proxy_timeout_status()
+        if status["seconds"] != [desired] or status["unexpanded_streaming_includes"]:
+            raise RuntimeError(f"CubeProxy guest connect timeout is inconsistent: {status}")
+        return False
+
+    backups: dict[Path, str] = {}
+    script = r"""
+import base64, pathlib, shutil, sys, time
+p = pathlib.Path(sys.argv[1])
+backup = p.with_name(p.name + '.pre-clawbox-' + str(time.time_ns()))
+shutil.copy2(p, backup)
+p.write_bytes(base64.b64decode(sys.argv[2]))
+print(backup)
+"""
+    try:
+        for path, text in after.items():
+            encoded = base64.b64encode(text.encode()).decode()
+            backups[path] = _run("sudo", "-n", "python3", "-c", script,
+                                 str(path), encoded)
+        _run("docker", "exec", "cube-proxy", "nginx", "-t")
+        _run("sudo", "-n", "systemctl", "restart", "cube-sandbox-cube-proxy")
+        _run("docker", "exec", "cube-proxy", "nginx", "-t")
+    except Exception:
+        for path, backup in backups.items():
+            _run("sudo", "-n", "cp", "--", backup, str(path))
+        _run("sudo", "-n", "systemctl", "restart", "cube-sandbox-cube-proxy")
+        raise
+    status = _cube_proxy_timeout_status()
+    if status["seconds"] != [desired] or status["unexpanded_streaming_includes"]:
+        raise RuntimeError(f"CubeProxy guest connect timeout did not take effect: {status}")
+    return True
 
 
 def _cubelet_tap_init_num() -> int:
@@ -231,6 +380,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
                 values[key] = profile[key]
         if profile.get('tcp_tw_reuse') is not None:
             values['tcp_tw_reuse'] = profile['tcp_tw_reuse']
+        if profile.get('cube_proxy_connect_timeout_seconds') is not None:
+            values['cube_proxy_connect_timeout_seconds'] = profile['cube_proxy_connect_timeout_seconds']
         if profile.get('cubelet_tap_init_num') is not None:
             values['cubelet_tap_init_num'] = profile['cubelet_tap_init_num']
         if profile.get('cube_scheduler_overcommit') is not None:
@@ -295,6 +446,12 @@ def check(config: HostConfig) -> dict:
             'requested': config.tcp_tw_reuse,
             'scope': 'host network namespace; applied until reboot',
         }, 'Install sysctl and use a Linux host exposing net.ipv4.tcp_tw_reuse, or set tcp_tw_reuse: null to leave it unchanged.')
+    if config.cube_proxy_connect_timeout_seconds is not None:
+        probe('CubeProxy guest connect timeout', lambda: {
+            **_cube_proxy_timeout_status(),
+            'requested_seconds': config.cube_proxy_connect_timeout_seconds,
+            'scope': 'guest HTTP, streaming, and gRPC connects; internal sidecar remains 2 seconds',
+        }, 'Install/start CubeProxy with readable nginx.conf, or set cube_proxy_connect_timeout_seconds: null to leave it unchanged.')
     if config.cubelet_tap_init_num is not None:
         probe('Cubelet TAP pool', lambda: {
             'current': _cubelet_tap_init_num(),
@@ -402,7 +559,10 @@ def apply(config: HostConfig, profile: Path) -> dict:
     if not report["ready_for_apply"]:
         print(json.dumps(report, indent=2))
         raise ValueError("host prerequisites failed; follow checks[].remedy, then rerun host check")
+    report["idle_cube_cache_reclaim"] = reclaim_idle_cube_file_cache()
+    print(json.dumps({"idle_cube_cache_reclaim": report["idle_cube_cache_reclaim"]}, sort_keys=True))
     apply_network(config)
+    apply_cube_proxy_connect_timeout(config)
     restart_cubemaster = False
     if config.cube_scheduler_overcommit is not None:
         from .cube_capacity import apply_ratios

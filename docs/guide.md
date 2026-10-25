@@ -50,7 +50,8 @@ file before applying it. Important host fields are:
 | `warm_root`, `cold_root`, `output_root` | Dedicated WARM tmpfs, COLD snapshot, and result paths |
 | `minimum_disk_free_gib` | Required free space; CubeSandbox also rejects snapshot writes above 85% filesystem use |
 | `tcp_tw_reuse` | `null` preserves the host value; `0`, `1`, and `2` request Linux's documented modes |
-| `cubelet_tap_init_num` | Optional pre-created TAP count; cover both VMs for every simultaneous session |
+| `cube_proxy_connect_timeout_seconds` | Guest HTTP, streaming, and gRPC connection timeout, 3–300 seconds; `null` preserves Cube's default. Use 30 for saturated Full runs. The separate internal resume-sidecar timeout stays at 2 seconds. |
+| `cubelet_tap_init_num` | Optional warm TAP target, not a VM limit. The patched embedded runtime creates a TAP on demand when the ready pool is empty. Size this for the expected creation burst, not all offered sessions; a very large idle pool makes restart recovery proportional to the retained TAP count. Changing it requires an idle-host apply and a new run ID. |
 | `cube_scheduler_overcommit` | Optional map from Cube node `InstanceType` to positive `cpu_ratio` and `mem_ratio`; `null` preserves Cube's settings. These multiply Cube's reported configured-VM quotas, not physical CPU/RAM allocations. |
 | `cube_scheduler_vm_count_ratio` | Optional positive per-instance multiplier over Cube's node-reported VM-count limit; `null` preserves Cube's setting. This is a scheduler limit, not physical capacity. |
 
@@ -63,7 +64,13 @@ bash scripts/clawbox --sudo experiment host apply "$HOME/.config/clawbox/host.ya
 
 Apply again after reboot or after changing topology, CPU lists, memory capacity,
 mounts, or host networking. `host apply` writes the adjacent `host.json` only
-after service, storage, and real-VM probes succeed.
+after service, storage, and real-VM probes succeed. While Cube is idle, apply
+also releases clean file cache retained in Cube's reusable VM cgroups so an old
+run cannot silently reduce the next run's LOCAL budget.
+
+Changing `cube_proxy_connect_timeout_seconds` restarts CubeProxy on an idle host
+and requires a new run ID. It rebuilds neither CubeSandbox nor Runtime/Tool
+images or templates, and it does not change an experiment policy or budget.
 
 `host check` also verifies that the installed Python SDK bounds create and
 inventory HTTP requests. An SDK-only timeout repair requires reinstalling the

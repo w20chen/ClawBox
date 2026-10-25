@@ -43,6 +43,18 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     create_timeout = (
         ROOT / "deploy" / "cubesandbox" / "cube-api-create-timeout.patch"
     ).read_text(encoding="utf-8")
+    active_irq = (
+        ROOT / "deploy" / "cubesandbox" / "irq-routing-active-legacy.patch"
+    ).read_text(encoding="utf-8")
+    envd_retry = (
+        ROOT / "deploy" / "cubesandbox" / "envd-init-retry.patch"
+    ).read_text(encoding="utf-8")
+    cgroup_reclaim = (
+        ROOT / "deploy" / "cubesandbox" / "cgroup-reuse-reclaim.patch"
+    ).read_text(encoding="utf-8")
+    rustup_url = (
+        ROOT / "deploy" / "cubesandbox" / "builder-rustup-url.patch"
+    ).read_text(encoding="utf-8")
 
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
     assert "apply --check" in helper
@@ -68,6 +80,21 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "timeout=cfg.request_timeout" in lifecycle_timeouts
     assert "timeout=self._config.request_timeout" in lifecycle_timeouts
     assert 'apply_once "$LIFECYCLE_TIMEOUT_PATCH_FILE"' in helper
+    assert "IRQ_ACTIVE_PATCH_FILE" in helper
+    assert 'apply_once "$IRQ_ACTIVE_PATCH_FILE"' in helper
+    assert "enable_requested" in active_irq
+    assert "self.requested.store(true" in active_irq
+    assert "ENVD_INIT_RETRY_PATCH_FILE" in helper
+    assert 'apply_once "$ENVD_INIT_RETRY_PATCH_FILE"' in helper
+    assert "envdInitAttemptTimeout" in envd_retry
+    assert "envdInitMaxAttempts" in envd_retry
+    assert "CGROUP_RECLAIM_PATCH_FILE" in helper
+    assert 'apply_once "$CGROUP_RECLAIM_PATCH_FILE"' in helper
+    assert '"memory.reclaim"' in cgroup_reclaim
+    assert "fileBytes - shmemBytes" in cgroup_reclaim
+    assert "RUSTUP_URL_PATCH_FILE" in helper
+    assert 'apply_once "$RUSTUP_URL_PATCH_FILE"' in helper
+    assert "RUSTUP_INIT_URL" in rustup_url
     assert '"phase":       "snapshot_create"' in lifecycle_timing
     assert '"phase":       "swap_out"' in lifecycle_timing
     assert '"duration_ms"' in lifecycle_timing

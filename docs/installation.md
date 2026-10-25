@@ -99,7 +99,7 @@ Use the smallest row that matches the changed content:
 | `deploy/cubesandbox/guest-agent-reconnect.patch` or `numa-migration-pause.patch` | Rebuild and install the Shim on an idle host, then use a new run ID. The NUMA control client is part of that Shim binary; no separate helper is installed. Existing VM images, templates, and ClawTune state remain valid. |
 | CubeSandbox server patches, including the native NUMA placement hook | Rebuild and install Cubelet/Shim, restart Cubelet once on an idle host, then run the documented recovery command. Existing guest images and templates remain valid. |
 | Runtime/Tool Dockerfile, dependencies, entrypoint, or workspace content | Rebuild only the affected images/templates, qualify them, and use a new run ID. |
-| Host capacity, NUMA, TAP, quota, or storage configuration | Review and apply a new host plan. Rebuild neither CubeSandbox nor images unless the plan explicitly changes their installed content. |
+| Host capacity, NUMA, TAP, CubeProxy guest-connect timeout, quota, or storage configuration | Review and apply a new host plan. Rebuild neither CubeSandbox nor images unless the plan explicitly changes their installed content. Use a new run ID when the setting affects measured behavior. |
 
 Template-sharing evidence remains reusable when the immutable Tool templates,
 VM shapes, target node, raw proof, and CubeSandbox RAM-mapping mechanism are
@@ -215,7 +215,7 @@ The helper registers both templates, waits for READY, verifies kernel binding,
 and updates `machine.env` only after both succeed. Use a new output directory and
 new template aliases when changing an image or VM size.
 
-Verify CubeSandbox's per-VM TCP endpoint instead of guessing guest IPs:
+Verify CubeSandbox's semantic TCP endpoint instead of guessing guest IPs:
 
 ```bash
 python scripts/validate-cubesandbox-tcp-endpoints.py \
@@ -281,6 +281,9 @@ bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
 bash scripts/clawbox --sudo experiment host apply \
   "$HOME/.config/clawbox/host.yaml"
 ```
+
+The apply step requires an idle Cube VM cgroup and reclaims clean cache retained
+in its reusable leaves; it never deletes VM/template files or unrelated data.
 
 For S3lvol, also require an active backend and `/var/run/s3lvol.sock`. The
 snapshot filesystem must remain below 85% use. Preview recognized crash-dump

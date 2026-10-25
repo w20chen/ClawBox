@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -672,6 +673,7 @@ def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: P
     )
     writer.write({"event": "agent_started", "session_id": "session-a"})
     writer.write({"event": "agent_finished", "session_id": "session-a"})
+    writer.close()
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [row["sequence_no"] for row in rows] == [0, 1]
     assert all(row["schema_version"] == 1 for row in rows)
@@ -727,6 +729,24 @@ def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) ->
     assert snapshot["completed_sessions"] == 1
     assert snapshot["activated_running_sessions"] == 0
     assert snapshot["not_yet_offered_sessions"] == 1
+    writer.close()
+
+
+def test_event_writer_buffers_concurrent_rows_without_reordering(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    writer = EventWriter(path)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [
+            pool.submit(writer.write, {"event": "sample", "value": value})
+            for value in range(4096)
+        ]
+        for future in futures:
+            future.result()
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 4096
+    assert [row["sequence_no"] for row in rows] == list(range(4096))
 
 
 def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:

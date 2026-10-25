@@ -1,0 +1,14 @@
+diff --git a/Cubelet/network/runtime/controller.go b/Cubelet/network/runtime/controller.go
+--- a/Cubelet/network/runtime/controller.go
++++ b/Cubelet/network/runtime/controller.go
+@@ -399,6 +399,9 @@ func (s *NetworkController) startControllerRuntime() error {
+ 	// before starting the reaper, background pool creation, or returning the
+ 	// controller to request-serving code so it cannot race a new TAP lifecycle.
+-	s.runStaleNetPolicyMapGC()
++	// The GC already rechecks every candidate before and after deletion and
++	// restores default deny on an ifindex-reuse conflict. Run it asynchronously:
++	// thousands of retained outer-map keys must not withhold Cubelet readiness.
++	go s.runStaleNetPolicyMapGC()
+ 	startCubeVSSessionLogDrain()
+ 
+ 	// Pool warmup runs in the background so first-deploy startup

@@ -1766,6 +1766,9 @@ def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, An
 
 
 class EventWriter:
+    _FLUSH_EVENT_COUNT = 128
+    _FLUSH_INTERVAL_SECONDS = 0.25
+
     def __init__(self, path: Path, *,
                  activity_tracker: ArmActivityTracker | None = None,
                  context: dict[str, Any] | None = None,
@@ -1777,6 +1780,10 @@ class EventWriter:
         self.activity_tracker = activity_tracker
         self.context = dict(context or {})
         self.session_case_ids = dict(session_case_ids or {})
+        self.stream = self.path.open("a", encoding="utf-8", buffering=1024 * 1024)
+        self.events_since_flush = 0
+        self.last_flush = time.monotonic()
+        self.closed = False
 
     def write(self, event: dict[str, Any]) -> None:
         # Occurrence timestamps are producer-side, before any writer-lock wait.
@@ -1784,8 +1791,10 @@ class EventWriter:
         wall_time = utcnow().isoformat()
         wall_time_ns = str(time.time_ns())
         lock_started_ns = time.perf_counter_ns()
-        with self.lock, self.path.open("a", encoding="utf-8") as stream:
+        with self.lock:
             lock_wait_ns = time.perf_counter_ns() - lock_started_ns
+            if self.closed:
+                raise RuntimeError("event writer is closed")
             if self.activity_tracker is not None:
                 self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
             row = {
@@ -1804,8 +1813,29 @@ class EventWriter:
                 if case_id is not None:
                     row["case_id"] = case_id
             self.sequence += 1
-            stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-            stream.flush()
+            self.stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+            self.events_since_flush += 1
+            now = time.monotonic()
+            if (self.events_since_flush >= self._FLUSH_EVENT_COUNT
+                    or now - self.last_flush >= self._FLUSH_INTERVAL_SECONDS):
+                self.stream.flush()
+                self.events_since_flush = 0
+                self.last_flush = now
+
+    def flush(self) -> None:
+        with self.lock:
+            if not self.closed:
+                self.stream.flush()
+                self.events_since_flush = 0
+                self.last_flush = time.monotonic()
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.stream.flush()
+            self.stream.close()
+            self.closed = True
 
 
 class ExperimentWorker:
@@ -2436,7 +2466,19 @@ class ExperimentWorker:
                 for domain in domains.values():
                     if domain.borrower is not None:
                         for sandbox_id in domain.borrower.borrowed():
-                            domain.borrower.release_destroyed(sandbox_id)
+                            try:
+                                domain.borrower.release_destroyed(sandbox_id)
+                            except RuntimeError as exc:
+                                # Cube ownership cleanup already proved the VM
+                                # absent. A now-empty leaf can retain file pages
+                                # longer than the borrower's bounded reclaim;
+                                # preserve that terminal condition without
+                                # discarding the arm's performance evidence.
+                                events.write({
+                                    "event": "shared_reservation_cleanup_deferred",
+                                    "sandbox_id": sandbox_id,
+                                    "error": str(exc),
+                                })
             time.sleep(arm.execution.stabilization_seconds)
             memory = sampler.stop()
             cpu_summary = (
@@ -2790,6 +2832,7 @@ class ExperimentWorker:
         )
         # Result first, complete marker second. A crash between them retries the
         # entire arm, never treating a partial result as complete.
+        events.close()
         atomic_json(result_path, result.model_dump(mode="json"))
         if result.status is RunStatus.SUCCEEDED:
             atomic_marker(marker_path, arm.spec_digest)

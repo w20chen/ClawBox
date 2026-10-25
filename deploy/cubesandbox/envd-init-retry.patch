@@ -1,0 +1,22 @@
+diff --git a/Cubelet/services/cubebox/probe.go b/Cubelet/services/cubebox/probe.go
+index 1aec414..3a9ab4c 100644
+--- a/Cubelet/services/cubebox/probe.go
++++ b/Cubelet/services/cubebox/probe.go
+@@ -35,12 +35,12 @@ import (
+ 
+ const (
+ 	envdInitPath = "/init"
+-	// Keep create-time envd init within a bounded sub-second budget so the
++	// Keep create-time envd init bounded while tolerating a CPU-starved guest.
+ 	// safeguard absorbs brief restore jitter without turning sandbox create
+-	// into an unbounded slow path.
+-	envdInitAttemptTimeout             = 150 * time.Millisecond
+-	envdInitMaxAttempts                = 3
+-	envdInitRetryDelay                 = 25 * time.Millisecond
++	// into an unbounded slow path; successful first attempts remain unchanged.
++	envdInitAttemptTimeout             = 2 * time.Second
++	envdInitMaxAttempts                = 8
++	envdInitRetryDelay                 = 100 * time.Millisecond
+ 	defaultEnvdInitPort                = 49983
+ 	missingEnvdSupportAnnotationDetail = "template does not carry envd support annotation"
+ )

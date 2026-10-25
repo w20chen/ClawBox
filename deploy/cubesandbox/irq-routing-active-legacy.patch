@@ -1,0 +1,149 @@
+--- a/hypervisor/vm-device/src/interrupt/mod.rs
++++ b/hypervisor/vm-device/src/interrupt/mod.rs
+@@ -153,6 +153,20 @@
+         Ok(())
+     }
+ 
++    /// Publish routes without activating every IRQFD. Older implementations
++    /// retain update_batch semantics; KVM-backed groups can defer activation.
++    fn configure_batch(
++        &self,
++        updates: Vec<(InterruptIndex, InterruptSourceConfig, bool)>,
++    ) -> Result<()> {
++        self.update_batch(updates)
++    }
++
++    /// Activate only IRQFDs actually requested by attached legacy devices.
++    fn enable_requested(&self) -> Result<()> {
++        self.enable()
++    }
++
+     /// Update the interrupt source group configuration.
+     ///
+     /// # Arguments
+--- a/hypervisor/vmm/src/interrupt.rs
++++ b/hypervisor/vmm/src/interrupt.rs
+@@ -24,6 +24,7 @@
+     gsi: u32,
+     irq_fd: EventFd,
+     registered: AtomicBool,
++    requested: AtomicBool,
+ }
+ 
+ impl InterruptRoute {
+@@ -37,6 +38,7 @@
+             gsi,
+             irq_fd,
+             registered: AtomicBool::new(false),
++            requested: AtomicBool::new(false),
+         })
+     }
+ 
+@@ -54,6 +56,13 @@
+         Ok(())
+     }
+ 
++    pub fn enable_if_requested(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
++        if self.requested.load(Ordering::Acquire) {
++            self.enable(vm)?;
++        }
++        Ok(())
++    }
++
+     pub fn disable(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
+         if self.registered.load(Ordering::Acquire) {
+             vm.unregister_irqfd(&self.irq_fd, self.gsi).map_err(|e| {
+@@ -78,6 +88,7 @@
+     }
+ 
+     pub fn notifier(&self) -> Option<EventFd> {
++        self.requested.store(true, Ordering::Release);
+         Some(
+             self.irq_fd
+                 .try_clone()
+@@ -141,6 +152,13 @@
+         Ok(())
+     }
+ 
++    fn enable_requested(&self) -> Result<()> {
++        for route in self.irq_routes.values() {
++            route.enable_if_requested(&self.vm)?;
++        }
++        Ok(())
++    }
++
+     fn disable(&self) -> Result<()> {
+         for (_, route) in self.irq_routes.iter() {
+             route.disable(&self.vm)?;
+@@ -154,6 +172,7 @@
+     fn trigger(&self, index: InterruptIndex) -> Result<()> {
+         if let Some(route) = self.irq_routes.get(&index) {
++            route.enable(&self.vm)?;
+             return route.trigger();
+         }
+ 
+         Err(io::Error::new(
+@@ -214,6 +232,35 @@
+         Ok(())
+     }
+ 
++    fn configure_batch(
++        &self,
++        updates: Vec<(InterruptIndex, InterruptSourceConfig, bool)>,
++    ) -> Result<()> {
++        if updates.is_empty() {
++            return Ok(());
++        }
++        let mut entries = Vec::with_capacity(updates.len());
++        for (index, config, masked) in updates {
++            let route = self.irq_routes.get(&index).ok_or_else(|| {
++                io::Error::new(io::ErrorKind::Other,
++                    format!("update: Invalid interrupt index {}", index))
++            })?;
++            entries.push((route, RoutingEntry {
++                route: self.vm.make_routing_entry(route.gsi, &config), masked,
++            }));
++        }
++        let mut routes = self.gsi_msi_routes.lock().unwrap();
++        for (route, entry) in &entries {
++            if entry.masked {
++                route.disable(&self.vm)?;
++            }
++        }
++        for (route, entry) in entries {
++            routes.insert(route.gsi, entry);
++        }
++        self.set_gsi_routes(&routes)
++    }
++
+ }
+ 
+ pub struct LegacyUserspaceInterruptGroup {
+@@ -297,7 +351,13 @@
+ impl InterruptManager for LegacyUserspaceInterruptManager {
+     type GroupConfig = LegacyIrqGroupConfig;
+ 
+     fn create_group(&self, config: Self::GroupConfig) -> Result<Arc<dyn InterruptSourceGroup>> {
++        // Device construction precedes GIC activation on create and restore.
++        // Mark this line as used so GIC activation need not register all 32
++        // reserved legacy IRQFDs with the host-global irq_bypass list.
++        #[cfg(target_arch = "aarch64")]
++        let _ = self.ioapic.lock().unwrap().notifier(config.irq as usize);
++
+         Ok(Arc::new(LegacyUserspaceInterruptGroup::new(
+             self.ioapic.clone(),
+             config.irq,
+--- a/hypervisor/devices/src/gic.rs
++++ b/hypervisor/devices/src/gic.rs
+@@ -99,7 +99,10 @@
+                 }), false))
+             .collect();
+-        self.interrupt_source_group.update_batch(updates)
++        self.interrupt_source_group.configure_batch(updates)
+             .map_err(Error::EnableInterrupt)?;
++        self.interrupt_source_group
++            .enable_requested()
++            .map_err(Error::EnableInterrupt)?;
+ 
+         Ok(())
+     }

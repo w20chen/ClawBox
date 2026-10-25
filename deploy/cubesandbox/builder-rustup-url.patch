@@ -1,0 +1,14 @@
+diff --git a/docker/Dockerfile.builder b/docker/Dockerfile.builder
+--- a/docker/Dockerfile.builder
++++ b/docker/Dockerfile.builder
+@@ -218,7 +218,9 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
+     && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1 \
+     && go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@v1.5.1
+ 
+-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
++ARG RUSTUP_INIT_URL=https://sh.rustup.rs
++
++RUN curl --proto '=https' --tlsv1.2 -sSf "${RUSTUP_INIT_URL}" \
+     | sh -s -- -y --profile minimal --default-toolchain none
+ 
+ ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}"

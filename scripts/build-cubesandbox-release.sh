@@ -7,6 +7,7 @@ assets=
 jobs=1
 mirror=upstream
 go_proxy=${GOPROXY:-}
+rustup_init_url=${RUSTUP_INIT_URL:-}
 while (( $# )); do
   case "$1" in
     --help)
@@ -33,8 +34,12 @@ done
 if [[ -z "$go_proxy" ]]; then
   if [[ "$mirror" == cn ]]; then go_proxy=https://goproxy.cn,direct; else go_proxy=https://proxy.golang.org,direct; fi
 fi
+if [[ -z "$rustup_init_url" ]]; then
+  if [[ "$mirror" == cn ]]; then rustup_init_url=https://rsproxy.cn/rustup-init.sh; else rustup_init_url=https://sh.rustup.rs; fi
+fi
 export GOPROXY="$go_proxy"
-export BUILDER_BUILD_ARGS="${BUILDER_BUILD_ARGS:-} --build-arg GOPROXY"
+export RUSTUP_INIT_URL="$rustup_init_url"
+export BUILDER_BUILD_ARGS="${BUILDER_BUILD_ARGS:-} --build-arg GOPROXY --build-arg RUSTUP_INIT_URL"
 assets=$(realpath "$assets")
 (cd "$assets" && sha256sum -c SHA256SUMS)
 docker info >/dev/null

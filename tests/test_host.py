@@ -13,6 +13,8 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"warm_root": "/data/../warm"}, {"warm_gib": -1},
     {"warm_gbi": 100}, {"local_node": "0"}, {"shared_borrow_percent": 101},
     {"tcp_tw_reuse": 3}, {"tcp_tw_reuse": True},
+    {"cube_proxy_connect_timeout_seconds": 2},
+    {"cube_proxy_connect_timeout_seconds": True},
     {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
 ])
 def test_invalid_host_plan_rejected(values):
@@ -49,6 +51,36 @@ def test_network_setting_is_explicit_verified_and_idempotent(monkeypatch):
         host.apply_network(HostConfig(tcp_tw_reuse=1))
 
 
+def test_idle_cube_cache_reclaim_targets_only_empty_numeric_pool_leaves(tmp_path):
+    from clawbox.experiments.host import reclaim_idle_cube_file_cache
+
+    def cgroup(path, *, file_bytes, shmem_bytes=0, populated=False):
+        path.mkdir()
+        (path / "cgroup.events").write_text(f"populated {int(populated)}\n")
+        (path / "memory.stat").write_text(
+            f"anon 0\nfile {file_bytes}\nshmem {shmem_bytes}\n"
+        )
+        (path / "memory.reclaim").write_text("")
+
+    (tmp_path / "cgroup.events").write_text("populated 0\n")
+    (tmp_path / "memory.stat").write_text("file 100\nshmem 10\n")
+    cgroup(tmp_path / "7", file_bytes=70, shmem_bytes=10)
+    cgroup(tmp_path / "ignored", file_bytes=30)
+
+    result = reclaim_idle_cube_file_cache(tmp_path)
+
+    assert (tmp_path / "7" / "memory.reclaim").read_text() == "60"
+    assert (tmp_path / "ignored" / "memory.reclaim").read_text() == ""
+    assert result == {
+        "before_bytes": 90,
+        "after_bytes": 90,
+        "released_bytes": 0,
+        "requested_bytes": 60,
+        "leaves": 1,
+        "partial_reclaims": 0,
+    }
+
+
 def test_cubelet_tap_pool_is_explicit_and_idempotent(monkeypatch):
     from clawbox.experiments import host
     current, writes = [500], []
@@ -64,6 +96,31 @@ def test_cubelet_tap_pool_is_explicit_and_idempotent(monkeypatch):
     assert host.apply_cubelet_tap_pool(HostConfig(cubelet_tap_init_num=1536))
     assert not host.apply_cubelet_tap_pool(HostConfig(cubelet_tap_init_num=1536))
     assert len(writes) == 1
+
+
+def test_cube_proxy_timeout_expands_streaming_routes_and_preserves_sidecar():
+    from clawbox.experiments.host import _render_cube_proxy_timeout
+    text = """location = /_sidecar_resume {
+    proxy_connect_timeout 2s;
+}
+location /sandbox/ {
+    proxy_connect_timeout 3s;
+}
+location /stream {
+    include /usr/local/openresty/nginx/conf/includes/envd_streaming_path_route.inc;
+}
+location /grpc {
+    grpc_connect_timeout 3s;
+}
+"""
+    result = _render_cube_proxy_timeout(text, 30, {
+        "envd_streaming_path_route.inc": "proxy_connect_timeout 3s;\nproxy_read_timeout 7206s;",
+        "envd_streaming_host_route.inc": "proxy_connect_timeout 3s;",
+    })
+    assert "proxy_connect_timeout 2s;" in result
+    assert result.count("proxy_connect_timeout 30s;") == 2
+    assert "grpc_connect_timeout 30s;" in result
+    assert "envd_streaming_path_route.inc;" not in result
 
 
 def test_malformed_host_yaml_has_actionable_cli_error(tmp_path, capsys):
@@ -108,6 +165,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
         "local_memory_high_watermark_mib": 20 * 1024,
         "warm_capacity_mib": 32 * 1024, "shared_memory_borrow_limit_mib": 8 * 1024,
         "tcp_tw_reuse": 1,
+        "cube_proxy_connect_timeout_seconds": 30,
         "cubelet_tap_init_num": 1536,
     }))
     path = tmp_path / "host.yaml"
@@ -117,6 +175,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert config.shared_borrow_percent == 25
     assert config.local_gib == 24
     assert config.tcp_tw_reuse == 1
+    assert config.cube_proxy_connect_timeout_seconds == 30
     assert config.cubelet_tap_init_num == 1536
 
 
