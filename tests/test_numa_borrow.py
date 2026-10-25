@@ -1,11 +1,17 @@
 from pathlib import Path
 import shutil
+import subprocess
 from threading import Thread
 import time
 
 import pytest
 
-from clawbox.experiments.numa_borrow import SandboxNumaBorrower, read_numa_lru_bytes
+from clawbox.experiments.numa_borrow import (
+    NumaBorrowUnavailable,
+    SandboxNumaBorrower,
+    read_numa_anon_bytes,
+    read_numa_lru_bytes,
+)
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 
 
@@ -36,6 +42,15 @@ def test_numa_usage_assigns_unattributed_charge_to_local(tmp_path: Path) -> None
     resident, unattributed = read_numa_lru_bytes(cgroup)
     assert resident == {0: 80, 1: 30}
     assert unattributed == 10
+
+
+def test_anonymous_numa_usage_excludes_shared_file_cache(tmp_path: Path) -> None:
+    _, leaf, _ = make_tree(tmp_path)
+    (leaf / "memory.numa_stat").write_text(
+        "inactive_anon N0=1 N1=20\nactive_anon N0=1 N1=40\n"
+        "inactive_file N0=100 N1=0\nactive_file N0=100 N1=0\n"
+    )
+    assert read_numa_anon_bytes(leaf) == {0: 2, 1: 60}
 
 
 def test_verified_vm_lookup_does_not_rescan_all_processes(tmp_path, monkeypatch):
@@ -154,11 +169,10 @@ def test_return_keeps_reservation_for_residual_remote_pages(tmp_path):
     assert pool.borrowed_bytes == 0
 
 
-@pytest.mark.parametrize('already_pinned',[True,False])
-def test_local_pin_verifies_existing_policy_and_repairs_only_changes(tmp_path,already_pinned):
+def test_local_pin_accepts_native_broad_cpuset_without_rewriting_it(tmp_path):
     root,leaf,proc=make_tree(tmp_path)
-    (leaf/'cpuset.cpus.effective').write_text('0,1' if already_pinned else '2-3')
-    (leaf/'cpuset.mems.effective').write_text('0' if already_pinned else '1')
+    (leaf/'cpuset.cpus.effective').write_text('0-3')
+    (leaf/'cpuset.mems.effective').write_text('0-1')
     writes=[]
     def write(path,value):
         writes.append(path.name)
@@ -168,8 +182,52 @@ def test_local_pin_verifies_existing_policy_and_repairs_only_changes(tmp_path,al
         shared_pool=WarmSnapshotPool(128),proc_root=proc,cgroup_mount=tmp_path/'sys/fs/cgroup',writer=write)
     borrower.pin_local('sandbox-abc')
     borrower._verify_cpus(leaf)
-    assert (leaf/'cpuset.mems.effective').read_text()=='0'
-    assert writes==([] if already_pinned else ['cpuset.cpus','cpuset.mems'])
+    assert (leaf/'cpuset.mems.effective').read_text()=='0-1'
+    assert writes==[]
+
+
+def test_local_pin_ignores_remote_file_cache_but_rejects_remote_anonymous_pages(tmp_path):
+    root, leaf, proc = make_tree(tmp_path)
+    borrower = SandboxNumaBorrower(
+        root, local_node=0, shared_node=1, cpus=None,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup',
+    )
+    (leaf/'memory.numa_stat').write_text('active_file N0=1 N1=100\n')
+    borrower.pin_local('sandbox-abc')
+    assert borrower.placements[-1]['residency_basis'] == 'insufficient_anonymous_sample_initial_create'
+    assert borrower.placements[-1]['local_residency_fraction'] is None
+    (leaf/'memory.numa_stat').write_text(
+        'active_anon N0=1 N1=100\nactive_file N0=100 N1=0\n'
+    )
+    borrower._initial_placement_verified.clear()
+    (leaf/'memory.numa_stat').write_text(
+        'active_anon N0=1 N1=16777216\nactive_file N0=100 N1=0\n'
+    )
+    with pytest.raises(RuntimeError, match='LOCAL placement did not take effect'):
+        borrower.pin_local('sandbox-abc')
+
+
+def test_local_pin_does_not_misclassify_warm_snapshot_pages_after_restore(tmp_path):
+    root, leaf, proc = make_tree(tmp_path)
+    borrower = SandboxNumaBorrower(
+        root, local_node=0, shared_node=1, cpus=None,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup',
+    )
+    borrower.pin_local('sandbox-abc')
+    (leaf/'memory.numa_stat').write_text('active_anon N0=1 N1=100\n')
+    borrower.pin_local('sandbox-abc')
+    assert borrower.placements[-1]['residency_basis'] == 'restore_policy_only'
+
+
+def test_local_pin_rejects_cgroup_that_excludes_requested_cpus(tmp_path):
+    root,leaf,proc=make_tree(tmp_path)
+    (leaf/'cpuset.cpus.effective').write_text('2-3')
+    borrower=SandboxNumaBorrower(root,local_node=0,shared_node=1,cpus='0-1',
+        shared_pool=WarmSnapshotPool(128),proc_root=proc,cgroup_mount=tmp_path/'sys/fs/cgroup')
+    with pytest.raises(RuntimeError, match='excludes requested CPUs'):
+        borrower.pin_local('sandbox-abc')
 
 
 def test_local_pin_accepts_retained_borrow_reservation_after_restore(tmp_path):
@@ -316,3 +374,85 @@ def test_borrow_failure_rolls_back_capacity(tmp_path: Path) -> None:
     with pytest.raises(OSError, match="denied"):
         borrower.borrow("sandbox-abc", 60)
     assert pool.borrowed_bytes == 0
+
+
+def test_timed_out_borrow_is_recoverable_after_verified_local_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from clawbox.experiments.numa_borrow import _NumaRebindTimeout
+    cgroup, leaf, proc = make_tree(tmp_path)
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)
+
+    def write(path, value):
+        if value == "1":
+            raise _NumaRebindTimeout("timed out updating cpuset.mems")
+        (leaf / "cpuset.mems").write_text("0")
+        (leaf / "cpuset.mems.effective").write_text("0")
+    borrower = SandboxNumaBorrower(
+        cgroup, local_node=0, shared_node=1, shared_pool=pool,
+        proc_root=proc, cgroup_mount=tmp_path / "sys/fs/cgroup",
+        cleanup_timeout_seconds=30, writer=write,
+    )
+
+    with pytest.raises(NumaBorrowUnavailable, match="timed out updating"):
+        borrower.borrow("sandbox-abc", 60)
+
+    assert pool.borrowed_bytes == 0
+    assert borrower.borrowed() == ()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "killed", "failed"])
+def test_incomplete_process_migration_never_accepts_effective_mask_or_queues_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    cgroup, leaf, proc = make_tree(tmp_path)
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=64)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        # Linux publishes the new mask before its migration queue finishes.
+        (leaf / "cpuset.mems.effective").write_text("1")
+        assert command[-1] == "1"
+        assert command[-3].endswith("numa_rebind.py")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 31)
+        return subprocess.CompletedProcess(command, 137 if failure == "killed" else 1, "", "incomplete")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    borrower = SandboxNumaBorrower(
+        cgroup, local_node=0, shared_node=1, shared_pool=pool,
+        proc_root=proc, cgroup_mount=tmp_path / "sys/fs/cgroup",
+        cleanup_timeout_seconds=30,
+    )
+    with pytest.raises(RuntimeError, match="retain the reservation"):
+        borrower.borrow("sandbox-abc", 60)
+    assert len(calls) == 1
+    assert pool.borrowed_bytes == 60
+    assert borrower.borrowed() == ("sandbox-abc",)
+
+
+def test_busy_shared_rebind_defers_borrow_without_reserving(tmp_path):
+    from threading import Event
+    root, leaf, proc = make_tree(tmp_path)
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=128)
+    borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,
+        shared_pool=pool, proc_root=proc, cgroup_mount=tmp_path/'sys/fs/cgroup',
+        writer=lambda *_: pytest.fail("busy rebind must not change the VM"))
+    held, release = Event(), Event()
+    def hold_other_domain_rebind():
+        with pool.rebind_lock:
+            held.set()
+            release.wait(5)
+    thread = Thread(target=hold_other_domain_rebind)
+    thread.start()
+    assert held.wait(2)
+    try:
+        with pytest.raises(NumaBorrowUnavailable, match="in progress"):
+            borrower.borrow('sandbox-abc', 80)
+        assert pool.borrowed_bytes == 0
+        assert (leaf/'cpuset.mems').read_text() == '0'
+        assert pool.snapshot()['active_transfers'] == {}
+    finally:
+        release.set()
+        thread.join(2)

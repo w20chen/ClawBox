@@ -564,6 +564,37 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor(tmp_path) -> N
     assert sandbox_id not in _Sandbox.items
 
 
+def test_restore_fault_sampling_uses_current_verified_leaf_and_counts_its_time(tmp_path, monkeypatch):
+    from clawbox.experiments import memory
+    from clawbox.cube import lifecycle as lifecycle_module
+    _Sandbox.items = {}
+    now = [100.0]
+    original_is_dir = Path.is_dir
+    monkeypatch.setattr(Path, 'is_dir', lambda p: True if p == Path('/proc') else original_is_dir(p))
+    monkeypatch.setattr(lifecycle_module.time, 'monotonic', lambda: now[0])
+    old_leaf, restored_leaf = tmp_path/'old-leaf', tmp_path/'restored-leaf'
+    active_leaf = [old_leaf]
+    seen = []
+    class Sampler:
+        def __init__(self, sandbox_id, *, cgroup=None):
+            assert cgroup == restored_leaf  # Never fall back to a host-wide scan.
+            seen.append(sandbox_id)
+            now[0] += 2.0
+    monkeypatch.setattr(memory, 'SandboxRSSSampler', Sampler)
+    vm = CubeSandboxLifecycle(CubeSandboxClient(sandbox_class=_Sandbox),
+        template='tpl', node_name='node-a', ownership=_owner(),
+        cold_snapshot_root=str(tmp_path/'cold'),
+        verify_cgroup=lambda _: {'cgroup': str(active_leaf[0])})
+    vm.start()
+    vm.checkpoint_and_evict()
+    active_leaf[0] = restored_leaf
+    assert vm.restore() == 2.0
+    assert seen == [vm.sandbox_id]
+    assert vm.timings[-1]['stage_seconds']['restore_fault_observation_s'] == 2.0
+    assert vm._first_tool_restore['restore_ready_monotonic_s'] == now[0]
+    vm.close()
+
+
 def test_lifecycle_passes_verified_cgroup_to_numa_borrower(tmp_path) -> None:
     _Sandbox.items = {}
     calls = []
@@ -977,17 +1008,21 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
                           resident_poll=None, checkpoint_relay=False,
-                          startup_begin=None, startup_wait=None, startup_event=None):
+                          resident_file_nonempty=None,
+                          startup_begin=None, startup_wait=None, startup_event=None,
+                          cancelled=None):
         # Pair creation must release its own claim before the Agent runs,
         # even when demand-backed Guest RAM uses less than configured capacity.
         # Otherwise the unused footprint remains pending until session teardown.
         assert coordinators
         assert all((session_id, "create") not in c.demand.claims for c in coordinators)
         assert resident_poll is not None
+        assert callable(resident_file_nonempty)
         assert checkpoint_relay is True
         assert callable(startup_wait)
         assert callable(startup_begin)
         assert callable(startup_event)
+        assert callable(cancelled)
         startup_begin()
         startup_wait()
         assert model_gateway.gateway.timeout_s == 120
@@ -1062,6 +1097,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         return {
             "agent_pid_file": f"/state/openclaw/{session_id}/agent.pid",
             "tool_latencies": [0.01, 0.01], "runtime_traces": [],
+            "final_response_observed_unix_s": time.time(),
             "agent_replay_invalid": True, "agent_tool_failures": 0,
             "policy_control_records": policy_control.records(),
         }
@@ -1075,6 +1111,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                 "memory_rss_peak_bytes": 2 * 1024 * 1024,
                 "ts_start": 1.0, "ts_end": 1.01,
                 "cpu_utilization_avg_cores": 0.25,
+                "sampling_quality": "valid",
             } for execution_id in ("exec-1", "exec-2")},
         ),
     )
@@ -1123,9 +1160,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         return
     assert result.status.value == "succeeded", result.model_dump()
     assert result.provenance["evidence_class"] == "deterministic-managed-replay"
-    assert result.provenance["configured_trace_sha256"] == hashlib.sha256(
-        trace.read_bytes()
-    ).hexdigest()
+    assert result.provenance["configured_traces"] == [{
+        "case_id": "snapshot-case", "reference": str(trace),
+    }]
     observation = result.performance["tool_execution_observations"][0]
     assert observation["actual_measured_memory_mib"] == 2.0
     assert observation["admitted_reservation_mib"] == 1
@@ -1206,6 +1243,30 @@ def test_lifecycle_records_failed_create_with_state_and_error_type() -> None:
     assert lifecycle.timings[-1]["stage_seconds"]["physical_observation_after_s"] >= 0
 
 
+def test_lifecycle_create_uses_the_shared_cube_operation_budget() -> None:
+    pool = WarmSnapshotPool(0, transfer_concurrency=2)
+    observed = []
+
+    class Client:
+        def create_sandbox(self, **_kwargs):
+            observed.append(pool.snapshot()["active_transfers"])
+            return SimpleNamespace(sandbox_id="sandbox-1")
+
+        @staticmethod
+        def sandbox_id(sandbox):
+            return sandbox.sandbox_id
+
+    lifecycle = CubeSandboxLifecycle(
+        Client(), template="tpl", node_name="node-a", ownership=_owner(),
+        snapshot_pool=pool,
+    )
+
+    lifecycle.start()
+
+    assert observed == [{"create": 1}]
+    assert pool.snapshot()["active_transfers"] == {"create": 0}
+
+
 def test_lifecycle_records_create_stage_breakdown() -> None:
     _Sandbox.items = {}
     prepared = []
@@ -1236,6 +1297,7 @@ def test_lifecycle_records_create_stage_breakdown() -> None:
     assert set(stages) == {
         "physical_observation_before_s", "prepare_cgroup_s", "api_create_s",
         "verify_cgroup_s", "pin_local_s", "physical_observation_after_s",
+        "transfer_slot_wait_s",
     }
     assert all(value >= 0 for value in stages.values())
 
@@ -1363,7 +1425,8 @@ def test_cleanup_retries_transient_kill_and_removes_every_owned_sandbox() -> Non
     assert PartiallyFailingSandbox.closed == 3
 
 
-def test_cleanup_bounds_parallel_destroy_requests() -> None:
+@pytest.mark.parametrize("bulk_cleanup", [False, True])
+def test_cleanup_bounds_parallel_destroy_requests(bulk_cleanup) -> None:
     class SlowSandbox(_Sandbox):
         active = 0
         peak = 0
@@ -1382,13 +1445,41 @@ def test_cleanup_bounds_parallel_destroy_requests() -> None:
 
     SlowSandbox.items = {}
     client = CubeSandboxClient(sandbox_class=SlowSandbox, cleanup_workers=2)
-    for _ in range(6):
-        client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
+    sandboxes = [client.create_sandbox(template="tpl", node_name="node", ownership=_owner())
+                 for _ in range(6)]
 
-    client.kill_owned_sandboxes("task")
+    if bulk_cleanup:
+        client.kill_owned_sandboxes("task")
+    else:
+        # Normal session close passes an ID; direct callers may pass handles.
+        # Both share one client budget even without the bulk cleanup pool.
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(client.kill_sandbox, [
+                item.sandbox_id if index % 2 else item
+                for index, item in enumerate(sandboxes)
+            ]))
 
     assert SlowSandbox.items == {}
     assert SlowSandbox.peak == 2
+
+
+def test_failed_delete_releases_shared_slot_and_propagates_failure() -> None:
+    client = CubeSandboxClient(sandbox_class=_Sandbox, cleanup_workers=1)
+    closed = []
+
+    def fail():
+        raise RuntimeError("injected kill failure")
+
+    broken = SimpleNamespace(sandbox_id="broken", kill=fail, close=lambda: closed.append(True))
+    with pytest.raises(RuntimeError, match="injected kill failure"):
+        client.kill_sandbox(broken)
+    assert closed == [True]
+    finished = threading.Event()
+    healthy = SimpleNamespace(sandbox_id="healthy", kill=finished.set)
+    thread = threading.Thread(target=client.kill_sandbox, args=(healthy,), daemon=True)
+    thread.start()
+    assert finished.wait(1), "failed delete must return its shared slot"
+    thread.join(1)
 
 
 def test_cleanup_rejects_non_positive_worker_count() -> None:

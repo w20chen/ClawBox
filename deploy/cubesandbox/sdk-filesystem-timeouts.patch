@@ -1,0 +1,45 @@
+diff --git a/sdk/python/cubesandbox/_filesystem.py b/sdk/python/cubesandbox/_filesystem.py
+--- a/sdk/python/cubesandbox/_filesystem.py
++++ b/sdk/python/cubesandbox/_filesystem.py
+@@ -37,7 +37,9 @@
+             headers["X-Access-Token"] = access_token
+         return headers
+ 
+-    def _filesystem_rpc(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
++    def _filesystem_rpc(
++        self, method: str, payload: dict[str, Any], *, timeout: float | None = None,
++    ) -> dict[str, Any]:
+         self._ensure_client()
+         headers = self._base_headers()
+         headers["Content-Type"] = "application/json"
+@@ -47,6 +49,7 @@
+             f"http://{self._sandbox.get_host(ENVD_PORT)}/filesystem.Filesystem/{method}",
+             json=payload,
+             headers=headers,
++            **({"timeout": timeout} if timeout is not None else {}),
+         )
+         if resp.status_code >= 400:
+             message = resp.text or f"HTTP {resp.status_code}"
+@@ -145,9 +148,9 @@
+         result = self._filesystem_rpc("ListDir", {"path": path})
+         return result.get("entries", [])
+ 
+-    def stat(self, path: str) -> dict[str, Any]:
+-        """Return metadata for a file or directory."""
+-        result = self._filesystem_rpc("Stat", {"path": path})
++    def stat(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
++        """Return metadata; timeout bounds each HTTP operation when supplied."""
++        result = self._filesystem_rpc("Stat", {"path": path}, timeout=timeout)
+         return result.get("entry", {})
+ 
+     def exists(self, path: str) -> bool:
+diff --git a/sdk/python/cubesandbox/_transport.py b/sdk/python/cubesandbox/_transport.py
+--- a/sdk/python/cubesandbox/_transport.py
++++ b/sdk/python/cubesandbox/_transport.py
+@@ -36,6 +36,7 @@
+                 for k, v in request.headers.raw
+             ],
+             content=request.content,
++            extensions=request.extensions,
+         )
+         return super().handle_request(proxied)

@@ -1,29 +1,17 @@
-from pathlib import Path
-from types import SimpleNamespace
+import json
 
 from clawbox.experiments.priority import PriorityDomain
 
 
-def test_prepare_skips_identical_cpuset_and_resets_changed_placement(tmp_path, monkeypatch):
-    (tmp_path/'cgroup.procs').write_text('')
-    (tmp_path/'cpuset.cpus').write_text('0-3\n')
-    (tmp_path/'cpuset.mems').write_text('0\n')
-    domain = SimpleNamespace(
-        leaves={(0, 'tool'): tmp_path}, _vcpu_threads={},
-        placements={0: ('0-3', 0)}, leaf_release_grace_seconds=0,
+def test_prepare_publishes_only_native_placement_intent(tmp_path):
+    registry = tmp_path/'registry'
+    registry.mkdir()
+    domain = PriorityDomain(
+        tmp_path, concurrency=1, repetition=0, legacy=False,
+        registry=registry, placements={0: ('0-3', 0)},
     )
-    original = Path.write_text
-    writes = []
-    def capture(path, value, *args, **kwargs):
-        writes.append((path.name, value))
-        return original(path, value, *args, **kwargs)
-    monkeypatch.setattr(Path, 'write_text', capture)
+    stale = tmp_path/'stale-leaf'
+    domain.leaves[0, 'tool'] = stale
     PriorityDomain.prepare(domain, 0, 'tool')
-    assert writes == []
-    original(tmp_path/'cpuset.mems', '2')
-    PriorityDomain.prepare(domain, 0, 'tool')
-    assert writes == [('cpuset.mems', '0')]
-    writes.clear()
-    original(tmp_path/'cpuset.cpus', '4-7')
-    PriorityDomain.prepare(domain, 0, 'tool')
-    assert writes == [('cpuset.cpus', '0-3')]
+    assert json.loads((registry/domain.token(0, 'tool')).read_text()) == {'numa_node': 0}
+    assert (0, 'tool') not in domain.leaves

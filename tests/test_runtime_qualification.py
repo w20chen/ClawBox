@@ -6,6 +6,17 @@ from clawbox.experiments import runtime_qualification as module
 from clawbox.cube import CubeSandboxClient
 
 
+def test_runtime_qualification_uses_first_configured_compute_node():
+    resources = SimpleNamespace(
+        compute_nodes=(
+            SimpleNamespace(numa_node=0, cpus="0-79"),
+            SimpleNamespace(numa_node=1, cpus="80-159"),
+        ),
+        local_numa_node=None,
+    )
+    assert module._qualification_compute_placement(resources) == (0, "0-79")
+
+
 @pytest.mark.parametrize('completed', [True, False])
 def test_guest_probe_checks_progress_after_releasing_vm_throttle(tmp_path, monkeypatch, completed):
     parent = tmp_path / 'probe'

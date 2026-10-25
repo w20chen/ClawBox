@@ -13,6 +13,22 @@ def key(index: int) -> SnapshotKey:
     return SnapshotKey(f"session-{index}", "tool", 1)
 
 
+def test_borrow_headroom_counts_all_shared_occupancy_and_rechecks_at_commit():
+    pool = WarmSnapshotPool(100, borrow_capacity_bytes=60,
+                            external_shared_live_bytes=10, external_warm_bytes=5)
+    assert pool.borrow_headroom_bytes == 60
+    pool.reserve_borrow('existing', 20)
+    pool.reserve(key(1), 50)
+    assert pool.borrow_headroom_bytes == 15
+    pool.commit(key(1), path='/warm/1', logical_bytes=50,
+                allocated_bytes=40, transferred_bytes=40)
+    assert pool.borrow_headroom_bytes == 25
+    pool.reserve(key(2), 20)
+    assert pool.borrow_headroom_bytes == 5
+    with pytest.raises(WarmCapacityError):
+        pool.reserve_borrow('stale-choice', 25)
+
+
 def commit(pool: WarmSnapshotPool, index: int, size: int) -> None:
     pool.reserve(key(index), size)
     pool.commit(key(index), path=f"/warm/{index}", logical_bytes=size,
@@ -74,6 +90,31 @@ def test_live_borrow_cannot_exceed_half_pool_limit() -> None:
     pool.reserve_borrow("vm-a", 64)
     with pytest.raises(WarmCapacityError, match="live-borrow"):
         pool.reserve_borrow("vm-b", 1)
+
+
+def test_preexisting_shared_cache_and_files_remain_inside_the_same_capacity():
+    pool = WarmSnapshotPool(100, borrow_capacity_bytes=100,
+                            external_shared_live_bytes=4, external_warm_bytes=2)
+    pool.reserve_borrow("vm-a", 3)
+    pool.reserve(key(1), 91)
+    with pytest.raises(WarmCapacityError):
+        pool.reserve(key(2), 1)
+    with pytest.raises(WarmCapacityError):
+        pool.reserve_borrow("vm-b", 1)
+    pool.commit(key(1), path="/warm/1", logical_bytes=91,
+                allocated_bytes=91, transferred_bytes=91)
+    assert pool.snapshot()["capacity_bytes"] == 100
+    assert pool.snapshot()["external_occupied_bytes"] == 6
+    assert pool.committed_bytes + pool.borrowed_bytes + 6 == 100
+
+
+def test_external_occupancy_cannot_be_reclaimed_by_snapshot_spill():
+    pool = WarmSnapshotPool(100, external_shared_live_bytes=4, external_warm_bytes=2)
+    with pytest.raises(WarmSnapshotTooLarge):
+        pool.reserve_for_admission(key(1), 95, timeout_s=.01)
+    commit(pool, 1, 50)
+    victims = pool.lru_victims(45)
+    assert [item.key for item in victims] == [key(1)]
 
 
 def test_retained_lineage_is_not_spillable_and_commit_counts_only_new_pages():

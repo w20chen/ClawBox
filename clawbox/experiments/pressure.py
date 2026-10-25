@@ -139,6 +139,9 @@ class PressureControl:
 
     def register(self, session, role, group, node, coordinator):
         with self.lock:
+            previous = self.vms.get((session, role))
+            if previous is not None:
+                self._restore(previous)
             vm = VMState(session, role, Path(group), node)
             if role == 'tool':
                 self._psi(vm.group, 'memory')
@@ -147,6 +150,12 @@ class PressureControl:
                 vm.saved[name] = (vm.group / name).read_text().strip()
             if vm.saved != {'cpu.weight': '100', 'memory.low': '0', 'memory.high': 'max'}:
                 raise RuntimeError(f'adaptive VM leaf has nondefault controls: {vm.group}')
+            if previous is not None:
+                previous.group = vm.group
+                previous.node = vm.node
+                previous.saved = vm.saved
+                previous.previous.clear()
+                vm = previous
             self.vms[session, role] = vm
             self.domains[session] = coordinator
 

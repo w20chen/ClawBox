@@ -130,8 +130,7 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
         for item in trusted:
             host_row = agent_rows.get(item.execution_id)
             if (host_row is None or item.execution_id in observed_execution_ids
-                    or item.cgroup is None or not item.command
-                    or not item.complete or item.exit_code != 0):
+                    or item.cgroup is None or not item.command):
                 continue
             case_id = session_cases.get(host_row.get("session_id"))
             task = tasks.get(case_id)
@@ -151,7 +150,6 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
             matching_calls = [
                 call for call in raw_clause.get("calls", [])
                 if call.get("tool_call_id") == item.execution_id
-                and call.get("eligible_for_kb") is True
             ]
             if len(matching_calls) != 1:
                 raise ValueError(
@@ -167,7 +165,7 @@ def export(result_path: Path, receipt_path: Path, workload_path: Path,
             completed_calls.append({
                 "execution_id": item.execution_id,
                 "host_cgroup_execution_increment_bytes": host_increment,
-                "call": asdict(observation_to_completed_call(item, task["repository"])),
+                "call": asdict(observation_to_completed_call(item, task["repository"], telemetry=matching_calls[0])),
             })
             for index, observation in enumerate(native_clause_observations(
                 task["repository"], matching_calls[0], raw_cgroup,

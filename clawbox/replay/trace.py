@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,21 @@ def load_trace(path: Path) -> list[ReplayAction]:
 
     Tool spans and resource records remain in the source file for analysis.
     OpenClaw, not this reader, executes tools during replay.
+
+    Parsed actions are shared read-only within the worker; each caller gets a
+    separate outer list. File metadata invalidates replaced/modified inputs
+    without hashing recordings on each session's startup path.
     """
+    path = Path(path).resolve()
+    stat = path.stat()
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return list(_load_trace_cached(path, identity))
+
+
+@lru_cache(maxsize=512)
+def _load_trace_cached(path: Path, _identity: tuple[int, ...]) -> tuple[ReplayAction, ...]:
+    # Retain only LLM input/output actions, never the full source record list.
+    # 512 covers the 503-case corpus without retaining every historical file.
     records = _read_jsonl(path)
     starts = {}
     actions = []
@@ -108,7 +123,7 @@ def load_trace(path: Path) -> list[ReplayAction]:
         raise ValueError(f"{path}: recording contains no LLM spans")
     if len({a.metadata["trace_id"] for a in actions}) != 1:
         raise ValueError(f"{path}: select one agent run for replay")
-    return sorted(actions, key=lambda action: action.sequence_no)
+    return tuple(sorted(actions, key=lambda action: action.sequence_no))
 
 
 def find_recordings(paths, runtime_id: str) -> list[Path]:

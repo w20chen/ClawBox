@@ -26,10 +26,10 @@ def use_clawtune() -> None:
 
 def seed_directory() -> Path:
     use_clawtune()
-    from clawtune_kb.contracts import data_root
+    from clawtune_kb import default_seed_directory
     from clawtune_kb import validate_seed
 
-    path = Path(os.environ["CLAWTUNE_COLD_START_DIR"]) if os.getenv("CLAWTUNE_COLD_START_DIR") else data_root() / "seeds/bootstrap-v1"
+    path = Path(os.environ["CLAWTUNE_KB_SEED"]) if os.getenv("CLAWTUNE_KB_SEED") else default_seed_directory()
     validate_seed(path)
     return path
 

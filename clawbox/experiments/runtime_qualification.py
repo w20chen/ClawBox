@@ -239,6 +239,17 @@ def guest_pressure_probe(domain, lifecycles, *, source=None, control_options=Non
                 client.run_command(vm, f'kill {pid}; rm -f {shlex.quote(marker)}', timeout_s=10)
 
 
+def _qualification_compute_placement(resources) -> tuple[int, str]:
+    if resources.compute_nodes:
+        node = resources.compute_nodes[0]
+        return node.numa_node, node.cpus
+    if resources.local_numa_node is None:
+        raise RuntimeError('runtime placement qualification requires compute_nodes or local_numa_node')
+    local_node = resources.local_numa_node
+    cpus = Path(f'/sys/devices/system/node/node{local_node}/cpulist').read_text().strip()
+    return local_node, cpus
+
+
 def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     """Verify both VM roles, priorities and configured snapshot restores."""
     if spec.schema_version == 4:
@@ -254,8 +265,11 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     probe_id = 'qualification-priority-' + uuid.uuid4().hex[:12]
     client = CubeSandboxClient(journal=OwnedSandboxJournal(artifact_root/'owned-sandboxes.jsonl'))
     parent = Path(spec.resources.local_memory_cgroup)
-    probe_root = parent / ('clawbox-vm-probe-' + uuid.uuid4().hex)
-    domain = PriorityDomain(probe_root, concurrency=2, repetition=0, legacy=False)
+    local_node, cpus = _qualification_compute_placement(spec.resources)
+    domain = PriorityDomain(
+        parent, concurrency=2, repetition=0, legacy=False,
+        placements={0: (cpus, local_node), 1: (cpus, local_node)},
+    )
     lifecycles = []
     placements = []
     observations = []
@@ -266,10 +280,6 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
         transfer_concurrency=spec.resources.pool_transfer_concurrency,
         transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds) if spec.resources.warm_memory_capacity_mib else None
     try:
-        PriorityDomain._enable(parent)
-        probe_root.mkdir()
-        (probe_root/'memory.max').write_text((parent/'memory.max').read_text())
-        (probe_root/'memory.swap.max').write_text('0')
         domain.start()
         for index in (0,1):
             for role in ('runtime','tool'):
@@ -320,7 +330,6 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
             cleanup.append(str(exc))
         try:
             domain.close()
-            probe_root.rmdir()
         except Exception as exc:
             cleanup.append(str(exc))
     result={'required':True,'passed':primary is None and not cleanup,

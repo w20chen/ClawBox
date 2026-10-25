@@ -1,8 +1,9 @@
-"""Stable experiment priority domains, allocated before Cube starts a VM.
+"""Stable experiment placement intent over CubeSandbox-owned VM cgroups.
 
 The root-owned registry conveys an opaque capability through Cube's persisted
-environment. Cubelet resolves it to an already allocated leaf; callers cannot
-pass arbitrary host paths. Both VM roles keep the same leaf across restore.
+environment. CubeSandbox keeps allocating and recycling its normal fast-pool
+cgroups; it publishes the assigned leaf back through that capability so the
+experiment can verify and control the official VM cgroup.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ import uuid
 
 REGISTRY = Path('/run/clawbox/cgroups')
 TOKEN_ENV = 'CLAWBOX_CGROUP_TOKEN'
+OFFICIAL_CGROUP = re.compile(r'^/cube_sandbox/sandbox/[0-9]+$')
+PLACEMENT_SAMPLE_MIN_BYTES = 8 * 1024 * 1024
 
 
 def c2_applies(execution_scope: str | None, operation: str | None) -> bool:
@@ -161,8 +164,10 @@ class PriorityDomain:
                  topology_group_max_active: int = 2,
                  topology_min_duration_seconds: float = 1.0,
                  topology_include_smt: bool = False,
-                 emit=None, proc_stat: Path = Path('/proc/stat')):
+                 emit=None, proc_stat: Path = Path('/proc/stat'),
+                 cgroup_mount: Path = Path('/sys/fs/cgroup')):
         self.parent = parent.resolve()
+        self.cgroup_mount = cgroup_mount.resolve()
         self.legacy = legacy
         self.registry = registry
         self.placements = placements or {}
@@ -201,6 +206,7 @@ class PriorityDomain:
         self._pending_started: dict[tuple[int, str], float] = {}
         self._pending_vcpus: dict[tuple[int, str], int] = {}
         self._capacity_bypassed: set[tuple[int, str]] = set()
+        self._initial_residency_verified: set[str] = set()
         self._total_call_assignments = 0
         self._total_expansions = 0
         self._total_capacity_bypasses = 0
@@ -658,7 +664,7 @@ class PriorityDomain:
             os.chmod(self.journal, 0o600)
             json.dump({'parent':str(self.parent),'prefix':self.prefix,
                        'priorities':self.priorities,'tokens':list(self.tokens.values()),
-                       'flat': not self.legacy},stream)
+                       'native': not self.legacy},stream)
             stream.flush()
             os.fsync(stream.fileno())
 
@@ -683,7 +689,7 @@ class PriorityDomain:
     def start(self):
         if os.geteuid() != 0:
             raise RuntimeError('priority domain registration requires a root experiment worker')
-        if not self.parent.is_relative_to(Path('/sys/fs/cgroup/cube_sandbox/sandbox')):
+        if not self.parent.is_relative_to(self.cgroup_mount/'cube_sandbox'/'sandbox'):
             raise ValueError('priority domain must be inside the Cube VM memory subtree')
         self.registry.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.registry.mkdir(exist_ok=True, mode=0o700)
@@ -697,22 +703,16 @@ class PriorityDomain:
             name = hashlib.sha256(str(self.parent).encode()).hexdigest() + '.lock'
             self.lock_file = (self.registry / name).open('a')
             fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            events = dict(line.split() for line in (self.parent/'cgroup.events').read_text().splitlines())
-            if events.get('populated') != '0':
-                raise RuntimeError('physical VM domain is not empty before the arm')
             self._journal()
             if not self.legacy:
-                for index in self.priorities:
-                    for role in ('runtime', 'tool'):
-                        leaf = self.parent / f'{self.prefix}-vm-{index:04d}-{role}'
-                        self._create(leaf, branch=False)
-                        self.leaves[index, role] = leaf
-                        self.prepare(index, role)
-                        with (self.registry / self.tokens[index, role]).open('x', encoding='utf-8') as stream:
-                            os.chmod(stream.name, 0o600)
-                            json.dump({'path': '/' + leaf.relative_to('/sys/fs/cgroup').as_posix()}, stream)
                 self.cpu_weights = {'default': 100}
                 return
+            events = dict(
+                line.split()
+                for line in (self.parent/'cgroup.events').read_text().splitlines()
+            )
+            if events.get('populated') != '0':
+                raise RuntimeError('physical VM domain is not empty before the arm')
             self._create(self.high, branch=True)
             self._create(self.low, branch=True)
             (self.high/'cpu.weight').write_text(str(self.cpu_weights['high']))
@@ -737,6 +737,28 @@ class PriorityDomain:
         return self.tokens[index, role]
 
     def prepare(self, index: int, role: str):
+        if not self.legacy:
+            self._vcpu_threads.pop((index, role), None)
+            self.leaves.pop((index, role), None)
+            _cpus, node = self.placements.get(index, (None, None))
+            if node is None:
+                raise RuntimeError(
+                    f'CubeSandbox native placement has no NUMA node for session {index}'
+                )
+            token = self.tokens[index, role]
+            target = self.registry / token
+            temporary = self.registry / f'.{token}.{os.getpid()}'
+            temporary.unlink(missing_ok=True)
+            try:
+                with temporary.open('x', encoding='utf-8') as stream:
+                    os.chmod(stream.name, 0o600)
+                    json.dump({'numa_node': node}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return
         leaf = self.leaves[index, role]
         self._vcpu_threads.pop((index, role), None)
         # Cube's pause/destroy response can precede the final VMM thread leaving
@@ -769,6 +791,8 @@ class PriorityDomain:
             (leaf/'cpuset.mems').write_text(str(node))
 
     def verify(self, index: int, role: str, sandbox_id: str) -> dict:
+        if not self.legacy:
+            return self._verify_native(index, role, sandbox_id)
         from .topology import parse_cpu_list
         from .numa_borrow import read_numa_lru_bytes
         expected = self.leaves[index, role]
@@ -826,10 +850,145 @@ class PriorityDomain:
         self.observations.append(evidence)
         return evidence
 
+    def _verify_native(self, index: int, role: str, sandbox_id: str) -> dict:
+        from .topology import parse_cpu_list
+        from .numa_borrow import read_numa_anon_bytes, read_numa_lru_bytes
+
+        token = self.tokens[index, role]
+        record = json.loads((self.registry/token).read_text(encoding='utf-8'))
+        relative = record.get('path')
+        _configured_cpus, configured_node = self.placements.get(index, (None, None))
+        if (record.get('numa_node') != configured_node
+                or not isinstance(relative, str)
+                or OFFICIAL_CGROUP.fullmatch(relative) is None):
+            raise RuntimeError(
+                f'CubeSandbox did not publish a valid native VM cgroup for {sandbox_id}'
+            )
+        actual = (self.cgroup_mount/relative.lstrip('/')).resolve()
+        if actual.parent != self.parent:
+            raise RuntimeError(f'CubeSandbox VM cgroup escaped its official pool: {actual}')
+        key = index, role
+        self.leaves[key] = actual
+        cpus = (actual/'cpuset.cpus.effective').read_text().strip()
+        mems = (actual/'cpuset.mems.effective').read_text().strip()
+        configured_cpus, configured_node = self.placements[index]
+        required_cpus = (
+            configured_cpus
+            or Path(f'/sys/devices/system/node/node{configured_node}/cpulist').read_text().strip()
+        )
+        if not parse_cpu_list(required_cpus) <= parse_cpu_list(cpus):
+            raise RuntimeError(
+                f'CubeSandbox native cgroup excludes requested CPUs at {actual}: '
+                f'requested={required_cpus}, effective={cpus}'
+            )
+        threads = []
+        for tid_text in (actual/'cgroup.threads').read_text().split():
+            tid = int(tid_text)
+            try:
+                status = dict(
+                    line.split(':', 1)
+                    for line in Path(f'/proc/{tid}/status').read_text().splitlines()
+                    if ':' in line
+                )
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            threads.append({
+                'tid': tid,
+                'name': status['Name'].strip(),
+                'cpus_allowed': status['Cpus_allowed_list'].strip(),
+            })
+        vcpus = [thread for thread in threads if thread['name'].startswith('vcpu')]
+        if not vcpus:
+            raise RuntimeError(f'CubeSandbox native cgroup has no vCPU threads: {actual}')
+        requested = parse_cpu_list(required_cpus)
+        escaped = [
+            thread for thread in vcpus
+            if not parse_cpu_list(thread['cpus_allowed']) <= requested
+        ]
+        if escaped:
+            raise RuntimeError(
+                f'CubeSandbox native vCPU affinity escaped NUMA CPUs {required_cpus}: {escaped}'
+            )
+        self._vcpu_threads[key] = tuple(
+            (thread['tid'], thread['name']) for thread in vcpus
+        )
+        resident, unattributed = read_numa_lru_bytes(actual)
+        anon_resident = read_numa_anon_bytes(actual)
+        attributed_anon = sum(anon_resident.values())
+        initial_residency_check = sandbox_id not in self._initial_residency_verified
+        # Incremental restore can leave all guest RAM file-backed until the
+        # guest dirties it. Shared template/snapshot cache is not controlled by
+        # the VMM allocation policy, so validate anonymous pages when present
+        # and record an unobservable sample when none exist.
+        local_anon = anon_resident.get(configured_node, 0)
+        if (initial_residency_check
+                and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES
+                and local_anon * 2 <= attributed_anon):
+            raise RuntimeError(
+                f'CubeSandbox native memory placement is not local to NUMA node '
+                f'{configured_node}: anon_residency={anon_resident}, '
+                f'total_residency={resident}, unattributed={unattributed}'
+            )
+        self._initial_residency_verified.add(sandbox_id)
+        topology_threads = None
+        if key in self._fine_masks:
+            selected = self._full_masks[key] if key in self._expanded else self._fine_masks[key]
+            topology_threads = self._apply_thread_affinity(index, role, selected)
+            try:
+                self._pressure_previous[key] = (
+                    time.monotonic(), _pressure_total(actual/'cpu.pressure')
+                )
+            except (OSError, RuntimeError, ValueError):
+                pass
+        evidence = {
+            'priority': self.priorities[index],
+            'cgroup': str(actual),
+            'sandbox_id': sandbox_id,
+            'role': role,
+            'compute_numa': configured_node,
+            'effective_cpus': cpus,
+            'memory_nodes': sorted(parse_cpu_list(mems)),
+            'requested_cpus': required_cpus,
+            'actual_residency_bytes': resident,
+            'actual_anon_residency_bytes': anon_resident,
+            'unattributed_bytes': unattributed,
+            'residency_basis': (
+                'anonymous_initial_create'
+                if initial_residency_check and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES
+                else 'insufficient_anonymous_sample_initial_create'
+                if initial_residency_check
+                else 'restore_policy_only'
+            ),
+            'local_residency_fraction': (
+                local_anon / attributed_anon
+                if (initial_residency_check
+                    and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES) else None
+            ),
+            'threads': threads,
+            'enforcement': 'cubesandbox_native_mempolicy_and_affinity',
+            'tool_call_cpu_placement': ({
+                'mode': self.topology_mode,
+                'selected_cpus': (
+                    self._full_masks[key] if key in self._expanded else self._fine_masks[key]
+                ),
+                'full_cpus': self._full_masks[key],
+                'target_threads': topology_threads,
+            } if topology_threads is not None else None),
+        }
+        self.observations.append(evidence)
+        return evidence
+
     def close(self):
         # Revoke capabilities first; never recursively delete an arbitrary path.
         for token in self.tokens.values():
             (self.registry / token).unlink(missing_ok=True)
+        if not self.legacy:
+            if self.lock_file is not None:
+                self.lock_file.close()
+                self.lock_file = None
+            if self.journal is not None:
+                self.journal.unlink(missing_ok=True)
+            return
         # Cube's destroy response can precede the final VMM thread leaving its
         # cgroup by a few seconds.  Retry the same known leaves rather than
         # making the next qualification or arm fail on that teardown race.
@@ -918,18 +1077,16 @@ def cleanup_priority_domains(directory: Path):
                 if not re.fullmatch(r'[0-9a-f]{32}',token):
                     raise ValueError('invalid priority cleanup token')
                 (REGISTRY/token).unlink(missing_ok=True)
+            if record.get('native'):
+                journal.unlink()
+                continue
             paths=[]
             for index,priority in record['priorities'].items():
                 if not index.isdecimal() or priority not in ('high','low','neutral'):
                     raise ValueError('invalid priority cleanup session')
-                if record.get('flat'):
-                    paths.extend(parent / f'{prefix}-vm-{int(index):04d}-{role}'
-                                 for role in ('runtime', 'tool'))
-                    continue
                 session=parent/(prefix+'-'+priority)/f'session-{int(index):04d}'
                 paths.extend([session/'runtime',session/'tool',session])
-            if not record.get('flat'):
-                paths.extend([parent/(prefix+'-high'),parent/(prefix+'-low')])
+            paths.extend([parent/(prefix+'-high'),parent/(prefix+'-low')])
             # A killed worker cannot run PriorityDomain.close().  Cube's API
             # can still report a sandbox destroyed before its last shim leaves
             # the owned leaf, so recovery needs the same bounded wait and

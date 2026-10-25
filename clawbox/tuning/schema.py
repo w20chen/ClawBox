@@ -81,6 +81,7 @@ class BridgeRecord(StrictModel):
     exit_code: int
     timed_out: bool = False
     cancelled: bool = False
+    timeout_duration_lower_bound_ms: float | None = Field(default=None, ge=0)
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
     output_truncated: bool = False
@@ -349,6 +350,8 @@ class ToolObservation(StrictModel):
     llc_mpki: float | None = Field(default=None, ge=0)
     llc_miss_rate: float | None = Field(default=None, ge=0)
     pmu_eligible_for_kb: bool = False
+    confirmed_timeout: bool = False
+    timeout_duration_lower_bound_ms: float | None = Field(default=None, ge=0)
     trusted: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -478,6 +481,8 @@ def span_end_to_observation(record: dict[str, Any]) -> ToolObservation | None:
             end_time=end_time,
             duration_sec=duration_sec,
             status_code=status_code,
+            confirmed_timeout=resources.get("confirmed_timeout") is True,
+            timeout_duration_lower_bound_ms=_as_float(resources.get("timeout_duration_lower_bound_ms")),
             exit_code=exit_code,
             complete=complete,
             collection_quality=quality,

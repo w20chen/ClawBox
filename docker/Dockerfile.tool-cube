@@ -24,7 +24,7 @@ LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
 COPY --from=clawtune services/sidecar /opt/clawtune-guest/services/sidecar
 COPY --from=clawtune contracts /opt/clawtune-guest/contracts
 COPY --from=clawtune seeds /opt/clawtune-guest/seeds
-RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune-guest/services/sidecar
+RUN /opt/conda/bin/python -m pip --python /opt/clawtune/venv/bin/python install --upgrade --force-reinstall /opt/clawtune-guest/services/sidecar
 COPY --from=clawtune tools/guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-tool-entrypoint.sh \
  && test -f /opt/clawtune-guest/tools/guest_collector_server.py \

@@ -278,17 +278,17 @@ def test_validator_rejects_each_gate():
     assert not validator.validate(bad_sig, "not-a-signature").valid
 
     bad_quality = obs(complete=False)
-    assert not validator.validate(bad_quality, sign_observation(bad_quality, "secret")).valid
+    assert validator.validate(bad_quality, sign_observation(bad_quality, "secret")).valid
 
     censored = obs(exit_code=1)
-    assert not validator.validate(censored, sign_observation(censored, "secret")).valid
+    assert validator.validate(censored, sign_observation(censored, "secret")).valid
 
 
 def test_classify_observations_partitions():
     validator = ObservationValidator(ingest_secret="secret")
     trusted = obs(execution_id="exec-ok")
     duplicate = obs(execution_id="exec-ok")
-    rejected = obs(execution_id="exec-bad", exit_code=1)
+    rejected = obs(execution_id="exec-bad", schema_version=99)
     sigs = {
         dedup_key(trusted): sign_observation(trusted, "secret"),
         dedup_key(rejected): sign_observation(rejected, "secret"),

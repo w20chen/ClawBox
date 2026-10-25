@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -339,14 +340,23 @@ def test_c2_failed_affinity_restores_c0_without_publishing_assignment(monkeypatc
 @pytest.mark.parametrize("disappeared", [FileNotFoundError, ProcessLookupError])
 def test_vm_verification_tolerates_exited_auxiliary_thread(monkeypatch, tmp_path, disappeared):
     from pathlib import Path
-    domain = PriorityDomain(tmp_path, concurrency=1, repetition=0, legacy=False,
-                            placements={0: ('0-1', 0)})
-    leaf = tmp_path / 'tool'
-    leaf.mkdir()
+    mount = tmp_path/'sys/fs/cgroup'
+    parent = mount/'cube_sandbox/sandbox'
+    leaf = parent/'42'
+    leaf.mkdir(parents=True)
+    registry = tmp_path/'registry'
+    registry.mkdir()
+    domain = PriorityDomain(
+        parent, concurrency=1, repetition=0, legacy=False,
+        placements={0: ('0-1', 0)}, registry=registry, cgroup_mount=mount,
+    )
     domain.leaves[0, 'tool'] = leaf
     for name, value in {'cpuset.cpus.effective': '0-1', 'cpuset.mems.effective': '0',
                         'cgroup.threads': '100 101'}.items():
         (leaf / name).write_text(value)
+    (registry/domain.token(0, 'tool')).write_text(json.dumps({
+        'numa_node': 0, 'path': '/cube_sandbox/sandbox/42',
+    }))
     original = Path.read_text
     def read(path, *args, **kwargs):
         if path.as_posix() == '/proc/100/status':
@@ -357,7 +367,23 @@ def test_vm_verification_tolerates_exited_auxiliary_thread(monkeypatch, tmp_path
     monkeypatch.setattr(Path, 'read_text', read)
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_lru_bytes',
                         lambda path: ({0: 1024}, 0))
+    monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_anon_bytes',
+                        lambda path: {0: 1024})
     assert [t['tid'] for t in domain.verify(0, 'tool', 'vm')['threads']] == [101]
+    # A freshly restored incremental snapshot can be entirely file-backed.
+    # Shared file cache is not evidence about the VMM allocation policy.
+    monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_lru_bytes',
+                        lambda path: ({0: 1, 1: 1024}, 0))
+    monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_anon_bytes',
+                        lambda path: {0: 0, 1: 0})
+    restored = domain.verify(0, 'tool', 'vm')
+    assert restored['residency_basis'] == 'restore_policy_only'
+    assert restored['local_residency_fraction'] is None
+    monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_anon_bytes',
+                        lambda path: {0: 1024, 1: 16 * 1024 * 1024})
+    domain._initial_residency_verified.clear()
+    with pytest.raises(RuntimeError, match='memory placement is not local'):
+        domain.verify(0, 'tool', 'vm')
     # An empty vCPU set must still fail: disappearance is not evidence of routing.
     (leaf / 'cgroup.threads').write_text('100')
     with pytest.raises(RuntimeError, match='no vCPU threads'):

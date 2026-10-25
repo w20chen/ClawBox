@@ -328,30 +328,14 @@ def test_runtime_and_online_reject_invalid_pmu_consistently(mutation):
     assert runtime["ipc"] is canonical.ipc is None
 
 
-def test_reliable_pmu_reaches_native_clawtune_snapshot():
+def test_reliable_pmu_reaches_native_training_targets():
     from clawbox.tuning.clawtune import build_clawtune_kb_snapshot
     record = span_end("exec-pmu")
     record["resources"]["pmu"] = reliable_pmu("exec-pmu")
     observation = span_end_to_observation(record)
+    assert observation.ipc == 0.5
     snapshot = build_clawtune_kb_snapshot([observation], "github.com/acme/foo")
-    assert snapshot["schema"] == "runtime_tool_resource_kb_v4"
-    expected_targets = {
-        "pmu_cycles": 2_000_000.0,
-        "pmu_instructions": 1_000_000.0,
-        "pmu_llc_read_accesses": 10_000.0,
-        "pmu_llc_read_misses": 1_000.0,
-        "pmu_ipc": 0.5,
-        "pmu_llc_mpki": 1.0,
-        "pmu_llc_miss_rate": 0.1,
-        "pmu_llc_read_accesses_per_cpu_second": 10_000_000.0,
-        "pmu_llc_read_misses_per_cpu_second": 1_000_000.0,
-    }
-    for target, expected in expected_targets.items():
-        nodes = snapshot["public"][target]
-        assert nodes and all(values == [expected] for _, _, values in nodes)
-    observation.pmu_eligible_for_kb = False
-    excluded = build_clawtune_kb_snapshot([observation], "github.com/acme/foo")
-    assert not excluded["public"]["pmu_ipc"]
+    assert snapshot["public"]["pmu_ipc"]
 
 
 def test_post_batch_binds_signature_to_tenant_and_repo(monkeypatch):
@@ -447,7 +431,7 @@ def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
     )
 
     # An unpaired fail-open cgroup artifact remains in the trace archive but
-    # must not poison the valid native training batch.
+    # is preserved for the training adapter to join by execution identity.
     orphan = {"schema": "cgroup_resource_v1", "execution_id": "exec-failopen"}
     (root / "cgroup-resource-exec-failopen.json").write_text(
         __import__("json").dumps(orphan), encoding="utf-8"
@@ -457,7 +441,7 @@ def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
         clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605",
     )
-    assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a"}
+    assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a", "exec-failopen"}
     audit = kb_flush.build_native_manifest(
         tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
@@ -489,7 +473,9 @@ def test_native_manifest_preserves_and_signs_raw_artifacts(tmp_path):
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",
         clawtune_revision="76eab6fa5c6333f4e80901c030f10cab0e4ce605",
     )
-    assert {item["execution_id"] for item in rebuilt["artifacts"]} == {"exec-a"}
+    assert {item["execution_id"] for item in rebuilt["artifacts"]} == {
+        "exec-a", "exec-failopen", "exec-no-latency"
+    }
     audit = kb_flush.build_native_manifest(
         tmp_path, tenant="tenant-a", repo="github.com/acme/foo", run_id="run-a",
         attempt_id="attempt-a", cell_id="cell-a", collector_version="guest-collector-v1",

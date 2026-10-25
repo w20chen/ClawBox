@@ -55,10 +55,14 @@ def main() -> None:
         sidecar_dir / "src" / "clawtune_kb" / "store.py",
     )
     missing = [str(path) for path in required if not path.is_file()]
-    if not (root / "seeds" / "bootstrap-v1").is_dir():
-        missing.append(str(root / "seeds" / "bootstrap-v1"))
     if missing:
         fail("missing current source files: " + ", ".join(missing))
+
+    sys.path.insert(0, str(sidecar_dir / "src"))
+    from clawtune_kb import default_seed_directory
+    default_seed = default_seed_directory()
+    if not default_seed.is_dir():
+        fail(f"seed is missing at {default_seed}; select a valid CLAWTUNE_KB_SEED")
 
     manifest = json.loads((plugin_dir / "openclaw.plugin.json").read_text(encoding="utf-8"))
     if manifest.get("id") != "clawtune":
@@ -101,7 +105,6 @@ def main() -> None:
             if marker in text:
                 fail(f"legacy marker {marker!r} remains in {path.relative_to(project_root)}")
 
-    import sys
     sys.path.insert(0, str(sidecar_dir / "src"))
     from clawtune_kb import validate_seed
     from clawtune_sidecar.trace import AgentTestBenchTraceWriter
@@ -162,8 +165,8 @@ def main() -> None:
         "targets: tool.targets",
     )):
         fail("hook-only execution envelope does not carry the selected LatticeKB prediction")
-    validate_seed(root / "seeds" / "bootstrap-v1")
-    seed_dir = root / "seeds" / "bootstrap-v1"
+    validate_seed(default_seed)
+    seed_dir = default_seed
     ClauseResourceKB.from_json_obj(json.loads(
         (seed_dir / "clause-resource-kb.json").read_text(encoding="utf-8")
     ))

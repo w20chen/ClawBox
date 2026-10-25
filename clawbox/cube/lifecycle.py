@@ -278,14 +278,17 @@ class CubeSandboxLifecycle:
                 if self.prepare_cgroup is not None:
                     with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
                         self.prepare_cgroup()
-                with self._measure_stage(stage_seconds, "api_create_s"):
-                    self.sandbox = self.client.create_sandbox(
-                        template=self.template, node_name=self.node_name,
-                        ownership=self.ownership, env_vars=self.env_vars or None,
-                        allow_internet_access=self.allow_internet_access,
-                        network_allow_out=self.network_allow_out or None,
-                        network_deny_out=self.network_deny_out or None,
-                    )
+                # Bound concurrent lifecycle calls and measure queue time
+                # separately from the actual Cube API operation.
+                with self._transfer("create", stage_seconds):
+                    with self._measure_stage(stage_seconds, "api_create_s"):
+                        self.sandbox = self.client.create_sandbox(
+                            template=self.template, node_name=self.node_name,
+                            ownership=self.ownership, env_vars=self.env_vars or None,
+                            allow_internet_access=self.allow_internet_access,
+                            network_allow_out=self.network_allow_out or None,
+                            network_deny_out=self.network_deny_out or None,
+                        )
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
                 verified = None
                 if self.verify_cgroup is not None:
@@ -378,6 +381,7 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.CHECKPOINTING
             started_wall, started_mono = time.time(), time.monotonic()
+            stage_seconds: dict[str, float] = {}
             host_memory_before = self._observe_physical()
             key = None
             pause_attempted = False
@@ -396,7 +400,7 @@ class CubeSandboxLifecycle:
                     tier = SnapshotTier.COLD
                 if tier is None:
                     pause_attempted = True
-                    with self._transfer("checkpoint"):
+                    with self._transfer("checkpoint", stage_seconds), self._measure_stage(stage_seconds, "api_checkpoint_s"):
                         self.client.pause_sandbox(
                             self.sandbox, snapshot_mechanism=self.snapshot_mechanism,
                         )
@@ -435,7 +439,7 @@ class CubeSandboxLifecycle:
                     if tier is SnapshotTier.WARM:
                         self._warm_paths.add(path)
                     pause_attempted = True
-                    with self._transfer("checkpoint"):
+                    with self._transfer("checkpoint", stage_seconds), self._measure_stage(stage_seconds, "api_checkpoint_s"):
                         manifest = self.client.pause_sandbox(
                             self.sandbox, tier=tier.value,
                             memory_snapshot_path=path, generation=self._generation,
@@ -485,6 +489,7 @@ class CubeSandboxLifecycle:
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,
                                     tier_from=SnapshotTier.LOCAL.value,
+                                    stage_seconds=stage_seconds,
                                     tier_to=tier.value if tier is not None else None,
                                     snapshot_generation=key.generation if key is not None else None,
                                     snapshot_path=manifest.get("memory_snapshot_path") if manifest else None,
@@ -508,6 +513,7 @@ class CubeSandboxLifecycle:
                     "checkpoint", before, self._state, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
                 )
                 raise
 
@@ -603,26 +609,33 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.RESTORING
             started_wall, started_mono = time.time(), time.monotonic()
-            host_memory_before = self._observe_physical()
+            stage_seconds: dict[str, float] = {}
+            with self._measure_stage(stage_seconds, "physical_observation_before_s"):
+                host_memory_before = self._observe_physical()
             resume_attempted = False
             try:
                 resume_attempted = True
                 if self.prepare_cgroup is not None:
-                    self.prepare_cgroup()
-                with self._transfer("restore"):
+                    with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
+                        self.prepare_cgroup()
+                with self._transfer("restore", stage_seconds), self._measure_stage(stage_seconds, "api_restore_s"):
                     self.sandbox = self.client.connect_sandbox(
                         self.sandbox_id,
                         snapshot_mechanism=self.snapshot_mechanism,
                     )
-                verified = self.verify_cgroup(self.sandbox_id) if self.verify_cgroup is not None else None
+                verified = None
+                if self.verify_cgroup is not None:
+                    with self._measure_stage(stage_seconds, "verify_cgroup_s"):
+                        verified = self.verify_cgroup(self.sandbox_id)
+                verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
                 if self.numa_borrower is not None:
-                    verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
-                    if verified_cgroup is None:
-                        self.numa_borrower.pin_local(self.sandbox_id)
-                    else:
-                        self.numa_borrower.pin_local(
-                            self.sandbox_id, verified_cgroup=verified_cgroup,
-                        )
+                    with self._measure_stage(stage_seconds, "pin_local_s"):
+                        if verified_cgroup is None:
+                            self.numa_borrower.pin_local(self.sandbox_id)
+                        else:
+                            self.numa_borrower.pin_local(
+                                self.sandbox_id, verified_cgroup=verified_cgroup,
+                            )
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
                         raise RuntimeError("WARM snapshot accounting disappeared before restore")
@@ -636,9 +649,23 @@ class CubeSandboxLifecycle:
                     self._snapshot_tier = None
                 self._tier = SnapshotTier.LOCAL
                 self._state = SandboxState.RUNNING
+                from pathlib import Path
+                from clawbox.experiments.memory import SandboxRSSSampler
+                with self._measure_stage(stage_seconds, "restore_fault_observation_s"):
+                    try:
+                        # Verification already identifies this VM's current
+                        # leaf. Avoid a host-wide /proc scan on every restore.
+                        self._restore_fault_sampler = (
+                            SandboxRSSSampler(self.sandbox_id,
+                                cgroup=Path(verified_cgroup) if verified_cgroup is not None else None)
+                            if Path("/proc").is_dir() else None
+                        )
+                    except OSError:
+                        self._restore_fault_sampler = None
                 elapsed = self._record("restore", before, self._state,
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,
+                                    stage_seconds=stage_seconds,
                                     tier_from=self._snapshot_tier.value if self._snapshot_tier else None,
                                     tier_to=SnapshotTier.LOCAL.value,
                                     snapshot_generation=self._generation)
@@ -648,14 +675,6 @@ class CubeSandboxLifecycle:
                     "snapshot_generation": self._generation,
                     "snapshot_tier": self._snapshot_tier.value if self._snapshot_tier else None,
                 }
-                from pathlib import Path
-                from clawbox.experiments.memory import SandboxRSSSampler
-                try:
-                    self._restore_fault_sampler = (
-                        SandboxRSSSampler(self.sandbox_id) if Path("/proc").is_dir() else None
-                    )
-                except OSError:
-                    self._restore_fault_sampler = None
                 return elapsed
             except Exception as exc:
                 remote_state = None
@@ -670,11 +689,24 @@ class CubeSandboxLifecycle:
                     "restore", before, self._state, started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
                 )
                 raise
 
-    def _transfer(self, operation):
-        return self.snapshot_pool.transfer(operation) if self.snapshot_pool is not None else nullcontext()
+    @contextmanager
+    def _transfer(self, operation, stage_seconds=None):
+        started = time.monotonic()
+        acquired = False
+        context = self.snapshot_pool.transfer(operation) if self.snapshot_pool is not None else nullcontext()
+        try:
+            with context:
+                acquired = True
+                if stage_seconds is not None:
+                    stage_seconds["transfer_slot_wait_s"] = time.monotonic() - started
+                yield
+        finally:
+            if not acquired and stage_seconds is not None:
+                stage_seconds["transfer_slot_wait_s"] = time.monotonic() - started
 
     def _verify_warm_files_removed(self):
         """Do not credit released capacity while an owned WARM file remains."""

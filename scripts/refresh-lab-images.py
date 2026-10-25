@@ -155,6 +155,11 @@ def main():
         call(["npm", "ci", "--ignore-scripts"], cwd=plugin)
     call(["npm", "run", "build"], cwd=plugin)
     revision = source_revision(tune)
+    from clawbox.clawtune_integration import use_clawtune
+    use_clawtune()
+    from clawtune_kb import default_seed_directory, validate_seed
+    seed = Path(os.environ["CLAWTUNE_KB_SEED"]) if os.getenv("CLAWTUNE_KB_SEED") else default_seed_directory()
+    validate_seed(seed)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     report = {"clawtune_revision": revision, "templates": {}}
     with tempfile.TemporaryDirectory(prefix="clawbox-image-") as temp:
@@ -162,6 +167,7 @@ def main():
         shutil.copytree(tune/"services/sidecar", context/"sidecar", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copytree(tune/"contracts", context/"contracts")
         shutil.copytree(tune/"seeds", context/"seeds")
+        shutil.copytree(seed, context/"selected-seed")
         shutil.copytree(plugin/"dist", context/"plugin/dist")
         for name in ("package.json", "openclaw.plugin.json"):
             shutil.copy(plugin/name, context/"plugin"/name)
@@ -193,11 +199,15 @@ def main():
             tag = f"{build['registry']}/lab-{role}:{stamp}"
             target = "/opt/clawtune" if role == "runtime" else "/opt/clawtune-guest"
             entry = "cube-runtime-entrypoint.sh" if role == "runtime" else "cube-tool-entrypoint.sh"
+            # Tool's collector venv is intentionally pip-free. Install into that
+            # interpreter using the base workload image's package manager.
+            pip = ("/opt/conda/bin/python -m pip --python /opt/clawtune/venv/bin/python"
+                   if role == "sandbox" else "/opt/clawtune/venv/bin/python -m pip")
             dockerfile = flattened_base(image) + f'''
 COPY sidecar {target}/services/sidecar
 COPY contracts {target}/contracts
 COPY seeds {target}/seeds
-RUN /opt/clawtune/venv/bin/pip install --index-url {args.pip_index} --upgrade jsonschema setuptools wheel && /opt/clawtune/venv/bin/pip install --index-url {args.pip_index} --no-build-isolation {target}/services/sidecar
+RUN {pip} install --index-url {args.pip_index} --upgrade jsonschema setuptools wheel && {pip} install --index-url {args.pip_index} --no-build-isolation {target}/services/sidecar
 ENV XDG_CACHE_HOME=/opt/clawtune/cache
 COPY {mvdan_binary_name} /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name}
 RUN chmod 755 /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name} && /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name} </dev/null >/dev/null
@@ -207,7 +217,8 @@ LABEL org.opencontainers.image.source.clawtune.revision="{revision}"
 '''
             if role == "runtime":
                 dockerfile += '''COPY plugin /opt/clawtune/packages/clawtune-plugin
-COPY seeds/bootstrap-v1 /opt/clawtune/cold-start/tool-resource
+COPY selected-seed /opt/clawtune/cold-start/tool-resource
+ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
 COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
 COPY scripts/initialize-clawtune-state.py /usr/local/bin/initialize-clawtune-state.py
 COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint

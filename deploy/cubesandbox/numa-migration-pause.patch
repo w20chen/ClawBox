@@ -1,0 +1,276 @@
+--- a/hypervisor/vmm/src/api/mod.rs
++++ b/hypervisor/vmm/src/api/mod.rs
+@@ -310,6 +310,10 @@
+     /// Pause a VM.
+     VmPause,
+ 
++    /// Clear stage-2 RAM mappings while paused, preserving checkpoint dirty bits.
++    VmResetRamMappings,
++    VmRestoreRamMappings,
++
+     /// Pause a VM to snapshot
+     VmPauseToSnapshot(Arc<SnapshotConfig>),
+ 
+--- a/hypervisor/vmm/src/lib.rs
++++ b/hypervisor/vmm/src/lib.rs
+@@ -688,6 +688,14 @@
+         }
+     }
+ 
++    fn vm_reset_ram_mappings(&mut self) -> result::Result<(), VmError> {
++        self.vm.as_mut().ok_or(VmError::VmNotRunning)?.reset_ram_mappings()
++    }
++
++    fn vm_restore_ram_mappings(&mut self) -> result::Result<(), VmError> {
++        self.vm.as_mut().ok_or(VmError::VmNotRunning)?.restore_ram_mappings()
++    }
++
+     fn vm_pause_to_snapshot(
+         &mut self,
+         snapshot_config: &SnapshotConfig,
+@@ -2053,6 +2061,18 @@
+                                         .map_err(ApiError::VmPause)
+                                         .map(|_| ApiResponsePayload::Empty);
+ 
++                                    res_sender.send(response).map_err(Error::ApiResponseSend)?;
++                                }
++                                ApiRequest::VmResetRamMappings => {
++                                    let response = self.vm_reset_ram_mappings()
++                                        .map_err(ApiError::VmPause)
++                                        .map(|_| ApiResponsePayload::Empty);
++                                    res_sender.send(response).map_err(Error::ApiResponseSend)?;
++                                }
++                                ApiRequest::VmRestoreRamMappings => {
++                                    let response = self.vm_restore_ram_mappings()
++                                        .map_err(ApiError::VmResume)
++                                        .map(|_| ApiResponsePayload::Empty);
+                                     res_sender.send(response).map_err(Error::ApiResponseSend)?;
+                                 }
+                                 ApiRequest::VmPauseToSnapshot(snapshot_data) => {
+--- a/hypervisor/vmm/src/vm.rs
++++ b/hypervisor/vmm/src/vm.rs
+@@ -503,6 +503,25 @@
+ }
+ 
+ impl Vm {
++    pub fn restore_ram_mappings(&mut self) -> std::result::Result<(), Error> {
++        let state = *self.state.read().unwrap();
++        if state != VmState::Paused {
++            return Err(Error::InvalidStateTransition(state, VmState::Paused));
++        }
++        self.memory_manager.lock().unwrap().restore_ram_mappings()
++            .map_err(Error::MemoryManager)
++    }
++
++    /// The VM remains paused on failure: callers must not resume incomplete mappings.
++    pub fn reset_ram_mappings(&mut self) -> std::result::Result<(), Error> {
++        let state = *self.state.read().unwrap();
++        if state != VmState::Paused {
++            return Err(Error::InvalidStateTransition(state, VmState::Paused));
++        }
++        self.memory_manager.lock().unwrap().reset_ram_mappings()
++            .map_err(Error::MemoryManager)
++    }
++
+     pub const HANDLED_SIGNALS: [i32; 1] = [SIGWINCH];
+ 
+     #[allow(clippy::too_many_arguments)]
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -48,7 +48,7 @@
+ use vm_allocator::GsiApic;
+ use vm_allocator::{AddressAllocator, SystemAllocator};
+ use vm_device::BusDevice;
+-use vm_memory::bitmap::AtomicBitmap;
++use vm_memory::bitmap::{AtomicBitmap, Bitmap};
+ use vm_memory::guest_memory::FileOffset;
+ use vm_memory::{
+     mmap::MmapRegionError, Address, Error as MmapError, GuestAddress, GuestAddressSpace,
+@@ -1946,6 +1946,85 @@
+         );
+ 
+         Ok(slot)
++    }
++
++    /// Drop KVM's populated stage-2 mappings once before host NUMA migration.
++    /// Preserve RAM, slot identities, and dirty bits consumed by incremental snapshots.
++    /// The caller must pause both vCPUs and devices throughout this operation.
++    pub fn reset_ram_mappings(&mut self) -> Result<(), Error> {
++        // Read-only device images (notably cube-agent.ext4) are shared by
++        // hundreds of VMs. Whole-process NUMA migration would move their page
++        // cache and invalidate every VM mapping the same pages. Drop only this
++        // VM's read-only file PTEs; the backing data stays intact and is faulted
++        // back from the same shared cache after resume. Writable guest RAM and
++        // private CoW state are not discarded.
++        for region in self.device_memory.memory().iter() {
++            if region.prot() & libc::PROT_WRITE == 0 && region.file_offset().is_some() {
++                let result = unsafe {
++                    libc::madvise(region.as_ptr() as *mut libc::c_void,
++                        region.len() as usize, libc::MADV_DONTNEED)
++                };
++                if result != 0 {
++                    return Err(Error::Dirtylog(MigratableError::MigrateSend(
++                        anyhow!("Release read-only device mappings before NUMA migration: {}",
++                            io::Error::last_os_error()))));
++                }
++            }
++        }
++        let memory = self.guest_memory.memory();
++        for mapping in &self.guest_ram_mappings {
++            let region = memory.find_region(GuestAddress(mapping.gpa))
++                .ok_or_else(|| Error::Dirtylog(MigratableError::MigrateSend(
++                    anyhow!("NUMA migration RAM region missing"))))?;
++            if region.start_addr().raw_value() != mapping.gpa || region.len() != mapping.size {
++                return Err(Error::Dirtylog(MigratableError::MigrateSend(
++                    anyhow!("NUMA migration RAM range mismatch"))));
++            }
++            if self.dirty_log {
++                let bitmap = self.vm.get_dirty_log(mapping.slot, mapping.gpa, mapping.size)
++                    .map_err(|e| Error::Dirtylog(MigratableError::MigrateSend(
++                        anyhow!("NUMA migration dirty log: {}", e))))?;
++                for (word, bits) in bitmap.iter().enumerate() {
++                    let mut remaining = *bits;
++                    while remaining != 0 {
++                        let bit = remaining.trailing_zeros() as usize;
++                        let offset = (word * 64 + bit) * host_page_size() as usize;
++                        if offset < mapping.size as usize {
++                            region.bitmap().mark_dirty(offset, host_page_size() as usize);
++                        }
++                        remaining &= remaining - 1;
++                    }
++                }
++            }
++            let make_region = || self.vm.make_user_memory_region(
++                mapping.slot, mapping.gpa, mapping.size, region.as_ptr() as u64,
++                false, self.log_dirty);
++            self.vm.remove_user_memory_region(make_region())
++                .map_err(Error::RemoveUserMemoryRegion)?;
++        }
++        Ok(())
++    }
++
++    /// Restore the same slots after migration, before resuming guest execution.
++    pub fn restore_ram_mappings(&mut self) -> Result<(), Error> {
++        let memory = self.guest_memory.memory();
++        for mapping in &self.guest_ram_mappings {
++            let region = memory.find_region(GuestAddress(mapping.gpa))
++                .ok_or_else(|| Error::Dirtylog(MigratableError::MigrateSend(
++                    anyhow!("NUMA migration RAM region missing on restore"))))?;
++            let mem_region = self.vm.make_user_memory_region(
++                mapping.slot, mapping.gpa, mapping.size, region.as_ptr() as u64,
++                false, self.log_dirty);
++            self.vm.create_user_memory_region(mem_region)
++                .map_err(Error::CreateUserMemoryRegion)?;
++        }
++        if self.dirty_log {
++            // Use the hypervisor method directly: MemoryManager::start_dirty_log
++            // also clears the VMM bitmap that now holds the saved dirty bits.
++            self.vm.start_dirty_log().map_err(|e| Error::Dirtylog(
++                MigratableError::MigrateSend(anyhow!("Restore dirty tracking: {}", e))))?;
++        }
++        Ok(())
+     }
+ 
+     pub fn remove_userspace_mapping(
+--- a/CubeShim/shim/src/hypervisor/cube_hypervisor.rs
++++ b/CubeShim/shim/src/hypervisor/cube_hypervisor.rs
+@@ -157,6 +157,22 @@
+             .map_err(|e| self.status_err(format!("Pause vm failed:{}", e)))?
+             .map_err(|e| self.status_err(format!("Pause vm failed:{}", e)))?;
+ 
++        Ok(())
++    }
++
++    pub async fn reset_ram_mappings(&self) -> CResult<()> {
++        let ch = self.ch.as_ref().unwrap().lock().await;
++        ch.send_request(ApiRequest::VmResetRamMappings)
++            .map_err(|e| self.status_err(format!("Reset RAM mappings: {}", e)))?
++            .map_err(|e| self.status_err(format!("Reset RAM mappings: {}", e)))?;
++        Ok(())
++    }
++
++    pub async fn restore_ram_mappings(&self) -> CResult<()> {
++        let ch = self.ch.as_ref().unwrap().lock().await;
++        ch.send_request(ApiRequest::VmRestoreRamMappings)
++            .map_err(|e| self.status_err(format!("Restore RAM mappings: {}", e)))?
++            .map_err(|e| self.status_err(format!("Restore RAM mappings: {}", e)))?;
+         Ok(())
+     }
+ 
+--- a/CubeShim/shim/src/sandbox/sb.rs
++++ b/CubeShim/shim/src/sandbox/sb.rs
+@@ -1495,6 +1495,18 @@
+             .await?;
+         ch.resume_vm().await
+     }
++    pub async fn prepare_numa_migration(&self) -> CResult<()> {
++        let ch = self.ch.as_ref().ok_or("VM hypervisor is absent")?.lock().await;
++        ch.pause_vm().await?;
++        ch.reset_ram_mappings().await
++    }
++
++    pub async fn finish_numa_migration(&self) -> CResult<()> {
++        let ch = self.ch.as_ref().ok_or("VM hypervisor is absent")?.lock().await;
++        ch.restore_ram_mappings().await?;
++        ch.resume_vm().await
++    }
++
+     pub async fn paused(&self) -> bool {
+         let state = self.state.lock().await;
+         *state == SandBoxState::Paused
+--- a/CubeShim/shim/src/service/update_ext.rs
++++ b/CubeShim/shim/src/service/update_ext.rs
+@@ -249,6 +249,14 @@
+     };
+ 
+     match action {
++        "ClawboxPrepareNuma" => {
++            sb.prepare_numa_migration().await?;
++            Ok(UpdateOutcome::default())
++        }
++        "ClawboxFinishNuma" => {
++            sb.finish_numa_migration().await?;
++            Ok(UpdateOutcome::default())
++        }
+         "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log).await,
+         "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log).await,
+         unknown => Err(format!("unknown update ext action: {}", unknown).into()),
+--- a/CubeShim/shim/src/main.rs
++++ b/CubeShim/shim/src/main.rs
+@@ -14,6 +14,13 @@
+ //const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
+ //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
+ fn main() {
++    if std::env::args().nth(1).as_deref() == Some("--clawbox-numa-control") {
++        if let Err(error) = handle_numa_control() {
++            eprintln!("NUMA control failed: {}", error);
++            std::process::exit(1);
++        }
++        return;
++    }
+     let c = Config {
+         no_reaper: true,
+         no_setup_logger: true,
+@@ -139,3 +146,22 @@
+         }
+     }
+ }
++
++// Internal client uses the existing authenticated-by-Unix-permissions shim socket.
++// Keeping it in the shim binary avoids an independently installed helper.
++fn handle_numa_control() -> Result<(), Box<dyn std::error::Error>> {
++    use containerd_shim_protos::{api::UpdateTaskRequest, shim_async::{Client, TaskClient}, ttrpc};
++    let args: Vec<String> = std::env::args().skip(2).collect();
++    if args.len() != 3 || !matches!(args[2].as_str(), "prepare" | "finish") {
++        return Err("usage: --clawbox-numa-control SOCKET SANDBOX_ID prepare|finish".into());
++    }
++    Builder::new_current_thread().enable_all().build()?.block_on(async {
++        let client = TaskClient::new(Client::connect(&args[0])?);
++        let mut request = UpdateTaskRequest::new();
++        request.id = args[1].clone();
++        request.annotations.insert("cube.shimapi.update.action".into(),
++            if args[2] == "prepare" { "ClawboxPrepareNuma" } else { "ClawboxFinishNuma" }.into());
++        client.update(ttrpc::context::with_timeout(30_000_000_000), &request).await?;
++        Ok(())
++    })
++}

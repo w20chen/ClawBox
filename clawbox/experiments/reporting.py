@@ -330,7 +330,7 @@ def render_run_report(run_root: Path) -> str:
             "",
         ])
     lines.extend([
-        "| Policy | c | Status | Sessions | Success | Agents/min | JCT p50/p95/p99 s | "
+        "| Policy | c | Status | Sessions | Success | Agents/min | JCT p50/p90/p95/p99 s | "
         "CPU mean/peak cores | CPU throttled s | "
         "Admission blocked s | LOCAL peak GiB | Whole-host peak delta GiB | "
         "HIGH crossings | Above HIGH s/GiB-s | "
@@ -351,6 +351,7 @@ def render_run_report(run_root: Path) -> str:
             f"{_number(performance.get('success_rate'))} | "
             f"{_number(performance.get('agents_per_minute'))} | "
             f"{_number(performance.get('jct_p50_seconds'))}/"
+            f"{_number(performance.get('jct_p90_seconds'))}/"
             f"{_number(performance.get('jct_p95_seconds'))}/"
             f"{_number(performance.get('jct_p99_seconds'))} | "
             f"{_number(cpu.get('mean_cores'))}/{_number(cpu.get('peak_interval_cores'))} | "
@@ -364,7 +365,7 @@ def render_run_report(run_root: Path) -> str:
             f"{memory.get('host_oom_kill_events', 'n/a')} |"
         )
 
-    lines.extend(["", "| Arm | Placement | Memory scheduling | Observed Tool peak/mean | Measured intervals | Offered-to-completion P50/P95/P99 s | Placement wait total s |",
+    lines.extend(["", "| Arm | Placement | Memory scheduling | Observed Tool peak/mean | Measured intervals | Offered-to-completion P50/P90/P95/P99 s | Placement wait total s |",
                   "| --- | --- | --- | ---: | ---: | ---: | ---: |"])
     for row in rows:
         result = row['result']
@@ -375,6 +376,7 @@ def render_run_report(run_root: Path) -> str:
                      f"{_number(concurrency.get('peak'))}/{_number(concurrency.get('mean_over_tool_window'))} | "
                      f"{concurrency.get('interval_count', 'n/a')} | "
                      f"{_number(result.get('performance', {}).get('offered_to_completion_p50_seconds'))}/"
+                     f"{_number(result.get('performance', {}).get('offered_to_completion_p90_seconds'))}/"
                      f"{_number(result.get('performance', {}).get('offered_to_completion_p95_seconds'))}/"
                      f"{_number(result.get('performance', {}).get('offered_to_completion_p99_seconds'))} | "
                      f"{_number(result.get('performance', {}).get('placement_wait_total_seconds'))} |")

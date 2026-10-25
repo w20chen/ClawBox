@@ -207,6 +207,12 @@ class ExecutionSpec(StrictFrozenModel):
     poisson_arrival_window_fraction: float = Field(
         default=2.0, gt=0, allow_inf_nan=False,
     )
+    # Optional fixed expected span from the first to the last offered session.
+    # This keeps the offered window identical when case frequencies (and thus
+    # the selected median trace duration) differ across concurrency levels.
+    poisson_arrival_window_seconds: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+    )
 
     @field_validator("concurrency_levels")
     @classmethod

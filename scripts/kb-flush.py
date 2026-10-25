@@ -79,6 +79,8 @@ SIGNED_FIELDS = (
     "llc_mpki",
     "llc_miss_rate",
     "pmu_eligible_for_kb",
+    "confirmed_timeout",
+    "timeout_duration_lower_bound_ms",
 )
 
 
@@ -233,6 +235,8 @@ def span_end_to_obs(record: dict[str, Any]) -> dict[str, Any] | None:
             "end_time": _iso(end_time),
             "duration_sec": duration_sec,
             "status_code": status_code,
+            "confirmed_timeout": resources.get("confirmed_timeout") is True,
+            "timeout_duration_lower_bound_ms": as_float(resources.get("timeout_duration_lower_bound_ms")),
             "exit_code": exit_code,
             "complete": complete,
             "collection_quality": quality,
@@ -306,7 +310,7 @@ def build_native_manifest(
     cell_id: str,
     collector_version: str,
     clawtune_revision: str,
-    eligible_only: bool = True,
+    eligible_only: bool = False,
 ) -> dict[str, Any] | None:
     by_execution: dict[str, dict[str, dict[str, Any]]] = {}
     root = trace_dir / "tool-resource"
@@ -513,6 +517,9 @@ def join_observations(
             out["status_code"] = "timeout"
         if out.get("exit_code") != 0 and out.get("status_code") == "ok":
             out["status_code"] = "error"
+        out["confirmed_timeout"] = bool(out.get("confirmed_timeout") or bridge.get("timed_out"))
+        if bridge.get("timeout_duration_lower_bound_ms") is not None:
+            out["timeout_duration_lower_bound_ms"] = bridge["timeout_duration_lower_bound_ms"]
         # Real per-execution measurement from the Tool-VM collector, when
         # present, supersedes the ClawTune span-side proxy values.
         artifact = artifacts.get(span["execution_id"])

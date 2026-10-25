@@ -163,7 +163,7 @@ def test_signed_native_ingest_is_immutable_loadable_and_idempotent(db):
     assert db.scalar(select(func.count()).select_from(TuningNativeArtifactRow)) == 2
 
 
-def test_identity_signature_revision_and_quality_are_hard_gates(db):
+def test_identity_signature_revision_and_numeric_values_are_hard_gates(db):
     manifest = make_manifest()
     bad_signature = ingest(db, manifest, signature="0" * 64)
     assert not bad_signature.accepted and "HMAC" in bad_signature.rejection_reason
@@ -180,9 +180,9 @@ def test_identity_signature_revision_and_quality_are_hard_gates(db):
     rejected = ingest(db, wrong_revision)
     assert not rejected.accepted and "incompatible ClawTune revision" in rejected.rejection_reason
 
-    zero_cpu = make_manifest(execution_id="exec-d", run_id="run-d", cpu=0.0)
+    zero_cpu = make_manifest(execution_id="exec-d", run_id="run-d", cpu=-1.0)
     rejected = ingest(db, zero_cpu)
-    assert not rejected.accepted and "non-positive cpu" in rejected.rejection_reason
+    assert not rejected.accepted and "invalid cpu" in rejected.rejection_reason
     assert latest_native_snapshot(db, tenant_id="tenant-a", repo_fingerprint=REPO) is None
 
 
@@ -206,7 +206,7 @@ def test_generations_are_cumulative_and_rollback_as_atomic_pairs(db):
 
 def test_rejected_manifest_does_not_poison_corrected_subset(db):
     good = make_manifest("exec-a", run_id="run-a")
-    bad = make_manifest("exec-b", run_id="run-a", cpu=0.0)
+    bad = make_manifest("exec-b", run_id="run-a", cpu=-1.0)
     combined = good.model_dump(mode="json", by_alias=True)
     combined["artifacts"].extend(
         bad.model_dump(mode="json", by_alias=True)["artifacts"]
@@ -255,7 +255,7 @@ def test_run_b_native_prediction_loads_exact_run_a_generation(db):
     assert clause.prediction.scope == "repo"
     assert clause.prediction.key_kind == "exact_clause"
     assert clause.prediction.evidence_count == 1
-    assert runtime["cpu_peak_cores"].conditional_p90 is None
+    assert runtime["cpu_peak_cores"].conditional_p90 == 0
     assert runtime["latency_ms"].scope == "repo"
     assert runtime["latency_ms"].key_kind == "exact_command"
     assert runtime["latency_ms"].evidence_count == 1
@@ -284,7 +284,8 @@ def test_each_identity_domain_refines_the_same_cold_start_independently(db):
         ))["memory_extra_peak_bytes"])
 
     assert [snapshot["generation"] for snapshot in snapshots] == [1, 1]
-    assert [prediction.conditional_p90 for prediction in predictions] == [None, None]
+    assert predictions[0].conditional_p90 == predictions[1].conditional_p90
+    assert predictions[0].conditional_p90 is not None
     assert snapshots[0]["evidence"]["cold_start"] == snapshots[1]["evidence"]["cold_start"]
 
 
@@ -324,7 +325,8 @@ def test_lattice_memory_requires_clause_window_samples():
     cgroup.pop("memory_timeline")
     without_samples = native_clause_observations(REPO, call, cgroup)
     assert not without_samples[0].memory_eligible
-    assert without_samples[0].memory_extra_peak_bytes is None
+    assert without_samples[0].memory_extra_peak_bytes == 0
+    assert "memory_extra_peak_bytes" in without_samples[0].imputed_targets
 
 
 def test_native_snapshot_export_selects_lattice(

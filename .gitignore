@@ -30,6 +30,7 @@ htmlcov/
 /.experiment-audit/
 /.clawbox-workspaces/
 /release-evidence/
+/.runtime/
 /.artifacts/
 /.verification/
 /validation/

@@ -66,3 +66,23 @@ def test_worker_preserves_original_clause_artifact(tmp_path):
     finally:
         writer.close()
     assert (tmp_path / "traces/tool-resource/clause-telemetry-exec-a.json").read_bytes() == raw.encode()
+
+
+def test_timeout_roundtrip_retains_training_lower_bound(tmp_path):
+    from clawbox.tuning.clawtune import observation_to_completed_call
+    from tool_resource.runtime_kb import _target_values, training_target_provenance
+
+    writer = ClawTuneTraceWriter(tmp_path, run_id="run", session_id="session")
+    try:
+        writer.record("sleep 10", CommandResult(124, "", "timeout", .1),
+                      execution_id="timeout-a", bridge_record={
+                          "timed_out": True, "timeout_duration_lower_bound_ms": 100,
+                      })
+    finally:
+        writer.close()
+    _, observations = build_joined_dataset(tmp_path / "traces", tmp_path / "tool-bridge.jsonl")
+    assert len(observations) == 1
+    call = observation_to_completed_call(observations[0], "test/repo")
+    assert call.confirmed_timeout and call.censored
+    assert _target_values(call)["workload_latency_ms"] == 100
+    assert training_target_provenance(call)["workload_latency_ms"] == "timeout_lower_bound"

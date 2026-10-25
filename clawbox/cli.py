@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 import subprocess
@@ -15,7 +16,7 @@ from clawbox.experiments import (
     spec_digest,
 )
 from clawbox.experiments.preset_view import DIMENSIONS, dimensions
-from clawbox.experiments.spec import PolicySpec
+from clawbox.experiments.spec import ExperimentSpec, PolicySpec
 
 
 def emit(value: Any) -> None:
@@ -245,6 +246,10 @@ def parser() -> argparse.ArgumentParser:
     sharing.add_argument("spec", type=Path)
     sharing.add_argument("--output", required=True, type=Path)
     sharing.add_argument("--artifact-root", type=Path)
+    sharing.add_argument(
+        "--resume-result", action="append", default=[], type=Path,
+        help="reuse verified per-template mappings from a prior raw result.json; repeat for multiple attempts",
+    )
     launch = sub.add_parser(
         "launch",
         help="validate, refresh host state, qualify when needed, and run or resume",
@@ -255,7 +260,7 @@ def parser() -> argparse.ArgumentParser:
     launch.add_argument("--run-id")
     launch.add_argument("--qualification", type=Path)
     launch.add_argument("--qualification-concurrency", type=int,
-                        help="bound the real-VM capability smoke (default: maximum trial concurrency); covers every case, does not prove target density")
+                        help="bound the real-VM capability smoke (default: the smallest of target concurrency, sandbox-create concurrency, and case count); covers every case, does not prove target density")
     launch.add_argument("--force-qualify", action="store_true")
     launch.add_argument("--detach", action="store_true")
     importer = sub.add_parser("import-trace", help="convert a supported research trace to replay schema 6")
@@ -354,9 +359,9 @@ def parser() -> argparse.ArgumentParser:
                            "phase_memcg", "release_cpu"),
                            help="optional pressure/progress control; suite deployment baseline stays off")
     configure.add_argument("--prediction-mode", choices=("runtime", "frozen", "cold-start"),
-                           help="query trained ClawTune KB per command, or replay frozen command predictions")
+                           help="runtime: trained ClawTune KB; cold-start: bootstrap-v2 seed; frozen: saved command predictions")
     configure.add_argument("--prediction-reservation-scale", type=float,
-                           help="positive multiplier on calibrated host growth; default 1")
+                           help="positive multiplier on predicted host memory growth; default 1")
     configure.add_argument("--admission-margin-mib", type=int,
                            help="global safety margin in MiB; default 256")
     configure.add_argument("--runtime-poll-interval-seconds", type=float,
@@ -420,7 +425,7 @@ def parser() -> argparse.ArgumentParser:
     )
     configure.add_argument(
         "--prediction-artifact",
-        help="frozen clawbox_prediction_v2 file from a separate validated training run",
+        help="bootstrap-v2 seed directory for cold-start; clawbox_prediction_v2 file for runtime/frozen",
     )
     configure.add_argument(
         "--template-base-sharing-artifact",
@@ -431,6 +436,11 @@ def parser() -> argparse.ArgumentParser:
     )
     configure.add_argument("--stagger-seconds", type=float)
     configure.add_argument("--poisson-arrival-window-fraction", type=float)
+    configure.add_argument(
+        "--poisson-arrival-window-seconds", type=float,
+        help=("fixed positive expected Poisson arrival window in seconds; "
+              "overrides the trace-duration fraction"),
+    )
     configure.add_argument("--random-seed", type=int)
     configure.add_argument("--arm-timeout-seconds", type=int)
     configure.add_argument("--command-timeout-seconds", type=int)
@@ -505,12 +515,21 @@ def launch_experiment(args: argparse.Namespace) -> int:
         try:
             validate_receipt(spec, receipt_path)
             qualification_reused = True
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            if getattr(args, "qualification", None) is not None:
+                raise ValueError(
+                    f"explicit qualification receipt cannot be reused: {receipt_path}: {exc}. "
+                    "Pass a valid receipt, omit --qualification to qualify automatically, "
+                    "or use --force-qualify to replace it."
+                ) from exc
     validated_inputs = None
     if not qualification_reused or getattr(args, 'apply_host', None) is not None:
-        from clawbox.experiments.inputs import validate_inputs
-        validated_inputs = validate_inputs(spec)
+        from clawbox.experiments.inputs import validate_inputs, validate_launch_inputs
+        validated_inputs = (
+            validate_inputs(spec)
+            if getattr(args, 'apply_host', None) is not None
+            else validate_launch_inputs(spec)
+        )
     if getattr(args, 'apply_host', None) is not None:
         # Host mutation remains behind a complete input check. Normal receipt
         # reuse takes the byte-hash fast path above.
@@ -665,12 +684,20 @@ def main(argv: list[str] | None = None) -> int:
 
             spec = load_experiment(args.spec)
             ensure_supported_experiment(spec)
+            if spec.schema_version == 4:
+                design = deepcopy(spec.design)
+                design["evidence"]["template_base_sharing_artifact"] = None
+                spec = ExperimentSpec.model_validate(design)
+            else:
+                spec = spec.model_copy(update={
+                    "resources": spec.resources.model_copy(update={
+                        "template_base_sharing_artifact": None,
+                    }),
+                })
+            # A proof-producing spec normally points at the artifact that this
+            # command is about to create.  Host validation must not try to
+            # consume that future path before proof generation starts.
             require_host_ready(spec)
-            spec = spec.model_copy(update={
-                "resources": spec.resources.model_copy(update={
-                    "template_base_sharing_artifact": None,
-                }),
-            })
             artifact_root = args.artifact_root or args.output.with_name(
                 args.output.stem + "-raw"
             )
@@ -678,7 +705,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise FileExistsError(
                     f"refusing to replace template-sharing proof root {artifact_root}"
                 )
-            result = template_base_sharing_test(spec, artifact_root=artifact_root)
+            result = template_base_sharing_test(
+                spec, artifact_root=artifact_root,
+                prior_results=tuple(args.resume_result),
+            )
             payload = write_template_base_sharing_artifact(
                 spec, result, artifact_root=artifact_root, output=args.output,
             )
@@ -948,6 +978,9 @@ def main(argv: list[str] | None = None) -> int:
                 poisson_arrival_window_fraction=(
                     args.poisson_arrival_window_fraction
                 ),
+                poisson_arrival_window_seconds=(
+                    args.poisson_arrival_window_seconds
+                ),
                 random_seed=args.random_seed,
                 arm_timeout_seconds=args.arm_timeout_seconds,
                 command_timeout_seconds=args.command_timeout_seconds,
@@ -1019,6 +1052,11 @@ def main(argv: list[str] | None = None) -> int:
             spec_path = output / "experiment.yaml" if args.command == "resume" else args.spec
             spec = load_experiment(spec_path)
             ensure_supported_experiment(spec)
+            if args.command == "run":
+                # Keep direct lower-level use actionable without repeating the
+                # expensive full corpus audit performed only by validate --inputs.
+                from clawbox.experiments.inputs import validate_launch_inputs
+                validate_launch_inputs(spec)
             require_host_ready(spec)
             receipt_path = (
                 output / "qualification.json"

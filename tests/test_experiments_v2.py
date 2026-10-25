@@ -471,6 +471,7 @@ def test_arrival_schedule_is_explicit_and_validated() -> None:
     execution = ExperimentSpec.model_validate(raw).execution
     assert execution.arrival_schedule.value == "poisson"
     assert execution.poisson_arrival_window_fraction == 2.0
+    assert execution.poisson_arrival_window_seconds is None
     raw["execution"].update({
         "arrival_schedule": "fixed_stagger", "stagger_interval_seconds": 0.25,
     })
@@ -511,6 +512,38 @@ def test_poisson_arrivals_are_deterministic_fair_and_trace_scaled() -> None:
                 for left, right in zip(first, first[1:])}) > 1
 
 
+def test_poisson_arrivals_accept_a_fixed_expected_window() -> None:
+    raw = raw_spec()
+    raw["workload"].update(
+        repetitions=1,
+        session_assignment="unique",
+        cases=[{
+            "case_id": f"case-{index}", "source": "recorded_trace",
+            "source_reference": f"trace-{index}.jsonl",
+            "replay_trace_reference": f"trace-{index}.jsonl",
+            "metadata": {"recorded_duration_seconds": 10.0 + index},
+        } for index in range(4)],
+    )
+    raw["execution"].update(
+        concurrency_levels=[4], poisson_arrival_window_seconds=800.0,
+    )
+    arm = expand_matrix(ExperimentSpec.model_validate(raw))[0]
+    offsets = session_offer_offsets(arm)
+    assert offsets[0] == 0.0
+    # The generator is deterministic and uses W/(N-1) as the exponential mean;
+    # it does not rescale this realization to end at W.
+    assert offsets == session_offer_offsets(arm)
+    assert offsets[-1] != pytest.approx(800.0)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("inf")])
+def test_poisson_fixed_window_must_be_positive_and_finite(value: float) -> None:
+    raw = raw_spec()
+    raw["execution"]["poisson_arrival_window_seconds"] = value
+    with pytest.raises(ValidationError, match="poisson_arrival_window_seconds"):
+        ExperimentSpec.model_validate(raw)
+
+
 def test_unique_assignment_requires_one_case_per_offered_session() -> None:
     raw = raw_spec()
     raw["workload"]["session_assignment"] = "unique"
@@ -531,8 +564,6 @@ def test_build_time_spans_reports_agent_and_sandbox_durations() -> None:
         "final_agent_completion": 9.0,
         "validation_start": 9.0,
         "validation_end": 9.5,
-        "output_hash_start": 9.5,
-        "output_hash_end": 10.0,
         "sandbox_cleanup_start": 10.0,
         "sandbox_cleanup_end": 11.0,
         "session_finished": 11.0,
@@ -634,13 +665,22 @@ def test_arm_provenance_uses_each_assigned_case_vm_shape() -> None:
 
 def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
-    writer = EventWriter(path)
+    writer = EventWriter(
+        path,
+        context={"run_id": "run-a", "attempt_id": "attempt-a", "arm_id": "arm-a"},
+        session_case_ids={"session-a": "case-a"},
+    )
     writer.write({"event": "agent_started", "session_id": "session-a"})
     writer.write({"event": "agent_finished", "session_id": "session-a"})
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [row["sequence_no"] for row in rows] == [0, 1]
     assert all(row["schema_version"] == 1 for row in rows)
     assert all(row["session_id"] == "session-a" for row in rows)
+    assert all(row["run_id"] == "run-a" for row in rows)
+    assert all(row["attempt_id"] == "attempt-a" for row in rows)
+    assert all(row["arm_id"] == "arm-a" for row in rows)
+    assert all(row["case_id"] == "case-a" for row in rows)
+    assert all(row["event_writer_lock_wait_ns"] >= 0 for row in rows)
     assert all(int(row["wall_time_ns"]) > 0 for row in rows)
     assert rows[0]["monotonic_time_ns"] <= rows[1]["monotonic_time_ns"]
 
@@ -654,6 +694,10 @@ def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) ->
     writer.write({"event": "sandbox_created", "session_id": session, "role": "tool"})
     assert tracker.snapshot()["vm_creating_sessions"] == 1
     writer.write({"event": "sandbox_created", "session_id": session, "role": "runtime"})
+    assert tracker.snapshot()["vm_creating_sessions"] == 1
+    writer.write({"event": "pair_ready", "session_id": session})
+    assert tracker.snapshot()["pair_ready_agent_starting_sessions"] == 1
+    writer.write({"event": "agent_runnable", "session_id": session})
     writer.write({"event": "model_wait_started", "session_id": session})
     assert tracker.snapshot()["idle_at_llm_sessions"] == 1
     writer.write({"event": "model_response_ready", "session_id": session})
@@ -830,6 +874,34 @@ def test_paused_tool_is_restored_before_growth_admission_and_routing():
         ("route", True, 3),
         ("admit", True, 0, 3),
     ]
+
+
+def test_tool_closed_during_admission_releases_new_claim():
+    from clawbox.replay.lifecycle import LifecycleError
+
+    lifecycle = SimpleNamespace(resident=True)
+    released = []
+    coordinator = SimpleNamespace(
+        set_tool_active=lambda *_: None,
+        begin_tool_admission=lambda *_, **__: 0.25,
+        release=lambda session, local, total_mib: released.append(
+            (session, local, total_mib)
+        ),
+    )
+    worker = object.__new__(ExperimentWorker)
+    arm = SimpleNamespace(execution=SimpleNamespace(arm_timeout_seconds=30))
+
+    def wait_while_cleanup_closes_vm(operation):
+        result = operation()
+        lifecycle.resident = False
+        return result
+
+    with pytest.raises(LifecycleError, match="unavailable while waiting"):
+        worker._prepare_tool_admission(
+            arm, "session", lifecycle, coordinator, SimpleNamespace(), None, 3,
+            wait_for_admission=wait_while_cleanup_closes_vm,
+        )
+    assert released == [("session", 3, 3)]
 
 
 def test_failed_tool_restore_does_not_reserve_growth():

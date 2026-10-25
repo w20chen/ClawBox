@@ -165,6 +165,11 @@ class DemandLedger:
     def _severe(self, used):
         if self.cgroup is None:
             return False
+        # Admission callers share this ledger and its condition. The pressure
+        # policy already reuses the last decision within its 100 ms interval;
+        # avoid reading and parsing kernel counters only to discard them.
+        if self.previous is not None and time.monotonic()-self.previous[0] < .1:
+            return self.sample_severe
         stats = dict(line.split() for line in (self.cgroup/'memory.stat').read_text().splitlines())
         psi = None
         path = self.cgroup/'memory.pressure'

@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import shlex
 import time
 import urllib.parse
@@ -24,6 +25,37 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
 OPENCLAW_SSH_RUNTIME_ROOT = "/workspace"
+
+# Initialize the session credential in the existing agent process through
+# OpenClaw's exported API. Its native store owns locking and persistence; do
+# not reproduce its SQLite schema or revive the legacy auth-profiles.json.
+OPENCLAW_AUTH_PRELOAD = """\
+import { realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+if (process.env.CLAWBOX_OPENCLAW_NODE_OPTIONS_SET === 'x') {
+  process.env.NODE_OPTIONS = process.env.CLAWBOX_OPENCLAW_NODE_OPTIONS;
+} else {
+  delete process.env.NODE_OPTIONS;
+}
+delete process.env.CLAWBOX_OPENCLAW_NODE_OPTIONS;
+delete process.env.CLAWBOX_OPENCLAW_NODE_OPTIONS_SET;
+
+const require = createRequire(realpathSync(process.argv[1]));
+const { upsertAuthProfileWithLock } = await import(pathToFileURL(
+  require.resolve('openclaw/plugin-sdk/provider-auth')).href);
+const saved = await upsertAuthProfileWithLock({
+  profileId: 'vllm:default',
+  credential: {
+    type: 'api_key', provider: 'vllm',
+    key: 'clawtune-runtime.' + process.env.CLAWTUNE_RUNTIME_ID,
+  },
+  agentDir: join(process.env.OPENCLAW_STATE_DIR, 'agents', 'main', 'agent'),
+});
+if (!saved) throw new Error('OpenClaw native session credential initialization failed');
+"""
 
 
 def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
@@ -279,10 +311,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  prediction_manifest: dict[str, dict[str, Any]] | None = None,
                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
                  resident_wait: Callable[[str, float], CommandResult | None] | None = None,
+                 resident_file_nonempty: Callable[[str, float], bool | None] | None = None,
                  checkpoint_relay: bool = False,
                  startup_begin: Callable[[], None] | None = None,
                  startup_wait: Callable[[], None] | None = None,
-                 startup_event: Callable[[dict[str, Any]], None] | None = None) -> dict:
+                 startup_event: Callable[[dict[str, Any]], None] | None = None,
+                 cancelled: Callable[[], bool] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
@@ -313,6 +347,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             or not 1 <= startup_value <= 3600):
         raise ValueError("runtime_startup_timeout_seconds must be an integer from 1 to 3600")
     startup_timeout_seconds = startup_value
+    completion_watch_seconds = configuration.get("runtime_completion_watch_seconds", 10)
+    if (isinstance(completion_watch_seconds, bool)
+            or not isinstance(completion_watch_seconds, (int, float))
+            or not 1 <= completion_watch_seconds <= 60):
+        raise ValueError("runtime_completion_watch_seconds must be between 1 and 60 seconds")
     exec_yield_value = configuration.get("openclaw_exec_yield_ms")
     exec_yield_ms: int | None = None
     exec_yield_export = ""
@@ -337,6 +376,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         raise ValueError("native SSH host_key_alias is not safe")
 
     home = f"/state/openclaw/{session_id}"
+    # OPENCLAW_HOME is an effective home, not the state directory. Preserve
+    # the state path used by the previous native onboard invocation.
+    openclaw_state_dir = f"{home}/.openclaw/.openclaw"
+    openclaw_config_file = f"{openclaw_state_dir}/openclaw.json"
     # Record and replay use the same runtime setup and task instruction.
     runtime_workspace = "/workspace"
     openclaw_model = model
@@ -345,18 +388,21 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     identity_file = f"{ssh_dir}/id_ed25519"
     known_hosts_file = f"{ssh_dir}/known_hosts"
     launcher_dir = f"{home}/bin"
+    auth_preload_file = f"{launcher_dir}/openclaw-auth.mjs"
     ssh_launcher = f"{launcher_dir}/ssh"
     real_ssh = openclaw_real_ssh_path(session_id)
     agent_pid_file = f"{home}/agent.pid"
     agent_stdout_file = f"{home}/logs/agent.stdout"
     agent_stderr_file = f"{home}/logs/agent.stderr"
-    agent_exit_file = f"{home}/agent.exit"
+    agent_exit_file = f"{home}/completion/agent.exit"
     policy_audit_file = f"{home}/logs/policy-ssh.jsonl"
     relay_script_file = f"{launcher_dir}/model-relay.py"
     relay_pid_file = f"{home}/model-relay.pid"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
     prefix = (
         f"export HOME={shlex.quote(home)} OPENCLAW_HOME={shlex.quote(home + '/.openclaw')} "
+        f"OPENCLAW_STATE_DIR={shlex.quote(openclaw_state_dir)} "
+        f"OPENCLAW_CONFIG_PATH={shlex.quote(openclaw_config_file)} "
         f"PATH={shlex.quote(launcher_dir)}:$PATH "
         f"CLAWBOX_POLICY_CONTROL_URL={shlex.quote(policy_control.url)} "
         # OpenClaw intentionally removes inherited *_TOKEN variables before
@@ -377,6 +423,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_SSH_HOST_KEY_ALIAS={shlex.quote(host_key_alias)} "
         + exec_yield_export
         + f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
+    )
+    # Apply --import only to the native agent launch. The preload restores
+    # inherited NODE_OPTIONS before OpenClaw can spawn any child processes.
+    agent_prefix = prefix + (
+        'export CLAWBOX_OPENCLAW_NODE_OPTIONS_SET="${NODE_OPTIONS+x}" '
+        'CLAWBOX_OPENCLAW_NODE_OPTIONS="${NODE_OPTIONS-}"; '
+        'export NODE_OPTIONS="${NODE_OPTIONS-} --import='
+        + urllib.parse.quote(auth_preload_file, safe="/") + '"; '
     )
 
     def emit_startup_stage(
@@ -402,11 +456,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         )
         if input_value is not None:
             encoded = base64.b64encode(input_value.encode()).decode()
-            command = prefix + f"printf %s {shlex.quote(encoded)} | base64 -d | {argv}"
+            command = agent_prefix + f"printf %s {shlex.quote(encoded)} | base64 -d | {argv}"
         elif pid_file is not None:
-            command = prefix + f"printf '%s\\n' $$ > {shlex.quote(pid_file)}; exec {argv}"
+            command = agent_prefix + f"printf '%s\\n' $$ > {shlex.quote(pid_file)}; exec {argv}"
         else:
-            command = prefix + argv
+            command = agent_prefix + argv
         started = time.monotonic()
         try:
             result = runtime_executor.execute(command, timeout_seconds or 300)
@@ -497,7 +551,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
-        + "CLAWTUNE_TOOL_RESOURCE_MEMORY_MEASUREMENT=guest_memtotal_minus_memavailable "
+        + "CLAWTUNE_TOOL_RESOURCE_MEMORY_MEASUREMENT=cgroup_v2_environment_union_v1 "
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
         + "CLAWTUNE_TRACE_MAX_MESSAGES_BYTES=67108864 "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
@@ -568,9 +622,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # restored Runtime processes.
         exec_tool_config["backgroundMs"] = exec_yield_ms
     provider_patch: dict[str, object] = {
-        # OpenClaw's onboard command adds reasoning=false.  The validated
-        # recordings predate that request-envelope field, so replace the
-        # one-model array without it in the same patch as the sandbox config.
+        "baseUrl": "http://127.0.0.1:8765/v1",
+        "api": "openai-completions",
+        "apiKey": "VLLM_API_KEY",
+        # Preserve the validated recording's request envelope: no reasoning
+        # field, matching the previous patch after native onboarding.
         "models": [{
             "id": openclaw_model,
             "name": openclaw_model,
@@ -586,8 +642,18 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # Admission control can intentionally hold an already-issued model
         # request while earlier Tools release their memory reservations.
         provider_patch["timeoutSeconds"] = transport_timeout_seconds
-    patch = {
-        "agents": {"defaults": {"workspace": runtime_workspace, "sandbox": {
+    native_config = {
+        "auth": {"profiles": {"vllm:default": {"provider": "vllm", "mode": "api_key"}}},
+        "session": {"dmScope": "per-channel-peer"},
+        "gateway": {
+            "mode": "local", "port": 18789, "bind": "loopback",
+            "auth": {"mode": "token", "token": secrets.token_hex(24)},
+            "tailscale": {"mode": "off", "resetOnExit": False},
+        },
+        "skills": {"install": {"nodeManager": "npm"}},
+        "hooks": {"internal": {"entries": {"session-memory": {"enabled": True}}}},
+        "agents": {"defaults": {"workspace": runtime_workspace,
+            "model": {"primary": f"vllm/{openclaw_model}"}, "sandbox": {
             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
             "ssh": {"target": ssh.target,
                     "workspaceRoot": ssh.workspace_root,
@@ -595,6 +661,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                     "strictHostKeyChecking": True, "updateHostKeys": False},
         }}},
         "tools": {
+            "profile": "coding",
             "allow": [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS],
             "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             "exec": exec_tool_config,
@@ -604,10 +671,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
             }},
         },
-        "models": {"providers": {"vllm": provider_patch}},
+        "models": {"mode": "merge", "providers": {"vllm": provider_patch}},
         "plugins": {
             "load": {"paths": [clawtune_plugin]},
-            "entries": {"clawtune": {"enabled": True, "config": {
+            "entries": {"vllm": {"enabled": True}, "clawtune": {"enabled": True, "config": {
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
             "sandboxExecPredictionModel": "lattice",
@@ -628,16 +695,36 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                       "trace_dir": trace_dir},
         }}}},
     }
-    invoke(["onboard", "--non-interactive", "--accept-risk", "--skip-health", "--mode", "local",
-            "--auth-choice", "vllm", "--custom-base-url", "http://127.0.0.1:8765/v1",
-            "--custom-api-key", f"clawtune-runtime.{session_id}", "--custom-model-id", openclaw_model],
-           startup_stage="openclaw_onboard")
-    invoke(
-        ["config", "patch", "--stdin"], input_value=json.dumps(patch),
-        startup_stage="openclaw_config",
-    )
+    config_b64 = base64.b64encode(json.dumps(native_config).encode()).decode()
+    auth_preload_b64 = base64.b64encode(OPENCLAW_AUTH_PRELOAD.encode()).decode()
+    config_started = time.monotonic()
+    try:
+        configured = runtime_executor.execute(
+            prefix + "set -eu; umask 077; "
+            + f"mkdir -p {shlex.quote(openclaw_state_dir)}; "
+            + f"printf %s {shlex.quote(config_b64)} | base64 -d > "
+            + f"{shlex.quote(openclaw_config_file)}; "
+            + f"printf %s {shlex.quote(auth_preload_b64)} | base64 -d > "
+            + shlex.quote(auth_preload_file),
+            30,
+        )
+        if configured.exit_code:
+            raise RuntimeError(
+                "OpenClaw native config setup failed: " + configured.stderr[-2000:]
+            )
+    except BaseException:
+        emit_startup_stage("openclaw_config", config_started, status="error")
+        raise
+    emit_startup_stage("openclaw_config", config_started)
     if startup_wait is not None:
         startup_wait()
+    if startup_event is not None:
+        startup_event({
+            "event": "agent_runnable",
+            "session_id": session_id,
+            "stage": "agent_runnable",
+            "status": "ok",
+        })
     instruction = prompt
     agent_args = [
         "agent", "--local", "--agent", "main", "--session-id", session_id,
@@ -648,6 +735,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         if timeout_seconds is None:
             raise ValueError("unbounded agent execution requires detached Runtime polling")
         result = invoke(agent_args, pid_file=agent_pid_file)
+        final_response_observed_unix_s = time.time()
+        final_response_observed_monotonic_s = time.monotonic()
     else:
         argv = " ".join(shlex.quote(item) for item in [executable, *agent_args])
         body = (
@@ -655,7 +744,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             f"{shlex.quote(agent_exit_file)}; exit \"$status\""
         )
         launched = runtime_executor.execute(
-            prefix
+            agent_prefix
+            + f"mkdir -p {shlex.quote(home + '/completion')}; "
             + f"rm -f {shlex.quote(agent_exit_file)} "
             + f"{shlex.quote(agent_stdout_file)} {shlex.quote(agent_stderr_file)}; "
             + f"nohup /bin/sh -c {shlex.quote(body)} </dev/null "
@@ -687,10 +777,23 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 )
         else:
             while True:
-                status = resident_poll(
-                    f"test -s {shlex.quote(agent_exit_file)}", 10,
-                )
-                if status is not None and status.exit_code == 0:
+                if cancelled is not None and cancelled():
+                    resident_poll(
+                        f"kill -TERM $(cat {shlex.quote(agent_pid_file)}) 2>/dev/null || true",
+                        10,
+                    )
+                    raise InterruptedError("OpenClaw Agent cancelled after arm failure")
+                if resident_file_nonempty is not None:
+                    watch_seconds = float(completion_watch_seconds)
+                    if deadline is not None:
+                        watch_seconds = max(0.001, min(watch_seconds, deadline-time.monotonic()))
+                    ready = resident_file_nonempty(agent_exit_file, watch_seconds)
+                else:
+                    status = resident_poll(
+                        f"test -s {shlex.quote(agent_exit_file)}", 10,
+                    )
+                    ready = status is not None and status.exit_code == 0
+                if ready:
                     break
                 if deadline is not None and time.monotonic() >= deadline:
                     resident_poll(
@@ -701,6 +804,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 time.sleep(1.0)
         exit_result = resident_poll(f"cat {shlex.quote(agent_exit_file)}", 10)
         stdout_result = resident_poll(f"cat {shlex.quote(agent_stdout_file)}", 30)
+        # Host receipt of the completed Agent output, before diagnostic/artifact
+        # collection. This includes completion polling and output transport.
+        final_response_observed_unix_s = time.time()
+        final_response_observed_monotonic_s = time.monotonic()
         stderr_result = resident_poll(f"cat {shlex.quote(agent_stderr_file)}", 30)
         if exit_result is None or stdout_result is None or stderr_result is None:
             raise RuntimeError("Runtime became non-resident while collecting Agent result")
@@ -748,6 +855,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 f"(exit {result.exit_code}; full log {failure_home / 'agent.stderr.log'}): "
                 + excerpt
             )
+    if startup_event is not None:
+        startup_event({
+            "event": "final_response_observed", "session_id": session_id,
+            "observed_unix_s": final_response_observed_unix_s,
+            "observed_monotonic_s": final_response_observed_monotonic_s,
+            "endpoint": "completed_agent_stdout_received_by_host",
+            "includes_completion_polling_and_transport": True,
+        })
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
@@ -817,6 +932,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         for item in agent_tool_completed
     ]
     return {"stdout": result.stdout, "stderr": result.stderr,
+            "final_response_observed_unix_s": final_response_observed_unix_s,
+            "final_response_observed_monotonic_s": final_response_observed_monotonic_s,
             "tool_calls": len(agent_tool_completed),
             "native_ssh_executions": len(completed), "tool_latencies": latencies,
             "native_ssh_latencies": native_ssh_latencies,

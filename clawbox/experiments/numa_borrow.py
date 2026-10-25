@@ -1,7 +1,8 @@
 """Live VM borrowing from the shared NUMA pool.
 
-CubeSandbox places each microVM in a descendant cgroup.  Rebinding that leaf's
-``cpuset.mems`` rebinds allocation and asks cgroup v2 to migrate existing pages.
+CubeSandbox places each microVM in a descendant cgroup. Temporary threaded
+cpusets move its allocation policy and existing pages once per process while
+retaining the Cube-owned cgroup and its memory accounting.
 Migration may be incomplete; residency deltas also include faults and frees.
 Capacity is reserved before the
 rebind, so live borrowing and WARM snapshots cannot independently overcommit
@@ -10,6 +11,9 @@ the same physical pool.
 from __future__ import annotations
 
 import subprocess
+import json
+import sys
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +21,22 @@ from threading import RLock
 from collections.abc import Callable
 
 from .snapshot_pool import WarmSnapshotPool
+
+PLACEMENT_SAMPLE_MIN_BYTES = 8 * 1024 * 1024
+
+
+class NumaBorrowUnavailable(RuntimeError):
+    """A live rebind failed but LOCAL placement was safely restored."""
+
+
+class _NumaRebindTimeout(RuntimeError):
+    """The kernel did not finish a cpuset rebind within the configured limit."""
+
+
+class _NumaRebindIncomplete(RuntimeError):
+    """A helper failed; do not queue another migration as a guessed rollback."""
+
+    rollback_safe = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +67,13 @@ class NumaBorrowRecord:
     shared_growth_bytes: int = 0
     shared_reclaimed_bytes: int = 0
     physical_effect: str = "unclassified"
+    transfer_slot_wait_seconds: float = 0.0
+    rebind_service_seconds: float = 0.0
+    premigrate_seconds: float | None = None
+    cpuset_seconds: float | None = None
+    premigrate_remaining_pages: int | None = None
+    native_prepare_seconds: float | None = None
+    native_resume_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,13 +118,38 @@ def read_numa_lru_bytes(cgroup: Path) -> tuple[dict[int, int], int]:
     return resident, max(0, charged - sum(resident.values()))
 
 
+def read_numa_anon_bytes(cgroup: Path) -> dict[int, int]:
+    """Return anonymous resident bytes by NUMA node.
+
+    File-backed pages may be shared across sandboxes and retain the NUMA
+    location of the host page cache.  Anonymous pages are the portion whose
+    placement is controlled by the VMM thread's allocation policy.
+    """
+    rows: dict[str, dict[int, int]] = {}
+    for line in (cgroup / "memory.numa_stat").read_text(encoding="ascii").splitlines():
+        fields = line.split()
+        if not fields or fields[0] not in {"inactive_anon", "active_anon"}:
+            continue
+        rows[fields[0]] = {
+            int(node[1:]): int(raw)
+            for field in fields[1:]
+            for node, separator, raw in (field.partition("="),)
+            if separator and node.startswith("N")
+        }
+    nodes = {node for values in rows.values() for node in values}
+    return {
+        node: sum(rows.get(name, {}).get(node, 0) for name in ("inactive_anon", "active_anon"))
+        for node in nodes
+    }
+
+
 class SandboxNumaBorrower:
     def __init__(self, cgroup_root: Path, *, local_node: int, shared_node: int,
                  shared_pool: WarmSnapshotPool,
                  cpus: str | None = None, node_id: str | None = None,
                  proc_root: Path = Path("/proc"),
                  cgroup_mount: Path = Path("/sys/fs/cgroup"),
-                 writer: Callable[[Path, str], None] | None = None,
+                 writer: Callable[[Path, str], dict | None] | None = None,
                  cleanup_timeout_seconds: float = 0) -> None:
         root = cgroup_root.resolve()
         if local_node == shared_node:
@@ -119,8 +171,11 @@ class SandboxNumaBorrower:
         self._borrowed: dict[str, _BorrowedAllocation] = {}
         self._leaf_cache: dict[str, tuple[Path, Path]] = {}
         self._verified_leaves: dict[str, Path] = {}
+        self._initial_placement_verified: set[str] = set()
 
-    def _privileged_write(self, path: Path, value: str) -> None:
+    def _privileged_write(self, path: Path, value: str) -> dict | None:
+        if path.name == "cpuset.mems":
+            return self._rebind_process(path.parent, value)
         # cpuset.mems may synchronously migrate a large VM working set.  Use
         # the experiment's configured pool-operation timeout instead of a
         # smaller hidden limit; memory.reclaim remains a short best-effort
@@ -128,19 +183,50 @@ class SandboxNumaBorrower:
         limit = (5 if path.name == 'memory.reclaim' else
                  max(30, int(self.cleanup_timeout_seconds or 0)))
         try:
+            privilege = [] if hasattr(os, "geteuid") and os.geteuid() == 0 else ["sudo", "-n"]
             completed = subprocess.run(
-                ["sudo", "-n", "timeout", "--signal=KILL", str(limit), "tee", str(path)], input=value + "\n",
+                privilege + ["timeout", "--signal=KILL", str(limit), "tee", str(path)], input=value + "\n",
                 text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 check=False, timeout=limit+1,
             )
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"timed out updating {path}") from exc
+            raise _NumaRebindTimeout(f"timed out updating {path}") from exc
         if completed.returncode in (-9, 124, 137):
-            raise RuntimeError(f"timed out or killed updating {path}: kernel write limit is {limit} seconds")
+            raise _NumaRebindTimeout(
+                f"timed out or killed updating {path}: kernel write limit is {limit} seconds"
+            )
         if completed.returncode:
             raise RuntimeError(
                 f"cannot update {path}: {completed.stderr.strip() or completed.returncode}"
             )
+
+    def _rebind_process(self, leaf: Path, value: str) -> dict:
+        with self.shared_pool.rebind_lock:
+            return self._rebind_process_serialized(leaf, value)
+
+    def _rebind_process_serialized(self, leaf: Path, value: str) -> dict:
+        limit = max(30, int(self.cleanup_timeout_seconds or 0))
+        privilege = [] if hasattr(os, "geteuid") and os.geteuid() == 0 else ["sudo", "-n"]
+        command = privilege + ["timeout", "--signal=KILL", str(limit),
+                   sys.executable, str(Path(__file__).with_name("numa_rebind.py")),
+                   str(leaf), value]
+        try:
+            completed = subprocess.run(
+                command, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=limit + 1,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise _NumaRebindIncomplete(
+                f"NUMA process migration did not finish within {limit}s: {leaf}; "
+                "retain the reservation and clean up this VM before retrying"
+            ) from exc
+        if completed.returncode:
+            raise _NumaRebindIncomplete(
+                f"NUMA process migration failed for {leaf}: "
+                f"{completed.stderr.strip() or completed.returncode}; "
+                "retain the reservation and clean up this VM before retrying"
+            )
+        return json.loads(completed.stdout)
 
     def _leaf_for(self, sandbox_id: str) -> Path:
         verified = self._verified_leaves.get(sandbox_id)
@@ -228,6 +314,14 @@ class SandboxNumaBorrower:
 
     def _move(self, sandbox_id: str, capacity_bytes: int, *, target_node: int,
               reserve: bool) -> NumaBorrowRecord:
+        # Wait before taking a lifecycle transfer slot or changing a cgroup.
+        # Checkpoint/restore retain their independently configured concurrency.
+        with self.shared_pool.rebind_lock:
+            return self._move_serialized(sandbox_id, capacity_bytes,
+                                         target_node=target_node, reserve=reserve)
+
+    def _move_serialized(self, sandbox_id: str, capacity_bytes: int, *, target_node: int,
+                         reserve: bool) -> NumaBorrowRecord:
         if capacity_bytes <= 0:
             raise ValueError("capacity_bytes must be positive")
         leaf = self._leaf_for(sandbox_id)
@@ -257,14 +351,18 @@ class SandboxNumaBorrower:
         started = time.monotonic()
         try:
             with self.shared_pool.transfer("rebind"):
-                self.writer(leaf / "cpuset.mems", str(target_node))
+                rebind_started = time.monotonic()
+                transfer_slot_wait_seconds = max(0.0, rebind_started - started)
+                phases = self.writer(leaf / "cpuset.mems", str(target_node)) or {}
+                rebind_service_seconds = max(0.0, time.monotonic() - rebind_started)
             effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
             if effective != str(target_node):
                 raise RuntimeError(
                     f"VM cpuset rebind did not take effect: requested {target_node}, got {effective}"
                 )
-        except Exception:
-            if reserve:
+        except Exception as exc:
+            rollback_verified = False
+            if reserve and getattr(exc, "rollback_safe", True):
                 try:
                     # A failed write can have taken effect. Undo allocation
                     # policy, then release only with physical evidence.
@@ -273,11 +371,15 @@ class SandboxNumaBorrower:
                     pass
                 try:
                     local = (leaf / "cpuset.mems.effective").read_text().strip()
-                    if local == str(self.local_node) and self._usage(leaf)[1] == 0:
-                        self.shared_pool.release_borrow(sandbox_id)
-                        self._borrowed.pop(sandbox_id)
+                    if local == str(self.local_node):
+                        rollback_verified = True
+                        if self._usage(leaf)[1] == 0:
+                            self.shared_pool.release_borrow(sandbox_id)
+                            self._borrowed.pop(sandbox_id)
                 except Exception:
                     pass  # keep the reservation for verified destruction
+            if isinstance(exc, _NumaRebindTimeout) and rollback_verified:
+                raise NumaBorrowUnavailable(str(exc)) from exc
             raise
         completed_wall = time.time()
         after = self._observe_leaf(sandbox_id, leaf, capacity_bytes)
@@ -314,21 +416,28 @@ class SandboxNumaBorrower:
             shared_growth_bytes=max(0, after.shared_bytes - before.shared_bytes),
             shared_reclaimed_bytes=max(0, before.shared_bytes - after.shared_bytes),
             physical_effect=physical_effect,
+            transfer_slot_wait_seconds=transfer_slot_wait_seconds,
+            rebind_service_seconds=rebind_service_seconds,
+            premigrate_seconds=phases.get("premigrate_seconds"),
+            cpuset_seconds=phases.get("cpuset_seconds"),
+            premigrate_remaining_pages=phases.get("premigrate_remaining_pages"),
+            native_prepare_seconds=phases.get("native_prepare_seconds"),
+            native_resume_seconds=phases.get("native_resume_seconds"),
         )
 
     def borrow(self, sandbox_id: str, capacity_bytes: int) -> NumaBorrowRecord:
         with self._lock:
-            record = self._move(
-                sandbox_id, capacity_bytes, target_node=self.shared_node, reserve=True,
-            )
-            return record
+            if not self.shared_pool.rebind_lock.acquire(blocking=False):
+                raise NumaBorrowUnavailable("another NUMA migration is in progress")
+            try:
+                return self._move(
+                    sandbox_id, capacity_bytes, target_node=self.shared_node, reserve=True,
+                )
+            finally:
+                self.shared_pool.rebind_lock.release()
 
     def pin_local(self, sandbox_id: str, *, verified_cgroup: str | Path | None = None) -> None:
-        """Pin after create/restore, before the worker releases further work.
-
-        Cube's VM boot/resume precedes this hook. Autonomous guest activity in
-        that interval may already have run under the parent's allowed set.
-        """
+        """Verify CubeSandbox's native LOCAL placement after create/restore."""
         if verified_cgroup is not None:
             leaf = Path(verified_cgroup).resolve()
             try:
@@ -344,27 +453,30 @@ class SandboxNumaBorrower:
         with self._lock:
             retained = self._borrowed.get(sandbox_id)
             if retained is not None and retained.leaf != leaf:
-                if retained.leaf.exists():
-                    raise RuntimeError(
-                        f"retained borrow reservation points at a different live cgroup: {sandbox_id}"
-                    )
                 self._borrowed[sandbox_id] = _BorrowedAllocation(
                     leaf=leaf,
                     capacity_bytes=retained.capacity_bytes,
                     parent_shared_bytes_before=retained.parent_shared_bytes_before,
                 )
             if self.cpus is not None:
-                from .topology import parse_cpu_list
-                if parse_cpu_list((leaf/'cpuset.cpus.effective').read_text()) != parse_cpu_list(self.cpus):
-                    self.writer(leaf / "cpuset.cpus", self.cpus)
                 self._verify_cpus(leaf)
-            if (leaf/'cpuset.mems.effective').read_text().strip() != str(self.local_node):
+            configured_mems = (leaf/'cpuset.mems').read_text().strip()
+            if retained is not None and configured_mems == str(self.shared_node):
                 self.writer(leaf / "cpuset.mems", str(self.local_node))
             effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
-            if effective != str(self.local_node):
+            resident, unattributed = read_numa_lru_bytes(leaf)
+            anon_resident = read_numa_anon_bytes(leaf)
+            attributed_anon = sum(anon_resident.values())
+            initial_residency_check = sandbox_id not in self._initial_placement_verified
+            if (initial_residency_check
+                    and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES
+                    and anon_resident.get(self.local_node, 0) * 2 <= attributed_anon):
                 raise RuntimeError(
-                    f"VM LOCAL pin did not take effect: requested {self.local_node}, got {effective}"
+                    f"VM native LOCAL placement did not take effect: requested node "
+                    f"{self.local_node}, anon_residency={anon_resident}, "
+                    f"total_residency={resident}, unattributed={unattributed}"
                 )
+            self._initial_placement_verified.add(sandbox_id)
             if retained is not None and self._usage(leaf)[1] == 0:
                 self.shared_pool.release_borrow(sandbox_id)
                 self._borrowed.pop(sandbox_id)
@@ -372,10 +484,24 @@ class SandboxNumaBorrower:
                 "sandbox_id": sandbox_id, "node_id": self.node_id,
                 "numa_node": self.local_node, "cpus": self.cpus,
                 "effective_mems": effective,
+                "actual_residency_bytes": resident,
+                "actual_anon_residency_bytes": anon_resident,
+                "residency_basis": (
+                    "anonymous_initial_create"
+                    if (initial_residency_check
+                        and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES)
+                    else "insufficient_anonymous_sample_initial_create"
+                    if initial_residency_check else "restore_policy_only"
+                ),
+                "local_residency_fraction": (
+                    anon_resident.get(self.local_node, 0) / attributed_anon
+                    if (initial_residency_check
+                        and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES) else None
+                ),
                 "effective_cpus": (leaf / "cpuset.cpus.effective").read_text().strip()
                     if self.cpus is not None else None,
                 "cgroup": str(leaf), "verified_unix_s": time.time(),
-                "scope": "after_create_or_restore_before_worker_dispatch",
+                "scope": "native_restore_policy_before_guest_allocation_verified_after_restore",
             })
 
     def _verify_cpus(self, leaf: Path) -> None:
@@ -383,8 +509,10 @@ class SandboxNumaBorrower:
             return
         from .topology import parse_cpu_list
         effective = (leaf / "cpuset.cpus.effective").read_text().strip()
-        if parse_cpu_list(effective) != parse_cpu_list(self.cpus):
-            raise RuntimeError(f"VM CPU pin did not take effect: requested {self.cpus}, got {effective}")
+        if not parse_cpu_list(self.cpus) <= parse_cpu_list(effective):
+            raise RuntimeError(
+                f"VM cgroup excludes requested CPUs: requested {self.cpus}, got {effective}"
+            )
 
     def return_local(self, sandbox_id: str) -> NumaBorrowRecord:
         with self._lock:

@@ -402,7 +402,7 @@ def test_build_joined_dataset_accepts_separate_managed_resource_dir(tmp_path):
     assert trusted[0].cgroup is not None
 
 
-def test_degraded_process_tree_artifact_cannot_enter_trusted_kb(tmp_path):
+def test_degraded_process_tree_artifact_retains_training_observation(tmp_path):
     trace_dir = tmp_path / "traces"
     (trace_dir / "tool-resource").mkdir(parents=True)
     (trace_dir / "run-a.jsonl").write_text(
@@ -430,7 +430,8 @@ def test_degraded_process_tree_artifact_cannot_enter_trusted_kb(tmp_path):
 
     assert joined.joined[0].collection_quality == "degraded"
     assert joined.joined[0].trusted is False
-    assert trusted == []
+    assert len(trusted) == 1
+    assert trusted[0].collection_quality == "degraded"
 
 def test_cancelled_bridge_cannot_train_even_with_valid_cgroup_and_zero_exit():
     bridge = bridge_record('exec-1').model_copy(update={'cancelled': True})
@@ -440,3 +441,21 @@ def test_cancelled_bridge_cannot_train_even_with_valid_cgroup_and_zero_exit():
     assert row.status_code == 'cancelled'
     assert row.collection_quality == CollectionQuality.DEGRADED
     assert row.trusted is False
+
+
+def test_native_export_preserves_measured_workload_cpu_peak_and_rss():
+    from clawbox.tuning.clawtune import observation_to_completed_call
+    from tool_resource.runtime_kb import _target_values
+    observation = join_trace_and_bridge([span_end("exec-1")], [bridge_record("exec-1")],
+        {"exec-1": cgroup_artifact_to_resource(cgroup_artifact("exec-1"))}).joined[0]
+    call = observation_to_completed_call(observation, "repo", telemetry={
+        "eligible_for_kb": True, "telemetry_quality": "ok", "clauses": [
+            {"ts_start": 1, "ts_end": 3, "availability": {"cpu_time": "ok"},
+             "provenance": {"cpu_time_ns": 1_000_000_000}}],
+        "call_resource": {"peak_cpu_cores": 1.5, "sampled_peak_rss_mb": 12,
+                          "availability": {"cpu": "ok", "memory": "ok"}}})
+    values = _target_values(call)
+    assert values["workload_latency_ms"] == 2000
+    assert values["cpu_avg_cores"] == .5
+    assert values["cpu_peak_cores"] == 1.5
+    assert values["sampled_peak_rss_bytes"] == 12_000_000

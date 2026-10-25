@@ -72,7 +72,7 @@ class ModelGateway:
             raise ValueError("api mode requires upstream URL, key, and model")
         self.store_path = store_path
         self.mode = mode
-        self.actions = [] if trace is None else [a for a in load_trace(trace) if a.kind == "llm"]
+        self.actions = [] if trace is None else load_trace(trace)
         if max_model_steps is not None and (
             mode != "replay" or type(max_model_steps) is not int or max_model_steps < 1
         ):

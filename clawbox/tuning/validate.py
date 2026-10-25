@@ -1,20 +1,7 @@
-"""Observation quality gate / signature / dedup (ADR-008).
+"""Validate observation identity/signatures and deduplicate training inputs.
 
-An observation is an immutable, signable artifact.  Only observations that pass
-every check may enter the trusted (active-KB-training) set; everything else goes
-to a diagnostic store and never trains.
-
-Checks, in order:
-
-1. **Schema**: normalized schema version must match and be known.
-2. **Identity**: execution_id present and well-formed; tool_name present.
-3. **Signature**: when an ``ingest_secret`` is configured, the observation must
-   carry a valid HMAC-SHA256 over its canonical payload.  This stops forged or
-   cross-tenant-injected observations.
-4. **Quality gate**: ``complete``, valid collection quality, duration present,
-   coverage not degraded (for span-sourced observations).
-5. **Dedup**: ``(execution_id, tool_name, sequence_no)`` must be unique within a
-   batch; a repeat of an already-seen key is dropped (idempotent), not trained.
+Partial execution and measurement quality remain diagnostics. ClawTune owns
+available-or-zero training labels; ClawBox does not filter by label quality.
 """
 
 from __future__ import annotations
@@ -25,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from .schema import CollectionQuality, OBSERVATION_SCHEMA_VERSION, ToolObservation
+from .schema import OBSERVATION_SCHEMA_VERSION, ToolObservation
 
 
 @dataclass(frozen=True)
@@ -96,7 +83,7 @@ def verify_signature(
 
 
 class ObservationValidator:
-    """Quality gate with optional HMAC signature verification."""
+    """Identity validation with optional HMAC signature verification."""
 
     def __init__(
         self,
@@ -113,7 +100,6 @@ class ObservationValidator:
             self._check_schema(observation),
             self._check_identity(observation),
             self._check_signature(observation, signature),
-            self._check_quality(observation),
         ]
         for result in checks:
             if not result.valid:
@@ -150,20 +136,6 @@ class ObservationValidator:
         ):
             return ValidationResult.reject("invalid HMAC signature")
         return ValidationResult.ok()
-
-    def _check_quality(self, observation: ToolObservation) -> ValidationResult:
-        if not observation.complete:
-            return ValidationResult.reject("incomplete observation (complete=false)")
-        if observation.collection_quality != CollectionQuality.VALID:
-            return ValidationResult.reject(
-                f"collection_quality={observation.collection_quality} (requires valid)"
-            )
-        if observation.exit_code != 0:
-            return ValidationResult.reject(f"exit_code={observation.exit_code} (censored)")
-        if observation.duration_sec is None:
-            return ValidationResult.reject("missing duration_sec")
-        return ValidationResult.ok()
-
 
 class Deduplicator:
     """Batch-level dedup on ``(execution_id, tool_name, sequence_no)``."""

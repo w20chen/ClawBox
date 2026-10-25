@@ -4,10 +4,11 @@ import json
 import os
 import queue
 import threading
+import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any
 
@@ -111,6 +112,7 @@ class CubeSandboxClient:
         self.tcp_endpoint_initial_delay_s = float(tcp_endpoint_initial_delay_s)
         self.tcp_endpoint_max_delay_s = float(tcp_endpoint_max_delay_s)
         self.cleanup_workers = int(cleanup_workers)
+        self._delete_slots = threading.BoundedSemaphore(self.cleanup_workers)
 
     def _sdk_kwargs(self) -> dict[str, Any]:
         return {} if self._config is None else {"config": self._config}
@@ -400,6 +402,69 @@ class CubeSandboxClient:
         return value
 
     @staticmethod
+    def file_nonempty(sandbox: Any, path: str, *, timeout_s: float) -> bool:
+        """Probe completion through Cube's bounded native filesystem RPC."""
+        from cubesandbox import FilesystemNotFoundError
+
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        def probe() -> bool:
+            try:
+                entry = sandbox.files.stat(path, timeout=timeout_s)
+            except FilesystemNotFoundError:
+                return False
+            # Stat's size is an int64 encoded as a string by Connect JSON. An
+            # existing but empty exit file is still being written by the Agent.
+            return int(entry.get("size", 0)) > 0
+
+        # Match the former read-only command poll's bounded transport retries.
+        return read_with_backoff(
+            probe, label=f"stat {path}", attempts=8,
+            initial_delay_s=0.1, max_delay_s=1.0,
+        )
+
+    @staticmethod
+    def wait_file_nonempty(sandbox: Any, path: str, *, timeout_s: float) -> bool:
+        """Wait on Cube's filesystem notifications, including subscribe races."""
+        import httpx
+        from cubesandbox import FilesystemNotFoundError
+
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        deadline = time.monotonic() + timeout_s
+
+        def ready() -> bool:
+            try:
+                entry = sandbox.files.stat(
+                    path, timeout=max(0.001, deadline - time.monotonic()),
+                )
+            except FilesystemNotFoundError:
+                return False
+            return int(entry.get("size", 0)) > 0
+
+        if ready():
+            return True
+        # Subscribe, then stat again: the file may have been written between
+        # the first stat and establishment of the notification stream.
+        try:
+            with sandbox.files.watch_dir(
+                str(PurePosixPath(path).parent),
+                timeout=max(0.001, deadline - time.monotonic()),
+            ) as watcher:
+                if ready():
+                    return True
+                for event in watcher:
+                    if PurePosixPath(event.name).name == PurePosixPath(path).name and ready():
+                        return True
+                    if time.monotonic() >= deadline:
+                        break
+        except httpx.ReadTimeout:
+            # An idle notification stream is expected to reach this bounded
+            # wait. The caller checks cancellation and residency before retry.
+            return False
+        return False
+
+    @staticmethod
     def read_file(sandbox: Any, path: str) -> str:
         return sandbox.files.read(path)
 
@@ -478,6 +543,13 @@ class CubeSandboxClient:
         return result
 
     def kill_sandbox(self, sandbox_or_id: Any) -> None:
+        # Session finalization shares the same budget as bulk cleanup. Keep
+        # this independent of snapshot transfer slots: pause itself needs a
+        # native keep-tombstone destroy and must retain room to make progress.
+        with self._delete_slots:
+            self._kill_sandbox(sandbox_or_id)
+
+    def _kill_sandbox(self, sandbox_or_id: Any) -> None:
         if not isinstance(sandbox_or_id, str):
             try:
                 sandbox_or_id.kill()

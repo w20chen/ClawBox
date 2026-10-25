@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ from clawbox.experiments.openclaw_driver import (
     native_ssh_host_key_alias,
     openclaw_real_ssh_path,
     OPENCLAW_SSH_RUNTIME_ROOT,
+    OPENCLAW_AUTH_PRELOAD,
     native_tool_workspace_setup_command,
     native_ssh_route,
     native_ssh_target,
@@ -95,6 +99,63 @@ class PolicySession:
         return [{"request": {}, "admission": {}, "completion": {
             "execution_started_at": 10.0, "execution_completed_at": 10.25,
         }}]
+
+
+@pytest.mark.parametrize("auth_saved", [True, False])
+@pytest.mark.parametrize("inherited_options", [None, "--no-warnings"])
+def test_auth_preload_uses_exported_store_in_agent_process(
+    tmp_path, auth_saved, inherited_options,
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to execute the native agent preload")
+    package = tmp_path / "node_modules" / "openclaw"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({
+        "name": "openclaw", "type": "module",
+        "exports": {"./plugin-sdk/provider-auth": "./provider-auth.mjs"},
+    }))
+    (package / "provider-auth.mjs").write_text("""
+export async function upsertAuthProfileWithLock(value) {
+  console.log(JSON.stringify({value, pid: process.pid,
+    options: process.env.NODE_OPTIONS ?? null,
+    helperEnvPresent: 'CLAWBOX_OPENCLAW_NODE_OPTIONS' in process.env}));
+  return process.env.AUTH_SAVED === 'yes' ? {profiles: {}} : null;
+}
+""")
+    agent = package / "openclaw.mjs"
+    agent.write_text("console.log(JSON.stringify({agentPid: process.pid}));")
+    preload = tmp_path / "auth.mjs"
+    preload.write_text(OPENCLAW_AUTH_PRELOAD)
+    environment = dict(os.environ)
+    environment.update({
+        "NODE_OPTIONS": f'--import="{preload.as_uri()}"',
+        "CLAWBOX_OPENCLAW_NODE_OPTIONS_SET": "x" if inherited_options is not None else "",
+        "CLAWBOX_OPENCLAW_NODE_OPTIONS": inherited_options or "",
+        "CLAWTUNE_RUNTIME_ID": "separate-session-b",
+        "OPENCLAW_STATE_DIR": str(tmp_path / "session-b-state"),
+        "AUTH_SAVED": "yes" if auth_saved else "no",
+    })
+    result = subprocess.run(
+        [node, str(agent), "agent"], env=environment,
+        capture_output=True, text=True, timeout=20,
+    )
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert records[0]["value"] == {
+        "profileId": "vllm:default",
+        "credential": {"type": "api_key", "provider": "vllm",
+                       "key": "clawtune-runtime.separate-session-b"},
+        "agentDir": str(tmp_path / "session-b-state" / "agents" / "main" / "agent"),
+    }
+    assert records[0]["options"] == inherited_options
+    assert records[0]["helperEnvPresent"] is False
+    if auth_saved:
+        assert result.returncode == 0, result.stderr
+        assert records[1]["agentPid"] == records[0]["pid"]
+    else:
+        assert result.returncode != 0
+        assert len(records) == 1
+        assert "native session credential initialization failed" in result.stderr
 
 
 @pytest.mark.parametrize("diagnostic_available", [True, False])
@@ -204,7 +265,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         startup_wait=lambda: startup_waits.append(len(commands)),
         startup_event=startup_events.append,
     )
-    patch_command = next(command for command in commands if "config patch" in command)
+    patch_command = next(command for command in commands if "set -eu; umask 077" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
     config = json.loads(base64.b64decode(encoded))
     sandbox = config["agents"]["defaults"]["sandbox"]
@@ -242,9 +303,20 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "install -m 0755 /state/openclaw/session-a/bin/ssh /usr/bin/ssh" in "\n".join(commands)
     assert "command" not in sandbox["ssh"]
     assert config["agents"]["defaults"]["workspace"] == "/workspace"
+    assert config["agents"]["defaults"]["model"] == {"primary": "vllm/test-model"}
+    assert "skipBootstrap" not in config["agents"]["defaults"]
+    assert config["auth"]["profiles"] == {
+        "vllm:default": {"provider": "vllm", "mode": "api_key"},
+    }
+    assert config["plugins"]["entries"]["vllm"] == {"enabled": True}
+    assert config["hooks"]["internal"]["entries"]["session-memory"] == {"enabled": True}
+    assert config["tools"]["profile"] == "coding"
     assert "CLAWBOX_POLICY_CONTROL_TOKEN=policy-token" in "\n".join(commands)
     provider = config["models"]["providers"]["vllm"]
     assert provider["timeoutSeconds"] == 120
+    assert provider["baseUrl"] == "http://127.0.0.1:8765/v1"
+    assert provider["apiKey"] == "VLLM_API_KEY"
+    assert provider["api"] == "openai-completions"
     assert provider["models"][0]["id"] == "test-model"
     assert "reasoning" not in provider["models"][0]
     assert not any("config unset" in command or "config set" in command
@@ -268,7 +340,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "--model vllm/test-model" in agent_command
     assert "CLAWTUNE_RUNTIME_ID=session-a" in agent_command
     assert "CLAWTUNE_GATEWAY_ID=session-a" in agent_command
-    assert any("--custom-api-key clawtune-runtime.session-a" in command for command in commands)
+    assert "--import=/state/openclaw/session-a/bin/openclaw-auth.mjs" in agent_command
+    assert "OPENCLAW_STATE_DIR=/state/openclaw/session-a/.openclaw/.openclaw" in agent_command
+    assert not any(" onboard " in command or "config patch" in command for command in commands)
     assert "--message 'Create /workspace/result.txt'" in agent_command
     assert "Use only sandboxed" not in agent_command
     assert "agent.pid" in agent_command
@@ -276,10 +350,12 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert result["tool_calls"] == 1
     assert result["tool_latencies"] == [0.25]
     assert result["agent_tool_failures"] == 0
-    assert [item["stage"] for item in startup_events] == [
-        "runtime_setup", "sidecar_ready", "openclaw_onboard", "openclaw_config",
+    stage_events = [item for item in startup_events if "stage" in item]
+    assert [item["stage"] for item in stage_events] == [
+        "runtime_setup", "sidecar_ready", "openclaw_config",
+        "agent_runnable",
     ]
-    assert all(item["status"] == "ok" for item in startup_events)
+    assert all(item["status"] == "ok" for item in stage_events)
     assert len(startup_begins) == 1
     assert len(startup_waits) == 1
     assert startup_begins[0] < startup_waits[0]
@@ -290,10 +366,19 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
 
 
 @pytest.mark.parametrize("timeout_seconds", [60, None])
+@pytest.mark.parametrize("native_stat", [False, True])
 def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
-    monkeypatch, tmp_path: Path, timeout_seconds,
+    monkeypatch, tmp_path: Path, timeout_seconds, native_stat,
 ) -> None:
     commands: list[str] = []
+    probes = []
+    readiness = iter((None, False, True))
+
+    def file_nonempty(path, timeout):
+        probes.append((path, timeout))
+        return next(readiness)
+
+    monkeypatch.setattr("clawbox.experiments.openclaw_driver.time.sleep", lambda _: None)
 
     class RuntimeExecutor:
         def execute(self, command, _timeout):
@@ -302,7 +387,7 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
 
     def resident_poll(command: str, _timeout: float) -> CommandResult:
         commands.append("POLL " + command)
-        if "cat /state/openclaw/session-a/agent.exit" in command:
+        if "cat /state/openclaw/session-a/completion/agent.exit" in command:
             return CommandResult(0, "0\n", "", 0.01)
         if "cat /state/openclaw/session-a/logs/agent.stdout" in command:
             return CommandResult(0, '{"ok":true}\n', "", 0.01)
@@ -323,13 +408,52 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=timeout_seconds,
         resident_poll=resident_poll,
+        resident_file_nonempty=file_nonempty if native_stat else None,
     )
 
     launch = next(command for command in commands if "nohup /bin/sh" in command)
     assert "agent.exit" in launch
     assert "agent.pid" in launch
+    assert "--import=/state/openclaw/session-a/bin/openclaw-auth.mjs" in launch
     assert f"--timeout {timeout_seconds if timeout_seconds is not None else 0}" in launch
     assert result["stdout"] == '{"ok":true}\n'
+    if native_stat:
+        assert probes == [("/state/openclaw/session-a/completion/agent.exit", 10)] * 3
+        assert not any(item.startswith("POLL test -s ") for item in commands)
+
+
+def test_openclaw_runner_cancels_detached_agent_after_arm_failure(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    commands: list[str] = []
+
+    class RuntimeExecutor:
+        def execute(self, command, _timeout):
+            commands.append(command)
+            return CommandResult(0, "", "", 0.01)
+
+    def resident_poll(command: str, _timeout: float) -> CommandResult:
+        commands.append("POLL " + command)
+        return CommandResult(0, "", "", 0.01)
+
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    with pytest.raises(InterruptedError, match="cancelled after arm failure"):
+        run_openclaw(
+            prompt="test", session_id="session-a",
+            configuration={"base_url": "http://model.test/v1", "model": "test-model"},
+            ssh=NativeSSHConfig(
+                target="executor@192.0.2.20:2222",
+                identity_private_key="PRIVATE KEY\n",
+                host_public_key="ssh-ed25519 AAAATEST",
+                sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
+            ),
+            policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+            output_dir=tmp_path, timeout_seconds=60,
+            resident_poll=resident_poll, cancelled=lambda: True,
+            resident_file_nonempty=lambda *_: pytest.fail("cancelled before stat"),
+        )
+
+    assert any("POLL kill -TERM" in command for command in commands)
 
 
 def test_openclaw_resident_wait_replaces_repeated_status_polling(
@@ -345,7 +469,7 @@ def test_openclaw_resident_wait_replaces_repeated_status_polling(
 
     def resident_poll(command: str, _timeout: float) -> CommandResult:
         commands.append("POLL " + command)
-        if "cat /state/openclaw/session-a/agent.exit" in command:
+        if "cat /state/openclaw/session-a/completion/agent.exit" in command:
             return CommandResult(0, "0\n", "", 0.01)
         if "cat /state/openclaw/session-a/logs/agent.stdout" in command:
             return CommandResult(0, '{"ok":true}\n', "", 0.01)
@@ -370,7 +494,7 @@ def test_openclaw_resident_wait_replaces_repeated_status_polling(
         resident_poll=resident_poll, resident_wait=resident_wait,
     )
 
-    assert waits == [("/state/openclaw/session-a/agent.exit", 60.0)]
+    assert waits == [("/state/openclaw/session-a/completion/agent.exit", 60.0)]
     assert not any(item.startswith("POLL test -s ") for item in commands)
 
 
@@ -384,7 +508,7 @@ def test_openclaw_failure_preserves_complete_agent_streams(
     stderr = "fatal-first-line\n" + ("diagnostic\n" * 500) + "fatal-last-line\n"
 
     def resident_poll(command: str, _timeout: float) -> CommandResult:
-        if "cat /state/openclaw/session-a/agent.exit" in command:
+        if "cat /state/openclaw/session-a/completion/agent.exit" in command:
             return CommandResult(0, "7\n", "", 0.01)
         if "cat /state/openclaw/session-a/logs/agent.stdout" in command:
             return CommandResult(0, "partial stdout\n", "", 0.01)

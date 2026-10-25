@@ -9,7 +9,7 @@ import clawbox.experiments.qualification as qualification_module
 from clawbox.experiments.baselines import BASELINES
 from clawbox.experiments.qualification import (
     QUALIFICATION_SCHEMA_VERSION, current_qualification_input_manifest,
-    implementation_digest,
+    implementation_digest, qualification_contract_digest,
     live_borrow_roundtrip_test, qualification_spec, snapshot_roundtrip_test,
     qualification_input_manifest, template_base_sharing_test, validate_receipt,
 )
@@ -49,6 +49,27 @@ def test_template_sharing_evidence_excludes_shared_root_filesystems():
 
     assert qualification_module._same_template_ram_mapping(ram, dict(ram))
     assert not qualification_module._same_template_ram_mapping(rootfs, dict(rootfs))
+
+
+def test_template_sharing_retries_only_explicit_cube_ttrpc_create_errors():
+    class ApiError(RuntimeError):
+        pass
+
+    assert qualification_module._retryable_template_probe_error(ApiError(
+        "failed to create shim task: ttrpc err: Receive packet timeout Elapsed(())"
+    ))
+    assert qualification_module._retryable_template_probe_error(ApiError(
+        "failed to create shim task: ttrpc err: Send packet to sender error SendError"
+    ))
+    assert qualification_module._retryable_template_probe_error(ApiError(
+        "failed to create shim task: Recv len invalid:0"
+    ))
+    assert not qualification_module._retryable_template_probe_error(ApiError(
+        "template has no physically shared mapping"
+    ))
+    assert not qualification_module._retryable_template_probe_error(RuntimeError(
+        "ttrpc err: Receive packet timeout"
+    ))
 
 
 def test_snapshot_probe_uses_one_template_per_vm_shape() -> None:
@@ -113,6 +134,10 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
     peak = 0
     template_by_id = {}
     cleanup_calls = []
+    start_attempts = {}
+
+    class ApiError(RuntimeError):
+        pass
 
     class Client:
         def __init__(self, **_kwargs):
@@ -128,6 +153,12 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
 
         def start(self):
             nonlocal active, peak
+            attempt = start_attempts.get(self.template, 0)
+            start_attempts[self.template] = attempt + 1
+            if self.template == "tool-1" and attempt == 0:
+                raise ApiError(
+                    "failed to create shim task: ttrpc err: Receive packet timeout Elapsed(())"
+                )
             template_by_id[self.sandbox_id] = self.template
             active += 1
             peak = max(peak, active)
@@ -148,13 +179,39 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
     monkeypatch.setattr(qualification_module, "CubeSandboxLifecycle", Lifecycle)
     monkeypatch.setattr(qualification_module, "_sandbox_file_mappings", mappings)
 
-    result = template_base_sharing_test(spec, artifact_root=tmp_path / "probe")
+    prior = tmp_path / "prior-result.json"
+    prior.write_text(json.dumps({
+        "passed": False,
+        "cleanup_errors": [],
+        "templates": {"tool-0": [{
+            "device_inode": ["00:01", 7],
+            "vm_0": {
+                "path": "/data/cubelet/volumes/tool-0-memory/tool-0-memory",
+                "size_kib": 3 * 1024 * 1024,
+                "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 1,
+            },
+            "vm_1": {
+                "path": "/data/cubelet/volumes/tool-0-memory/tool-0-memory",
+                "size_kib": 3 * 1024 * 1024,
+                "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 1,
+            },
+        }]},
+    }), encoding="utf-8")
+
+    result = template_base_sharing_test(
+        spec, artifact_root=tmp_path / "probe", prior_results=(prior,),
+    )
 
     assert result["passed"] is True
     assert result["template_count"] == 3
     assert result["max_parallel_templates"] == 1
     assert result["live_probe_vm_bound"] == 2
     assert result["peak_live_probe_vms"] == 2
+    assert result["template_retry_attempts"] == 1
+    assert list(result["template_retry_errors"]) == ["tool-1"]
+    assert result["template_count_reused"] == 1
+    assert result["template_count_probed_this_attempt"] == 2
+    assert "tool-0" not in start_attempts
     assert peak == 2 and active == 0
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0].startswith("qualification-base-")
@@ -196,6 +253,13 @@ def test_template_sharing_artifact_reuses_exact_templates_and_raw_proof(
             "template_base_sharing_artifact": str(artifact),
         }),
     })
+    # An unrelated Cubelet/config update does not invalidate physical mapping
+    # evidence for the same immutable templates. Changes to the mapping
+    # mechanism itself require an explicitly new proof contract.
+    monkeypatch.setattr(
+        qualification_module, "_template_sharing_backend_identity",
+        lambda: {"files": {"cubelet": "b" * 64}},
+    )
 
     verified = template_base_sharing_test(reused, artifact_root=tmp_path / "unused")
 
@@ -230,6 +294,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
     return {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
+        "qualification_contract_digest": qualification_contract_digest(spec),
         "input_manifest": qualification_input_manifest(spec),
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
@@ -277,7 +342,9 @@ def test_qualification_uses_all_policies_at_target_concurrency() -> None:
     ]
 
 
-def test_receipt_is_bound_to_exact_spec_and_required_concurrency(tmp_path: Path) -> None:
+def test_receipt_reuses_capability_across_run_scale_but_not_template_change(
+    tmp_path: Path,
+) -> None:
     spec = load_experiment(EXAMPLE)
     path = tmp_path / "qualification.json"
     path.write_text(json.dumps(_receipt(spec)), encoding="utf-8")
@@ -289,8 +356,35 @@ def test_receipt_is_bound_to_exact_spec_and_required_concurrency(tmp_path: Path)
             "concurrency_levels": (1, 2),
         }),
     })
-    with pytest.raises(ValueError, match="source_spec_digest|concurrency"):
-        validate_receipt(changed, path)
+    assert validate_receipt(changed, path)["status"] == "succeeded"
+
+    transfer_tuned = spec.model_copy(update={
+        "resources": spec.resources.model_copy(update={
+            "pool_transfer_concurrency": 32,
+            "pool_transfer_timeout_seconds": 300,
+        }),
+        "execution": spec.execution.model_copy(update={
+            "sandbox_create_concurrency": 4,
+            "dependency_install_concurrency": 8,
+        }),
+    })
+    assert validate_receipt(transfer_tuned, path)["status"] == "succeeded"
+
+    watch_tuned = spec.model_copy(update={
+        "inference": spec.inference.model_copy(update={
+            "configuration": {**spec.inference.configuration,
+                              "runtime_completion_watch_seconds": 30},
+        }),
+    })
+    assert validate_receipt(watch_tuned, path)["status"] == "succeeded"
+
+    changed_template = spec.model_copy(update={
+        "runtime": spec.runtime.model_copy(update={
+            "template_id": "different-runtime-template",
+        }),
+    })
+    with pytest.raises(ValueError, match="qualification_contract_digest"):
+        validate_receipt(changed_template, path)
 
     stale = _receipt(spec)
     stale["implementation_digest"] = "0" * 64
@@ -374,6 +468,35 @@ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
     path.write_text(json.dumps(receipt))
     with pytest.raises(ValueError, match='concurrency'):
         validate_receipt(spec, path)
+
+
+def test_default_gate_uses_create_limit_without_repeating_cases():
+    spec = load_experiment(EXAMPLE)
+    case = spec.workload.cases[0]
+    cases = tuple(
+        case.model_copy(update={"case_id": f"qualification-case-{index}"})
+        for index in range(3)
+    )
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": cases}),
+        "execution": spec.execution.model_copy(update={
+            "concurrency_levels": (1280,),
+            "sandbox_create_concurrency": 2,
+        }),
+    })
+
+    qualified = qualification_spec(spec)
+
+    assert qualified.inference.configuration[
+        "qualification_max_parallel_sessions"
+    ] == 2
+    assert qualified.execution.concurrency_levels == (3,)
+    assert session_worker_count(expand_matrix(qualified)[0]) == 2
+
+
+def test_zero_qualification_concurrency_is_rejected():
+    with pytest.raises(ValueError, match="qualification concurrency must be positive"):
+        qualification_spec(load_experiment(EXAMPLE), concurrency=0)
 
 
 @pytest.mark.parametrize('pair', [False, True])

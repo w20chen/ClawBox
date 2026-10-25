@@ -19,8 +19,10 @@ Host capacities use GiB. Experiment VM memory, reservations, and watermarks use
 MiB. Result names ending in `_bytes` use bytes. Relative paths resolve from the
 current directory; use absolute paths for traces, prediction files, and results.
 
-The installed CubeSandbox SDK must include `sdk-control-timeouts.patch` and
-`sdk-lifecycle-timeouts.patch`. Its request timeout defaults to 30 seconds per
+The installed CubeSandbox SDK must include `sdk-control-timeouts.patch`,
+`sdk-lifecycle-timeouts.patch`, and `sdk-filesystem-timeouts.patch`. Follow the
+[SDK update commands](installation.md#what-an-update-rebuilds) after updating an
+existing host. Its request timeout defaults to 30 seconds per
 create, resume, pause, status, or destroy request; it is not the experiment
 deadline. After an ambiguous create failure, preserve the run directory and use
 `experiment abort RUN_ID` before starting a different run.
@@ -138,6 +140,21 @@ The schema has six mechanism dimensions plus deployment and coordination:
 | `deployment` | `managed`, `os-default` | Managed lifecycle accounting versus the guarded OS baseline |
 | `coordination` | `reclaim_first`, `measured_cost` | Choice between safe reclaim and borrowing actions |
 
+Managed placement reuses CubeSandbox's normal preallocated per-VM cgroup pool;
+ClawBox does not create a parallel VM-cgroup hierarchy. An opaque placement
+token carries the selected NUMA-node intent, Cubelet publishes the official
+assigned leaf, and CubeShim applies NUMA CPU affinity and allocation policy
+before launching the VMM. ClawBox then verifies vCPU affinity and physical
+memory residency and attaches pressure, borrowing, and `c2` controls to that
+official leaf. Live borrowing uses temporary threaded cpusets inside that leaf
+to migrate each VM once per process, retaining the original memory accounting
+and restoring its CPU affinities. The temporary groups are removed before the
+operation completes. This avoids repeated per-thread migration on older Linux
+kernels and requires no image rebuild or ClawTune retraining. CubeSandbox
+clears the leaf's `cpuset.mems` when it returns to its pool. This integration
+changes VM creation mechanics, not the admission, prediction, borrowing,
+checkpointing, pressure-control, or tool-call placement strategies.
+
 Use `configure --fixed-methods --recipe FAMILY` to compare one policy family
 while keeping the workload, host resources, measurements, and numeric settings
 fixed. Always inspect `describe`: names and labels do not change runtime behavior.
@@ -158,65 +175,47 @@ bash scripts/clawbox experiment configure --help
 bash scripts/clawbox experiment describe --help
 ```
 
-For predicted admission, `--prediction-mode runtime` uses an immutable trained
-knowledge base (KB) for the matching repository and Tool image.
-`--prediction-mode cold-start` directly uses one immutable ClawTune seed
-directory for every workload repository. The seed manifest and every KB file
-are hash-verified. Its provenance must contain validated host-memory
-calibration and the exact `sandbox_identities` set, including template, image,
-VM size, and architecture.
-
-First export observations from a successful real-VM environment-calibration
-run that covers the workload catalog:
+For predicted admission, `--prediction-mode cold-start` uses the immutable
+ClawTune `bootstrap-v2` seed directly across workload repositories. Set
+`resources.prediction_artifact` to the seed directory. It does not require a
+ClawBox-specific seed, prior workload replay, or VM calibration in the seed.
 
 ```bash
-python scripts/export-cold-start-calibration.py \
-  --result <successful-arm-result.json> \
-  --receipt <matching-qualification-receipt.json> \
-  --workload <exact-workload-catalog.json> \
-  --output <new-clawbox-observations.json>
-```
-
-Then, in the matching ClawTune checkout, build a new seed; the output directory
-must not already exist:
-
-```bash
-python scripts/build_clawbox_seed.py \
-  --observations <new-clawbox-observations.json> \
-  --base-seed seeds/bootstrap-v1 \
-  --output seeds/bootstrap-v2
-```
-
-Before starting VMs, measure command coverage for the exact workload catalog:
-
-```bash
-CLAWTUNE_ROOT=/path/to/ClawTune python scripts/evaluate-cold-start-coverage.py \
-  --seed /path/to/ClawTune/seeds/bootstrap-v2 \
+export CLAWTUNE_ROOT="$HOME/src/ClawTune"
+python scripts/evaluate-cold-start-coverage.py \
+  --seed "$CLAWTUNE_ROOT/seeds/bootstrap-v2" \
   --workload /path/to/workload.json \
-  --output /path/to/cold-start-coverage.json
+  --output /path/to/new-coverage.json
 ```
 
-The report counts fallback levels and partial-clause predictions. It is a
-corpus replay coverage check, not a held-out accuracy result, and starts no VMs.
+Use `clawbox experiment configure` with `--prediction-mode cold-start` and
+`--prediction-artifact "$CLAWTUNE_ROOT/seeds/bootstrap-v2"`, together with the
+host and workload options shown above. The coverage command starts no VMs;
+its report measures prediction availability, not held-out accuracy.
 
-Set `resources.prediction_artifact` to that `bootstrap-v2` directory. ClawBox
-exports only validated call/clause evidence and calibration; ClawTune owns KB
-training and seed publication. The builder retains the base Lattice history,
-adds Cube guest-memory clause labels, and builds public ClauseKB and ToolKB
-layers. Cold-start admission selects guest extra-memory from LatticeKB first,
-then its sampled-RSS proxy, then ToolKB guest extra-memory and its tool-class
-guest extra-memory fallback. The RSS proxy retains its original target and is
-converted to host demand only through its own paired calibration; it is never
-relabeled as guest extra memory. The imported artifacts do not provide a
-call-level RSS label for ToolKB. For a multi-clause command, Lattice memory and RSS predictions may use
-the clauses that have evidence even when another retained clause is missing or
-a dynamic structure is only partly representable; the prediction records its
-partial-evidence assumption and covered-clause count.
-Other resource targets still require complete clause evidence. The ToolKB
-public layer omits repository and exact-command identity.
-Missing measurements remain unavailable and are never converted to zero.
-Rebuilding the seed or changing the configured directory requires a new run ID
-and qualification, but not an image rebuild or host apply.
+Cold-start admission queries `cgroup_v2_environment_union_v1` memory evidence.
+It selects Lattice extra-memory P50, then Lattice sampled RSS, then ToolKB
+extra-memory and tool-class extra-memory. The selected value is used directly
+as a host-growth estimate, not a measured host calibration or guest-memory
+measurement. `resources.prediction_reservation_scale` (CLI
+`--prediction-reservation-scale`, default `1.0`, positive dimensionless multiplier)
+adjusts the reservation; the final reservation is rounded up to whole MiB, with
+a minimum of 0 MiB. A zero prediction therefore reserves 0 MiB.
+Prediction records retain the original measurement, assumptions, selected model,
+and `identity_estimate` mapping. Zero predictions and partial evidence are accepted.
+
+`--prediction-mode runtime` continues to use an immutable KB trained by
+`clawbox experiment train` for the matching repository and Tool image, including
+its measured guest-to-host calibration. `frozen` uses its precomputed commands.
+Training accepts partial, approximate and short observations; ClawTune supplies
+missing-target zeros. Quality and interruption markers remain diagnostics.
+Execution identity, artifact format, policy failures and cleanup remain checked.
+
+The deployment seed contains former evaluation tasks. Do not treat accuracy on
+those tasks as held-out accuracy. Changing prediction input, reservation scale,
+or training policy requires a new run ID; completed results remain unchanged.
+
+ClawTune owns the seven-target prediction/measurement contract: duration, cumulative CPU, average CPU cores, 500 ms peak CPU cores, sampled process RSS, environment total peak and environment extra peak. ToolKB, TrieKB and LatticeKB support all seven; EdgeKappa predicts duration only. The main memory-admission workflow does not consume CPU, duration or PMU predictions; PMU and disk/network measurements remain in the traces. The default seed is resolved by ClawTune (`bootstrap-v2`); `CLAWTUNE_KB_SEED` selects another seed when initializing new state. Existing writable state is not replaced. Use a new state directory and run ID to adopt a new seed. Collector code changes require rebuilding the Runtime/Tool images; selecting a different external seed alone does not.
 
 ### Compare fixed memory charges
 
@@ -262,9 +261,43 @@ To run only the discounted arms, remove `resident-capacity-1` from the generated
 `execution.sandbox_create_concurrency` limits how many Runtime/Tool VM pairs are
 created at once (default `8`; unit: session pairs). The two VMs in each admitted
 pair start concurrently, so maximum Cube create-request concurrency is twice this
-value. It does not limit tool calls.
+value. Create requests also share the Cube lifecycle-operation budget described
+below. This field does not limit tool calls.
 Set it no higher than the largest `execution.concurrency_levels` value. Changing
-it requires validation, qualification, and a new run ID.
+it requires validation and a new run ID, but not host apply, image rebuild,
+qualification, or ClawTune retraining.
+
+`mechanisms.checkpoint.pool_transfer_concurrency` is the shared Cube lifecycle
+operation budget (default `1`; unit: concurrent VM operations). Create,
+checkpoint, restore, and snapshot-spill calls draw from this one pool, so idle
+capacity is available to whichever operation needs it without allowing their
+combined load to overwhelm Cube. `pool_transfer_timeout_seconds` bounds how long
+an operation waits for a slot (default `120`; unit: seconds). Changing either
+field requires validation and a new run ID, but not host apply, image rebuild,
+qualification, or ClawTune retraining.
+
+The shared memory capacity includes pre-existing shared-node cache and WARM
+files. Each run measures this occupancy before launching VMs and withholds that
+space from new snapshot and live-borrow reservations. Existing data remains in
+place; the pool report distinguishes this occupancy from the run's own
+reservations and committed snapshots.
+
+NUMA rebinds are serialized before entering the kernel's ordered migration
+queue. A new borrow defers to the existing pressure/reclaim policy while another
+rebind is active. This does not reduce checkpoint or restore concurrency.
+Borrowing requires the `numa-migration-pause.patch` Shim build and host `libnuma`
+(installed with `numactl`). Cube briefly pauses the VM, preserves checkpoint
+dirty bits, and detaches its KVM RAM slots during page migration and the cpuset
+change. Read-only device-image mappings are faulted back from their unchanged
+files, keeping their shared cache out of whole-process migration. It restores
+the RAM slots and resumes the VM after destination placement
+succeeds. A failed migration retains the reservation and fails the owning run
+so its VM can be cleaned up. Borrow/return events report
+`native_prepare_seconds`, `premigrate_seconds`, `cpuset_seconds`,
+`native_resume_seconds`, and `premigrate_remaining_pages`; residual pages do
+not release reserved capacity without a residency check. Updating this native
+path requires installing the rebuilt Shim on an idle host and a new run ID;
+it does not require VM-image rebuilds or ClawTune retraining.
 
 `execution.dependency_install_concurrency` optionally limits concurrent `apt`,
 `apt-get`, and Python `pip install` commands across an experiment arm (default:
@@ -342,6 +375,24 @@ Changing this experiment setting requires qualification and a new run ID, withou
 rebuilding guest images. After an ambiguous creation timeout, ClawBox verifies a
 guest command before accepting a recovered VM; a listed VM alone is insufficient.
 
+Runtime completion uses Cube filesystem change notifications when snapshots are
+enabled. `inference.configuration.runtime_completion_watch_seconds` sets each
+notification wait (default `10` seconds, range `1`–`60`). A completion event wakes
+the waiter immediately; the limit controls idle reconnects and cancellation
+checks. Watches release the lifecycle lock and reconnect after checkpoint/restore.
+For example, set this field to `30` to reduce idle requests further. Install the
+[SDK timeout patches](installation.md#what-an-update-rebuilds) before using this
+path. Changing this field requires a new run ID, but no host apply, image rebuild,
+retraining or repeated capability qualification.
+
+The patched Shim also reuses Cube's bounded guest-agent reconnect when creating
+or restoring from a snapshot: up to five attempts, 200 ms between attempts,
+with a 10-second overall deadline and the existing 3-second RPC timeout.
+It retries only the connection and guest reset, before workload execution.
+This backend fix requires rebuilding the Shim and a new run ID; it does not
+require rebuilding VM images or retraining ClawTune. See the
+[update reference](installation.md#what-an-update-rebuilds).
+
 `execution.worker_thread_switch_interval_seconds` controls Python thread handoff
 (default `0.001` seconds; valid range above zero through `0.1`). Keep it identical
 across comparisons. Changing it requires qualification and a new run ID, but not
@@ -413,6 +464,13 @@ with overlapping sessions but enough time for bounded VM creation to keep up.
 The realized exponential inter-arrivals are derived
 from `random_seed`, repetition, concurrency, and ordered case IDs; policy names
 are excluded so every compared baseline receives the identical arrival sequence.
+Set the optional `execution.poisson_arrival_window_seconds` (CLI
+`--poisson-arrival-window-seconds`) to a positive number of seconds when multiple
+scales must use one common expected window. It overrides the fraction without
+rescaling the realized exponential sequence; the actual last arrival normally
+differs from the configured expectation. Changing either arrival-window field
+requires validation, qualification, and a new run ID. It does not require host
+apply, an image rebuild, or prediction retraining.
 Set `arrival_schedule: burst` only for an explicit burst experiment, or
 `fixed_stagger` with `stagger_interval_seconds` for a fixed-rate experiment.
 The default `execution.arm_timeout_seconds` is `3600` seconds. This is a failure
@@ -502,6 +560,57 @@ terminates, so reruns retain the actionable cause and retry failed entries.
 The updated recipe version also rebuilds mappings produced before these cache
 and extraction checks were introduced.
 
+When the task workspaces and dependencies are already verified and only the
+ClawTune guest collector contract/code changed, reuse the immutable task images
+instead of running the full ARM64 dependency build again:
+
+```bash
+python scripts/refresh-swe-collector-images.py \
+  --workload /absolute/path/workload-ready.json \
+  --collector-image registry/clawbox/validated-tool@sha256:DIGEST \
+  --clawtune-revision GIT_SHA --node CUBE_NODE \
+  --expected-kernel-version KERNEL_ID \
+  --output-dir /data/clawbox-environments/collector-refresh \
+  --workers 8 --batch-size 16 --minimum-free-gib 64 \
+  --storage-check-path /data/CubeMaster/storage
+```
+
+The command adds an immutable collector-only OCI layer, registers new Tool
+templates, and writes a new workload/catalog without changing the old images or
+templates. Completed entries are reused on repeat execution; failed entries are
+retried. `--workers` bounds concurrent image/template work and
+`--batch-size` bounds the number of tasks allowed to retain intermediate build
+state at once (`0`, the default, uses one batch). `--minimum-free-gib` is the
+per-filesystem safety floor in GiB. Repeat `--storage-check-path` for any separate
+filesystem used by the registry or Cube artifact store; each path must already
+exist. On a disk-constrained dedicated builder,
+`--prune-build-cache-between-batches` deletes all unused Docker build cache after
+each non-final batch; do not use it on a shared builder whose cache must be
+preserved. It does not prune images, containers, or volumes. First validate
+the collector source image on a real VM. Then use the new workload in a newly
+qualified experiment with a new run ID. This update does not rebuild task
+dependencies, apply host settings, or retrain an external bootstrap seed.
+
+If a completed entry's immutable image is still valid but its registered Cube
+template no longer launches, re-register only that template from the saved
+image. Supply the exact workload case ID once per affected template and a
+stable generation label:
+
+```bash
+python scripts/refresh-swe-collector-images.py \
+  [the same workload, collector, node, kernel, output, and storage options] \
+  --reregister-case CASE_ID --reregister-generation restore-repair-01
+```
+
+Repeat `--reregister-case` for multiple entries and reuse the same generation
+when resuming an interruption. Other completed entries are reused. The command
+requires the prior completed state, retains the old template, verifies that the
+replacement has the same Cube kernel identity, and rewrites the generated
+workload/catalog with the new template ID. A different generation deliberately
+registers another immutable template. This operation does not rebuild or push
+the task image, but the changed template identity requires a new sharing proof,
+qualification receipt, and run ID.
+
 Training uses separate successful runs with complete measurements, final task
 validation, and verified cleanup. Missing observations remain unavailable; they
 are never replaced with zero. Keep the generated JSON and `.kb.json` together.
@@ -520,6 +629,14 @@ bash scripts/clawbox experiment status eval-01
 bash scripts/clawbox experiment report eval-01
 ```
 
+Normal `launch` reuses each case's saved `metadata.input_validation` identity,
+checks that referenced files still exist, loads the selected prediction seed once,
+and lets qualification execute the first real Tool call in every environment. It
+does not reparse every immutable trace or resolve every recorded command before
+starting. Run `experiment validate SPEC --inputs` only when you explicitly want a
+full byte-level audit after changing or replacing workload/seed files; that command
+rehashes and reparses the inputs and can take several minutes for a large corpus.
+
 Useful commands:
 
 | Command | Purpose |
@@ -533,7 +650,13 @@ Useful commands:
 | `status`, `report`, `collect` | Inspect progress or regenerate reports without rerunning work |
 | `abort`, `destroy` | Stop owned VMs or clean them up while retaining result files |
 
-`abort` and `destroy` issue at most 8 concurrent Cube destroy requests and wait
+When `launch` receives an explicit `--qualification PATH`, that receipt must be
+reusable for the specification or the command fails before starting a new
+qualification. Omit the option to let `launch` create the default receipt, or
+use `--force-qualify` when replacing the explicit receipt is intentional.
+
+Normal session finalization shares an eight-request delete limit within each
+worker. `abort` and `destroy` issue at most 8 concurrent Cube destroy requests and wait
 180 seconds by default. For a dense interrupted run, set
 `--cleanup-workers N` and `--cleanup-timeout-seconds S`; these change only the
 bounded cleanup operation, in requests and seconds respectively. They do not
@@ -541,11 +664,21 @@ rebuild images, retrain predictions, alter the frozen experiment, or require a
 new run ID. Cleanup still exits nonzero unless a fresh Cube inventory proves
 that no VM owned by the run remains.
 
-A qualification receipt is bound to the exact spec, implementation, templates,
-images, nodes, concurrency, and referenced file hashes. A lower qualification
+A qualification receipt is bound to the maintained capability-contract version,
+templates/images, VM shapes, nodes/resources, policies, case coverage, prediction
+seed, and saved input identities. Run IDs, experiment IDs, formal offered
+concurrency, arrival timing, reporting, documentation, and CLI-only changes do not
+invalidate it because the smoke does not prove those properties. Changes to VM
+execution, ToolBridge/policy handling, prediction/measurement integration, or the
+qualification itself bump the receipt schema and require one new qualification.
+A lower qualification
 concurrency bounds the qualification worker pool while one session still executes
-every workload case. The receipt records both values; this capability smoke does
-not prove full-density performance. After interruption, restore
+every workload case. By default, `launch` uses the smallest of the target
+concurrency, `execution.sandbox_create_concurrency`, and the workload case count;
+use `--qualification-concurrency N` only when a different smoke-test bound is
+needed. The receipt records both the smoke bound and target concurrency for audit;
+the target value is not a reuse gate. This
+capability smoke does not prove full-density performance. After interruption, restore
 the host, retain the result directory, and launch the frozen spec with the same
 run ID. Use a new run ID for any configuration change.
 
@@ -562,13 +695,28 @@ bash scripts/clawbox experiment configure base.yaml eval-with-proof.yaml \
   --template-base-sharing-artifact /data/clawbox-evidence/template-sharing.json
 ```
 
+If Cube reports an explicit failed-create transport error, retain that raw
+attempt and resume into a new artifact root. Repeat `--resume-result` for each
+retained `result.json`; mappings and cleanup are revalidated, their file hashes
+are bound into the final proof, and only templates without valid evidence are
+created again:
+
+```bash
+bash scripts/clawbox --sudo experiment prove-template-sharing eval.yaml \
+  --resume-result /data/clawbox-evidence/failed-attempt/result.json \
+  --output /data/clawbox-evidence/template-sharing.json \
+  --artifact-root /data/clawbox-evidence/template-sharing-resumed-raw
+```
+
 In editable schema-4 YAML the corresponding field is
 `evidence.template_base_sharing_artifact`; schema 3 uses
 `resources.template_base_sharing_artifact`. Reuse verifies the exact template
-IDs, image digests, VM sizes and architecture, target node, Cubelet binary and
-configuration hashes, and the retained raw proof hashes. A changed Tool
-template/image, VM shape, target node, Cubelet installation, or missing raw
-proof requires running `prove-template-sharing` again. Changing the artifact
+IDs, image digests, VM sizes and architecture, target node, and the retained
+raw proof hashes. A changed Tool template/image, VM shape, target node, the
+CubeSandbox template-RAM mapping mechanism, or missing raw proof requires
+running `prove-template-sharing` again. Ordinary ClawBox, ClawTune, Cubelet
+placement, or Cube configuration updates do not invalidate the physical
+mapping evidence. Changing the artifact
 path requires a new run ID and qualification receipt, but not an image rebuild.
 This evidence skips only the repeated sharing probe; it never substitutes for
 the experiment's own VM creation or full-density measurement.
@@ -621,6 +769,8 @@ placement wait, tool time, CPU pressure, memory residency, checkpoint cost, and
 prediction error explain the result but do not replace it. Empty or `null`
 measurements are unavailable, not zero. NUMA allocation-event counters are pages,
 not cross-NUMA traffic bytes; do not infer traffic without a qualified host PMU.
+
+`offered_to_final_response_*` measures scheduled arrival to host receipt of the final response, including completion polling and transport but excluding later artifact collection, validation, and cleanup; `offered_to_completion_*` retains the older postcollection endpoint.
 
 ## When changes take effect
 

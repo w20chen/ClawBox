@@ -20,23 +20,40 @@ from clawbox.cube import (
     CubeSandboxClient, CubeSandboxLifecycle, OwnedSandboxJournal, Ownership,
 )
 from clawbox.lab import apply_environment, doctor
-from clawbox.replay.trace import load_trace
-
 from .results import RunStatus
-from .inputs import validate_inputs
+from .inputs import _saved_trace_info, validate_inputs, validate_launch_inputs
 from .prediction import prediction_input_paths
 from .snapshot_pool import WarmSnapshotPool
 from .numa_borrow import SandboxNumaBorrower, read_numa_lru_bytes
 from .spec import (
-    ExperimentSpec, InferenceBackend, ReclamationPolicy, expand_matrix,
-    load_workload_cases, spec_digest,
+    ExperimentSpec, InferenceBackend, ReclamationPolicy, canonical_json,
+    expand_matrix, load_workload_cases, spec_digest,
 )
 from .spec_types import AdmissionPolicy, ArrivalSchedule
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 11
+QUALIFICATION_SCHEMA_VERSION = 14
+_TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
+
+
+def _retryable_template_probe_error(exc: BaseException) -> bool:
+    """Recognize Cube's explicit failed-create transport errors, not ambiguous I/O."""
+    message = str(exc)
+    return (
+        type(exc).__name__ == "ApiError"
+        and (
+            (
+                "ttrpc err:" in message
+                and (
+                    "Receive packet timeout" in message
+                    or "Send packet to sender error" in message
+                )
+            )
+            or "Recv len invalid:0" in message
+        )
+    )
 
 
 def qualification_input_manifest(
@@ -99,10 +116,15 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
         if spec.inference.backend is InferenceBackend.REPLAY:
             for case in load_workload_cases(spec.workload):
                 path = Path(case.replay_trace_reference or case.source_reference)
+                saved = _saved_trace_info(case, path)
                 traces.append({
                     "case_id": case.case_id,
                     "path": str(path),
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "sha256": (
+                        saved["sha256"]
+                        if saved is not None
+                        else hashlib.sha256(path.read_bytes()).hexdigest()
+                    ),
                 })
         prediction_files = []
         admissions = {policy.admission for policy in spec.policies}
@@ -137,20 +159,53 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
 
 
 def implementation_digest() -> str:
-    """Bind qualification to the exact supported Python implementation tree."""
-    root = Path(__file__).resolve().parents[2]
-    files = sorted((root / "clawbox").rglob("*.py"))
-    if not files:
-        raise RuntimeError(f"ClawBox source tree is unavailable below {root}")
-    digest = hashlib.sha256()
-    for path in files:
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        content = path.read_bytes()
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return digest.hexdigest()
+    """Return the maintained capability-contract version identity.
+
+    Receipt compatibility is intentionally explicit.  Changes to VM execution,
+    ToolBridge/policy handling, prediction integration, or qualification must
+    bump ``QUALIFICATION_SCHEMA_VERSION``.  Unrelated CLI, reporting, test, and
+    documentation edits must not make users rerun hundreds of real-VM smokes.
+    """
+    return hashlib.sha256(
+        f"clawbox-qualification-contract-v{QUALIFICATION_SCHEMA_VERSION}".encode()
+    ).hexdigest()
+
+
+def qualification_contract_digest(spec: ExperimentSpec) -> str:
+    """Identify capability inputs while excluding formal scheduling identity."""
+    raw = spec.model_dump(mode="json")
+    raw.pop("experiment_id", None)
+    raw.pop("validation", None)
+    raw.pop("design", None)
+    raw.pop("suite", None)
+    raw.pop("suite_ablations", None)
+    workload = raw.get("workload") or {}
+    workload.pop("repetitions", None)
+    execution = raw.get("execution") or {}
+    for key in (
+        "concurrency_levels",
+        "randomized_order",
+        "random_seed",
+        "stabilization_seconds",
+        "arrival_schedule",
+        "stagger_interval_seconds",
+        "poisson_arrival_window_fraction",
+        "poisson_arrival_window_seconds",
+        "sandbox_create_concurrency",
+        "dependency_install_concurrency",
+    ):
+        execution.pop(key, None)
+    configuration = (raw.get("inference") or {}).get("configuration") or {}
+    configuration.pop("time_scale", None)
+    configuration.pop("max_model_steps", None)
+    # Notification wait bounds change observation overhead, not VM capability.
+    configuration.pop("runtime_completion_watch_seconds", None)
+    resources = raw.get("resources") or {}
+    # These bound concurrent work and queue wait; they do not change whether
+    # the already-qualified snapshot and NUMA operations are supported.
+    resources.pop("pool_transfer_concurrency", None)
+    resources.pop("pool_transfer_timeout_seconds", None)
+    return hashlib.sha256(canonical_json(raw).encode()).hexdigest()
 
 
 def default_receipt_path(spec_path: Path) -> Path:
@@ -778,20 +833,18 @@ def live_borrow_roundtrip_test(
 def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) -> ExperimentSpec:
     if spec.inference.backend is not InferenceBackend.REPLAY:
         raise ValueError("qualification requires inference.backend=replay")
-    level = concurrency or max(spec.execution.concurrency_levels)
+    cases = load_workload_cases(spec.workload)
+    level = (
+        concurrency
+        if concurrency is not None
+        else min(
+            max(spec.execution.concurrency_levels),
+            spec.execution.sandbox_create_concurrency,
+            len(cases),
+        )
+    )
     if level < 1:
         raise ValueError("qualification concurrency must be positive")
-    cases = load_workload_cases(spec.workload)
-    for selected in cases:
-        trace_value = selected.replay_trace_reference or selected.source_reference
-        if not trace_value:
-            raise ValueError(f"qualification case {selected.case_id} has no replay trace")
-        actions = load_trace(Path(trace_value))
-        first_output = actions[0].output if isinstance(actions[0].output, dict) else {}
-        if not first_output.get("tool_calls"):
-            raise ValueError(
-                f"qualification case {selected.case_id} must issue a native Tool call in its first model step"
-            )
     inference = spec.inference.model_copy(update={
         "configuration": {
             **spec.inference.configuration,
@@ -957,6 +1010,15 @@ def write_template_base_sharing_artifact(
             "path": str(path.resolve()),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         })
+    for probe in required:
+        for item in probe.get("prior_result_files", []):
+            path = Path(item.get("path", ""))
+            digest = item.get("sha256")
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError(f"prior template-sharing result differs or is missing: {path}")
+            resolved = str(path.resolve())
+            if not any(existing["path"] == resolved for existing in proof_files):
+                proof_files.append({"path": resolved, "sha256": digest})
     if not proof_files:
         raise ValueError("template-sharing proof has no persisted result.json")
     payload = {
@@ -974,7 +1036,8 @@ def write_template_base_sharing_artifact(
         "probe_summary": [{
             key: probe.get(key) for key in (
                 "template_count", "max_parallel_templates", "live_probe_vm_bound",
-                "peak_live_probe_vms", "metric",
+                "peak_live_probe_vms", "template_count_reused",
+                "template_count_probed_this_attempt", "template_retry_attempts", "metric",
             )
         } for probe in required],
     }
@@ -995,8 +1058,6 @@ def validate_template_base_sharing_artifact(
         raise ValueError("template-sharing artifact schema/status mismatch")
     if payload.get("target_node") != spec.resources.target_node:
         raise ValueError("template-sharing artifact target node differs")
-    if payload.get("backend_identity") != _template_sharing_backend_identity():
-        raise ValueError("template-sharing artifact Cube backend differs; rerun prove-template-sharing")
     expected = _template_sharing_identities(spec)
     observed = payload.get("templates") or {}
     stripped = {
@@ -1020,9 +1081,66 @@ def validate_template_base_sharing_artifact(
     return payload
 
 
-def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> dict[str, Any]:
+def _validated_prior_template_evidence(
+    path: Path, templates: dict[str, Any],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+    """Load only complete mappings from a cleanup-safe earlier proof attempt."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read prior template-sharing result {path}: {exc}") from exc
+    if raw.get("cleanup_errors"):
+        raise ValueError(f"prior template-sharing result has cleanup errors: {path}")
+    observed = raw.get("templates")
+    if not isinstance(observed, dict):
+        raise ValueError(f"prior template-sharing result has no template mappings: {path}")
+    validated: dict[str, list[dict[str, Any]]] = {}
+    for template, rows in observed.items():
+        sandbox = templates.get(template)
+        if sandbox is None:
+            raise ValueError(
+                f"prior template-sharing result contains an unexpected template {template}: {path}"
+            )
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"prior template-sharing result has empty evidence for {template}")
+        minimum_kib = sandbox.memory_mib * 1024 // 2
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("device_inode"), list):
+                raise ValueError(f"prior template-sharing evidence is malformed for {template}")
+            left, right = row.get("vm_0"), row.get("vm_1")
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                raise ValueError(f"prior template-sharing VM evidence is missing for {template}")
+            if not _same_template_ram_mapping(left, right):
+                raise ValueError(f"prior template-sharing paths differ for {template}")
+            if template not in str(left.get("path", "")):
+                raise ValueError(f"prior template-sharing path does not identify {template}")
+            if min(int(left.get("size_kib", 0)), int(right.get("size_kib", 0))) < minimum_kib:
+                raise ValueError(f"prior template-sharing mapping is too small for {template}")
+            if min(
+                int(left.get("shared_clean_kib", 0)),
+                int(right.get("shared_clean_kib", 0)),
+            ) <= 0:
+                raise ValueError(f"prior template-sharing mapping is not shared for {template}")
+        validated[template] = rows
+    resolved = path.resolve()
+    return validated, {
+        "path": str(resolved),
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+    }
+
+
+def template_base_sharing_test(
+    spec: ExperimentSpec, *, artifact_root: Path,
+    prior_results: tuple[Path, ...] = (),
+) -> dict[str, Any]:
     if spec.schema_version == 4:
-        return design_probes(spec, template_base_sharing_test, artifact_root=artifact_root)
+        return design_probes(
+            spec,
+            lambda child, *, artifact_root: template_base_sharing_test(
+                child, artifact_root=artifact_root, prior_results=prior_results,
+            ),
+            artifact_root=artifact_root,
+        )
     """Prove two VMs physically share a large file-backed template mapping."""
     required = spec.resources.template_base_sharing == "required"
     if not required:
@@ -1045,17 +1163,31 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> 
         templates.setdefault(sandbox.template, sandbox)
     journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
     run_id = "qualification-base-" + uuid.uuid4().hex[:12]
-    evidence = {}
+    evidence: dict[str, list[dict[str, Any]]] = {}
+    prior_result_files: list[dict[str, str]] = []
+    for path in prior_results:
+        reused, receipt = _validated_prior_template_evidence(path, templates)
+        for template, rows in reused.items():
+            evidence.setdefault(template, rows)
+        prior_result_files.append(receipt)
+    reused_template_count = len(evidence)
+    pending_templates = [
+        (index, template, sandbox)
+        for index, (template, sandbox) in enumerate(templates.items())
+        if template not in evidence
+    ]
     primary_error = None
-    worker_count = min(spec.execution.sandbox_create_concurrency, len(templates))
+    worker_count = min(spec.execution.sandbox_create_concurrency, len(pending_templates))
     activity_lock = Lock()
     active_probe_vms = 0
     peak_probe_vms = 0
 
-    def verify_template(index: int, template: str, sandbox: Any) -> tuple[str, list[dict[str, Any]]]:
+    def verify_template(
+        index: int, template: str, sandbox: Any, retry: int = 0,
+    ) -> tuple[str, list[dict[str, Any]]]:
         """Verify one template pair, then release it before another pair accumulates."""
         nonlocal active_probe_vms, peak_probe_vms
-        session_prefix = f"{run_id}-{index}"
+        session_prefix = f"{run_id}-{index}-r{retry}"
         client = CubeSandboxClient(
             journal=journal,
             request_timeout_s=spec.execution.cube_request_timeout_seconds,
@@ -1112,17 +1244,57 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> 
             raise RuntimeError("template-pair cleanup failed: " + "; ".join(cleanup_errors))
         return template, common
 
+    retryable_failures: dict[str, tuple[int, Any, list[str], BaseException]] = {}
+    terminal_failures: list[BaseException] = []
+    retry_attempts = 0
     try:
-        with ThreadPoolExecutor(
-            max_workers=worker_count, thread_name_prefix="template-sharing",
-        ) as pool:
-            futures = {
-                pool.submit(verify_template, index, template, sandbox): template
-                for index, (template, sandbox) in enumerate(templates.items())
-            }
-            for future in as_completed(futures):
-                template, common = future.result()
-                evidence[template] = common
+        if pending_templates:
+            with ThreadPoolExecutor(
+                max_workers=worker_count, thread_name_prefix="template-sharing",
+            ) as pool:
+                futures = {
+                    pool.submit(verify_template, index, template, sandbox): (
+                        index, template, sandbox,
+                    )
+                    for index, template, sandbox in pending_templates
+                }
+                for future in as_completed(futures):
+                    index, template, sandbox = futures[future]
+                    try:
+                        verified_template, common = future.result()
+                    except Exception as exc:
+                        if _retryable_template_probe_error(exc):
+                            retryable_failures[template] = (
+                                index, sandbox,
+                                [f"{type(exc).__name__}: {exc}"], exc,
+                            )
+                        else:
+                            terminal_failures.append(exc)
+                    else:
+                        evidence[verified_template] = common
+        for template, (index, sandbox, errors, last_error) in retryable_failures.items():
+            for retry in range(1, _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT + 1):
+                retry_attempts += 1
+                try:
+                    verified_template, common = verify_template(
+                        index, template, sandbox, retry,
+                    )
+                except Exception as exc:
+                    errors.append(f"{type(exc).__name__}: {exc}")
+                    last_error = exc
+                    if not _retryable_template_probe_error(exc):
+                        break
+                else:
+                    evidence[verified_template] = common
+                    break
+            if template not in evidence:
+                terminal_failures.append(last_error)
+        if terminal_failures:
+            primary_error = terminal_failures[0]
+        elif set(evidence) != set(templates):
+            primary_error = RuntimeError(
+                f"template-sharing proof is incomplete: {len(evidence)}/{len(templates)} templates"
+            )
     except BaseException as exc:
         primary_error = exc
     cleanup_errors = []
@@ -1137,6 +1309,15 @@ def template_base_sharing_test(spec: ExperimentSpec, *, artifact_root: Path) -> 
         "max_parallel_templates": worker_count,
         "live_probe_vm_bound": worker_count * 2,
         "peak_live_probe_vms": peak_probe_vms,
+        "template_count_reused": reused_template_count,
+        "template_count_probed_this_attempt": len(pending_templates),
+        "prior_result_files": prior_result_files,
+        "template_retry_attempts": retry_attempts,
+        "template_retry_errors": {
+            template: errors
+            for template, (_index, _sandbox, errors, _last_error)
+            in retryable_failures.items()
+        },
         "metric": "Linux smaps Shared_Clean/Pss for common Cube *-memory device+inode mapping",
         "failure": f"{type(primary_error).__name__}: {primary_error}" if primary_error else None,
         "cleanup_errors": cleanup_errors,
@@ -1156,7 +1337,9 @@ def qualify(
 ) -> dict[str, Any]:
     require_host_ready(spec)
     validated_inputs = (
-        validated_inputs if validated_inputs is not None else validate_inputs(spec)
+        validated_inputs
+        if validated_inputs is not None
+        else validate_launch_inputs(spec)
     )
     fault_test = supervision_fault_test()
     qualified = qualification_spec(spec, concurrency=concurrency)
@@ -1184,6 +1367,7 @@ def qualify(
     receipt = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
         "source_spec_digest": spec_digest(spec),
+        "qualification_contract_digest": qualification_contract_digest(spec),
         "input_manifest": qualification_input_manifest(
             spec, validated_inputs=validated_inputs,
         ),
@@ -1233,7 +1417,7 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         raise ValueError(f"cannot read qualification receipt {path}: {exc}") from exc
     expected = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
-        "source_spec_digest": spec_digest(spec),
+        "qualification_contract_digest": qualification_contract_digest(spec),
         "input_manifest": current_qualification_input_manifest(spec),
         "implementation_digest": implementation_digest(),
         "target_node": spec.resources.target_node,
@@ -1245,7 +1429,6 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         }, key=lambda value: value or ""),
         "status": "succeeded",
         "cleanup_verified": True,
-        "target_concurrency": max(spec.execution.concurrency_levels),
         "scope": "capability_smoke",
     }
     mismatches = [

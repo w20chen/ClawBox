@@ -147,6 +147,7 @@ def test_two_nodes_share_borrow_capacity_and_keep_cpu_placement(tmp_path):
         (leaf/'memory.numa_stat').write_text('active_anon N0=0 N1=0 N2=0\n')
         (leaf/'cgroup.events').write_text('populated 0\n')
         (leaf/'cpuset.cpus.effective').write_text('0-159')
+        (leaf/'cpuset.mems').write_text('')
         (leaf/'cpuset.mems.effective').write_text('0-2')
         def write(path, value):
             path.write_text(value)
@@ -159,15 +160,18 @@ def test_two_nodes_share_borrow_capacity_and_keep_cpu_placement(tmp_path):
     borrowers[0].borrow("vm0", 40)
     with pytest.raises(WarmCapacityError):
         borrowers[1].borrow("vm1", 40)
-    assert (group / "1/cpuset.mems.effective").read_text() == "1"
+    assert (group / "1/cpuset.mems.effective").read_text() == "0-2"
     borrowers[0].return_local("vm0")
     borrowers[1].borrow("vm1", 40)
-    assert (group / "1/cpuset.cpus.effective").read_text() == "80-159"
+    assert (group / "1/cpuset.cpus.effective").read_text() == "0-159"
     assert (group / "1/cpuset.mems.effective").read_text() == "2"
     borrowers[1].release_destroyed("vm1")
+    # Cube resets an empty pooled leaf; native VMM policy selects LOCAL.
+    (group / "1/cpuset.mems").write_text("")
+    (group / "1/cpuset.mems.effective").write_text("0-2")
     borrowers[1].pin_local("vm1-restored")
-    assert borrowers[1].placements[-1]["effective_mems"] == "1"
+    assert borrowers[1].placements[-1]["effective_mems"] == "0-2"
     (group / "1/cpuset.cpus.effective").write_text("0-79")
-    with pytest.raises(RuntimeError, match="CPU pin"):
+    with pytest.raises(RuntimeError, match="excludes requested CPUs"):
         borrowers[1].borrow("vm1-restored", 40)
     assert pool.borrowed_bytes == 0

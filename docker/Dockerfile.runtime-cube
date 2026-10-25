@@ -10,6 +10,8 @@ COPY --from=clawtune packages/clawtune-plugin/package-lock.json ./
 RUN npm ci --registry="${NPM_REGISTRY}"
 COPY --from=clawtune packages/clawtune-plugin/tsconfig.json ./
 COPY --from=clawtune packages/clawtune-plugin/src ./src
+COPY --from=clawtune packages/clawtune-plugin/scripts ./scripts
+COPY --from=clawtune packages/clawtune-plugin/openclaw.plugin.json ./
 RUN npm run build
 
 
@@ -28,7 +30,8 @@ COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
 COPY --from=clawtune services/sidecar /opt/clawtune/services/sidecar
 COPY --from=clawtune contracts /opt/clawtune/contracts
 COPY --from=clawtune seeds /opt/clawtune/seeds
-COPY --from=clawtune seeds/bootstrap-v1 /opt/clawtune/cold-start/tool-resource
+COPY --from=clawtune seeds/bootstrap-v2 /opt/clawtune/cold-start/tool-resource
+ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
 COPY --from=plugin-build /src/plugin/dist /opt/clawtune/packages/clawtune-plugin/dist
 COPY --from=clawtune packages/clawtune-plugin/openclaw.plugin.json packages/clawtune-plugin/package.json /opt/clawtune/packages/clawtune-plugin/
 RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune/services/sidecar

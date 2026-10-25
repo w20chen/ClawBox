@@ -30,7 +30,7 @@ def test_training_provenance_records_exact_clawtune_and_collector_semantics(
     assert _clawtune_revision() == revision
     assert COLLECTOR_SEMANTICS['resource_source'] == 'cgroup-v2'
     assert 'usage_usec' in COLLECTOR_SEMANTICS['cpu_total_counter']
-    assert COLLECTOR_SEMANTICS['required_pmu_running_ratio'] == 1.0
+    assert COLLECTOR_SEMANTICS['training_label_policy'] == 'clawtune_available_or_zero'
 
 
 def _write_run(

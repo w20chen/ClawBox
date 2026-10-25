@@ -165,6 +165,7 @@ def configure_experiment(
     arrival_schedule: str | None = None,
     stagger_seconds: float | None = None,
     poisson_arrival_window_fraction: float | None = None,
+    poisson_arrival_window_seconds: float | None = None,
     random_seed: int | None = None,
     arm_timeout_seconds: int | None = None,
     command_timeout_seconds: int | None = None,
@@ -474,6 +475,10 @@ def configure_experiment(
         execution["poisson_arrival_window_fraction"] = (
             poisson_arrival_window_fraction
         )
+    if poisson_arrival_window_seconds is not None:
+        execution["poisson_arrival_window_seconds"] = (
+            poisson_arrival_window_seconds
+        )
     if random_seed is not None:
         execution["random_seed"] = random_seed
     if arm_timeout_seconds is not None:
@@ -753,6 +758,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             "stagger_interval_seconds": spec.execution.stagger_interval_seconds,
             "poisson_arrival_window_fraction": (
                 spec.execution.poisson_arrival_window_fraction
+            ),
+            "poisson_arrival_window_seconds": (
+                spec.execution.poisson_arrival_window_seconds
             ),
             "random_seed": spec.execution.random_seed,
             "arm_timeout_seconds": spec.execution.arm_timeout_seconds,

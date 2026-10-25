@@ -245,7 +245,7 @@ diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cu
 diff --git a/Cubelet/services/cubebox/incremental_memory_test.go b/Cubelet/services/cubebox/incremental_memory_test.go
 --- a/Cubelet/services/cubebox/incremental_memory_test.go
 +++ b/Cubelet/services/cubebox/incremental_memory_test.go
-@@ -1,138 +1,220 @@
+@@ -1,14 +1,14 @@
  package cubebox
  
  import (
@@ -266,6 +266,10 @@ diff --git a/Cubelet/services/cubebox/incremental_memory_test.go b/Cubelet/servi
 +	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 +	"golang.org/x/sys/unix"
  )
+ 
+ func TestAllocateWarmRangeRetriesEINTR(t *testing.T) {
+@@ -28,127 +28,209 @@
+ }
  
  func TestDirectPauseMemoryPathAcceptsConfiguredWarmRoot(t *testing.T) {
 -    t.Setenv("CLAWBOX_WARM_SNAPSHOT_ROOT", "/mnt/clawbox-warm")

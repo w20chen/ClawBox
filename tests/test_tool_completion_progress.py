@@ -37,23 +37,62 @@ def test_resident_runtime_poll_does_not_take_model_lifecycle_lock():
     assert result[0].stdout == "status"
 
 
-def test_snapshot_runtime_poll_serializes_with_lifecycle_transition():
+@pytest.mark.parametrize("native_stat", [False, True])
+def test_snapshot_runtime_poll_serializes_with_lifecycle_transition(native_stat):
     lifecycle_lock = Lock()
     lifecycle_lock.acquire()
     executor = SimpleNamespace(
         execute=lambda command, timeout: CommandResult(0, command, "", 0.0),
+        file_nonempty=lambda path, timeout: True,
     )
     poller = RuntimeStatusPoller(
         lifecycle=SimpleNamespace(resident=True), executor=executor,
         lifecycle_lock=lifecycle_lock, snapshot_enabled=True,
     )
     completed = Event()
-    thread = Thread(target=lambda: (poller("status", 1), completed.set()), daemon=True)
+    probe = poller.file_nonempty if native_stat else poller
+    thread = Thread(target=lambda: (probe("status", 1), completed.set()), daemon=True)
     thread.start()
     assert not completed.wait(0.05)
     lifecycle_lock.release()
     thread.join(1)
     assert completed.is_set()
+
+
+def test_native_runtime_file_poll_skips_nonresident_guest():
+    lifecycle_lock = Lock()
+    poller = RuntimeStatusPoller(
+        lifecycle=SimpleNamespace(resident=False),
+        executor=SimpleNamespace(file_nonempty=lambda *_: pytest.fail("guest is paused")),
+        lifecycle_lock=lifecycle_lock, snapshot_enabled=True,
+    )
+    assert poller.file_nonempty("/state/agent.exit", 10) is None
+    assert lifecycle_lock.acquire(blocking=False)
+    lifecycle_lock.release()
+
+
+@pytest.mark.parametrize("stream_failure", [False, True])
+def test_completion_watch_releases_lifecycle_lock_and_discards_old_generation(stream_failure):
+    lifecycle_lock = Lock()
+    lifecycle = SimpleNamespace(resident=True, sandbox=object())
+    old = lifecycle.sandbox
+
+    def wait(sandbox, path, **kwargs):
+        assert sandbox is old
+        assert lifecycle_lock.acquire(blocking=False), "watch must not prevent checkpoint"
+        try:
+            lifecycle.sandbox = object()
+        finally:
+            lifecycle_lock.release()
+        if stream_failure:
+            raise ConnectionError("old VM was checkpointed")
+        return True
+
+    poller = RuntimeStatusPoller(
+        lifecycle=lifecycle, lifecycle_lock=lifecycle_lock, snapshot_enabled=True,
+        executor=SimpleNamespace(client=SimpleNamespace(wait_file_nonempty=wait)),
+    )
+    assert poller.watch_file_nonempty("/state/completion/agent.exit", 10) is None
 
 
 def test_resident_runtime_wait_uses_one_remote_command_without_lifecycle_lock():

@@ -60,6 +60,8 @@ class WarmSnapshotPool:
 
     def __init__(self, capacity_bytes: int, *,
                  borrow_capacity_bytes: int = 0,
+                 external_shared_live_bytes: int = 0,
+                 external_warm_bytes: int = 0,
                  transfer_concurrency: int = 1,
                  transfer_timeout_seconds: float = 120,
                  snapshot_aware: bool = False,
@@ -68,14 +70,28 @@ class WarmSnapshotPool:
             raise ValueError("capacity_bytes must be non-negative")
         if borrow_capacity_bytes < 0 or borrow_capacity_bytes > capacity_bytes:
             raise ValueError("borrow_capacity_bytes must be between zero and capacity")
+        external_occupied_bytes = external_shared_live_bytes + external_warm_bytes
+        if (external_shared_live_bytes < 0 or external_warm_bytes < 0
+                or external_occupied_bytes > capacity_bytes):
+            raise ValueError("pre-existing shared occupancy must be between zero and capacity")
         self.capacity_bytes = capacity_bytes
         self.borrow_capacity_bytes = borrow_capacity_bytes
+        # Measured before this run starts allocating: existing shared-node
+        # cache and WARM files are outside its borrow/manifest ledgers. Keep
+        # their space unavailable rather than promise it to new generations.
+        self.external_occupied_bytes = external_occupied_bytes
+        self.external_shared_live_bytes = external_shared_live_bytes
+        self.external_warm_bytes = external_warm_bytes
         if transfer_concurrency < 1 or transfer_timeout_seconds <= 0:
             raise ValueError("transfer concurrency and timeout must be positive")
         self.transfer_concurrency = transfer_concurrency
         self.transfer_timeout_seconds = transfer_timeout_seconds
         self.snapshot_aware = snapshot_aware
         self._transfer_slots = BoundedSemaphore(transfer_concurrency)
+        # Linux cpuset migrations share one ordered kernel workqueue. Queue
+        # rebind transactions here instead of making concurrent cgroup writes
+        # drain each other's migrations while holding kernel cgroup locks.
+        self.rebind_lock = RLock()
         self._transfers: dict[str, int] = {}
         self._clock = clock
         self._lock = RLock()
@@ -91,13 +107,16 @@ class WarmSnapshotPool:
 
     @contextmanager
     def transfer(self, operation: str):
-        """Bound concurrent I/O/rebind calls; this is not a bandwidth meter.
+        """Bound concurrent Cube lifecycle calls; this is not a bandwidth meter.
 
         Call only around VMM I/O, after capacity/spill/pin decisions, so a
         waiter never holds a transfer slot while waiting for another transfer.
         """
         if not self._transfer_slots.acquire(timeout=self.transfer_timeout_seconds):
-            raise TimeoutError(f"shared-pool {operation} transfer timed out; inspect active transfers or increase resources.pool_transfer_timeout_seconds")
+            raise TimeoutError(
+                f"Cube lifecycle {operation} slot timed out; inspect active operations "
+                "or increase resources.pool_transfer_timeout_seconds"
+            )
         with self._lock:
             self._transfers[operation] = self._transfers.get(operation, 0) + 1
         try:
@@ -121,6 +140,15 @@ class WarmSnapshotPool:
     def borrowed_bytes(self) -> int:
         with self._lock:
             return sum(self._borrow_reservations.values())
+
+    @property
+    def borrow_headroom_bytes(self) -> int:
+        """Current reservation headroom; reserve_borrow still commits atomically."""
+        with self._lock:
+            return max(0, min(
+                self.borrow_capacity_bytes - sum(self._borrow_reservations.values()),
+                self.capacity_bytes - self._usage_locked(),
+            ))
 
     def reserve_borrow(self, sandbox_id: str, upper_bound_bytes: int) -> None:
         """Reserve live VM capacity on the shared NUMA node.
@@ -157,10 +185,11 @@ class WarmSnapshotPool:
         if upper_bound_bytes <= 0:
             raise ValueError("upper_bound_bytes must be positive")
         with self._lock:
-            if upper_bound_bytes > self.capacity_bytes:
+            if upper_bound_bytes > self.capacity_bytes - self.external_occupied_bytes:
                 raise WarmSnapshotTooLarge(
                     f"snapshot reservation {upper_bound_bytes} exceeds WARM capacity "
-                    f"{self.capacity_bytes}"
+                    f"{self.capacity_bytes - self.external_occupied_bytes} remaining "
+                    "after pre-existing shared occupancy"
                 )
             if key in self._reservations or key in self._manifests:
                 raise RuntimeError(f"duplicate snapshot generation: {key}")
@@ -370,10 +399,11 @@ class WarmSnapshotPool:
         """
         if required_bytes <= 0:
             return ()
-        if required_bytes > self.capacity_bytes:
+        if required_bytes > self.capacity_bytes - self.external_occupied_bytes:
             raise WarmSnapshotTooLarge(
                 f"snapshot reservation {required_bytes} exceeds WARM capacity "
-                f"{self.capacity_bytes}"
+                f"{self.capacity_bytes - self.external_occupied_bytes} remaining "
+                "after pre-existing shared occupancy"
             )
         excluded = exclude or set()
         with self._lock:
@@ -420,6 +450,9 @@ class WarmSnapshotPool:
         with self._lock:
             return {
                 "capacity_bytes": self.capacity_bytes,
+                "external_occupied_bytes": self.external_occupied_bytes,
+                "external_shared_live_bytes": self.external_shared_live_bytes,
+                "external_warm_bytes": self.external_warm_bytes,
                 "transfer_concurrency": self.transfer_concurrency,
                 "active_transfers": dict(self._transfers),
                 "bandwidth_measurement": "unavailable",
@@ -459,7 +492,7 @@ class WarmSnapshotPool:
             }
 
     def _usage_locked(self) -> int:
-        return sum(self._borrow_reservations.values()) + sum(self._reservations.values()) + sum(
+        return self.external_occupied_bytes + sum(self._borrow_reservations.values()) + sum(self._reservations.values()) + sum(
             item.allocated_bytes for item in self._manifests.values()
         )
 

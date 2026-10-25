@@ -56,7 +56,7 @@ class ClawTuneTraceWriter:
         if pmu is None and isinstance(cgroup, dict) and isinstance(cgroup.get("pmu"), dict):
             pmu = cgroup["pmu"]
         with self._lock:
-            self._record_native(command, result, execution_id, cgroup, pmu, prediction, tool_name)
+            self._record_native(command, result, execution_id, cgroup, pmu, prediction, tool_name, bridge_record)
             bridge = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "cell_id": None,
@@ -87,7 +87,7 @@ class ClawTuneTraceWriter:
             self._native.close()
             self._native = None
 
-    def _record_native(self, command, result, execution_id, cgroup, pmu, prediction, tool_name):
+    def _record_native(self, command, result, execution_id, cgroup, pmu, prediction, tool_name, bridge_record=None):
         from clawbox.clawtune_integration import use_clawtune
         use_clawtune()
         from clawtune_sidecar.trace import AgentTestBenchTraceWriter
@@ -117,9 +117,14 @@ class ClawTuneTraceWriter:
             param_features=dict(serialized_size_bytes=len(command.encode()), string_length=len(command),
                                 list_item_count=0, path_count=0, has_command_like_field=True),
             raw_params={"command": command}, resource_scope=scope)
+        interruption = bridge_record or {}
+        timed_out = interruption.get("timed_out", result.exit_code == 124)
         after = ToolCompletedEvent(**common, decision_id=None, lease_id=None, execution_id=execution_id,
             duration_ms=duration_ms, succeeded=result.exit_code == 0, resource_scope=scope,
-            error_type="timeout" if result.exit_code == 124 else None, error_digest=None,
+            error_type="timeout" if timed_out else "cancelled" if interruption.get("cancelled") else None,
+            confirmed_timeout=bool(timed_out),
+            timeout_duration_lower_bound_ms=interruption.get("timeout_duration_lower_bound_ms"),
+            error_digest=None,
             raw_result={"exit_code": result.exit_code, "stdout": result.stdout, "stderr": result.stderr})
         c = cgroup or {}
         measured_start = c.get("ts_start")

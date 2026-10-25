@@ -80,22 +80,53 @@ python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
 The helper pins CubeSandbox v0.7.0, applies the required endpoint, networking,
-image-provenance, snapshot, cgroup-routing, and bounded control/lifecycle-RPC patches,
+image-provenance, snapshot, cgroup-routing, bounded control/lifecycle-RPC, and guest-agent reconnect patches,
 and builds Cubelet and Shim. It does not install or restart services. Repeating the same patch set
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
 
-For an existing SDK already carrying `sdk-control-timeouts.patch`, add the
-lifecycle timeout patch without rebuilding VM images or restarting services:
+### What an update rebuilds
+
+Do not repeat the complete host installation after an ordinary source update.
+Use the smallest row that matches the changed content:
+
+| Changed content | Required action |
+| --- | --- |
+| ClawBox Python, CLI, scheduling, reporting, or documentation | Update the checkout. Reinstall the editable Python package only if its environment is not already editable. No CubeSandbox or VM-image rebuild. Use a new run ID when experiment behavior or recorded metadata changes. |
+| ClawTune host prediction logic or a selected seed | Update `CLAWTUNE_ROOT`; use a new writable state directory and run ID when adopting new learned state. No CubeSandbox or VM-image rebuild. |
+| ClawTune collector/sidecar code copied into guests | Rebuild only the affected Runtime/Tool image layers and register new templates. Qualification and a new run ID are required; CubeSandbox is unchanged. |
+| `deploy/cubesandbox/sdk-*.patch` | Apply the SDK patch and reinstall the editable host SDK as shown below. Start a new run ID. No service restart or VM-image rebuild. |
+| `deploy/cubesandbox/guest-agent-reconnect.patch` or `numa-migration-pause.patch` | Rebuild and install the Shim on an idle host, then use a new run ID. The NUMA control client is part of that Shim binary; no separate helper is installed. Existing VM images, templates, and ClawTune state remain valid. |
+| CubeSandbox server patches, including the native NUMA placement hook | Rebuild and install Cubelet/Shim, restart Cubelet once on an idle host, then run the documented recovery command. Existing guest images and templates remain valid. |
+| Runtime/Tool Dockerfile, dependencies, entrypoint, or workspace content | Rebuild only the affected images/templates, qualify them, and use a new run ID. |
+| Host capacity, NUMA, TAP, quota, or storage configuration | Review and apply a new host plan. Rebuild neither CubeSandbox nor images unless the plan explicitly changes their installed content. |
+
+Template-sharing evidence remains reusable when the immutable Tool templates,
+VM shapes, target node, raw proof, and CubeSandbox RAM-mapping mechanism are
+unchanged. Placement-hook and ordinary configuration updates do not repeat the
+503-template proof. The build helpers perform their own source/bundle integrity
+checks; users do not need to create or compare ad hoc hash lists. Normal
+`experiment launch` also reuses saved input identities. Run the slower
+`experiment validate SPEC --inputs` only after intentionally replacing inputs.
+
+For an existing SDK already carrying `sdk-control-timeouts.patch`, apply the
+lifecycle and filesystem timeout patches. These let Runtime completion checks
+use Cube's native metadata and directory notifications with finite timeouts.
+Run from the ClawBox checkout; repeating these commands is safe:
 
 ```bash
-git -C "$CUBE_SOURCE_DIR" apply --check "$PWD/deploy/cubesandbox/sdk-lifecycle-timeouts.patch"
-git -C "$CUBE_SOURCE_DIR" apply "$PWD/deploy/cubesandbox/sdk-lifecycle-timeouts.patch"
+for patch in sdk-lifecycle-timeouts.patch sdk-filesystem-timeouts.patch sdk-filesystem-watch-timeouts.patch; do
+  patch_path="$PWD/deploy/cubesandbox/$patch"
+  if ! git -C "$CUBE_SOURCE_DIR" apply --reverse --check "$patch_path" 2>/dev/null; then
+    git -C "$CUBE_SOURCE_DIR" apply --check "$patch_path" || exit 1
+    git -C "$CUBE_SOURCE_DIR" apply "$patch_path" || exit 1
+  fi
+done
 python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
-If already applied, verify with `git apply --reverse --check` instead of applying
-it again. Start a new run ID; existing workers keep their loaded SDK code.
+Start a new run ID; existing workers keep their loaded SDK code. SDK-only
+updates require neither a service restart nor a VM-image rebuild.
 
 `--mirror cn` selects China package and Go mirrors; `--direct-network` bypasses
 inherited host proxies. These options do not solve inaccessible GitHub release
@@ -152,11 +183,17 @@ Edit `machine.env` and supply:
 | `CLAWBOX_CONTROL_HOST`, `CLAWBOX_MODEL_GATEWAY_HOST` | Host address reachable from guests |
 | `CLAWBOX_RUNTIME_IMAGE`, `CLAWBOX_TOOL_IMAGE` | Immutable `registry/name@sha256:...` references |
 | `CLAWTUNE_ROOT`, `CLAWTUNE_SIDECAR_SRC` | Absolute paths to the matching source |
+| `CLAWTUNE_KB_SEED` | Optional immutable seed path; defaults to ClawTune `bootstrap-v2`. Applies to new state and image builds; existing state is retained. |
 | `CUBE_SOURCE_DIR` | Patched CubeSandbox checkout |
 | `CLAWBOX_OUTPUT_ROOT` | Writable result directory outside the checkout |
 
 Add control and proxy addresses to both `NO_PROXY` and `no_proxy`. Leave template
 IDs empty until registration.
+
+The normal `experiment launch` path reuses saved workload readiness metadata and
+does not repeat a full corpus audit. Use `experiment validate SPEC --inputs` after
+you intentionally replace trace or prediction files; it is the slower command that
+reparses and rehashes all inputs.
 
 ## 4. Register templates and verify VM access
 
@@ -228,12 +265,17 @@ smoke run using the current configuration format from the guide.
 
 ## After reboot
 
-Check services and storage before applying the saved host plan:
+Recover the Cubelet and egress dependency chain, then check services and
+storage before applying the saved host plan. The optional argument is the
+maximum number of seconds to wait for both Cubelet's delegated cgroup and its
+real storage-node heartbeat (default 1200). A 5120-entry TAP pool can take
+several minutes to initialize after reboot:
 
 ```bash
+sudo bash scripts/recover-cubesandbox-after-reboot.sh
 systemctl is-active cube-sandbox-cube-api.service \
   cube-sandbox-cubemaster.service cube-sandbox-cubelet.service \
-  cube-sandbox-cube-egress.service
+  cube-sandbox-cube-egress.service cube-sandbox-cube-egress-net.service
 df -h /data/cubelet
 bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
 bash scripts/clawbox --sudo experiment host apply \

@@ -155,14 +155,14 @@ def select_p50(models: dict[str, Any], *, short_call_evidence: dict | None = Non
         if result["clawtune_memory_backend"] != expected_backend:
             raise PredictionUnavailable(f"{name} prediction backend mismatch")
         return {**result, "fallback_level": name, "unavailable_models": missing}
-    raise PredictionUnavailable(f"No P50 memory estimate (short duration does not establish zero memory): {missing}")
+    raise PredictionUnavailable(f"No P50 memory estimate: {missing}")
 
 
 def select_cold_start_p50(
     models: dict[str, Any], policy: list[dict[str, Any]],
     calibrations: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Apply the seed-declared Lattice-first memory fallback policy."""
+    """Apply ClawBox's Lattice-first memory selection to native seed predictions."""
     missing = {}
     for row in policy:
         if not isinstance(row, dict):
@@ -480,7 +480,7 @@ class RuntimePredictionProvider(P50PredictionProvider):
         query = ToolCallQuery(
             repo=self.repository, tool_name="exec", command=command,
             ts_start=query_ts,
-            memory_measurement="guest_memtotal_minus_memavailable",
+            memory_measurement=getattr(self, "memory_measurement", "guest_memtotal_minus_memavailable"),
         )
         result = predict_native_call_load_models(
             self.runtime, query, lattice=self.lattice,
@@ -492,7 +492,7 @@ class RuntimePredictionProvider(P50PredictionProvider):
         tool_class_query = ToolCallQuery(
             repo=self.repository, tool_name="exec", command=None,
             ts_start=query_ts,
-            memory_measurement="guest_memtotal_minus_memavailable",
+            memory_measurement=getattr(self, "memory_measurement", "guest_memtotal_minus_memavailable"),
         )
         models["tool_class"] = predict_native_call_load_models(
             self.runtime, tool_class_query, lattice=self.lattice,
@@ -542,22 +542,26 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
 
         path = path.resolve(strict=True)
         manifest = validate_seed(path)
-        provenance = manifest.get("provenance") or {}
-        if provenance.get("kind") != "clawbox-qualified-observation-import":
-            raise ValueError(
-                "cold-start prediction requires a ClawTune seed built from "
-                "validated ClawBox observations"
+        self.memory_measurement = "cgroup_v2_environment_union_v1"
+        # A general deployment prior needs no Cube-specific training identities.
+        # Use its P50 as the host-growth estimate; the existing reservation scale
+        # is the operator's adjustment. This is an estimate, not measured calibration.
+        calibrations = {"direct_estimate": {
+            "target": "host_cgroup_memory_current_increment",
+            "method": "identity_estimate", "sample_count": 0,
+            "scale": 1.0, "offset_bytes": 0,
+        }}
+        policy = [
+            {"model": model, "level": level, "target": target,
+             "measurement": self.memory_measurement, "semantics": "proxy",
+             "host_calibration": "direct_estimate"}
+            for model, level, target in (
+                ("lattice", "lattice_environment_extra", "memory_extra_peak_bytes"),
+                ("lattice", "lattice_rss_proxy", "sampled_peak_rss_bytes"),
+                ("tool", "tool_environment_extra", "memory_extra_peak_bytes"),
+                ("tool_class", "tool_class_environment_extra", "memory_extra_peak_bytes"),
             )
-        admission = provenance.get("admission") or {}
-        identities = admission.get("sandbox_identities")
-        calibrations = admission.get("host_calibrations")
-        policy = provenance.get("admission_prediction_policy")
-        if (not isinstance(identities, list) or not identities
-                or not isinstance(calibrations, dict) or not calibrations
-                or not isinstance(policy, list) or not policy):
-            raise ValueError("ClawTune seed lacks ClawBox admission provenance")
-        if sandbox_identity is not None and sandbox_identity not in identities:
-            raise ValueError("P50 training and evaluation Tool environments differ")
+        ]
 
         manifest_bytes = (path / "manifest.json").read_bytes()
         seed_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
@@ -567,10 +571,6 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
         self.sha256 = seed_sha256
         self.payload = {
             **manifest,
-            "sandbox_identities": identities,
-            "sandbox_identities_sha256": admission.get(
-                "sandbox_identities_sha256"
-            ),
             "kb_sha256": seed_sha256,
         }
         self._by_digest = {}
@@ -616,9 +616,8 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
             self.host_calibrations,
         )
         calibration = self.host_calibrations[selected["host_calibration_key"]]
-        if (calibration.get("target") != "host_cgroup_memory_current_increment"
-                or calibration.get("sample_count", 0) <= 0):
-            raise PredictionUnavailable("cold-start signal lacks measured host calibration")
+        if calibration.get("target") != "host_cgroup_memory_current_increment":
+            raise PredictionUnavailable("cold-start signal lacks host memory mapping")
         scale, offset = calibration.get("scale"), calibration.get("offset_bytes")
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
                or not math.isfinite(value) or value < 0 for value in (scale, offset)):

@@ -1,0 +1,192 @@
+--- a/hypervisor/vm-device/src/interrupt/mod.rs
++++ b/hypervisor/vm-device/src/interrupt/mod.rs
+@@ -141,6 +141,18 @@
+     #[allow(unused_variables)]
+     fn notifier(&self, index: InterruptIndex) -> Option<EventFd>;
+ 
++    /// Publish a group of routing updates. Kernel-backed groups can submit
++    /// one table instead of rebuilding it for each vector during restore.
++    fn update_batch(
++        &self,
++        updates: Vec<(InterruptIndex, InterruptSourceConfig, bool)>,
++    ) -> Result<()> {
++        for (index, config, masked) in updates {
++            self.update(index, config, masked)?;
++        }
++        Ok(())
++    }
++
+     /// Update the interrupt source group configuration.
+     ///
+     /// # Arguments
+--- a/hypervisor/vmm/src/interrupt.rs
++++ b/hypervisor/vmm/src/interrupt.rs
+@@ -131,10 +131,15 @@
+ 
+ impl InterruptSourceGroup for MsiInterruptGroup {
+     fn enable(&self) -> Result<()> {
+-        for (_, route) in self.irq_routes.iter() {
+-            route.enable(&self.vm)?;
+-        }
+-
++        // Match upstream's deferred IRQFD activation: only configured,
++        // unmasked vectors need a kernel consumer. Keep GSI allocation stable
++        // for existing Cube snapshots.
++        let routes = self.gsi_msi_routes.lock().unwrap();
++        for route in self.irq_routes.values() {
++            if routes.get(&route.gsi).map_or(false, |entry| !entry.masked) {
++                route.enable(&self.vm)?;
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -171,26 +176,47 @@
+         config: InterruptSourceConfig,
+         masked: bool,
+     ) -> Result<()> {
+-        if let Some(route) = self.irq_routes.get(&index) {
+-            let entry = RoutingEntry {
+-                route: self.vm.make_routing_entry(route.gsi, &config),
+-                masked,
+-            };
+-            if masked {
++        self.update_batch(vec![(index, config, masked)])
++    }
++
++    fn update_batch(
++        &self,
++        updates: Vec<(InterruptIndex, InterruptSourceConfig, bool)>,
++    ) -> Result<()> {
++        if updates.is_empty() {
++            return Ok(());
++        }
++        let mut entries = Vec::with_capacity(updates.len());
++        for (index, config, masked) in updates {
++            let route = self.irq_routes.get(&index).ok_or_else(|| {
++                io::Error::new(io::ErrorKind::Other,
++                    format!("update: Invalid interrupt index {}", index))
++            })?;
++            entries.push((route, RoutingEntry {
++                route: self.vm.make_routing_entry(route.gsi, &config), masked,
++            }));
++        }
++        // Preserve upstream ordering: deassign masked vectors before routing
++        // changes, then assign unmasked IRQFDs after publishing the table.
++        let mut routes = self.gsi_msi_routes.lock().unwrap();
++        for (route, entry) in &entries {
++            if entry.masked {
+                 route.disable(&self.vm)?;
+-            } else {
+-                route.enable(&self.vm)?;
+             }
+-            let mut routes = self.gsi_msi_routes.lock().unwrap();
++        }
++        let enabled: Vec<_> = entries.iter()
++            .filter_map(|(route, entry)| if entry.masked { None } else { Some(*route) })
++            .collect();
++        for (route, entry) in entries {
+             routes.insert(route.gsi, entry);
+-            return self.set_gsi_routes(&routes);
+-        }
+-
+-        Err(io::Error::new(
+-            io::ErrorKind::Other,
+-            format!("update: Invalid interrupt index {}", index),
+-        ))
+-    }
++        }
++        self.set_gsi_routes(&routes)?;
++        for route in enabled {
++            route.enable(&self.vm)?;
++        }
++        Ok(())
++    }
++
+ }
+ 
+ pub struct LegacyUserspaceInterruptGroup {
+--- a/hypervisor/devices/src/gic.rs
++++ b/hypervisor/devices/src/gic.rs
+@@ -89,27 +89,17 @@
+ 
+ impl InterruptController for Gic {
+     fn enable(&self) -> Result<()> {
+-        // Set irqfd for legacy interrupts
+-        self.interrupt_source_group
+-            .enable()
++        // Upstream Cloud Hypervisor batches GIC routing table publication.
++        // Preserve all legacy routes while avoiding 32 whole-table ioctls.
++        let updates = (IRQ_LEGACY_BASE..(IRQ_LEGACY_BASE + IRQ_LEGACY_COUNT))
++            .map(|i| (i as InterruptIndex,
++                InterruptSourceConfig::LegacyIrq(LegacyIrqSourceConfig {
++                    irqchip: 0, pin: (i - IRQ_LEGACY_BASE) as u32,
++                }), false))
++            .collect();
++        self.interrupt_source_group.update_batch(updates)
+             .map_err(Error::EnableInterrupt)?;
+ 
+-        // Set irq_routing for legacy interrupts.
+-        //   irqchip: Hardcode to 0 as we support only 1 GIC
+-        //   pin: Use irq number as pin
+-        for i in IRQ_LEGACY_BASE..(IRQ_LEGACY_BASE + IRQ_LEGACY_COUNT) {
+-            let config = LegacyIrqSourceConfig {
+-                irqchip: 0,
+-                pin: (i - IRQ_LEGACY_BASE) as u32,
+-            };
+-            self.interrupt_source_group
+-                .update(
+-                    i as InterruptIndex,
+-                    InterruptSourceConfig::LegacyIrq(config),
+-                    false,
+-                )
+-                .map_err(Error::EnableInterrupt)?;
+-        }
+         Ok(())
+     }
+ 
+--- a/hypervisor/pci/src/msix.rs
++++ b/hypervisor/pci/src/msix.rs
+@@ -116,30 +116,18 @@
+         self.enabled = state.enabled;
+ 
+         if self.enabled && !self.masked {
+-            for (idx, table_entry) in self.table_entries.iter().enumerate() {
+-                if table_entry.masked() {
+-                    continue;
+-                }
+-
+-                let config = MsiIrqSourceConfig {
+-                    high_addr: table_entry.msg_addr_hi,
+-                    low_addr: table_entry.msg_addr_lo,
+-                    data: table_entry.msg_data,
+-                    devid: self.devid,
+-                };
+-
+-                self.interrupt_source_group
+-                    .update(
+-                        idx as InterruptIndex,
+-                        InterruptSourceConfig::MsiIrq(config),
+-                        self.masked,
+-                    )
+-                    .map_err(Error::UpdateInterruptRoute)?;
+-
+-                self.interrupt_source_group
+-                    .enable()
+-                    .map_err(Error::EnableInterruptRoute)?;
+-            }
++            let updates = self.table_entries.iter().enumerate()
++                .filter(|(_, entry)| !entry.masked())
++                .map(|(idx, entry)| (idx as InterruptIndex,
++                    InterruptSourceConfig::MsiIrq(MsiIrqSourceConfig {
++                        high_addr: entry.msg_addr_hi,
++                        low_addr: entry.msg_addr_lo,
++                        data: entry.msg_data,
++                        devid: self.devid,
++                    }), false))
++                .collect();
++            self.interrupt_source_group.update_batch(updates)
++                .map_err(Error::UpdateInterruptRoute)?;
+         }
+ 
+         Ok(())

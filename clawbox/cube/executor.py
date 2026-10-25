@@ -56,6 +56,9 @@ class CubeCommandExecutor:
             duration_s=time.monotonic() - started,
         )
 
+    def file_nonempty(self, path: str, timeout_s: float) -> bool:
+        return self.client.file_nonempty(self._handle(), path, timeout_s=timeout_s)
+
     def execute_observed(self, command: str, timeout_s: float, *,
                          execution_id: str) -> ObservedCommand:
         """Execute through Tool VM instrumentation using the Cube command API."""

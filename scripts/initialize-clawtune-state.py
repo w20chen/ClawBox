@@ -9,7 +9,7 @@ from pathlib import Path
 
 def initialize(path: Path, owner: str, seed: Path | None = None) -> None:
     from clawtune_kb import StateStore, initialize_state
-    from clawtune_kb.contracts import data_root
+    from clawtune_kb import default_seed_directory
 
     if (path / "state.json").is_file():
         with StateStore(path):
@@ -20,8 +20,8 @@ def initialize(path: Path, owner: str, seed: Path | None = None) -> None:
     if path.exists():
         # Only remove an empty directory created by guest setup.
         path.rmdir()
-    selected_seed = seed or (Path(os.environ["CLAWTUNE_COLD_START_DIR"])
-                             if os.getenv("CLAWTUNE_COLD_START_DIR") else data_root() / "seeds/bootstrap-v1")
+    selected_seed = seed or (Path(os.environ["CLAWTUNE_KB_SEED"])
+                             if os.getenv("CLAWTUNE_KB_SEED") else default_seed_directory())
     initialize_state(path, selected_seed, owner=owner)
 
 

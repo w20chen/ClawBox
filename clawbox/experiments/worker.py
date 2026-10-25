@@ -43,7 +43,7 @@ from .memory import (
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
-from .numa_borrow import SandboxNumaBorrower
+from .numa_borrow import NumaBorrowUnavailable, SandboxNumaBorrower
 from .memory_actions import MemoryActionCostModel
 from .openclaw_driver import (
     NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
@@ -337,7 +337,9 @@ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
         durations.append(max(1.0, float(recorded) * time_scale))
     reference = statistics.median(durations)
     expected_window = (
-        reference * arm.execution.poisson_arrival_window_fraction
+        arm.execution.poisson_arrival_window_seconds
+        if arm.execution.poisson_arrival_window_seconds is not None
+        else reference * arm.execution.poisson_arrival_window_fraction
     )
     if count == 1:
         return (0.0,)
@@ -548,6 +550,16 @@ class WatermarkController:
             except WarmCapacityError:
                 self._last_borrow_rejection = 'shared_capacity_unavailable'
                 return False
+            except NumaBorrowUnavailable as exc:
+                self._last_borrow_rejection = 'borrow_rebind_unavailable'
+                self.events.write({
+                    'event': 'shared_memory_borrow_rejected',
+                    'role': lifecycle.role,
+                    'reason': self._last_borrow_rejection,
+                    'sandbox_id': lifecycle.sandbox_id,
+                    'error': str(exc),
+                })
+                return False
             self.borrow_count += 1
             self._last_borrow = time.monotonic()
             self.borrow_service_seconds += record.service_seconds
@@ -580,6 +592,14 @@ class WatermarkController:
     def _next_borrow_candidate(self) -> CubeSandboxLifecycle | None:
         if self.borrower is None:
             return None
+        # Ranking reads every candidate's NUMA cgroup. Under pressure this can
+        # consume seconds only to choose a VM that reserve_borrow must reject.
+        # Filter by the same configured-footprint budget before those reads;
+        # the eventual reservation rechecks capacity under the pool lock.
+        headroom = self.shared_pool.borrow_headroom_bytes
+        if headroom == 0:
+            self._last_borrow_rejection = 'shared_capacity_unavailable'
+            return None
         borrowed = {sandbox_id for sandbox_id in self.borrower.borrowed()
                     if self.borrower.allocates_shared(sandbox_id)}
         with self._lock:
@@ -588,7 +608,10 @@ class WatermarkController:
                 for session in self._lifecycles.values()
                 for lifecycle in session
                 if lifecycle.resident and lifecycle.sandbox_id not in borrowed
+                and 0 < (lifecycle.configured_memory_bytes or 0) <= headroom
             ]
+        if not candidates:
+            self._last_borrow_rejection = 'no_capacity_eligible_borrow_candidate'
         ranked = []
         for candidate in candidates:
             observation = candidate.observe_borrow_candidate()
@@ -814,7 +837,10 @@ class WatermarkController:
         local, shared, combined = self.sampler.tier_usage()
         pool = self.shared_pool.snapshot()
         snapshot_claim = int(pool["reserved_bytes"]) + int(pool["committed_bytes"])
-        shared_total = shared + snapshot_claim
+        # Current shared residency already includes its pre-run cache. Only
+        # pre-existing WARM files lie outside this sample and the run ledger.
+        external_warm = int(pool["external_warm_bytes"])
+        shared_total = shared + snapshot_claim + external_warm
         self.peak_local_bytes = max(self.peak_local_bytes, local)
         self.peak_shared_live_bytes = max(self.peak_shared_live_bytes, shared)
         self.peak_combined_live_bytes = max(self.peak_combined_live_bytes, combined)
@@ -823,6 +849,7 @@ class WatermarkController:
             raise RuntimeError(
                 "shared NUMA physical capacity exceeded: "
                 f"live={shared} snapshot_claim={snapshot_claim} "
+                f"external_warm={external_warm} "
                 f"capacity={pool['capacity_bytes']}"
             )
         self.high_overshoot_byte_seconds += max(0, local - self.high) * elapsed
@@ -923,6 +950,15 @@ class RuntimeStatusPoller:
                 return None
             return _execute_idempotent(self.executor, command, timeout)
 
+    def file_nonempty(self, path: str, timeout: float) -> bool | None:
+        # A bounded native stat avoids spawning a guest process and command
+        # stream every second. Serialize it with pause/restore so it never
+        # holds this lock while waiting for a paused guest to become resident.
+        with self.lifecycle_lock:
+            if not self.lifecycle.resident:
+                return None
+            return self.executor.file_nonempty(path, timeout)
+
     def wait_for_file(self, path: str, timeout: float) -> CommandResult | None:
         """Wait inside a resident Runtime instead of issuing 5 polls/second."""
         if self.snapshot_enabled:
@@ -938,6 +974,29 @@ class RuntimeStatusPoller:
         # Agent exits.  Do not retry it: a deadline is the Agent deadline, not
         # a transient read-only probe failure.
         return self.executor.execute(command, timeout)
+
+    def watch_file_nonempty(self, path: str, timeout: float) -> bool | None:
+        # Capture a resident generation, then release the lifecycle lock for
+        # the whole watch. Holding it would prevent LLM delivery/checkpoint.
+        with self.lifecycle_lock:
+            if not self.lifecycle.resident:
+                return None
+            sandbox = self.lifecycle.sandbox
+        try:
+            ready = self.executor.client.wait_file_nonempty(
+                sandbox, path, timeout_s=timeout,
+            )
+        except Exception:
+            with self.lifecycle_lock:
+                if (not self.lifecycle.resident
+                        or self.lifecycle.sandbox is not sandbox):
+                    return None
+            raise
+        with self.lifecycle_lock:
+            if (not self.lifecycle.resident
+                    or self.lifecycle.sandbox is not sandbox):
+                return None
+        return ready
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -1110,8 +1169,8 @@ def build_time_spans(timeline: dict[str, Any]) -> list[dict[str, Any]]:
         ("sandbox.tool.create", "tool_create_start", "tool_ready"),
         ("sandbox.runtime.create", "runtime_create_start", "runtime_ready"),
         ("agent", "agent_execution_start", "final_agent_completion"),
+        ("agent.to_final_response", "agent_execution_start", "final_response_observed"),
         ("validation", "validation_start", "validation_end"),
-        ("output_hash", "output_hash_start", "output_hash_end"),
         ("sandbox.cleanup", "sandbox_cleanup_start", "sandbox_cleanup_end"),
     )
     spans: list[dict[str, float | str]] = []
@@ -1170,18 +1229,17 @@ def enrich_tool_execution_observations(
     for item in records:
         execution_id = str(item["execution_id"])
         cgroup = cgroup_artifacts[execution_id]
-        actual_mib = float(cgroup["memory_rss_peak_bytes"]) / (1024.0 * 1024.0)
+        actual_mib = (float(cgroup["memory_rss_peak_bytes"]) / (1024.0 * 1024.0)
+                      if cgroup.get("memory_rss_peak_bytes") is not None else None)
         duration = max(0.0, float(cgroup["ts_end"]) - float(cgroup["ts_start"]))
         row = dict(item)
         row.update({
             "actual_measured_memory_mib": actual_mib,
             "actual_memory_metric": "tool_guest_cgroup_v2_memory_rss_peak_bytes",
             "actual_execution_duration_seconds": duration,
-            "actual_cpu_utilization_avg_cores": float(
-                cgroup["cpu_utilization_avg_cores"]
-            ),
-            "telemetry_validity": "valid",
-            "telemetry_eligible_for_kb": True,
+            "actual_cpu_utilization_avg_cores": cgroup.get("cpu_utilization_avg_cores"),
+            "telemetry_validity": cgroup.get("sampling_quality", "unknown"),
+            "telemetry_eligible_for_kb": cgroup.get("eligible_for_kb"),
         })
         if cgroup.get("memory_eligible") is True and cgroup.get("memory_measurement") == "guest_memtotal_minus_memavailable":
             extra = cgroup.get("memory_extra_peak_bytes")
@@ -1193,7 +1251,7 @@ def enrich_tool_execution_observations(
                         row["p50_extra_memory_error_mib"] = float(value) - extra / 1024**2
         row["memory_unavailable_reason"] = cgroup.get("memory_unavailable_reason")
         predicted_guest = row.get("predicted_guest_memory_p90_mib")
-        if predicted_guest is not None:
+        if predicted_guest is not None and actual_mib is not None:
             predicted_mib = float(predicted_guest)
             signed_error = predicted_mib - actual_mib
             row.update({
@@ -1505,6 +1563,7 @@ class ArmActivityTracker:
         self.offered: set[str] = set()
         self.vm_create_waiting: dict[str, float] = {}
         self.vm_creating: dict[str, float] = {}
+        self.agent_starting: dict[str, float] = {}
         self.activated: set[str] = set()
         self.ever_activated: set[str] = set()
         self.llm_waiting: dict[str, float] = {}
@@ -1551,8 +1610,12 @@ class ArmActivityTracker:
             elif name == "sandbox_create_gate_acquired":
                 self.vm_create_waiting.pop(session_id, None)
                 self.vm_creating[session_id] = now
-            elif name == "sandbox_created" and event.get("role") == "runtime":
+            elif name == "pair_ready":
                 self.vm_creating.pop(session_id, None)
+                self.agent_starting[session_id] = now
+            elif name == "agent_runnable":
+                self.vm_creating.pop(session_id, None)
+                self.agent_starting.pop(session_id, None)
                 self.activated.add(session_id)
                 self.ever_activated.add(session_id)
             elif name == "model_wait_started":
@@ -1591,6 +1654,7 @@ class ArmActivityTracker:
             elif name in {"session_complete", "session_failed"}:
                 self.vm_create_waiting.pop(session_id, None)
                 self.vm_creating.pop(session_id, None)
+                self.agent_starting.pop(session_id, None)
                 self.llm_waiting.pop(session_id, None)
                 self.activated.discard(session_id)
                 self._drop_session_operations(session_id)
@@ -1621,6 +1685,10 @@ class ArmActivityTracker:
                     self.vm_create_waiting.values(), now
                 ),
                 "vm_creating_sessions": len(self.vm_creating),
+                "pair_ready_agent_starting_sessions": len(self.agent_starting),
+                "agent_starting_oldest_seconds": self._oldest(
+                    self.agent_starting.values(), now
+                ),
                 "activated_running_sessions": len(active),
                 "idle_at_llm_sessions": len(set(self.llm_waiting) & active),
                 "agent_active_sessions": len(active - set(self.llm_waiting)),
@@ -1699,26 +1767,42 @@ def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, An
 
 class EventWriter:
     def __init__(self, path: Path, *,
-                 activity_tracker: ArmActivityTracker | None = None) -> None:
+                 activity_tracker: ArmActivityTracker | None = None,
+                 context: dict[str, Any] | None = None,
+                 session_case_ids: dict[str, str] | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.lock = Lock()
         self.sequence = 0
         self.activity_tracker = activity_tracker
+        self.context = dict(context or {})
+        self.session_case_ids = dict(session_case_ids or {})
 
     def write(self, event: dict[str, Any]) -> None:
+        # Occurrence timestamps are producer-side, before any writer-lock wait.
+        monotonic_ns = time.monotonic_ns()
+        wall_time = utcnow().isoformat()
+        wall_time_ns = str(time.time_ns())
+        lock_started_ns = time.perf_counter_ns()
         with self.lock, self.path.open("a", encoding="utf-8") as stream:
-            monotonic_ns = time.monotonic_ns()
+            lock_wait_ns = time.perf_counter_ns() - lock_started_ns
             if self.activity_tracker is not None:
                 self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
             row = {
                 "schema_version": 1,
                 "sequence_no": self.sequence,
-                "wall_time": utcnow().isoformat(),
-                "wall_time_ns": str(time.time_ns()),
+                "wall_time": wall_time,
+                "wall_time_ns": wall_time_ns,
                 "monotonic_time_ns": str(monotonic_ns),
+                "event_writer_lock_wait_ns": lock_wait_ns,
+                **self.context,
                 **event,
             }
+            session_id = str(row.get("session_id") or "")
+            if session_id and "case_id" not in row:
+                case_id = self.session_case_ids.get(session_id)
+                if case_id is not None:
+                    row["case_id"] = case_id
             self.sequence += 1
             stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             stream.flush()
@@ -1848,6 +1932,15 @@ class ExperimentWorker:
         events = EventWriter(
             self.output_root / "events" / f"{arm.arm_id}.jsonl",
             activity_tracker=activity_tracker,
+            context={
+                "run_id": self.run_id,
+                "attempt_id": self.attempt_id,
+                "arm_id": arm.arm_id,
+            },
+            session_case_ids={
+                f"{arm.arm_id}-{index:04d}": session_case_for(arm, index).case_id
+                for index in range(arm.concurrency)
+            },
         )
         shared_borrow_mib = arm.resources.shared_memory_borrow_limit_mib
         sampler = (
@@ -1938,13 +2031,24 @@ class ExperimentWorker:
                                     free_floor=arm.resources.emergency_free_memory_mib*1024**2,
                                     margin=arm.resources.admission_margin_mib*1024**2,
                                     cgroup=Path(arm.resources.local_memory_cgroup))
+        initial_shared_live = 0
+        initial_warm_files = 0
+        if arm.resources.warm_memory_capacity_mib:
+            if isinstance(sampler, NumaCgroupMemorySampler):
+                initial_shared_live = sampler.tier_usage()[1]
+            if arm.resources.warm_snapshot_root:
+                stat = os.statvfs(arm.resources.warm_snapshot_root)
+                initial_warm_files = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
         snapshot_pool = WarmSnapshotPool(
             arm.resources.warm_memory_capacity_mib * 1024 * 1024,
             borrow_capacity_bytes=(shared_borrow_mib or 0) * 1024 * 1024,
+            external_shared_live_bytes=initial_shared_live,
+            external_warm_bytes=initial_warm_files,
             transfer_concurrency=arm.resources.pool_transfer_concurrency,
             transfer_timeout_seconds=arm.resources.pool_transfer_timeout_seconds,
             snapshot_aware=arm.policy.snapshot_aware_residency,
         )
+        events.write({"event": "shared_memory_pool_initialized", **snapshot_pool.snapshot()})
         domains = {}
         os_default = arm.execution.placement_policy == 'os_default'
         for node in (() if os_default else arm.resources.compute_nodes) or (None,):
@@ -2059,6 +2163,9 @@ class ExperimentWorker:
                     "warm_allocated_bytes": warm_physical,
                     "warm_reserved_bytes": pool["reserved_bytes"],
                     "warm_committed_bytes": pool["committed_bytes"],
+                    "warm_external_allocated_bytes": pool["external_warm_bytes"],
+                    "shared_external_initial_live_bytes": pool["external_shared_live_bytes"],
+                    "shared_pool_external_occupied_bytes": pool["external_occupied_bytes"],
                     "shared_borrow_reserved_bytes": pool["borrowed_bytes"],
                     "compute_pressure": placement.sample() if placement is not None else None,
                     "tool_call_cpu_placement_changes": topology_changes,
@@ -2136,6 +2243,7 @@ class ExperimentWorker:
         pool = ThreadPoolExecutor(
             max_workers=session_worker_count(arm), thread_name_prefix="agent"
         )
+        arm_cancel = Event()
         offer_offsets = session_offer_offsets(arm)
         futures: dict[Any, int] = {}
         def check_shared_health():
@@ -2153,7 +2261,16 @@ class ExperimentWorker:
         def run_placed_session(index):
             offset = offer_offsets[index]
             time.sleep(max(0., arm_started_monotonic+offset-time.monotonic()))
-            with creation_slot(sandbox_create_gate, events, f'{arm.arm_id}-{index:04d}') as slot:
+            session_id = f'{arm.arm_id}-{index:04d}'
+            dispatched = time.monotonic()
+            events.write({
+                "event": "session_dispatched", "session_id": session_id,
+                "scheduled_offset_seconds": offset,
+                "dispatch_lateness_seconds": max(
+                    0.0, dispatched - (arm_started_monotonic + offset)
+                ),
+            })
+            with creation_slot(sandbox_create_gate, events, session_id) as slot:
                 return run_placed_session_impl(index, slot)
 
         def run_placed_session_impl(index, slot):
@@ -2198,11 +2315,15 @@ class ExperimentWorker:
                     creation_reserved=placement is not None, creation_gate_info=slot,
                     offered_offset_seconds=offer_offsets[index],
                     telemetry_warmup_pool=telemetry_warmup_pool,
-                    dependency_install_gate=dependency_install_gate)
+                    dependency_install_gate=dependency_install_gate,
+                    arm_cancel=arm_cancel)
                 result['placement_wait_seconds'] = waited if placement is not None else 0.
                 offered = arm_started_wall + offer_offsets[index]
                 result['offered_to_completion_seconds'] = max(0.,
                     result['timeline']['final_agent_completion']-offered)
+                if 'final_response_observed' in result['timeline']:
+                    result['offered_to_final_response_seconds'] = max(0.,
+                        result['timeline']['final_response_observed']-offered)
                 result['compute_node'] = (None if os_default else
                     key if placement is not None else result.get('compute_node'))
                 return result
@@ -2239,6 +2360,7 @@ class ExperimentWorker:
             # strand the CLI behind blocked VM calls and prevent lab cleanup.
             # Destroy this run's VMs first so those calls unblock, and cancel
             # sessions that have not started.
+            arm_cancel.set()
             for future in futures:
                 future.cancel()
             pool.shutdown(wait=False, cancel_futures=True)
@@ -2254,6 +2376,7 @@ class ExperimentWorker:
             interrupted = True
             if isinstance(exc, ArmInfrastructureError):
                 infrastructure_error = exc
+            arm_cancel.set()
             for future in futures:
                 future.cancel()
             pool.shutdown(wait=False, cancel_futures=True)
@@ -2463,13 +2586,19 @@ class ExperimentWorker:
                 "failure": None if failure is None else str(failure),
                 "infrastructure_failure": str(infrastructure_error) if infrastructure_error else None,
                 "experiment_cgroup_oom_kill_events": domain_oom_kills,
-                "session_output_hashes": [item.get("output_hash") for item in sessions],
             },
             performance={
+                "offered_to_final_response_endpoint": "completed_agent_stdout_received_by_host; includes completion polling and transport; excludes artifact collection, validation and cleanup",
+                **{f"offered_to_final_response_p{int(q*100)}_seconds": percentile(
+                    [s['offered_to_final_response_seconds'] for s in sessions
+                     if 'offered_to_final_response_seconds' in s], q)
+                   for q in (.5, .9, .95, .99)},
                 "observed_tool_concurrency": observed_tool_concurrency(sessions),
                 "observed_agent_tool_concurrency": observed_tool_concurrency(sessions, execution_scope='agent-tool'),
                 "offered_to_completion_p50_seconds": percentile(
                     [s['offered_to_completion_seconds'] for s in sessions if 'offered_to_completion_seconds' in s], .5),
+                "offered_to_completion_p90_seconds": percentile(
+                    [s['offered_to_completion_seconds'] for s in sessions if 'offered_to_completion_seconds' in s], .9),
                 "offered_to_completion_p95_seconds": percentile(
                     [s['offered_to_completion_seconds'] for s in sessions if 'offered_to_completion_seconds' in s], .95),
                 "offered_to_completion_p99_seconds": percentile(
@@ -2683,6 +2812,7 @@ class ExperimentWorker:
                       offered_offset_seconds: float | None = None,
                       telemetry_warmup_pool: ThreadPoolExecutor | None = None,
                       dependency_install_gate: DependencyInstallGate | None = None,
+                      arm_cancel: Event | None = None,
                       ) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         tool_sandbox = session_case.sandbox or arm.sandbox
@@ -2698,10 +2828,6 @@ class ExperimentWorker:
         priority_domain = getattr(self, '_priority_domain', None)
         progress_control = (self._runtime_memory
                             if isinstance(self._runtime_memory, PressureControl) else None)
-        if progress_control and priority_domain:
-            for role in ('runtime', 'tool'):
-                progress_control.register(session_id, role, priority_domain.leaves[index, role],
-                                          arm.resources.local_numa_node, coordinator)
         def progress_event(kind, identifier):
             if progress_control:
                 progress_control.event(session_id, kind, identifier)
@@ -2711,11 +2837,15 @@ class ExperimentWorker:
             def verify(sandbox_id):
                 evidence = priority_domain.verify(index, role, sandbox_id)
                 if progress_control:
+                    progress_control.register(
+                        session_id, role, evidence['cgroup'],
+                        arm.resources.local_numa_node, coordinator,
+                    )
                     progress_control.generation(session_id, role, sandbox_id)
                 events.write({'event': 'runtime_memory_placement', 'session_id': session_id, **evidence})
                 return evidence
             def prepare():
-                if progress_control:
+                if progress_control and (session_id, role) in progress_control.vms:
                     progress_control.transition(session_id, role)
                 priority_domain.prepare(index, role)
             return {'cgroup_token': priority_domain.token(index, role), 'verify_cgroup': verify,
@@ -3000,6 +3130,9 @@ class ExperimentWorker:
                     "event": "model_wait_started",
                     "session_id": session_id,
                     "request_id": request_id,
+                    "request_started_at": event.get("request_started_at"),
+                    "oracle_model_wait_seconds": event.get("oracle_model_wait_seconds"),
+                    "oracle_model_wait_source": event.get("oracle_model_wait_source"),
                 })
                 if arm.policy.reclamation is not ReclamationPolicy.RESIDENT:
                     submit_policy_event(pause_for_model_wait, event)
@@ -3132,16 +3265,6 @@ class ExperimentWorker:
         # occupying policy state even though the main cleanup block was never
         # entered.
         coordinator.register(session_id, lifecycle)
-        if self._priority_domain is not None:
-            tool_leaf = self._priority_domain.leaves[index, 'tool']
-            coordinator.register_memory(session_id,
-                tool=lambda: read_priority_memory_charge(
-                    tool_leaf, arm.resources.local_numa_node),
-                lifecycle=lambda: tuple(sum(values) for values in zip(
-                    read_priority_memory_charge(tool_leaf, arm.resources.local_numa_node),
-                    read_priority_memory_charge(self._priority_domain.leaves[index, 'runtime'],
-                                                arm.resources.local_numa_node))))
-
         coordinator.register_runtime(
             session_id, runtime_lifecycle,
             before_pause=(
@@ -3185,6 +3308,26 @@ class ExperimentWorker:
                     (tool_create_s, timeline["tool_create_start"], timeline["tool_ready"]),
                     (runtime_create_s, timeline["runtime_create_start"], timeline["runtime_ready"]),
                 ) = start_sandbox_pair(lifecycle, runtime_lifecycle)
+                # Native Cube cgroup leaves do not exist until each sandbox is
+                # created and verified. Register physical-memory readers only
+                # after both leaves have been published; configured-capacity
+                # admission above does not need these measurements.
+                if self._priority_domain is not None:
+                    tool_leaf = self._priority_domain.leaves[index, 'tool']
+                    runtime_leaf = self._priority_domain.leaves[index, 'runtime']
+                    coordinator.register_memory(
+                        session_id,
+                        tool=lambda leaf=tool_leaf: read_priority_memory_charge(
+                            leaf, arm.resources.local_numa_node),
+                        lifecycle=lambda tool=tool_leaf, runtime=runtime_leaf: tuple(
+                            sum(values) for values in zip(
+                                read_priority_memory_charge(
+                                    tool, arm.resources.local_numa_node),
+                                read_priority_memory_charge(
+                                    runtime, arm.resources.local_numa_node),
+                            )
+                        ),
+                    )
                 tool_create_reservation_wait = 0.0 if lifetime else pair_wait
                 runtime_create_reservation_wait = 0.0
                 events.write({"event": "sandbox_created", "session_id": session_id,
@@ -3216,6 +3359,12 @@ class ExperimentWorker:
                               "materialization_reservation_wait_seconds": runtime_create_reservation_wait,
                               "lifecycle_timing": runtime_lifecycle.timings[-1],
                               "sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox)})
+                events.write({
+                    "event": "pair_ready", "session_id": session_id,
+                    "service_seconds": max(tool_create_s, runtime_create_s),
+                    "tool_sandbox_id": self.client.sandbox_id(lifecycle.sandbox),
+                    "runtime_sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox),
+                })
             finally:
                 if pair_reservation is not None:
                     # One create claim covers the pair. Its measured growth is
@@ -3557,7 +3706,10 @@ class ExperimentWorker:
                                 })
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
-                            current_sandbox_id = self.client.sandbox_id(lifecycle.sandbox)
+                            current_sandbox = lifecycle.sandbox
+                            if current_sandbox is None:
+                                raise LifecycleError("Tool VM closed during admission")
+                            current_sandbox_id = self.client.sandbox_id(current_sandbox)
                             if (admitted_route is None
                                     or admitted_route.sandbox_id != current_sandbox_id):
                                 admitted_route = resolve_native_ssh_route("admit")
@@ -4033,8 +4185,11 @@ class ExperimentWorker:
                         startup_begin=begin_tool_telemetry_warmup,
                         startup_wait=await_tool_telemetry_warmup,
                         startup_event=events.write,
+                        cancelled=(arm_cancel.is_set if arm_cancel is not None else None),
                         **({"resident_wait": poll_resident_runtime.wait_for_file}
-                           if not runtime_snapshot_enabled else {}),
+                           if not runtime_snapshot_enabled else {
+                               "resident_file_nonempty": poll_resident_runtime.watch_file_nonempty,
+                           }),
                     )
                 except BaseException:
                     # Do not destroy the Tool VM while its bounded background
@@ -4046,6 +4201,7 @@ class ExperimentWorker:
                     raise
                 if outcome.get("agent_pid_file") != agent_pid_file:
                     raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                timeline["final_response_observed"] = outcome["final_response_observed_unix_s"]
                 coordinator.set_tool_active(session_id, True)
                 finalization_active = True
                 # No Agent SSH process remains after run_openclaw returns.
@@ -4169,8 +4325,8 @@ class ExperimentWorker:
             timeline.setdefault("agent_execution_start", timeline.get("sandbox_ready", time.time()))
             # A delayed eager-pause callback from the final Tool completion
             # must not swap the Tool between collection and validation. Keep
-            # restore, validation, and hashing in the same lifecycle critical
-            # section; Agent commands have already terminated at this point.
+            # restore and validation in the same lifecycle critical section;
+            # Agent commands have already terminated at this point.
             with wait_lock:
                 if not lifecycle.resident:
                     self._restore_with_one_victim(
@@ -4191,20 +4347,6 @@ class ExperimentWorker:
                     })
                     valid = valid and validation_result.exit_code == 0
                 timeline["validation_end"] = time.time()
-                timeline["output_hash_start"] = time.time()
-                hash_result = _execute_idempotent(
-                    executor,
-                    "find . -type f -exec sha256sum {} \\; | LC_ALL=C sort | sha256sum",
-                    arm.execution.command_timeout_seconds,
-                )
-                timeline["output_hash_end"] = time.time()
-            timeline["output_hash_overhead_seconds"] = max(
-                0.0, timeline["output_hash_end"] - timeline["validation_end"]
-            )
-            output_hash = (hash_result.stdout.split()[0] if hash_result.exit_code == 0
-                           and hash_result.stdout.split() else hashlib.sha256(
-                               json.dumps({"valid": valid, "mismatches": exit_mismatches},
-                                          sort_keys=True).encode()).hexdigest())
             coordinator.set_tool_active(session_id, False)
             finalization_active = False
             events.write({"event": "session_complete", "session_id": session_id, "valid": valid})
@@ -4253,7 +4395,7 @@ class ExperimentWorker:
                         0.0, timeline["validation_end"] - timeline["final_agent_completion"]
                     ),
                     "tool_steps": len(tool_latencies), "model_steps": model_steps,
-                    "tool_latencies": tool_latencies, "output_hash": output_hash,
+                    "tool_latencies": tool_latencies,
                     "prediction_records": prediction_records,
                     "prediction_provenance": (
                         prediction_provider.provenance(prediction_records)
@@ -4474,6 +4616,12 @@ class ExperimentWorker:
                 total_mib=amount_mib,
             )
         )
+        # Failed-session cleanup can close the VM while this callback releases
+        # the lifecycle lock to wait. Do not return an admission for that VM,
+        # and release the newly acquired claim before propagating the failure.
+        if not lifecycle.resident:
+            coordinator.release(session_id, local_amount, total_mib=amount_mib)
+            raise LifecycleError("Tool VM became unavailable while waiting for admission")
         return local_amount, admission_memory_tier, admission_wait, restored_tool
 
     def _tool_reservation_mib(self, arm: ExperimentArm, *,
@@ -4492,7 +4640,7 @@ class ExperimentWorker:
         value = prediction.get('predicted_incremental_memory_mib')
         if isinstance(value, bool) or not isinstance(value, (int,float)) or not math.isfinite(value) or value < 0:
             raise PredictionUnavailable('invalid predicted host memory increment')
-        return max(1, math.ceil(value * arm.resources.prediction_reservation_scale))
+        return max(0, math.ceil(value * arm.resources.prediction_reservation_scale))
 
     def _provenance(self) -> dict[str, Any]:
         def command(*args: str) -> str:
@@ -4558,14 +4706,9 @@ class ExperimentWorker:
         configured_traces = []
         for case in cases:
             trace_reference = case.replay_trace_reference or case.source_reference
-            trace_path = Path(trace_reference)
             configured_traces.append({
                 "case_id": case.case_id,
                 "reference": trace_reference,
-                "sha256": (
-                    hashlib.sha256(trace_path.read_bytes()).hexdigest()
-                    if trace_path.is_file() else None
-                ),
             })
         configuration = arm.inference.configuration
         assigned_cases = [session_case_for(arm, index) for index in range(arm.concurrency)]
@@ -4582,9 +4725,6 @@ class ExperimentWorker:
             "configured_trace_reference": (
                 configured_traces[0]["reference"] if len(configured_traces) == 1 else None
             ),
-            "configured_trace_sha256": (
-                configured_traces[0]["sha256"] if len(configured_traces) == 1 else None
-            ),
             "session_assignment": arm.session_assignment.value,
             "random_seed": arm.execution.random_seed,
             "arrival_schedule": {
@@ -4592,6 +4732,9 @@ class ExperimentWorker:
                 "stagger_interval_seconds": arm.execution.stagger_interval_seconds,
                 "poisson_arrival_window_fraction": (
                     arm.execution.poisson_arrival_window_fraction
+                ),
+                "poisson_arrival_window_seconds": (
+                    arm.execution.poisson_arrival_window_seconds
                 ),
             },
             "resource_scope": {

@@ -395,7 +395,8 @@ class PolicyCoordinator:
     def _pressure_reasons(self, additional_bytes: int = 0, *,
                           capacity_claim: bool = False,
                           existing_progress: bool = False,
-                          total_bytes: int | None = None) -> tuple[str, ...]:
+                          total_bytes: int | None = None,
+                          first_budget_blocker_only: bool = False) -> tuple[str, ...]:
         if self.resident_capacity_accounting:
             # Static overcommit uses nominal charges for the entire VM lifetime.
             # RSS, pending physical growth, free-memory floors and congestion
@@ -416,6 +417,21 @@ class PolicyCoordinator:
         )
         global_used, global_available = self.demand.sample()
         global_additional = additional_bytes if total_bytes is None else total_bytes
+        if first_budget_blocker_only:
+            # Queue-head selection only needs to know whether creation fits.
+            # When resident usage alone rules it out, reading every existing
+            # claim cannot make it feasible: pending growth is nonnegative.
+            # Keep the full reason evaluation for actual admission decisions.
+            self.demand.check()
+            base_local = (max(used, capacity)
+                          + (0 if capacity_claim else additional_bytes)
+                          + self.operation_headroom_bytes)
+            if (base_local > effective_budget
+                    and not (existing_progress and additional_bytes == 0)):
+                return ('configured_memory_budget',)
+            if (global_used + self.demand.margin + global_additional
+                    + self.operation_headroom_bytes > self.demand.capacity):
+                return ('global_memory_budget',)
         local_upper = self.demand.pending_upper_bound(self.demand_scope)
         global_upper = self.demand.pending_upper_bound()
         local_charge_upper = (
@@ -513,6 +529,7 @@ class PolicyCoordinator:
                         creation_fits = not blocked and not self._pressure_reasons(
                             oldest.amount_bytes + extra,
                             capacity_claim=oldest.capacity_claim,
+                            first_budget_blocker_only=True,
                         )
                         if tuple(self._waiters) != snapshot:
                             retry = True
@@ -850,13 +867,19 @@ class PolicyCoordinator:
 
     def release(self, session_id: str, amount_mib: int, *, wait_class='tool_admission',
                 total_mib: int | None = None) -> None:
+        total = amount_mib if total_mib is None else total_mib
+        if wait_class == 'tool_admission' and amount_mib == 0 and total == 0:
+            # ``acquire`` deliberately bypasses both reservation ledgers for a
+            # zero-growth prediction.  Completion must mirror that fast path;
+            # there is no demand claim to release.
+            return
         with self._condition:
             self._release_from(self._reservations, session_id, amount_mib)
             key = (session_id, wait_class)
             if wait_class == 'tool_admission':
                 self.demand.release_amount(
                     key,
-                    amount=(amount_mib if total_mib is None else total_mib) * MIB,
+                    amount=total * MIB,
                     local_amount=amount_mib * MIB,
                 )
             else:

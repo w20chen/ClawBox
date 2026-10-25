@@ -7,7 +7,9 @@ import yaml
 
 from clawbox import cli
 from clawbox.experiments.configure import configure_experiment
-from clawbox.experiments.inputs import inspect_trace, validate_inputs
+from clawbox.experiments.inputs import (
+    inspect_trace, validate_inputs, validate_launch_inputs,
+)
 from clawbox.experiments.spec import load_experiment
 
 
@@ -125,6 +127,40 @@ def test_duplicate_action_ids_are_rejected(tmp_path):
     path.write_text(row + "\n" + row + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate"):
         inspect_trace(path)
+
+
+def test_launch_reuses_saved_trace_validation_while_explicit_audit_rehashes(
+    tmp_path, monkeypatch,
+):
+    import clawbox.experiments.inputs as inputs
+
+    trace = tmp_path / "ready.jsonl"
+    trace.write_bytes(Path("examples/traces/smoke.jsonl").read_bytes())
+    saved = inspect_trace(trace)
+    spec = load_experiment(EXAMPLE)
+    case = spec.workload.cases[0].model_copy(update={
+        "source_reference": str(trace),
+        "replay_trace_reference": str(trace),
+        "metadata": {"input_validation": saved},
+    })
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": (case,)}),
+    })
+    monkeypatch.setattr(
+        inputs, "inspect_trace",
+        lambda _path: pytest.fail("normal launch reparsed a prevalidated trace"),
+    )
+
+    fast = validate_launch_inputs(spec)["traces"][0]
+
+    assert fast["sha256"] == saved["sha256"]
+    assert fast["identity_source"] == "workload.metadata.input_validation"
+    assert fast["content_rehashed"] is False
+
+    monkeypatch.undo()
+    trace.write_text(trace.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    audited = validate_inputs(spec)["traces"][0]
+    assert audited["sha256"] != saved["sha256"]
 
 
 def test_report_uses_same_result_root(tmp_path, capsys):

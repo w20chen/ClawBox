@@ -5,7 +5,35 @@ import json
 import re
 from pathlib import Path
 
+from .model_gateway import DEFERRED_TOOL_TIMEOUT_PREFIX
 from .trace import load_trace
+
+
+_DEFERRED_TIMEOUT_COMMAND = re.compile(
+    rf"\A{re.escape(DEFERRED_TOOL_TIMEOUT_PREFIX)}\d+\n"
+)
+
+
+def _unwrap_deferred_timeout(command: object) -> tuple[object, int]:
+    """Return the trace command and lines added by the replay transport."""
+    if not isinstance(command, str):
+        return command, 0
+    match = _DEFERRED_TIMEOUT_COMMAND.match(command)
+    if match is None:
+        return command, 0
+    prefix = match.group(0)
+    return command[len(prefix):], prefix.count("\n")
+
+
+def _remove_wrapper_line_offset(text: str, lines: int) -> str:
+    """Undo shell line-number changes caused only by the timeout wrapper."""
+    if lines == 0:
+        return text
+
+    def shift(match: re.Match[str]) -> str:
+        return f"{match[1]}{max(1, int(match[2]) - lines)}{match[3]}"
+
+    return re.sub(r"(?m)^(\S*\bsh: )(\d+)(: )", shift, text)
 
 
 def _failure(text: str, code: int | None = None) -> tuple[int, str] | None:
@@ -16,7 +44,7 @@ def _failure(text: str, code: int | None = None) -> tuple[int, str] | None:
     )
     if directory:
         return 1, "missing-directory:" + directory[1]
-    exit_match = re.search(r"\n+(?:Exit code: (\d+)|\(Command exited with code (\d+)\))\s*$", text)
+    exit_match = re.search(r"(?:\A|\n+)(?:Exit code: (\d+)|\(Command exited with code (\d+)\))\s*$", text)
     if exit_match:
         recorded_code = int(exit_match[1] or exit_match[2])
         if code is not None and code != recorded_code:
@@ -87,6 +115,9 @@ def match_recorded_tool_failures(
             text = "\n".join(item.get("text", "") for item in result.get("content", []) if item.get("type") == "text")
         execution = span.get("execution") or {}
         command = execution.get("requested_command") or execution.get("payload_command")
+        command, wrapper_lines = _unwrap_deferred_timeout(command)
+        if wrapper_lines:
+            text = _remove_wrapper_line_offset(text, wrapper_lines)
         evidence = expected.get(identity)
         if (not evidence or not isinstance(code, int) or code == 0
                 or details.get("noOutputTimedOut") or details.get("exitSignal")
@@ -94,6 +125,10 @@ def match_recorded_tool_failures(
             raise ValueError(f"unexpected replay Tool failure: {identity}")
         matched.append({"call_id": identity, "exit_code": code,
                         "recorded_error": evidence[1][1]})
-    if len(matched) != reported_failures:
-        raise ValueError("Runtime Tool failure evidence does not match OpenClaw failure count")
+    # OpenClaw's ``toolSummary.failures`` is a final-answer warning-group
+    # signal, not a count of failed Tool spans. One warning can summarize a
+    # chain of failed commands. Every observed failed span is matched above;
+    # require evidence on both sides without equating their cardinalities.
+    if reported_failures < 1 or not matched:
+        raise ValueError("Runtime Tool failure evidence does not cover OpenClaw failure signal")
     return matched

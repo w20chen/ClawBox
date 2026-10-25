@@ -4,8 +4,11 @@ import pytest
 
 from clawbox.experiments.worker import WatermarkController, observed_tool_concurrency
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
+from clawbox.experiments.snapshot_pool import SnapshotKey
 from clawbox.experiments.memory_actions import MemoryActionCostModel
-from clawbox.experiments.numa_borrow import NumaBorrowRecord, NumaResidencyObservation
+from clawbox.experiments.numa_borrow import (
+    NumaBorrowRecord, NumaBorrowUnavailable, NumaResidencyObservation,
+)
 from clawbox.experiments.spec import (
     ExperimentSpec, MemoryActionCostSpec, ReclamationPolicy, SnapshotTier,
     expand_matrix,
@@ -41,6 +44,53 @@ def test_joint_reclaims_idle_before_considering_borrow():
     c._sample_once(.2, False)
     assert calls == ['reclaim']
     assert events[-1]['action'] == 'reclaim'
+
+
+def test_borrow_ranking_skips_unaffordable_vms_before_residency_reads():
+    c, _, _ = controller('joint')
+    c.shared_pool = WarmSnapshotPool(10, borrow_capacity_bytes=10)
+    c.shared_pool.reserve(SnapshotKey('warm', 'tool', 1), 8)
+    c.borrower.borrowed = lambda: ()
+    reads = []
+
+    def candidate(sandbox_id, configured, local):
+        def observe():
+            reads.append(sandbox_id)
+            return SimpleNamespace(local_bytes=local)
+        return SimpleNamespace(sandbox_id=sandbox_id, resident=True,
+                               configured_memory_bytes=configured,
+                               observe_borrow_candidate=observe)
+
+    large = candidate('large', 3, 100)
+    small = candidate('small', 1, 20)
+    other = candidate('other', 2, 10)
+    c.register('one', large, small)
+    c.register('two', other, SimpleNamespace(resident=False))
+    assert c._next_borrow_candidate() is small
+    assert reads == ['small', 'other']
+
+    # Once capacity is exhausted, even the eligible VM files are untouched.
+    c.shared_pool.reserve_borrow('new-borrow', 2)
+    reads.clear()
+    assert c._next_borrow_candidate() is None
+    assert reads == []
+
+
+def test_shared_guard_counts_current_cache_once_and_preexisting_warm_files():
+    c, _, _ = controller('joint', idle=True)
+    c.shared_pool = WarmSnapshotPool(
+        100, borrow_capacity_bytes=100,
+        external_shared_live_bytes=4, external_warm_bytes=2,
+    )
+    c.shared_pool.reserve_borrow('vm', 3)
+    c.shared_pool.reserve(SnapshotKey('session', 'tool', 1), 91)
+    c.sampler.tier_usage = lambda: (33*1024**2, 7, 33*1024**2+7)
+    c._sample_once(.2, False)
+    assert c.peak_shared_total_bytes == 100
+    # New physical growth remains a hard failure, not an accounting waiver.
+    c.sampler.tier_usage = lambda: (33*1024**2, 8, 33*1024**2+8)
+    with pytest.raises(RuntimeError, match='external_warm=2'):
+        c._sample_once(.2, True)
 
 
 def test_joint_checks_idle_reclaim_for_blocked_demand_below_high():
@@ -676,6 +726,42 @@ def test_transfer_timeout_and_failure_release_slot():
     with pool.transfer('spill'):
         assert sum(pool.snapshot()['active_transfers'].values()) == 1
     assert sum(pool.snapshot()['active_transfers'].values()) == 0
+
+
+def test_rebind_timeout_is_a_recoverable_borrow_rejection():
+    events = []
+    pool = WarmSnapshotPool(100, borrow_capacity_bytes=100)
+    borrower = SimpleNamespace(
+        node_id='node0', shared_pool=pool, borrowed=lambda: (),
+        allocates_shared=lambda _sandbox_id: False,
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=20,
+        local_memory_high_watermark_mib=32,
+        local_memory_capacity_mib=36,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, SimpleNamespace(), SimpleNamespace(), borrower,
+        SimpleNamespace(write=events.append),
+    )
+    lifecycle = SimpleNamespace(
+        sandbox_id='tool-1', role='tool',
+        borrow_shared=lambda: (_ for _ in ()).throw(
+            NumaBorrowUnavailable('timed out updating cpuset.mems')
+        ),
+    )
+
+    assert controller._record_borrow(lifecycle, reason='pressure') is False
+    assert controller._last_borrow_rejection == 'borrow_rebind_unavailable'
+    assert events == [{
+        'event': 'shared_memory_borrow_rejected',
+        'role': 'tool',
+        'reason': 'borrow_rebind_unavailable',
+        'sandbox_id': 'tool-1',
+        'error': 'timed out updating cpuset.mems',
+    }]
 
 
 def test_tool_concurrency_counts_overlapping_intervals_not_agents():

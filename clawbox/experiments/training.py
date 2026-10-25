@@ -42,8 +42,8 @@ COLLECTOR_SEMANTICS = {
     'required_pmu_events': [
         'cycles', 'instructions', 'llc_read_accesses', 'llc_read_misses',
     ],
-    'required_pmu_running_ratio': 1.0,
-    'required_telemetry_loss_total': 0,
+    'training_label_policy': 'clawtune_available_or_zero',
+    'quality_markers': 'retained as diagnostics; partial observations train',
 }
 
 
@@ -253,7 +253,7 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
                     if item.execution_id in seen:
                         continue
                     seen.add(item.execution_id)
-                    if item.cgroup is None or not item.command or not item.complete or item.exit_code != 0:
+                    if item.cgroup is None or not item.command:
                         continue
                     c = item.cgroup.model_dump(mode='json')
                     if c.get('memory_measurement') != 'guest_memtotal_minus_memavailable':
@@ -264,7 +264,12 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
                         continue
                     raw = json.loads(cgpath.read_text(encoding='utf-8'))
                     digest.update(cgpath.read_bytes())
-                    call = observation_to_completed_call(item, repository)
+                    native = json.loads(artpath.read_text(encoding='utf-8')) if artpath.is_file() else {}
+                    matched = [row for row in native.get('calls', [])
+                               if row.get('tool_call_id') == item.execution_id]
+                    if len(matched) != 1:
+                        raise ValueError(f'{artpath}: expected one qualified execution for {item.execution_id}')
+                    call = observation_to_completed_call(item, repository, telemetry=matched[0])
                     calls.append(call)
                     short[item.command].append(raw)
                     memory = memory_labels(raw)
@@ -279,7 +284,7 @@ def train_p50(runs: list[Path], trace: Path, repository: str, output: Path) -> d
                         validate_artifact(artpath, artifact, expected_repo=repository)
                         digest.update(artpath.read_bytes())
                         for native in artifact.get('calls', []):
-                            if native.get('tool_call_id') == item.execution_id and native.get('eligible_for_kb') is True:
+                            if native.get('tool_call_id') == item.execution_id:
                                 clauses.extend(native_clause_observations(repository, native, raw))
     if not calls:
         raise ValueError('No trusted completed Cube tool calls')

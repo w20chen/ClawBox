@@ -116,6 +116,9 @@ def join_trace_and_bridge(
         merged.complete = True
         if bridge.timed_out or bridge.cancelled:
             merged.status_code = "cancelled" if bridge.cancelled else "timeout"
+        merged.confirmed_timeout = merged.confirmed_timeout or bridge.timed_out
+        if bridge.timeout_duration_lower_bound_ms is not None:
+            merged.timeout_duration_lower_bound_ms = bridge.timeout_duration_lower_bound_ms
         if bridge.exit_code != 0 and merged.status_code == "ok":
             merged.status_code = "error"
         # Attach the independent cgroup v2/procfs resource artifact when the

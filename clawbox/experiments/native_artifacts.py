@@ -327,23 +327,15 @@ def _validate_cgroup(payload: dict[str, Any], execution_id: str) -> None:
         raise ValueError(f"{execution_id}: cgroup artifact identity mismatch")
     if payload.get("source") != "cgroup-v2":
         raise ValueError(f"{execution_id}: cgroup artifact is not cgroup-v2")
-    if payload.get("sampling_quality") != "valid":
-        raise ValueError(f"{execution_id}: cgroup sampling is not valid")
-    if payload.get("cgroup_setup_error") or payload.get("cgroup_read_error"):
-        raise ValueError(f"{execution_id}: cgroup artifact reports a read/setup error")
-    if payload.get("collector_errors"):
-        raise ValueError(f"{execution_id}: cgroup artifact reports collector errors")
     for key in ("ts_start", "ts_end", "cpu_utilization_avg_cores", "memory_rss_peak_bytes"):
         value = payload.get(key)
+        if value is None and key not in {"ts_start", "ts_end"}:
+            continue
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(float(value)) or value < 0):
             raise ValueError(f"{execution_id}: cgroup artifact has invalid {key}")
     if payload["ts_end"] < payload["ts_start"]:
         raise ValueError(f"{execution_id}: cgroup artifact end precedes start")
-    if payload["cpu_utilization_avg_cores"] <= 0:
-        raise ValueError(f"{execution_id}: cgroup CPU utilization is not positive")
-    if payload["memory_rss_peak_bytes"] <= 0:
-        raise ValueError(f"{execution_id}: cgroup peak RSS is not positive")
 
 
 def _validate_backend_maintenance_cgroup(
@@ -411,21 +403,14 @@ def _validate_clause(payload: dict[str, Any], execution_id: str) -> None:
         raise ValueError(f"{execution_id}: unsupported clause telemetry version")
     if (payload.get("provenance") or {}).get("collector") != "ebpf_ebpf":
         raise ValueError(f"{execution_id}: clause telemetry is not from eBPF")
-    if payload.get("collection_validity") != "valid":
-        raise ValueError(f"{execution_id}: clause collection is not valid")
     if payload.get("cleanup") != "ok":
         raise ValueError(f"{execution_id}: clause collector cleanup is not ok")
-    loss = payload.get("telemetry_loss_total")
-    if not isinstance(loss, dict) or loss.get("total") != 0:
-        raise ValueError(f"{execution_id}: clause telemetry reports event loss")
     calls = payload.get("calls")
     if not isinstance(calls, list) or len(calls) != 1:
         raise ValueError(f"{execution_id}: clause telemetry call count is not exactly one")
     call = calls[0]
     if not isinstance(call, dict) or call.get("tool_call_id") != execution_id:
         raise ValueError(f"{execution_id}: clause telemetry identity mismatch")
-    if call.get("eligible_for_kb") is not True:
-        raise ValueError(f"{execution_id}: clause telemetry is not eligible for KB")
     # A task cannot accumulate more CPU than all guest CPUs since boot.
     # This catches incompatible BCC kernel layouts that otherwise look like
     # healthy, loss-free collections while reading pointers as CPU counters.

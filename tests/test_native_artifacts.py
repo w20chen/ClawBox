@@ -281,19 +281,17 @@ def test_agent_tool_rejects_cgroup_process_tree_fallback():
             policy_records=_policy(execution_id, digest),
         )
 
-def test_shell_exec_still_rejects_non_kb_clause():
+def test_shell_exec_retains_partial_non_kb_clause():
     execution_id, digest = "exec-invalid", "b" * 64
     bridge, cgroup, clause = _artifacts(execution_id, digest)
     clause["collection_validity"] = "invalid"
     clause["calls"][0]["eligible_for_kb"] = False
-    with pytest.raises(ValueError, match="clause collection is not valid"):
-        validate_native_tool_join(
-            bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
-            clause_artifacts={execution_id: clause},
-            policy_records=_policy(execution_id, digest),
-            expected_session_id="session-a",
-        )
-
+    validate_native_tool_join(
+        bridge_records=bridge, cgroup_artifacts={execution_id: cgroup},
+        clause_artifacts={execution_id: clause},
+        policy_records=_policy(execution_id, digest),
+        expected_session_id="session-a",
+    )
 
 def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
     tmp_path: Path,
@@ -678,7 +676,7 @@ def test_native_measurements_enrich_admission_and_prediction_evidence() -> None:
     assert enriched[0]["actual_execution_duration_seconds"] == 1.5
     assert enriched[0]["prediction_error_mib"] == 1.0
     assert enriched[0]["prediction_underestimate_mib"] == 0.0
-    assert enriched[0]["telemetry_eligible_for_kb"] is True
+    assert enriched[0]["telemetry_eligible_for_kb"] is None
     enriched.append({
         **enriched[0], "execution_id": "maintenance-1",
         "execution_scope": "backend-maintenance",

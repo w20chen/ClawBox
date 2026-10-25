@@ -1,0 +1,29 @@
+diff --git a/sdk/python/cubesandbox/_filesystem.py b/sdk/python/cubesandbox/_filesystem.py
+--- a/sdk/python/cubesandbox/_filesystem.py
++++ b/sdk/python/cubesandbox/_filesystem.py
+@@ -175,7 +175,7 @@
+         result = self._filesystem_rpc("MakeDir", {"path": path})
+         return result.get("entry", {})
+ 
+-    def watch_dir(self, path: str) -> Watcher:
++    def watch_dir(self, path: str, *, timeout: float | None = None) -> Watcher:
+         """Watch a directory for filesystem changes.
+ 
+         Returns a Watcher that yields WatchEvent dicts. Use as a context
+@@ -199,6 +199,7 @@
+                 f"http://{self._sandbox.get_host(ENVD_PORT)}/filesystem.Filesystem/WatchDir",
+                 content=envelope,
+                 headers=headers,
++                **({"timeout": timeout} if timeout is not None else {}),
+             ),
+             stream=True,
+         )
+@@ -296,7 +297,7 @@
+             raise
+         except Exception:  # noqa: BLE001
+             logger.debug("unexpected error parsing watch frame", exc_info=True)
+-            return None
++            raise
+ 
+ 
+ _SKIP = object()

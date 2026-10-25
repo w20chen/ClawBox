@@ -54,7 +54,7 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
         RuntimePredictionProvider(path, repository='r')
 
 
-def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tmp_path):
+def test_cold_start_prediction_accepts_general_seed_and_new_environment(tmp_path):
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
     from clawtune_kb import FILES, create_seed
@@ -70,45 +70,31 @@ def test_cold_start_prediction_accepts_any_repo_but_requires_same_environment(tm
     create_seed(path, dict(zip(FILES, (
         ClauseResourceKB().to_json_obj(), RuntimeToolResourceKB().to_json_obj(),
         LatticeTimeKB().to_json_obj(),
-    ))), provenance={
-        'kind': 'clawbox-qualified-observation-import',
-        'admission': {
-            'sandbox_identities': [identity, second_identity],
-            'sandbox_identities_sha256': 'calibrated-environment-set',
-            'host_calibrations': {
-                'guest': {
-                    'target': 'host_cgroup_memory_current_increment',
-                    'sample_count': 3, 'scale': 2, 'offset_bytes': 0,
-                },
-            },
-        },
-        'admission_prediction_policy': [{
-            'model': 'lattice', 'level': 'lattice_guest_extra',
-            'target': 'memory_extra_peak_bytes',
-            'measurement': 'guest_memtotal_minus_memavailable',
-            'semantics': 'exact', 'host_calibration': 'guest',
-        }],
-    })
+    ))), provenance={'kind': 'repository-all-trace-v6'})
     resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
     provider = ColdStartPredictionProvider(path, repository='another/repo',
                                            sandbox_identity=identity)
     assert provider.repository == 'another/repo'
     assert provider.prediction_source == 'runtime_clawtune_cold_start_kb'
-    assert ColdStartPredictionProvider(
-        path, repository='third/repo', sandbox_identity=second_identity,
-    ).provenance()['calibration_sandbox_identity_count'] == 2
-    with pytest.raises(ValueError, match='environments differ'):
-        ColdStartPredictionProvider(path, repository='another/repo', sandbox_identity=resized)
-    with pytest.raises(ValueError, match='environments differ'):
-        ColdStartPredictionProvider(path, repository='another/repo',
-                                    sandbox_identity={**resized, 'image_digest': 'sha256:other'})
+    other = ColdStartPredictionProvider(path, repository='third/repo', sandbox_identity=resized)
+    assert other.memory_measurement == 'cgroup_v2_environment_union_v1'
+    assert other.provenance()['calibration_sandbox_identity_count'] == 0
+    estimate = model('lattice', 0)
+    estimate['memory_measurement'] = other.memory_measurement
+    result = other._metadata({'models': {'lattice': estimate}}, 'true',
+                             hashlib.sha256(b'true').hexdigest())
+    assert result['predicted_incremental_memory_mib'] == 0
+    assert result['predicted_guest_extra_memory_mib'] is None
+    assert result['host_calibration']['method'] == 'identity_estimate'
+    assert result['host_calibration']['sample_count'] == 0
     assert prediction_input_paths(path, 'cold-start') == [
         path / 'manifest.json',
         *(path / name for name in sorted(FILES)),
     ]
 
 
-def test_reservation_scale_does_not_change_model_prediction():
+@pytest.mark.parametrize('value,expected', [(0, 0), (.1, 1), (100.5, 51)])
+def test_reservation_scale_does_not_change_model_prediction(value, expected):
     from clawbox.experiments.spec import ExperimentSpec, expand_matrix
     from clawbox.experiments.worker import ExperimentWorker
     from test_experiments_v2 import raw_spec
@@ -118,9 +104,9 @@ def test_reservation_scale_does_not_change_model_prediction():
     raw['resources']['prediction_reservation_scale'] = .5
     arm = expand_matrix(ExperimentSpec.model_validate(raw))[0]
     prediction = {'admission_prediction_target': 'host_cgroup_memory_current_increment',
-                  'predicted_incremental_memory_mib': 100.5}
-    assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=prediction) == 51
-    assert prediction['predicted_incremental_memory_mib'] == 100.5
+                  'predicted_incremental_memory_mib': value}
+    assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=prediction) == expected
+    assert prediction['predicted_incremental_memory_mib'] == value
     for invalid in (0, -1, float('inf'), float('nan')):
         raw['resources']['prediction_reservation_scale'] = invalid
         with pytest.raises(ValueError):

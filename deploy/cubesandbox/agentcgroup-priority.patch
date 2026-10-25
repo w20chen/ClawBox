@@ -1,92 +1,159 @@
-diff --git a/Cubelet/plugins/cube/internals/cgroup/local.go b/Cubelet/plugins/cube/internals/cgroup/local.go
---- a/Cubelet/plugins/cube/internals/cgroup/local.go
-+++ b/Cubelet/plugins/cube/internals/cgroup/local.go
-@@ -347,16 +347,23 @@
- 	}
- 	l.vmSpecLock.RUnlock()
- 
--	fullCgID, err = l.pool.Get(ctx, opts.GetSandboxID(), usePoolV2, numa)
-+	cgroupPath, err := clawboxCgroup(realReq)
- 	if err != nil {
- 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "%s", err)
- 	}
--	cgroupPath := MakeCgroupPathByID(*fullCgID)
-+	cgIDStr := "clawbox:" + cgroupPath
-+	if cgroupPath == "" {
-+		fullCgID, err = l.pool.Get(ctx, opts.GetSandboxID(), usePoolV2, numa)
-+		if err != nil {
-+			return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "%s", err)
-+		}
-+		cgroupPath = MakeCgroupPathByID(*fullCgID)
-+		cgIDStr = strconv.Itoa(int(*fullCgID))
-+	}
- 	baseline, err := l.hostMetricsBaselineAtAssignment(ctx, cgroupPath)
- 	if err != nil {
- 		log.G(ctx).Warnf("capture host metrics baseline for cgroup assignment %s: %v", cgroupPath, err)
- 	}
--	cgIDStr := strconv.Itoa(int(*fullCgID))
- 	err = l.db.Set(bucket, opts.GetSandboxID(), []byte(cgIDStr))
- 	if err != nil {
- 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "failed save to db: %v", err)
-@@ -427,6 +434,11 @@
- 		return nil
- 	}
- 
-+	// Registered leaves belong to the experiment, not the reusable VM pool.
-+	// Retain them while paused so restore enters the identical priority domain.
-+	if strings.HasPrefix(string(cgIDStr), "clawbox:") {
-+		return l.db.Delete(bucket, opts.SandboxID)
-+	}
- 	fullcgID, err := strconv.Atoi(string(cgIDStr))
- 	if err != nil {
- 		return ret.Errorf(errorcode.ErrorCode_DestroyCgroupFailed, "invalid cgroup id %s", string(cgIDStr))
-diff --git a/Cubelet/services/cubebox/cube_container_create.go b/Cubelet/services/cubebox/cube_container_create.go
---- a/Cubelet/services/cubebox/cube_container_create.go
-+++ b/Cubelet/services/cubebox/cube_container_create.go
-@@ -170,10 +170,6 @@
- 			}
- 		}
- 	}
--	opts.CubeBoxCreated = true
--	if err := l.createContainers(ctx, opts); err != nil {
--		return err
--	}
- 	cgInfo, ok := opts.CgroupInfo.(*cgroupp.Info)
- 	if ok {
- 		if !config.GetCommon().DisableHostCgroup && !constants.GetDisableHostCgroup(ctx) {
-@@ -190,6 +186,11 @@
- 			log.G(ctx).Debugf("set cubebox cgroup %s limit: mem %s, cpu %s", cgInfo.CgroupID,
- 				cgInfo.ResourceQuantity.HostMemQ.String(), cgInfo.ResourceQuantity.HostCpuQ.String())
- 		}
-+	}
-+
-+	opts.CubeBoxCreated = true
-+	if err := l.createContainers(ctx, opts); err != nil {
-+		return err
- 	}
- 
- 	sandBox, err := l.cubeboxManger.Get(ctx, opts.GetSandboxID())
 diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
+index 4021983..e9796ed 100644
 --- a/CubeShim/shim/src/sandbox/sb.rs
 +++ b/CubeShim/shim/src/sandbox/sb.rs
-@@ -472,8 +472,7 @@
-     pub async fn create_sandbox(&mut self) -> CResult<()> {
+@@ -48,8 +48,79 @@ use crate::{debugf, errf, infof, warnf};
+ 
+ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
+ const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
++const ANNO_CLAWBOX_NUMA_NODE: &str = "clawbox.numa_node";
+ const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
+ 
++fn parse_cpu_list(raw: &str) -> CResult<Vec<usize>> {
++    let mut cpus = Vec::new();
++    for item in raw.trim().split(',').filter(|item| !item.is_empty()) {
++        let (first, last) = match item.split_once('-') {
++            Some((first, last)) => (
++                first
++                    .parse::<usize>()
++                    .map_err(|e| format!("invalid CPU list {raw}: {e}"))?,
++                last.parse::<usize>()
++                    .map_err(|e| format!("invalid CPU list {raw}: {e}"))?,
++            ),
++            None => {
++                let cpu = item
++                    .parse::<usize>()
++                    .map_err(|e| format!("invalid CPU list {raw}: {e}"))?;
++                (cpu, cpu)
++            }
++        };
++        if first > last || last >= libc::CPU_SETSIZE as usize {
++            return Err(format!("invalid CPU range in {raw}"));
++        }
++        cpus.extend(first..=last);
++    }
++    if cpus.is_empty() {
++        return Err("NUMA node has an empty CPU list".to_string());
++    }
++    Ok(cpus)
++}
++
++fn apply_clawbox_numa_policy(node: u32) -> CResult<()> {
++    let cpulist_path = format!("/sys/devices/system/node/node{node}/cpulist");
++    let cpulist =
++        stdfs::read_to_string(&cpulist_path).map_err(|e| format!("read {cpulist_path}: {e}"))?;
++    let cpus = parse_cpu_list(&cpulist)?;
++    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
++    unsafe {
++        libc::CPU_ZERO(&mut set);
++        for cpu in cpus {
++            libc::CPU_SET(cpu, &mut set);
++        }
++        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
++            return Err(format!(
++                "set NUMA-node CPU affinity: {}",
++                std::io::Error::last_os_error()
++            ));
++        }
++    }
++    let word_bits = usize::BITS as usize;
++    let mut mask = vec![0usize; node as usize / word_bits + 1];
++    mask[node as usize / word_bits] |= 1usize << (node as usize % word_bits);
++    let result = unsafe {
++        libc::syscall(
++            libc::SYS_set_mempolicy,
++            2 as libc::c_int, // MPOL_BIND, relative to the current cpuset.
++            mask.as_ptr(),
++            // Linux treats maxnode as an exclusive bit count after its
++            // historical internal decrement. node + 1 therefore becomes an
++            // empty mask for node 0; node + 2 includes the selected node.
++            node as libc::c_ulong + 2,
++        )
++    };
++    if result != 0 {
++        return Err(format!(
++            "bind VM allocation to NUMA node {node}: {}",
++            std::io::Error::last_os_error()
++        ));
++    }
++    Ok(())
++}
++
+ #[derive(PartialEq, Eq)]
+ enum SandBoxState {
+     Normal,
+@@ -473,15 +544,30 @@ impl SandBox {
          // Join LOCAL before restoring/allocating guest RAM. Moving the shim
          // only after Create completes leaves those pages charged to Cubelet.
--        if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1")
+         if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1")
 -            || std::env::var("CLAWBOX_KVM_DIRTY_TRACKING").as_deref() == Ok("1") {
+-            let group = self.spec.annotations().as_ref()
++            || std::env::var("CLAWBOX_KVM_DIRTY_TRACKING").as_deref() == Ok("1")
++            || self
++                .spec
++                .annotations()
++                .as_ref()
++                .and_then(|annotations| annotations.get(ANNO_CLAWBOX_NUMA_NODE))
++                .is_some()
 +        {
-             let group = self.spec.annotations().as_ref()
++            let group = self
++                .spec
++                .annotations()
++                .as_ref()
                  .and_then(|annotations| annotations.get("cube.sandbox_cgroup_path"))
                  .ok_or_else(|| "missing LOCAL cgroup annotation".to_string())?;
-diff --git a/Cubelet/plugins/cube/internals/cgroup/clawbox.go b/Cubelet/plugins/cube/internals/cgroup/clawbox.go
+             let path = PathBuf::from("/sys/fs/cgroup")
+-                .join(group.trim_start_matches('/')).join("cgroup.procs");
++                .join(group.trim_start_matches('/'))
++                .join("cgroup.procs");
+             stdfs::write(&path, self.pid.to_string())
+                 .map_err(|error| format!("enter LOCAL cgroup {}: {}", path.display(), error))?;
+-            infof!(self.log, "entered LOCAL cgroup {} before guest RAM allocation", group);
++            infof!(
++                self.log,
++                "entered LOCAL cgroup {} before guest RAM allocation",
++                group
++            );
+         }
+         let snapshot = self.start_vm().await?;
+ 
+@@ -878,8 +964,25 @@ impl SandBox {
+     }
+     async fn start_vm(&mut self) -> CResult<bool> {
+         infof!(self.log, "start vm start");
++        let clawbox_numa_node = self
++            .spec
++            .annotations()
++            .as_ref()
++            .and_then(|annotations| annotations.get(ANNO_CLAWBOX_NUMA_NODE))
++            .map(|value| {
++                value
++                    .parse::<u32>()
++                    .map_err(|e| format!("invalid ClawBox NUMA node {value}: {e}"))
++            })
++            .transpose()?;
+         {
+             let mut ch = self.ch.as_mut().unwrap().lock().await;
++            if let Some(node) = clawbox_numa_node {
++                // Apply immediately before VmmInstance creates its worker and
++                // vCPU threads. Linux threads inherit affinity and mempolicy.
++                apply_clawbox_numa_policy(node)?;
++                infof!(self.log, "bound VM allocation to NUMA node {}", node);
++            }
+             ch.launch_vmm().await?;
+         }
+         let mut snapshot = false;
+diff --git a/Cubelet/pkg/clawboxplacement/placement.go b/Cubelet/pkg/clawboxplacement/placement.go
 new file mode 100644
+index 0000000..81301f4
 --- /dev/null
-+++ b/Cubelet/plugins/cube/internals/cgroup/clawbox.go
-@@ -0,0 +1,104 @@
++++ b/Cubelet/pkg/clawboxplacement/placement.go
+@@ -0,0 +1,153 @@
 +// Copyright (c) 2026 ClawBox contributors.
 +// SPDX-License-Identifier: Apache-2.0
-+package cgroup
++// Package clawboxplacement carries only optimization intent into CubeSandbox.
++// CubeSandbox continues to allocate and own the sandbox cgroup.
++package clawboxplacement
 +
 +import (
 +	"encoding/json"
@@ -94,174 +161,322 @@ new file mode 100644
 +	"os"
 +	"path/filepath"
 +	"regexp"
-+	"strings"
 +	"syscall"
 +
 +	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 +	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 +)
 +
-+var clawboxTokenPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
++const registry = "/run/clawbox/cgroups"
 +
-+// A host administrator grants a precreated leaf through a root-only registry.
-+// Guest environment contains only an opaque token, never a host cgroup path.
-+func clawboxCgroup(req *cubebox.RunCubeSandboxRequest) (string, error) {
-+	token, err := clawboxToken(req)
-+	if err != nil || token == "" {
-+		return "", err
-+	}
-+	return readClawboxCgroup("/run/clawbox/cgroups", token)
++var (
++	tokenPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
++	groupPattern = regexp.MustCompile(`^/cube_sandbox/sandbox/[0-9]+$`)
++)
++
++type Placement struct {
++	Token    string  `json:"-"`
++	NumaNode int32   `json:"numa_node"`
++	Path     *string `json:"path,omitempty"`
 +}
 +
-+func clawboxToken(req *cubebox.RunCubeSandboxRequest) (string, error) {
++func requestToken(req *cubebox.RunCubeSandboxRequest) (string, error) {
 +	token := ""
-+	// CubeMaster keeps SDK envVars in this annotation for template restores.
-+	// Read it before VM allocation, not after envd applies guest variables.
 +	if raw := req.GetAnnotations()[constants.MasterAnnotationCreateTimeEnvVars]; raw != "" {
 +		var envs map[string]string
 +		if err := json.Unmarshal([]byte(raw), &envs); err != nil {
 +			return "", fmt.Errorf("invalid create-time environment: %w", err)
 +		}
 +		if value, exists := envs["CLAWBOX_CGROUP_TOKEN"]; exists {
-+			if !clawboxTokenPattern.MatchString(value) {
-+				return "", fmt.Errorf("invalid ClawBox cgroup capability")
++			if !tokenPattern.MatchString(value) {
++				return "", fmt.Errorf("invalid ClawBox placement capability")
 +			}
 +			token = value
 +		}
 +	}
 +	for _, container := range req.GetContainers() {
 +		for _, env := range container.GetEnvs() {
-+			if env.GetKey() == "CLAWBOX_CGROUP_TOKEN" {
-+				if !clawboxTokenPattern.MatchString(env.GetValue()) || (token != "" && token != env.GetValue()) {
-+					return "", fmt.Errorf("invalid or conflicting ClawBox cgroup capability")
-+				}
-+				token = env.GetValue()
++			if env.GetKey() != "CLAWBOX_CGROUP_TOKEN" {
++				continue
 +			}
++			value := env.GetValue()
++			if !tokenPattern.MatchString(value) || (token != "" && token != value) {
++				return "", fmt.Errorf("invalid or conflicting ClawBox placement capability")
++			}
++			token = value
 +		}
 +	}
 +	return token, nil
 +}
 +
-+func readClawboxCgroup(registry, token string) (string, error) {
-+	if !clawboxTokenPattern.MatchString(token) {
-+		return "", fmt.Errorf("invalid capability")
-+	}
-+	for _, name := range []string{filepath.Dir(registry), registry, filepath.Join(registry, token)} {
-+		info, err := os.Lstat(name)
-+		if err != nil {
-+			return "", err
-+		}
-+		stat, ok := info.Sys().(*syscall.Stat_t)
-+		if !ok || stat.Uid != 0 || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
-+			return "", fmt.Errorf("unsafe ClawBox registry: %s", name)
-+		}
-+	}
-+	data, err := os.ReadFile(filepath.Join(registry, token))
++func checkOwned(path string) error {
++	info, err := os.Lstat(path)
 +	if err != nil {
-+		return "", err
++		return err
 +	}
-+	var record struct {
-+		Path string `json:"path"`
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok || stat.Uid != 0 || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
++		return fmt.Errorf("unsafe ClawBox placement registry: %s", path)
 +	}
-+	if err := json.Unmarshal(data, &record); err != nil {
-+		return "", err
-+	}
-+	group := record.Path
-+	if group != filepath.Clean(group) || !strings.HasPrefix(group, "/cube_sandbox/sandbox/clawbox-") {
-+		return "", fmt.Errorf("ClawBox path outside the experiment subtree")
-+	}
-+	realPath, err := filepath.EvalSymlinks("/sys/fs/cgroup" + group)
-+	if err != nil {
-+		return "", err
-+	}
-+	if realPath != "/sys/fs/cgroup"+group {
-+		return "", fmt.Errorf("symlink cgroup")
-+	}
-+	// The registry cannot reuse a live VM leaf. Pause removes its processes;
-+	// the persisted token then permits resume into this exact empty leaf.
-+	procs, err := os.ReadFile(realPath + "/cgroup.procs")
-+	if err != nil {
-+		return "", err
-+	}
-+	if strings.TrimSpace(string(procs)) != "" {
-+		return "", fmt.Errorf("ClawBox leaf is populated")
-+	}
-+	return group, nil
++	return nil
 +}
-diff --git a/Cubelet/plugins/cube/internals/cgroup/clawbox_test.go b/Cubelet/plugins/cube/internals/cgroup/clawbox_test.go
++
++func read(token string) (*Placement, error) {
++	if !tokenPattern.MatchString(token) {
++		return nil, fmt.Errorf("invalid ClawBox placement capability")
++	}
++	file := filepath.Join(registry, token)
++	for _, path := range []string{filepath.Dir(registry), registry, file} {
++		if err := checkOwned(path); err != nil {
++			return nil, err
++		}
++	}
++	data, err := os.ReadFile(file)
++	if err != nil {
++		return nil, err
++	}
++	var placement struct {
++		NumaNode *int32  `json:"numa_node"`
++		Path     *string `json:"path,omitempty"`
++	}
++	if err := json.Unmarshal(data, &placement); err != nil {
++		return nil, err
++	}
++	if placement.NumaNode == nil || *placement.NumaNode < 0 {
++		return nil, fmt.Errorf("ClawBox placement requires a non-negative NUMA node")
++	}
++	if placement.Path != nil && *placement.Path != "" {
++		return nil, fmt.Errorf("ClawBox placement capability is already assigned")
++	}
++	return &Placement{Token: token, NumaNode: *placement.NumaNode}, nil
++}
++
++func FromRequest(req *cubebox.RunCubeSandboxRequest) (*Placement, error) {
++	token, err := requestToken(req)
++	if err != nil || token == "" {
++		return nil, err
++	}
++	return read(token)
++}
++
++func Publish(placement *Placement, group string) error {
++	if placement == nil {
++		return nil
++	}
++	if !groupPattern.MatchString(group) || group != filepath.Clean(group) {
++		return fmt.Errorf("CubeSandbox assigned an invalid cgroup path: %s", group)
++	}
++	current, err := read(placement.Token)
++	if err != nil {
++		return err
++	}
++	if current.NumaNode != placement.NumaNode {
++		return fmt.Errorf("ClawBox placement changed while assigning the sandbox")
++	}
++	current.Path = &group
++	tmp := filepath.Join(registry, "."+placement.Token+fmt.Sprintf(".%d", os.Getpid()))
++	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
++	if err != nil {
++		return err
++	}
++	remove := true
++	defer func() {
++		_ = file.Close()
++		if remove {
++			_ = os.Remove(tmp)
++		}
++	}()
++	encoder := json.NewEncoder(file)
++	if err := encoder.Encode(current); err != nil {
++		return err
++	}
++	if err := file.Sync(); err != nil {
++		return err
++	}
++	if err := file.Close(); err != nil {
++		return err
++	}
++	if err := os.Rename(tmp, filepath.Join(registry, placement.Token)); err != nil {
++		return err
++	}
++	remove = false
++	return nil
++}
+diff --git a/Cubelet/pkg/clawboxplacement/placement_test.go b/Cubelet/pkg/clawboxplacement/placement_test.go
 new file mode 100644
+index 0000000..e5d5ac2
 --- /dev/null
-+++ b/Cubelet/plugins/cube/internals/cgroup/clawbox_test.go
-@@ -0,0 +1,72 @@
-+package cgroup
++++ b/Cubelet/pkg/clawboxplacement/placement_test.go
+@@ -0,0 +1,32 @@
++package clawboxplacement
 +
 +import (
-+	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
-+	"os"
-+	"path/filepath"
 +	"strings"
 +	"testing"
++
++	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 +)
 +
-+func TestClawboxRejectsUnregisteredAndConflictingCapabilities(t *testing.T) {
-+	req := &cubebox.RunCubeSandboxRequest{}
-+	if path, err := clawboxCgroup(req); err != nil || path != "" {
-+		t.Fatal(path, err)
-+	}
-+	for _, tokens := range [][]string{{"../../escape"}, {""}, {strings.Repeat("a", 32), strings.Repeat("b", 32)}} {
-+		envs := []*cubebox.KeyValue{}
-+		for _, token := range tokens {
-+			envs = append(envs, &cubebox.KeyValue{Key: "CLAWBOX_CGROUP_TOKEN", Value: token})
-+		}
-+		req.Containers = []*cubebox.ContainerConfig{{Envs: envs}}
-+		if _, err := clawboxCgroup(req); err == nil {
-+			t.Fatal("accepted invalid capability", tokens)
-+		}
-+	}
-+}
-+
-+func TestClawboxRejectsUnsafeRegistryAndPaths(t *testing.T) {
-+	if os.Geteuid() != 0 {
-+		t.Skip("root-owned registry test")
-+	}
-+	registry := filepath.Join(t.TempDir(), "registry")
-+	if err := os.Mkdir(registry, 0700); err != nil {
-+		t.Fatal(err)
-+	}
++func TestRequestToken(t *testing.T) {
 +	token := strings.Repeat("a", 32)
-+	file := filepath.Join(registry, token)
-+	for _, path := range []string{"/system.slice", "/cube_sandbox/sandbox/clawbox-test/../escape"} {
-+		if err := os.WriteFile(file, []byte(`{"path":"`+path+`"}`), 0600); err != nil {
-+			t.Fatal(err)
-+		}
-+		if _, err := readClawboxCgroup(registry, token); err == nil {
-+			t.Fatal("accepted", path)
-+		}
++	req := &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{
++		constants.MasterAnnotationCreateTimeEnvVars: `{"CLAWBOX_CGROUP_TOKEN":"` + token + `"}`,
++	}}
++	if got, err := requestToken(req); err != nil || got != token {
++		t.Fatalf("got %q, %v", got, err)
 +	}
-+	if err := os.Chmod(file, 0666); err != nil {
-+		t.Fatal(err)
++	req.Containers = []*cubebox.ContainerConfig{{Envs: []*cubebox.KeyValue{
++		{Key: "CLAWBOX_CGROUP_TOKEN", Value: strings.Repeat("b", 32)},
++	}}}
++	if _, err := requestToken(req); err == nil {
++		t.Fatal("accepted conflicting capability")
 +	}
-+	if _, err := readClawboxCgroup(registry, token); err == nil {
-+		t.Fatal("accepted writable capability")
++	for _, raw := range []string{`{`, `[]`, `{"CLAWBOX_CGROUP_TOKEN":""}`, `{"CLAWBOX_CGROUP_TOKEN":"../../escape"}`} {
++		req.Containers = nil
++		req.Annotations[constants.MasterAnnotationCreateTimeEnvVars] = raw
++		if _, err := requestToken(req); err == nil {
++			t.Fatalf("accepted invalid create-time environment %q", raw)
++		}
 +	}
 +}
-+
-+func TestClawboxCreateTimeEnvironment(t *testing.T) {
-+    token := strings.Repeat("a", 32)
-+    req := &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{
-+        constants.MasterAnnotationCreateTimeEnvVars: `{"CLAWBOX_CGROUP_TOKEN":"` + token + `"}`,
-+    }}
-+    if got, err := clawboxToken(req); err != nil || got != token { t.Fatal(got, err) }
-+    req.Containers = []*cubebox.ContainerConfig{{Envs: []*cubebox.KeyValue{
-+        {Key: "CLAWBOX_CGROUP_TOKEN", Value: token},
-+    }}}
-+    if got, err := clawboxToken(req); err != nil || got != token { t.Fatal(got, err) }
-+    req.Containers[0].Envs[0].Value = strings.Repeat("b",32)
-+    if _, err := clawboxToken(req); err == nil { t.Fatal("accepted conflicting create-time token") }
-+    req.Containers = nil
-+    for _, raw := range []string{`{`, `[]`, `{"CLAWBOX_CGROUP_TOKEN":""}`, `{"CLAWBOX_CGROUP_TOKEN":"../../escape"}`} {
-+        req.Annotations[constants.MasterAnnotationCreateTimeEnvVars] = raw
-+        if _, err := clawboxToken(req); err == nil { t.Fatal("accepted invalid create-time env",raw) }
-+    }
-+}
+diff --git a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
+index d738eeb..126d458 100644
+--- a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
++++ b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
+@@ -335,6 +335,26 @@ func (h *handler) CleanForReuse(ctx context.Context, group string) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	// ClawBox may temporarily narrow a normal CubeSandbox leaf while a VM
++	// borrows shared NUMA memory. The native pool owns reuse, so return only its
++	// ordinary flat pool to inherited cpus/mems after all processes have left.
++	if h.baseGroup == handle.DefaultPathPoolV1 {
++		for _, name := range []string{"cpuset.cpus", "cpuset.mems"} {
++			file := path.Join(h.root, group, name)
++			value, readErr := os.ReadFile(file)
++			if readErr != nil {
++				if errors.Is(readErr, os.ErrNotExist) {
++					continue
++				}
++				return readErr
++			}
++			if strings.TrimSpace(string(value)) != "" {
++				if writeErr := os.WriteFile(file, []byte("\n"), 0644); writeErr != nil {
++					return fmt.Errorf("reset %s for cgroup reuse: %w", name, writeErr)
++				}
++			}
++		}
++	}
+ 	return nil
+ }
+ 
+diff --git a/Cubelet/plugins/cube/internals/cgroup/local.go b/Cubelet/plugins/cube/internals/cgroup/local.go
+index 8b35058..64872c6 100644
+--- a/Cubelet/plugins/cube/internals/cgroup/local.go
++++ b/Cubelet/plugins/cube/internals/cgroup/local.go
+@@ -27,6 +27,7 @@ import (
+ 
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/multimetadb/v1"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/clawboxplacement"
+ 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+@@ -319,6 +320,10 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
+ 	var fullCgID *uint32
+ 	usePoolV2 := false
+ 	numa := opts.GetNumaNode()
++	placement, err := clawboxplacement.FromRequest(realReq)
++	if err != nil {
++		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "%s", err)
++	}
+ 
+ 	defer func() {
+ 		if err != nil && fullCgID != nil {
+@@ -361,6 +366,10 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
+ 	if err != nil {
+ 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "failed save to db: %v", err)
+ 	}
++	if err = clawboxplacement.Publish(placement, cgroupPath); err != nil {
++		_ = l.db.Delete(bucket, opts.GetSandboxID())
++		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "publish assigned cgroup: %v", err)
++	}
+ 
+ 	opts.CgroupInfo = &Info{
+ 		CgroupID:                               cgroupPath,
+@@ -369,6 +378,8 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
+ 		UsePoolV2:                              usePoolV2,
+ 		HostMetricsBaseline:                    baseline,
+ 		HostMetricsBaselineMissingAtAssignment: baseline == nil,
++		ClawboxPlacement:                       placement != nil,
++		ClawboxNumaNode:                        numa,
+ 	}
+ 
+ 	return nil
+@@ -556,4 +567,6 @@ type Info struct {
+ 	UsePoolV2                              bool
+ 	HostMetricsBaseline                    *cubeboxstore.HostMetricsBaseline
+ 	HostMetricsBaselineMissingAtAssignment bool
++	ClawboxPlacement                       bool
++	ClawboxNumaNode                        int32
+ }
+diff --git a/Cubelet/services/cubebox/annotation.go b/Cubelet/services/cubebox/annotation.go
+index e866144..419a961 100644
+--- a/Cubelet/services/cubebox/annotation.go
++++ b/Cubelet/services/cubebox/annotation.go
+@@ -8,6 +8,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"net"
++	"strconv"
+ 	"strings"
+ 
+ 	"github.com/containerd/containerd/v2/core/containers"
+@@ -211,11 +212,14 @@ func (l *local) genCgroupAnnotationOpt(ctx context.Context, c *cubebox.Container
+ 	log.G(ctx).Debugf("%v genCgroupAnnotationOpt:%+v,vmres:%v", opts.SandboxID,
+ 		cgInfo.CgroupID, string(resJson))
+ 
+-	tmpSpecs = append(tmpSpecs, oci.WithAnnotations(map[string]string{
+-
+-		constants.AnnotationsVMSpecKey: string(resJson),
++	annotations := map[string]string{
++		constants.AnnotationsVMSpecKey:  string(resJson),
+ 		constants.AnnotationsCgroupPath: cgInfo.CgroupID,
+-	}))
++	}
++	if cgInfo.ClawboxPlacement {
++		annotations["clawbox.numa_node"] = strconv.Itoa(int(cgInfo.ClawboxNumaNode))
++	}
++	tmpSpecs = append(tmpSpecs, oci.WithAnnotations(annotations))
+ 
+ 	return tmpSpecs
+ }
+diff --git a/Cubelet/services/cubebox/resource.go b/Cubelet/services/cubebox/resource.go
+index f973ade..715fa54 100644
+--- a/Cubelet/services/cubebox/resource.go
++++ b/Cubelet/services/cubebox/resource.go
+@@ -10,6 +10,7 @@ import (
+ 	"sync/atomic"
+ 
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/clawboxplacement"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+@@ -58,5 +59,15 @@ func (s *service) setRequestResource(createInfo *workflow.CreateContext, reqInfo
+ 	if useRoundRobinNumaNode {
+ 		createInfo.NumaNode = s.getNextNumaNode()
+ 	}
++	placement, err := clawboxplacement.FromRequest(reqInfo)
++	if err != nil {
++		return err
++	}
++	if placement != nil {
++		if placement.NumaNode < 0 || placement.NumaNode >= int32(numa.GetMaxNumaNodeId()) {
++			return fmt.Errorf("invalid ClawBox NUMA node: %d", placement.NumaNode)
++		}
++		createInfo.NumaNode = placement.NumaNode
++	}
+ 	return nil
+ }

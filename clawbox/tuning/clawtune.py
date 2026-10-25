@@ -8,6 +8,7 @@ P90 remain ClawTune code and must not drift into a second implementation here.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import Any
 
 from .schema import ToolObservation
@@ -51,7 +52,7 @@ def shell_command_prefix_tokens(command: str | None) -> list[str]:
     return list(_load_clawtune()[4](command))
 
 
-def observation_to_completed_call(observation: ToolObservation, repo: str) -> Any:
+def observation_to_completed_call(observation: ToolObservation, repo: str, *, telemetry: dict | None = None) -> Any:
     """Adapt one validated ClawBox observation to ClawTune's native record."""
     CompletedCall = _load_clawtune()[0]
     end = observation.end_time
@@ -62,22 +63,20 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
     else:
         start_epoch = to_epoch(start)
         end_epoch = to_epoch(end)
-    cpu_cores = observation.cpu_utilization_avg_cores
-    pmu = observation.pmu
-    pmu_eligible = bool(
-        observation.pmu_eligible_for_kb and pmu is not None
-        and pmu.execution_id == observation.execution_id
-        and pmu.coverage.status == "reliable" and pmu.coverage.eligible_for_kb
-    )
-    return CompletedCall(
+    call = CompletedCall(
         repo=repo,
         tool_name=observation.tool_name,
         command=observation.command,
         ts_start=round(start_epoch, 6),
         ts_end=round(end_epoch, 6),
-        censored=not observation.complete or observation.exit_code != 0,
+        censored=not observation.complete or observation.status_code in {"timeout", "cancelled", "interrupted"},
+        confirmed_timeout=observation.confirmed_timeout or observation.status_code == "timeout",
+        timeout_duration_lower_bound_ms=observation.timeout_duration_lower_bound_ms,
+        outcome="ok" if observation.exit_code == 0 else "error",
+        workload_duration_required=True,
         cpu_time_seconds=observation.cpu_time_sec,
-        cpu_time_eligible=observation.cpu_time_sec is not None and observation.complete,
+        cpu_avg_cores=observation.cpu_utilization_avg_cores,
+        cpu_time_eligible=observation.cpu_time_sec is not None,
         # Average cgroup CPU must never train the fixed-window peak target.
         cpu_peak_cores=None,
         cpu_peak_cores_eligible=False,
@@ -87,32 +86,45 @@ def observation_to_completed_call(observation: ToolObservation, repo: str) -> An
         memory_measurement=observation.memory_measurement,
         memory_environment_id=observation.memory_environment_id,
         memory_eligible=observation.memory_eligible,
-        pmu_cycles=(
-            pmu.events["cycles"].raw_count if pmu_eligible else None
-        ),
-        pmu_instructions=(
-            pmu.events["instructions"].raw_count if pmu_eligible else None
-        ),
-        pmu_llc_read_accesses=(
-            pmu.events["llc_read_accesses"].raw_count
-            if pmu_eligible else None
-        ),
-        pmu_llc_read_misses=(
-            pmu.events["llc_read_misses"].raw_count
-            if pmu_eligible else None
-        ),
-        pmu_ipc=pmu.derived["ipc"] if pmu_eligible else None,
-        pmu_llc_mpki=pmu.derived["llc_mpki"] if pmu_eligible else None,
-        pmu_llc_miss_rate=pmu.derived["llc_miss_rate"] if pmu_eligible else None,
-        pmu_llc_read_accesses_per_cpu_second=(
-            pmu.derived.get("llc_read_accesses_per_cpu_second")
-            if pmu_eligible else None
-        ),
-        pmu_llc_read_misses_per_cpu_second=(
-            pmu.derived.get("llc_read_misses_per_cpu_second")
-            if pmu_eligible else None
-        ),
-        pmu_eligible=pmu_eligible,
+
+    )
+    pmu = observation.pmu
+    if pmu is not None and pmu.execution_id == observation.execution_id:
+        values = {f"pmu_{name}": event.raw_count for name, event in pmu.events.items()}
+        values.update({f"pmu_{name}": value for name, value in pmu.derived.items()})
+        values["pmu_eligible"] = observation.pmu_eligible_for_kb
+        call = replace(call, **values)
+    if telemetry is not None:
+        call = with_execution_labels(call, telemetry)
+    return call
+
+
+def with_execution_labels(call: Any, telemetry: dict) -> Any:
+    """Project native execution counters; ClawTune owns missing-target imputation."""
+    from clawtune_sidecar.predictors.tool_resource import _retained_workload_duration_seconds
+    from tool_resource.sdk import clause_cpu_time_ns
+
+    clauses = telemetry.get("clauses") or []
+    counters = [clause_cpu_time_ns(row) for row in clauses]
+    profile = telemetry.get("call_resource") or {}
+    availability = profile.get("availability") or {}
+    peak = profile.get("peak_cpu_cores")
+    rss = profile.get("sampled_peak_rss_mb")
+    return replace(
+        call,
+        workload_duration_seconds=_retained_workload_duration_seconds({"calls": [telemetry]}),
+        workload_duration_required=True,
+        cpu_time_seconds=(sum(value for value in counters if value is not None) / 1e9
+                          if any(value is not None for value in counters) else call.cpu_time_seconds),
+        cpu_peak_cores=peak,
+        cpu_peak_window_ms=500 if peak is not None else None,
+        cpu_peak_cores_eligible=availability.get("cpu") == "ok",
+        sampled_peak_rss_bytes=rss * 1_000_000 if rss is not None else None,
+        sampled_peak_rss_eligible=availability.get("memory") == "ok",
+        censored=call.censored or telemetry.get("censored") is True,
+        confirmed_timeout=call.confirmed_timeout or telemetry.get("confirmed_timeout") is True,
+        timeout_duration_lower_bound_ms=(telemetry.get("timeout_duration_lower_bound_ms")
+                                         or call.timeout_duration_lower_bound_ms),
     )
 
 

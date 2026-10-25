@@ -218,17 +218,25 @@ def native_clause_observations(repo: str, call: Mapping[str, Any], cgroup: Mappi
     observations_from_call = _clawtune_api()[4]
     observations = observations_from_call(repo, call, require_timestamps=True)
     from clawtune_sidecar.monitoring.environment_memory import clause_memory_labels
+    from clawtune_sidecar.predictors.tool_resource import apply_trace_label_policy_to_clause, COLD_START_V2_LABEL_POLICY
+
+    def finish(rows):
+        # Merge actual environment labels before ClawTune fills absent targets.
+        return [apply_trace_label_policy_to_clause(
+            replace(row, memory_measurement=row.memory_measurement or cgroup.get("memory_measurement")),
+            COLD_START_V2_LABEL_POLICY,
+        ) for row in rows]
 
     timeline = cgroup.get("memory_timeline")
     if not isinstance(timeline, list) or not timeline:
-        return observations
+        return finish(observations)
     previous = -math.inf
     for point in timeline:
         if (not isinstance(point, (list, tuple)) or len(point) != 2
                 or any(isinstance(v, bool) or not isinstance(v, (int, float))
                        or not math.isfinite(v) or v < 0 for v in point)
                 or point[0] < previous):
-            return observations
+            return finish(observations)
         previous = point[0]
     clauses = call.get("clauses") or []
     labels = clause_memory_labels(cgroup, clauses)
@@ -240,7 +248,7 @@ def native_clause_observations(repo: str, call: Mapping[str, Any], cgroup: Mappi
     for observation in observations:
         matches = by_identity.get((observation.argv, observation.ts_start, observation.ts_end), [])
         result.append(replace(observation, **matches[0]) if len(matches) == 1 and matches[0] else observation)
-    return result
+    return finish(result)
 
 
 def _positive_number(value: Any, name: str) -> float:
@@ -257,16 +265,11 @@ def _validate_cgroup(payload: Mapping[str, Any], execution_id: str) -> None:
         raise ValueError("cgroup artifact execution identity mismatch")
     if payload.get("source") != "cgroup-v2":
         raise ValueError("native training requires cgroup-v2 resource scope")
-    if payload.get("sampling_quality") != "valid":
-        raise ValueError("cgroup artifact sampling is not valid")
-    if payload.get("cgroup_setup_error") or payload.get("cgroup_read_error"):
-        raise ValueError("cgroup artifact reports setup/read failure")
-    if payload.get("collector_errors"):
-        raise ValueError("cgroup artifact reports collector errors")
     _finite_number(payload.get("ts_start"), "ts_start")
     _finite_number(payload.get("ts_end"), "ts_end")
-    _positive_number(payload.get("cpu_utilization_avg_cores"), "cpu utilization")
-    _positive_number(payload.get("memory_rss_peak_bytes"), "peak RSS")
+    for key in ("cpu_utilization_avg_cores", "memory_rss_peak_bytes"):
+        if payload.get(key) is not None:
+            _finite_number(payload[key], key)
 
 
 def project_native_manifest(manifest: NativeTelemetryManifest) -> NativeProjection:
@@ -297,7 +300,6 @@ def project_native_manifests(
         validate_artifact,
         LatticeTimeKB,
     ) = _clawtune_api()
-    from clawtune_sidecar.monitoring.environment_memory import memory_labels
     clause_payloads: dict[str, dict[str, Any]] = {}
     cgroup_payloads: dict[str, dict[str, Any]] = {}
     digests: list[str] = []
@@ -318,14 +320,9 @@ def project_native_manifests(
                 )
                 if payload.get("version") != 2:
                     raise ValueError("unsupported native clause artifact version")
-                loss = payload.get("telemetry_loss_total")
-                if not isinstance(loss, Mapping) or loss.get("total") != 0:
-                    raise ValueError("native clause artifact reports event loss")
                 calls = payload.get("calls") or []
                 if len(calls) != 1 or calls[0].get("tool_call_id") != item.execution_id:
                     raise ValueError("native clause artifact execution identity mismatch")
-                if calls[0].get("eligible_for_kb") is not True:
-                    raise ValueError("native clause call is not eligible for KB")
                 clause_payloads[item.execution_id] = payload
                 owners[item.execution_id] = owner
             else:
@@ -338,6 +335,7 @@ def project_native_manifests(
         raise ValueError("native batch contains no paired executions")
 
     clause_observations: list[Any] = []
+    from clawbox.tuning.clawtune import with_execution_labels
     completed_calls: list[Any] = []
     evidence_rows: list[dict[str, Any]] = []
     for execution_id in sorted(clause_payloads):
@@ -346,11 +344,8 @@ def project_native_manifests(
         observations = native_clause_observations(
             manifest.repo_fingerprint, call, cgroup_payloads[execution_id],
         )
-        if not observations:
-            raise ValueError(f"{execution_id}: native artifact has no eligible clauses")
         clause_observations.extend(observations)
         cgroup = cgroup_payloads[execution_id]
-        memory = memory_labels(cgroup)
         ts_start = _finite_number(cgroup.get("ts_start"), "ts_start")
         ts_end = _finite_number(cgroup.get("ts_end"), "ts_end")
         if ts_end < ts_start:
@@ -360,31 +355,20 @@ def project_native_manifests(
         ) or {}
         exit_code = fidelity.get("replay_exit_code")
         completed_calls.append(
-            CompletedCall(
+            with_execution_labels(CompletedCall(
                 repo=manifest.repo_fingerprint,
                 tool_name=str(cgroup.get("tool_name") or "exec"),
                 command=str(call.get("command") or "") or None,
                 ts_start=ts_start,
                 ts_end=ts_end,
-                censored=exit_code not in (None, 0),
-                cpu_time_seconds=(
-                    _finite_number(cgroup["cpu_time_s"], "CPU time")
-                    if cgroup.get("cpu_time_s") is not None else None
-                ),
-                cpu_time_eligible=cgroup.get("cpu_time_s") is not None,
-                memory_baseline_bytes=(
-                    int(cgroup["memory_baseline_bytes"]) if memory else None
-                ),
-                memory_total_peak_bytes=(
-                    int(memory["memory_total_peak_bytes"]) if memory else None
-                ),
-                memory_extra_peak_bytes=(
-                    int(memory["memory_extra_peak_bytes"]) if memory else None
-                ),
-                memory_measurement=(str(cgroup["memory_measurement"]) if memory else None),
-                memory_environment_id=(str(cgroup["memory_environment_id"]) if memory else None),
-                memory_eligible=bool(memory),
-            )
+                outcome="ok" if exit_code in (None, 0) else "error",
+                memory_baseline_bytes=cgroup.get("memory_baseline_bytes"),
+                memory_total_peak_bytes=cgroup.get("memory_total_peak_bytes"),
+                memory_extra_peak_bytes=cgroup.get("memory_extra_peak_bytes"),
+                memory_measurement=cgroup.get("memory_measurement"),
+                memory_environment_id=cgroup.get("memory_environment_id"),
+                memory_eligible=cgroup.get("memory_eligible") is True,
+            ), call)
         )
         evidence_rows.append(
             {
@@ -422,8 +406,8 @@ def project_native_manifests(
     for observation in clause_observations:
         clause_kb.observe_completed_clause(observation)
         lattice_kb.observe_completed_clause(observation)
-    clause_kb._advance(max(obs.ts_end for obs in clause_observations) + 1e-6)
-    lattice_kb._advance(max(obs.ts_end for obs in clause_observations) + 1e-6)
+    clause_kb._advance(advance_ts)
+    lattice_kb._advance(advance_ts)
 
     runtime_snapshot = runtime_kb.to_json_obj()
     clause_snapshot = clause_kb.to_json_obj()

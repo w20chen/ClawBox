@@ -60,6 +60,49 @@ def test_public_cli_contains_only_experiment_group() -> None:
     }
 
 
+def test_prove_template_sharing_clears_future_artifact_before_host_check(
+    monkeypatch, tmp_path,
+) -> None:
+    import clawbox.experiments.qualification as qualification
+    from clawbox.experiments.spec import ExperimentSpec
+
+    raw = yaml.safe_load(Path(
+        "examples/experiments/six-dimension.yaml"
+    ).read_text(encoding="utf-8"))
+    raw["evidence"]["template_base_sharing_artifact"] = str(
+        tmp_path / "future-proof.json"
+    )
+    spec = ExperimentSpec.model_validate(raw)
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(cli, "load_experiment", lambda _path: spec)
+    monkeypatch.setattr(
+        qualification, "require_host_ready",
+        lambda observed: calls.append((
+            "host", observed.resources.template_base_sharing_artifact,
+        )),
+    )
+    monkeypatch.setattr(
+        qualification, "template_base_sharing_test",
+        lambda observed, **_kwargs: calls.append((
+            "proof", observed.resources.template_base_sharing_artifact,
+        )) or {"passed": True},
+    )
+    monkeypatch.setattr(
+        qualification, "write_template_base_sharing_artifact",
+        lambda observed, _result, **_kwargs: calls.append((
+            "write", observed.resources.template_base_sharing_artifact,
+        )) or {"template_count": 1, "backend_identity": {}},
+    )
+
+    assert cli.main([
+        "experiment", "prove-template-sharing",
+        "ignored.yaml", "--output", str(tmp_path / "proof.json"),
+        "--artifact-root", str(tmp_path / "proof-raw"),
+        "--resume-result", str(tmp_path / "prior-result.json"),
+    ]) == 0
+    assert calls == [("host", None), ("proof", None), ("write", None)]
+
+
 def test_launch_qualifies_when_needed_then_starts_run(
     monkeypatch, tmp_path,
 ) -> None:
@@ -70,7 +113,9 @@ def test_launch_qualifies_when_needed_then_starts_run(
     spec_path = Path("examples/experiments/getting-started.yaml")
     receipt = tmp_path / "qualification.json"
     calls: list[object] = []
-    monkeypatch.setattr(inputs, "validate_inputs", lambda spec: calls.append("inputs"))
+    monkeypatch.setattr(
+        inputs, "validate_launch_inputs", lambda spec: calls.append("inputs"),
+    )
     monkeypatch.setattr(
         qualification, "require_host_ready",
         lambda spec: calls.append("host"),
@@ -78,6 +123,9 @@ def test_launch_qualifies_when_needed_then_starts_run(
     monkeypatch.setattr(
         qualification, "validate_receipt",
         lambda spec, path: (_ for _ in ()).throw(ValueError("stale")),
+    )
+    monkeypatch.setattr(
+        qualification, "default_receipt_path", lambda _path: receipt,
     )
     monkeypatch.setattr(
         qualification, "qualify",
@@ -91,7 +139,7 @@ def test_launch_qualifies_when_needed_then_starts_run(
     assert cli.launch_experiment(Namespace(
         spec=spec_path,
         output_root=tmp_path,
-        qualification=receipt,
+        qualification=None,
         qualification_concurrency=4,
         force_qualify=False,
         run_id="self-service",
@@ -109,6 +157,34 @@ def test_launch_qualifies_when_needed_then_starts_run(
             "--qualification", str(receipt), "--detach",
         ],
     )
+
+
+def test_launch_rejects_an_invalid_explicit_receipt_without_requalifying(
+    monkeypatch, tmp_path,
+) -> None:
+    from argparse import Namespace
+    import clawbox.experiments.qualification as qualification
+
+    receipt = tmp_path / "qualification.json"
+    monkeypatch.setattr(
+        qualification, "validate_receipt",
+        lambda spec, path: (_ for _ in ()).throw(ValueError("contract mismatch")),
+    )
+    monkeypatch.setattr(
+        qualification, "qualify",
+        lambda *_args, **_kwargs: pytest.fail("unexpected qualification"),
+    )
+
+    with pytest.raises(ValueError, match="explicit qualification receipt cannot be reused"):
+        cli.launch_experiment(Namespace(
+            spec=Path("examples/experiments/getting-started.yaml"),
+            output_root=tmp_path,
+            qualification=receipt,
+            qualification_concurrency=None,
+            force_qualify=False,
+            run_id="explicit-stale-receipt",
+            detach=True,
+        ))
 
 
 def test_qualify_cli_delegates_preflight_and_input_validation_to_qualify(

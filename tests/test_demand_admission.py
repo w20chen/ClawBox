@@ -58,6 +58,21 @@ def test_same_vm_concurrent_tool_reservations_share_one_aggregate_claim():
     assert 'busy' not in c._reservations
 
 
+def test_zero_tool_reservation_release_matches_zero_admission_fast_path():
+    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+
+    c.acquire('busy', 10, .1)
+    c.acquire('busy', 0, .1, total_mib=0)
+    c.release('busy', 0, total_mib=0)
+
+    claim = c.demand.claims['busy', 'tool_admission']
+    assert claim.amount == 10 * MIB
+    assert claim.local_amount == 10 * MIB
+    assert c._reservations['busy'] == 10 * MIB
+    c.release('busy', 10)
+
+
 def test_aggregate_tool_claim_keeps_first_memory_baseline():
     c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
@@ -294,6 +309,32 @@ def test_severe_pressure_uses_sustained_stall_deltas_and_hysteresis(tmp_path, mo
         assert not ledger.reasons(0)
 
 
+def test_pressure_interval_reuses_decision_without_kernel_reads(tmp_path, monkeypatch):
+    from pathlib import Path
+    from clawbox.experiments import admission
+    now = [0.0]
+    monkeypatch.setattr(admission.time, 'monotonic', lambda: now[0])
+    (tmp_path / 'memory.stat').write_text('pgscan 0\npgsteal 0\n')
+    psi = tmp_path / 'memory.pressure'
+    psi.write_text('some avg10=0 total=0\n')
+    ledger = DemandLedger(sample=lambda: (950, 1000), capacity=1000, cgroup=tmp_path)
+    with ledger.condition:
+        assert not ledger.reasons(0)
+        now[0] = .2
+        psi.write_text('some avg10=0 total=40000\n')
+        assert ledger.reasons(0) == ('sustained_memory_congestion',)
+        def failed_read(*args, **kwargs):
+            raise OSError('pressure counters unavailable')
+        monkeypatch.setattr(Path, 'read_text', failed_read)
+        now[0] = .25
+        # Reuse only the congestion sample, not capacity/admission decisions.
+        assert ledger.reasons(0) == ('sustained_memory_congestion',)
+        assert ledger.reasons(51) == ('global_memory_budget', 'sustained_memory_congestion')
+        now[0] = .31
+        with pytest.raises(OSError, match='pressure counters unavailable'):
+            ledger.reasons(0)
+
+
 def test_controller_failure_propagates_through_admission():
     ledger = DemandLedger(sample=lambda: (0, 100*MIB), capacity=10*MIB)
     def fail():
@@ -304,6 +345,52 @@ def test_controller_failure_propagates_through_admission():
     with pytest.raises(RuntimeError, match='controller stopped'):
         c.acquire('s', 1, .1)
     assert not ledger.claims
+
+
+@pytest.mark.parametrize('local_used,global_used,create_amount', [
+    (95, 95, 10), (20, 195, 10),
+])
+def test_blocked_creation_head_does_not_resample_existing_vm_claims(
+        local_used, global_used, create_amount):
+    from clawbox.experiments.policy import AdmissionRequest
+    ledger = DemandLedger(sample=lambda: (global_used*MIB, 1000*MIB), capacity=200*MIB)
+    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(),
+        budget_mib=100, emergency_free_mib=0, operation_headroom_mib=0,
+        physical_sample=lambda: (local_used*MIB, 1000*MIB), demand_ledger=ledger)
+    reads = []
+    def sample():
+        reads.append(True)
+        return 0, 0
+    with c._condition:
+        ledger.add(('active', 'tool_admission'), scope=c.demand_scope,
+                   amount=MIB, local_amount=MIB, sample=sample)
+        reads.clear()
+        create, tool = object(), object()
+        c._waiters.extend((create, tool))
+        c._waiter_requests[create] = AdmissionRequest('new', create_amount*MIB, 'create', False)
+        c._waiter_requests[tool] = AdmissionRequest('active', MIB, 'tool_admission', False)
+        c._progress_waiters.add(tool)
+        assert c._admission_head_locked() is tool
+        assert not reads
+
+
+def test_creation_head_still_samples_pending_growth_when_it_can_change_decision():
+    from clawbox.experiments.policy import AdmissionRequest
+    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(),
+        budget_mib=100, emergency_free_mib=0, operation_headroom_mib=0,
+        physical_sample=lambda: (80*MIB, 1000*MIB))
+    observed = [0]
+    with c._condition:
+        c.demand.add(('active', 'tool_admission'), scope=c.demand_scope,
+            amount=30*MIB, local_amount=30*MIB, sample=lambda: (observed[0], observed[0]))
+        create, tool = object(), object()
+        c._waiters.extend((create, tool))
+        c._waiter_requests[create] = AdmissionRequest('new', 10*MIB, 'create', False)
+        c._waiter_requests[tool] = AdmissionRequest('active', MIB, 'tool_admission', False)
+        c._progress_waiters.add(tool)
+        assert c._admission_head_locked() is tool  # Unmaterialized growth still blocks creation.
+        observed[0] = 30*MIB
+        assert c._admission_head_locked() is create  # Already-resident growth is not charged twice.
 
 
 def test_no_psi_reclaim_signal_recovers_without_assuming_guest_backing_is_freed(tmp_path, monkeypatch):

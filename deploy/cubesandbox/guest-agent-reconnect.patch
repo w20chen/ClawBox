@@ -1,0 +1,131 @@
+diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
+--- a/CubeShim/shim/src/sandbox/sb.rs
++++ b/CubeShim/shim/src/sandbox/sb.rs
+@@ -135,6 +135,11 @@
+     tx_oom_exited: Option<Sender<()>>,
+     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+ }
++
++// Bounded native reconnects after restoring a guest from a snapshot.
++const RECONNECT_ATTEMPTS: u32 = 5;
++const RECONNECT_BACKOFF_MS: u64 = 200;
++const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
+ 
+ impl SandBox {
+     pub fn new(
+@@ -276,6 +281,69 @@
+         )
+     }
+ 
++    /// Connect + reset with bounded retries. Restores are retried because
++    /// the guest is thawed from a snapshot with its connections just RST and
++    /// transiently refuses or resets the first connections while its runtime
++    /// settles -- every restored guest, including an ordinary create from a
++    /// template snapshot. A VM booted from scratch (snapshot == false) gets
++    /// a single attempt: a booted guest has no carried connection state, so
++    /// a failure there is permanent. Every error class is retried: the
++    /// transient surfaces both at the connect handshake and at the first
++    /// RPC. What follows the first RPC is not retried: it is not idempotent,
++    /// and reset_guest passing is the signal that the guest can serve again.
++    /// A restored guest whose agent is dead pays the full 10 s deadline
++    /// before the create or resume fails.
++    async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
++        // One stat for the whole sequence: a failed attempt that a later one
++        // supersedes must not record an Err.
++        let mut stat =
++            restore.then(|| self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string()));
++        let mut last_err: Option<String> = None;
++        let retry = async {
++            let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
++            let mut attempt = 0;
++            loop {
++                attempt += 1;
++                let res: CResult<()> = async {
++                    self.connect_agent().await?;
++                    if restore {
++                        self.reset_guest().await?;
++                    }
++                    Ok(())
++                }
++                .await;
++                match res {
++                    Ok(()) => return Ok(()),
++                    Err(e) if attempt < max_attempts => {
++                        last_err = Some(e.clone());
++                        warnf!(
++                            self.log,
++                            "reconnect attempt {}/{} failed: {}, retrying",
++                            attempt,
++                            max_attempts,
++                            e
++                        );
++                        tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
++                    }
++                    Err(e) => return Err(e),
++                }
++            }
++        };
++        let res = match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
++            Ok(res) => res,
++            Err(_) => Err(format!(
++                "agent reconnect exceeded the deadline (last attempt: {})",
++                last_err.unwrap_or_else(|| "still in flight".to_string())
++            )),
++        };
++        if res.is_ok() {
++            if let Some(stat) = stat.as_mut() {
++                stat.set_ok();
++            }
++        }
++        res
++    }
++
+     async fn connect_agent(&mut self) -> CResult<()> {
+         let conn = AsyncUtils::connect_agent(&self.id).await?;
+         let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
+@@ -498,7 +566,6 @@
+             return Err(format!("client is None"));
+         }
+         let client = self.client.as_ref().unwrap().lock().await;
+-        let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string());
+         let tm = Utc::now();
+ 
+         let req = agent::SetGuestDateTimeRequest {
+@@ -522,7 +589,6 @@
+             .reseed_random_dev(self.ctx.clone(), &req)
+             .await
+             .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
+-        stat.set_ok();
+         Ok(())
+     }
+ 
+@@ -551,13 +617,9 @@
+             }
+         }
+ 
+-        self.connect_agent().await?;
++        self.connect_agent_with_retry(snapshot).await?;
+ 
+         infof!(self.log, "agent is ready");
+-
+-        if snapshot {
+-            self.reset_guest().await?;
+-        }
+ 
+         //add vfio device
+         if !self.app_snapshot_restore() {
+@@ -1612,14 +1674,7 @@
+             }
+         }
+ 
+-        self.connect_agent().await?;
+-
+-        if self.client.is_none() {
+-            errf!(self.log, "client is None in resume_vm");
+-            return Err(format!("client is None"));
+-        }
+-
+-        self.reset_guest().await?;
++        self.connect_agent_with_retry(true).await?;
+ 
+         let client = self.client.as_ref().unwrap();
