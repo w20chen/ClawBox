@@ -2,17 +2,67 @@ diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
 index 4021983..e9796ed 100644
 --- a/CubeShim/shim/src/sandbox/sb.rs
 +++ b/CubeShim/shim/src/sandbox/sb.rs
-@@ -48,8 +48,9 @@ use crate::{debugf, errf, infof, warnf};
+@@ -48,8 +48,59 @@ use crate::{debugf, errf, infof, warnf};
  
  const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
  const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 +const ANNO_CLAWBOX_NUMA_NODE: &str = "clawbox.numa_node";
  const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
  
++fn parse_cpu_list(raw: &str) -> CResult<Vec<usize>> {
++    let mut cpus = Vec::new();
++    for item in raw.trim().split(',').filter(|item| !item.is_empty()) {
++        let (first, last) = match item.split_once('-') {
++            Some((first, last)) => (
++                first
++                    .parse::<usize>()
++                    .map_err(|e| format!("invalid CPU list {raw}: {e}"))?,
++                last.parse::<usize>()
++                    .map_err(|e| format!("invalid CPU list {raw}: {e}"))?,
++            ),
++            None => {
++                let cpu = item
++                    .parse::<usize>()
++                    .map_err(|e| format!("invalid CPU list {raw}: {e}"))?;
++                (cpu, cpu)
++            }
++        };
++        if first > last || last >= libc::CPU_SETSIZE as usize {
++            return Err(format!("invalid CPU range in {raw}"));
++        }
++        cpus.extend(first..=last);
++    }
++    if cpus.is_empty() {
++        return Err("NUMA node has an empty CPU list".to_string());
++    }
++    Ok(cpus)
++}
++
++fn apply_clawbox_cpu_affinity(node: u32) -> CResult<()> {
++    let cpulist_path = format!("/sys/devices/system/node/node{node}/cpulist");
++    let cpulist =
++        stdfs::read_to_string(&cpulist_path).map_err(|e| format!("read {cpulist_path}: {e}"))?;
++    let cpus = parse_cpu_list(&cpulist)?;
++    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
++    unsafe {
++        libc::CPU_ZERO(&mut set);
++        for cpu in cpus {
++            libc::CPU_SET(cpu, &mut set);
++        }
++        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
++            return Err(format!(
++                "set NUMA-node CPU affinity: {}",
++                std::io::Error::last_os_error()
++            ));
++        }
++    }
++    Ok(())
++}
++
  #[derive(PartialEq, Eq)]
  enum SandBoxState {
      Normal,
-@@ -473,15 +544,30 @@ impl SandBox {
+@@ -473,15 +524,30 @@ impl SandBox {
          // Join LOCAL before restoring/allocating guest RAM. Moving the shim
          // only after Create completes leaves those pages charged to Cubelet.
          if std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1")
@@ -47,6 +97,32 @@ index 4021983..e9796ed 100644
          }
          let snapshot = self.start_vm().await?;
  
+@@ -878,8 +944,25 @@ impl SandBox {
+     }
+     async fn start_vm(&mut self) -> CResult<bool> {
+         infof!(self.log, "start vm start");
++        let clawbox_numa_node = self
++            .spec
++            .annotations()
++            .as_ref()
++            .and_then(|annotations| annotations.get(ANNO_CLAWBOX_NUMA_NODE))
++            .map(|value| {
++                value
++                    .parse::<u32>()
++                    .map_err(|e| format!("invalid ClawBox NUMA node {value}: {e}"))
++            })
++            .transpose()?;
+         {
+             let mut ch = self.ch.as_mut().unwrap().lock().await;
++            if let Some(node) = clawbox_numa_node {
++                // The Cube cgroup constrains memory nodes; this affinity is
++                // inherited by the VMM worker and vCPU threads.
++                apply_clawbox_cpu_affinity(node)?;
++                infof!(self.log, "bound VM CPUs to NUMA node {}", node);
++            }
+             ch.launch_vmm().await?;
+         }
+         let mut snapshot = false;
 diff --git a/Cubelet/pkg/clawboxplacement/placement.go b/Cubelet/pkg/clawboxplacement/placement.go
 new file mode 100644
 index 0000000..81301f4
