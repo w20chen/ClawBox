@@ -420,6 +420,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         f"CLAWBOX_POLICY_AUDIT_FILE={shlex.quote(policy_audit_file)} "
+        f"CLAWBOX_SSH_CONTROL_DIR={shlex.quote(ssh_dir)} "
         f"CLAWBOX_TOOL_TIMEOUT_SECONDS={tool_timeout_seconds} "
         f"CLAWBOX_REAL_SSH={shlex.quote(real_ssh)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
@@ -556,6 +557,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"test -d {shlex.quote(clawtune_plugin)}; "
         + relay_setup
         + f"chmod 700 {shlex.quote(ssh_launcher)} {shlex.quote(init_state_file)} {shlex.quote(timed_sidecar_file)}; "
+        + f"chmod 700 {shlex.quote(ssh_dir)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
         + f"/opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "

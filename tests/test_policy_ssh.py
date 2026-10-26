@@ -5,6 +5,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -72,6 +73,7 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     monkeypatch.setenv("CLAWBOX_POLICY_SESSION_ID", "session-a")
     monkeypatch.setenv("CLAWBOX_TOOL_SANDBOX_ID", "tool-a")
     monkeypatch.setenv("CLAWBOX_SSH_HOST_KEY_ALIAS", "clawbox-tool-tool-a")
+    monkeypatch.setenv("CLAWBOX_SSH_CONTROL_DIR", "/state/openclaw/session-a/ssh")
     posted: list[tuple[str, dict]] = []
 
     def post(path: str, body: dict, *, attempts: int) -> dict:
@@ -101,6 +103,9 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert "HostName=192.0.2.20" in command
     assert "Port=20020" in command
     assert "HostKeyAlias=clawbox-tool-tool-a" in command
+    assert "ControlMaster=auto" in command
+    assert "ControlPersist=300" in command
+    assert "ControlPath=/state/openclaw/session-a/ssh/master-9" in command
     assert command[-2] == "openclaw-sandbox"
     assert command[-1].endswith("\nprintf /run/identity\n} 2>&1")
     assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
@@ -121,24 +126,37 @@ def test_policy_route_replaces_stale_explicit_port_and_route_options() -> None:
         "-o", "HostName=192.0.2.9",
         "-oPort=20009",
         "-o", "HostKeyAlias=stale-tool",
+        "-o", "ControlMaster=yes",
+        "-o", "ControlPath=/tmp/stale-master",
         "executor@192.0.2.9", "true",
     ]
     route = {
         "host": "192.0.2.20", "port": 20020,
-        "host_key_alias": "clawbox-tool-tool-a",
+        "host_key_alias": "clawbox-tool-tool-a", "epoch": 7,
     }
-
-    command = policy_ssh._ssh_args_for_route(argv, route)
+    previous = os.environ.get("CLAWBOX_SSH_CONTROL_DIR")
+    os.environ["CLAWBOX_SSH_CONTROL_DIR"] = "/state/openclaw/session-a/ssh"
+    try:
+        command = policy_ssh._ssh_args_for_route(argv, route)
+    finally:
+        if previous is None:
+            os.environ.pop("CLAWBOX_SSH_CONTROL_DIR", None)
+        else:
+            os.environ["CLAWBOX_SSH_CONTROL_DIR"] = previous
 
     assert "-p" not in command
     assert "20009" not in command
     assert "HostName=192.0.2.9" not in command
     assert "Port=20009" not in command
     assert "HostKeyAlias=stale-tool" not in command
+    assert "ControlMaster=yes" not in command
+    assert "ControlPath=/tmp/stale-master" not in command
     assert "StrictHostKeyChecking=yes" in command
     assert "HostName=192.0.2.20" in command
     assert "Port=20020" in command
     assert "HostKeyAlias=clawbox-tool-tool-a" in command
+    assert "ControlMaster=auto" in command
+    assert "ControlPath=/state/openclaw/session-a/ssh/master-7" in command
     assert command[-2:] == ["executor@192.0.2.9", "true"]
 
 
