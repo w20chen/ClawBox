@@ -611,6 +611,9 @@ predictor/cache code therefore requires rebuilding the single Runtime image and
 using a new qualification/run ID. It does not require rebuilding Tool task
 images or retraining when the underlying seed and prediction semantics remain
 unchanged.
+The standalone Runtime disables its local optional eBPF tool monitor because
+commands execute in the separate Tool VM. The prewarmed Tool collector remains
+the authoritative command-resource measurement path.
 The collector refresh below carries the source image's prewarm settings to each
 task image. Task workspaces/dependencies are retained. Runtime templates remain
 valid for a Tool-only collector change. Validate collection after restore before

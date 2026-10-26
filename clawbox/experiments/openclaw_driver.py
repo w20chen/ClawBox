@@ -562,6 +562,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + "export CLAWTUNE_POLICY=observe-only "
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
+        + "CLAWTUNE_TOOL_RESOURCE_EBPF_ENABLED=false "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
         + "CLAWTUNE_TOOL_RESOURCE_MEMORY_MEASUREMENT=cgroup_v2_environment_union_v1 "
         + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "

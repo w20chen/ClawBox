@@ -299,6 +299,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         "CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource"
         in "\n".join(commands)
     )
+    assert "CLAWTUNE_TOOL_RESOURCE_EBPF_ENABLED=false" in "\n".join(commands)
     assert "timed-clawtune-sidecar.py" in "\n".join(commands)
     assert "sidecar-startup-timing.json" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)
