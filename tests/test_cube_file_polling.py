@@ -157,10 +157,36 @@ def test_completion_watch_closes_idle_stream_and_does_not_hide_permission_errors
     assert len(closed) == 2
 
 
-def test_completion_watch_treats_initial_stat_read_timeout_as_not_ready(native_filesystem):
+@pytest.mark.parametrize("error", [
+    httpx.ReadTimeout("busy guest"),
+    httpx.ConnectError("temporary Cube endpoint lookup failure"),
+])
+def test_completion_watch_treats_transient_initial_stat_failure_as_not_ready(
+    native_filesystem, error,
+):
     sandbox = SimpleNamespace(files=SimpleNamespace(
-        stat=lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("busy guest")),
-        watch_dir=lambda *args, **kwargs: pytest.fail("deadline was consumed by stat"),
+        stat=lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        watch_dir=lambda *args, **kwargs: pytest.fail("stat ended this watch window"),
+    ))
+    assert not CubeSandboxClient.wait_file_nonempty(
+        sandbox, "/state/agent.exit", timeout_s=10,
+    )
+
+
+def test_completion_watch_treats_transient_stream_connect_failure_as_not_ready(
+    native_filesystem,
+):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def watch_dir(*_args, **_kwargs):
+        def events():
+            raise httpx.ConnectError("temporary Cube endpoint lookup failure")
+            yield
+        yield events()
+
+    sandbox = SimpleNamespace(files=SimpleNamespace(
+        stat=lambda *args, **kwargs: {"size": 0}, watch_dir=watch_dir,
     ))
     assert not CubeSandboxClient.wait_file_nonempty(
         sandbox, "/state/agent.exit", timeout_s=10,

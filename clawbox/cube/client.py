@@ -450,11 +450,14 @@ class CubeSandboxClient:
                 )
             except FilesystemNotFoundError:
                 return False
-            except httpx.ReadTimeout:
+            except (httpx.ReadTimeout, httpx.ConnectError):
                 # Under Full load, a bounded Stat can consume the remaining
                 # watch window before response headers arrive. That is the
-                # normal "not ready within this window" outcome; the caller
-                # rechecks cancellation/residency and may wait again.
+                # normal "not ready within this window" outcome. Cube's
+                # endpoint-name lookup can also fail transiently while its DNS
+                # registry changes under high churn. The caller rechecks
+                # cancellation/residency and retries within the session's
+                # existing command deadline.
                 stat_timed_out = True
                 return False
             return int(entry.get("size", 0)) > 0
@@ -479,9 +482,10 @@ class CubeSandboxClient:
                         break
                     if time.monotonic() >= deadline:
                         break
-        except httpx.ReadTimeout:
+        except (httpx.ReadTimeout, httpx.ConnectError):
             # An idle notification stream is expected to reach this bounded
-            # wait. The caller checks cancellation and residency before retry.
+            # wait. A transient endpoint lookup failure is equivalent here:
+            # the caller checks cancellation and residency before retry.
             return False
         return False
 
