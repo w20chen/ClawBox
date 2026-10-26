@@ -151,8 +151,10 @@ The schema has six mechanism dimensions plus deployment and coordination:
 Managed placement reuses CubeSandbox's normal preallocated per-VM cgroup pool;
 ClawBox does not create a parallel VM-cgroup hierarchy. An opaque placement
 token carries the selected NUMA-node intent, Cubelet publishes the official
-assigned leaf, and CubeShim applies NUMA CPU affinity and allocation policy
-before launching the VMM. ClawBox then verifies vCPU affinity and physical
+assigned leaf, and CubeShim enters that leaf before launching the VMM. The
+leaf's native cgroup-v2 CPU and memory-node constraints therefore apply to the
+VMM and its descendants without a second per-thread NUMA policy. ClawBox then
+verifies vCPU affinity and physical
 memory residency and attaches pressure, borrowing, and `c2` controls to that
 official leaf. Live borrowing uses temporary threaded cpusets inside that leaf
 to migrate each VM once per process, retaining the original memory accounting
