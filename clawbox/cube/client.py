@@ -224,7 +224,15 @@ class CubeSandboxClient:
         self._handles[sandbox_id] = sandbox
         return sandbox
 
-    def get_sandbox_state(self, sandbox_id: str) -> str | None:
+    def get_sandbox_state(self, sandbox_or_id: Any) -> str | None:
+        if not isinstance(sandbox_or_id, str):
+            getter = getattr(sandbox_or_id, "get_info", None)
+            if callable(getter):
+                info = getter()
+                return str(info.get("state", "")).lower() or None
+            sandbox_id = self.sandbox_id(sandbox_or_id)
+        else:
+            sandbox_id = sandbox_or_id
         for info in self._sandbox_class.list_v2(**self._sdk_kwargs()):
             if self._info_id(info) == sandbox_id:
                 return str(info.get("state", "")).lower() or None

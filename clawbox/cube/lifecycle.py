@@ -392,6 +392,8 @@ class CubeSandboxLifecycle:
             host_memory_before = self._observe_physical()
             key = None
             pause_attempted = False
+            pause_completed = False
+            path = None
             predecessor = (self._snapshot_key if self._snapshot_tier is SnapshotTier.WARM
                            and self._tier is SnapshotTier.LOCAL else None)
             try:
@@ -406,11 +408,12 @@ class CubeSandboxLifecycle:
                         raise WarmCapacityError("WARM pool is too small; disk fallback is disabled")
                     tier = SnapshotTier.COLD
                 if tier is None:
-                    pause_attempted = True
                     with self._transfer("checkpoint", stage_seconds), self._measure_stage(stage_seconds, "api_checkpoint_s"):
+                        pause_attempted = True
                         self.client.pause_sandbox(
                             self.sandbox, snapshot_mechanism=self.snapshot_mechanism,
                         )
+                        pause_completed = True
                 else:
                     if tier is SnapshotTier.LOCAL:
                         raise ValueError("cannot checkpoint a sandbox to LOCAL")
@@ -445,13 +448,14 @@ class CubeSandboxLifecycle:
                     )
                     if tier is SnapshotTier.WARM:
                         self._warm_paths.add(path)
-                    pause_attempted = True
                     with self._transfer("checkpoint", stage_seconds), self._measure_stage(stage_seconds, "api_checkpoint_s"):
+                        pause_attempted = True
                         manifest = self.client.pause_sandbox(
                             self.sandbox, tier=tier.value,
                             memory_snapshot_path=path, generation=self._generation,
                             snapshot_mechanism=self.snapshot_mechanism,
                         )
+                        pause_completed = True
                     if tier is SnapshotTier.WARM:
                         self.snapshot_pool.commit(
                             key, path=path,
@@ -511,8 +515,90 @@ class CubeSandboxLifecycle:
                 remote_state = None
                 if pause_attempted and self.sandbox_id is not None:
                     try:
-                        remote_state = self.client.get_sandbox_state(self.sandbox_id)
+                        remote_state = self.client.get_sandbox_state(self.sandbox)
                     except Exception:
+                        pass
+                # Cube can finish PauseToSnapshot and lose or time out the
+                # control response under a large lifecycle wave.  The paused
+                # state plus Cube's complete native snapshot metadata are the
+                # authoritative completion evidence; publish that generation
+                # instead of stranding the VM in UNKNOWN and leaking its WARM
+                # reservation.  Never use this path for a transfer-slot wait
+                # or for a failure after the manifest was already returned.
+                if (
+                    pause_attempted and not pause_completed
+                    and getattr(exc, "status_code", None) is None
+                    and remote_state == "paused"
+                    and key is not None and tier is not None and path is not None
+                ):
+                    try:
+                        from .snapshot import read_snapshot_metadata
+                        manifest = {
+                            "memory_snapshot_path": path,
+                            "generation": key.generation,
+                            "tier": tier.value,
+                            **read_snapshot_metadata(
+                                path,
+                                require_lineage=self.snapshot_mechanism == "incremental-cow",
+                            ),
+                            "control_response_reconciled": True,
+                        }
+                        manifest.setdefault("transferred_bytes", None)
+                        if tier is SnapshotTier.WARM:
+                            if self.snapshot_pool is None:
+                                raise RuntimeError("WARM snapshot accounting is not configured")
+                            self.snapshot_pool.commit(
+                                key, path=path,
+                                logical_bytes=int(manifest["logical_bytes"]),
+                                allocated_bytes=int(manifest["allocated_bytes"]),
+                                transferred_bytes=(
+                                    int(manifest["transferred_bytes"])
+                                    if manifest["transferred_bytes"] is not None else None
+                                ),
+                                spiller=(self._spill_to_cold if self.snapshot_storage != "warm-only" else None),
+                                replaces=predecessor,
+                                template_id=self.template,
+                                shared_base_identity=manifest.get("external_base_identity"),
+                                shared_base_allocated_bytes=int(
+                                    manifest.get("external_base_allocated_bytes") or 0
+                                ),
+                                private_delta_bytes=int(
+                                    manifest.get("private_delta_bytes") or manifest["allocated_bytes"]
+                                ),
+                                dependency_count=int(manifest.get("dependency_count") or 0),
+                                expected_reuse_probability=self.snapshot_reuse_probability,
+                                retention_value_seconds=self._retention_value_seconds(
+                                    int(manifest["logical_bytes"])
+                                ),
+                            )
+                            self._pending_snapshot_keys.discard(key)
+                        elif predecessor is not None and self.snapshot_pool is not None:
+                            self._verify_warm_files_removed()
+                            self.snapshot_pool.remove(predecessor)
+                        self._snapshot_key = key
+                        self._snapshot_tier = tier
+                        self._tier = tier
+                        self._state = SandboxState.SWAPPED
+                        if (
+                            self.numa_borrower is not None
+                            and self.sandbox_id is not None
+                            and self.sandbox_id in self.numa_borrower.borrowed()
+                        ):
+                            self.numa_borrower.return_local(self.sandbox_id)
+                        return self._record(
+                            "checkpoint", before, self._state,
+                            started_wall, started_mono,
+                            host_memory_before=host_memory_before,
+                            tier_from=SnapshotTier.LOCAL.value,
+                            tier_to=tier.value,
+                            snapshot_generation=key.generation,
+                            snapshot_path=path,
+                            snapshot_metrics=manifest,
+                            stage_seconds=stage_seconds,
+                        )
+                    except Exception:
+                        # If either half of the proof is absent, retain the
+                        # original failure and the conservative UNKNOWN state.
                         pass
                 self._state = (before if not pause_attempted or remote_state == "running"
                                else SandboxState.UNKNOWN)
@@ -694,7 +780,7 @@ class CubeSandboxLifecycle:
                 remote_state = None
                 if resume_attempted:
                     try:
-                        remote_state = self.client.get_sandbox_state(self.sandbox_id)
+                        remote_state = self.client.get_sandbox_state(self.sandbox)
                     except Exception:
                         pass
                 self._state = (before if not resume_attempted or remote_state == "paused"

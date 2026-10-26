@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -391,6 +392,19 @@ def test_cube_client_retries_endpoint_publication_after_create() -> None:
     assert EventuallyPublishedSandbox.endpoint_calls == 3
 
 
+def test_cube_client_reads_state_from_existing_handle_without_full_inventory() -> None:
+    class DirectInfoSandbox(_Sandbox):
+        @classmethod
+        def list_v2(cls, **kwargs):
+            raise AssertionError("state lookup must not scan the full inventory")
+
+        def get_info(self):
+            return {"state": "PAUSED"}
+
+    client = CubeSandboxClient(sandbox_class=DirectInfoSandbox)
+    assert client.get_sandbox_state(DirectInfoSandbox({"sandboxID": "sb-direct"})) == "paused"
+
+
 def test_lifecycle_refreshes_runtime_network_only_for_a_new_endpoint_host() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
@@ -667,6 +681,95 @@ def test_checkpoint_manifest_failure_does_not_mark_paused_vm_running() -> None:
         lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
+
+
+def test_checkpoint_reconciles_lost_response_from_complete_native_snapshot(tmp_path) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    pause = client.pause_sandbox
+
+    def lose_response_after_pause(sandbox, **kwargs):
+        pause(sandbox, **kwargs)
+        raise RuntimeError("control response lost")
+
+    client.pause_sandbox = lose_response_after_pause
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.state.value == "swapped"
+    assert pool.reserved_bytes == 0
+    assert pool.committed_bytes > 0
+    timing = lifecycle.timings[-1]
+    assert timing["status"] == "ok"
+    assert timing["snapshot_metrics"]["control_response_reconciled"] is True
+    lifecycle.restore()
+    snapshot = Path(timing["snapshot_path"])
+    (Path(str(snapshot) + ".layers") / "000000.mem").unlink()
+    Path(str(snapshot) + ".layers").rmdir()
+    Path(str(snapshot) + ".lineage.json").unlink()
+    snapshot.unlink()
+    lifecycle.close()
+
+
+def test_checkpoint_does_not_reconcile_server_timeout_as_completed_pause(tmp_path) -> None:
+    class ServerTimeout(RuntimeError):
+        status_code = 408
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    pause = client.pause_sandbox
+
+    def server_timeout_after_writing_snapshot(sandbox, **kwargs):
+        pause(sandbox, **kwargs)
+        raise ServerTimeout("HTTP 408")
+
+    client.pause_sandbox = server_timeout_after_writing_snapshot
+    with pytest.raises(ServerTimeout, match="HTTP 408"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.state.value == "unknown"
+    assert pool.reserved_bytes == 8192
+    with pytest.raises(Exception, match="snapshot files remain"):
+        lifecycle.close()
+
+
+def test_checkpoint_slot_timeout_aborts_unstarted_warm_reservation(tmp_path) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(8192)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=4096,
+    )
+    lifecycle.start()
+
+    @contextmanager
+    def reject_transfer(_operation):
+        raise TimeoutError("snapshot slot timed out")
+        yield
+
+    pool.transfer = reject_transfer
+    with pytest.raises(TimeoutError, match="snapshot slot timed out"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.state.value == "running"
+    assert pool.reserved_bytes == pool.committed_bytes == 0
+    assert lifecycle.sandbox.state == "running"
+    lifecycle.close()
 
 
 def test_restore_failure_after_remote_resume_does_not_mark_vm_swapped(tmp_path) -> None:
