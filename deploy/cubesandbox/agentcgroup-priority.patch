@@ -374,10 +374,20 @@ index 8b35058..64872c6 100644
  
  	defer func() {
  		if err != nil && fullCgID != nil {
-@@ -361,6 +366,10 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
+@@ -361,6 +366,20 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
  	if err != nil {
  		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "failed save to db: %v", err)
  	}
++	if placement != nil {
++		// A reused native pool leaf may inherit both host NUMA nodes. Narrow it
++		// while it is still empty, before publishing the path to CubeShim.
++		mems := path.Join("/sys/fs/cgroup", cgroupPath, "cpuset.mems")
++		if err = os.WriteFile(mems, []byte(strconv.Itoa(int(placement.NumaNode))), 0644); err != nil {
++			_ = l.db.Delete(bucket, opts.GetSandboxID())
++			return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed,
++				"apply ClawBox NUMA placement to %s: %v", cgroupPath, err)
++		}
++	}
 +	if err = clawboxplacement.Publish(placement, cgroupPath); err != nil {
 +		_ = l.db.Delete(bucket, opts.GetSandboxID())
 +		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "publish assigned cgroup: %v", err)
