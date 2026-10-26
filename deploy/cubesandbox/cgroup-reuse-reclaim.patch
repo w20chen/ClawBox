@@ -1,7 +1,7 @@
 diff --git a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
 --- a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
 +++ b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
-@@ -319,6 +319,43 @@ func (h *handler) cleanProc(ctx context.Context, group string) error {
+@@ -319,6 +319,54 @@ func (h *handler) cleanProc(ctx context.Context, group string) error {
  	return fmt.Errorf("unable to kill proc of group %q: %w", group, err)
  }
  
@@ -32,9 +32,20 @@ diff --git a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go b/Cubele
 +		return nil
 +	}
 +	reclaimBytes := fileBytes - shmemBytes
-+	if err := os.WriteFile(path.Join(groupPath, "memory.reclaim"),
-+		[]byte(strconv.FormatUint(reclaimBytes, 10)), defaultFilePerm); err != nil &&
-+		!errors.Is(err, syscall.EAGAIN) {
++	// memory.reclaim returns EAGAIN for partial reclaim. os.File.Write can
++	// interpret it as pollable I/O and wait forever; use one kernel write.
++	fd, err := syscall.Open(path.Join(groupPath, "memory.reclaim"), syscall.O_WRONLY|syscall.O_CLOEXEC, 0)
++	if err != nil {
++		return fmt.Errorf("open memory.reclaim for reusable cgroup %q: %w", group, err)
++	}
++	defer syscall.Close(fd)
++	for {
++		_, err = syscall.Write(fd, []byte(strconv.FormatUint(reclaimBytes, 10)))
++		if !errors.Is(err, syscall.EINTR) {
++			break
++		}
++	}
++	if err != nil && !errors.Is(err, syscall.EAGAIN) {
 +		return fmt.Errorf("reclaim %d file-cache bytes from reusable cgroup %q: %w", reclaimBytes, group, err)
 +	}
 +	// EAGAIN means the kernel reclaimed less than requested. That best-effort
@@ -45,7 +56,7 @@ diff --git a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go b/Cubele
  func (h *handler) CleanForReuse(ctx context.Context, group string) error {
  	exists := h.IsExist(ctx, group)
  	if !exists {
-@@ -333,6 +370,10 @@ func (h *handler) CleanForReuse(ctx context.Context, group string) error {
+@@ -333,6 +381,10 @@ func (h *handler) CleanForReuse(ctx context.Context, group string) error {
  	if err != nil {
  		return err
  	}

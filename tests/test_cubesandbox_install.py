@@ -92,6 +92,9 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert 'apply_once "$CGROUP_RECLAIM_PATCH_FILE"' in helper
     assert '"memory.reclaim"' in cgroup_reclaim
     assert "fileBytes - shmemBytes" in cgroup_reclaim
+    assert "syscall.Write" in cgroup_reclaim
+    assert "syscall.EAGAIN" in cgroup_reclaim
+    assert "os.WriteFile(path.Join(groupPath, \"memory.reclaim\")" not in cgroup_reclaim
     assert "RUSTUP_URL_PATCH_FILE" in helper
     assert 'apply_once "$RUSTUP_URL_PATCH_FILE"' in helper
     assert "RUSTUP_INIT_URL" in rustup_url
