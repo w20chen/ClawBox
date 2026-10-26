@@ -104,3 +104,10 @@ def test_linux_guest_script_normalizer_rejects_binary_data(tmp_path):
         assert "binary file" in str(exc)
     else:
         raise AssertionError("binary script was accepted")
+
+
+def test_runtime_image_builds_content_verified_predictor_startup_cache():
+    source = Path("scripts/refresh-lab-images.py").read_text(encoding="utf-8")
+
+    assert "clawtune_sidecar.predictors.startup_cache" in source
+    assert "--artifact-dir /opt/clawtune/cold-start/tool-resource" in source

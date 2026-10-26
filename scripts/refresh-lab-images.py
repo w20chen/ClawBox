@@ -229,6 +229,8 @@ LABEL org.opencontainers.image.source.clawtune.revision="{revision}"
                 dockerfile += '''COPY plugin /opt/clawtune/packages/clawtune-plugin
 COPY selected-seed /opt/clawtune/cold-start/tool-resource
 ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
+RUN /opt/clawtune/venv/bin/python -m clawtune_sidecar.predictors.startup_cache \
+    --artifact-dir /opt/clawtune/cold-start/tool-resource
 COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
 COPY scripts/initialize-clawtune-state.py /usr/local/bin/initialize-clawtune-state.py
 COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint

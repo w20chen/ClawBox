@@ -142,6 +142,8 @@ COPY --from=clawtune seeds/bootstrap-v2 ./cold-start/tool-resource
 ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
 RUN python3 -m venv /opt/clawtune/venv \
  && /opt/clawtune/venv/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" ./services/sidecar \
+ && /opt/clawtune/venv/bin/python -m clawtune_sidecar.predictors.startup_cache \
+      --artifact-dir /opt/clawtune/cold-start/tool-resource \
  && sed -i 's/\r$//' services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
  && /bin/sh services/sidecar/src/tool_resource/_mvdan_adapter/build.sh \
  && rm -rf /opt/clawtune/cache/go-toolchain-* /opt/clawtune/cache/go-mod-cache \

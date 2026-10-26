@@ -34,7 +34,9 @@ COPY --from=clawtune seeds/bootstrap-v2 /opt/clawtune/cold-start/tool-resource
 ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
 COPY --from=plugin-build /src/plugin/dist /opt/clawtune/packages/clawtune-plugin/dist
 COPY --from=clawtune packages/clawtune-plugin/openclaw.plugin.json packages/clawtune-plugin/package.json /opt/clawtune/packages/clawtune-plugin/
-RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune/services/sidecar
+RUN /opt/clawtune/venv/bin/pip install --upgrade --force-reinstall /opt/clawtune/services/sidecar \
+ && /opt/clawtune/venv/bin/python -m clawtune_sidecar.predictors.startup_cache \
+      --artifact-dir /opt/clawtune/cold-start/tool-resource
 RUN chmod 0755 /usr/bin/envd /usr/local/bin/cube-runtime-entrypoint.sh \
  && chmod 0755 /usr/local/bin/ssh
 ENV PATH=/usr/local/bin:/opt/clawtune/venv/bin:$PATH

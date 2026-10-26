@@ -601,6 +601,16 @@ ClawBox changes require neither image rebuild.
 These options are saved with the image build settings. Changing them requires
 new Tool images/templates and a new qualified run ID, but no host apply or
 prediction retraining when collector measurement semantics are unchanged.
+Runtime image builds also materialize a content-verified prepared predictor
+cache from the selected immutable seed. Runtime VMs read the cache from their
+shared immutable image layer; it is not copied into each session's private
+writable state. A session uses it only when the Python ABI, feature bound, cache
+digest, and both private source-snapshot digests match; otherwise startup
+rebuilds the same state from JSON. Changing the seed or this ClawTune
+predictor/cache code therefore requires rebuilding the single Runtime image and
+using a new qualification/run ID. It does not require rebuilding Tool task
+images or retraining when the underlying seed and prediction semantics remain
+unchanged.
 The collector refresh below carries the source image's prewarm settings to each
 task image. Task workspaces/dependencies are retained. Runtime templates remain
 valid for a Tool-only collector change. Validate collection after restore before
