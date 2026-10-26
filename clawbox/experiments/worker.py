@@ -27,6 +27,9 @@ from threading import Event, Lock, RLock, Semaphore, Thread
 from types import SimpleNamespace
 from typing import Any, Callable
 
+_WORKER_MODULE_STARTED_MONOTONIC = time.monotonic()
+_WORKER_MODULE_STARTED_PROCESS_CPU = time.process_time()
+
 from clawbox.cube import (
     CubeCommandExecutor, CubeSandboxClient, CubeSandboxLifecycle,
     OwnedSandboxJournal, Ownership,
@@ -1913,6 +1916,8 @@ class ExperimentWorker:
 
     def run(self, *, arm_ids: set[str] | None = None,
             write_summary: bool = True) -> list[ResultEnvelope]:
+        self._run_entered_monotonic = time.monotonic()
+        self._run_entered_process_cpu = time.process_time()
         with worker_thread_scheduling(
                 self.spec.execution.worker_thread_switch_interval_seconds):
             return self._run(arm_ids=arm_ids, write_summary=write_summary)
@@ -1985,6 +1990,7 @@ class ExperimentWorker:
     def _run_arm(self, arm: ExperimentArm, result_path: Path, marker_path: Path) -> ResultEnvelope:
         started_at = utcnow()
         started = time.monotonic()
+        started_process_cpu = time.process_time()
         session_cases = arm.session_cases or (arm.case,)
         tool_sandboxes = {
             (case.sandbox or arm.sandbox).template: case.sandbox or arm.sandbox
@@ -2024,6 +2030,8 @@ class ExperimentWorker:
                     )
             return providers
 
+        startup_gate_started = time.monotonic()
+        startup_gate_started_process_cpu = time.process_time()
         # Template provenance and the immutable prediction seed are independent
         # startup gates.  Run them together so neither serially extends the
         # pre-event critical path.
@@ -2038,6 +2046,8 @@ class ExperimentWorker:
             if template_future is not None:
                 template_future.result()
             prediction_providers = prediction_future.result()
+        startup_gate_completed = time.monotonic()
+        startup_gate_completed_process_cpu = time.process_time()
         activity_tracker = ArmActivityTracker(arm.concurrency)
         events = EventWriter(
             self.output_root / "events" / f"{arm.arm_id}.jsonl",
@@ -2145,7 +2155,53 @@ class ExperimentWorker:
             transfer_timeout_seconds=arm.resources.pool_transfer_timeout_seconds,
             snapshot_aware=arm.policy.snapshot_aware_residency,
         )
-        events.write({"event": "shared_memory_pool_initialized", **snapshot_pool.snapshot()})
+        first_event_started = time.monotonic()
+        first_event_started_process_cpu = time.process_time()
+        events.write({
+            "event": "shared_memory_pool_initialized",
+            "worker_startup_stage_seconds": {
+                "module_to_run": max(
+                    0.0, self._run_entered_monotonic
+                    - _WORKER_MODULE_STARTED_MONOTONIC,
+                ),
+                "pre_arm": max(0.0, started - self._run_entered_monotonic),
+                "arm_setup_before_gates": max(
+                    0.0, startup_gate_started - started,
+                ),
+                "template_and_prediction_gates": max(
+                    0.0, startup_gate_completed - startup_gate_started,
+                ),
+                "post_gate_to_first_event": max(
+                    0.0, first_event_started - startup_gate_completed,
+                ),
+                "module_to_first_event": max(
+                    0.0, first_event_started - _WORKER_MODULE_STARTED_MONOTONIC,
+                ),
+            },
+            "worker_startup_process_cpu_seconds": {
+                "module_to_run": max(
+                    0.0, self._run_entered_process_cpu
+                    - _WORKER_MODULE_STARTED_PROCESS_CPU,
+                ),
+                "arm_setup_before_gates": max(
+                    0.0, startup_gate_started_process_cpu
+                    - started_process_cpu,
+                ),
+                "template_and_prediction_gates": max(
+                    0.0, startup_gate_completed_process_cpu
+                    - startup_gate_started_process_cpu,
+                ),
+                "post_gate_to_first_event": max(
+                    0.0, first_event_started_process_cpu
+                    - startup_gate_completed_process_cpu,
+                ),
+                "arm_to_first_event": max(
+                    0.0, first_event_started_process_cpu
+                    - started_process_cpu,
+                ),
+            },
+            **snapshot_pool.snapshot(),
+        })
         domains = {}
         os_default = arm.execution.placement_policy == 'os_default'
         for node in (() if os_default else arm.resources.compute_nodes) or (None,):
