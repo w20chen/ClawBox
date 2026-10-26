@@ -149,3 +149,22 @@ including any dependency-install wait, lifecycle-lock wait, memory admission,
 restore, routing, and bookkeeping.
 `admission_blocked_seconds` covers memory admission only. Neither includes the
 HTTP transport before the callback; use the guest/control journal for that.
+
+Startup `native_ssh_warmup_finished` records submission, worker start and worker
+finish on the host monotonic clock, plus each attempt's command duration, exit
+status or exception type, identity match, and retry sleep. It is emitted even
+when warmup fails. Startup `native_ssh_identity_ready.service_seconds` spans
+submission to join observation; use its separate queue, execution, and blocking
+join fields for attribution. All durations are seconds.
+
+Create/restore lifecycle `stage_seconds` includes `pin_local_s` and its
+`pin_local_vm_lock_wait_seconds`, `pin_local_discovery_seconds`, and
+`pin_local_placement_service_seconds` components. Discovery is included in
+placement service. Same-VM operations serialize; unrelated VM placement checks
+do not wait for a borrower's migration or reclaim to finish.
+
+`tool_admitted.memory_baseline_timing` separates the admission-condition wait
+and hold during claim lookup, the kernel memory sample, and the wait and hold
+when publishing that sample. It also records total wall and calling-thread CPU
+seconds and whether a new baseline was bound. These components refine the
+existing `control_stage_seconds.memory_baseline` interval; do not add them to it.

@@ -88,6 +88,39 @@ def test_session_pair_starts_tool_and_runtime_concurrently() -> None:
     assert runtime[1] <= runtime[2]
 
 
+@pytest.mark.parametrize('succeeds', [False, True])
+def test_runtime_ssh_warmup_records_execution_and_retry_time(monkeypatch, succeeds):
+    clock = [100.0]
+    calls = []
+    monkeypatch.setattr(worker_module.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(worker_module.time, 'sleep', lambda duration: clock.__setitem__(0, clock[0] + duration))
+
+    class Executor:
+        def execute(self, command, timeout):
+            calls.append(command)
+            clock[0] += 3.0
+            if len(calls) == 1:
+                raise TimeoutError('transport timeout')
+            return SimpleNamespace(exit_code=0, stdout='session-1' if succeeds else 'stale-session', stderr='')
+
+    timing = {}
+    def run():
+        return worker_module.warm_runtime_ssh_route(
+            Executor(), NativeSSHRoute('tool-1', 22, 1, '192.0.2.20', 22022),
+            'session-1', attempt_limit=2, timing=timing)
+    if succeeds:
+        assert run() == 2
+    else:
+        with pytest.raises(RuntimeError, match='intended Tool identity'):
+            run()
+    first, second = timing['attempt_observations']
+    assert first['error_type'] == 'TimeoutError'
+    assert first['execute_seconds'] == second['execute_seconds'] == 3.0
+    assert first['retry_sleep_seconds'] == 0.5
+    assert second['retry_sleep_seconds'] == 0.0
+    assert second['identity_matches'] is succeeds
+
+
 def test_snapshot_retention_value_uses_logical_state_not_private_delta() -> None:
     lifecycle = object.__new__(CubeSandboxLifecycle)
     lifecycle.snapshot_reuse_probability = 0.5
@@ -980,7 +1013,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             super().unregister(session_id)
 
     monkeypatch.setattr(worker_module, "PolicyCoordinator", ObservedCoordinator)
-    monkeypatch.setattr(worker_module, "warm_runtime_ssh_route", lambda *_args: 1)
+    monkeypatch.setattr(worker_module, "warm_runtime_ssh_route", lambda *_args, **_kwargs: 1)
 
     class SnapshotCommands(_Commands):
         def run(self, command: str, **kwargs):

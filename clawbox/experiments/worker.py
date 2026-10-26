@@ -109,22 +109,33 @@ def start_sandbox_pair(tool_lifecycle: CubeSandboxLifecycle,
 
 def warm_runtime_ssh_route(
     runtime_executor: Any, route: NativeSSHRoute, session_id: str,
-    *, attempt_limit: int = 120,
+    *, attempt_limit: int = 120, timing: dict[str, Any] | None = None,
 ) -> int:
     """Warm the long-lived Tool bridge through the proven Runtime route."""
     command = native_ssh_identity_command(route, session_id)
     last_error = ""
     for attempt in range(1, attempt_limit + 1):
+        started = time.monotonic()
+        detail: dict[str, Any] = {"attempt": attempt, "started_monotonic_s": started}
         try:
             result = runtime_executor.execute(command, 30)
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            detail["error_type"] = type(exc).__name__
         else:
-            if result.exit_code == 0 and result.stdout.strip() == session_id:
-                return attempt
+            detail["exit_code"] = result.exit_code
+            detail["identity_matches"] = result.stdout.strip() == session_id
             last_error = f"exit={result.exit_code}: " + result.stderr[-1000:]
+        detail["execute_seconds"] = time.monotonic() - started
+        detail["retry_sleep_seconds"] = 0.0
+        if timing is not None:
+            timing.setdefault("attempt_observations", []).append(detail)
+        if detail.get("exit_code") == 0 and detail.get("identity_matches"):
+            return attempt
         if attempt < attempt_limit:
+            sleep_started = time.monotonic()
             time.sleep(0.5)
+            detail["retry_sleep_seconds"] = time.monotonic() - sleep_started
     raise RuntimeError(
         "Runtime native SSH warmup did not reach the intended Tool identity "
         f"for {session_id}: {last_error}"
@@ -3845,7 +3856,7 @@ class ExperimentWorker:
                                     "service_seconds": time.monotonic() - identity_started,
                                 })
                             control_marks["restore_and_route"] = time.monotonic()
-                            coordinator.bind_tool_memory(session_id)
+                            memory_baseline_timing = coordinator.bind_tool_memory(session_id)
                             control_marks["memory_baseline"] = time.monotonic()
                             if (arm.execution.tool_call_cpu_policy == 'c2'
                                     and c2_applies(execution_scope, request.get('operation'))):
@@ -3940,6 +3951,7 @@ class ExperimentWorker:
                     events.write({
                         "event": "tool_admitted", "session_id": session_id,
                         "control_stage_seconds": control_stages,
+                        "memory_baseline_timing": memory_baseline_timing,
                         "control_total_seconds": control_marks['bookkeeping']-control_marks['started'],
                         "execution_id": execution_id,
                         "execution_scope": execution_scope,
@@ -4194,6 +4206,39 @@ class ExperimentWorker:
                 route_warmup_future = None
                 route_warmup_started = None
                 route_warmup_reported = False
+                route_warmup_timing: dict[str, Any] = {}
+
+                def perform_tool_telemetry_warmup() -> int:
+                    started = time.monotonic()
+                    route_warmup_timing["worker_started_monotonic_s"] = started
+                    status = "error"
+                    try:
+                        attempts = warm_runtime_ssh_route(
+                            runtime_executor, setup_route, session_id,
+                            timing=route_warmup_timing,
+                        )
+                        status = "ok"
+                        return attempts
+                    finally:
+                        finished = time.monotonic()
+                        route_warmup_timing.update({
+                            "worker_finished_monotonic_s": finished,
+                            "executor_queue_seconds": started - route_warmup_started,
+                            "warmup_execution_seconds": finished - started,
+                        })
+                        # Emit here even if startup fails before joining the
+                        # future. These timestamps belong to the worker, not
+                        # to the session's later observation of its result.
+                        events.write({
+                            "event": "native_ssh_warmup_finished",
+                            "session_id": session_id,
+                            "execution_id": "startup-warmup",
+                            "sandbox_id": setup_route.sandbox_id,
+                            "endpoint_epoch": setup_route.epoch,
+                            "phase": "startup", "status": status,
+                            "submitted_monotonic_s": route_warmup_started,
+                            **route_warmup_timing,
+                        })
 
                 def begin_tool_telemetry_warmup() -> None:
                     nonlocal route_warmup_future, route_warmup_started
@@ -4201,10 +4246,7 @@ class ExperimentWorker:
                         return
                     route_warmup_started = time.monotonic()
                     route_warmup_future = telemetry_warmup_pool.submit(
-                        warm_runtime_ssh_route,
-                        runtime_executor,
-                        setup_route,
-                        session_id,
+                        perform_tool_telemetry_warmup,
                     )
 
                 def await_tool_telemetry_warmup() -> None:
@@ -4228,7 +4270,15 @@ class ExperimentWorker:
                             "attempts": attempts,
                             "phase": "startup",
                             "service_seconds": completed - route_warmup_started,
+                            "service_scope": "submission_to_join_observation",
                             "critical_path_wait_seconds": completed - wait_started,
+                            "join_started_monotonic_s": wait_started,
+                            "join_finished_monotonic_s": completed,
+                            "worker_finished_to_join_observed_seconds": (
+                                completed - route_warmup_timing["worker_finished_monotonic_s"]
+                            ),
+                            "executor_queue_seconds": route_warmup_timing["executor_queue_seconds"],
+                            "warmup_execution_seconds": route_warmup_timing["warmup_execution_seconds"],
                             "overlapped_with_runtime_startup": True,
                         })
 

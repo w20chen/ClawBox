@@ -304,12 +304,16 @@ class CubeSandboxLifecycle:
                             else None
                         )
                         if verified_cgroup is None:
-                            self.numa_borrower.pin_local(self.sandbox_id)
+                            pin_observation = self.numa_borrower.pin_local(self.sandbox_id)
                         else:
-                            self.numa_borrower.pin_local(
+                            pin_observation = self.numa_borrower.pin_local(
                                 self.sandbox_id, verified_cgroup=verified_cgroup,
                                 **({'verified_placement': placement} if placement else {}),
                             )
+                        if isinstance(pin_observation, Mapping):
+                            for name in ("vm_lock_wait_seconds", "discovery_seconds",
+                                         "placement_service_seconds"):
+                                stage_seconds[f"pin_local_{name}"] = pin_observation[name]
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
                                     started_wall, started_mono,
@@ -730,12 +734,16 @@ class CubeSandboxLifecycle:
                             else None
                         )
                         if verified_cgroup is None:
-                            self.numa_borrower.pin_local(self.sandbox_id)
+                            pin_observation = self.numa_borrower.pin_local(self.sandbox_id)
                         else:
-                            self.numa_borrower.pin_local(
+                            pin_observation = self.numa_borrower.pin_local(
                                 self.sandbox_id, verified_cgroup=verified_cgroup,
                                 **({'verified_placement': placement} if placement else {}),
                             )
+                        if isinstance(pin_observation, Mapping):
+                            for name in ("vm_lock_wait_seconds", "discovery_seconds",
+                                         "placement_service_seconds"):
+                                stage_seconds[f"pin_local_{name}"] = pin_observation[name]
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
                         raise RuntimeError("WARM snapshot accounting disappeared before restore")

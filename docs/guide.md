@@ -579,6 +579,33 @@ When the task workspaces and dependencies are already verified and only the
 ClawTune guest collector contract/code changed, reuse the immutable task images
 instead of running the full ARM64 dependency build again:
 
+Prepare the shared Tool collector image and template with the current ClawTune
+checkout selected by `CLAWTUNE_ROOT` in the machine environment:
+
+```bash
+bash scripts/clawbox experiment images --role sandbox \
+  --profile "$HOME/.config/clawbox/host.json" --tool-prewarm enabled
+```
+
+The saved build settings must identify Go and the source/generated headers for
+the actual Cube guest kernel. Set `--go`, `--kernel-source`, and `--kernel-build`
+on the first build or when those locations change. `--role sandbox` updates
+only the Tool image/template; `--role runtime` updates only Runtime. Host-only
+ClawBox changes require neither image rebuild.
+
+| Image option | Meaning |
+| --- | --- |
+| `--tool-prewarm enabled\|disabled` | Default `enabled`. Compile and attach Tool BPF before template readiness, then reuse the restored collector. No measurement window is opened during preparation. |
+| `--tool-prewarm-timeout-seconds N` | Default 120 seconds; positive deadline for collector initialization during Tool template preparation. Failure prevents template readiness. |
+
+These options are saved with the image build settings. Changing them requires
+new Tool images/templates and a new qualified run ID, but no host apply or
+prediction retraining when collector measurement semantics are unchanged.
+The collector refresh below carries the source image's prewarm settings to each
+task image. Task workspaces/dependencies are retained. Runtime templates remain
+valid for a Tool-only collector change. Validate collection after restore before
+refreshing the full workload.
+
 ```bash
 python scripts/refresh-swe-collector-images.py \
   --workload /absolute/path/workload-ready.json \
@@ -786,6 +813,16 @@ measurements are unavailable, not zero. NUMA allocation-event counters are pages
 not cross-NUMA traffic bytes; do not infer traffic without a qualified host PMU.
 
 `offered_to_final_response_*` measures scheduled arrival to host receipt of the final response, including completion polling and transport but excluding later artifact collection, validation, and cleanup; `offered_to_completion_*` retains the older postcollection endpoint.
+
+For startup delays, compare `native_ssh_warmup_finished.executor_queue_seconds`
+with `warmup_execution_seconds`. The startup `native_ssh_identity_ready` event
+reports the session's blocking join separately as `critical_path_wait_seconds`.
+These intervals overlap Runtime startup; do not add them to sidecar readiness.
+For per-tool delays, `tool_admitted.memory_baseline_timing` distinguishes
+admission-lock waits from the kernel memory sample and reports calling-thread
+CPU time alongside wall time.
+Host-side timing and lock fixes require a new run ID, without rebuilding guest
+images or retraining predictions when their contents and semantics are unchanged.
 
 ## When changes take effect
 

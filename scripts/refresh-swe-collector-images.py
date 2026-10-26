@@ -71,14 +71,21 @@ def image_content_manifest(image: str) -> dict[str, Any]:
         ["docker", "run", "--rm", "--entrypoint", "/bin/sh", image, "-lc", command],
         text=True,
     )
+    config = json.loads(subprocess.check_output(
+        ["docker", "image", "inspect", image], text=True,
+    ))[0].get("Config") or {}
+    environment = dict(value.split("=", 1) for value in config.get("Env") or [])
     return {
         "source_image": immutable_digest(image),
         "files_sha256": output.splitlines(),
         "manifest_sha256": hashlib.sha256(output.encode()).hexdigest(),
+        "tool_prewarm": environment.get("CLAWBOX_TOOL_PREWARM", "1") == "1",
+        "tool_prewarm_timeout_seconds": int(environment.get("CLAWBOX_TOOL_PREWARM_TIMEOUT_SECONDS", "120")),
     }
 
 
-def overlay_dockerfile(collector_image: str, clawtune_revision: str) -> str:
+def overlay_dockerfile(collector_image: str, clawtune_revision: str, *,
+                       tool_prewarm: bool = True, tool_prewarm_timeout_seconds: int = 120) -> str:
     return f"""ARG BASE_IMAGE
 FROM {collector_image} AS collector
 FROM ${{BASE_IMAGE}}
@@ -91,7 +98,9 @@ COPY --from=collector /opt/clawtune/cache/agent-sched-bench /opt/clawtune/cache/
 COPY --from=collector /usr/local/bin/tool-bridge /usr/local/bin/tool-bridge
 COPY --from=collector /usr/local/bin/cube-tool-entrypoint.sh /usr/local/bin/cube-tool-entrypoint.sh
 RUN chmod 755 /usr/local/bin/tool-bridge /usr/local/bin/cube-tool-entrypoint.sh
-ENV CLAWTUNE_REVISION={clawtune_revision} \\
+ENV CLAWBOX_TOOL_PREWARM={int(tool_prewarm)} \\
+    CLAWBOX_TOOL_PREWARM_TIMEOUT_SECONDS={tool_prewarm_timeout_seconds} \\
+    CLAWTUNE_REVISION={clawtune_revision} \\
     XDG_CACHE_HOME=/opt/clawtune/cache \\
     BCC_KERNEL_SOURCE=/lib/modules/6.18.28/build \\
     CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py \\
@@ -200,7 +209,9 @@ def main() -> int:
     state_lock = threading.Lock()
     collector_image = immutable_digest(args.collector_image)
     manifest = image_content_manifest(collector_image)
-    dockerfile = overlay_dockerfile(collector_image, args.clawtune_revision)
+    dockerfile = overlay_dockerfile(collector_image, args.clawtune_revision,
+        tool_prewarm=manifest['tool_prewarm'],
+        tool_prewarm_timeout_seconds=manifest['tool_prewarm_timeout_seconds'])
     recipe = {
         "schema_version": 1,
         "collector": manifest,

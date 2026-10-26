@@ -3,7 +3,35 @@ set -eu
 
 mkdir -p /workspace /var/log /run/clawtune /var/lib/clawtune/artifacts/tool-resource
 tool_bridge_pid=""
+collector_pid=""
 if [ "${CLAWBOX_VM_ROLE:-runtime}" = "tool" ]; then
+  if [ "${CLAWBOX_TOOL_PREWARM:-1}" = "1" ]; then
+    rm -f /run/clawtune/prewarmed
+    kernel_source="/lib/modules/$(uname -r)/build"
+    test -d "$kernel_source"
+    zcat /proc/config.gz | cmp -s - "$kernel_source/.config" || {
+      echo 'Guest kernel/header configuration mismatch; rebuild Tool image' >&2; exit 1;
+    }
+    BCC_KERNEL_SOURCE="$kernel_source" XDG_CACHE_HOME=/opt/clawtune/cache \
+      /opt/clawtune/venv/bin/python /opt/clawtune-guest/tools/guest_collector_server.py \
+      --socket /run/clawtune/guest-collector.sock \
+      --token-file /run/clawtune/guest-collector.token \
+      --artifact-root /var/lib/clawtune/artifacts/tool-resource \
+      --max-active "${TOOL_MAX_CONCURRENCY:-4}" --prewarm \
+      --ready-file /run/clawtune/prewarmed \
+      >/var/log/clawtune-guest-collector.log 2>&1 &
+    collector_pid=$!
+    remaining=${CLAWBOX_TOOL_PREWARM_TIMEOUT_SECONDS:-120}
+    while ! test -s /run/clawtune/prewarmed; do
+      if ! kill -0 "$collector_pid" 2>/dev/null || [ "$remaining" -le 0 ]; then
+        cat /var/log/clawtune-guest-collector.log >&2
+        echo 'Tool BPF prewarm failed; inspect collector log and kernel headers' >&2
+        kill "$collector_pid" 2>/dev/null || true
+        exit 1
+      fi
+      remaining=$((remaining - 1)); sleep 1
+    done
+  fi
   # Cube builds a template by booting the image without per-session env vars.
   # Keep envd healthy in that phase; real Tool instances must provide both
   # ephemeral keys and then start their SSH/telemetry service.
@@ -23,5 +51,5 @@ if [ "${CLAWBOX_VM_ROLE:-runtime}" = "tool" ]; then
 fi
 /usr/bin/envd -port "${ENVD_PORT:-49983}" >/var/log/envd.log 2>&1 &
 envd_pid=$!
-trap 'kill "$envd_pid" 2>/dev/null || true; [ -z "$tool_bridge_pid" ] || kill "$tool_bridge_pid" 2>/dev/null || true' TERM INT EXIT
+trap 'kill "$envd_pid" 2>/dev/null || true; [ -z "$tool_bridge_pid" ] || kill "$tool_bridge_pid" 2>/dev/null || true; [ -z "$collector_pid" ] || kill "$collector_pid" 2>/dev/null || true' TERM INT EXIT
 wait "$envd_pid"

@@ -3,7 +3,8 @@
 Reservations cover only growth not already visible in the measured charge.
 CPU placement, runtime congestion enforcement and snapshot policy are external.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from concurrent.futures import Future
 from threading import Condition
 from typing import Callable
 from pathlib import Path
@@ -55,11 +56,7 @@ class DemandLedger:
         # caller samples while concurrent exact checks share that result; the
         # policy condition is reacquired before the result is reconciled with
         # claims added or removed during the read.
-        self._exact_sample_condition = Condition()
-        self._exact_sample_inflight = False
-        self._exact_sample_result: dict[
-            tuple[str, str], tuple[Claim, tuple[int, int] | BaseException]
-        ] = {}
+        self._exact_sample_future: Future | None = None
 
     def pending_upper_bound(self, scope=None):
         """Return the safe nominal bound without sampling every live claim."""
@@ -82,56 +79,55 @@ class DemandLedger:
         same safe reservation semantics while allowing tool completion and
         unrelated fast-path admissions to publish progress.
         """
-        snapshot = dict(self.claims)
+        # Claims can be extended, released or rebound while sampling is outside
+        # admission. Keep the sampled nominal amount/baseline immutable so its
+        # observed growth can be reconciled with the current reservation.
         self.pending_exact_count += 1
-        leader = False
-        measured: dict[
-            tuple[str, str], tuple[Claim, tuple[int, int] | BaseException]
-        ]
-        self.condition.release()
+        future = self._exact_sample_future
+        leader = future is None
+        if leader:
+            future = Future()
+            self._exact_sample_future = future
+            snapshot = {key: (claim, replace(claim)) for key, claim in self.claims.items()}
+        # Match Condition.wait's recursive-lock handling. A nested pressure
+        # check must release every acquisition, not leave the ledger locked
+        # throughout filesystem I/O or a wait for another sampling thread.
+        lock_state = self.condition._release_save()
         try:
-            with self._exact_sample_condition:
-                if self._exact_sample_inflight:
-                    self._exact_sample_condition.wait_for(
-                        lambda: not self._exact_sample_inflight
-                    )
-                    measured = dict(self._exact_sample_result)
-                else:
-                    self._exact_sample_inflight = True
-                    leader = True
+            if leader:
+                try:
                     measured = {}
-            if leader:
-                for key, claim in snapshot.items():
-                    try:
-                        value: tuple[int, int] | BaseException = claim.remaining()
-                    except BaseException as exc:
-                        value = exc
-                    measured[key] = (claim, value)
-                with self._exact_sample_condition:
-                    self._exact_sample_result = measured
-                    self._exact_sample_inflight = False
-                    self._exact_sample_condition.notify_all()
+                    for key, (claim, frozen) in snapshot.items():
+                        try:
+                            value: tuple[int, int] | BaseException = frozen.remaining()
+                        except BaseException as exc:
+                            value = exc
+                        measured[key] = (claim, frozen, value)
+                    future.set_result(measured)
+                except BaseException as exc:
+                    future.set_exception(exc)
+            measured = future.result()
         finally:
-            if leader:
-                # Never strand followers if an unexpected interpreter-level
-                # failure occurs outside an individual claim read.
-                with self._exact_sample_condition:
-                    if self._exact_sample_inflight:
-                        self._exact_sample_inflight = False
-                        self._exact_sample_condition.notify_all()
-            self.condition.acquire()
+            self.condition._acquire_restore(lock_state)
+            if leader and self._exact_sample_future is future:
+                self._exact_sample_future = None
 
         global_pending = 0
         scoped_pending = 0
         for key, claim in self.claims.items():
             sampled = measured.get(key)
-            if sampled is None or sampled[0] is not claim:
+            if (sampled is None or sampled[0] is not claim
+                    or sampled[1].baseline != claim.baseline
+                    or sampled[1].sample is not claim.sample):
                 remaining = (claim.amount, claim.local_amount)
             else:
-                value = sampled[1]
+                frozen, value = sampled[1:]
                 if isinstance(value, BaseException):
                     raise value
-                remaining = value
+                remaining = (
+                    max(0, claim.amount - (frozen.amount - value[0])),
+                    max(0, claim.local_amount - (frozen.local_amount - value[1])),
+                )
             global_pending += remaining[0]
             if claim.scope == scope:
                 scoped_pending += remaining[1]

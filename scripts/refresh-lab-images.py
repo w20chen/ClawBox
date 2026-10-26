@@ -65,6 +65,9 @@ def resolve_build_inputs(args: argparse.Namespace, profile: dict[str, Any]) -> d
             or os.getenv("CLAWBOX_GUEST_KERNEL_BUILD")
         ),
         "direct_network": direct_network,
+        "tool_prewarm": getattr(args, "tool_prewarm", None) or saved.get("tool_prewarm", "enabled"),
+        "tool_prewarm_timeout_seconds": (getattr(args, "tool_prewarm_timeout_seconds", None)
+                                        or saved.get("tool_prewarm_timeout_seconds", 120)),
     }
 
 
@@ -109,6 +112,8 @@ def main():
     p.add_argument("--role", choices=["runtime", "sandbox"], action="append")
     p.add_argument("--kernel-source")
     p.add_argument("--kernel-build")
+    p.add_argument("--tool-prewarm", choices=["enabled", "disabled"])
+    p.add_argument("--tool-prewarm-timeout-seconds", type=int)
     args = p.parse_args()
     if not args.profile.is_file():
         p.error(f"host profile does not exist: {args.profile}; run 'clawbox experiment setup' first")
@@ -117,6 +122,8 @@ def main():
         if not isinstance(profile, dict):
             raise ValueError("root value is not an object")
         build = resolve_build_inputs(args, profile)
+        if args.tool_prewarm_timeout_seconds is not None and args.tool_prewarm_timeout_seconds <= 0:
+            raise ValueError("--tool-prewarm-timeout-seconds must be positive")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         p.error(f"cannot read host profile {args.profile}: {exc}")
     if "sandbox" in (args.role or ("runtime", "sandbox")):
@@ -151,9 +158,11 @@ def main():
     }:
         p.error("image refresh must run on the target ARM64 Linux host")
     plugin = tune/"packages/clawtune-plugin"
-    if not (plugin/"node_modules/.bin/tsc").exists():
-        call(["npm", "ci", "--ignore-scripts"], cwd=plugin)
-    call(["npm", "run", "build"], cwd=plugin)
+    runtime_requested = "runtime" in (args.role or ("runtime", "sandbox"))
+    if runtime_requested:
+        if not (plugin/"node_modules/.bin/tsc").exists():
+            call(["npm", "ci", "--ignore-scripts"], cwd=plugin)
+        call(["npm", "run", "build"], cwd=plugin)
     revision = source_revision(tune)
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
@@ -168,9 +177,10 @@ def main():
         shutil.copytree(tune/"contracts", context/"contracts")
         shutil.copytree(tune/"seeds", context/"seeds")
         shutil.copytree(seed, context/"selected-seed")
-        shutil.copytree(plugin/"dist", context/"plugin/dist")
-        for name in ("package.json", "openclaw.plugin.json"):
-            shutil.copy(plugin/name, context/"plugin"/name)
+        if runtime_requested:
+            shutil.copytree(plugin/"dist", context/"plugin/dist")
+            for name in ("package.json", "openclaw.plugin.json"):
+                shutil.copy(plugin/name, context/"plugin"/name)
         shutil.copy(tune/"tools/guest_collector_server.py", context)
         shutil.copytree(root/"scripts", context/"scripts", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(root/"docker/cube-runtime-entrypoint.sh", context/"entrypoint.sh")
@@ -228,6 +238,10 @@ COPY scripts/kb-flush.py /usr/local/bin/kb-flush.py
 RUN chmod 755 /usr/local/bin/ssh /usr/local/bin/runtime-entrypoint /usr/local/bin/clawtune-sidecar-entrypoint
 '''
             else:
+                dockerfile += (
+                    f"ENV CLAWBOX_TOOL_PREWARM={int(build['tool_prewarm'] == 'enabled')} "
+                    f"CLAWBOX_TOOL_PREWARM_TIMEOUT_SECONDS={build['tool_prewarm_timeout_seconds']}\n"
+                )
                 # BCC reads kernel structures: a matching version string alone
                 # is insufficient. Use the actual build's generated headers.
                 probe = Sandbox.create(template=profile[role]["template_id"],

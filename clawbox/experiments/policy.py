@@ -308,20 +308,41 @@ class PolicyCoordinator:
                 claim.baseline = lifecycle()
 
     def bind_tool_memory(self, session_id):
+        started = time.monotonic()
+        cpu_started = time.thread_time()
+        timing = {'sample_seconds': 0.0, 'publish_lock_wait_seconds': 0.0,
+                  'publish_lock_hold_seconds': 0.0}
+        def finished(status):
+            return {**timing, 'status': status,
+                    'service_seconds': time.monotonic() - started,
+                    'thread_cpu_seconds': time.thread_time() - cpu_started}
         key = (session_id, 'tool_admission')
         with self._condition:
+            acquired = time.monotonic()
+            timing['lookup_lock_wait_seconds'] = acquired - started
             claim = self.demand.claims.get(key)
             sample = self._memory_samples.get(session_id, {}).get('tool_admission')
             already_bound = claim is not None and claim.sample is not None
+        timing['lookup_lock_hold_seconds'] = time.monotonic() - acquired
         if claim is None or sample is None or already_bound:
-            return
+            return finished('no_claim' if claim is None else
+                            'no_sampler' if sample is None else 'already_bound')
         # Kernel NUMA accounting can block. Keep the nominal reservation
         # charged while reading, so other sessions can still make progress.
+        sample_started = time.monotonic()
         baseline = sample()
+        publish_started = time.monotonic()
+        timing['sample_seconds'] = publish_started - sample_started
+        status = 'claim_changed'
         with self._condition:
+            acquired = time.monotonic()
+            timing['publish_lock_wait_seconds'] = acquired - publish_started
             if self.demand.claims.get(key) is claim and claim.sample is None:
                 claim.baseline = baseline
                 claim.sample = sample
+                status = 'bound'
+        timing['publish_lock_hold_seconds'] = time.monotonic() - acquired
+        return finished(status)
 
     def pressure(self, additional_bytes: int = 0) -> bool:
         with self._condition:
@@ -330,10 +351,11 @@ class PolicyCoordinator:
     def projected_local_commitment(self, additional_mib: int = 0) -> int:
         """Return LOCAL usage plus still-unmaterialized LOCAL reservations."""
         with self._condition:
+            _, pending = self.demand.pending_breakdown_without_condition(self.demand_scope)
             used, _available = self.physical_sample()
             return (
                 max(used, sum(self._capacity_claims.values()))
-                + self.demand.pending(self.demand_scope)
+                + pending
                 + additional_mib * MIB
                 + self.operation_headroom_bytes
             )
@@ -385,8 +407,11 @@ class PolicyCoordinator:
             memory_reasons = set(reasons) - {'execution_already_inflight'}
             extra = request.amount_bytes+self.operation_headroom_bytes
             upper_deficit = used+self.demand.pending_upper_bound(self.demand_scope)+extra-self.budget_bytes
-            deficit = (0 if upper_deficit<=0 else
-                       max(0,used+self.demand.pending(self.demand_scope)+extra-self.budget_bytes))
+            deficit = 0
+            if upper_deficit > 0:
+                _, pending = self.demand.pending_breakdown_without_condition(self.demand_scope)
+                used, available = self.physical_sample()
+                deficit = max(0, used + pending + extra - self.budget_bytes)
             return {'memory_blocked': bool(memory_reasons), 'scope': self.demand_scope,
                     'waiters': len(self._waiters), 'reasons': list(reasons),
                     'local_used_bytes': used, 'local_available_bytes': available,
@@ -652,6 +677,10 @@ class PolicyCoordinator:
                             if wait_class == "create"
                             and self._startup_headroom_needed(session_id) else 0
                         ),
+                        # A later prefix that cannot fit even with zero pending
+                        # growth must wait for predecessors. Scanning every VM
+                        # cannot admit it and stalls the queue head's checks.
+                        first_budget_blocker_only=(progress_prefix is not None),
                     ) if can_attempt else ()
                     if same_session_inflight:
                         safety_reasons = (*safety_reasons, 'execution_already_inflight')

@@ -35,6 +35,7 @@ CGROUP_RECLAIM_PATCH_FILE=$SCRIPT_DIR/cgroup-reuse-reclaim.patch
 NETWORK_ASYNC_GC_PATCH_FILE=$SCRIPT_DIR/network-startup-async-gc.patch
 IRQ_ROUTING_PATCH_FILE=$SCRIPT_DIR/irq-routing-batch.patch
 IRQ_ACTIVE_PATCH_FILE=$SCRIPT_DIR/irq-routing-active-legacy.patch
+NUMA_CLEAN_FILE_PATCH_FILE=$SCRIPT_DIR/numa-clean-file-and-checkpoint-summary.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -63,6 +64,7 @@ PATCH_FILES=(
   "$NETWORK_ASYNC_GC_PATCH_FILE"
   "$IRQ_ROUTING_PATCH_FILE"
   "$IRQ_ACTIVE_PATCH_FILE"
+  "$NUMA_CLEAN_FILE_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -328,6 +330,7 @@ apply_once "$CGROUP_RECLAIM_PATCH_FILE" "reclaim file cache when returning nativ
 apply_once "$NETWORK_ASYNC_GC_PATCH_FILE" "run stale network-policy GC outside Cubelet readiness"
 apply_once "$IRQ_ROUTING_PATCH_FILE" "batched and deferred interrupt routing"
 apply_once "$IRQ_ACTIVE_PATCH_FILE" "activate only attached legacy IRQ routes"
+apply_once "$NUMA_CLEAN_FILE_PATCH_FILE" "retain shared file backing during NUMA migration and summarize checkpoint timings"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"

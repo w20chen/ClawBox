@@ -115,6 +115,12 @@ def test_resource_feedback_reselects_head_removed_during_exact_sampling():
 
     c.demand.pending_breakdown_without_condition = sample_while_head_completes
 
+    # Ensure this fixture reaches the exact path. With no pending claims the
+    # nominal upper bound already fits and the sampler is correctly skipped.
+    with c._condition:
+        c.demand.add(('active', 'tool_admission'), scope=c.demand_scope,
+                     amount=MIB, local_amount=MIB)
+
     feedback = c.resource_feedback()
     assert removed
     assert feedback['waiters'] == 1
@@ -147,6 +153,28 @@ def test_feasible_tool_prefix_does_not_wait_for_each_predecessor_thread():
         c._waiters.remove(older)
         c._waiter_requests.pop(older)
         c._progress_waiters.remove(older)
+
+
+def test_impossible_tool_prefix_does_not_scan_existing_vm_claims():
+    from clawbox.experiments.policy import AdmissionRequest, MIB
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (8*MIB, 100*MIB))
+    older = object()
+    with c._condition:
+        c._waiters.append(older)
+        c._waiter_requests[older] = AdmissionRequest('older', MIB, 'tool_admission', False)
+        c._progress_waiters.add(older)
+        c.demand.add(('active', 'tool_admission'), scope=c.demand_scope,
+                     amount=MIB, local_amount=MIB)
+        c.demand.claims['active', 'tool_admission'].sample = (
+            lambda: pytest.fail('an impossible prefix scanned VM memory'))
+    with pytest.raises(AdmissionTimeout):
+        c.acquire('new', 4, .02)
+    assert c.demand.pending_exact_count == 0
+    assert ('new', 'tool_admission') not in c.demand.claims
 
 
 def test_tool_prefix_stays_fifo_when_the_whole_prefix_cannot_fit():

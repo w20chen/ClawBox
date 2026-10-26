@@ -1,7 +1,8 @@
 from pathlib import Path
 import shutil
 import subprocess
-from threading import Thread
+from threading import Event, Thread
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 import pytest
@@ -483,3 +484,77 @@ def test_busy_shared_rebind_defers_borrow_without_reserving(tmp_path):
     finally:
         release.set()
         thread.join(2)
+
+
+@pytest.mark.parametrize('operation', ['borrow', 'return', 'reclaim', 'incomplete'])
+def test_slow_vm_operation_does_not_block_other_vm_placement(tmp_path, operation):
+    from clawbox.experiments.numa_borrow import NumaRebindIncomplete
+    root, leaf, proc = make_tree(tmp_path)
+    other = root / '43'
+    shutil.copytree(leaf, other)
+    pool = WarmSnapshotPool(128, borrow_capacity_bytes=128)
+    entered, release, same_started = Event(), Event(), Event()
+    should_block = False
+
+    def write(path, value):
+        if should_block:
+            entered.set()
+            assert release.wait(5), 'test did not release the slow operation'
+            if operation == 'incomplete':
+                raise NumaRebindIncomplete('migration outcome unknown')
+        if path.name == 'memory.reclaim':
+            (leaf / 'memory.numa_stat').write_text('active_anon N0=80 N1=0\n')
+        else:
+            path.write_text(value)
+            path.with_name(path.name + '.effective').write_text(value)
+
+    borrower = SandboxNumaBorrower(root, local_node=0, shared_node=1,
+        shared_pool=pool, proc_root=proc, cgroup_mount=tmp_path/'sys/fs/cgroup',
+        writer=write)
+    borrower.pin_local('sandbox-abc', verified_cgroup=leaf)
+    borrower.pin_local('sandbox-other', verified_cgroup=other)
+    if operation in {'return', 'reclaim'}:
+        borrower.borrow('sandbox-abc', 60)
+    if operation == 'reclaim':
+        (leaf / 'memory.reclaim').write_text('')
+        (leaf / 'memory.numa_stat').write_text('active_anon N0=50 N1=30\n')
+    should_block = True
+
+    def slow_operation():
+        if operation == 'return':
+            return borrower.return_local('sandbox-abc')
+        if operation == 'reclaim':
+            return borrower.release_destroyed('sandbox-abc')
+        return borrower.borrow('sandbox-abc', 60)
+
+    def same_vm_observation():
+        same_started.set()
+        return borrower.observe_resident('sandbox-abc')
+
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        slow = workers.submit(slow_operation)
+        try:
+            assert entered.wait(2)
+            assert pool.borrowed_bytes == 60
+            assert workers.submit(borrower.borrowed).result(timeout=1) == ('sandbox-abc',)
+            same = workers.submit(same_vm_observation)
+            assert same_started.wait(1)
+            # The actual placement path must finish while migration is blocked.
+            observation = workers.submit(borrower.pin_local, 'sandbox-other',
+                                         verified_cgroup=other).result(timeout=1)
+            assert observation['effective_mems'] == '0'
+            assert not same.done()
+            if operation in {'borrow', 'return', 'incomplete'}:
+                with pytest.raises(NumaBorrowUnavailable, match='in progress'):
+                    workers.submit(borrower.borrow, 'sandbox-other', 60).result(timeout=1)
+                assert pool.borrowed_bytes == 60
+        finally:
+            release.set()
+        if operation == 'incomplete':
+            with pytest.raises(NumaRebindIncomplete):
+                slow.result(timeout=2)
+            assert pool.borrowed_bytes == 60
+        else:
+            slow.result(timeout=2)
+            assert pool.borrowed_bytes == (60 if operation == 'borrow' else 0)
+        same.result(timeout=2)

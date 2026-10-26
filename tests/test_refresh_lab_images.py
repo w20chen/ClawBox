@@ -57,6 +57,8 @@ def test_saved_image_build_inputs_make_repeat_build_self_contained(monkeypatch):
         "kernel_source": "/saved/source",
         "kernel_build": "/saved/build",
         "direct_network": True,
+        "tool_prewarm": "disabled",
+        "tool_prewarm_timeout_seconds": 90,
     }}
 
     assert module.resolve_build_inputs(args, profile) == profile["image_build"]
@@ -77,6 +79,7 @@ def test_explicit_image_build_inputs_override_saved_values():
         "registry": "new/registry", "go": "new-go",
         "kernel_source": "new-source", "kernel_build": "new-build",
         "direct_network": False,
+        "tool_prewarm": "enabled", "tool_prewarm_timeout_seconds": 120,
     }
 
 

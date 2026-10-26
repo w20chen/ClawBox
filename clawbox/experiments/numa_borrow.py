@@ -168,10 +168,20 @@ class SandboxNumaBorrower:
             raise ValueError("cleanup_timeout_seconds must be non-negative")
         self.cleanup_timeout_seconds = cleanup_timeout_seconds
         self._lock = RLock()
+        # Keep locks for the borrower lifetime: replacing one on destroy would
+        # let an already waiting operation race a new placement of the same ID.
+        self._vm_locks: dict[str, RLock] = {}
         self._borrowed: dict[str, _BorrowedAllocation] = {}
         self._leaf_cache: dict[str, tuple[Path, Path]] = {}
         self._verified_leaves: dict[str, Path] = {}
         self._initial_placement_verified: set[str] = set()
+
+    def _vm_lock(self, sandbox_id: str):
+        # Never wait for a VM, read a cgroup, or migrate under the registry lock.
+        with self._lock:
+            if sandbox_id not in self._vm_locks:
+                self._vm_locks[sandbox_id] = RLock()
+            return self._vm_locks[sandbox_id]
 
     def _privileged_write(self, path: Path, value: str) -> dict | None:
         if path.name == "cpuset.mems":
@@ -342,11 +352,12 @@ class SandboxNumaBorrower:
                 parent_shared_before = self._shared_usage(self.cgroup_root)
                 self.shared_pool.reserve_borrow(sandbox_id, capacity_bytes)
                 # Retain ownership even if the write or its verification fails.
-                self._borrowed[sandbox_id] = _BorrowedAllocation(
-                    leaf=leaf,
-                    capacity_bytes=capacity_bytes,
-                    parent_shared_bytes_before=parent_shared_before,
-                )
+                with self._lock:
+                    self._borrowed[sandbox_id] = _BorrowedAllocation(
+                        leaf=leaf,
+                        capacity_bytes=capacity_bytes,
+                        parent_shared_bytes_before=parent_shared_before,
+                    )
         started_wall = time.time()
         started = time.monotonic()
         try:
@@ -375,7 +386,8 @@ class SandboxNumaBorrower:
                         rollback_verified = True
                         if self._usage(leaf)[1] == 0:
                             self.shared_pool.release_borrow(sandbox_id)
-                            self._borrowed.pop(sandbox_id)
+                            with self._lock:
+                                self._borrowed.pop(sandbox_id)
                 except Exception:
                     pass  # keep the reservation for verified destruction
             if isinstance(exc, _NumaRebindTimeout) and rollback_verified:
@@ -426,7 +438,7 @@ class SandboxNumaBorrower:
         )
 
     def borrow(self, sandbox_id: str, capacity_bytes: int) -> NumaBorrowRecord:
-        with self._lock:
+        with self._vm_lock(sandbox_id):
             if not self.shared_pool.rebind_lock.acquire(blocking=False):
                 raise NumaBorrowUnavailable("another NUMA migration is in progress")
             try:
@@ -437,8 +449,19 @@ class SandboxNumaBorrower:
                 self.shared_pool.rebind_lock.release()
 
     def pin_local(self, sandbox_id: str, *, verified_cgroup: str | Path | None = None,
-                  verified_placement: Mapping[str, object] | None = None) -> None:
+                  verified_placement: Mapping[str, object] | None = None) -> dict:
         """Verify CubeSandbox's native LOCAL placement after create/restore."""
+        started = time.monotonic()
+        with self._vm_lock(sandbox_id):
+            acquired = time.monotonic()
+            return self._pin_local(sandbox_id, verified_cgroup=verified_cgroup,
+                            verified_placement=verified_placement,
+                            vm_lock_wait_seconds=acquired - started)
+
+    def _pin_local(self, sandbox_id: str, *, verified_cgroup: str | Path | None,
+                   verified_placement: Mapping[str, object] | None,
+                   vm_lock_wait_seconds: float) -> dict:
+        started = time.monotonic()
         if verified_cgroup is not None:
             leaf = Path(verified_cgroup).resolve()
             try:
@@ -448,76 +471,83 @@ class SandboxNumaBorrower:
             if leaf == self.cgroup_root or not (leaf / 'cpuset.mems').exists():
                 raise RuntimeError(f'verified VM cgroup is not a writable leaf cpuset: {leaf}')
             self._verified_leaves[sandbox_id] = leaf
-        # Legacy/non-preallocated callers still use process discovery. Do not
-        # hold the borrower lock during that read-only scan.
+        # Same-VM serialization covers discovery and publication, so another
+        # pin/return/destroy cannot replace this VM's leaf during migration.
         leaf = self._leaf_for(sandbox_id)
-        with self._lock:
-            retained = self._borrowed.get(sandbox_id)
-            if retained is not None and retained.leaf != leaf:
+        discovery_seconds = time.monotonic() - started
+        retained = self._borrowed.get(sandbox_id)
+        if retained is not None and retained.leaf != leaf:
+            with self._lock:
                 self._borrowed[sandbox_id] = _BorrowedAllocation(
                     leaf=leaf,
                     capacity_bytes=retained.capacity_bytes,
                     parent_shared_bytes_before=retained.parent_shared_bytes_before,
                 )
-            if self.cpus is not None:
-                self._verify_cpus(leaf)
-            configured_mems = (leaf/'cpuset.mems').read_text().strip()
-            if retained is not None and configured_mems == str(self.shared_node):
-                self.writer(leaf / "cpuset.mems", str(self.local_node))
-            effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
-            if verified_placement is None:
-                resident, unattributed = read_numa_lru_bytes(leaf)
-                anon_resident = read_numa_anon_bytes(leaf)
-            else:
-                # PriorityDomain.verify has just read and validated these same
-                # counters. Re-reading memory.numa_stat here serialized every
-                # concurrent restore behind this borrower-wide lock.
-                resident = {
-                    int(node): int(value) for node, value in
-                    verified_placement['actual_residency_bytes'].items()  # type: ignore[union-attr]
-                }
-                anon_resident = {
-                    int(node): int(value) for node, value in
-                    verified_placement['actual_anon_residency_bytes'].items()  # type: ignore[union-attr]
-                }
-                unattributed = int(verified_placement.get('unattributed_bytes', 0))
-            attributed_anon = sum(anon_resident.values())
-            initial_residency_check = sandbox_id not in self._initial_placement_verified
-            if (initial_residency_check
-                    and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES
-                    and anon_resident.get(self.local_node, 0) * 2 <= attributed_anon):
-                raise RuntimeError(
-                    f"VM native LOCAL placement did not take effect: requested node "
-                    f"{self.local_node}, anon_residency={anon_resident}, "
-                    f"total_residency={resident}, unattributed={unattributed}"
-                )
-            self._initial_placement_verified.add(sandbox_id)
-            if retained is not None and self._usage(leaf)[1] == 0:
-                self.shared_pool.release_borrow(sandbox_id)
+        if self.cpus is not None:
+            self._verify_cpus(leaf)
+        configured_mems = (leaf/'cpuset.mems').read_text().strip()
+        if retained is not None and configured_mems == str(self.shared_node):
+            self.writer(leaf / "cpuset.mems", str(self.local_node))
+        effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
+        if verified_placement is None:
+            resident, unattributed = read_numa_lru_bytes(leaf)
+            anon_resident = read_numa_anon_bytes(leaf)
+        else:
+            # PriorityDomain.verify has just read and validated these same
+            # counters. Re-reading memory.numa_stat here serialized every
+            # concurrent restore behind this borrower-wide lock.
+            resident = {
+                int(node): int(value) for node, value in
+                verified_placement['actual_residency_bytes'].items()  # type: ignore[union-attr]
+            }
+            anon_resident = {
+                int(node): int(value) for node, value in
+                verified_placement['actual_anon_residency_bytes'].items()  # type: ignore[union-attr]
+            }
+            unattributed = int(verified_placement.get('unattributed_bytes', 0))
+        attributed_anon = sum(anon_resident.values())
+        initial_residency_check = sandbox_id not in self._initial_placement_verified
+        if (initial_residency_check
+                and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES
+                and anon_resident.get(self.local_node, 0) * 2 <= attributed_anon):
+            raise RuntimeError(
+                f"VM native LOCAL placement did not take effect: requested node "
+                f"{self.local_node}, anon_residency={anon_resident}, "
+                f"total_residency={resident}, unattributed={unattributed}"
+            )
+        self._initial_placement_verified.add(sandbox_id)
+        if retained is not None and self._usage(leaf)[1] == 0:
+            self.shared_pool.release_borrow(sandbox_id)
+            with self._lock:
                 self._borrowed.pop(sandbox_id)
-            self.placements.append({
-                "sandbox_id": sandbox_id, "node_id": self.node_id,
-                "numa_node": self.local_node, "cpus": self.cpus,
-                "effective_mems": effective,
-                "actual_residency_bytes": resident,
-                "actual_anon_residency_bytes": anon_resident,
-                "residency_basis": (
-                    "anonymous_initial_create"
-                    if (initial_residency_check
-                        and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES)
-                    else "insufficient_anonymous_sample_initial_create"
-                    if initial_residency_check else "restore_policy_only"
-                ),
-                "local_residency_fraction": (
-                    anon_resident.get(self.local_node, 0) / attributed_anon
-                    if (initial_residency_check
-                        and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES) else None
-                ),
-                "effective_cpus": (leaf / "cpuset.cpus.effective").read_text().strip()
-                    if self.cpus is not None else None,
-                "cgroup": str(leaf), "verified_unix_s": time.time(),
-                "scope": "native_restore_policy_before_guest_allocation_verified_after_restore",
-            })
+        placement = {
+            "sandbox_id": sandbox_id, "node_id": self.node_id,
+            "numa_node": self.local_node, "cpus": self.cpus,
+            "effective_mems": effective,
+            "actual_residency_bytes": resident,
+            "actual_anon_residency_bytes": anon_resident,
+            "residency_basis": (
+                "anonymous_initial_create"
+                if (initial_residency_check
+                    and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES)
+                else "insufficient_anonymous_sample_initial_create"
+                if initial_residency_check else "restore_policy_only"
+            ),
+            "local_residency_fraction": (
+                anon_resident.get(self.local_node, 0) / attributed_anon
+                if (initial_residency_check
+                    and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES) else None
+            ),
+            "effective_cpus": (leaf / "cpuset.cpus.effective").read_text().strip()
+                if self.cpus is not None else None,
+            "cgroup": str(leaf), "verified_unix_s": time.time(),
+            "scope": "native_restore_policy_before_guest_allocation_verified_after_restore",
+            "vm_lock_wait_seconds": vm_lock_wait_seconds,
+            "discovery_seconds": discovery_seconds,
+            "placement_service_seconds": time.monotonic() - started,
+        }
+        self.placements.append(placement)
+        return placement
 
     def _verify_cpus(self, leaf: Path) -> None:
         if self.cpus is None:
@@ -530,7 +560,7 @@ class SandboxNumaBorrower:
             )
 
     def return_local(self, sandbox_id: str) -> NumaBorrowRecord:
-        with self._lock:
+        with self._vm_lock(sandbox_id):
             try:
                 capacity_bytes = self._borrowed[sandbox_id].capacity_bytes
             except KeyError as exc:
@@ -539,7 +569,8 @@ class SandboxNumaBorrower:
                 sandbox_id, capacity_bytes, target_node=self.local_node, reserve=False,
             )
             if record.reservation_released:
-                self._borrowed.pop(sandbox_id)
+                with self._lock:
+                    self._borrowed.pop(sandbox_id)
             return record
 
     def release_destroyed(self, sandbox_id: str) -> None:
@@ -547,7 +578,7 @@ class SandboxNumaBorrower:
         deadline = time.monotonic() + self.cleanup_timeout_seconds
         while True:
             try:
-                with self._lock:
+                with self._vm_lock(sandbox_id):
                     entry = self._borrowed.get(sandbox_id)
                     if entry is None:
                         return
@@ -592,7 +623,8 @@ class SandboxNumaBorrower:
                                 f"{entry.parent_shared_bytes_before})"
                             )
                     self.shared_pool.release_borrow(sandbox_id)
-                    self._borrowed.pop(sandbox_id)
+                    with self._lock:
+                        self._borrowed.pop(sandbox_id)
                     return
             except (FileNotFoundError, RuntimeError):
                 if time.monotonic() >= deadline:
@@ -605,7 +637,7 @@ class SandboxNumaBorrower:
 
     def residency(self, sandbox_id: str) -> NumaResidencyObservation:
         """Observe the VM's current physical placement without changing policy."""
-        with self._lock:
+        with self._vm_lock(sandbox_id):
             try:
                 entry = self._borrowed[sandbox_id]
             except KeyError as exc:
@@ -618,10 +650,11 @@ class SandboxNumaBorrower:
 
     def observe_resident(self, sandbox_id: str) -> NumaResidencyObservation:
         """Observe a LOCAL candidate; do not mistake configured size for relief."""
-        return self._observe_leaf(sandbox_id, self._leaf_for(sandbox_id))
+        with self._vm_lock(sandbox_id):
+            return self._observe_leaf(sandbox_id, self._leaf_for(sandbox_id))
 
     def allocates_shared(self, sandbox_id: str) -> bool:
-        with self._lock:
+        with self._vm_lock(sandbox_id):
             entry = self._borrowed.get(sandbox_id)
             return entry is not None and (
                 entry.leaf / 'cpuset.mems.effective'

@@ -752,14 +752,22 @@ func main() {
 		authorizedKey = "/var/run/secrets/tool-ssh/id_ed25519.pub"
 	}
 	config := loadServerConfig(hostKey, authorizedKey)
-	collectorProcess, collectorErr := startGuestCollectorProcess()
-	if collectorErr != nil {
-		guestCollectorError = collectorErr.Error()
-		log.Printf("guest collector unavailable: %v", collectorErr)
-	} else if collectorProcess != nil {
-		guestCollector = collectorProcess.client
-		defer collectorProcess.Stop()
-		log.Printf("guest collector ready")
+	if _, err := os.Stat("/run/clawtune/prewarmed"); err == nil {
+		guestCollector = connectExistingGuestCollector()
+		if guestCollector == nil {
+			log.Fatalf("prewarmed %s", guestCollectorError)
+		}
+		log.Printf("guest collector ready (restored resident process)")
+	} else {
+		collectorProcess, collectorErr := startGuestCollectorProcess()
+		if collectorErr != nil {
+			guestCollectorError = collectorErr.Error()
+			log.Printf("guest collector unavailable: %v", collectorErr)
+		} else if collectorProcess != nil {
+			guestCollector = collectorProcess.client
+			defer collectorProcess.Stop()
+			log.Printf("guest collector ready")
+		}
 	}
 	timeout := time.Duration(envInt("TOOL_EXEC_TIMEOUT_SECONDS", 300)) * time.Second
 	outputLimit := int64(envInt("TOOL_OUTPUT_LIMIT_BYTES", 4*1024*1024))

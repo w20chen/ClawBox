@@ -311,6 +311,10 @@ def parser() -> argparse.ArgumentParser:
     images.add_argument("--role", choices=("runtime", "sandbox"), action="append")
     images.add_argument("--kernel-source")
     images.add_argument("--kernel-build")
+    images.add_argument("--tool-prewarm", choices=("enabled", "disabled"),
+                        help="compile Tool BPF before template readiness (default: enabled)")
+    images.add_argument("--tool-prewarm-timeout-seconds", type=int,
+                        help="Tool template initialization deadline (default: 120 seconds)")
     for name in ("status", "collect", "report", "abort", "destroy"):
         command = sub.add_parser(name)
         command.add_argument("run_id")
@@ -616,6 +620,9 @@ def main(argv: list[str] | None = None) -> int:
                 *[value for role in args.role or () for value in ("--role", role)],
                 *(["--kernel-source", args.kernel_source] if args.kernel_source else []),
                 *(["--kernel-build", args.kernel_build] if args.kernel_build else []),
+                *(["--tool-prewarm", args.tool_prewarm] if args.tool_prewarm else []),
+                *(["--tool-prewarm-timeout-seconds", str(args.tool_prewarm_timeout_seconds)]
+                  if args.tool_prewarm_timeout_seconds is not None else []),
                 *(["--direct-network"] if args.direct_network is True else []),
                 *(["--proxy-network"] if args.direct_network is False else []),
             ]

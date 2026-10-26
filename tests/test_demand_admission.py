@@ -10,6 +10,50 @@ from clawbox.experiments.baselines import resolve_baseline
 MIB = 1024**2
 
 
+@pytest.mark.parametrize('operation', ['projected', 'exceeds', 'feedback', 'nested'])
+def test_pressure_observers_release_the_lock_during_exact_reads(operation):
+    from clawbox.experiments.policy import AdmissionRequest
+    reading, finish = threading.Event(), threading.Event()
+    enabled = [False]
+    def sample():
+        if enabled[0]:
+            reading.set()
+            assert finish.wait(2)
+        return 0, 0
+    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(),
+                          budget_mib=10, emergency_free_mib=0, operation_headroom_mib=0)
+    with c._condition:
+        c.demand.add(('busy', 'tool_admission'), scope=c.demand_scope,
+                     amount=20*MIB, local_amount=20*MIB, sample=sample)
+        ticket = object()
+        c._waiters.append(ticket)
+        c._waiter_requests[ticket] = AdmissionRequest('next', MIB, 'tool_admission', False, MIB)
+    enabled[0] = True
+    def observe():
+        if operation == 'projected':
+            return c.projected_local_commitment()
+        if operation == 'exceeds':
+            return c.local_commitment_exceeds(0, 10*MIB)
+        if operation == 'feedback':
+            c._pressure_reasons = lambda *args, **kwargs: ('configured_memory_budget',)
+            return c.resource_feedback()
+        with c._condition:
+            with c._condition:
+                return c.demand.pending_breakdown_without_condition(c.demand_scope)
+    def release():
+        with c._condition:
+            c.demand.release(('busy', 'tool_admission'))
+    with ThreadPoolExecutor(2) as workers:
+        result = workers.submit(observe)
+        assert reading.wait(1)
+        try:
+            workers.submit(release).result(timeout=1)
+        finally:
+            finish.set()
+        result.result(timeout=1)
+    assert not c.demand.claims
+
+
 def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
     c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
@@ -33,7 +77,12 @@ def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
             replacement = c.demand.claims['s', 'tool_admission']
         finally:
             finish.set()
-        binding.result(timeout=1)
+        timing = binding.result(timeout=1)
+        assert timing['status'] == 'claim_changed'
+        assert timing['sample_seconds'] >= 0
+        assert timing['service_seconds'] >= timing['sample_seconds']
+        assert timing['lookup_lock_wait_seconds'] >= 0
+        assert timing['publish_lock_wait_seconds'] >= 0
     assert replacement is not original
     assert replacement.sample is None
     assert replacement.baseline == (0, 0)
@@ -173,6 +222,41 @@ def test_policy_uses_exact_claim_growth_when_upper_bound_nears_capacity():
     assert calls[0] == 4  # baseline, one policy scan, and two exact borrow guards.
     assert ledger.pending_upper_bound_fast_path_count == 0
     assert ledger.pending_exact_count == 3
+
+
+@pytest.mark.parametrize('change, expected', [('extend', 5), ('release', 0), ('rebase', 2)])
+def test_exact_scan_reconciles_mutated_claim_after_its_sample(change, expected):
+    entered, finish = threading.Event(), threading.Event()
+    ledger = DemandLedger(sample=lambda: (0, 100*MIB), capacity=100*MIB)
+    first_sample = lambda: (MIB, MIB)
+    def slow_sample():
+        entered.set()
+        assert finish.wait(2)
+        return 0, 0
+    with ledger.condition:
+        ledger.add(('first', 'tool'), scope='local', amount=2*MIB, local_amount=2*MIB)
+        ledger.claims['first', 'tool'].sample = first_sample
+        ledger.add(('slow', 'tool'), scope='local', amount=0, local_amount=0)
+        ledger.claims['slow', 'tool'].sample = slow_sample
+
+    def check():
+        with ledger.condition:
+            return ledger.pending_breakdown_without_condition('local')
+
+    with ThreadPoolExecutor(1) as workers:
+        pending = workers.submit(check)
+        try:
+            assert entered.wait(1)  # first claim has already been sampled
+            with ledger.condition:
+                if change == 'extend':
+                    ledger.extend(('first', 'tool'), amount=4*MIB, local_amount=4*MIB)
+                elif change == 'release':
+                    ledger.release_amount(('first', 'tool'), amount=MIB, local_amount=MIB)
+                else:
+                    ledger.rebase(('first', 'tool'))
+        finally:
+            finish.set()
+        assert pending.result(timeout=1) == (expected*MIB, expected*MIB)
 
 
 def test_exact_claim_reads_do_not_hold_the_admission_condition():

@@ -1,0 +1,112 @@
+--- a/hypervisor/vmm/src/lib.rs
++++ b/hypervisor/vmm/src/lib.rs
+@@ -83,6 +83,7 @@
+ pub mod memory_manager;
+ pub mod migration;
+ pub mod pagemap_anon;
++mod numa_clean_file;
+ mod pci_segment;
+ pub mod seccomp_filters;
+ mod serial_manager;
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -2001,6 +2001,19 @@
+                 false, self.log_dirty);
+             self.vm.remove_user_memory_region(make_region())
+                 .map_err(Error::RemoveUserMemoryRegion)?;
++        }
++        // Do not move clean template/library pages shared by unrelated VMs.
++        // Guest RAM is now quiescent and detached from KVM. Retain every CoW
++        // page and every dirty bit; refault clean pages from the immutable file.
++        if !self.shared && !self.hugepages {
++            let ranges: Vec<_> = memory.iter()
++                .map(|region| (region.as_ptr() as u64, region.len())).collect();
++            let started = std::time::Instant::now();
++            let bytes = crate::numa_clean_file::discard_clean_file_ptes(&ranges)
++                .map_err(|e| Error::Dirtylog(MigratableError::MigrateSend(
++                    anyhow!("Release clean file PTEs before NUMA migration: {}", e))))?;
++            info!("clawbox NUMA clean file PTEs: bytes={} elapsed_us={}",
++                bytes, started.elapsed().as_micros());
+         }
+         Ok(())
+     }
+--- a/hypervisor/vmm/src/checkpoint_metrics.rs
++++ b/hypervisor/vmm/src/checkpoint_metrics.rs
+@@ -4,6 +4,14 @@
+ 
+ pub fn measure<T, E>(phase: &str, target: &str, bytes: Option<u64>,
+                      operation: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
++    // Per-range logging adds thousands of open/write/close operations to each
++    // checkpoint. Keep aggregate phase timings on; detailed range tracing is
++    // diagnostic-only and must be explicitly enabled before starting the VM.
++    static RANGE_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    if phase == "memory.write_range" && !*RANGE_LOG.get_or_init(||
++        std::env::var("CLAWBOX_CHECKPOINT_RANGE_LOG").as_deref() == Ok("1")) {
++        return operation();
++    }
+     let started = Instant::now();
+     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+     let result = operation();
+--- /dev/null
++++ b/hypervisor/vmm/src/numa_clean_file.rs
+@@ -0,0 +1,60 @@
++//! Remove this paused VM's clean file PTEs before whole-process NUMA migration.
++//! Private CoW pages stay mapped; backing files and their page cache are untouched.
++use std::fs::File;
++use std::io;
++use std::os::unix::fs::FileExt;
++
++pub fn discard_clean_file_ptes(guest_ram: &[(u64, u64)]) -> io::Result<u64> {
++    let page_size = crate::pagemap_anon::host_page_size();
++    let pagemap = File::open("/proc/self/pagemap")?;
++    let maps = std::fs::read_to_string("/proc/self/maps")?;
++    let mut discarded = 0;
++    for line in maps.lines() {
++        let fields: Vec<_> = line.split_whitespace().collect();
++        if fields.len() < 6 || !fields[1].ends_with('p') || fields[4] == "0" {
++            continue;
++        }
++        let (start, end) = fields[0].split_once('-').ok_or_else(||
++            io::Error::new(io::ErrorKind::InvalidData, "invalid process map"))?;
++        let start = u64::from_str_radix(start, 16).map_err(io::Error::other)?;
++        let end = u64::from_str_radix(end, 16).map_err(io::Error::other)?;
++        // Only paused/detached guest RAM may be writable. Never discard host
++        // writable mappings: they could become CoW after the pagemap read.
++        let guest = guest_ram.iter().any(|&(base, size)| start >= base && end <= base + size);
++        if fields[1].contains('w') && !guest {
++            continue;
++        }
++        // Exclude device mappings. VM snapshots, executable and library pages
++        // come from regular files. A deleted file is still reachable here.
++        let backing = format!("/proc/self/map_files/{:x}-{:x}", start, end);
++        if !std::fs::metadata(backing)?.is_file() {
++            continue;
++        }
++        let mut entries = vec![0u8; ((end - start) / page_size * 8) as usize];
++        pagemap.read_exact_at(&mut entries, start / page_size * 8)?;
++        let mut run_start = None;
++        for index in 0..=entries.len() / 8 {
++            let file_page = if index < entries.len() / 8 {
++                let bits = u64::from_ne_bytes(entries[index*8..index*8+8].try_into().unwrap());
++                // Present and file-backed; private CoW and swapped pages are
++                // excluded. Shared-anonymous mappings were excluded above.
++                bits & ((1u64 << 63) | (1u64 << 62) | (1u64 << 61))
++                    == ((1u64 << 63) | (1u64 << 61))
++            } else { false };
++            if file_page {
++                run_start.get_or_insert(index);
++            } else if let Some(first) = run_start.take() {
++                let address = start + first as u64 * page_size;
++                let length = (index - first) as u64 * page_size;
++                // The VMA is still mapped. Guest execution and devices are
++                // paused, KVM RAM slots detached, and host mappings read-only.
++                if unsafe { libc::madvise(address as *mut libc::c_void,
++                    length as usize, libc::MADV_DONTNEED) } != 0 {
++                    return Err(io::Error::last_os_error());
++                }
++                discarded += length;
++            }
++        }
++    }
++    Ok(discarded)
++}

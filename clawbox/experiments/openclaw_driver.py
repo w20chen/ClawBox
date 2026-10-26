@@ -240,11 +240,12 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
     if restart:
         restart_command = (
             "pkill -x tool-bridge 2>/dev/null || true; "
-            "i=0; while grep -Eq ':08AE[[:space:]]' /proc/net/tcp && [ $i -lt 50 ]; do "
+            "i=0; while bridge_listening && [ $i -lt 50 ]; do "
             "i=$((i + 1)); sleep 0.1; done; "
+            "if ! test -s /run/clawtune/prewarmed; then "
             "rm -f /run/clawtune/guest-collector.sock "
             "/run/clawtune/guest-collector.token "
-            "/var/log/clawtune-guest-collector.unavailable; "
+            "/var/log/clawtune-guest-collector.unavailable; fi; "
         )
     progress_check = (
         "/usr/local/bin/tool-bridge --self-test | grep -q '\"progress_events\":true' || "
@@ -269,6 +270,8 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         )
     return (
         "set -eu; "
+        "bridge_listening() { awk '$2 ~ /:08AE$/ && $4 == \"0A\" "
+        "{ found=1 } END { exit !found }' /proc/net/tcp; }; "
         + progress_check
         + apt_proxy_setup
         + "mkdir -p /etc/profile.d; "
@@ -281,7 +284,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         + "kernel_source=/lib/modules/$(uname -r)/build; test -d \"$kernel_source\"; "
         + "zcat /proc/config.gz | cmp -s - \"$kernel_source/.config\" || "
         "{ echo 'Guest kernel/header configuration mismatch; rebuild with scripts/lab images' >&2; exit 1; }; "
-        + "if ! grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then "
+        + "if ! bridge_listening; then "
         "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
@@ -296,7 +299,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "/usr/local/bin/tool-bridge </dev/null >/var/log/tool-bridge.log 2>&1 & "
         "fi; "
         "ready=0; i=0; while [ $i -lt 400 ]; do "
-        "if grep -Eq ':08AE[[:space:]]' /proc/net/tcp; then ready=1; break; fi; "
+        "if bridge_listening; then ready=1; break; fi; "
         "i=$((i + 1)); sleep 0.1; done; "
         "if [ $ready -ne 1 ] || ! test -S /run/clawtune/guest-collector.sock "
         "|| ! grep -q 'guest collector ready' /var/log/tool-bridge.log; then "
