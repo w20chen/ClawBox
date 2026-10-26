@@ -571,6 +571,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
+        # Cube command processes do not inherit Dockerfile ENV values from
+        # the template entrypoint. Point the sidecar at the immutable seed
+        # explicitly so it can use the prepared image-layer cache.
+        + "CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource "
         + f"/opt/clawtune/venv/bin/python {shlex.quote(timed_sidecar_file)} "
         + f"--host 127.0.0.1 --port 8765 --timing-output {shlex.quote(sidecar_timing_file)} "
         + f">{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "

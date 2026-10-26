@@ -295,6 +295,10 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_REAL_SSH=/state/openclaw/session-a/bin/ssh.real" in "\n".join(commands)
     assert "OPENCLAW_BASH_YIELD_MS=120000" in "\n".join(commands)
     assert "XDG_CACHE_HOME=/opt/clawtune/cache" in "\n".join(commands)
+    assert (
+        "CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource"
+        in "\n".join(commands)
+    )
     assert "timed-clawtune-sidecar.py" in "\n".join(commands)
     assert "sidecar-startup-timing.json" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)
