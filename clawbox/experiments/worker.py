@@ -1990,14 +1990,19 @@ class ExperimentWorker:
             (case.sandbox or arm.sandbox).template: case.sandbox or arm.sandbox
             for case in session_cases
         }
-        for role, sandbox in (("runtime", arm.runtime), *(
-            (f"tool:{template}", sandbox)
-            for template, sandbox in tool_sandboxes.items()
-        )):
-            if sandbox.image_digest:
-                self.client.validate_template_image(
-                    sandbox.template, sandbox.image_digest,
+        template_images: dict[str, str] = {}
+        for sandbox in (arm.runtime, *tool_sandboxes.values()):
+            if not sandbox.image_digest:
+                continue
+            previous = template_images.setdefault(
+                sandbox.template, sandbox.image_digest,
+            )
+            if previous != sandbox.image_digest:
+                raise ValueError(
+                    f"template {sandbox.template!r} has conflicting image digests"
                 )
+        if template_images:
+            self.client.validate_template_images(template_images)
         activity_tracker = ArmActivityTracker(arm.concurrency)
         events = EventWriter(
             self.output_root / "events" / f"{arm.arm_id}.jsonl",

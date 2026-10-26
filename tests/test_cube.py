@@ -515,6 +515,42 @@ def test_cube_client_uses_official_list_when_detail_omits_image_info() -> None:
     assert result["image_digest"] == digest
 
 
+def test_cube_client_validates_many_templates_from_one_inventory_read() -> None:
+    runtime_digest = "sha256:" + "a" * 64
+    tool_digest = "sha256:" + "b" * 64
+
+    class Item:
+        def __init__(self, template_id: str, digest: str) -> None:
+            self.template_id = template_id
+            self.status = "READY"
+            self.image_info = f"registry.example/{template_id}@{digest}"
+
+    class Template:
+        calls = 0
+
+        @classmethod
+        def list(cls):
+            cls.calls += 1
+            return [
+                Item("tpl-runtime", runtime_digest),
+                Item("tpl-tool", tool_digest),
+            ]
+
+        @classmethod
+        def get(cls, _reference: str):
+            raise AssertionError("bulk validation must not issue per-template reads")
+
+    client = CubeSandboxClient(sandbox_class=_Sandbox, template_class=Template)
+    result = client.validate_template_images({
+        "tpl-runtime": runtime_digest,
+        "tpl-tool": tool_digest,
+    })
+
+    assert Template.calls == 1
+    assert result["tpl-runtime"]["image_digest"] == runtime_digest
+    assert result["tpl-tool"]["image_digest"] == tool_digest
+
+
 def test_cube_client_bounds_a_stalled_command_stream() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox, command_stream_grace_s=0.01)

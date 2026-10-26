@@ -371,6 +371,62 @@ class CubeSandboxClient:
         return {"template": reference, "status": status, "image_info": image_info,
                 "image_digest": actual_digest}
 
+    def validate_template_images(
+        self, expected_digests: Mapping[str, str],
+    ) -> dict[str, dict[str, str]]:
+        """Validate many pinned templates from one official inventory read."""
+        expected = {
+            str(template or "").strip(): str(digest or "").strip()
+            for template, digest in expected_digests.items()
+        }
+        if not expected or any(not template or not digest
+                               for template, digest in expected.items()):
+            raise ValueError("template and expected image digest are required")
+        template_class = self._template_class
+        if template_class is None:
+            from cubesandbox import Template
+            template_class = Template
+        inventory: dict[str, Any] = {}
+        duplicates: set[str] = set()
+        for item in template_class.list():
+            reference = str(getattr(item, "template_id", "") or "").strip()
+            if reference in expected:
+                if reference in inventory:
+                    duplicates.add(reference)
+                inventory[reference] = item
+        if duplicates:
+            raise RuntimeError(
+                "CubeSandbox template inventory contains duplicate IDs: "
+                f"{sorted(duplicates)}"
+            )
+        missing = sorted(set(expected) - set(inventory))
+        if missing:
+            raise RuntimeError(
+                f"CubeSandbox template inventory is missing: {missing}"
+            )
+        validated = {}
+        for reference, digest in expected.items():
+            info = inventory[reference]
+            status = str(getattr(info, "status", "")).strip().lower()
+            if status not in {"ready", "succeeded", "success", "completed"}:
+                raise RuntimeError(
+                    f"CubeSandbox template {reference!r} is not ready: {status}"
+                )
+            image_info = str(getattr(info, "image_info", "") or "").strip()
+            actual_digest = image_info.rsplit("@", 1)[-1] if "@" in image_info else ""
+            if actual_digest != digest:
+                raise RuntimeError(
+                    f"CubeSandbox template {reference!r} image digest mismatch: "
+                    f"expected {digest!r}, got {actual_digest or image_info!r}"
+                )
+            validated[reference] = {
+                "template": reference,
+                "status": status,
+                "image_info": image_info,
+                "image_digest": actual_digest,
+            }
+        return validated
+
     def run_command(self, sandbox: Any, command: str, *, timeout_s: float,
                     cwd: str = "/workspace") -> Any:
         """Run a command without allowing a broken stream to block forever.
