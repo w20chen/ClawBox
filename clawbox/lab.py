@@ -538,6 +538,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
     profile['cubelet_tap_init_num'] = getattr(args, 'cubelet_tap_init_num', None)
     profile['cube_scheduler_overcommit'] = getattr(args, 'cube_scheduler_overcommit', None)
     profile['cube_scheduler_vm_count_ratio'] = getattr(args, 'cube_scheduler_vm_count_ratio', None)
+    profile['cube_master_log_level'] = getattr(args, 'cube_master_log_level', None)
     _write_json_atomic(args.profile, profile)
     print(f"Saved host profile: {args.profile}")
     return profile

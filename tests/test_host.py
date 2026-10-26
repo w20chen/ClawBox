@@ -167,6 +167,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
         "tcp_tw_reuse": 1,
         "cube_proxy_connect_timeout_seconds": 30,
         "cubelet_tap_init_num": 1536,
+        "cube_master_log_level": "warn",
     }))
     path = tmp_path / "host.yaml"
     init_config(path, original)
@@ -177,6 +178,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert config.tcp_tw_reuse == 1
     assert config.cube_proxy_connect_timeout_seconds == 30
     assert config.cubelet_tap_init_num == 1536
+    assert config.cube_master_log_level == "warn"
 
 
 def test_profile_import_supports_dense_host_without_warm_memory(tmp_path):
