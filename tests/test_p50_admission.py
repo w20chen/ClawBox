@@ -54,12 +54,14 @@ def test_runtime_prediction_queries_new_command_and_checks_kb_identity(tmp_path,
         RuntimePredictionProvider(path, repository='r')
 
 
-def test_cold_start_prediction_accepts_general_seed_and_new_environment(tmp_path):
+def test_cold_start_prediction_accepts_general_seed_and_new_environment(tmp_path, monkeypatch):
     from clawbox.clawtune_integration import use_clawtune
     use_clawtune()
+    import clawtune_kb
     from clawtune_kb import FILES, create_seed
     from tool_time.lattice_kb import LatticeTimeKB
     from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB
+    from clawbox.experiments import prediction
     from clawbox.experiments.prediction import (
         ColdStartPredictionProvider, prediction_input_paths,
     )
@@ -71,12 +73,20 @@ def test_cold_start_prediction_accepts_general_seed_and_new_environment(tmp_path
         ClauseResourceKB().to_json_obj(), RuntimeToolResourceKB().to_json_obj(),
         LatticeTimeKB().to_json_obj(),
     ))), provenance={'kind': 'repository-all-trace-v6'})
+    validate_seed = clawtune_kb.validate_seed
+    validations = []
+    def counted_validate_seed(seed_path):
+        validations.append(seed_path)
+        return validate_seed(seed_path)
+    monkeypatch.setattr(clawtune_kb, 'validate_seed', counted_validate_seed)
+    prediction._VALIDATED_COLD_START_SEED_CACHE.clear()
     resized = {**identity, 'template_id': 'evaluation', 'memory_mib': 3072}
     provider = ColdStartPredictionProvider(path, repository='another/repo',
                                            sandbox_identity=identity)
     assert provider.repository == 'another/repo'
     assert provider.prediction_source == 'runtime_clawtune_cold_start_kb'
     other = ColdStartPredictionProvider(path, repository='third/repo', sandbox_identity=resized)
+    assert validations == [path]
     assert other.memory_measurement == 'cgroup_v2_environment_union_v1'
     assert other.provenance()['calibration_sandbox_identity_count'] == 0
     estimate = model('lattice', 0)

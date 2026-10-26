@@ -2001,8 +2001,43 @@ class ExperimentWorker:
                 raise ValueError(
                     f"template {sandbox.template!r} has conflicting image digests"
                 )
-        if template_images:
-            self.client.validate_template_images(template_images)
+        def build_prediction_providers() -> dict[str, Any]:
+            providers = {}
+            if arm.resources.prediction_artifact and (
+                arm.policy.admission is AdmissionPolicy.PREDICTED
+                or arm.resources.observe_predictions
+            ):
+                for case in session_cases:
+                    tool_sandbox = case.sandbox or arm.sandbox
+                    providers[case.case_id] = prediction_provider_type(
+                        arm.resources.prediction_mode
+                    )(
+                        Path(arm.resources.prediction_artifact),
+                        repository=case.repository or case.case_id,
+                        sandbox_identity={
+                            key: getattr(tool_sandbox, key)
+                            for key in (
+                                "template_id", "image_digest", "vcpu",
+                                "memory_mib", "architecture",
+                            )
+                        },
+                    )
+            return providers
+
+        # Template provenance and the immutable prediction seed are independent
+        # startup gates.  Run them together so neither serially extends the
+        # pre-event critical path.
+        with ThreadPoolExecutor(max_workers=2) as startup_pool:
+            template_future = (
+                startup_pool.submit(
+                    self.client.validate_template_images, template_images,
+                )
+                if template_images else None
+            )
+            prediction_future = startup_pool.submit(build_prediction_providers)
+            if template_future is not None:
+                template_future.result()
+            prediction_providers = prediction_future.result()
         activity_tracker = ArmActivityTracker(arm.concurrency)
         events = EventWriter(
             self.output_root / "events" / f"{arm.arm_id}.jsonl",
@@ -2083,20 +2118,6 @@ class ExperimentWorker:
                 raise RuntimeError('LOCAL cache reclamation failed') from exc
             events.write({"event": "local_cache_reclaim", **observation})
 
-        prediction_providers = {}
-        if arm.resources.prediction_artifact and (arm.policy.admission is AdmissionPolicy.PREDICTED or arm.resources.observe_predictions):
-            for case in session_cases:
-                tool_sandbox = case.sandbox or arm.sandbox
-                prediction_providers[case.case_id] = prediction_provider_type(arm.resources.prediction_mode)(
-                    Path(arm.resources.prediction_artifact),
-                    repository=case.repository or case.case_id,
-                    sandbox_identity={
-                        k: getattr(tool_sandbox, k)
-                        for k in (
-                            "template_id", "image_digest", "vcpu", "memory_mib", "architecture",
-                        )
-                    },
-                )
         prediction_provider = next(iter(prediction_providers.values()), None)
         global_sampler = CgroupMemorySampler(Path(arm.resources.local_memory_cgroup),
             physical_limit_bytes=(arm.resources.physical_live_limit_mib * 1024**2 if arm.resources.physical_live_limit_mib else None),

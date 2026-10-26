@@ -374,7 +374,12 @@ class CubeSandboxClient:
     def validate_template_images(
         self, expected_digests: Mapping[str, str],
     ) -> dict[str, dict[str, str]]:
-        """Validate many pinned templates from one official inventory read."""
+        """Validate pinned templates with bounded parallel official reads.
+
+        Cube's unfiltered template inventory includes every historical build on
+        the host and is expensive to materialize.  A detail read with
+        ``limit=1`` is small, so overlap those independent reads instead.
+        """
         expected = {
             str(template or "").strip(): str(digest or "").strip()
             for template, digest in expected_digests.items()
@@ -386,24 +391,46 @@ class CubeSandboxClient:
         if template_class is None:
             from cubesandbox import Template
             template_class = Template
+        def fetch(reference: str) -> tuple[str, Any]:
+            return reference, template_class.get(
+                reference, limit=1, **self._sdk_kwargs(),
+            )
+
+        workers = min(64, len(expected))
         inventory: dict[str, Any] = {}
-        duplicates: set[str] = set()
-        for item in template_class.list():
-            reference = str(getattr(item, "template_id", "") or "").strip()
-            if reference in expected:
-                if reference in inventory:
-                    duplicates.add(reference)
-                inventory[reference] = item
-        if duplicates:
-            raise RuntimeError(
-                "CubeSandbox template inventory contains duplicate IDs: "
-                f"{sorted(duplicates)}"
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(fetch, reference) for reference in expected]
+            for future in as_completed(futures):
+                reference, info = future.result()
+                inventory[reference] = info
+
+        # CubeAPI v0.7.0 detail responses may omit imageInfo.  Only in that
+        # compatibility case pay for one unfiltered official inventory read.
+        missing_image_info = {
+            reference for reference, info in inventory.items()
+            if not str(getattr(info, "image_info", "") or "").strip()
+        }
+        if missing_image_info:
+            matches: dict[str, list[Any]] = {
+                reference: [] for reference in missing_image_info
+            }
+            for item in template_class.list(**self._sdk_kwargs()):
+                reference = str(
+                    getattr(item, "template_id", "") or ""
+                ).strip()
+                if reference in matches:
+                    matches[reference].append(item)
+            invalid = sorted(
+                reference for reference, items in matches.items()
+                if len(items) != 1
             )
-        missing = sorted(set(expected) - set(inventory))
-        if missing:
-            raise RuntimeError(
-                f"CubeSandbox template inventory is missing: {missing}"
-            )
+            if invalid:
+                raise RuntimeError(
+                    "CubeSandbox template inventory is missing or ambiguous: "
+                    f"{invalid}"
+                )
+            for reference, items in matches.items():
+                inventory[reference] = items[0]
         validated = {}
         for reference, digest in expected.items():
             info = inventory[reference]

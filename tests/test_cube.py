@@ -515,7 +515,7 @@ def test_cube_client_uses_official_list_when_detail_omits_image_info() -> None:
     assert result["image_digest"] == digest
 
 
-def test_cube_client_validates_many_templates_from_one_inventory_read() -> None:
+def test_cube_client_validates_many_templates_with_parallel_detail_reads() -> None:
     runtime_digest = "sha256:" + "a" * 64
     tool_digest = "sha256:" + "b" * 64
 
@@ -526,19 +526,17 @@ def test_cube_client_validates_many_templates_from_one_inventory_read() -> None:
             self.image_info = f"registry.example/{template_id}@{digest}"
 
     class Template:
-        calls = 0
+        calls = []
 
         @classmethod
-        def list(cls):
-            cls.calls += 1
-            return [
-                Item("tpl-runtime", runtime_digest),
-                Item("tpl-tool", tool_digest),
-            ]
+        def list(cls, **_kwargs):
+            raise AssertionError("detail responses have complete image provenance")
 
         @classmethod
-        def get(cls, _reference: str):
-            raise AssertionError("bulk validation must not issue per-template reads")
+        def get(cls, reference: str, **kwargs):
+            cls.calls.append((reference, kwargs))
+            digest = runtime_digest if reference == "tpl-runtime" else tool_digest
+            return Item(reference, digest)
 
     client = CubeSandboxClient(sandbox_class=_Sandbox, template_class=Template)
     result = client.validate_template_images({
@@ -546,7 +544,10 @@ def test_cube_client_validates_many_templates_from_one_inventory_read() -> None:
         "tpl-tool": tool_digest,
     })
 
-    assert Template.calls == 1
+    assert sorted(Template.calls) == [
+        ("tpl-runtime", {"limit": 1}),
+        ("tpl-tool", {"limit": 1}),
+    ]
     assert result["tpl-runtime"]["image_digest"] == runtime_digest
     assert result["tpl-tool"]["image_digest"] == tool_digest
 

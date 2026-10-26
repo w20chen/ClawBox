@@ -20,6 +20,8 @@ _IMMUTABLE_ARTIFACT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _IMMUTABLE_ARTIFACT_CACHE_LOCK = Lock()
 _IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 _IMMUTABLE_PREDICTION_CACHE_LOCK = Lock()
+_VALIDATED_COLD_START_SEED_CACHE: dict[str, tuple[dict[str, Any], str]] = {}
+_VALIDATED_COLD_START_SEED_CACHE_LOCK = Lock()
 
 
 def prediction_input_paths(path: Path, mode: str) -> list[Path]:
@@ -541,7 +543,17 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
         from tool_resource.runtime_kb import RuntimeToolResourceKB
 
         path = path.resolve(strict=True)
-        manifest = validate_seed(path)
+        cache_key = str(path)
+        with _VALIDATED_COLD_START_SEED_CACHE_LOCK:
+            validated_seed = _VALIDATED_COLD_START_SEED_CACHE.get(cache_key)
+            if validated_seed is None:
+                manifest = validate_seed(path)
+                manifest_bytes = (path / "manifest.json").read_bytes()
+                validated_seed = (
+                    manifest, hashlib.sha256(manifest_bytes).hexdigest(),
+                )
+                _VALIDATED_COLD_START_SEED_CACHE[cache_key] = validated_seed
+        manifest, seed_sha256 = validated_seed
         self.memory_measurement = "cgroup_v2_environment_union_v1"
         # A general deployment prior needs no Cube-specific training identities.
         # Use its P50 as the host-growth estimate; the existing reservation scale
@@ -563,8 +575,6 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
             )
         ]
 
-        manifest_bytes = (path / "manifest.json").read_bytes()
-        seed_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         self.path = path
         self.repository = repository
         self.prediction_source = "runtime_clawtune_cold_start_kb"
