@@ -503,6 +503,7 @@ class WatermarkController:
         self.return_count = 0
         self.return_release_count = 0
         self.return_service_seconds = 0.0
+        self.low_route_fast_path_count = 0
         self._last_reactive_borrow_local_bytes: int | None = None
         self.memory_scheduling = getattr(arm.resources, 'memory_scheduling', 'static')
         self.borrow_cooldown = getattr(arm.resources, 'borrow_cooldown_seconds', 5.)
@@ -751,6 +752,26 @@ class WatermarkController:
         if (lifecycle.sandbox_id in set(self.borrower.borrowed())
                 and self.borrower.allocates_shared(lifecycle.sandbox_id)):
             return True
+        # The watermark thread samples this domain every configured interval
+        # and ``peak_local_bytes`` never decreases.  While that observed peak
+        # plus every nominal pending claim still fits below LOW, this request
+        # cannot require a HIGH/HARD routing action.  Avoid taking the global
+        # admission condition and rereading NUMA files for every Tool call in
+        # that abundant-capacity interval.  Once the conservative upper bound
+        # reaches LOW, retain the exact locked check below.
+        demand = getattr(self.coordinator, 'demand', None)
+        capacity_claims = getattr(self.coordinator, '_capacity_claims', None)
+        if demand is not None and not capacity_claims:
+            pending = demand.pending_upper_bound(
+                getattr(self.coordinator, 'demand_scope', None),
+            )
+            predicted = predicted_increment_mib * 1024 * 1024
+            headroom = int(getattr(
+                self.coordinator, 'operation_headroom_bytes', 0,
+            ))
+            if self.peak_local_bytes + pending + predicted + headroom <= self.low:
+                self.low_route_fast_path_count += 1
+                return False
         if not self.coordinator.local_commitment_exceeds(
                 predicted_increment_mib,
                 self.high if self.memory_scheduling == 'joint' else self.hard):
@@ -2647,7 +2668,7 @@ class ExperimentWorker:
                     "low", "high", "hard", "peak_local_bytes", "high_crossings",
                     "high_overshoot_byte_seconds", "high_overshoot_seconds",
                     "hard_overshoot_byte_seconds", "hard_overshoot_seconds", "borrow_count",
-                    "return_count", "return_release_count",
+                    "return_count", "return_release_count", "low_route_fast_path_count",
                 )} if c else None,
             }
         if arm.resources.compute_nodes:
@@ -2667,6 +2688,7 @@ class ExperimentWorker:
                     "high_overshoot_seconds", "hard_overshoot_byte_seconds", "hard_overshoot_seconds",
                     "borrow_count", "borrow_service_seconds", "return_count",
                     "return_release_count", "return_service_seconds",
+                    "low_route_fast_path_count",
                 )
             }, peak_local_bytes=memory.peak_used_delta_bytes, **{
                 name: max(getattr(c, name) for c in controllers) for name in (
@@ -2831,6 +2853,10 @@ class ExperimentWorker:
                 ),
                 "shared_memory_return_service_seconds": (
                     watermark_controller.return_service_seconds
+                    if watermark_controller is not None else None
+                ),
+                "low_route_fast_path_count": (
+                    watermark_controller.low_route_fast_path_count
                     if watermark_controller is not None else None
                 ),
                 "blocked_admission_seconds": sum(d.coordinator.blocked_seconds for d in domains.values()),

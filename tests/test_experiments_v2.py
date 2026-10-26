@@ -240,6 +240,44 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
     assert controller.borrow_count == 2
 
 
+def test_tool_routing_skips_exact_memory_check_below_conservative_low_bound() -> None:
+    gib = 1024 ** 3
+    demand = SimpleNamespace(pending_upper_bound=lambda scope: 2 * gib)
+    coordinator = SimpleNamespace(
+        demand=demand,
+        demand_scope='node0',
+        _capacity_claims={},
+        operation_headroom_bytes=gib,
+        local_commitment_exceeds=lambda *_args: pytest.fail(
+            'abundant capacity must not take the exact admission lock'
+        ),
+    )
+    borrower = SimpleNamespace(
+        shared_pool=WarmSnapshotPool(128 * gib, borrow_capacity_bytes=64 * gib),
+        node_id='node0',
+        borrowed=lambda: (),
+        allocates_shared=lambda _sandbox_id: False,
+    )
+    arm = SimpleNamespace(
+        resources=SimpleNamespace(
+            local_memory_low_watermark_mib=28 * 1024,
+            local_memory_high_watermark_mib=32 * 1024,
+            local_memory_capacity_mib=36 * 1024,
+        ),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.RESIDENT),
+    )
+    controller = WatermarkController(
+        arm, coordinator,
+        SimpleNamespace(interval_s=.2, tier_usage=lambda: (10*gib, 0, 10*gib)),
+        borrower, SimpleNamespace(write=lambda _row: None),
+    )
+    controller.peak_local_bytes = 10 * gib
+
+    assert controller.route_progress_to_shared(
+        SimpleNamespace(sandbox_id='tool', resident=True), 1024,
+    ) is False
+
+
 @pytest.mark.parametrize("root", [None, "", "   "])
 def test_incremental_reclamation_requires_cold_destination(root) -> None:
     raw = raw_spec()
