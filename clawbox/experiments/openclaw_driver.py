@@ -391,6 +391,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     identity_file = f"{ssh_dir}/id_ed25519"
     known_hosts_file = f"{ssh_dir}/known_hosts"
     launcher_dir = f"{home}/bin"
+    timed_sidecar_file = f"{launcher_dir}/timed-clawtune-sidecar.py"
+    sidecar_timing_file = f"{home}/logs/sidecar-startup-timing.json"
     auth_preload_file = f"{launcher_dir}/openclaw-auth.mjs"
     ssh_launcher = f"{launcher_dir}/ssh"
     real_ssh = openclaw_real_ssh_path(session_id)
@@ -438,6 +440,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
 
     def emit_startup_stage(
         stage: str, started: float, *, status: str = "ok",
+        details: dict[str, Any] | None = None,
     ) -> None:
         if startup_event is not None:
             startup_event({
@@ -446,6 +449,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 "stage": stage,
                 "status": status,
                 "duration_seconds": max(0.0, time.monotonic() - started),
+                **({"guest_timing": details} if details is not None else {}),
             })
 
     def invoke(args: list[str], *, input_value: str | None = None,
@@ -488,6 +492,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     init_state_file = f"{home}/initialize-clawtune-state.py"
     init_state_source = Path(__file__).resolve().parents[2] / "scripts" / "initialize-clawtune-state.py"
     init_state_b64 = base64.b64encode(init_state_source.read_bytes()).decode()
+    timed_sidecar_source = Path(__file__).resolve().parents[2] / "scripts" / "timed-clawtune-sidecar.py"
+    timed_sidecar_b64 = base64.b64encode(
+        timed_sidecar_source.read_text(encoding="utf-8").replace("\r\n", "\n").encode()
+    ).decode()
     _user, host, port = split_native_ssh_target(ssh.target)
     known_host = f"{host_key_alias} {ssh.host_public_key.strip()}\n"
     known_b64 = base64.b64encode(known_host.encode()).decode()
@@ -544,9 +552,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/local/bin/ssh; "
         + f"install -m 0755 {shlex.quote(ssh_launcher)} /usr/bin/ssh; "
         + f"printf %s {shlex.quote(init_state_b64)} | base64 -d > {shlex.quote(init_state_file)}; "
+        + f"printf %s {shlex.quote(timed_sidecar_b64)} | base64 -d > {shlex.quote(timed_sidecar_file)}; "
         + f"test -d {shlex.quote(clawtune_plugin)}; "
         + relay_setup
-        + f"chmod 700 {shlex.quote(ssh_launcher)} {shlex.quote(init_state_file)}; "
+        + f"chmod 700 {shlex.quote(ssh_launcher)} {shlex.quote(init_state_file)} {shlex.quote(timed_sidecar_file)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
         + f"/opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
@@ -562,8 +571,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
-        + "/opt/clawtune/venv/bin/python -m clawtune_sidecar.main "
-        + f"--host 127.0.0.1 --port 8765 >{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
+        + f"/opt/clawtune/venv/bin/python {shlex.quote(timed_sidecar_file)} "
+        + f"--host 127.0.0.1 --port 8765 --timing-output {shlex.quote(sidecar_timing_file)} "
+        + f">{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
         + f"echo $! >{shlex.quote(home + '/sidecar.pid')}", 30,
         )
     except BaseException:
@@ -586,8 +596,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         ready = runtime_executor.execute(
             prefix + f"deadline=$(( $(date +%s) + {startup_timeout_seconds} )); "
             + "while [ $(date +%s) -lt $deadline ]; do " + relay_ready
-            + "curl --max-time 2 -fsS http://127.0.0.1:8765/health/ready "
-            + ">/dev/null 2>&1 && exit 0; sleep 0.5; done; exit 1",
+            + "if curl --max-time 2 -fsS http://127.0.0.1:8765/health/ready "
+            + f">/dev/null 2>&1; then cat {shlex.quote(sidecar_timing_file)}; exit 0; fi; "
+            + "sleep 0.5; done; exit 1",
             startup_timeout_seconds + 10,
         )
         if ready.exit_code:
@@ -610,7 +621,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 str(diagnostic_error), encoding="utf-8",
             )
         raise
-    emit_startup_stage("sidecar_ready", ready_started)
+    guest_timing = None
+    try:
+        guest_timing = json.loads(ready.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        pass
+    emit_startup_stage("sidecar_ready", ready_started, details=guest_timing)
     exec_tool_config: dict[str, object] = {
         "host": "sandbox", "security": "full", "ask": "off",
     }
