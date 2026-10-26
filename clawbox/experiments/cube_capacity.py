@@ -29,7 +29,8 @@ def log_level() -> str | None:
     script = """
 import json,sys,yaml
 data=yaml.safe_load(open(sys.argv[1])) or {}
-print(json.dumps((data.get('log') or {}).get('level')))
+level=(data.get('log') or {}).get('level')
+print(json.dumps(level.lower() if isinstance(level,str) else level))
 """
     return json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG)))
 
@@ -141,7 +142,7 @@ def apply_log_level(level: str) -> bool:
     from .host import _run
     script = """
 import json,pathlib,shutil,sys,time,yaml
-p=pathlib.Path(sys.argv[1]); desired=sys.argv[2]
+p=pathlib.Path(sys.argv[1]); desired=sys.argv[2].upper()
 data=yaml.safe_load(p.read_text()) or {}; log=data.setdefault('log',{})
 changed=log.get('level') != desired
 if changed:
@@ -151,6 +152,6 @@ if changed:
 print(json.dumps({'changed':changed}))
 """
     result = json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG), level))
-    if log_level() != level:
+    if log_level() != level.lower():
         raise RuntimeError('CubeMaster log level was not saved; inspect configuration permissions')
     return result['changed']

@@ -114,7 +114,7 @@ def test_log_level_update_preserves_configuration_and_is_idempotent(tmp_path, mo
     assert capacity.apply_log_level('warn')
     assert not capacity.apply_log_level('warn')
     updated = yaml.safe_load(path.read_text())
-    assert updated['log'] == {'level': 'warn', 'path': '/data/log/CubeMaster'}
+    assert updated['log'] == {'level': 'WARN', 'path': '/data/log/CubeMaster'}
     assert updated['redis'] == original['redis']
     assert len(list(tmp_path.glob('conf.yaml.pre-clawbox-log-level-*'))) == 1
 
