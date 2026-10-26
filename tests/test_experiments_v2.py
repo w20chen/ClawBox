@@ -866,8 +866,10 @@ def test_paused_tool_is_restored_before_growth_admission_and_routing():
         set_tool_active=lambda session_id, active: calls.append(
             ("active", session_id, active)
         ),
-        begin_tool_admission=lambda session_id, local, timeout, total_mib: (
-            calls.append(("admit", lifecycle.resident, local, total_mib)) or 0.25
+        begin_tool_admission=lambda session_id, local, timeout, total_mib,
+        already_active=False: (
+            calls.append(("admit", lifecycle.resident, local, total_mib,
+                          already_active)) or 0.25
         ),
     )
     watermark = SimpleNamespace(
@@ -894,7 +896,7 @@ def test_paused_tool_is_restored_before_growth_admission_and_routing():
         ("active", "session", True),
         ("restore", False),
         ("route", True, 3),
-        ("admit", True, 0, 3),
+        ("admit", True, 0, 3, True),
     ]
 
 

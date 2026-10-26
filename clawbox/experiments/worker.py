@@ -4819,6 +4819,7 @@ class ExperimentWorker:
                 local_amount,
                 arm.execution.arm_timeout_seconds,
                 total_mib=amount_mib,
+                already_active=True,
             )
         )
         # Failed-session cleanup can close the VM while this callback releases

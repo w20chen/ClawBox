@@ -270,14 +270,16 @@ class PolicyCoordinator:
             self._condition.notify_all()
 
     def begin_tool_admission(self, session_id: str, amount_mib: int,
-                             timeout_s: float, *, total_mib: int | None = None) -> float:
+                             timeout_s: float, *, total_mib: int | None = None,
+                             already_active: bool = False) -> float:
         """Reserve Tool growth after the caller has chosen its allocation tier.
 
         The caller marks the session active before restore and routing.  Keep
         that protection while ``acquire`` waits so another admission cannot
         select this resident Tool as a victim.
         """
-        self.set_tool_active(session_id, True)
+        if not already_active:
+            self.set_tool_active(session_id, True)
         try:
             return self.acquire(session_id, amount_mib, timeout_s, total_mib=total_mib)
         except Exception:

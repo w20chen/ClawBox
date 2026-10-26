@@ -186,6 +186,22 @@ def test_pending_upper_bound_tracks_claim_mutations_by_scope():
         assert c.demand.pending_upper_bound('node1') == 0
 
 
+def test_tool_admission_can_reuse_existing_active_claim():
+    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    c.register('s', type('Lifecycle', (), {'resident': True})())
+    c.set_tool_active('s', True)
+    original = c.set_tool_active
+    calls = []
+    c.set_tool_active = lambda session_id, active: (
+        calls.append((session_id, active)), original(session_id, active)
+    )[1]
+
+    c.begin_tool_admission('s', 1, .1, already_active=True)
+    assert calls == []
+    c.release('s', 1)
+
+
 def test_realized_growth_is_not_reserved_twice_and_retained_pages_still_count():
     used = [100, 10]
     group = [10, 10]
