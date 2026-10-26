@@ -278,6 +278,7 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     snapshots = any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in spec.policies)
     pool = WarmSnapshotPool(spec.resources.warm_memory_capacity_mib*MIB,
         transfer_concurrency=spec.resources.pool_transfer_concurrency,
+        snapshot_transfer_concurrency=spec.resources.snapshot_transfer_concurrency,
         transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds) if spec.resources.warm_memory_capacity_mib else None
     try:
         domain.start()

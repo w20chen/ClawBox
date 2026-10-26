@@ -445,8 +445,9 @@ def policy_progress_budget_mib(arm: ExperimentArm) -> int | None:
 
 
 def policy_event_workers(arm: ExperimentArm) -> int:
-    """Apply the documented snapshot-transfer limit to pause/restore RPCs."""
-    return arm.resources.pool_transfer_concurrency
+    """Do not let checkpoint pressure occupy every Cube lifecycle slot."""
+    return (getattr(arm.resources, 'snapshot_transfer_concurrency', None)
+            or arm.resources.pool_transfer_concurrency)
 
 
 class WatermarkController:
@@ -2075,6 +2076,7 @@ class ExperimentWorker:
             external_shared_live_bytes=initial_shared_live,
             external_warm_bytes=initial_warm_files,
             transfer_concurrency=arm.resources.pool_transfer_concurrency,
+            snapshot_transfer_concurrency=arm.resources.snapshot_transfer_concurrency,
             transfer_timeout_seconds=arm.resources.pool_transfer_timeout_seconds,
             snapshot_aware=arm.policy.snapshot_aware_residency,
         )

@@ -337,6 +337,7 @@ class ResourcesSpec(StrictFrozenModel):
     warm_numa_node: int | None = Field(default=None, ge=0)
     memory_scheduling: Literal["static", "local_only", "snapshot_only", "joint"] = "static"
     pool_transfer_concurrency: int = Field(default=1, ge=1)
+    snapshot_transfer_concurrency: int | None = Field(default=None, ge=1)
     pool_transfer_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     borrow_cooldown_seconds: float = Field(default=5, ge=0, allow_inf_nan=False)
     return_cooldown_seconds: float = Field(default=5, ge=0, allow_inf_nan=False)
@@ -375,6 +376,11 @@ class ResourcesSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        if (self.snapshot_transfer_concurrency is not None
+                and self.snapshot_transfer_concurrency > self.pool_transfer_concurrency):
+            raise ValueError(
+                "snapshot_transfer_concurrency cannot exceed pool_transfer_concurrency"
+            )
         if self.resident_capacity_accounting and self.shared_memory_borrow_limit_mib:
             raise ValueError("resident capacity accounting does not support shared-memory borrowing")
         if self.lifecycle_reservation_scale != 1 and not self.resident_capacity_accounting:

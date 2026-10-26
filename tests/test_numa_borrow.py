@@ -221,6 +221,33 @@ def test_local_pin_does_not_misclassify_warm_snapshot_pages_after_restore(tmp_pa
     assert borrower.placements[-1]['residency_basis'] == 'restore_policy_only'
 
 
+def test_local_pin_reuses_fresh_priority_placement_evidence(monkeypatch, tmp_path):
+    root, leaf, proc = make_tree(tmp_path)
+    borrower = SandboxNumaBorrower(
+        root, local_node=0, shared_node=1, cpus=None,
+        shared_pool=WarmSnapshotPool(128), proc_root=proc,
+        cgroup_mount=tmp_path/'sys/fs/cgroup',
+    )
+    monkeypatch.setattr(
+        'clawbox.experiments.numa_borrow.read_numa_lru_bytes',
+        lambda _path: pytest.fail('duplicate NUMA residency read'),
+    )
+    monkeypatch.setattr(
+        'clawbox.experiments.numa_borrow.read_numa_anon_bytes',
+        lambda _path: pytest.fail('duplicate NUMA anonymous read'),
+    )
+    borrower.pin_local(
+        'sandbox-abc', verified_cgroup=leaf,
+        verified_placement={
+            'actual_residency_bytes': {0: 24 * 1024 * 1024},
+            'actual_anon_residency_bytes': {0: 16 * 1024 * 1024},
+            'unattributed_bytes': 4096,
+        },
+    )
+    assert borrower.placements[-1]['actual_residency_bytes'] == {0: 24 * 1024 * 1024}
+    assert borrower.placements[-1]['local_residency_fraction'] == 1.0
+
+
 def test_local_pin_rejects_cgroup_that_excludes_requested_cpus(tmp_path):
     root,leaf,proc=make_tree(tmp_path)
     (leaf/'cpuset.cpus.effective').write_text('2-3')

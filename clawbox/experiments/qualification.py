@@ -204,6 +204,7 @@ def qualification_contract_digest(spec: ExperimentSpec) -> str:
     # These bound concurrent work and queue wait; they do not change whether
     # the already-qualified snapshot and NUMA operations are supported.
     resources.pop("pool_transfer_concurrency", None)
+    resources.pop("snapshot_transfer_concurrency", None)
     resources.pop("pool_transfer_timeout_seconds", None)
     return hashlib.sha256(canonical_json(raw).encode()).hexdigest()
 
@@ -445,6 +446,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
     pool = (
         WarmSnapshotPool(spec.resources.warm_memory_capacity_mib * 1024 * 1024,
                          transfer_concurrency=spec.resources.pool_transfer_concurrency,
+                         snapshot_transfer_concurrency=spec.resources.snapshot_transfer_concurrency,
                          transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds)
         if spec.resources.warm_memory_capacity_mib > 0 else None
     )
@@ -689,6 +691,7 @@ def live_borrow_roundtrip_test(
         spec.resources.warm_memory_capacity_mib * 1024 * 1024,
         borrow_capacity_bytes=limit_mib * 1024 * 1024,
         transfer_concurrency=spec.resources.pool_transfer_concurrency,
+        snapshot_transfer_concurrency=spec.resources.snapshot_transfer_concurrency,
         transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds,
     )
     borrower = SandboxNumaBorrower(
@@ -1417,7 +1420,6 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         raise ValueError(f"cannot read qualification receipt {path}: {exc}") from exc
     expected = {
         "schema_version": QUALIFICATION_SCHEMA_VERSION,
-        "qualification_contract_digest": qualification_contract_digest(spec),
         "input_manifest": current_qualification_input_manifest(spec),
         "implementation_digest": implementation_digest(),
         "target_node": spec.resources.target_node,

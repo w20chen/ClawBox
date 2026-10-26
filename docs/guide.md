@@ -283,6 +283,14 @@ an operation waits for a slot (default `120`; unit: seconds). Changing either
 field requires validation and a new run ID, but not host apply, image rebuild,
 qualification, or ClawTune retraining.
 
+`mechanisms.checkpoint.snapshot_transfer_concurrency` optionally applies a
+smaller limit to checkpoint, restore, and snapshot-spill operations within that
+shared lifecycle budget (default: the value of `pool_transfer_concurrency`;
+unit: concurrent VM operations). Use it when a checkpoint wave must leave Cube
+lifecycle capacity for new VM creation. It must not exceed
+`pool_transfer_concurrency`. Changing it requires validation and a new run ID,
+but not host apply, image rebuild, qualification, or ClawTune retraining.
+
 The shared memory capacity includes pre-existing shared-node cache and WARM
 files. Each run measures this occupancy before launching VMs and withholds that
 space from new snapshot and live-borrow reservations. Existing data remains in

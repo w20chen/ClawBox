@@ -342,7 +342,7 @@ def test_qualification_uses_all_policies_at_target_concurrency() -> None:
     ]
 
 
-def test_receipt_reuses_capability_across_run_scale_but_not_template_change(
+def test_receipt_reuses_capability_across_scheduling_and_same_image_template_change(
     tmp_path: Path,
 ) -> None:
     spec = load_experiment(EXAMPLE)
@@ -383,8 +383,15 @@ def test_receipt_reuses_capability_across_run_scale_but_not_template_change(
             "template_id": "different-runtime-template",
         }),
     })
-    with pytest.raises(ValueError, match="qualification_contract_digest"):
-        validate_receipt(changed_template, path)
+    assert validate_receipt(changed_template, path)["status"] == "succeeded"
+
+    changed_image = spec.model_copy(update={
+        "runtime": spec.runtime.model_copy(update={
+            "image_digest": "sha256:" + "1" * 64,
+        }),
+    })
+    with pytest.raises(ValueError, match="runtime_image_digest"):
+        validate_receipt(changed_image, path)
 
     stale = _receipt(spec)
     stale["implementation_digest"] = "0" * 64

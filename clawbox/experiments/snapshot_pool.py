@@ -63,6 +63,7 @@ class WarmSnapshotPool:
                  external_shared_live_bytes: int = 0,
                  external_warm_bytes: int = 0,
                  transfer_concurrency: int = 1,
+                 snapshot_transfer_concurrency: int | None = None,
                  transfer_timeout_seconds: float = 120,
                  snapshot_aware: bool = False,
                  clock: Callable[[], float] = time.monotonic) -> None:
@@ -84,10 +85,21 @@ class WarmSnapshotPool:
         self.external_warm_bytes = external_warm_bytes
         if transfer_concurrency < 1 or transfer_timeout_seconds <= 0:
             raise ValueError("transfer concurrency and timeout must be positive")
+        if snapshot_transfer_concurrency is None:
+            snapshot_transfer_concurrency = transfer_concurrency
+        if not 1 <= snapshot_transfer_concurrency <= transfer_concurrency:
+            raise ValueError(
+                "snapshot transfer concurrency must be between one and total transfer concurrency"
+            )
         self.transfer_concurrency = transfer_concurrency
+        self.snapshot_transfer_concurrency = snapshot_transfer_concurrency
         self.transfer_timeout_seconds = transfer_timeout_seconds
         self.snapshot_aware = snapshot_aware
         self._transfer_slots = BoundedSemaphore(transfer_concurrency)
+        # Cube create, checkpoint, restore, spill and NUMA rebind still share
+        # one host-wide lifecycle budget.  A smaller snapshot budget prevents
+        # a checkpoint wave from occupying every slot needed for creation.
+        self._snapshot_transfer_slots = BoundedSemaphore(snapshot_transfer_concurrency)
         # Linux cpuset migrations share one ordered kernel workqueue. Queue
         # rebind transactions here instead of making concurrent cgroup writes
         # drain each other's migrations while holding kernel cgroup locks.
@@ -112,11 +124,28 @@ class WarmSnapshotPool:
         Call only around VMM I/O, after capacity/spill/pin decisions, so a
         waiter never holds a transfer slot while waiting for another transfer.
         """
-        if not self._transfer_slots.acquire(timeout=self.transfer_timeout_seconds):
+        deadline = time.monotonic() + self.transfer_timeout_seconds
+        snapshot_slot = operation in {"checkpoint", "restore", "spill"}
+        if snapshot_slot and not self._snapshot_transfer_slots.acquire(
+            timeout=self.transfer_timeout_seconds
+        ):
             raise TimeoutError(
-                f"Cube lifecycle {operation} slot timed out; inspect active operations "
+                f"Cube lifecycle {operation} snapshot slot timed out; inspect active operations "
                 "or increase resources.pool_transfer_timeout_seconds"
             )
+        acquired_total = False
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            acquired_total = self._transfer_slots.acquire(timeout=remaining)
+            if not acquired_total:
+                raise TimeoutError(
+                    f"Cube lifecycle {operation} slot timed out; inspect active operations "
+                    "or increase resources.pool_transfer_timeout_seconds"
+                )
+        except BaseException:
+            if snapshot_slot:
+                self._snapshot_transfer_slots.release()
+            raise
         with self._lock:
             self._transfers[operation] = self._transfers.get(operation, 0) + 1
         try:
@@ -125,6 +154,8 @@ class WarmSnapshotPool:
             with self._lock:
                 self._transfers[operation] -= 1
             self._transfer_slots.release()
+            if snapshot_slot:
+                self._snapshot_transfer_slots.release()
 
     @property
     def reserved_bytes(self) -> int:
@@ -454,6 +485,7 @@ class WarmSnapshotPool:
                 "external_shared_live_bytes": self.external_shared_live_bytes,
                 "external_warm_bytes": self.external_warm_bytes,
                 "transfer_concurrency": self.transfer_concurrency,
+                "snapshot_transfer_concurrency": self.snapshot_transfer_concurrency,
                 "active_transfers": dict(self._transfers),
                 "bandwidth_measurement": "unavailable",
                 "residency_policy": "value_aware" if self.snapshot_aware else "lru",

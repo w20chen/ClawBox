@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from .snapshot_pool import WarmSnapshotPool
 
@@ -436,7 +436,8 @@ class SandboxNumaBorrower:
             finally:
                 self.shared_pool.rebind_lock.release()
 
-    def pin_local(self, sandbox_id: str, *, verified_cgroup: str | Path | None = None) -> None:
+    def pin_local(self, sandbox_id: str, *, verified_cgroup: str | Path | None = None,
+                  verified_placement: Mapping[str, object] | None = None) -> None:
         """Verify CubeSandbox's native LOCAL placement after create/restore."""
         if verified_cgroup is not None:
             leaf = Path(verified_cgroup).resolve()
@@ -464,8 +465,22 @@ class SandboxNumaBorrower:
             if retained is not None and configured_mems == str(self.shared_node):
                 self.writer(leaf / "cpuset.mems", str(self.local_node))
             effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
-            resident, unattributed = read_numa_lru_bytes(leaf)
-            anon_resident = read_numa_anon_bytes(leaf)
+            if verified_placement is None:
+                resident, unattributed = read_numa_lru_bytes(leaf)
+                anon_resident = read_numa_anon_bytes(leaf)
+            else:
+                # PriorityDomain.verify has just read and validated these same
+                # counters. Re-reading memory.numa_stat here serialized every
+                # concurrent restore behind this borrower-wide lock.
+                resident = {
+                    int(node): int(value) for node, value in
+                    verified_placement['actual_residency_bytes'].items()  # type: ignore[union-attr]
+                }
+                anon_resident = {
+                    int(node): int(value) for node, value in
+                    verified_placement['actual_anon_residency_bytes'].items()  # type: ignore[union-attr]
+                }
+                unattributed = int(verified_placement.get('unattributed_bytes', 0))
             attributed_anon = sum(anon_resident.values())
             initial_residency_check = sandbox_id not in self._initial_placement_verified
             if (initial_residency_check

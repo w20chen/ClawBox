@@ -32,7 +32,8 @@ RESOURCE_FIELDS = {
     'placement': (),
     'idle_reclaim': ('checkpoint_restore_headroom_mib',),
     'shared_memory': ('borrow_cooldown_seconds', 'return_cooldown_seconds'),
-    'checkpoint': ('pool_transfer_concurrency', 'pool_transfer_timeout_seconds'),
+    'checkpoint': ('pool_transfer_concurrency', 'snapshot_transfer_concurrency',
+                   'pool_transfer_timeout_seconds'),
 }
 EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs',
                    'idle_reclaim_costs', 'template_base_sharing_artifact')

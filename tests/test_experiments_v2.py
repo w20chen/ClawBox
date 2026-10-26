@@ -52,9 +52,11 @@ def test_priority_memory_charge_treats_a_cleaned_cgroup_as_zero(tmp_path: Path) 
 
 def test_policy_event_workers_honors_snapshot_transfer_concurrency() -> None:
     arm = SimpleNamespace(
-        resources=SimpleNamespace(pool_transfer_concurrency=7),
+        resources=SimpleNamespace(
+            pool_transfer_concurrency=32, snapshot_transfer_concurrency=8,
+        ),
     )
-    assert policy_event_workers(arm) == 7
+    assert policy_event_workers(arm) == 8
 
 
 def test_incremental_snapshot_is_default() -> None:

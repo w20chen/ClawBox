@@ -269,6 +269,30 @@ def test_consumer_failure_releases_pin_without_retiring_snapshot() -> None:
     assert pool.snapshot()["manifests"][0]["pinned"] == 0
 
 
+def test_snapshot_limit_leaves_total_lifecycle_capacity_for_create() -> None:
+    pool = WarmSnapshotPool(
+        100, transfer_concurrency=2, snapshot_transfer_concurrency=1,
+        transfer_timeout_seconds=.01,
+    )
+    with pool.transfer("checkpoint"):
+        # The independent total slot remains available for Cube create.
+        with pool.transfer("create"):
+            pass
+        with pytest.raises(TimeoutError, match="snapshot slot timed out"):
+            with pool.transfer("restore"):
+                pass
+    with pool.transfer("restore"):
+        pass
+    assert pool.snapshot()["snapshot_transfer_concurrency"] == 1
+
+
+def test_snapshot_limit_cannot_exceed_total_lifecycle_limit() -> None:
+    with pytest.raises(ValueError, match="between one and total"):
+        WarmSnapshotPool(
+            100, transfer_concurrency=2, snapshot_transfer_concurrency=3,
+        )
+
+
 def test_atomic_admission_waits_for_uncommitted_writer() -> None:
     pool = WarmSnapshotPool(100)
     pool.reserve(key(1), 100)

@@ -85,7 +85,11 @@ def emit_overview(value: dict[str, Any]) -> None:
         print(f"Warning: {warning}")
     if value.get("compute_nodes"):
         print(f"Compute placement: {value['placement_policy']} (Runtime + Tool stay together)")
-        print(f"Memory scheduling: {value['memory_scheduling']}; shared transfer concurrency: {value['pool_transfer_concurrency']}")
+        print(
+            f"Memory scheduling: {value['memory_scheduling']}; "
+            f"lifecycle concurrency: {value['pool_transfer_concurrency']}; "
+            f"checkpoint/restore concurrency: {value['snapshot_transfer_concurrency']}"
+        )
         for node in value["compute_nodes"]:
             print(f"  {node['node_id']}: NUMA {node['numa_node']}, CPUs {node['cpus']}, "
                   f"LOW/HIGH/HARD={node['low_watermark_mib']/1024:g}/"

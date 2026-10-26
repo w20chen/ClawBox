@@ -717,6 +717,10 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
         "memory_scheduling": spec.resources.memory_scheduling,
         "runtime_poll_interval_seconds": spec.resources.runtime_poll_interval_seconds,
         "pool_transfer_concurrency": spec.resources.pool_transfer_concurrency,
+        "snapshot_transfer_concurrency": (
+            spec.resources.snapshot_transfer_concurrency
+            or spec.resources.pool_transfer_concurrency
+        ),
         "borrow_cooldown_seconds": spec.resources.borrow_cooldown_seconds,
         "return_cooldown_seconds": spec.resources.return_cooldown_seconds,
         "memory_action_costs": (

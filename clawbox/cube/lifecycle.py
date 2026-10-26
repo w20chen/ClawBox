@@ -297,11 +297,18 @@ class CubeSandboxLifecycle:
                 if self.numa_borrower is not None:
                     with self._measure_stage(stage_seconds, "pin_local_s"):
                         verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
+                        placement = (
+                            verified if isinstance(verified, Mapping)
+                            and isinstance(verified.get('actual_residency_bytes'), Mapping)
+                            and isinstance(verified.get('actual_anon_residency_bytes'), Mapping)
+                            else None
+                        )
                         if verified_cgroup is None:
                             self.numa_borrower.pin_local(self.sandbox_id)
                         else:
                             self.numa_borrower.pin_local(
                                 self.sandbox_id, verified_cgroup=verified_cgroup,
+                                **({'verified_placement': placement} if placement else {}),
                             )
                 self._state = SandboxState.RUNNING
                 return self._record("create", before, self._state,
@@ -630,11 +637,18 @@ class CubeSandboxLifecycle:
                 verified_cgroup = verified.get('cgroup') if isinstance(verified, Mapping) else None
                 if self.numa_borrower is not None:
                     with self._measure_stage(stage_seconds, "pin_local_s"):
+                        placement = (
+                            verified if isinstance(verified, Mapping)
+                            and isinstance(verified.get('actual_residency_bytes'), Mapping)
+                            and isinstance(verified.get('actual_anon_residency_bytes'), Mapping)
+                            else None
+                        )
                         if verified_cgroup is None:
                             self.numa_borrower.pin_local(self.sandbox_id)
                         else:
                             self.numa_borrower.pin_local(
                                 self.sandbox_id, verified_cgroup=verified_cgroup,
+                                **({'verified_placement': placement} if placement else {}),
                             )
                 if self._snapshot_key is not None and self._tier is SnapshotTier.WARM:
                     if self.snapshot_pool is None:
