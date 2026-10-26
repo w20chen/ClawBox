@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -74,6 +75,7 @@ class HostConfig(BaseModel):
     cubelet_tap_init_num: int | None = Field(default=None, ge=1)
     cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
     cube_scheduler_vm_count_ratio: dict[str, float] | None = Field(default=None, min_length=1)
+    cube_master_log_level: Literal["debug", "info", "warn", "error"] | None = None
 
     @field_validator("cube_scheduler_vm_count_ratio")
     @classmethod
@@ -388,6 +390,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
             values['cube_scheduler_overcommit'] = profile['cube_scheduler_overcommit']
         if profile.get('cube_scheduler_vm_count_ratio') is not None:
             values['cube_scheduler_vm_count_ratio'] = profile['cube_scheduler_vm_count_ratio']
+        if profile.get('cube_master_log_level') is not None:
+            values['cube_master_log_level'] = profile['cube_master_log_level']
         for target, source in (("local_gib", "local_memory_capacity_mib"),
                                ("low_gib", "local_memory_low_watermark_mib"),
                                ("high_gib", "local_memory_high_watermark_mib"),
@@ -470,6 +474,13 @@ def check(config: HostConfig) -> dict:
             'current': scheduler_settings(),
             'requested_by_instance_type': config.cube_scheduler_vm_count_ratio,
         }, 'Verify CubeMaster conf.yaml is readable with sudo and review the VM-count multiplier against the node-reported limit.')
+    if config.cube_master_log_level is not None:
+        from .cube_capacity import log_level
+        probe('CubeMaster log threshold', lambda: {
+            'current': log_level(),
+            'requested': config.cube_master_log_level,
+            'scope': 'CubeMaster file logs; warnings and errors remain at warn',
+        }, 'Verify CubeMaster conf.yaml is readable with sudo, or set cube_master_log_level: null to preserve it.')
     probe("Docker", lambda: _run("docker", "info", "--format", "{{.ServerVersion}}"),
           "Start Docker and enable this user's Docker access; docs/installation.md step 1.")
     for name in ("findmnt", "mount", "numactl", "systemctl"):
@@ -570,6 +581,9 @@ def apply(config: HostConfig, profile: Path) -> dict:
     if config.cube_scheduler_vm_count_ratio is not None:
         from .cube_capacity import apply_vm_count_ratios
         restart_cubemaster = apply_vm_count_ratios(config.cube_scheduler_vm_count_ratio) or restart_cubemaster
+    if config.cube_master_log_level is not None:
+        from .cube_capacity import apply_log_level
+        restart_cubemaster = apply_log_level(config.cube_master_log_level) or restart_cubemaster
     if restart_cubemaster:
         lab.command('sudo', '-n', 'systemctl', 'restart', 'cube-sandbox-cubemaster', timeout=120)
     restart_cubelet = apply_cubelet_tap_pool(config)

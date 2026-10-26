@@ -23,6 +23,17 @@ print(json.dumps({k:s.get(k) for k in ('overcommit_ratio','overcommit_ratio_conf
     return json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG)))
 
 
+def log_level() -> str | None:
+    """Read only CubeMaster's log level; never expose the rest of conf.yaml."""
+    from .host import _run
+    script = """
+import json,sys,yaml
+data=yaml.safe_load(open(sys.argv[1])) or {}
+print(json.dumps((data.get('log') or {}).get('level')))
+"""
+    return json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG)))
+
+
 def node_capacity(node: str) -> dict:
     url = 'http://127.0.0.1:8089/internal/node?' + urlencode({'host_id': node})
     with build_opener(ProxyHandler({})).open(url, timeout=10) as response:
@@ -122,4 +133,24 @@ print(json.dumps({'changed':changed}))
     saved = scheduler_settings().get('node_max_mvm_num_conf') or {}
     if any((saved.get(k) or {}).get('mvm_num_reserve_num_percent') != v for k, v in ratios.items()):
         raise RuntimeError('Cube scheduler VM-count ratios were not saved; inspect CubeMaster configuration permissions')
+    return result['changed']
+
+
+def apply_log_level(level: str) -> bool:
+    """Set CubeMaster's persistent log threshold with a recoverable backup."""
+    from .host import _run
+    script = """
+import json,pathlib,shutil,sys,time,yaml
+p=pathlib.Path(sys.argv[1]); desired=sys.argv[2]
+data=yaml.safe_load(p.read_text()) or {}; log=data.setdefault('log',{})
+changed=log.get('level') != desired
+if changed:
+    shutil.copy2(p,p.with_name(p.name+'.pre-clawbox-log-level-'+str(time.time_ns())))
+    log['level']=desired
+    p.write_text(yaml.safe_dump(data,sort_keys=False))
+print(json.dumps({'changed':changed}))
+"""
+    result = json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG), level))
+    if log_level() != level:
+        raise RuntimeError('CubeMaster log level was not saved; inspect configuration permissions')
     return result['changed']

@@ -103,6 +103,29 @@ def test_vm_count_config_update_preserves_other_scheduler_fields(tmp_path, monke
     assert updated['scheduler']['node_max_mvm_num_conf']['cubebox']['mvm_num_reserve_num_percent']==1.05
 
 
+def test_log_level_update_preserves_configuration_and_is_idempotent(tmp_path, monkeypatch):
+    from clawbox.experiments import host
+    path = tmp_path/'conf.yaml'
+    original = {'log': {'level': 'info', 'path': '/data/log/CubeMaster'},
+                'redis': {'password': 'test-only'}}
+    path.write_text(yaml.safe_dump(original))
+    monkeypatch.setattr(capacity, 'CONFIG', path)
+    monkeypatch.setattr(host, '_run', lambda *args: subprocess.check_output(args[2:], text=True))
+    assert capacity.apply_log_level('warn')
+    assert not capacity.apply_log_level('warn')
+    updated = yaml.safe_load(path.read_text())
+    assert updated['log'] == {'level': 'warn', 'path': '/data/log/CubeMaster'}
+    assert updated['redis'] == original['redis']
+    assert len(list(tmp_path.glob('conf.yaml.pre-clawbox-log-level-*'))) == 1
+
+
+def test_cube_master_log_level_is_explicit_and_validated():
+    assert HostConfig().cube_master_log_level is None
+    assert HostConfig(cube_master_log_level='warn').cube_master_log_level == 'warn'
+    with pytest.raises(ValueError, match='cube_master_log_level'):
+        HostConfig(cube_master_log_level='trace')
+
+
 def test_insufficient_capacity_fails_with_remedy(monkeypatch):
     monkeypatch.setattr(capacity, 'node_capacity', lambda _: node())
     monkeypatch.setattr(capacity, 'scheduler_settings', lambda: {})

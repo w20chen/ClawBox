@@ -54,6 +54,7 @@ file before applying it. Important host fields are:
 | `cubelet_tap_init_num` | Optional warm TAP target, not a VM limit. The patched embedded runtime creates a TAP on demand when the ready pool is empty. Size this for the expected creation burst, not all offered sessions; a very large idle pool makes restart recovery proportional to the retained TAP count. Changing it requires an idle-host apply and a new run ID. |
 | `cube_scheduler_overcommit` | Optional map from Cube node `InstanceType` to positive `cpu_ratio` and `mem_ratio`; `null` preserves Cube's settings. These multiply Cube's reported configured-VM quotas, not physical CPU/RAM allocations. |
 | `cube_scheduler_vm_count_ratio` | Optional positive per-instance multiplier over Cube's node-reported VM-count limit; `null` preserves Cube's setting. This is a scheduler limit, not physical capacity. |
+| `cube_master_log_level` | Optional CubeMaster file-log threshold: `debug`, `info`, `warn`, or `error`; `null` preserves Cube's setting. Use `warn` for large runs to retain warning/error evidence without logging every template and sandbox-list response. Changing it requires idle-host apply and a new run ID, but no image rebuild or retraining. |
 
 Check without mutation, then apply on an idle host:
 
