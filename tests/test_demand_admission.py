@@ -88,6 +88,25 @@ def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
     assert replacement.baseline == (0, 0)
 
 
+def test_tool_binding_publishes_exact_baseline_without_global_lock():
+    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    observed = [10*MIB, 10*MIB]
+    c.register_memory('s', tool=lambda: tuple(observed), lifecycle=lambda: (0, 0))
+    c.acquire('s', 20, .1)
+
+    timing = c.bind_tool_memory('s')
+    observed[:] = [16*MIB, 16*MIB]
+    with c._condition:
+        assert c.demand.pending_breakdown_without_condition(c.demand_scope) == (
+            14*MIB, 14*MIB,
+        )
+    assert timing['status'] == 'bound'
+    assert timing['lookup_lock_wait_seconds'] == 0
+    assert timing['publish_lock_wait_seconds'] == 0
+    c.release('s', 20)
+
+
 def test_same_vm_concurrent_tool_reservations_share_one_aggregate_claim():
     c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)

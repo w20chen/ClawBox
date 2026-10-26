@@ -341,14 +341,18 @@ class PolicyCoordinator:
         publish_started = time.monotonic()
         timing['sample_seconds'] = publish_started - sample_started
         status = 'claim_changed'
-        with self._condition:
-            acquired = time.monotonic()
-            timing['publish_lock_wait_seconds'] = acquired - publish_started
-            if self.demand.claims.get(key) is claim and claim.sample is None:
-                claim.baseline = baseline
-                claim.sample = sample
-                status = 'bound'
-        timing['publish_lock_hold_seconds'] = time.monotonic() - acquired
+        # Publish baseline before sampler.  An exact-demand reader that races
+        # between those assignments still sees an unbound claim and charges its
+        # full nominal reservation.  Once sampler is visible, baseline is
+        # already complete.  Removed/replaced claims fail the identity check;
+        # exact readers also compare their frozen identity/fields and fall back
+        # to the nominal bound when either changed.  No shared-condition write
+        # is needed, and waiters already poll while nominal charge is retained.
+        if self.demand.claims.get(key) is claim and claim.sample is None:
+            claim.baseline = baseline
+            claim.sample = sample
+            status = 'bound'
+        timing['publish_snapshot_seconds'] = time.monotonic() - publish_started
         return finished(status)
 
     def pressure(self, additional_bytes: int = 0) -> bool:
