@@ -226,7 +226,9 @@ ENV CLAWTUNE_REVISION={revision}
 LABEL org.opencontainers.image.source.clawtune.revision="{revision}"
 '''
             if role == "runtime":
-                dockerfile += '''COPY plugin /opt/clawtune/packages/clawtune-plugin
+                dockerfile += '''COPY scripts/patch-openclaw-ssh-backend.js /tmp/patch-openclaw-ssh-backend.js
+RUN node /tmp/patch-openclaw-ssh-backend.js && rm /tmp/patch-openclaw-ssh-backend.js
+COPY plugin /opt/clawtune/packages/clawtune-plugin
 COPY selected-seed /opt/clawtune/cold-start/tool-resource
 ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
 RUN /opt/clawtune/venv/bin/python -m clawtune_sidecar.predictors.startup_cache \
