@@ -7,7 +7,8 @@ from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.snapshot_pool import SnapshotKey
 from clawbox.experiments.memory_actions import MemoryActionCostModel
 from clawbox.experiments.numa_borrow import (
-    NumaBorrowRecord, NumaBorrowUnavailable, NumaResidencyObservation,
+    NumaBorrowRecord, NumaBorrowUnavailable, NumaRebindIncomplete,
+    NumaResidencyObservation,
 )
 from clawbox.experiments.spec import (
     ExperimentSpec, MemoryActionCostSpec, ReclamationPolicy, SnapshotTier,
@@ -557,6 +558,71 @@ def test_low_watermark_releases_return_claim_when_return_fails():
     assert calls == [('claim', 'session-1'), ('release', 'session-1')]
 
 
+def test_incomplete_return_rebind_quarantines_vm_and_keeps_controller_healthy():
+    mib = 1024**2
+    calls = []
+    events = []
+    pool = WarmSnapshotPool(128*mib, borrow_capacity_bytes=64*mib)
+
+    class Lifecycle:
+        sandbox_id = 'tool-1'
+        role = 'tool'
+        resident = True
+        def observe_borrow_candidate(self):
+            return NumaResidencyObservation(
+                sandbox_id=self.sandbox_id, cgroup='/cg/tool-1', effective_mems='2',
+                local_bytes=0, shared_bytes=mib, other_numa_bytes=0,
+                unattributed_bytes=0, charged_bytes=mib, reserved_bytes=mib,
+                observed_unix_s=1,
+            )
+        def return_local_memory(self):
+            raise NumaRebindIncomplete('return migration outcome is uncertain')
+        def quarantine_incomplete_rebind(self):
+            calls.append(('quarantine', self.sandbox_id))
+            self.resident = False
+            return True
+
+    coordinator = SimpleNamespace(
+        claim_memory_return=lambda session_id: calls.append(('claim', session_id)) or True,
+        release_memory_return=lambda session_id: calls.append(('release', session_id)),
+    )
+    borrower = SimpleNamespace(
+        node_id='node0', shared_node=2, shared_pool=pool,
+        borrowed=lambda: ('tool-1',),
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=12,
+        local_memory_high_watermark_mib=16,
+        local_memory_capacity_mib=18,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, coordinator, SimpleNamespace(), borrower,
+        SimpleNamespace(write=events.append),
+    )
+    controller.register('session-1', Lifecycle(), SimpleNamespace(
+        sandbox_id='runtime-1', resident=False,
+    ))
+
+    assert controller._return_one(10*mib) is False
+    assert controller._error is None
+    assert calls == [
+        ('claim', 'session-1'),
+        ('quarantine', 'tool-1'),
+        ('release', 'session-1'),
+    ]
+    assert events == [{
+        'event': 'shared_memory_return_rejected',
+        'role': 'tool',
+        'reason': 'return_rebind_incomplete',
+        'sandbox_id': 'tool-1',
+        'error': 'return migration outcome is uncertain',
+        'quarantined': True,
+        'reservation_retained': True,
+    }]
+
+
 def test_low_watermark_runtime_return_does_not_use_tool_coordination():
     mib = 1024**2
     pool = WarmSnapshotPool(128*mib, borrow_capacity_bytes=64*mib)
@@ -761,6 +827,48 @@ def test_rebind_timeout_is_a_recoverable_borrow_rejection():
         'reason': 'borrow_rebind_unavailable',
         'sandbox_id': 'tool-1',
         'error': 'timed out updating cpuset.mems',
+    }]
+
+
+def test_incomplete_rebind_quarantines_one_vm_without_failing_controller():
+    events = []
+    pool = WarmSnapshotPool(100, borrow_capacity_bytes=100)
+    borrower = SimpleNamespace(
+        node_id='node0', shared_pool=pool, borrowed=lambda: ('tool-1',),
+        allocates_shared=lambda _sandbox_id: False,
+    )
+    arm = SimpleNamespace(resources=SimpleNamespace(
+        local_memory_low_watermark_mib=20,
+        local_memory_high_watermark_mib=32,
+        local_memory_capacity_mib=36,
+        memory_scheduling='joint', borrow_cooldown_seconds=0,
+        return_cooldown_seconds=0, memory_action_costs=None),
+        policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
+    controller = WatermarkController(
+        arm, SimpleNamespace(), SimpleNamespace(), borrower,
+        SimpleNamespace(write=events.append),
+    )
+    quarantined = []
+    lifecycle = SimpleNamespace(
+        sandbox_id='tool-1', role='tool',
+        borrow_shared=lambda: (_ for _ in ()).throw(
+            NumaRebindIncomplete('migration outcome is uncertain')
+        ),
+        quarantine_incomplete_rebind=lambda: quarantined.append(True) or True,
+    )
+
+    assert controller._record_borrow(lifecycle, reason='pressure') is False
+    assert controller._error is None
+    assert controller._last_borrow_rejection == 'borrow_rebind_incomplete'
+    assert quarantined == [True]
+    assert events == [{
+        'event': 'shared_memory_borrow_rejected',
+        'role': 'tool',
+        'reason': 'borrow_rebind_incomplete',
+        'sandbox_id': 'tool-1',
+        'error': 'migration outcome is uncertain',
+        'quarantined': True,
+        'reservation_retained': True,
     }]
 
 

@@ -43,7 +43,9 @@ from .memory import (
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
 from .native_artifacts import collect_and_validate_native_tool_artifacts
-from .numa_borrow import NumaBorrowUnavailable, SandboxNumaBorrower
+from .numa_borrow import (
+    NumaBorrowUnavailable, NumaRebindIncomplete, SandboxNumaBorrower,
+)
 from .memory_actions import MemoryActionCostModel
 from .openclaw_driver import (
     NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
@@ -551,6 +553,19 @@ class WatermarkController:
             except WarmCapacityError:
                 self._last_borrow_rejection = 'shared_capacity_unavailable'
                 return False
+            except NumaRebindIncomplete as exc:
+                self._last_borrow_rejection = 'borrow_rebind_incomplete'
+                quarantined = lifecycle.quarantine_incomplete_rebind()
+                self.events.write({
+                    'event': 'shared_memory_borrow_rejected',
+                    'role': lifecycle.role,
+                    'reason': self._last_borrow_rejection,
+                    'sandbox_id': lifecycle.sandbox_id,
+                    'error': str(exc),
+                    'quarantined': quarantined,
+                    'reservation_retained': True,
+                })
+                return False
             except NumaBorrowUnavailable as exc:
                 self._last_borrow_rejection = 'borrow_rebind_unavailable'
                 self.events.write({
@@ -789,7 +804,20 @@ class WatermarkController:
             if coordinate_tool and not self.coordinator.claim_memory_return(session_id):
                 continue
             try:
-                record = candidate.return_local_memory()
+                try:
+                    record = candidate.return_local_memory()
+                except NumaRebindIncomplete as exc:
+                    quarantined = candidate.quarantine_incomplete_rebind()
+                    self.events.write({
+                        'event': 'shared_memory_return_rejected',
+                        'role': candidate.role,
+                        'reason': 'return_rebind_incomplete',
+                        'sandbox_id': candidate.sandbox_id,
+                        'error': str(exc),
+                        'quarantined': quarantined,
+                        'reservation_retained': True,
+                    })
+                    record = None
             finally:
                 if coordinate_tool:
                     self.coordinator.release_memory_return(session_id)

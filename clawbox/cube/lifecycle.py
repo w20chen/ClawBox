@@ -842,6 +842,22 @@ class CubeSandboxLifecycle:
                 self.sandbox_id, self.configured_memory_bytes,
             )
 
+    def quarantine_incomplete_rebind(self) -> bool:
+        """Exclude a VM whose kernel migration outcome cannot be verified.
+
+        The borrow reservation remains owned by ``SandboxNumaBorrower`` until
+        ordinary session cleanup destroys the VM and verifies that its shared
+        pages are gone.  Marking the lifecycle UNKNOWN prevents admission and
+        victim selection from using the VM in the meantime.
+        """
+        with self._lock:
+            if self._state is SandboxState.CLOSED:
+                return False
+            if self._state is not SandboxState.RUNNING:
+                return False
+            self._state = SandboxState.UNKNOWN
+            return True
+
     def return_local_memory(self):
         with self._lock:
             if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:

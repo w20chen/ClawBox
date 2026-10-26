@@ -33,8 +33,8 @@ class _NumaRebindTimeout(RuntimeError):
     """The kernel did not finish a cpuset rebind within the configured limit."""
 
 
-class _NumaRebindIncomplete(RuntimeError):
-    """A helper failed; do not queue another migration as a guessed rollback."""
+class NumaRebindIncomplete(RuntimeError):
+    """A rebind outcome is uncertain; retain capacity and quarantine the VM."""
 
     rollback_safe = False
 
@@ -216,12 +216,12 @@ class SandboxNumaBorrower:
                 stderr=subprocess.PIPE, check=False, timeout=limit + 1,
             )
         except subprocess.TimeoutExpired as exc:
-            raise _NumaRebindIncomplete(
+            raise NumaRebindIncomplete(
                 f"NUMA process migration did not finish within {limit}s: {leaf}; "
                 "retain the reservation and clean up this VM before retrying"
             ) from exc
         if completed.returncode:
-            raise _NumaRebindIncomplete(
+            raise NumaRebindIncomplete(
                 f"NUMA process migration failed for {leaf}: "
                 f"{completed.stderr.strip() or completed.returncode}; "
                 "retain the reservation and clean up this VM before retrying"
