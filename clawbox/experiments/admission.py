@@ -47,6 +47,13 @@ class DemandLedger:
         self.previous = None
         self.check = lambda: None
         self.claims: dict[tuple[str, str], Claim] = {}
+        # Admission checks call the conservative bound for every Tool request.
+        # Re-summing every live claim while holding the shared policy condition
+        # turns that O(n) read into a lock convoy at high concurrency.  All
+        # amount mutations already pass through add/extend/release below, so
+        # keep the same bound incrementally in O(1).
+        self._pending_amount = 0
+        self._pending_local_by_scope: dict[str, int] = {}
         self.pending_upper_bound_fast_path_count = 0
         self.pending_exact_count = 0
         # Exact claim reads can touch hundreds of VM cgroup files.  The policy
@@ -60,9 +67,21 @@ class DemandLedger:
 
     def pending_upper_bound(self, scope=None):
         """Return the safe nominal bound without sampling every live claim."""
-        return sum(c.amount if scope is None else c.local_amount
-                   for c in self.claims.values()
-                   if scope is None or c.scope == scope)
+        if scope is None:
+            return self._pending_amount
+        return self._pending_local_by_scope.get(scope, 0)
+
+    def _adjust_pending_upper_bound(
+        self, scope: str, amount_delta: int, local_delta: int,
+    ) -> None:
+        self._pending_amount += amount_delta
+        scoped = self._pending_local_by_scope.get(scope, 0) + local_delta
+        if self._pending_amount < 0 or scoped < 0:
+            raise RuntimeError("demand upper-bound accounting underflow")
+        if scoped:
+            self._pending_local_by_scope[scope] = scoped
+        else:
+            self._pending_local_by_scope.pop(scope, None)
 
     def pending(self, scope=None):
         # Callers hold the shared condition throughout sample/check/commit.
@@ -195,6 +214,7 @@ class DemandLedger:
             raise RuntimeError(f'duplicate demand claim: {key}')
         self.claims[key] = Claim(scope, amount, local_amount, sample,
                                  sample() if sample else (0, 0))
+        self._adjust_pending_upper_bound(scope, amount, local_amount)
 
     def extend(self, key, *, amount, local_amount):
         """Add one execution reservation to an existing aggregate claim."""
@@ -203,6 +223,7 @@ class DemandLedger:
             raise RuntimeError(f'missing demand claim: {key}')
         claim.amount += amount
         claim.local_amount += local_amount
+        self._adjust_pending_upper_bound(claim.scope, amount, local_amount)
 
     def release_amount(self, key, *, amount, local_amount):
         """Release one execution without dropping sibling reservations."""
@@ -213,6 +234,7 @@ class DemandLedger:
             raise ValueError('released demand must not be negative')
         if amount > claim.amount or local_amount > claim.local_amount:
             raise RuntimeError(f'demand release exceeds claim: {key}')
+        self._adjust_pending_upper_bound(claim.scope, -amount, -local_amount)
         claim.amount -= amount
         claim.local_amount -= local_amount
         if claim.amount == 0 and claim.local_amount == 0:
@@ -220,7 +242,11 @@ class DemandLedger:
         self.condition.notify_all()
 
     def release(self, key):
-        self.claims.pop(key, None)
+        claim = self.claims.pop(key, None)
+        if claim is not None:
+            self._adjust_pending_upper_bound(
+                claim.scope, -claim.amount, -claim.local_amount,
+            )
         self.condition.notify_all()
 
     def rebase(self, key):

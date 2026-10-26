@@ -161,6 +161,31 @@ def test_concurrent_same_vm_admissions_commit_without_an_inflight_convoy():
     assert not c.demand.claims
 
 
+def test_pending_upper_bound_tracks_claim_mutations_by_scope():
+    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+                          emergency_free_mib=0, operation_headroom_mib=0)
+    with c._condition:
+        c.demand.add(('a', 'tool'), scope='node0', amount=10*MIB,
+                     local_amount=7*MIB)
+        c.demand.add(('b', 'tool'), scope='node1', amount=20*MIB,
+                     local_amount=11*MIB)
+        assert c.demand.pending_upper_bound() == 30*MIB
+        assert c.demand.pending_upper_bound('node0') == 7*MIB
+        assert c.demand.pending_upper_bound('node1') == 11*MIB
+
+        c.demand.extend(('a', 'tool'), amount=5*MIB, local_amount=3*MIB)
+        c.demand.release_amount(('b', 'tool'), amount=4*MIB, local_amount=2*MIB)
+        assert c.demand.pending_upper_bound() == 31*MIB
+        assert c.demand.pending_upper_bound('node0') == 10*MIB
+        assert c.demand.pending_upper_bound('node1') == 9*MIB
+
+        c.demand.release(('a', 'tool'))
+        c.demand.release(('b', 'tool'))
+        assert c.demand.pending_upper_bound() == 0
+        assert c.demand.pending_upper_bound('node0') == 0
+        assert c.demand.pending_upper_bound('node1') == 0
+
+
 def test_realized_growth_is_not_reserved_twice_and_retained_pages_still_count():
     used = [100, 10]
     group = [10, 10]

@@ -310,20 +310,25 @@ class PolicyCoordinator:
     def bind_tool_memory(self, session_id):
         started = time.monotonic()
         cpu_started = time.thread_time()
-        timing = {'sample_seconds': 0.0, 'publish_lock_wait_seconds': 0.0,
+        timing = {'sample_seconds': 0.0, 'lookup_lock_wait_seconds': 0.0,
+                  'lookup_lock_hold_seconds': 0.0,
+                  'publish_lock_wait_seconds': 0.0,
                   'publish_lock_hold_seconds': 0.0}
         def finished(status):
             return {**timing, 'status': status,
                     'service_seconds': time.monotonic() - started,
                     'thread_cpu_seconds': time.thread_time() - cpu_started}
         key = (session_id, 'tool_admission')
-        with self._condition:
-            acquired = time.monotonic()
-            timing['lookup_lock_wait_seconds'] = acquired - started
-            claim = self.demand.claims.get(key)
-            sample = self._memory_samples.get(session_id, {}).get('tool_admission')
-            already_bound = claim is not None and claim.sample is not None
-        timing['lookup_lock_hold_seconds'] = time.monotonic() - acquired
+        # These are speculative object lookups only.  CPython dictionary reads
+        # retain strong references, and the publish section below revalidates
+        # both claim identity and its unbound state under the policy condition.
+        # Taking the domain-wide condition here added a second lock convoy to
+        # every Tool request at 1280+ concurrency without protecting a write.
+        lookup_started = time.monotonic()
+        claim = self.demand.claims.get(key)
+        sample = self._memory_samples.get(session_id, {}).get('tool_admission')
+        already_bound = claim is not None and claim.sample is not None
+        timing['lookup_snapshot_seconds'] = time.monotonic() - lookup_started
         if claim is None or sample is None or already_bound:
             return finished('no_claim' if claim is None else
                             'no_sampler' if sample is None else 'already_bound')
