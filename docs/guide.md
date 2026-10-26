@@ -390,6 +390,16 @@ Changing this experiment setting requires qualification and a new run ID, withou
 rebuilding guest images. After an ambiguous creation timeout, ClawBox verifies a
 guest command before accepting a recovered VM; a listed VM alone is insufficient.
 
+`execution.cube_create_capacity_retry_seconds` bounds how long one VM creation
+may retry CubeMaster's definite `130597` (`no more resource`) scheduler rejection
+(default `60`; unit: seconds; `0` disables retries). Retries use jittered
+exponential backoff and release the shared Cube lifecycle slot while waiting, so
+checkpoint operations can free scheduler capacity. Other create failures still
+propagate immediately, and ambiguous HTTP failures still use ownership
+reconciliation rather than repeating the create request. Changing this field
+requires qualification and a new run ID, but no host apply, image rebuild, or
+ClawTune retraining.
+
 Runtime completion uses Cube filesystem change notifications when snapshots are
 enabled. `inference.configuration.runtime_completion_watch_seconds` sets each
 notification wait (default `10` seconds, range `1`–`60`). A completion event wakes

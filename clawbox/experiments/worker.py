@@ -1921,6 +1921,9 @@ class ExperimentWorker:
         journal = OwnedSandboxJournal(self.output_root / "owned-sandboxes.jsonl")
         self.client = client or CubeSandboxClient(
             journal=journal, request_timeout_s=spec.execution.cube_request_timeout_seconds,
+            create_capacity_retry_seconds=(
+                spec.execution.cube_create_capacity_retry_seconds
+            ),
         )
         if self.client.journal is None:
             self.client.journal = journal

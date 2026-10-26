@@ -233,6 +233,78 @@ def test_cube_client_pins_node_disables_automatic_lifecycle_and_journals(tmp_pat
     assert journal.sandbox_ids(task_uid="task") == [sandbox.sandbox_id]
 
 
+def test_lifecycle_retries_definite_capacity_rejection_outside_transfer_slot(monkeypatch) -> None:
+    import clawbox.cube.lifecycle as lifecycle_module
+
+    class CapacitySandbox(_Sandbox):
+        attempts = 0
+
+        @classmethod
+        def create(cls, **kwargs):
+            cls.attempts += 1
+            if cls.attempts == 1:
+                raise RuntimeError("CubeMaster returned error code 130597: no more resource")
+            return super().create(**kwargs)
+
+    class TransferPool:
+        active = 0
+        entries = 0
+
+        @contextmanager
+        def transfer(self, operation):
+            assert operation == "create"
+            self.entries += 1
+            self.active += 1
+            try:
+                yield
+            finally:
+                self.active -= 1
+
+    CapacitySandbox.items = {}
+    pool = TransferPool()
+    sleeps = []
+    monkeypatch.setattr(lifecycle_module.random, "uniform", lambda _low, high: high)
+
+    def sleep(delay):
+        assert pool.active == 0
+        sleeps.append(delay)
+
+    monkeypatch.setattr(lifecycle_module.time, "sleep", sleep)
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=CapacitySandbox),
+        template="tpl", node_name="node", ownership=_owner(), snapshot_pool=pool,
+    )
+
+    lifecycle.start()
+
+    assert CapacitySandbox.attempts == 2
+    assert pool.entries == 2
+    assert sleeps == [0.25]
+    stages = lifecycle.timings[-1]["stage_seconds"]
+    assert stages["create_capacity_retry_count"] == 1
+    assert stages["create_capacity_retry_sleep_s"] == 0.25
+
+
+def test_lifecycle_capacity_retry_can_be_disabled(monkeypatch) -> None:
+    class CapacitySandbox(_Sandbox):
+        attempts = 0
+
+        @classmethod
+        def create(cls, **_kwargs):
+            cls.attempts += 1
+            raise RuntimeError("CubeMaster returned error code 130597: no more resource")
+
+    client = CubeSandboxClient(
+        sandbox_class=CapacitySandbox, create_capacity_retry_seconds=0,
+    )
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node", ownership=_owner(),
+    )
+    with pytest.raises(RuntimeError, match="130597"):
+        lifecycle.start()
+    assert CapacitySandbox.attempts == 1
+
+
 @pytest.mark.parametrize("failure", [RequestsTimeout("lost"), RequestsConnectionError("lost"),
                                      408, 502, 503, 504])
 def test_cube_client_reconciles_a_timed_out_create_by_unique_ownership(

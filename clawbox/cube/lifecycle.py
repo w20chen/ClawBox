@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
@@ -278,17 +279,50 @@ class CubeSandboxLifecycle:
                 if self.prepare_cgroup is not None:
                     with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
                         self.prepare_cgroup()
-                # Bound concurrent lifecycle calls and measure queue time
-                # separately from the actual Cube API operation.
-                with self._transfer("create", stage_seconds):
-                    with self._measure_stage(stage_seconds, "api_create_s"):
-                        self.sandbox = self.client.create_sandbox(
-                            template=self.template, node_name=self.node_name,
-                            ownership=self.ownership, env_vars=self.env_vars or None,
-                            allow_internet_access=self.allow_internet_access,
-                            network_allow_out=self.network_allow_out or None,
-                            network_deny_out=self.network_deny_out or None,
+                # CubeMaster's 130597 response is a definite scheduler
+                # rejection: no VM was created, so retrying is safe. Sleep
+                # outside the shared lifecycle slot so checkpoints that free
+                # capacity cannot be starved by rejected create calls.
+                capacity_retry_seconds = float(
+                    getattr(self.client, "create_capacity_retry_seconds", 0.0)
+                )
+                retry_deadline = time.monotonic() + capacity_retry_seconds
+                retry_attempt = 0
+                while True:
+                    attempt_stages: dict[str, float] = {}
+                    try:
+                        # Bound concurrent lifecycle calls and measure queue
+                        # time separately from the actual Cube API operation.
+                        with self._transfer("create", attempt_stages):
+                            with self._measure_stage(attempt_stages, "api_create_s"):
+                                self.sandbox = self.client.create_sandbox(
+                                    template=self.template, node_name=self.node_name,
+                                    ownership=self.ownership, env_vars=self.env_vars or None,
+                                    allow_internet_access=self.allow_internet_access,
+                                    network_allow_out=self.network_allow_out or None,
+                                    network_deny_out=self.network_deny_out or None,
+                                )
+                        break
+                    except Exception as exc:
+                        if (capacity_retry_seconds <= 0
+                                or not self.client.is_create_capacity_error(exc)):
+                            raise
+                        retry_attempt += 1
+                        ceiling = min(2.0, 0.25 * (2 ** min(retry_attempt - 1, 3)))
+                        delay = random.uniform(0.0, ceiling)
+                        remaining = retry_deadline - time.monotonic()
+                        if remaining <= 0 or delay > remaining:
+                            raise
+                        stage_seconds["create_capacity_retry_count"] = float(retry_attempt)
+                        stage_seconds["create_capacity_retry_sleep_s"] = (
+                            stage_seconds.get("create_capacity_retry_sleep_s", 0.0) + delay
                         )
+                        time.sleep(delay)
+                    finally:
+                        for name in ("transfer_slot_wait_s", "api_create_s"):
+                            stage_seconds[name] = (
+                                stage_seconds.get(name, 0.0) + attempt_stages.get(name, 0.0)
+                            )
                 self.sandbox_id = self.client.sandbox_id(self.sandbox)
                 verified = None
                 if self.verify_cgroup is not None:

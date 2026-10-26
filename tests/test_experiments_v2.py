@@ -1027,6 +1027,13 @@ def test_worker_uses_explicit_pair_creation_concurrency() -> None:
         ExecutionSpec(sandbox_create_concurrency=0)
 
 
+def test_cube_capacity_retry_budget_is_public_and_non_negative() -> None:
+    assert ExecutionSpec().cube_create_capacity_retry_seconds == 60
+    assert ExecutionSpec(cube_create_capacity_retry_seconds=0).cube_create_capacity_retry_seconds == 0
+    with pytest.raises(ValidationError, match="cube_create_capacity_retry_seconds"):
+        ExecutionSpec(cube_create_capacity_retry_seconds=-1)
+
+
 def test_dependency_install_concurrency_is_optional_and_positive() -> None:
     assert ExecutionSpec().dependency_install_concurrency is None
     assert ExecutionSpec(dependency_install_concurrency=8).dependency_install_concurrency == 8

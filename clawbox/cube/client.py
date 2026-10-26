@@ -86,6 +86,7 @@ class CubeSandboxClient:
                  tcp_endpoint_attempts: int = 10,
                  tcp_endpoint_initial_delay_s: float = 0.25,
                  tcp_endpoint_max_delay_s: float = 2.0,
+                 create_capacity_retry_seconds: float = 60.0,
                  cleanup_workers: int = 8) -> None:
         if request_timeout_s <= 0:
             raise ValueError("Cube API request timeout must be positive")
@@ -105,12 +106,15 @@ class CubeSandboxClient:
             raise ValueError("tcp_endpoint_attempts must be positive")
         if tcp_endpoint_initial_delay_s < 0 or tcp_endpoint_max_delay_s < 0:
             raise ValueError("TCP endpoint retry delays must be non-negative")
+        if create_capacity_retry_seconds < 0:
+            raise ValueError("Cube create capacity retry budget must be non-negative")
         if cleanup_workers < 1:
             raise ValueError("cleanup_workers must be positive")
         self.command_stream_grace_s = float(command_stream_grace_s)
         self.tcp_endpoint_attempts = int(tcp_endpoint_attempts)
         self.tcp_endpoint_initial_delay_s = float(tcp_endpoint_initial_delay_s)
         self.tcp_endpoint_max_delay_s = float(tcp_endpoint_max_delay_s)
+        self.create_capacity_retry_seconds = float(create_capacity_retry_seconds)
         self.cleanup_workers = int(cleanup_workers)
         self._delete_slots = threading.BoundedSemaphore(self.cleanup_workers)
 
@@ -120,6 +124,18 @@ class CubeSandboxClient:
     @staticmethod
     def sandbox_id(sandbox: Any) -> str:
         return str(sandbox.sandbox_id)
+
+    @staticmethod
+    def is_create_capacity_error(exc: BaseException) -> bool:
+        """True only for CubeMaster's definite no-schedulable-node rejection."""
+        code = getattr(exc, "code", None)
+        if code is None:
+            code = getattr(exc, "error_code", None)
+        if code is not None and str(code) == "130597":
+            return True
+        message = str(exc).lower()
+        return ("130597" in message or "no more resource" in message
+                or "selectnodesnores" in message)
 
     def create_sandbox(self, *, template: str, node_name: str,
                        ownership: Ownership, env_vars: dict[str, str] | None = None,

@@ -186,6 +186,11 @@ class ExecutionSpec(StrictFrozenModel):
     # Optional host-local devpi caching index inherited by Tool commands.
     pypi_cache_index_url: str | None = Field(default=None, min_length=1)
     cube_request_timeout_seconds: float = Field(default=130, gt=0, allow_inf_nan=False)
+    # CubeMaster 130597 is a definite scheduler rejection, so create can wait
+    # and retry without risking a duplicate VM. Zero disables this retry.
+    cube_create_capacity_retry_seconds: float = Field(
+        default=60, ge=0, allow_inf_nan=False,
+    )
     worker_thread_switch_interval_seconds: float = Field(
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     randomized_order: bool = True
