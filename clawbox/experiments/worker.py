@@ -759,19 +759,8 @@ class WatermarkController:
         # admission condition and rereading NUMA files for every Tool call in
         # that abundant-capacity interval.  Once the conservative upper bound
         # reaches LOW, retain the exact locked check below.
-        demand = getattr(self.coordinator, 'demand', None)
-        capacity_claims = getattr(self.coordinator, '_capacity_claims', None)
-        if demand is not None and not capacity_claims:
-            pending = demand.pending_upper_bound(
-                getattr(self.coordinator, 'demand_scope', None),
-            )
-            predicted = predicted_increment_mib * 1024 * 1024
-            headroom = int(getattr(
-                self.coordinator, 'operation_headroom_bytes', 0,
-            ))
-            if self.peak_local_bytes + pending + predicted + headroom <= self.low:
-                self.low_route_fast_path_count += 1
-                return False
+        if self.progress_fits_below_low(predicted_increment_mib):
+            return False
         if not self.coordinator.local_commitment_exceeds(
                 predicted_increment_mib,
                 self.high if self.memory_scheduling == 'joint' else self.hard):
@@ -789,6 +778,23 @@ class WatermarkController:
             'predicted_local_high_guard' if self.memory_scheduling == 'joint'
             else 'predicted_local_hard_guard'))
         return borrowed
+
+    def progress_fits_below_low(self, predicted_increment_mib: int) -> bool:
+        """Use sampled peak plus nominal claims for the no-pressure fast path."""
+        demand = getattr(self.coordinator, 'demand', None)
+        capacity_claims = getattr(self.coordinator, '_capacity_claims', None)
+        if demand is not None and not capacity_claims:
+            pending = demand.pending_upper_bound(
+                getattr(self.coordinator, 'demand_scope', None),
+            )
+            predicted = predicted_increment_mib * 1024 * 1024
+            headroom = int(getattr(
+                self.coordinator, 'operation_headroom_bytes', 0,
+            ))
+            if self.peak_local_bytes + pending + predicted + headroom <= self.low:
+                self.low_route_fast_path_count += 1
+                return True
+        return False
 
     def _borrow_one(self) -> bool:
         candidate = self._next_borrow_candidate()
@@ -4821,8 +4827,17 @@ class ExperimentWorker:
         wait_for_admission: Callable[[Callable[[], float]], float],
     ) -> tuple[int, str, float, bool]:
         """Restore first, then reserve growth in its actual allocation tier."""
-        coordinator.set_tool_active(session_id, True)
         restored_tool = not lifecycle.resident
+        fast_local = bool(
+            not restored_tool
+            and watermark_controller is not None
+            and watermark_controller.progress_fits_below_low(amount_mib)
+        )
+        early_active = restored_tool or (
+            watermark_controller is not None and not fast_local
+        )
+        if early_active:
+            coordinator.set_tool_active(session_id, True)
         if restored_tool:
             self._restore_with_one_victim(
                 arm, session_id, lifecycle, coordinator, events,
@@ -4831,6 +4846,7 @@ class ExperimentWorker:
         local_amount = amount_mib
         admission_memory_tier = "local"
         if (
+            not fast_local and
             watermark_controller is not None
             and watermark_controller.route_progress_to_shared(lifecycle, amount_mib)
         ):
@@ -4845,7 +4861,7 @@ class ExperimentWorker:
                 local_amount,
                 arm.execution.arm_timeout_seconds,
                 total_mib=amount_mib,
-                already_active=True,
+                already_active=early_active,
             )
         )
         # Failed-session cleanup can close the VM while this callback releases

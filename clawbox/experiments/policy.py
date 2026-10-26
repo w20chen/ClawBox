@@ -278,13 +278,36 @@ class PolicyCoordinator:
         that protection while ``acquire`` waits so another admission cannot
         select this resident Tool as a victim.
         """
-        if not already_active:
-            self.set_tool_active(session_id, True)
-        try:
-            return self.acquire(session_id, amount_mib, timeout_s, total_mib=total_mib)
-        except Exception:
-            self.set_tool_active(session_id, False)
-            raise
+        if already_active:
+            try:
+                return self.acquire(
+                    session_id, amount_mib, timeout_s, total_mib=total_mib,
+                )
+            except Exception:
+                self.set_tool_active(session_id, False)
+                raise
+        # For an already-resident Tool below LOW, victim selection cannot be
+        # needed before this admission.  Mark it active and enqueue/commit its
+        # growth while retaining one recursive acquisition of the shared
+        # condition, eliminating a scheduling gap and a second lock convoy.
+        with self._condition:
+            state = self._sessions[session_id]
+            while state.eviction_in_progress:
+                self._condition.wait()
+            state.tool_active = True
+            state.eviction_eligible = False
+            state.last_used = time.monotonic()
+            self._condition.notify_all()
+            try:
+                return self.acquire(
+                    session_id, amount_mib, timeout_s, total_mib=total_mib,
+                )
+            except Exception:
+                state.tool_active = False
+                state.eviction_eligible = True
+                state.last_used = time.monotonic()
+                self._condition.notify_all()
+                raise
 
     def tool_active(self, session_id: str) -> bool:
         with self._condition:
