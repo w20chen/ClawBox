@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from threading import Condition
 from typing import Callable
 from pathlib import Path
+from .control_timing import span, operation
 from .admission_lock import AdmissionLock, ProgressLock
 import os
 import time
@@ -92,6 +93,7 @@ class DemandLedger:
         return sum(c.remaining()[0 if scope is None else 1]
                    for c in self.claims.values() if scope is None or c.scope == scope)
 
+    @operation('admission.exact_pending')
     def pending_breakdown_without_condition(self, scope: str) -> tuple[int, int]:
         """Return global and scoped pending demand without pinning admission.
 
@@ -118,17 +120,19 @@ class DemandLedger:
         try:
             if leader:
                 try:
-                    measured = {}
-                    for key, (claim, frozen) in snapshot.items():
-                        try:
-                            value: tuple[int, int] | BaseException = frozen.remaining()
-                        except BaseException as exc:
-                            value = exc
-                        measured[key] = (claim, frozen, value)
+                    with span('admission.exact_sample_work', claims=len(snapshot)):
+                        measured = {}
+                        for key, (claim, frozen) in snapshot.items():
+                            try:
+                                value: tuple[int, int] | BaseException = frozen.remaining()
+                            except BaseException as exc:
+                                value = exc
+                            measured[key] = (claim, frozen, value)
                     future.set_result(measured)
                 except BaseException as exc:
                     future.set_exception(exc)
-            measured = future.result()
+            with span('admission.exact_sample_future', leader=leader):
+                measured = future.result()
         finally:
             self.condition._acquire_restore(lock_state)
             if leader and self._exact_sample_future is future:

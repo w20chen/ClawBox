@@ -63,3 +63,38 @@ def test_gc_intervals_are_scoped_and_correlated_without_logging_in_gc():
     assert gc.callbacks == before
     assert any(s['generation'] == 2 for s in events[0]['gc_intervals'])
     assert all(s['end_ns'] >= s['start_ns'] for s in events[0]['gc_intervals'])
+
+
+def test_condition_reacquisition_is_separate_from_condition_sleep():
+    from threading import Condition
+    from clawbox.experiments.admission_lock import AdmissionLock
+    events = []
+    condition = Condition(AdmissionLock())
+
+    @trace_callback('admission', events.append, 's')
+    def callback(request):
+        with condition:
+            with condition:
+                with span('condition_wait', reasons=['configured_memory_budget']):
+                    condition.wait(0.001)
+                assert condition._is_owned()
+
+    callback({'execution_id': 'e'})
+    spans = events[0]['spans']
+    wait = next(s for s in spans if s['stage'] == 'condition_wait')
+    reacquire = next(s for s in spans if s['stage'] == 'admission.condition.reacquire')
+    assert wait['start_ns'] <= reacquire['start_ns'] <= reacquire['end_ns'] <= wait['end_ns']
+    assert wait['reasons'] == ['configured_memory_budget']
+    assert wait['status'] == 'ok'
+
+
+def test_bounded_trace_retains_root_and_reports_missing_spans():
+    from clawbox.experiments.control_timing import trace_scope
+    events = []
+    with trace_scope('collection', events.append, 's'):
+        for _ in range(8200):
+            with span('file'):
+                pass
+    assert len(events[0]['spans']) == 8192
+    assert events[0]['dropped_spans'] == 9
+    assert events[0]['spans'][-1]['stage'] == 'callback'

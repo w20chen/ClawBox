@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from clawbox.experiments.control_timing import span
+
 import json
 import os
 import queue
@@ -266,17 +268,18 @@ class CubeSandboxClient:
         # Resuming the same immutable sandbox ID is idempotent. CubeMaster can
         # transiently reject or drop HTTP requests during a large restore
         # wave, so retry the control-plane transport without creating a new VM.
-        sandbox = retry_with_backoff(
-            lambda: self._sandbox_class.connect(
-                sandbox_id, **self._sdk_kwargs(),
-                **({"snapshot_mechanism": snapshot_mechanism}
-                   if snapshot_mechanism != "full-copy" else {}),
-            ),
-            label=f"resume sandbox {sandbox_id}",
-            attempts=10,
-            initial_delay_s=0.25,
-            max_delay_s=2.0,
-        )
+        with span('native.connect_with_retries'):
+            sandbox = retry_with_backoff(
+                lambda: self._sandbox_class.connect(
+                    sandbox_id, **self._sdk_kwargs(),
+                    **({"snapshot_mechanism": snapshot_mechanism}
+                       if snapshot_mechanism != "full-copy" else {}),
+                ),
+                label=f"resume sandbox {sandbox_id}",
+                attempts=10,
+                initial_delay_s=0.25,
+                max_delay_s=2.0,
+            )
         self._handles[sandbox_id] = sandbox
         return sandbox
 
@@ -649,13 +652,14 @@ class CubeSandboxClient:
         if not memory_snapshot_path or generation is None:
             raise ValueError("tiered pause requires memory_snapshot_path and generation")
         try:
-            result = sandbox.pause(
-                wait=True, snapshot_tier=tier,
-                memory_snapshot_path=memory_snapshot_path,
-                snapshot_generation=generation,
-                **({"snapshot_mechanism": snapshot_mechanism}
-                   if snapshot_mechanism != "full-copy" else {}),
-            )
+            with span('native.pause_sdk'):
+                result = sandbox.pause(
+                    wait=True, snapshot_tier=tier,
+                    memory_snapshot_path=memory_snapshot_path,
+                    snapshot_generation=generation,
+                    **({"snapshot_mechanism": snapshot_mechanism}
+                       if snapshot_mechanism != "full-copy" else {}),
+                )
         except TypeError as exc:
             raise RuntimeError(
                 "installed CubeSandbox SDK lacks the required direct tiered pause API"

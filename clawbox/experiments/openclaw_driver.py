@@ -1,6 +1,8 @@
 """Run OpenClaw in a Runtime CubeSandbox with native SSH tools."""
 from __future__ import annotations
 
+from .control_timing import span
+
 import base64
 import json
 import os
@@ -889,6 +891,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "endpoint": "completed_agent_stdout_received_by_host",
             "includes_completion_polling_and_transport": True,
         })
+    def collection_execute(stage, command, timeout):
+        with span(stage) as timing:
+            result = runtime_executor.execute(command, timeout)
+            timing.update(exit_code=result.exit_code, stdout_chars=len(result.stdout))
+            return result
+
     host_home = output_dir / "openclaw" / session_id
     host_home.mkdir(parents=True, exist_ok=True)
     (host_home / "final-answer.json").write_text(result.stdout, encoding="utf-8")
@@ -909,21 +917,21 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     if checkpoint_relay:
         runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
     for local_name, remote_path in runtime_logs.items():
-        log_result = runtime_executor.execute(
+        log_result = collection_execute('finalize.runtime_log',
             prefix + f"cat {shlex.quote(remote_path)}", 30,
         )
         if log_result.exit_code == 0:
             (host_home / local_name).write_text(
                 log_result.stdout, encoding="utf-8",
             )
-    runtime_executor.execute(
+    collection_execute('finalize.helper_stop',
         prefix + f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
         + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi; "
         + (f"if [ -s {shlex.quote(relay_pid_file)} ]; then "
            f"kill -TERM $(cat {shlex.quote(relay_pid_file)}) 2>/dev/null || true; fi"
            if checkpoint_relay else "true"), 10,
     )
-    listing = runtime_executor.execute(
+    listing = collection_execute('finalize.runtime_list',
         prefix + f"find {shlex.quote(trace_dir)} -type f "
         + "\\( -name '*.jsonl' -o -name '*.json' \\) -print", 30,
     )
@@ -936,18 +944,19 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         relative = Path(remote_path.removeprefix(trace_dir + "/"))
         if relative.is_absolute() or ".." in relative.parts:
             continue
-        encoded = runtime_executor.execute(prefix + f"base64 -w0 {shlex.quote(remote_path)}", 30)
+        encoded = collection_execute('finalize.runtime_trace',prefix + f"base64 -w0 {shlex.quote(remote_path)}", 30)
         if encoded.exit_code == 0:
             target = host_trace_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(base64.b64decode(encoded.stdout))
             copied.append(str(target))
-    control_records = policy_control.records()
-    completed = [item for item in control_records if item["completion"]]
-    agent_tool_completed = [
-        item for item in completed
-        if (item.get("request") or {}).get("execution_scope", "agent-tool") == "agent-tool"
-    ]
+    with span('finalize.policy_materialize'):
+        control_records = policy_control.records()
+        completed = [item for item in control_records if item["completion"]]
+        agent_tool_completed = [
+            item for item in completed
+            if (item.get("request") or {}).get("execution_scope", "agent-tool") == "agent-tool"
+        ]
     native_ssh_latencies = [
         max(0.0, float(item["completion"]["execution_completed_at"])
             - float(item["completion"]["execution_started_at"])) for item in completed

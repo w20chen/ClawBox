@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .control_timing import timed_lock, operation
+from .control_timing import timed_lock, operation, span
 
 import time
 from collections import Counter, deque
@@ -271,6 +271,7 @@ class PolicyCoordinator:
                 state.eviction_in_progress = False
             self._condition.notify_all()
 
+    @operation('admission.begin')
     def begin_tool_admission(self, session_id: str, amount_mib: int,
                              timeout_s: float, *, total_mib: int | None = None,
                              already_active: bool = False) -> float:
@@ -292,14 +293,16 @@ class PolicyCoordinator:
         # needed before this admission.  Mark it active and enqueue/commit its
         # growth while retaining one recursive acquisition of the shared
         # condition, eliminating a scheduling gap and a second lock convoy.
-        with self._condition:
+        with timed_lock(self._condition, 'admission.begin_condition'):
             state = self._sessions[session_id]
             while state.eviction_in_progress:
-                self._condition.wait()
-            state.tool_active = True
-            state.eviction_eligible = False
-            state.last_used = time.monotonic()
-            self._condition.notify_all()
+                with span('admission.eviction_wait'):
+                    self._condition.wait()
+            with span('admission.active_update'):
+                state.tool_active = True
+                state.eviction_eligible = False
+                state.last_used = time.monotonic()
+                self._condition.notify_all()
             try:
                 return self.acquire(
                     session_id, amount_mib, timeout_s, total_mib=total_mib,
@@ -396,6 +399,7 @@ class PolicyCoordinator:
                 + self.operation_headroom_bytes
             )
 
+    @operation('admission.routing_commitment')
     def local_commitment_exceeds(self, additional_mib: int, limit_bytes: int) -> bool:
         """Avoid per-claim reads when even the nominal upper bound fits."""
         with self._condition:
@@ -466,7 +470,8 @@ class PolicyCoordinator:
             return (("resident_capacity_budget",)
                     if sum(self._resident_capacity_claims.values()) + additional_bytes > self.budget_bytes
                     else ())
-        used, available = self.physical_sample()
+        with span('admission.physical_sample'):
+            used, available = self.physical_sample()
         capacity = sum(self._capacity_claims.values())
         if capacity_claim:
             capacity += additional_bytes
@@ -477,7 +482,8 @@ class PolicyCoordinator:
             )
             else self.budget_bytes
         )
-        global_used, global_available = self.demand.sample()
+        with span('admission.global_sample'):
+            global_used, global_available = self.demand.sample()
         global_additional = additional_bytes if total_bytes is None else total_bytes
         if first_budget_blocker_only:
             # Queue-head selection only needs to know whether creation fits.
@@ -558,6 +564,7 @@ class PolicyCoordinator:
                 return True
         return False
 
+    @operation('admission.queue_head')
     def _admission_head_locked(self):
         """Use FIFO when creation fits; let progress bypass blocked creation."""
         while True:
@@ -603,6 +610,7 @@ class PolicyCoordinator:
                 continue
             return first
 
+    @operation('admission.queue_prefix')
     def _feasible_progress_prefix_locked(
         self, ticket: object, head: object | None,
     ) -> tuple[int, int] | None:
@@ -639,6 +647,7 @@ class PolicyCoordinator:
                 return local_bytes, total_bytes
         return None
 
+    @operation('admission.reservation')
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
                 capacity_claim: bool = False, total_mib: int | None = None,
@@ -656,13 +665,13 @@ class PolicyCoordinator:
             return 0.0
         if amount == 0 and total == 0 and wait_class not in {"create", "restore"}:
             elapsed = time.monotonic() - started
-            with self._condition:
+            with timed_lock(self._condition, 'admission.reservation_condition'):
                 self._record_wait_locked(wait_class, elapsed)
             return elapsed
         deadline = None if timeout_s is None else started + timeout_s
         blocked_head_since = None
         ticket = object()
-        with self._condition:
+        with timed_lock(self._condition, 'admission.reservation_condition'):
             self._waiters.append(ticket)
             self._waiter_requests[ticket] = AdmissionRequest(
                 session_id=session_id,
@@ -781,30 +790,32 @@ class PolicyCoordinator:
                     remaining = 0.2 if deadline is None else deadline - time.monotonic()
                     if remaining <= 0:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
-                    self._condition.wait(min(0.2, remaining))
-                self._waiters.remove(ticket)
-                self._waiter_requests.pop(ticket, None)
-                self._waiter_blockers.pop(ticket, None)
-                self._progress_waiters.discard(ticket)
-                claim_key = (session_id, wait_class)
-                if wait_class == "tool_admission" and claim_key in self.demand.claims:
-                    self.demand.extend(
-                        claim_key, amount=total, local_amount=amount,
+                    with span('admission.condition_wait', reasons=list(self._waiter_blockers[ticket]), wait_class=wait_class):
+                        self._condition.wait(min(0.2, remaining))
+                with span('admission.commit', wait_class=wait_class):
+                    self._waiters.remove(ticket)
+                    self._waiter_requests.pop(ticket, None)
+                    self._waiter_blockers.pop(ticket, None)
+                    self._progress_waiters.discard(ticket)
+                    claim_key = (session_id, wait_class)
+                    if wait_class == "tool_admission" and claim_key in self.demand.claims:
+                        self.demand.extend(
+                            claim_key, amount=total, local_amount=amount,
+                        )
+                    else:
+                        self.demand.add(claim_key, scope=self.demand_scope,
+                            amount=total, local_amount=amount,
+                            sample=(self._memory_samples.get(session_id, {}).get(wait_class)
+                                    if wait_class != 'tool_admission' else None))
+                    if self.resident_capacity_accounting and wait_class == "create":
+                        self._resident_capacity_claims[session_id] = amount
+                    ledger = self._capacity_claims if capacity_claim else self._reservations
+                    ledger[session_id] = ledger.get(session_id, 0) + amount
+                    self.peak_commitment_bytes = max(
+                        self.peak_commitment_bytes,
+                        sum(self._capacity_claims.values()) + sum(self._reservations.values()),
                     )
-                else:
-                    self.demand.add(claim_key, scope=self.demand_scope,
-                        amount=total, local_amount=amount,
-                        sample=(self._memory_samples.get(session_id, {}).get(wait_class)
-                                if wait_class != 'tool_admission' else None))
-                if self.resident_capacity_accounting and wait_class == "create":
-                    self._resident_capacity_claims[session_id] = amount
-                ledger = self._capacity_claims if capacity_claim else self._reservations
-                ledger[session_id] = ledger.get(session_id, 0) + amount
-                self.peak_commitment_bytes = max(
-                    self.peak_commitment_bytes,
-                    sum(self._capacity_claims.values()) + sum(self._reservations.values()),
-                )
-                self._condition.notify_all()
+                    self._condition.notify_all()
             except Exception:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
@@ -816,7 +827,7 @@ class PolicyCoordinator:
                 self._record_wait_locked(wait_class, waited)
                 raise
         waited = time.monotonic() - started
-        with self._condition:
+        with timed_lock(self._condition, 'admission.reservation_condition'):
             self._record_wait_locked(wait_class, waited)
         return waited
 
@@ -1093,12 +1104,14 @@ class PolicyCoordinator:
     def restore(self, session_id: str, amount_mib: int,
                 operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:
         """Reserve a VM footprint, restore, and try one capacity recovery."""
-        waited = self.acquire(
-            session_id, amount_mib, timeout_s, wait_class="restore",
-        )
+        with span('restore.reservation'):
+            waited = self.acquire(
+                session_id, amount_mib, timeout_s, wait_class="restore",
+            )
         try:
             try:
-                elapsed = operation()
+                with span('restore.service'):
+                    elapsed = operation()
                 self.resume_count += 1
                 self.resume_service_seconds += elapsed
                 return elapsed, waited
@@ -1111,7 +1124,8 @@ class PolicyCoordinator:
                         "CubeSandbox restore capacity rejection with no reclaimable idle VM pair; "
                         "free LOCAL/WARM capacity or reduce concurrency"
                     ) from first
-                elapsed = operation()  # second rejection is deliberately final
+                with span('restore.service'):
+                    elapsed = operation()  # second rejection is deliberately final
                 self.resume_count += 1
                 self.resume_service_seconds += elapsed
                 return elapsed, waited

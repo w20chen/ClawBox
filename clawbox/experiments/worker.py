@@ -58,7 +58,7 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .congestion import locate_cgroup
-from .control_timing import monitor_gc, span, timed_lock, trace_callback
+from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation
 from .pressure import PressureControl
 from .prediction_records import PredictionRecordBuffer
 from .priority import PriorityDomain, c2_applies
@@ -308,7 +308,8 @@ def wait_for_admission_without_lifecycle_lock(
     try:
         return operation()
     finally:
-        lifecycle_lock.acquire()
+        with span('admission.lifecycle_reacquire'):
+            lifecycle_lock.acquire()
 
 
 def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
@@ -541,6 +542,7 @@ class WatermarkController:
         if self._error is not None:
             raise RuntimeError(f"memory watermark controller failed: {self._error}") from self._error
 
+    @operation('prepare.borrow')
     def _record_borrow(self, lifecycle: CubeSandboxLifecycle, *, reason: str) -> bool:
         # Rebinding a populated VM can spend seconds in the kernel.  A borrow
         # already in flight is pressure relief for this NUMA domain; making
@@ -652,6 +654,7 @@ class WatermarkController:
                 ranked.append((-observation.local_bytes, candidate.sandbox_id or "", candidate))
         return min(ranked, key=lambda item: item[:2])[2] if ranked else None
 
+    @operation('prepare.joint_reclaim')
     def _joint_relieve_pressure(self, *,
                                preferred_borrow: CubeSandboxLifecycle | None = None,
                                reason: str) -> str:
@@ -746,6 +749,7 @@ class WatermarkController:
                        candidates=candidates, estimates=estimates)
         return 'wait'
 
+    @operation('prepare.route')
     def route_progress_to_shared(self, lifecycle: CubeSandboxLifecycle,
                                  predicted_increment_mib: int) -> bool:
         """Borrow before an existing Tool's prediction would cross LOCAL HARD."""
@@ -781,6 +785,7 @@ class WatermarkController:
             else 'predicted_local_hard_guard'))
         return borrowed
 
+    @operation('prepare.below_low')
     def progress_fits_below_low(self, predicted_increment_mib: int) -> bool:
         """Use sampled peak plus nominal claims for the no-pressure fast path."""
         demand = getattr(self.coordinator, 'demand', None)
@@ -4414,89 +4419,96 @@ class ExperimentWorker:
                     snapshot_enabled=runtime_snapshot_enabled,
                 )
 
-                try:
-                    outcome = run_openclaw(
-                        prompt=arm.case.prompt, session_id=session_id,
-                        configuration={
-                            **inference_configuration,
-                            "command_timeout_seconds": arm.execution.command_timeout_seconds,
-                        },
-                        ssh=ssh_config,
-                        policy_control=policy_session, runtime_executor=runtime_executor,
-                        output_dir=self.output_root,
-                        timeout_seconds=arm.execution.arm_timeout_seconds,
-                        model_gateway=gateway_session,
-                        prediction_manifest=(prediction_provider.manifest
-                                             if prediction_provider is not None else None),
-                        resident_poll=poll_resident_runtime,
-                        checkpoint_relay=runtime_snapshot_enabled,
-                        startup_begin=begin_tool_telemetry_warmup,
-                        startup_wait=await_tool_telemetry_warmup,
-                        startup_event=events.write,
-                        cancelled=(arm_cancel.is_set if arm_cancel is not None else None),
-                        **({"resident_wait": poll_resident_runtime.wait_for_file}
-                           if not runtime_snapshot_enabled else {
-                               "resident_file_nonempty": poll_resident_runtime.watch_file_nonempty,
-                           }),
-                    )
-                except BaseException:
-                    # Do not destroy the Tool VM while its bounded background
-                    # route/collector warmup is still using the SSH endpoint.
+                with trace_scope('session_collection_timing', events.write, session_id):
                     try:
-                        await_tool_telemetry_warmup()
-                    except Exception:
-                        pass
-                    raise
-                if outcome.get("agent_pid_file") != agent_pid_file:
-                    raise RuntimeError("OpenClaw agent PID witness path was not initialized")
-                timeline["final_response_observed"] = outcome["final_response_observed_unix_s"]
-                coordinator.set_tool_active(session_id, True)
-                finalization_active = True
-                # No Agent SSH process remains after run_openclaw returns.
-                # Drain callbacks already queued by model/tool completions so
-                # none can pause a VM underneath collection or validation.
-                drain_policy_events()
-                prediction_records = prediction_buffer.records()
-                timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
-                tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
-                policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"
-                atomic_json(policy_control_path, outcome["policy_control_records"])
-                # A completed Agent call may have triggered eager Tool eviction.
-                # Serialize restore and collection with delayed model-wait and
-                # eager-pause callbacks so the Tool cannot disappear halfway
-                # through the artifact stream.
-                with wait_lock:
-                    if not lifecycle.resident:
-                        self._restore_with_one_victim(
-                            arm, session_id, lifecycle, coordinator, events,
+                        outcome = run_openclaw(
+                            prompt=arm.case.prompt, session_id=session_id,
+                            configuration={
+                                **inference_configuration,
+                                "command_timeout_seconds": arm.execution.command_timeout_seconds,
+                            },
+                            ssh=ssh_config,
+                            policy_control=policy_session, runtime_executor=runtime_executor,
+                            output_dir=self.output_root,
+                            timeout_seconds=arm.execution.arm_timeout_seconds,
+                            model_gateway=gateway_session,
+                            prediction_manifest=(prediction_provider.manifest
+                                                 if prediction_provider is not None else None),
+                            resident_poll=poll_resident_runtime,
+                            checkpoint_relay=runtime_snapshot_enabled,
+                            startup_begin=begin_tool_telemetry_warmup,
+                            startup_wait=await_tool_telemetry_warmup,
+                            startup_event=events.write,
+                            cancelled=(arm_cancel.is_set if arm_cancel is not None else None),
+                            **({"resident_wait": poll_resident_runtime.wait_for_file}
+                               if not runtime_snapshot_enabled else {
+                                   "resident_file_nonempty": poll_resident_runtime.watch_file_nonempty,
+                               }),
                         )
-                    resolve_native_ssh_route("collection")
-                    if ssh_config is None:
-                        raise RuntimeError("native SSH config was not initialized")
-                    native_artifacts = collect_and_validate_native_tool_artifacts(
-                        runtime_executor=runtime_executor, ssh=ssh_config,
-                        session_id=session_id, output_dir=self.output_root,
-                        policy_records=outcome["policy_control_records"],
-                        runtime_trace_paths=outcome["runtime_traces"],
-                    )
-                    predicted_execution_ids = {
-                        str(item.get("execution_id") or "")
-                        for item in prediction_records
-                    }
-                    enrich_tool_execution_observations(
-                        prediction_records, {
-                            execution_id: artifact
-                            for execution_id, artifact
-                            in native_artifacts.cgroup_artifacts.items()
-                            if execution_id in predicted_execution_ids
-                        },
-                    )
-                events.write({
-                    "event": "native_tool_artifacts_collected",
-                    "session_id": session_id,
-                    "root": str(native_artifacts.root),
-                    "validation": native_artifacts.validation,
-                })
+                    except BaseException:
+                        # Do not destroy the Tool VM while its bounded background
+                        # route/collector warmup is still using the SSH endpoint.
+                        try:
+                            await_tool_telemetry_warmup()
+                        except Exception:
+                            pass
+                        raise
+                    if outcome.get("agent_pid_file") != agent_pid_file:
+                        raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                    timeline["final_response_observed"] = outcome["final_response_observed_unix_s"]
+                    with span('finalize.mark_active'):
+                        coordinator.set_tool_active(session_id, True)
+                    finalization_active = True
+                    # No Agent SSH process remains after run_openclaw returns.
+                    # Drain callbacks already queued by model/tool completions so
+                    # none can pause a VM underneath collection or validation.
+                    with span('finalize.policy_drain'):
+                        drain_policy_events()
+                    with span('finalize.prediction_materialize'):
+                        prediction_records = prediction_buffer.records()
+                    timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
+                    tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
+                    policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"
+                    with span('finalize.policy_export'):
+                        atomic_json(policy_control_path, outcome['policy_control_records'])
+                    # A completed Agent call may have triggered eager Tool eviction.
+                    # Serialize restore and collection with delayed model-wait and
+                    # eager-pause callbacks so the Tool cannot disappear halfway
+                    # through the artifact stream.
+                    with timed_lock(wait_lock, 'finalize.lifecycle'):
+                        if not lifecycle.resident:
+                            self._restore_with_one_victim(
+                                arm, session_id, lifecycle, coordinator, events,
+                            )
+                        with span('finalize.route'):
+                            resolve_native_ssh_route('collection')
+                        if ssh_config is None:
+                            raise RuntimeError("native SSH config was not initialized")
+                        native_artifacts = collect_and_validate_native_tool_artifacts(
+                            runtime_executor=runtime_executor, ssh=ssh_config,
+                            session_id=session_id, output_dir=self.output_root,
+                            policy_records=outcome["policy_control_records"],
+                            runtime_trace_paths=outcome["runtime_traces"],
+                        )
+                        with span('finalize.enrichment'):
+                            predicted_execution_ids = {
+                                str(item.get("execution_id") or "")
+                                for item in prediction_records
+                            }
+                            enrich_tool_execution_observations(
+                                prediction_records, {
+                                    execution_id: artifact
+                                    for execution_id, artifact
+                                    in native_artifacts.cgroup_artifacts.items()
+                                    if execution_id in predicted_execution_ids
+                                },
+                            )
+                    events.write({
+                        "event": "native_tool_artifacts_collected",
+                        "session_id": session_id,
+                        "root": str(native_artifacts.root),
+                        "validation": native_artifacts.validation,
+                    })
                 if gateway_session is None:
                     raise RuntimeError("managed OpenClaw session has no ModelGateway state")
                 model_steps = gateway_session.gateway.logical_model_steps()
@@ -4826,6 +4838,7 @@ class ExperimentWorker:
                       "lifecycle_timing": lifecycle.timings[-1]})
         return elapsed
 
+    @operation('prepare.total')
     def _prepare_tool_admission(
         self,
         arm: ExperimentArm,
@@ -4849,7 +4862,8 @@ class ExperimentWorker:
             watermark_controller is not None and not fast_local
         )
         if early_active:
-            coordinator.set_tool_active(session_id, True)
+            with span('prepare.mark_active'):
+                coordinator.set_tool_active(session_id, True)
         if restored_tool:
             self._restore_with_one_victim(
                 arm, session_id, lifecycle, coordinator, events,
@@ -4867,15 +4881,16 @@ class ExperimentWorker:
 
         # The caller drops its lifecycle lock during this wait so completion can
         # publish the result and release the preceding Tool claim.
-        admission_wait = wait_for_admission(
-            lambda: coordinator.begin_tool_admission(
-                session_id,
-                local_amount,
-                arm.execution.arm_timeout_seconds,
-                total_mib=amount_mib,
-                already_active=early_active,
+        with span('prepare.reserve', fast_local=fast_local, restored_tool=restored_tool, tier=admission_memory_tier):
+            admission_wait = wait_for_admission(
+                lambda: coordinator.begin_tool_admission(
+                    session_id,
+                    local_amount,
+                    arm.execution.arm_timeout_seconds,
+                    total_mib=amount_mib,
+                    already_active=early_active,
+                )
             )
-        )
         # Failed-session cleanup can close the VM while this callback releases
         # the lifecycle lock to wait. Do not return an admission for that VM,
         # and release the newly acquired claim before propagating the failure.

@@ -1,6 +1,8 @@
 """Read native CubeSandbox snapshot manifests; never inspect Guest RAM."""
 from __future__ import annotations
 
+from clawbox.experiments.control_timing import operation
+
 import json
 import os
 from pathlib import Path
@@ -32,6 +34,7 @@ def _allocated_bytes(path: Path, stat: os.stat_result | None = None) -> int:
     raise RuntimeError(f"physical allocation is unavailable for {path}")
 
 
+@operation('native.snapshot_metadata')
 def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[str, Any]:
     memory = Path(path)
     sidecar = Path(path + ".lineage.json")

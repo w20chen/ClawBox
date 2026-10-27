@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from clawbox.replay.lifecycle import LifecycleError
+from clawbox.experiments.control_timing import capture_spans
 
 from .client import CubeSandboxClient, Ownership
 from clawbox.experiments.snapshot_pool import SnapshotKey, SnapshotManifest, WarmSnapshotPool, WarmCapacityError
@@ -55,6 +56,13 @@ class LifecycleTiming:
     host_memory_effect: dict[str, dict[str, int]] | None = None
     stage_seconds: dict[str, float] | None = None
     create_attempts: list[dict[str, Any]] | None = None
+    stage_spans: list[dict[str, Any]] | None = None
+
+
+class _StageSeconds(dict):
+    def __init__(self):
+        super().__init__()
+        self.spans = []
 
 
 class CubeSandboxLifecycle:
@@ -247,16 +255,27 @@ class CubeSandboxLifecycle:
             memory_effect or None,
             measured_stages or None,
             create_attempts,
+            getattr(stage_seconds, 'spans', None),
         ))
         return duration
 
     @contextmanager
     def _measure_stage(self, timings: dict[str, float], name: str):
         started = time.monotonic()
+        cpu = time.thread_time_ns()
+        status = 'error'
         try:
-            yield
+            with capture_spans() as nested:
+                yield
+            status = 'ok'
         finally:
-            timings[name] = max(0.0, time.monotonic() - started)
+            ended = time.monotonic()
+            timings[name] = max(0.0, ended - started)
+            if isinstance(timings, _StageSeconds):
+                timings.spans.extend(nested)
+                timings.spans.append({'stage': name, 'start_ns': int(started * 1e9),
+                                      'end_ns': int(ended * 1e9), 'status': status,
+                                      'thread_cpu_ns': time.thread_time_ns() - cpu})
 
     def _observe_physical(self) -> Mapping[str, Any] | None:
         return self.physical_observation() if self.physical_observation is not None else None
@@ -275,7 +294,7 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.CREATING
             started_wall, started_mono = time.time(), time.monotonic()
-            stage_seconds: dict[str, float] = {}
+            stage_seconds: dict[str, float] = _StageSeconds()
             create_attempts: list[dict[str, Any]] = []
             with self._measure_stage(stage_seconds, "physical_observation_before_s"):
                 host_memory_before = self._observe_physical()
@@ -435,8 +454,9 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.CHECKPOINTING
             started_wall, started_mono = time.time(), time.monotonic()
-            stage_seconds: dict[str, float] = {}
-            host_memory_before = self._observe_physical()
+            stage_seconds: dict[str, float] = _StageSeconds()
+            with self._measure_stage(stage_seconds, 'physical_observation_before_s'):
+                host_memory_before = self._observe_physical()
             key = None
             pause_attempted = False
             pause_completed = False
@@ -749,7 +769,7 @@ class CubeSandboxLifecycle:
             before = self._state
             self._state = SandboxState.RESTORING
             started_wall, started_mono = time.time(), time.monotonic()
-            stage_seconds: dict[str, float] = {}
+            stage_seconds: dict[str, float] = _StageSeconds()
             with self._measure_stage(stage_seconds, "physical_observation_before_s"):
                 host_memory_before = self._observe_physical()
             resume_attempted = False
@@ -847,13 +867,17 @@ class CubeSandboxLifecycle:
     @contextmanager
     def _transfer(self, operation, stage_seconds=None):
         started = time.monotonic()
+        cpu = time.thread_time_ns()
         acquired = False
         context = self.snapshot_pool.transfer(operation) if self.snapshot_pool is not None else nullcontext()
         try:
             with context:
                 acquired = True
                 if stage_seconds is not None:
-                    stage_seconds["transfer_slot_wait_s"] = time.monotonic() - started
+                    ended = time.monotonic()
+                    stage_seconds["transfer_slot_wait_s"] = ended - started
+                    if isinstance(stage_seconds, _StageSeconds):
+                        stage_seconds.spans.append({"stage": "transfer_slot_wait_s", "start_ns": int(started * 1e9), "end_ns": int(ended * 1e9), "thread_cpu_ns": time.thread_time_ns() - cpu, "status": "ok"})
                 yield
         finally:
             if not acquired and stage_seconds is not None:

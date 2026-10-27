@@ -4,6 +4,7 @@ Memory checks remain atomic with reservation commits. Completion does not queue
 behind every expensive memory check; at most eight priority handoffs precede a
 waiting ordinary caller. Only the selected waiter is awakened at each handoff.
 """
+from .control_timing import operation
 from collections import deque
 from dataclasses import dataclass, field
 from threading import Event, Lock, get_ident
@@ -25,6 +26,7 @@ class AdmissionLock:
         self._progress = deque()
         self._burst = 0
 
+    @operation('admission.lock.acquire')
     def acquire(self, blocking=True, timeout=-1, *, progress=False):
         if not blocking and timeout != -1:
             raise ValueError('cannot specify timeout for a non-blocking acquire')
@@ -83,6 +85,7 @@ class AdmissionLock:
             self._handoff()
             return state
 
+    @operation('admission.condition.reacquire')
     def _acquire_restore(self, state):
         self.acquire()
         with self._guard:

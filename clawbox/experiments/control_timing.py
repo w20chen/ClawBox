@@ -35,19 +35,68 @@ def monitor_gc():
 
 
 @contextmanager
-def span(name):
+def span(name, **attributes):
     records = getattr(_state, 'records', None)
     if records is None:
-        yield
+        yield attributes
         return
     started = time.monotonic_ns()
     cpu = time.thread_time_ns()
+    status = 'error'
     try:
-        yield
+        yield attributes
+        status = 'ok'
     finally:
         records.append({'stage': name, 'start_ns': started,
                         'end_ns': time.monotonic_ns(),
-                        'thread_cpu_ns': time.thread_time_ns() - cpu})
+                        'thread_cpu_ns': time.thread_time_ns() - cpu,
+                        'status': status, **attributes})
+
+
+class _Records(deque):
+    def __init__(self):
+        super().__init__(maxlen=8192)
+        self.dropped = 0
+
+    def append(self, item):
+        if len(self) == self.maxlen:
+            self.dropped += 1
+        super().append(item)
+
+
+@contextmanager
+def capture_spans():
+    """Capture a lifecycle stage, also retaining it in an enclosing callback."""
+    previous = getattr(_state, 'records', None)
+    records = _state.records = _Records()
+    try:
+        yield records
+    finally:
+        _state.records = previous
+        if previous is not None:
+            for record in records:
+                previous.append(record)
+
+
+@contextmanager
+def trace_scope(event, emit, session_id, **identity):
+    """Buffer one operation; callers must exit owned locks before this scope."""
+    previous = getattr(_state, 'records', None)
+    records = _state.records = _Records()
+    status = 'error'
+    try:
+        with span('callback') as root:
+            yield
+        status = 'ok'
+    finally:
+        _state.records = previous
+        root_span = records[-1]
+        pauses = [s for s in tuple(_gc_intervals)
+                  if s['end_ns'] >= root_span['start_ns']
+                  and s['start_ns'] <= root_span['end_ns']]
+        emit({'event': event, 'session_id': session_id, **identity,
+              'status': status, 'spans': list(records),
+              'dropped_spans': records.dropped, 'gc_intervals': pauses})
 
 
 @contextmanager
@@ -75,22 +124,8 @@ def trace_callback(event, emit, session_id):
     def decorate(callback):
         @wraps(callback)
         def wrapped(request):
-            previous = getattr(_state, 'records', None)
-            records = _state.records = []
-            status = 'error'
-            try:
-                with span('callback'):
-                    result = callback(request)
-                status = 'ok'
-                return result
-            finally:
-                _state.records = previous
-                callback_span = next(s for s in reversed(records) if s['stage'] == 'callback')
-                pauses = [s for s in tuple(_gc_intervals)
-                          if s['end_ns'] >= callback_span['start_ns']
-                          and s['start_ns'] <= callback_span['end_ns']]
-                emit({'event': event, 'session_id': session_id,
-                      'execution_id': request.get('execution_id'),
-                      'status': status, 'spans': records, 'gc_intervals': pauses})
+            with trace_scope(event, emit, session_id,
+                             execution_id=request.get('execution_id')):
+                return callback(request)
         return wrapped
     return decorate

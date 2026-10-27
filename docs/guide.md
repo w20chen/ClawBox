@@ -876,6 +876,23 @@ these intervals can overlap several threads and must not be added to their spans
 `pressure_poll_timing` records the polling lock interval for correlation with
 blocked callbacks. These events are always recorded, including failed callbacks;
 no option or host apply is required.
+Admission spans separate the initial condition acquisition, reservation checks,
+exact sampling, routing, restore, and lifecycle-lock reacquisition.
+`admission.condition_wait.reasons` records the blockers observed before sleeping;
+the nested `admission.condition.reacquire` interval is lock contention, not memory
+waiting. Sleep can also include wakeup scheduling delay; a capacity blocker is
+not proof that every nanosecond of the interval was necessary resource waiting.
+`session_collection_timing` joins by session ID and includes Runtime log/trace
+transfers, Tool export attempts/chunks, parsing, and evidence validation. Use
+`final_response_observed.observed_monotonic_s` as the finalization start; the
+collection event's root span also includes the earlier Agent run. Transfer spans
+report output character counts or chunk bytes. Span `status` describes Python
+success/error; remote command status is reported separately as `exit_code`.
+Traces retain at most 8192 spans per scope; `dropped_spans` reports lost detail,
+so a truncated trace cannot establish a complete phase decomposition.
+Lifecycle `stage_spans` uses the same nanosecond clock and separates native API,
+snapshot metadata, placement verification, and transfer-slot waiting. These
+queues are not free-memory waits. Parent stages include their children.
 Host-side timing and lock fixes require a new run ID, without rebuilding guest
 images or retraining predictions when their contents and semantics are unchanged.
 

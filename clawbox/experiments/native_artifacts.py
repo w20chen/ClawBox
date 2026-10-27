@@ -7,6 +7,8 @@ exact execution-ID join before a managed result can be accepted.
 """
 from __future__ import annotations
 
+from .control_timing import span, operation
+
 import base64
 import binascii
 import gzip
@@ -89,6 +91,7 @@ def _direct_ssh_command(ssh: NativeSSHConfig, identity_file: str,
     return shlex.join(args)
 
 
+@operation('finalize.large_export')
 def _collect_large_artifact_stream(runtime_executor: Any, ssh: NativeSSHConfig,
                                    identity_file: str, known_hosts_file: str, *,
                                    ssh_executable: str = "/usr/bin/ssh") -> CommandResult:
@@ -106,24 +109,28 @@ def _collect_large_artifact_stream(runtime_executor: Any, ssh: NativeSSHConfig,
 
     # Capture once. Reading chunks itself creates maintenance telemetry, which
     # must not change the file being transferred between successive reads.
-    size_result = execute(
-        f"( {_collection_command()} ) > {_ARTIFACT_EXPORT} && "
-        f"wc -c < {_ARTIFACT_EXPORT}"
-    )
+    with span('finalize.fixed_export'):
+        size_result = execute(
+            f"( {_collection_command()} ) > {_ARTIFACT_EXPORT} && "
+            f"wc -c < {_ARTIFACT_EXPORT}"
+        )
     size = int(size_result.stdout.strip())
     chunks = []
     for offset in range(0, size, _ARTIFACT_CHUNK_BYTES):
-        result = execute(
-            f"dd if={_ARTIFACT_EXPORT} bs={_ARTIFACT_CHUNK_BYTES} "
-            f"skip={offset // _ARTIFACT_CHUNK_BYTES} count=1 2>/dev/null"
-        )
+        with span('finalize.chunk', offset=offset) as timing:
+            result = execute(
+                f"dd if={_ARTIFACT_EXPORT} bs={_ARTIFACT_CHUNK_BYTES} "
+                f"skip={offset // _ARTIFACT_CHUNK_BYTES} count=1 2>/dev/null"
+            )
         expected_size = min(_ARTIFACT_CHUNK_BYTES, size - offset)
         if len(result.stdout.encode("ascii")) != expected_size:
             raise RuntimeError(f"Tool artifact export chunk at {offset} is incomplete")
+        timing['bytes'] = expected_size
         chunks.append(result.stdout)
     return CommandResult(0, "".join(chunks), "", 0.0)
 
 
+@operation('finalize.decode')
 def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
     lines = stdout.splitlines()
     result: dict[str, bytes] = {}
@@ -188,6 +195,7 @@ def _jsonl(raw: bytes, label: str) -> list[dict[str, Any]]:
     return records
 
 
+@operation('finalize.runtime_parse')
 def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
     """Load Runtime ClawTune tool span ends from the copied trace files.
 
@@ -474,6 +482,7 @@ def _is_preflight_rejection(span: dict[str, Any]) -> bool:
     )
 
 
+@operation('finalize.validate_join')
 def validate_native_tool_join(
     *, bridge_records: list[dict[str, Any]],
     cgroup_artifacts: dict[str, dict[str, Any]],
@@ -657,6 +666,7 @@ def validate_native_tool_join(
     }
 
 
+@operation('finalize.tool_collection')
 def collect_and_validate_native_tool_artifacts(
     *, runtime_executor: Any, ssh: NativeSSHConfig, session_id: str,
     output_dir: Path, policy_records: list[dict[str, Any]],
@@ -675,7 +685,9 @@ def collect_and_validate_native_tool_artifacts(
     max_collection_attempts = 8
     for collection_attempt in range(1, max_collection_attempts + 1):
         try:
-            candidate: CommandResult = runtime_executor.execute(command, 60)
+            with span('finalize.initial_export', attempt=collection_attempt) as timing:
+                candidate: CommandResult = runtime_executor.execute(command, 60)
+                timing.update(exit_code=candidate.exit_code, stdout_chars=len(candidate.stdout))
             if (candidate.exit_code == 0 and _ARTIFACT_END not in candidate.stdout
                     and len(candidate.stdout) >= _ARTIFACT_CHUNK_BYTES):
                 candidate = _collect_large_artifact_stream(
@@ -688,7 +700,8 @@ def collect_and_validate_native_tool_artifacts(
                     "Tool artifact collection transport failed after "
                     f"{max_collection_attempts} attempts"
                 ) from exc
-            time.sleep(min(0.1 * (2 ** (collection_attempt - 1)), 1.0))
+            with span('finalize.retry_sleep', attempt=collection_attempt):
+                time.sleep(min(0.1 * (2 ** (collection_attempt - 1)), 1.0))
             continue
         if candidate.exit_code != 0:
             raise RuntimeError(
@@ -705,7 +718,8 @@ def collect_and_validate_native_tool_artifacts(
                     "Tool artifact collection produced no complete framed stream "
                     f"after {max_collection_attempts} attempts"
                 )
-            time.sleep(min(0.1 * (2 ** (collection_attempt - 1)), 1.0))
+            with span('finalize.retry_sleep', attempt=collection_attempt):
+                time.sleep(min(0.1 * (2 ** (collection_attempt - 1)), 1.0))
             continue
         result = candidate
         break
@@ -714,47 +728,49 @@ def collect_and_validate_native_tool_artifacts(
     raw_files = _decode_framed_artifacts(result.stdout)
     root = output_dir / "tool-artifacts" / session_id
     root.mkdir(parents=True, exist_ok=True)
-    for name, raw in raw_files.items():
-        target = root / name
-        temporary = target.with_name(target.name + ".next")
-        temporary.write_bytes(raw)
-        temporary.replace(target)
+    with span('finalize.write_files', files=len(raw_files), bytes=sum(map(len, raw_files.values()))):
+        for name, raw in raw_files.items():
+            target = root / name
+            temporary = target.with_name(target.name + ".next")
+            temporary.write_bytes(raw)
+            temporary.replace(target)
     bridge_raw = raw_files.pop("tool-bridge.jsonl", None)
     if bridge_raw is None:
         raise ValueError("Tool artifact collection is missing tool-bridge.jsonl")
-    bridge_records = _jsonl(bridge_raw, "tool-bridge.jsonl")
-    cgroup_artifacts: dict[str, dict[str, Any]] = {}
-    clause_artifacts: dict[str, dict[str, Any]] = {}
-    pmu_artifacts: dict[str, dict[str, Any]] = {}
-    pmu_artifact_errors: list[str] = []
-    for name, raw in raw_files.items():
-        if name.startswith("cgroup-resource-") and name.endswith(".json"):
-            payload = _json_object(raw, name)
-            execution_id = str(payload.get("execution_id") or "")
-            if execution_id in cgroup_artifacts:
-                raise ValueError(f"duplicate cgroup artifact identity: {execution_id}")
-            cgroup_artifacts[execution_id] = payload
-        elif name.startswith("clause-telemetry-") and name.endswith(".json"):
-            payload = _json_object(raw, name)
-            calls = payload.get("calls") or []
-            first_call = calls[0] if isinstance(calls, list) and calls else {}
-            execution_id = str(
-                first_call.get("tool_call_id") if isinstance(first_call, dict) else ""
-            )
-            if execution_id in clause_artifacts:
-                raise ValueError(f"duplicate clause artifact identity: {execution_id}")
-            clause_artifacts[execution_id] = payload
-        elif name.startswith("pmu-profile-") and name.endswith(".json"):
-            try:
+    with span('finalize.parse_tool'):
+        bridge_records = _jsonl(bridge_raw, "tool-bridge.jsonl")
+        cgroup_artifacts: dict[str, dict[str, Any]] = {}
+        clause_artifacts: dict[str, dict[str, Any]] = {}
+        pmu_artifacts: dict[str, dict[str, Any]] = {}
+        pmu_artifact_errors: list[str] = []
+        for name, raw in raw_files.items():
+            if name.startswith("cgroup-resource-") and name.endswith(".json"):
                 payload = _json_object(raw, name)
                 execution_id = str(payload.get("execution_id") or "")
-                PmuProfile.model_validate(payload)
-            except (TypeError, ValueError):
-                pmu_artifact_errors.append(name)
-                continue
-            if execution_id in pmu_artifacts:
-                raise ValueError(f"duplicate PMU artifact identity: {execution_id}")
-            pmu_artifacts[execution_id] = payload
+                if execution_id in cgroup_artifacts:
+                    raise ValueError(f"duplicate cgroup artifact identity: {execution_id}")
+                cgroup_artifacts[execution_id] = payload
+            elif name.startswith("clause-telemetry-") and name.endswith(".json"):
+                payload = _json_object(raw, name)
+                calls = payload.get("calls") or []
+                first_call = calls[0] if isinstance(calls, list) and calls else {}
+                execution_id = str(
+                    first_call.get("tool_call_id") if isinstance(first_call, dict) else ""
+                )
+                if execution_id in clause_artifacts:
+                    raise ValueError(f"duplicate clause artifact identity: {execution_id}")
+                clause_artifacts[execution_id] = payload
+            elif name.startswith("pmu-profile-") and name.endswith(".json"):
+                try:
+                    payload = _json_object(raw, name)
+                    execution_id = str(payload.get("execution_id") or "")
+                    PmuProfile.model_validate(payload)
+                except (TypeError, ValueError):
+                    pmu_artifact_errors.append(name)
+                    continue
+                if execution_id in pmu_artifacts:
+                    raise ValueError(f"duplicate PMU artifact identity: {execution_id}")
+                pmu_artifacts[execution_id] = payload
 
     runtime_span_records = (
         _runtime_spans(runtime_trace_paths)
