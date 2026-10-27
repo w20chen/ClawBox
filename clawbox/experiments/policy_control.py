@@ -7,6 +7,7 @@ SSH data path.
 from __future__ import annotations
 
 import json
+import zlib
 import re
 import secrets
 import threading
@@ -31,7 +32,7 @@ class SessionLifecycle(str, Enum):
 
 @dataclass(slots=True)
 class _Execution:
-    request_json: str
+    request_blob: bytes
     command_sha256: str
     admission: dict[str, Any] | None = None
     admission_error: dict[str, str] | None = None
@@ -47,7 +48,7 @@ class _Execution:
 
     @property
     def request(self):
-        return json.loads(self.request_json)
+        return json.loads(zlib.decompress(self.request_blob))
 
 
 @dataclass(slots=True)
@@ -71,7 +72,7 @@ class _Session:
             execution = self.executions.get(execution_id)
             if execution is None:
                 execution = _Execution(
-                    request_json=json.dumps(request, separators=(',', ':')),
+                    request_blob=zlib.compress(json.dumps(request, separators=(',', ':')).encode(), level=1),
                     command_sha256=request['command_sha256'], admitting=True,
                     admission_started_monotonic_s=time.monotonic(),
                 )

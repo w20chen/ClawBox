@@ -6,6 +6,7 @@ import base64
 import hashlib
 import inspect
 import json
+import zlib
 import sys
 import threading
 import time
@@ -40,7 +41,7 @@ class GatewayRequest:
     response_released_unix_s: float = 0.0
     completed_unix_s: float = 0.0
     delivered_unix_s: float = 0.0
-    request_payload_json: str = "{}"
+    request_payload_blob: bytes = zlib.compress(b'{}', level=1)
     admission: dict[str, Any] = field(default_factory=dict)
     http_attempts: int = 0
     reconnect_attempts: int = 0
@@ -51,20 +52,20 @@ class GatewayRequest:
 
     @property
     def request_payload(self) -> dict[str, Any]:
-        return json.loads(self.request_payload_json)
+        return json.loads(zlib.decompress(self.request_payload_blob))
 
     def record(self, *, include_payload: bool = True) -> dict[str, Any]:
         result = asdict(self)
-        encoded = result.pop('request_payload_json')
+        encoded = result.pop('request_payload_blob')
         if include_payload:
-            result['request_payload'] = json.loads(encoded)
+            result['request_payload'] = json.loads(zlib.decompress(encoded))
         return result
 
     def record_json(self) -> str:
         # Preserve the public ledger shape without rebuilding the entire
         # conversation graph merely to encode it again during final flush.
         fields = self.record(include_payload=False)
-        return json.dumps(fields, sort_keys=True)[:-1] + ',"request_payload":' + self.request_payload_json + '}'
+        return json.dumps(fields, sort_keys=True)[:-1] + ',"request_payload":' + zlib.decompress(self.request_payload_blob).decode('utf-8') + '}'
 
 
 class ModelGateway:
@@ -292,7 +293,7 @@ class ModelGateway:
                     request_id, index, started_unix_s=time.time(),
                     request_namespace=self.request_namespace,
                     request_fingerprint=fingerprint,
-                    request_payload_json=canonical_json,
+                    request_payload_blob=zlib.compress(canonical_json.encode(), level=1),
                     replay_process_sessions=dict(self._process_sessions),
                 )
                 self._requests[request_id] = request
@@ -318,6 +319,7 @@ class ModelGateway:
                 if request.http_attempts > 1:
                     request.reconnect_attempts += 1
                 self._persist()
+        del canonical_json
         # Lifecycle notification is deliberately outside the gateway condition
         # lock. The callback must only enqueue work and return immediately.
         if started_event is not None:

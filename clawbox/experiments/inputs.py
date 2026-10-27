@@ -35,7 +35,7 @@ def inspect_trace(path: Path) -> dict:
         "model_calls": sum(action.kind == "llm" for action in actions),
         "tool_calls": sum(action.kind == "tool" for action in actions),
         "model_wait_seconds": sum(action.duration_s for action in actions if action.kind == "llm"),
-        "model_requests_present": all(action.input_json is not None for action in actions if action.kind == "llm"),
+        "model_requests_present": all(action.input_blob is not None for action in actions if action.kind == "llm"),
         "model_responses_present": all(action.output is not None for action in actions if action.kind == "llm"),
         "response_tool_names": sorted(tool_names),
         "ends_with_tool_request": last_model_requests_tools,

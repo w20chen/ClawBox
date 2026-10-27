@@ -27,7 +27,7 @@ def test_standalone_gateway_flushes_final_ledger_on_close(tmp_path: Path) -> Non
     assert len(records) == 1
     assert records[0]["delivered"] is True
     assert records[0]["request_payload"] == {"messages": []}
-    assert "request_payload_json" not in records[0]
+    assert "request_payload_blob" not in records[0]
 
 
 def test_gateway_retains_encoded_history_without_changing_retry_or_evidence(tmp_path):
@@ -38,7 +38,7 @@ def test_gateway_retains_encoded_history_without_changing_retry_or_evidence(tmp_
     first = gateway.complete_http(payload)
     assert gateway.complete_http(payload)[3] == first[3]  # undelivered retry
     request = gateway._requests[first[3]]
-    assert isinstance(request.request_payload_json, str)
+    assert isinstance(request.request_payload_blob, bytes)
     assert gateway.records()[0]['request_payload'] == payload
     assert 'request_payload' not in gateway.records(include_payload=False)[0]
     gateway.mark_delivery(first[3], delivered=True)

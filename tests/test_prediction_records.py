@@ -8,7 +8,7 @@ def test_completed_evidence_is_encoded_and_materializes_in_admission_order():
     records.append({'execution_id': 'b', 'actual_measured_memory_mib': None})
     records.complete('b', {'host_cgroup_execution_increment_bytes': None})
     records.complete('a', {'host_cgroup_execution_increment_bytes': 2 * 1024**2})
-    assert all(isinstance(row, str) for row in records._rows)
+    assert all(isinstance(row, bytes) for row in records._rows)
     assert records._active == {}
     result = records.records()
     assert [r['execution_id'] for r in result] == ['a', 'b']
@@ -23,3 +23,12 @@ def test_incomplete_evidence_remains_explicitly_incomplete():
     records = PredictionRecordBuffer()
     records.append({'execution_id': 'pending', 'actual_measured_memory_mib': None})
     assert records.records() == [{'execution_id': 'pending', 'actual_measured_memory_mib': None}]
+
+
+def test_large_repeated_evidence_is_retained_compactly_without_truncation():
+    records = PredictionRecordBuffer()
+    text = 'repeated diagnostic evidence\n' * 10000
+    records.append({'execution_id': 'large', 'evidence': text})
+    records.complete('large', {'host_cgroup_execution_increment_bytes': None})
+    assert len(records._rows[0]) < len(text) / 10
+    assert records.records()[0]['evidence'] == text

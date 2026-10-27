@@ -1,5 +1,6 @@
 """Retain completed prediction evidence without a growing GC container graph."""
 import json
+import zlib
 from threading import Lock
 
 
@@ -26,9 +27,9 @@ class PredictionRecordBuffer:
             record['actual_host_execution_increment_mib'] = (
                 float(increment) / (1024.0 * 1024.0)
                 if isinstance(increment, int) else None)
-            self._rows[index] = json.dumps(record, separators=(',', ':'))
+            self._rows[index] = zlib.compress(json.dumps(record, separators=(',', ':')).encode(), level=1)
 
     def records(self):
         with self._lock:
-            return [json.loads(row) if isinstance(row, str) else dict(row)
+            return [json.loads(zlib.decompress(row)) if isinstance(row, bytes) else dict(row)
                     for row in self._rows]

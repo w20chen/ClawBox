@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -15,7 +16,7 @@ class ReplayAction:
     start_s: float
     duration_s: float
     name: str
-    input_json: str | None = None
+    input_blob: bytes | None = None
     output: Any = None
     expected_exit_code: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -24,11 +25,11 @@ class ReplayAction:
     def input(self) -> Any:
         # Conversation histories are large, immutable evidence. Retaining them
         # as nested containers makes every full GC walk the entire corpus.
-        return None if self.input_json is None else json.loads(self.input_json)
+        return None if self.input_blob is None else json.loads(zlib.decompress(self.input_blob))
 
     @property
     def input_chars(self) -> int:
-        return 0 if self.input_json is None else len(self.input_json)
+        return 0 if self.input_blob is None else len(zlib.decompress(self.input_blob).decode('utf-8'))
 
     @property
     def output_chars(self) -> int:
@@ -118,8 +119,8 @@ def _load_trace_cached(path: Path, _identity: tuple[int, ...]) -> tuple[ReplayAc
                 sequence_no=int(record["sequence_no"]),
                 start_s=_finite_float(before.get("wall_time_ns"), path, "wall_time_ns") / 1e9,
                 duration_s=duration, name=str(record.get("name") or ""),
-                input_json=json.dumps(messages, ensure_ascii=False, sort_keys=True,
-                                      separators=(",", ":")), output=output,
+                input_blob=zlib.compress(json.dumps(messages, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode(), level=1), output=output,
                 metadata={"trace_id": key[0]},
             ))
         else:

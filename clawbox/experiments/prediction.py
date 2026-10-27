@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zlib
 import math
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ _IMMUTABLE_KB_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
 _IMMUTABLE_KB_CACHE_LOCK = Lock()
 _IMMUTABLE_ARTIFACT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _IMMUTABLE_ARTIFACT_CACHE_LOCK = Lock()
-_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], str] = {}
+_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], bytes] = {}
 _IMMUTABLE_PREDICTION_CACHE_LOCK = Lock()
 _VALIDATED_COLD_START_SEED_CACHE: dict[str, tuple[dict[str, Any], str]] = {}
 _VALIDATED_COLD_START_SEED_CACHE_LOCK = Lock()
@@ -511,7 +512,7 @@ class RuntimePredictionProvider(P50PredictionProvider):
             cached = _IMMUTABLE_PREDICTION_CACHE.get(cache_key)
         if cached is not None:
             return {
-                **json.loads(cached),
+                **json.loads(zlib.decompress(cached)),
                 "session_runtime_metadata": dict(runtime_metadata),
             }
         with self._query_lock:
@@ -519,10 +520,10 @@ class RuntimePredictionProvider(P50PredictionProvider):
             prediction = self._metadata({"models": models}, command, digest)
         with _IMMUTABLE_PREDICTION_CACHE_LOCK:
             encoded = _IMMUTABLE_PREDICTION_CACHE.setdefault(
-                cache_key, json.dumps(prediction, separators=(',', ':')),
+                cache_key, zlib.compress(json.dumps(prediction, separators=(',', ':')).encode(), level=1),
             )
         return {
-            **json.loads(encoded),
+            **json.loads(zlib.decompress(encoded)),
             "session_runtime_metadata": dict(runtime_metadata),
         }
 
