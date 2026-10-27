@@ -85,6 +85,11 @@ and builds Cubelet and Shim. It does not install or restart services. Repeating 
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
 
+Managed NUMA placement starts shims directly in their assigned cgroup. The host
+must use cgroup v2 and permit `clone3(CLONE_INTO_CGROUP)` (Linux 5.7 or newer).
+Install matching Cubelet and CubeShim binaries from the same prepared source;
+guest templates do not need rebuilding for this placement update.
+
 ### What an update rebuilds
 
 Do not repeat the complete host installation after an ordinary source update.

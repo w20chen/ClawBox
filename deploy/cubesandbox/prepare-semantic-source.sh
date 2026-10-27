@@ -36,6 +36,7 @@ NETWORK_ASYNC_GC_PATCH_FILE=$SCRIPT_DIR/network-startup-async-gc.patch
 IRQ_ROUTING_PATCH_FILE=$SCRIPT_DIR/irq-routing-batch.patch
 IRQ_ACTIVE_PATCH_FILE=$SCRIPT_DIR/irq-routing-active-legacy.patch
 NUMA_CLEAN_FILE_PATCH_FILE=$SCRIPT_DIR/numa-clean-file-and-checkpoint-summary.patch
+CGROUP_BIRTH_PATCH_FILE=$SCRIPT_DIR/cgroup-birth.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -65,6 +66,7 @@ PATCH_FILES=(
   "$IRQ_ROUTING_PATCH_FILE"
   "$IRQ_ACTIVE_PATCH_FILE"
   "$NUMA_CLEAN_FILE_PATCH_FILE"
+  "$CGROUP_BIRTH_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -86,6 +88,30 @@ require_current_patchset() {
     exit 1
   fi
 }
+
+apply_final_placement_patches() {
+  local patch_file
+  for patch_file in "$NUMA_CLEAN_FILE_PATCH_FILE" "$CGROUP_BIRTH_PATCH_FILE"; do
+    if ! git -C "$SOURCE_DIR" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+      git -C "$SOURCE_DIR" apply --check "$patch_file"
+      git -C "$SOURCE_DIR" apply "$patch_file"
+    fi
+  done
+}
+
+# The final birth patch supersedes the priority patch's attachment hunk.
+if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$CGROUP_BIRTH_PATCH_FILE" >/dev/null 2>&1; then
+  if [[ -f "$PATCHSET_STAMP" ]]; then
+    require_current_patchset "$PATCHSET_STAMP" complete
+  else
+    require_current_patchset "$PATCHSET_PENDING" interrupted
+  fi
+  git -C "$SOURCE_DIR" diff --check
+  printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
+  rm -f "$PATCHSET_PENDING"
+  echo "standalone patch set already prepared: $SOURCE_DIR"
+  exit 0
+fi
 
 # The priority patch supersedes hunks in incremental/tier-isolation patches.
 if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$PRIORITY_PATCH_FILE" >/dev/null 2>&1; then
@@ -163,6 +189,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
     git -C "$SOURCE_DIR" apply --check "$IRQ_ACTIVE_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$IRQ_ACTIVE_PATCH_FILE"
   fi
+  apply_final_placement_patches
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
@@ -266,6 +293,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
     git -C "$SOURCE_DIR" apply --check "$IRQ_ACTIVE_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$IRQ_ACTIVE_PATCH_FILE"
   fi
+  apply_final_placement_patches
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -331,6 +359,7 @@ apply_once "$NETWORK_ASYNC_GC_PATCH_FILE" "run stale network-policy GC outside C
 apply_once "$IRQ_ROUTING_PATCH_FILE" "batched and deferred interrupt routing"
 apply_once "$IRQ_ACTIVE_PATCH_FILE" "activate only attached legacy IRQ routes"
 apply_once "$NUMA_CLEAN_FILE_PATCH_FILE" "retain shared file backing during NUMA migration and summarize checkpoint timings"
+apply_once "$CGROUP_BIRTH_PATCH_FILE" "start shims in their assigned cgroup without migrating shared mappings"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"

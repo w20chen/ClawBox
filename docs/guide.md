@@ -151,8 +151,13 @@ The schema has six mechanism dimensions plus deployment and coordination:
 Managed placement reuses CubeSandbox's normal preallocated per-VM cgroup pool;
 ClawBox does not create a parallel VM-cgroup hierarchy. An opaque placement
 token carries the selected NUMA-node intent, Cubelet publishes the official
-assigned leaf after narrowing its `cpuset.mems`, and CubeShim enters that leaf
-before launching the VMM. The leaf's native cgroup-v2 memory-node constraint
+assigned leaf after narrowing its `cpuset.mems`, and CubeShim starts inside that
+leaf using `clone3(CLONE_INTO_CGROUP)` before initializing the VMM. Managed
+placement requires cgroup v2 and a host kernel permitting this syscall (Linux
+5.7 or newer). A placement failure aborts creation. Updating this mechanism
+requires rebuilding/installing CubeShim and Cubelet and a new run ID; it does
+not require a guest-image rebuild or ClawTune retraining.
+The leaf's native cgroup-v2 memory-node constraint
 applies to the VMM and its descendants, while CubeShim sets NUMA CPU affinity
 before spawning VMM threads.
 No redundant per-thread memory policy is needed. ClawBox then verifies vCPU

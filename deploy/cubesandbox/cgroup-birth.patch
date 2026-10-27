@@ -1,0 +1,253 @@
+diff --git a/CubeShim/shim/src/lib.rs b/CubeShim/shim/src/lib.rs
+--- a/CubeShim/shim/src/lib.rs
++++ b/CubeShim/shim/src/lib.rs
+@@ -7,6 +7,7 @@
+ pub mod cube;
+ pub mod hypervisor;
+ pub mod log;
++pub mod placement_start;
+ pub mod sandbox;
+ pub mod service;
+ pub mod snapshot;
+diff --git a/CubeShim/shim/src/main.rs b/CubeShim/shim/src/main.rs
+--- a/CubeShim/shim/src/main.rs
++++ b/CubeShim/shim/src/main.rs
+@@ -47,6 +47,10 @@
+     if flags.version {
+         print_version();
+         return;
++    }
++    if let Err(error) = containerd_shim_cube_rs::placement_start::start_in_cgroup(&flags.action) {
++        eprintln!("shim cgroup birth failed: {error}");
++        std::process::exit(1);
+     }
+     if flags.action.is_empty() {
+         thread_num = 2;
+diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
+--- a/CubeShim/shim/src/sandbox/sb.rs
++++ b/CubeShim/shim/src/sandbox/sb.rs
+@@ -604,11 +604,9 @@
+                 .as_ref()
+                 .and_then(|annotations| annotations.get("cube.sandbox_cgroup_path"))
+                 .ok_or_else(|| "missing LOCAL cgroup annotation".to_string())?;
+-            let path = PathBuf::from("/sys/fs/cgroup")
+-                .join(group.trim_start_matches('/'))
+-                .join("cgroup.procs");
+-            stdfs::write(&path, self.pid.to_string())
+-                .map_err(|error| format!("enter LOCAL cgroup {}: {}", path.display(), error))?;
++            // Placement is established at process birth. A redundant write to
++            // cgroup.procs can still flush the global cpuset migration queue.
++            crate::placement_start::verify_current(group)?;
+             infof!(
+                 self.log,
+                 "entered LOCAL cgroup {} before guest RAM allocation",
+diff --git a/CubeShim/shim/src/placement_start.rs b/CubeShim/shim/src/placement_start.rs
+new file mode 100644
+--- /dev/null
++++ b/CubeShim/shim/src/placement_start.rs
+@@ -0,0 +1,145 @@
++//! Start the existing containerd launcher in its final cgroup before any threads.
++//! Its ordinary spawn then inherits placement; no initialized VM is migrated.
++use std::ffi::CString;
++use std::fs::{self, File};
++use std::io;
++use std::os::fd::AsRawFd;
++use std::os::unix::ffi::OsStrExt;
++use std::path::{Component, Path};
++
++fn normalized_group(group: &str) -> Result<String, String> {
++    let relative = group.trim_start_matches('/');
++    if relative.is_empty()
++        || Path::new(relative)
++            .components()
++            .any(|p| !matches!(p, Component::Normal(_)))
++    {
++        return Err(format!("invalid sandbox cgroup path: {group:?}"));
++    }
++    Ok(format!("/{relative}"))
++}
++
++fn is_member(contents: &str, group: &str) -> bool {
++    contents
++        .lines()
++        .any(|line| line.strip_prefix("0::") == Some(group))
++}
++
++pub fn verify_current(group: &str) -> Result<(), String> {
++    let group = normalized_group(group)?;
++    let membership = fs::read_to_string("/proc/self/cgroup").map_err(|e| e.to_string())?;
++    if !is_member(&membership, &group) {
++        return Err(format!("shim was not born in {group}; install matching CubeShim and Cubelet placement binaries"));
++    }
++    Ok(())
++}
++
++pub fn start_in_cgroup(action: &str) -> Result<(), String> {
++    if action != "start" {
++        return Ok(());
++    }
++    let spec: serde_json::Value = serde_json::from_slice(
++        &fs::read("config.json").map_err(|e| format!("read shim bundle config: {e}"))?,
++    )
++    .map_err(|e| format!("parse shim bundle config: {e}"))?;
++    let annotations = &spec["annotations"];
++    let required = annotations.get("clawbox.numa_node").is_some()
++        || std::env::var("CUBE_RESTORE_PRIVATE_COPY").as_deref() == Ok("1")
++        || std::env::var("CLAWBOX_KVM_DIRTY_TRACKING").as_deref() == Ok("1");
++    if !required {
++        return Ok(());
++    }
++    let group = normalized_group(
++        annotations["cube.sandbox_cgroup_path"]
++            .as_str()
++            .ok_or("missing LOCAL cgroup annotation at shim start")?,
++    )?;
++    if is_member(
++        &fs::read_to_string("/proc/self/cgroup").map_err(|e| e.to_string())?,
++        &group,
++    ) {
++        return Ok(());
++    }
++    // This hook must stay before Tokio, logging workers and all other threads.
++    if fs::read_dir("/proc/self/task")
++        .map_err(|e| e.to_string())?
++        .count()
++        != 1
++    {
++        return Err("cgroup birth must run before creating shim threads".into());
++    }
++    let target = File::open(Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')))
++        .map_err(|e| format!("open target cgroup {group}: {e}"))?;
++    let executable = CString::new("/proc/self/exe").unwrap();
++    let argv = std::env::args_os()
++        .map(|s| CString::new(s.as_bytes()))
++        .collect::<Result<Vec<_>, _>>()
++        .map_err(|e| e.to_string())?;
++    let env = std::env::vars_os()
++        .map(|(key, value)| {
++            let mut entry = key.as_bytes().to_vec();
++            entry.push(b'=');
++            entry.extend_from_slice(value.as_bytes());
++            CString::new(entry)
++        })
++        .collect::<Result<Vec<_>, _>>()
++        .map_err(|e| e.to_string())?;
++    let mut argv_ptrs: Vec<_> = argv.iter().map(|s| s.as_ptr()).collect();
++    argv_ptrs.push(std::ptr::null());
++    let mut env_ptrs: Vec<_> = env.iter().map(|s| s.as_ptr()).collect();
++    env_ptrs.push(std::ptr::null());
++    let mut args: libc::clone_args = unsafe { std::mem::zeroed() };
++    args.flags = 1u64 << 33; // CLONE_INTO_CGROUP, Linux >= 5.7, cgroup v2.
++    args.exit_signal = libc::SIGCHLD as u64;
++    args.cgroup = target.as_raw_fd() as u64;
++    // No shared VM/files/thread state. Child calls only execve/_exit, using
++    // prebuilt pointers; it never runs Rust allocation or copied lock state.
++    let pid = unsafe { libc::syscall(libc::SYS_clone3, &args, std::mem::size_of_val(&args)) };
++    if pid == -1 {
++        return Err(format!("clone3(CLONE_INTO_CGROUP) for {group}: {}; require cgroup v2 and a host kernel permitting clone3 (Linux >= 5.7)", io::Error::last_os_error()));
++    }
++    if pid == 0 {
++        unsafe {
++            libc::execve(executable.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
++            libc::_exit(127);
++        }
++    }
++    let mut status = 0;
++    loop {
++        if unsafe { libc::waitpid(pid as i32, &mut status, 0) } != -1 {
++            break;
++        }
++        let error = io::Error::last_os_error();
++        if error.kind() != io::ErrorKind::Interrupted {
++            return Err(format!("wait for cgroup launcher: {error}"));
++        }
++    }
++    let code = if libc::WIFEXITED(status) {
++        libc::WEXITSTATUS(status)
++    } else if libc::WIFSIGNALED(status) {
++        128 + libc::WTERMSIG(status)
++    } else {
++        1
++    };
++    std::process::exit(code);
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn membership_requires_exact_unified_group() {
++        assert!(is_member("0::/cube/1\n", "/cube/1"));
++        assert!(!is_member("0::/cube/11\n", "/cube/1"));
++        assert!(!is_member("2:cpuset:/cube/1\n", "/cube/1"));
++    }
++
++    #[test]
++    fn target_cannot_be_root_or_escape_cgroup_mount() {
++        for invalid in ["", "/", "../cube", "/cube/../1"] {
++            assert!(normalized_group(invalid).is_err());
++        }
++        assert_eq!(normalized_group("cube/1").unwrap(), "/cube/1");
++    }
++}
+diff --git a/Cubelet/plugins/cube/internals/cgroup/cgroup.go b/Cubelet/plugins/cube/internals/cgroup/cgroup.go
+--- a/Cubelet/plugins/cube/internals/cgroup/cgroup.go
++++ b/Cubelet/plugins/cube/internals/cgroup/cgroup.go
+@@ -9,6 +9,7 @@
+ 	"fmt"
+ 	"os"
+ 	"path"
++	"strings"
+ 	"time"
+ 
+ 	jsoniter "github.com/json-iterator/go"
+@@ -223,7 +224,23 @@
+ 	return l.poolV1Handle.Update(ctx, group, cpuQ, memQ)
+ }
+ 
++func alreadyInUnifiedCgroup(membership []byte, group string) bool {
++	want := "0::/" + strings.TrimLeft(group, "/")
++	for _, line := range strings.Split(string(membership), "\n") {
++		if line == want {
++			return true
++		}
++	}
++	return false
++}
++
+ func AddProc(path string, pid uint64) error {
++	// CubeShim may already be born in this group. Even a same-group write
++	// invokes cpuset_post_attach and waits on unrelated migration work.
++	if membership, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid)); err == nil &&
++		alreadyInUnifiedCgroup(membership, path) {
++		return nil
++	}
+ 	if l.poolV1Handle == nil {
+ 		return fmt.Errorf("cgroup plugin not initialized")
+ 	}
+diff --git a/Cubelet/plugins/cube/internals/cgroup/birth_test.go b/Cubelet/plugins/cube/internals/cgroup/birth_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/plugins/cube/internals/cgroup/birth_test.go
+@@ -0,0 +1,20 @@
++package cgroup
++
++import "testing"
++
++func TestAlreadyInUnifiedCgroup(t *testing.T) {
++	for _, tc := range []struct {
++		membership, group string
++		want              bool
++	}{
++		{"0::/cube/1\n", "cube/1", true},
++		{"0::/cube/1\n", "/cube/1", true},
++		{"0::/cube/11\n", "cube/1", false},
++		{"2:cpuset:/cube/1\n", "cube/1", false},
++		{"", "cube/1", false},
++	} {
++		if got := alreadyInUnifiedCgroup([]byte(tc.membership), tc.group); got != tc.want {
++			t.Fatalf("membership=%q group=%q: got %v want %v", tc.membership, tc.group, got, tc.want)
++		}
++	}
++}
