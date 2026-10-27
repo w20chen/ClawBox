@@ -1,7 +1,8 @@
 # Full service-overhead diagnosis handoff
 
 Prepared 2026-10-27 Asia/Shanghai for an independent Codex session. This is the
-current diagnosis and execution plan. It supersedes the priority ordering in
+diagnosis and execution plan. The scope review below is the current priority;
+the earlier sections remain historical evidence. This file supersedes the ordering in
 `FULL_SERVICE_OVERHEAD_HANDOFF_20261026.md`; that file and
 `FULL_LATENCY_HANDOFF_20261025.md` remain useful for the earlier evidence and
 historical fixes.
@@ -12,8 +13,110 @@ See [VM creation follow-up](FULL_VM_CREATION_HANDOFF_20261027.md) for the
 `b5943df` cgroup-birth repair, completed creation measurements, remaining failures,
 and verified cleanup. Initial placement stayed below one second in every matched
 creation at both offered loads. Total creation still exceeds one second; measured
-IRQ-bypass registration during device restoration is the next priority. Upstream
-Linux 6.18 has an indexed lookup redesign worth evaluating as a separate baseline.
+IRQ-bypass registration during device restoration remains measured, but its
+kernel/VMM redesign is outside the user's revised scope below.
+
+## Scope review: ClawBox overhead, no pure-Cube baseline or kernel change
+
+The user explicitly excludes building a faster sandbox, a pure CubeSandbox
+baseline, kernel upgrades/reboots and interrupt-delivery redesign. Focus on
+overhead introduced by ClawBox ideas and their implementation, using existing
+ClawBox runs as the comparison. Preserve NUMA placement, prediction/admission,
+measurement validity, configured snapshot mechanisms and immutable run evidence.
+
+Fresh analysis reads the cgroup-birth 1280/2560 runs through their saved pre-abort
+cutoffs. It does not reuse the older v6 distributions as current results. These
+are cancelled diagnostics with completed-operation bias, not successful full
+experiments. Host-observed Tool progress callbacks bound execution; they are not
+calibrated guest CPU timestamps. All durations below are seconds, p50 / p90.
+
+| Path | 1280 | 2560 | Current interpretation |
+|---|---:|---:|---|
+| Agent Tool non-execution, subtracting that execution's recorded admission wait | 2.980 / 8.818 | 2.524 / 9.406 | Repeated overhead; 22,169 / 18,908 matched calls; includes restore/control/transport |
+| Observed Tool end to completion event | 1.440 / 4.078 | 1.114 / 4.153 | First priority: completion/control path, not guest work |
+| Tool admission-blocked interval | 0.0068 / 23.777 | 0.0075 / 34.118 | Mixed capacity/controller waiting; do not call all of it avoidable overhead |
+| Tool checkpoint total | 6.839 / 17.491 | 5.463 / 14.246 | 781 / 634 completed Tool checkpoints |
+| Tool checkpoint transfer queue | 1.840 / 13.276 | 0.248 / 7.233 | ClawBox lifecycle scheduling cost |
+| Tool checkpoint service excluding its own transfer wait | 3.723 / 5.725 | 4.271 / 6.693 | Custom tiered snapshot path plus native service; attribution incomplete |
+| Tool restore total | 5.200 / 16.040 | 3.411 / 8.507 | 668 / 511 completed Tool restores |
+| Tool restore transfer queue | 1.843 / 14.245 | <0.001 / 4.113 | Avoid serializing unrelated lifecycle work unnecessarily |
+| Tool restore service excluding its own transfer wait | 1.716 / 4.162 | 2.466 / 4.976 | Includes native restoration; not all attributable to ClawBox |
+| Runtime setup | 1.294 / 2.202 | 2.709 / 7.548 | Per-session ClawTune/Runtime initialization |
+| Sidecar readiness | 2.850 / 4.512 | 5.920 / 15.675 | Initialization plus health-command transport/polling |
+| Pair ready to agent runnable | 5.474 / 9.141 | 10.522 / 25.511 | Startup total; nested/overlapping with the preceding rows |
+| Live NUMA borrow total | 0.680 / 1.679 | 0.807 / 1.825 | 91 / 68 observations; old minute-long cpuset stalls absent |
+| Return to LOCAL total | 1.231 / 1.882 | 1.159 / 2.168 | 28 / 26 observations; migration remains material |
+| Final response observed to validated session complete | 12.077 / 43.824 | 34.765 / 78.010 | Only 17 / 10 completed sessions; collection/validation, not response latency |
+
+The latest borrow cpuset maximum is 0.649 / 0.456 seconds; return cpuset maximum
+is 0.570 / 0.458 seconds. The older 68-91-second cpuset diagnosis must not drive
+the next patch. Pre-migration now accounts for material borrow/return tails,
+but copied bytes are unavailable and residency differences are not copy volume.
+77 / 124 borrow rejections say another migration is in progress; this is
+serialization, not evidence of shared-memory exhaustion.
+
+### Next implementation milestone: Tool completion and pressure-control locks
+
+Source confirms these ClawBox mechanisms:
+
+- `worker.py:complete_openclaw_tool` calls sampler stop/join and final sampling,
+  lifecycle bookkeeping, reservation release and pressure feedback under the
+  per-session `reservation_lock`; it later waits for `wait_lock` to update state.
+- `memory.py:SandboxRSSSampler` creates one periodic thread per execution.
+- `pressure.py:PressureControl.poll` performs cgroup reads/writes while holding
+  its global lock, also acquired by execution start/completion notifications.
+- `worker.py:session_worker_count` gives ordinary runs one worker per offered
+  session; workers sleep until arrival and then wait for the creation gate.
+
+Saved policy-control records independently establish slow host completion
+callbacks: p90 1.759 / 1.602 seconds on 1,254 / 667 agent calls. These are selected
+finished-session subsets, not the full operation populations. Their matching
+end-observation-to-callback-start p90 is 0.192 / 0.286 seconds. The exact division
+inside the host callback remains unmeasured; neither GIL contention nor sampler
+join is yet established as the dominant cause.
+
+Implement a narrow completion/control milestone first: record callback receipt,
+reservation/lifecycle/pressure lock wait and hold, sampler join/final read, and
+resource-release stages. Move slow sampling out of the global pressure lock
+using VM/generation validation and same-VM serialization; keep completion
+ownership and resource accounting correct. Shorten the completion reservation
+critical section while retaining final measurement before release. Consolidate
+periodic samplers only with preserved per-execution baseline/peak/final/fault
+semantics and measured sampling lag. Do not begin with a wholesale async rewrite
+or lower offered concurrency to hide queueing.
+
+Then address checkpoint/restore orchestration and custom snapshot work (dispatch
+waves, pair sequencing, redundant reads/retries/metadata work), Runtime/sidecar
+startup, NUMA migration tails, and artifact collection/validation. Recheck
+capacity before dispatching pending reclamation; changes to victim selection,
+prediction, retention or action-cost semantics require separate review rather
+than being disguised as implementation optimizations.
+
+Current low-priority paths: Tool baseline binding p90 8.44 / 7.65 ms; initial
+LOCAL placement p90 17.17 / 21.70 ms; restored LOCAL placement p90 9.66 / 10.26 ms;
+CPU placement p90 about 60 microseconds; event-writer lock p90 below a microsecond.
+Rare tails remain visible. Prior direct journal measurements were millisecond
+scale and do not justify a journal redesign. Native create IRQ/network/readiness
+remains reported, but is not the next optimization target without evidence of
+ClawBox-added work. The 16 / 32 Cube admission failures and replay failures remain
+correctness issues; do not remove failures from denominators or relax budgets.
+
+Validation: compact tests for cross-VM progress, duplicate completion, concurrent
+admission, VM replacement and sample integrity; then one 1280 run followed by
+2560 if successful. Hold templates, budgets, offered arrivals, snapshot policy
+and native binaries fixed. Require lower repeated control/completion latency
+without lost measurements, changed admission rules or lower completed work.
+Sub-100-ms control overhead is the target, not an achieved result. No new VM run,
+deployment or kernel change was performed for this review; the host VM parent
+was verified `populated 0`.
+
+Evidence on kunpeng:
+`/data/clawbox-create-placement-20261027/clawbox-overhead-review-20261027/`.
+`review.py` reproduces `c1280-r2.json`, `c2560.json` and their
+`*-completion-subset.json` files in a new output directory. Local copies are in
+`.runtime/overhead-review-20261027/`. Per-operation subtraction precedes
+quantiling; overlapping stages and cumulative concurrent durations are not
+added into an E2E total.
 
 ## Update: instrumented Full-1280, 2026-10-27 afternoon
 
