@@ -7,8 +7,8 @@ from collections import Counter, deque
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
-from threading import Condition, Thread
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Condition, Event, Lock, Thread
 from typing import Protocol
 
 from .spec import EvictionPolicy, PolicySpec, ReclamationPolicy, RestorePolicy
@@ -77,23 +77,89 @@ def checkpoint_reservations(lifecycles, tier):
 
 
 class PolicyEventExecutor:
-    """Small per-arm executor for nonblocking model lifecycle events."""
+    """Per-arm executor with a single-flight edge-triggered work path."""
 
     def __init__(self, *, workers: int = 4) -> None:
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, workers), thread_name_prefix="policy-event"
         )
+        self._lock = Lock()
+        self._coalesced: dict[object, dict[str, object]] = {}
+        self._failures: list[BaseException] = []
+        self.submitted_count = 0
+        self.coalesced_count = 0
+        self.executed_count = 0
 
     def submit(self, operation: Callable[..., object], *args: object, **kwargs: object):
         # ThreadPoolExecutor.submit only enqueues work; callers are never
         # allowed to perform checkpoint/restore work in the gateway callback.
         return self._executor.submit(operation, *args, **kwargs)
 
+    def submit_coalesced(
+        self, key: object, operation: Callable[..., object],
+        *args: object, **kwargs: object,
+    ) -> Future:
+        """Keep one running item and at most one trailing edge for ``key``."""
+        with self._lock:
+            self.submitted_count += 1
+            state = self._coalesced.get(key)
+            if state is not None:
+                state.update(operation=operation, args=args, kwargs=kwargs, dirty=True)
+                self.coalesced_count += 1
+                return state["future"]  # type: ignore[return-value]
+            state = {
+                "operation": operation, "args": args, "kwargs": kwargs,
+                "dirty": False, "future": None,
+            }
+            self._coalesced[key] = state
+            future = self._executor.submit(self._run_coalesced, key)
+            state["future"] = future
+            return future
+
+    def _run_coalesced(self, key: object) -> None:
+        while True:
+            with self._lock:
+                state = self._coalesced[key]
+                operation = state["operation"]
+                args = state["args"]
+                kwargs = state["kwargs"]
+                state["dirty"] = False
+                self.executed_count += 1
+            try:
+                operation(*args, **kwargs)  # type: ignore[operator]
+            except BaseException as exc:
+                with self._lock:
+                    self._failures.append(exc)
+            with self._lock:
+                state = self._coalesced[key]
+                if state["dirty"]:
+                    continue
+                del self._coalesced[key]
+                return
+
+    def check(self) -> None:
+        with self._lock:
+            failure = self._failures[0] if self._failures else None
+        if failure is not None:
+            raise RuntimeError("coalesced policy event failed") from failure
+
+    def metrics(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "submitted": self.submitted_count,
+                "coalesced": self.coalesced_count,
+                "executed": self.executed_count,
+                "active_keys": len(self._coalesced),
+                "failures": len(self._failures),
+            }
+
     def close(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=not wait)
 
 
 class PolicyCoordinator:
+    _PROGRESS_WAKE_BATCH = 8
+
     """Admission ledger and LRU view for one compute memory domain in an arm."""
 
     def __init__(self, policy: PolicySpec, *, budget_mib: int,
@@ -149,6 +215,7 @@ class PolicyCoordinator:
         self._waiters: deque[object] = deque()
         self._waiter_requests: dict[object, AdmissionRequest] = {}
         self._waiter_blockers: dict[object, tuple[str, ...]] = {}
+        self._waiter_events: dict[object, Event] = {}
         self._progress_waiters: set[object] = set()
         self._sessions: dict[str, SessionState] = {}
         self.blocked_seconds = 0.0
@@ -171,6 +238,7 @@ class PolicyCoordinator:
         """Latch only new VM-pair admission; existing sessions must make progress."""
         with self._condition:
             self._new_session_admission_blocked = blocked
+            self._signal_admission_waiters_locked()
             self._condition.notify_all()
 
     def register(self, session_id: str, lifecycle: Pausable) -> None:
@@ -220,6 +288,7 @@ class PolicyCoordinator:
             self._reservations.pop(session_id, None)
             self._capacity_claims.pop(session_id, None)
             self._resident_capacity_claims.pop(session_id, None)
+            self._signal_admission_waiters_locked()
             self._condition.notify_all()
 
     def set_tool_active(self, session_id: str, active: bool) -> None:
@@ -271,6 +340,25 @@ class PolicyCoordinator:
                 state.eviction_in_progress = False
             self._condition.notify_all()
 
+    @operation('admission.small_bypass')
+    def begin_unaccounted_tool(
+        self, session_id: str, *, already_active: bool = False,
+    ) -> float:
+        """Protect a configured tiny Tool without adding a demand claim."""
+        started = time.monotonic()
+        if already_active:
+            return 0.0
+        with timed_lock(self.demand.progress_lock, 'admission.begin_condition'):
+            state = self._sessions[session_id]
+            while state.eviction_in_progress:
+                with span('admission.eviction_wait'):
+                    self._condition.wait()
+            state.tool_active = True
+            state.eviction_eligible = False
+            state.last_used = time.monotonic()
+            self._condition.notify_all()
+        return time.monotonic() - started
+
     @operation('admission.begin')
     def begin_tool_admission(self, session_id: str, amount_mib: int,
                              timeout_s: float, *, total_mib: int | None = None,
@@ -281,10 +369,20 @@ class PolicyCoordinator:
         that protection while ``acquire`` waits so another admission cannot
         select this resident Tool as a victim.
         """
+        observations = (
+            self._admission_snapshot(
+                amount_mib * MIB,
+                (amount_mib if total_mib is None else total_mib) * MIB,
+                existing_progress=True,
+            )
+            if amount_mib or (total_mib is not None and total_mib != 0)
+            else (None, None, None)
+        )
         if already_active:
             try:
                 return self.acquire(
                     session_id, amount_mib, timeout_s, total_mib=total_mib,
+                    progress_entrance=True, _observations=observations,
                 )
             except Exception:
                 self.set_tool_active(session_id, False)
@@ -293,7 +391,7 @@ class PolicyCoordinator:
         # needed before this admission.  Mark it active and enqueue/commit its
         # growth while retaining one recursive acquisition of the shared
         # condition, eliminating a scheduling gap and a second lock convoy.
-        with timed_lock(self._condition, 'admission.begin_condition'):
+        with timed_lock(self.demand.progress_lock, 'admission.begin_condition'):
             state = self._sessions[session_id]
             while state.eviction_in_progress:
                 with span('admission.eviction_wait'):
@@ -306,6 +404,7 @@ class PolicyCoordinator:
             try:
                 return self.acquire(
                     session_id, amount_mib, timeout_s, total_mib=total_mib,
+                    progress_entrance=True, _observations=observations,
                 )
             except Exception:
                 state.tool_active = False
@@ -384,14 +483,136 @@ class PolicyCoordinator:
         return finished(status)
 
     def pressure(self, additional_bytes: int = 0) -> bool:
+        physical, global_sample, pending = self._admission_snapshot(
+            additional_bytes, additional_bytes,
+            existing_progress=False,
+        )
         with self._condition:
-            return bool(self._pressure_reasons(additional_bytes))
+            return bool(self._pressure_reasons(
+                additional_bytes, physical_observation=physical,
+                global_observation=global_sample,
+                pending_observation=pending,
+            ))
+
+    def _admission_observations(
+        self,
+    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        if self.resident_capacity_accounting:
+            return None, None
+        with span('admission.physical_sample'):
+            physical = self.demand.sample_concurrently(
+                ('physical', self.demand_scope), self.physical_sample,
+            )
+        with span('admission.global_sample'):
+            global_sample = self.demand.sample_concurrently(
+                ('global', None), self.demand.sample,
+            )
+        return physical, global_sample
+
+    def _pending_observation_needed(
+        self, additional_bytes: int, total_bytes: int, *,
+        existing_progress: bool,
+        physical_observation: tuple[int, int],
+        global_observation: tuple[int, int],
+    ) -> bool:
+        """Return an unlocked prefetch hint; the later locked check is final."""
+        used = physical_observation[0]
+        effective_budget = (
+            self.progress_budget_bytes
+            if existing_progress and (
+                used >= self.budget_bytes or not self._reservations
+            )
+            else self.budget_bytes
+        )
+        base_local = (
+            used + additional_bytes
+            + self.operation_headroom_bytes
+        )
+        base_global = (
+            global_observation[0] + self.demand.margin
+            + total_bytes + self.operation_headroom_bytes
+        )
+        base_rejects = (
+            (base_local > effective_budget
+             and not (existing_progress and additional_bytes == 0))
+            or base_global > self.demand.capacity
+        )
+        if base_rejects:
+            # Existing pending claims are nonnegative; exact reads cannot make
+            # this request fit when resident/base demand already rejects it.
+            # A queued creation can have a different charge, though, and the
+            # FIFO/progress selector must not start its own repeated scan after
+            # the lock is entered. Prefetch once whenever queue selection may
+            # need the same claim observation.
+            return bool(
+                self.demand.claims
+                and any(
+                    request.wait_class == "create"
+                    for request in self._waiter_requests.values()
+                )
+            )
+        local_charge_upper = (
+            used
+            + self.demand.pending_upper_bound(self.demand_scope)
+            + additional_bytes
+            + self.operation_headroom_bytes
+        )
+        global_charge_upper = (
+            global_observation[0] + self.demand.pending_upper_bound()
+            + self.demand.margin + total_bytes + self.operation_headroom_bytes
+        )
+        return (
+            local_charge_upper > effective_budget
+            or global_charge_upper > self.demand.capacity
+        )
+
+    def _admission_snapshot(
+        self, additional_bytes: int, total_bytes: int, *,
+        existing_progress: bool,
+    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None, dict | None]:
+        physical, global_sample = self._admission_observations()
+        if physical is None or global_sample is None:
+            return physical, global_sample, None
+        # Queue-head selection also evaluates an older creation, whose charge
+        # can exceed this Tool request. Carry one shared exact observation into
+        # the lock whenever such a mixed queue exists so selection never starts
+        # repeated sample/reacquire cycles under contention.
+        queued_creation = bool(
+            self.demand.claims
+            and any(
+                request.wait_class == "create"
+                for request in self._waiter_requests.values()
+            )
+        )
+        needs_exact = queued_creation or self._pending_observation_needed(
+            additional_bytes, total_bytes,
+            existing_progress=existing_progress,
+            physical_observation=physical,
+            global_observation=global_sample,
+        )
+        if not needs_exact:
+            return physical, global_sample, None
+        pending = self.demand.pending_observation(progress=existing_progress)
+        physical, global_sample = self._admission_observations()
+        return physical, global_sample, pending
+
+    def _physical_sample_locked(self) -> tuple[int, int]:
+        with span('admission.physical_sample'):
+            return self.demand.sample_without_condition(
+                ('physical', self.demand_scope), self.physical_sample,
+            )
+
+    def _global_sample_locked(self) -> tuple[int, int]:
+        with span('admission.global_sample'):
+            return self.demand.sample_without_condition(
+                ('global', None), self.demand.sample,
+            )
 
     def projected_local_commitment(self, additional_mib: int = 0) -> int:
         """Return LOCAL usage plus still-unmaterialized LOCAL reservations."""
         with self._condition:
             _, pending = self.demand.pending_breakdown_without_condition(self.demand_scope)
-            used, _available = self.physical_sample()
+            used, _available = self._physical_sample_locked()
             return (
                 max(used, sum(self._capacity_claims.values()))
                 + pending
@@ -402,22 +623,47 @@ class PolicyCoordinator:
     @operation('admission.routing_commitment')
     def local_commitment_exceeds(self, additional_mib: int, limit_bytes: int) -> bool:
         """Avoid per-claim reads when even the nominal upper bound fits."""
-        with self._condition:
-            used, _available = self.physical_sample()
+        with span('admission.physical_sample'):
+            physical = self.demand.sample_concurrently(
+                ('physical', self.demand_scope), self.physical_sample,
+            )
+        with self.demand.progress_lock:
+            used, _available = physical
             upper = (max(used, sum(self._capacity_claims.values()))
                      + self.demand.pending_upper_bound(self.demand_scope)
                      + additional_mib*MIB + self.operation_headroom_bytes)
             if upper <= limit_bytes:
                 self.demand.pending_upper_bound_fast_path_count += 1
                 return False
-            return self.projected_local_commitment(additional_mib) > limit_bytes
+        pending_observation = self.demand.pending_observation(progress=True)
+        with span('admission.physical_sample'):
+            physical = self.demand.sample_concurrently(
+                ('physical', self.demand_scope), self.physical_sample,
+            )
+        with self.demand.progress_lock:
+            _, pending = self.demand.pending_from_observation_locked(
+                self.demand_scope, pending_observation,
+            )
+            used, _available = physical
+            return (
+                max(used, sum(self._capacity_claims.values()))
+                + pending + additional_mib * MIB
+                + self.operation_headroom_bytes
+            ) > limit_bytes
 
     def blocked_demand_pressure(self) -> bool:
         """Include the next runnable blocked admission in pressure detection."""
+        physical, global_sample, pending = self._admission_snapshot(
+            0, 0, existing_progress=True,
+        )
         with self._condition:
-            head = self._admission_head_locked()
+            head = self._admission_head_locked(physical, global_sample, pending)
             if head is None:
-                return self.pressure()
+                return bool(self._pressure_reasons(
+                    physical_observation=physical,
+                    global_observation=global_sample,
+                    pending_observation=pending,
+                ))
             request = self._waiter_requests[head]
             amount = request.amount_bytes
             if (request.wait_class == "create"
@@ -426,15 +672,23 @@ class PolicyCoordinator:
             return bool(self._pressure_reasons(
                 amount, capacity_claim=request.capacity_claim,
                 existing_progress=(request.wait_class == "tool_admission"),
+                physical_observation=physical,
+                global_observation=global_sample,
+                pending_observation=pending,
             ))
 
     def resource_feedback(self) -> dict:
         """Read the existing LOCAL admission ledger; never add a second queue."""
+        physical, global_sample, pending = self._admission_snapshot(
+            0, 0, existing_progress=True,
+        )
+        if physical is None:
+            physical = self.physical_sample()
         with self._condition:
             if not self._waiters:
                 return {'memory_blocked': False, 'scope': self.demand_scope, 'waiters': 0}
-            used, available = self.physical_sample()
-            head = self._admission_head_locked()
+            used, available = physical
+            head = self._admission_head_locked(physical, global_sample, pending)
             if head is None:
                 return {'memory_blocked': False, 'scope': self.demand_scope,
                         'waiters': len(self._waiters), 'reasons': ['execution_already_inflight'],
@@ -443,14 +697,17 @@ class PolicyCoordinator:
             request = self._waiter_requests[head]
             reasons = self._pressure_reasons(request.amount_bytes,
                 capacity_claim=request.capacity_claim,
-                existing_progress=request.wait_class == 'tool_admission')
+                existing_progress=request.wait_class == 'tool_admission',
+                physical_observation=physical,
+                global_observation=global_sample,
+                pending_observation=pending)
             memory_reasons = set(reasons) - {'execution_already_inflight'}
             extra = request.amount_bytes+self.operation_headroom_bytes
             upper_deficit = used+self.demand.pending_upper_bound(self.demand_scope)+extra-self.budget_bytes
             deficit = 0
             if upper_deficit > 0:
                 _, pending = self.demand.pending_breakdown_without_condition(self.demand_scope)
-                used, available = self.physical_sample()
+                used, available = self._physical_sample_locked()
                 deficit = max(0, used + pending + extra - self.budget_bytes)
             return {'memory_blocked': bool(memory_reasons), 'scope': self.demand_scope,
                     'waiters': len(self._waiters), 'reasons': list(reasons),
@@ -462,7 +719,10 @@ class PolicyCoordinator:
                           capacity_claim: bool = False,
                           existing_progress: bool = False,
                           total_bytes: int | None = None,
-                          first_budget_blocker_only: bool = False) -> tuple[str, ...]:
+                          first_budget_blocker_only: bool = False,
+                          physical_observation: tuple[int, int] | None = None,
+                          global_observation: tuple[int, int] | None = None,
+                          pending_observation: dict | None = None) -> tuple[str, ...]:
         if self.resident_capacity_accounting:
             # Static overcommit uses nominal charges for the entire VM lifetime.
             # RSS, pending physical growth, free-memory floors and congestion
@@ -470,8 +730,10 @@ class PolicyCoordinator:
             return (("resident_capacity_budget",)
                     if sum(self._resident_capacity_claims.values()) + additional_bytes > self.budget_bytes
                     else ())
-        with span('admission.physical_sample'):
-            used, available = self.physical_sample()
+        used, available = (
+            physical_observation
+            if physical_observation is not None else self._physical_sample_locked()
+        )
         capacity = sum(self._capacity_claims.values())
         if capacity_claim:
             capacity += additional_bytes
@@ -482,8 +744,10 @@ class PolicyCoordinator:
             )
             else self.budget_bytes
         )
-        with span('admission.global_sample'):
-            global_used, global_available = self.demand.sample()
+        global_used, global_available = (
+            global_observation
+            if global_observation is not None else self._global_sample_locked()
+        )
         global_additional = additional_bytes if total_bytes is None else total_bytes
         if first_budget_blocker_only:
             # Queue-head selection only needs to know whether creation fits.
@@ -523,17 +787,26 @@ class PolicyCoordinator:
             global_pending = global_upper
             self.demand.pending_upper_bound_fast_path_count += 1
         else:
-            global_pending, incremental = (
-                self.demand.pending_breakdown_without_condition(self.demand_scope)
-            )
+            if pending_observation is None:
+                global_pending, incremental = (
+                    self.demand.pending_breakdown_without_condition(self.demand_scope)
+                )
+            else:
+                global_pending, incremental = (
+                    self.demand.pending_from_observation_locked(
+                        self.demand_scope, pending_observation,
+                    )
+                )
             # Exact cgroup reads deliberately release the admission condition.
             # Refresh every mutable aggregate used by the decision after it is
             # reacquired; new claims were reconciled at their nominal amount.
-            used, available = self.physical_sample()
+            if pending_observation is None:
+                used, available = self._physical_sample_locked()
             capacity = sum(self._capacity_claims.values())
             if capacity_claim:
                 capacity += additional_bytes
-            global_used, global_available = self.demand.sample()
+            if pending_observation is None:
+                global_used, global_available = self._global_sample_locked()
             effective_budget = (
                 self.progress_budget_bytes
                 if existing_progress and (
@@ -565,7 +838,11 @@ class PolicyCoordinator:
         return False
 
     @operation('admission.queue_head')
-    def _admission_head_locked(self):
+    def _admission_head_locked(
+        self, physical_observation: tuple[int, int] | None = None,
+        global_observation: tuple[int, int] | None = None,
+        pending_observation: dict | None = None,
+    ):
         """Use FIFO when creation fits; let progress bypass blocked creation."""
         while True:
             # The exact pending-demand path in _pressure_reasons deliberately
@@ -599,6 +876,9 @@ class PolicyCoordinator:
                             oldest.amount_bytes + extra,
                             capacity_claim=oldest.capacity_claim,
                             first_budget_blocker_only=True,
+                            physical_observation=physical_observation,
+                            global_observation=global_observation,
+                            pending_observation=pending_observation,
                         )
                         if tuple(self._waiters) != snapshot:
                             retry = True
@@ -631,6 +911,7 @@ class PolicyCoordinator:
             return None
         local_bytes = 0
         total_bytes = 0
+        progress_count = 0
         for queued in self._waiters:
             request = self._waiter_requests[queued]
             if (request.session_id, request.wait_class) in self.demand.claims \
@@ -638,6 +919,9 @@ class PolicyCoordinator:
                 continue
             if queued not in self._progress_waiters:
                 continue
+            progress_count += 1
+            if progress_count > self._PROGRESS_WAKE_BATCH:
+                return None
             local_bytes += request.amount_bytes
             total_bytes += (
                 request.amount_bytes
@@ -647,11 +931,35 @@ class PolicyCoordinator:
                 return local_bytes, total_bytes
         return None
 
+    def _signal_admission_waiters_locked(self) -> None:
+        """Wake one FIFO head and a bounded feasible-progress batch."""
+        first = True
+        progress = 0
+        for ticket in self._waiters:
+            request = self._waiter_requests.get(ticket)
+            event = self._waiter_events.get(ticket)
+            if request is None or event is None:
+                continue
+            if ((request.session_id, request.wait_class) in self.demand.claims
+                    and request.wait_class != "tool_admission"):
+                continue
+            if first:
+                event.set()
+                first = False
+            if ticket in self._progress_waiters:
+                progress += 1
+                if progress <= self._PROGRESS_WAKE_BATCH:
+                    event.set()
+
     @operation('admission.reservation')
     def acquire(self, session_id: str, amount_mib: int, timeout_s: float | None, *,
                 wait_class: str = "tool_admission",
                 capacity_claim: bool = False, total_mib: int | None = None,
-                blocked_head_timeout_s: float | None = None) -> float:
+                blocked_head_timeout_s: float | None = None,
+                progress_entrance: bool = False,
+                _observations: tuple[
+                    tuple[int, int] | None, tuple[int, int] | None, dict | None,
+                ] | None = None) -> float:
         started = time.monotonic()
         amount = amount_mib * MIB
         total = (amount_mib if total_mib is None else total_mib) * MIB
@@ -663,15 +971,22 @@ class PolicyCoordinator:
             if self.physical_sample()[1] < self.emergency_free_bytes:
                 raise AdmissionTimeout("host emergency free-memory floor reached; reduce concurrency or free host memory")
             return 0.0
+        entrance = self.demand.progress_lock if progress_entrance else self._condition
         if amount == 0 and total == 0 and wait_class not in {"create", "restore"}:
             elapsed = time.monotonic() - started
-            with timed_lock(self._condition, 'admission.reservation_condition'):
+            with timed_lock(entrance, 'admission.reservation_condition'):
                 self._record_wait_locked(wait_class, elapsed)
             return elapsed
+        physical_observation, global_observation, pending_observation = (
+            self._admission_snapshot(
+                amount, total,
+                existing_progress=(wait_class == "tool_admission"),
+            ) if _observations is None else _observations
+        )
         deadline = None if timeout_s is None else started + timeout_s
         blocked_head_since = None
         ticket = object()
-        with timed_lock(self._condition, 'admission.reservation_condition'):
+        with timed_lock(entrance, 'admission.reservation_condition'):
             self._waiters.append(ticket)
             self._waiter_requests[ticket] = AdmissionRequest(
                 session_id=session_id,
@@ -680,6 +995,7 @@ class PolicyCoordinator:
                 capacity_claim=capacity_claim,
                 total_bytes=total,
             )
+            self._waiter_events[ticket] = Event()
             if wait_class != "create" and not capacity_claim:
                 self._progress_waiters.add(ticket)
             recorded_safety_reasons: set[str] = set()
@@ -695,7 +1011,10 @@ class PolicyCoordinator:
                         raise RuntimeError("LOCAL cache reclamation failed") from self._cache_reclaim_error
                     # Existing sessions must be able to finish and free memory
                     # while a new VM pair is waiting for capacity.
-                    head = self._admission_head_locked()
+                    head = self._admission_head_locked(
+                        physical_observation, global_observation,
+                        pending_observation,
+                    )
                     at_head = head is ticket
                     same_session_inflight = (
                         session_id, wait_class
@@ -727,6 +1046,9 @@ class PolicyCoordinator:
                         # growth must wait for predecessors. Scanning every VM
                         # cannot admit it and stalls the queue head's checks.
                         first_budget_blocker_only=(progress_prefix is not None),
+                        physical_observation=physical_observation,
+                        global_observation=global_observation,
+                        pending_observation=pending_observation,
                     ) if can_attempt else ()
                     if same_session_inflight:
                         safety_reasons = (*safety_reasons, 'execution_already_inflight')
@@ -786,16 +1108,47 @@ class PolicyCoordinator:
                         finally:
                             self._condition.acquire()
                         if relieved:
+                            physical_observation = None
+                            global_observation = None
+                            pending_observation = None
                             continue
-                    remaining = 0.2 if deadline is None else deadline - time.monotonic()
-                    if remaining <= 0:
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
                         raise AdmissionTimeout(f"memory admission timed out for {session_id}")
-                    with span('admission.condition_wait', reasons=list(self._waiter_blockers[ticket]), wait_class=wait_class):
-                        self._condition.wait(min(0.2, remaining))
+                    # FIFO followers sleep on their own event until queue
+                    # progress selects a bounded batch. Only a request that can
+                    # currently attempt admission polls external memory. This
+                    # avoids waking hundreds of followers every 200 ms.
+                    wait_seconds = (
+                        min(0.2, remaining) if remaining is not None else 0.2
+                    ) if can_attempt else remaining
+                    event = self._waiter_events[ticket]
+                    event.clear()
+                    lock_state = self._condition._release_save()
+                    try:
+                        with span(
+                            'admission.condition_wait',
+                            reasons=list(self._waiter_blockers[ticket]),
+                            wait_class=wait_class,
+                        ):
+                            event.wait(wait_seconds)
+                        # Refresh once while still outside admission, then
+                        # carry the observation through the atomic recheck.
+                        (
+                            physical_observation,
+                            global_observation,
+                            pending_observation,
+                        ) = self._admission_snapshot(
+                            amount, total,
+                            existing_progress=(wait_class == "tool_admission"),
+                        )
+                    finally:
+                        self._condition._acquire_restore(lock_state)
                 with span('admission.commit', wait_class=wait_class):
                     self._waiters.remove(ticket)
                     self._waiter_requests.pop(ticket, None)
                     self._waiter_blockers.pop(ticket, None)
+                    self._waiter_events.pop(ticket, None)
                     self._progress_waiters.discard(ticket)
                     claim_key = (session_id, wait_class)
                     if wait_class == "tool_admission" and claim_key in self.demand.claims:
@@ -815,13 +1168,16 @@ class PolicyCoordinator:
                         self.peak_commitment_bytes,
                         sum(self._capacity_claims.values()) + sum(self._reservations.values()),
                     )
+                    self._signal_admission_waiters_locked()
                     self._condition.notify_all()
             except Exception:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
                 self._waiter_requests.pop(ticket, None)
                 self._waiter_blockers.pop(ticket, None)
+                self._waiter_events.pop(ticket, None)
                 self._progress_waiters.discard(ticket)
+                self._signal_admission_waiters_locked()
                 self._condition.notify_all()
                 waited = time.monotonic() - started
                 self._record_wait_locked(wait_class, waited)
@@ -934,6 +1290,8 @@ class PolicyCoordinator:
                 self.demand.pending_upper_bound_fast_path_count
             ),
             "demand_pending_exact_count": self.demand.pending_exact_count,
+            "shared_sample_leader_count": self.demand.shared_sample_leader_count,
+            "shared_sample_follower_count": self.demand.shared_sample_follower_count,
             "lifecycle_create_reservation_wait_seconds": sum(
                 lifecycle_samples["create"]
             ),
@@ -961,10 +1319,12 @@ class PolicyCoordinator:
                 )
             else:
                 self.demand.release(key)
+            self._signal_admission_waiters_locked()
 
     def release_resident_capacity(self, session_id: str) -> None:
         with self._condition:
             self._resident_capacity_claims.pop(session_id, None)
+            self._signal_admission_waiters_locked()
             self._condition.notify_all()
 
     def acquire_capacity(self, session_id: str, amount_mib: int,
@@ -988,6 +1348,7 @@ class PolicyCoordinator:
                 ledger.pop(session_id, None)
             else:
                 ledger[session_id] = current - amount
+            self._signal_admission_waiters_locked()
             self._condition.notify_all()
 
     def victim_for_restore(self, session_id: str) -> SessionState | None:
@@ -998,6 +1359,7 @@ class PolicyCoordinator:
         with self._condition:
             victim.eviction_in_progress = False
             victim.eviction_eligible = False
+            self._signal_admission_waiters_locked()
             self._condition.notify_all()
 
     def watermark_reclaim_candidate(self) -> dict[str, object] | None:

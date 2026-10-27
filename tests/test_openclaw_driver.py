@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -244,6 +246,20 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
                 )
             if "cat /state/openclaw/session-a/logs/sidecar.log" in command:
                 return CommandResult(0, "sidecar evidence\n", "", 0.01)
+            if "tar -cPzhf" in command:
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+                    for name, content in (
+                        ("/state/clawtune/session-a/traces/native/trace.jsonl",
+                         b'{"trace":true}\n'),
+                        ("/state/openclaw/session-a/logs/sidecar.log",
+                         b"sidecar evidence\n"),
+                    ):
+                        member = tarfile.TarInfo(name)
+                        member.size = len(content)
+                        archive.addfile(member, io.BytesIO(content))
+                payload = base64.b64encode(stream.getvalue()).decode()
+                return CommandResult(0, payload, "", 0.01)
             return CommandResult(0, "", "", 0.01)
 
     monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
@@ -289,6 +305,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert clawtune["instrumentHosts"] == ["sandbox", "gateway"]
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
+    assert (tmp_path / "runtime-traces/session-a/native/trace.jsonl").read_bytes() == b'{"trace":true}\n'
+    assert sum("tar -cPzhf" in command for command in commands) == 1
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "CLAWBOX_TOOL_TIMEOUT_SECONDS=300" in "\n".join(commands)

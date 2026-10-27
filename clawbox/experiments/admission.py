@@ -4,8 +4,8 @@ Reservations cover only growth not already visible in the measured charge.
 CPU placement, runtime congestion enforcement and snapshot policy are external.
 """
 from dataclasses import dataclass, replace
-from concurrent.futures import Future
-from threading import Condition
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Condition, Lock
 from typing import Callable
 from pathlib import Path
 from .control_timing import span, operation
@@ -68,6 +68,49 @@ class DemandLedger:
         # policy condition is reacquired before the result is reconciled with
         # claims added or removed during the read.
         self._exact_sample_future: Future | None = None
+        # Share only an in-flight kernel observation (never a time-based cached
+        # value), then reconcile each caller against current claims after it
+        # reacquires the admission condition. Keys separate LOCAL NUMA samples
+        # while allowing the combined-cgroup observation to be shared.
+        self._sample_futures: dict[object, Future] = {}
+        self._sample_guard = Lock()
+        self.shared_sample_leader_count = 0
+        self.shared_sample_follower_count = 0
+
+    @operation('admission.shared_sample')
+    def sample_concurrently(self, key: object, sample: Callable[[], object]):
+        """Share one in-flight kernel observation without caching its result."""
+        with self._sample_guard:
+            future = self._sample_futures.get(key)
+            leader = future is None
+            if leader:
+                future = Future()
+                self._sample_futures[key] = future
+                self.shared_sample_leader_count += 1
+            else:
+                self.shared_sample_follower_count += 1
+        try:
+            if leader:
+                try:
+                    with span('admission.shared_sample_work'):
+                        future.set_result(sample())
+                except BaseException as exc:
+                    future.set_exception(exc)
+            with span('admission.shared_sample_future', leader=leader):
+                return future.result()
+        finally:
+            if leader:
+                with self._sample_guard:
+                    if self._sample_futures.get(key) is future:
+                        del self._sample_futures[key]
+
+    def sample_without_condition(self, key: object, sample: Callable[[], object]):
+        """Release recursive admission ownership around a shared observation."""
+        lock_state = self.condition._release_save()
+        try:
+            return self.sample_concurrently(key, sample)
+        finally:
+            self.condition._acquire_restore(lock_state)
 
     def pending_upper_bound(self, scope=None):
         """Return the safe nominal bound without sampling every live claim."""
@@ -93,51 +136,64 @@ class DemandLedger:
         return sum(c.remaining()[0 if scope is None else 1]
                    for c in self.claims.values() if scope is None or c.scope == scope)
 
-    @operation('admission.exact_pending')
-    def pending_breakdown_without_condition(self, scope: str) -> tuple[int, int]:
-        """Return global and scoped pending demand without pinning admission.
-
-        The caller must hold ``self.condition``.  Claims created while the
-        filesystem reads are in flight are charged at their full nominal
-        amount; removed or replaced claims are ignored.  This preserves the
-        same safe reservation semantics while allowing tool completion and
-        unrelated fast-path admissions to publish progress.
-        """
-        # Claims can be extended, released or rebound while sampling is outside
-        # admission. Keep the sampled nominal amount/baseline immutable so its
-        # observed growth can be reconciled with the current reservation.
+    def _start_pending_observation_locked(self):
         self.pending_exact_count += 1
         future = self._exact_sample_future
         leader = future is None
+        snapshot = None
         if leader:
             future = Future()
             self._exact_sample_future = future
-            snapshot = {key: (claim, replace(claim)) for key, claim in self.claims.items()}
-        # Match Condition.wait's recursive-lock handling. A nested pressure
-        # check must release every acquisition, not leave the ledger locked
-        # throughout filesystem I/O or a wait for another sampling thread.
-        lock_state = self.condition._release_save()
-        try:
-            if leader:
-                try:
-                    with span('admission.exact_sample_work', claims=len(snapshot)):
-                        measured = {}
-                        for key, (claim, frozen) in snapshot.items():
-                            try:
-                                value: tuple[int, int] | BaseException = frozen.remaining()
-                            except BaseException as exc:
-                                value = exc
-                            measured[key] = (claim, frozen, value)
-                    future.set_result(measured)
-                except BaseException as exc:
-                    future.set_exception(exc)
-            with span('admission.exact_sample_future', leader=leader):
-                measured = future.result()
-        finally:
-            self.condition._acquire_restore(lock_state)
-            if leader and self._exact_sample_future is future:
-                self._exact_sample_future = None
+            snapshot = {
+                key: (claim, replace(claim)) for key, claim in self.claims.items()
+            }
+        return future, leader, snapshot
 
+    def _read_pending_observation(self, future, leader, snapshot):
+        if leader:
+            try:
+                with span('admission.exact_sample_work', claims=len(snapshot)):
+                    def measure(item):
+                        key, (claim, frozen) = item
+                        try:
+                            value: tuple[int, int] | BaseException = frozen.remaining()
+                        except BaseException as exc:
+                            value = exc
+                        return key, (claim, frozen, value)
+
+                    # Each callback reads independent cgroup files. A single
+                    # serial leader took seconds at c1280 while all followers
+                    # waited on its Future; cap parallel I/O to avoid replacing
+                    # that serialization with an unbounded thread burst.
+                    with ThreadPoolExecutor(
+                        max_workers=min(16, max(1, len(snapshot))),
+                        thread_name_prefix="admission-sample",
+                    ) as readers:
+                        measured = dict(readers.map(measure, snapshot.items()))
+                future.set_result(measured)
+            except BaseException as exc:
+                future.set_exception(exc)
+        with span('admission.exact_sample_future', leader=leader):
+            return future.result()
+
+    @operation('admission.exact_pending_observation')
+    def pending_observation(self, *, progress: bool = False):
+        """Measure one identity-frozen claim snapshot outside admission."""
+        entrance = self.progress_lock if progress else self.condition
+        with entrance:
+            future, leader, snapshot = self._start_pending_observation_locked()
+        try:
+            return self._read_pending_observation(future, leader, snapshot)
+        finally:
+            if leader:
+                with entrance:
+                    if self._exact_sample_future is future:
+                        self._exact_sample_future = None
+
+    def pending_from_observation_locked(
+        self, scope: str, measured: dict,
+    ) -> tuple[int, int]:
+        """Reconcile a frozen observation with the current claim identities."""
         global_pending = 0
         scoped_pending = 0
         for key, claim in self.claims.items():
@@ -158,6 +214,33 @@ class DemandLedger:
             if claim.scope == scope:
                 scoped_pending += remaining[1]
         return global_pending, scoped_pending
+
+    @operation('admission.exact_pending')
+    def pending_breakdown_without_condition(self, scope: str) -> tuple[int, int]:
+        """Return global and scoped pending demand without pinning admission.
+
+        The caller must hold ``self.condition``.  Claims created while the
+        filesystem reads are in flight are charged at their full nominal
+        amount; removed or replaced claims are ignored.  This preserves the
+        same safe reservation semantics while allowing tool completion and
+        unrelated fast-path admissions to publish progress.
+        """
+        # Claims can be extended, released or rebound while sampling is outside
+        # admission. Keep the sampled nominal amount/baseline immutable so its
+        # observed growth can be reconciled with the current reservation.
+        future, leader, snapshot = self._start_pending_observation_locked()
+        # Match Condition.wait's recursive-lock handling. A nested pressure
+        # check must release every acquisition, not leave the ledger locked
+        # throughout filesystem I/O or a wait for another sampling thread.
+        lock_state = self.condition._release_save()
+        try:
+            measured = self._read_pending_observation(future, leader, snapshot)
+        finally:
+            self.condition._acquire_restore(lock_state)
+            if leader and self._exact_sample_future is future:
+                self._exact_sample_future = None
+
+        return self.pending_from_observation_locked(scope, measured)
 
     def reasons(self, additional: int, margin: int = 0, *,
                 pending: int | None = None,

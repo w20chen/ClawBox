@@ -27,7 +27,8 @@ RECIPES = ('admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim'
 RESOURCE_FIELDS = {
     'admission': ('startup_headroom_mib', 'admission_margin_mib',
                   'static_tool_memory_mib', 'non_command_tool_memory_mib',
-                  'prediction_reservation_scale'),
+                  'prediction_reservation_scale',
+                  'small_tool_admission_bypass_mib'),
     'runtime': ('pressure_control', 'runtime_poll_interval_seconds'),
     'placement': (),
     'idle_reclaim': ('checkpoint_restore_headroom_mib',),

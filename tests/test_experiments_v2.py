@@ -929,13 +929,44 @@ def test_paused_tool_is_restored_before_growth_admission_and_routing():
         watermark, 3, wait_for_admission=lambda operation: operation(),
     )
 
-    assert result == (0, "shared", 0.25, True)
+    assert result == (0, 3, "shared", 0.25, True)
     assert calls == [
         ("active", "session", True),
         ("restore", False),
         ("route", True, 3),
         ("admit", True, 0, 3, True),
     ]
+
+
+def test_configured_small_tool_bypass_skips_routing_and_records_no_claim():
+    lifecycle = SimpleNamespace(resident=True)
+    calls = []
+    coordinator = SimpleNamespace(
+        begin_unaccounted_tool=lambda session_id, already_active=False: (
+            calls.append((session_id, already_active)) or 0.01
+        ),
+    )
+    watermark = SimpleNamespace(
+        progress_fits_below_low=lambda _amount: pytest.fail(
+            "small bypass consulted the memory route"
+        ),
+        route_progress_to_shared=lambda *_args: pytest.fail(
+            "small bypass routed to shared memory"
+        ),
+    )
+    worker = object.__new__(ExperimentWorker)
+    arm = SimpleNamespace(
+        execution=SimpleNamespace(arm_timeout_seconds=30),
+        resources=SimpleNamespace(small_tool_admission_bypass_mib=4),
+    )
+
+    result = worker._prepare_tool_admission(
+        arm, "session", lifecycle, coordinator, SimpleNamespace(),
+        watermark, 4, wait_for_admission=lambda operation: operation(),
+    )
+
+    assert result == (0, 0, "unaccounted-small", 0.01, False)
+    assert calls == [("session", False)]
 
 
 def test_tool_closed_during_admission_releases_new_claim():

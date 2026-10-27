@@ -71,6 +71,17 @@ def test_every_recipe_roundtrips_and_expands(recipe, axis, count):
     assert all(a.execution.placement_cpu_overcommit == 1024 for a in arms)
 
 
+def test_small_tool_admission_bypass_is_an_editable_admission_field():
+    raw = base()
+    raw['mechanisms']['admission']['small_tool_admission_bypass_mib'] = 4
+
+    spec = ExperimentSpec.model_validate(raw)
+    arm = expand_matrix(spec)[0]
+
+    assert arm.resources.small_tool_admission_bypass_mib == 4
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+
+
 def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
     raw = base()
     raw['mechanisms']['placement'].update(

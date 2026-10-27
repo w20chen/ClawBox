@@ -1,4 +1,5 @@
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -8,6 +9,101 @@ from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
 from clawbox.experiments.baselines import resolve_baseline
 
 MIB = 1024**2
+
+
+def test_kernel_observation_is_single_flight_without_becoming_a_cache():
+    ledger = DemandLedger(sample=lambda: (0, 0), capacity=100 * MIB)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def kernel_read():
+        calls.append(len(calls) + 1)
+        entered.set()
+        assert release.wait(2)
+        return calls[-1]
+
+    def observe():
+        with ledger.condition:
+            return ledger.sample_without_condition("local-0", kernel_read)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(observe)
+        assert entered.wait(1)
+        second = workers.submit(observe)
+        deadline = time.monotonic() + 1
+        while ledger.shared_sample_follower_count != 1 and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert ledger.shared_sample_follower_count == 1
+        # Both callers released the admission lock around the filesystem read.
+        with ledger.condition:
+            pass
+        release.set()
+        assert first.result(timeout=1) == second.result(timeout=1) == 1
+
+    # A completed observation is not reused as a stale capacity sample.
+    with ledger.condition:
+        assert ledger.sample_without_condition("local-0", lambda: 2) == 2
+    assert ledger.shared_sample_leader_count == 2
+
+
+def test_exact_claim_observation_reads_independent_cgroups_in_parallel():
+    ledger = DemandLedger(sample=lambda: (0, 0), capacity=100 * MIB)
+    barrier = threading.Barrier(4)
+
+    def sample():
+        barrier.wait(timeout=1)
+        return MIB, MIB
+
+    with ledger.condition:
+        for index in range(4):
+            ledger.add(
+                (str(index), 'tool_admission'), scope='local',
+                amount=2 * MIB, local_amount=2 * MIB,
+            )
+            ledger.claims[str(index), 'tool_admission'].sample = sample
+
+    measured = ledger.pending_observation()
+    with ledger.condition:
+        assert ledger.pending_from_observation_locked('local', measured) == (
+            4 * MIB, 4 * MIB,
+        )
+
+
+def test_admission_revalidates_claims_added_after_unlocked_observation():
+    reading, release = threading.Event(), threading.Event()
+
+    def physical_sample():
+        reading.set()
+        assert release.wait(2)
+        return 0, 100 * MIB
+
+    coordinator = PolicyCoordinator(
+        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        physical_sample=physical_sample,
+    )
+    result = []
+
+    def admit():
+        try:
+            coordinator.acquire('new', 6, .05)
+        except Exception as exc:
+            result.append(exc)
+
+    thread = threading.Thread(target=admit)
+    thread.start()
+    assert reading.wait(1)
+    # Observation work happens before lock admission. Publish a concurrent
+    # reservation and prove the later atomic decision accounts for it.
+    with coordinator._condition:
+        coordinator.demand.add(
+            ('existing', 'tool_admission'), scope=coordinator.demand_scope,
+            amount=6 * MIB, local_amount=6 * MIB,
+        )
+    release.set()
+    thread.join(1)
+    assert len(result) == 1
+    assert isinstance(result[0], AdmissionTimeout)
 
 
 @pytest.mark.parametrize('operation', ['projected', 'exceeds', 'feedback', 'nested'])

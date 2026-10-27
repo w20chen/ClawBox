@@ -218,6 +218,15 @@ measurement. `resources.prediction_reservation_scale` (CLI
 `--prediction-reservation-scale`, default `1.0`, positive dimensionless multiplier)
 adjusts the reservation; the final reservation is rounded up to whole MiB, with
 a minimum of 0 MiB. A zero prediction therefore reserves 0 MiB.
+`mechanisms.admission.small_tool_admission_bypass_mib` (effective resource
+field `resources.small_tool_admission_bypass_mib`; default `0`, disabled) can make
+predicted Tool reservations at or below the configured whole-MiB threshold
+unaccounted. Such a Tool is still marked active, executed, and measured, but it
+does not read, wait for, increment, or decrement the memory-admission ledger.
+This is an explicit aggregate-memory-risk tradeoff for workloads whose many
+small predictions make serialized accounting more expensive than the protected
+memory. Changing it requires a new run ID, but no host apply, image rebuild, or
+retraining.
 Prediction records retain the original measurement, assumptions, selected model,
 and `identity_estimate` mapping. Zero predictions and partial evidence are accepted.
 
@@ -876,8 +885,29 @@ these intervals can overlap several threads and must not be added to their spans
 `pressure_poll_timing` records the polling lock interval for correlation with
 blocked callbacks. These events are always recorded, including failed callbacks;
 no option or host apply is required.
+Each `memory_sample.policy_event_executor` snapshot reports submitted pressure
+notifications, notifications folded into existing work, executed pressure scans,
+active scan keys, and failures. Model-wait notifications use one running scan
+plus at most one trailing scan per admission coordinator; they are not a
+per-session completion barrier. A session is protected from later reclamation
+before evidence validation by its progress-priority active-state update.
 Admission spans separate the initial condition acquisition, reservation checks,
 exact sampling, routing, restore, and lifecycle-lock reacquisition.
+`admission.shared_sample` obtains the LOCAL NUMA and combined-cgroup kernel
+observations before joining the admission condition; concurrent callers for a
+scope share only that in-flight read. The completed value is removed
+immediately, and every caller reconciles current claims before its atomic
+reservation commit. When conservative nominal demand may overstate a
+near-capacity charge, claim identities are frozen briefly, measured outside the
+condition, then reconciled with all current/changed claims at commit; unmatched
+claims retain their full nominal charge. After an actual admission wait, one
+complete observation snapshot is refreshed outside the condition and carried
+through the next atomic decision, avoiding separate LOCAL/global/exact lock
+re-entry. FIFO followers sleep on per-request events; queue progress wakes one
+head plus at most eight existing-session progress requests, while only the
+currently feasible batch polls external memory. Near capacity, one shared exact
+observation uses at most sixteen readers for independent VM cgroups. None of
+these observations is a time-based capacity cache.
 `admission.condition_wait.reasons` records the blockers observed before sleeping;
 the nested `admission.condition.reacquire` interval is lock contention, not memory
 waiting. Sleep can also include wakeup scheduling delay; a capacity blocker is
@@ -888,6 +918,11 @@ transfers, Tool export attempts/chunks, parsing, and evidence validation. Use
 collection event's root span also includes the earlier Agent run. Transfer spans
 report output character counts or chunk bytes. Span `status` describes Python
 success/error; remote command status is reported separately as `exit_code`.
+Runtime logs and trace JSON are transferred in one tar/gzip stream, decoded to
+their original bytes, and written back to the established per-file run layout;
+this changes neither trace content nor the validation join. Tool evidence uses
+the same bounded-transfer pattern and is checked for regular safe-named members
+before in-memory validation.
 Traces retain at most 8192 spans per scope; `dropped_spans` reports lost detail,
 so a truncated trace cannot establish a complete phase decomposition.
 Lifecycle `stage_spans` uses the same nanosecond clock and separates native API,

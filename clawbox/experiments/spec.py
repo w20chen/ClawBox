@@ -324,6 +324,7 @@ class ResourcesSpec(StrictFrozenModel):
     checkpoint_restore_headroom_mib: int = Field(default=1024, ge=0)
     static_tool_memory_mib: int | None = Field(default=None, ge=1)
     non_command_tool_memory_mib: int | None = Field(default=None, ge=1)
+    small_tool_admission_bypass_mib: int = Field(default=0, ge=0)
     prediction_artifact: str | None = None
     prediction_mode: Literal["runtime", "frozen", "cold-start"] = "frozen"
     observe_predictions: bool = False

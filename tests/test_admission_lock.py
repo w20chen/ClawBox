@@ -65,6 +65,41 @@ def test_condition_wait_releases_all_recursion_and_restores_it():
     assert not lock._is_owned()
 
 
+def test_condition_reacquires_with_original_progress_priority():
+    lock = AdmissionLock()
+    condition = Condition(lock)
+    progress = ProgressLock(lock)
+    released = Event()
+    order = []
+
+    def ordinary():
+        with lock:
+            order.append("ordinary")
+
+    def notifier():
+        with progress:
+            condition.notify()
+            # Keep ownership until the awakened condition waiter has joined
+            # the lock queue, making the priority comparison deterministic.
+            queued(lock, 1, 1)
+            released.set()
+
+    with progress:
+        normal = Thread(target=ordinary)
+        normal.start()
+        queued(lock, 1, 0)
+        notify = Thread(target=notifier)
+        notify.start()
+        queued(lock, 1, 1)
+        assert condition.wait(2)
+        assert released.is_set()
+        assert lock._owner_progress is True
+        order.append("resumed-progress")
+    normal.join(2)
+    notify.join(2)
+    assert order == ["resumed-progress", "ordinary"]
+
+
 def test_timed_out_waiter_does_not_receive_or_leak_ownership():
     lock = AdmissionLock()
     results = []

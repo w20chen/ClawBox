@@ -4,15 +4,17 @@ from __future__ import annotations
 from .control_timing import span
 
 import base64
+import io
 import json
 import os
 import re
 import secrets
 import shlex
+import tarfile
 import time
 import urllib.parse
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from clawbox.replay.lifecycle import CommandResult
@@ -916,14 +918,6 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     }
     if checkpoint_relay:
         runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
-    for local_name, remote_path in runtime_logs.items():
-        log_result = collection_execute('finalize.runtime_log',
-            prefix + f"cat {shlex.quote(remote_path)}", 30,
-        )
-        if log_result.exit_code == 0:
-            (host_home / local_name).write_text(
-                log_result.stdout, encoding="utf-8",
-            )
     collection_execute('finalize.helper_stop',
         prefix + f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
         + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi; "
@@ -931,25 +925,68 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
            f"kill -TERM $(cat {shlex.quote(relay_pid_file)}) 2>/dev/null || true; fi"
            if checkpoint_relay else "true"), 10,
     )
-    listing = collection_execute('finalize.runtime_list',
-        prefix + f"find {shlex.quote(trace_dir)} -type f "
-        + "\\( -name '*.jsonl' -o -name '*.json' \\) -print", 30,
+    # Runtime evidence used to require one SSH command per log/trace file.
+    # Collect the same regular files in one compressed stream so synchronized
+    # c1280 completion does not multiply SSH startup and transport latency.
+    remote_log_words = " ".join(shlex.quote(path) for path in runtime_logs.values())
+    bundle = collection_execute(
+        'finalize.runtime_bundle',
+        prefix
+        + f"{{ for path in {remote_log_words}; do "
+        + "[ ! -f \"$path\" ] || printf '%s\\0' \"$path\"; done; "
+        + f"find {shlex.quote(trace_dir)} -type f "
+        + "\\( -name '*.jsonl' -o -name '*.json' \\) -print0; } "
+        + "| tar -cPzhf - --null -T - 2>/dev/null | base64 -w0",
+        60,
     )
+    if bundle.exit_code:
+        raise RuntimeError(
+            "Runtime evidence bundle failed "
+            f"(exit {bundle.exit_code}): {bundle.stderr[:1000]}"
+        )
     copied: list[str] = []
     host_trace_dir = output_dir / "runtime-traces" / session_id
     host_trace_dir.mkdir(parents=True, exist_ok=True)
-    for remote_path in listing.stdout.splitlines():
-        if not remote_path.startswith(trace_dir + "/"):
-            continue
-        relative = Path(remote_path.removeprefix(trace_dir + "/"))
-        if relative.is_absolute() or ".." in relative.parts:
-            continue
-        encoded = collection_execute('finalize.runtime_trace',prefix + f"base64 -w0 {shlex.quote(remote_path)}", 30)
-        if encoded.exit_code == 0:
-            target = host_trace_dir / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(base64.b64decode(encoded.stdout))
-            copied.append(str(target))
+    remote_logs = {path: local_name for local_name, path in runtime_logs.items()}
+    trace_prefix = trace_dir.rstrip("/") + "/"
+    try:
+        if not bundle.stdout:
+            archive_payloads = ()
+        else:
+            payload = base64.b64decode(bundle.stdout, validate=True)
+            archive_payloads = (payload,)
+        for payload in archive_payloads:
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                for member in archive:
+                    remote_path = "/" + member.name.lstrip("/")
+                    if not member.isfile():
+                        raise RuntimeError(
+                            f"Runtime evidence member is not a regular file: {remote_path}"
+                        )
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise RuntimeError(
+                            f"Runtime evidence member could not be decoded: {remote_path}"
+                        )
+                    content = source.read()
+                    if remote_path in remote_logs:
+                        (host_home / remote_logs[remote_path]).write_bytes(content)
+                        continue
+                    if not remote_path.startswith(trace_prefix):
+                        raise RuntimeError(
+                            f"Unexpected runtime evidence member: {remote_path}"
+                        )
+                    relative = PurePosixPath(remote_path.removeprefix(trace_prefix))
+                    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                        raise RuntimeError(
+                            f"Unsafe runtime trace member: {remote_path}"
+                        )
+                    target = host_trace_dir.joinpath(*relative.parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+                    copied.append(str(target))
+    except (ValueError, tarfile.TarError) as exc:
+        raise RuntimeError("Runtime evidence bundle is invalid") from exc
     with span('finalize.policy_materialize'):
         control_records = policy_control.records()
         completed = [item for item in control_records if item["completion"]]

@@ -79,7 +79,7 @@ def test_large_export_is_frozen_once_and_read_below_stdout_limit():
     )
     assert result.stdout == payload
     assert len(commands) == 7
-    assert sum("gzip -c" in command for command in commands) == 1
+    assert sum("tar -czf" in command for command in commands) == 1
 
 
 def test_large_export_rejects_a_truncated_chunk():
@@ -349,6 +349,34 @@ def test_runtime_spans_recovers_exact_clawtune_envelope_identity(
     assert spans[0]["execution"]["execution_id_source"] == (
         "effective_command_envelope_recovery"
     )
+
+
+def test_runtime_spans_excludes_tool_request_rejected_before_execution(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.jsonl"
+    rejected = {
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "status": {"code": "error"},
+        "output": {"result": {
+            "content": [{"type": "text", "text": (
+                'workdir "/workspace" is unavailable: command was not executed.'
+            )}],
+            "details": {
+                "failureKind": "runtime-error", "status": "failed",
+                "exitCode": None,
+            },
+        }},
+        "execution": {"execution_id": "exec-rejected", "mode": "launcher"},
+    }
+    path.write_text(json.dumps(rejected) + "\n", encoding="utf-8")
+
+    assert _runtime_spans([str(path)]) == []
+
+    rejected["output"]["result"]["content"][0]["text"] = "unknown runtime error"
+    path.write_text(json.dumps(rejected) + "\n", encoding="utf-8")
+    assert len(_runtime_spans([str(path)])) == 1
 
 
 def test_runtime_spans_recovers_base64_clawtune_envelope_identity(

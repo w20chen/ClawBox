@@ -7,6 +7,15 @@ It supersedes the next-work ordering and broad performance conclusions in
 That file and [the VM creation handoff](FULL_VM_CREATION_HANDOFF_20261027.md)
 retain the earlier detailed evidence.
 
+## Completion update (2026-10-28)
+
+The admission and finalization priorities in this handoff are complete. Do not
+repeat its remaining-work plan. The implemented changes, c1280 measurements,
+known rare accounted-pressure tail, configuration tradeoff, validation audit,
+and current evidence paths are in
+[`FULL_SERVICE_OVERHEAD_OPTIMIZATION_20261028.md`](FULL_SERVICE_OVERHEAD_OPTIMIZATION_20261028.md).
+Checkpoint/restore remains intentionally deferred to a later study.
+
 ## 1. Start here: consequential conclusion and user direction
 
 **Completion accounting improved substantially, but overall end-to-end overhead

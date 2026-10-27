@@ -2338,6 +2338,7 @@ class ExperimentWorker:
                     "admission_queue_snapshot": aggregate_admission_queue_snapshots(
                         domains
                     ),
+                    "policy_event_executor": policy_events.metrics(),
                     "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
                     "numa_residency": sampler.node_usage() if isinstance(sampler, NumaCgroupMemorySampler) else None,
                     "combined_live_used_bytes": sampler.tier_usage()[2] if isinstance(sampler, NumaCgroupMemorySampler) else used,
@@ -2439,6 +2440,7 @@ class ExperimentWorker:
         futures: dict[Any, int] = {}
         def check_shared_health():
             try:
+                policy_events.check()
                 if self._runtime_memory is not None:
                     self._runtime_memory.check()
                 for domain in domains.values():
@@ -2584,6 +2586,11 @@ class ExperimentWorker:
                 wait=not interrupted, cancel_futures=interrupted,
             )
             policy_events.close(wait=not interrupted)
+            try:
+                policy_events.check()
+            except Exception as exc:
+                infrastructure_error = infrastructure_error or exc
+                failure = failure or exc
             # Watermark threads call DemandLedger.check(), which delegates to
             # the shared pressure controller. Stop those readers before
             # marking the pressure controller stopped.
@@ -2878,6 +2885,7 @@ class ExperimentWorker:
                 ),
                 "blocked_admission_seconds": sum(d.coordinator.blocked_seconds for d in domains.values()),
                 "admission_control": coordinator.admission_metrics(),
+                "policy_event_executor": policy_events.metrics(),
                 "runtime_memory_control": ({**self._runtime_memory.provenance,
                                             **self._runtime_memory.stats,
                                             "priority_cpu_weights": self._priority_domain.cpu_weights}
@@ -3222,20 +3230,7 @@ class ExperimentWorker:
         completed_model_requests: set[str] = set()
         generated_model_requests: set[str] = set()
         generated_model_requests_lock = Lock()
-        policy_event_errors: list[str] = []
-        pending_policy_events: list[Any] = []
-        pending_policy_events_lock = Lock()
         finalization_active = False
-
-        def submit_policy_event(operation: Any, *args: Any) -> None:
-            future = policy_events.submit(operation, *args)
-            with pending_policy_events_lock:
-                pending_policy_events.append(future)
-
-        def drain_policy_events() -> None:
-            """Finish this session's queued lifecycle work before validation."""
-            drain_policy_futures(pending_policy_events, pending_policy_events_lock,
-                                 arm.execution.arm_timeout_seconds)
 
         if arm.agent.driver is AgentDriver.OPENCLAW:
             if self.model_gateway is None:
@@ -3256,10 +3251,10 @@ class ExperimentWorker:
                     if coordinator.blocked_demand_pressure():
                         coordinator.relieve_pressure()
                 except Exception as exc:
-                    policy_event_errors.append(f"pause: {type(exc).__name__}: {exc}")
                     events.write({"event": "policy_event_failed", "session_id": session_id,
                                   "operation": "pause", "error": str(exc),
                                   "error_type": type(exc).__name__})
+                    raise
 
             def before_runtime_idle_pause() -> None:
                 wait_state["runtime_agent_pid_before_pause"] = observe_openclaw_agent_pid(
@@ -3344,7 +3339,10 @@ class ExperimentWorker:
                     "oracle_model_wait_source": event.get("oracle_model_wait_source"),
                 })
                 if arm.policy.reclamation is not ReclamationPolicy.RESIDENT:
-                    submit_policy_event(pause_for_model_wait, event)
+                    policy_events.submit_coalesced(
+                        (coordinator, "memory-pressure"),
+                        pause_for_model_wait, event,
+                    )
 
             def before_model_response_ready(step: int | None, message: dict[str, Any],
                                             event: dict[str, Any]) -> dict[str, Any]:
@@ -3796,6 +3794,7 @@ class ExperimentWorker:
                         runtime_memory.check()
                     amount = self._tool_reservation_mib(arm, prediction=prediction)
                     local_amount = amount
+                    accounted_amount = amount
                     admission_memory_tier = "local"
                     reservation_acquired = False
                     cpu_placement_acquired = False
@@ -3845,6 +3844,7 @@ class ExperimentWorker:
                             # LOCAL while this request carries a zero LOCAL claim.
                             (
                                 local_amount,
+                                accounted_amount,
                                 admission_memory_tier,
                                 admission_wait,
                                 restored_tool,
@@ -4005,7 +4005,9 @@ class ExperimentWorker:
                                                                     host_sampler.charge_baseline)
                             with reservation_lock:
                                 pending_admissions.discard(execution_id)
-                                active_reservations[execution_id] = (local_amount, amount)
+                                active_reservations[execution_id] = (
+                                    local_amount, accounted_amount,
+                                )
                                 admitted_routes[execution_id] = route
                                 host_rss_samplers[execution_id] = host_sampler
                                 if cpu_placement_acquired:
@@ -4029,7 +4031,8 @@ class ExperimentWorker:
                                 priority_domain.release_tool_call(execution_id)
                             if reservation_acquired:
                                 coordinator.release(
-                                    session_id, local_amount, total_mib=amount,
+                                    session_id, local_amount,
+                                    total_mib=accounted_amount,
                                 )
                             if dependency_permit_acquired:
                                 dependency_install_gate.release(
@@ -4061,7 +4064,7 @@ class ExperimentWorker:
                                  "operation": request.get("operation"),
                                  "execution_scope": execution_scope,
                                  "actual_measured_memory_mib": None,
-                                 "admitted_reservation_mib": amount,
+                                 "admitted_reservation_mib": accounted_amount,
                                  "prediction_reservation_scale": arm.resources.prediction_reservation_scale,
                                  "local_admitted_reservation_mib": local_amount,
                                  "admission_memory_tier": admission_memory_tier,
@@ -4090,7 +4093,7 @@ class ExperimentWorker:
                         "predicted_memory_mib": prediction_record.get(
                             "predicted_incremental_memory_mib"
                         ),
-                        "admitted_memory_mib": amount,
+                        "admitted_memory_mib": accounted_amount,
                         "local_admitted_memory_mib": local_amount,
                         "admission_memory_tier": admission_memory_tier,
                         "admission_blocked_seconds": admission_wait,
@@ -4101,7 +4104,7 @@ class ExperimentWorker:
                         "endpoint_port": route.port,
                     })
                     return {
-                        "decision": "ADMIT", "admitted_memory_mib": amount,
+                        "decision": "ADMIT", "admitted_memory_mib": accounted_amount,
                         "notify_execution_start": bool(progress_control and arm.policy.runtime_control.adaptive),
                         "local_admitted_memory_mib": local_amount,
                         "admission_memory_tier": admission_memory_tier,
@@ -4459,11 +4462,11 @@ class ExperimentWorker:
                     with span('finalize.mark_active'):
                         coordinator.set_tool_active(session_id, True)
                     finalization_active = True
-                    # No Agent SSH process remains after run_openclaw returns.
-                    # Drain callbacks already queued by model/tool completions so
-                    # none can pause a VM underneath collection or validation.
-                    with span('finalize.policy_drain'):
-                        drain_policy_events()
+                    # This progress-priority state update waits for an eviction
+                    # that already claimed this session and prevents later
+                    # global pressure work from selecting it. The coalesced
+                    # pressure scan owns no session-local evidence, so artifact
+                    # collection does not wait for shared-arm pressure work.
                     with span('finalize.prediction_materialize'):
                         prediction_records = prediction_buffer.records()
                     timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
@@ -4631,8 +4634,6 @@ class ExperimentWorker:
                     if prediction_provider is not None else None
                 ),
             })
-            if policy_event_errors:
-                raise RuntimeError("policy event executor failed: " + "; ".join(policy_event_errors))
             return {"session_id": session_id, "case_id": arm.case.case_id,
                     "rollout_id": session_id,
                     "tool_template": arm.sandbox.template,
@@ -4850,13 +4851,23 @@ class ExperimentWorker:
         amount_mib: int,
         *,
         wait_for_admission: Callable[[Callable[[], float]], float],
-    ) -> tuple[int, str, float, bool]:
+    ) -> tuple[int, int, str, float, bool]:
         """Restore first, then reserve growth in its actual allocation tier."""
         restored_tool = not lifecycle.resident
+        bypass_limit_mib = getattr(
+            getattr(arm, "resources", None),
+            "small_tool_admission_bypass_mib", 0,
+        )
+        small_bypass = (
+            bypass_limit_mib > 0 and amount_mib <= bypass_limit_mib
+        )
         fast_local = bool(
-            not restored_tool
-            and watermark_controller is not None
-            and watermark_controller.progress_fits_below_low(amount_mib)
+            small_bypass
+            or (
+                not restored_tool
+                and watermark_controller is not None
+                and watermark_controller.progress_fits_below_low(amount_mib)
+            )
         )
         early_active = restored_tool or (
             watermark_controller is not None and not fast_local
@@ -4870,6 +4881,7 @@ class ExperimentWorker:
             )
 
         local_amount = amount_mib
+        accounted_amount = amount_mib
         admission_memory_tier = "local"
         if (
             not fast_local and
@@ -4878,26 +4890,45 @@ class ExperimentWorker:
         ):
             local_amount = 0
             admission_memory_tier = "shared"
+        if small_bypass:
+            local_amount = 0
+            accounted_amount = 0
+            admission_memory_tier = "unaccounted-small"
 
         # The caller drops its lifecycle lock during this wait so completion can
         # publish the result and release the preceding Tool claim.
-        with span('prepare.reserve', fast_local=fast_local, restored_tool=restored_tool, tier=admission_memory_tier):
+        with span(
+            'prepare.reserve', fast_local=fast_local,
+            restored_tool=restored_tool, tier=admission_memory_tier,
+            small_bypass=small_bypass,
+        ):
             admission_wait = wait_for_admission(
-                lambda: coordinator.begin_tool_admission(
-                    session_id,
-                    local_amount,
-                    arm.execution.arm_timeout_seconds,
-                    total_mib=amount_mib,
-                    already_active=early_active,
+                lambda: (
+                    coordinator.begin_unaccounted_tool(
+                        session_id, already_active=early_active,
+                    )
+                    if small_bypass else
+                    coordinator.begin_tool_admission(
+                        session_id,
+                        local_amount,
+                        arm.execution.arm_timeout_seconds,
+                        total_mib=accounted_amount,
+                        already_active=early_active,
+                    )
                 )
             )
         # Failed-session cleanup can close the VM while this callback releases
         # the lifecycle lock to wait. Do not return an admission for that VM,
         # and release the newly acquired claim before propagating the failure.
         if not lifecycle.resident:
-            coordinator.release(session_id, local_amount, total_mib=amount_mib)
+            coordinator.release(
+                session_id, local_amount, total_mib=accounted_amount,
+            )
             raise LifecycleError("Tool VM became unavailable while waiting for admission")
-        return local_amount, admission_memory_tier, admission_wait, restored_tool
+        return (
+            local_amount, accounted_amount, admission_memory_tier,
+            admission_wait, restored_tool,
+        )
 
     def _tool_reservation_mib(self, arm: ExperimentArm, *,
                               prediction: dict[str, Any] | None = None) -> int:

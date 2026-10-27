@@ -13,6 +13,7 @@ from threading import Event, Lock, get_ident
 @dataclass(eq=False)
 class _Waiter:
     owner: int
+    progress: bool = False
     ready: Event = field(default_factory=Event)
     granted: bool = False
 
@@ -21,6 +22,7 @@ class AdmissionLock:
     def __init__(self):
         self._guard = Lock()
         self._owner = None
+        self._owner_progress = False
         self._depth = 0
         self._normal = deque()
         self._progress = deque()
@@ -37,10 +39,11 @@ class AdmissionLock:
                 return True
             if self._owner is None:
                 self._owner, self._depth = owner, 1
+                self._owner_progress = progress
                 return True
             if not blocking:
                 return False
-            waiter = _Waiter(owner)
+            waiter = _Waiter(owner, progress=progress)
             queue = self._progress if progress else self._normal
             queue.append(waiter)
         if waiter.ready.wait(None if timeout == -1 else timeout):
@@ -60,8 +63,10 @@ class AdmissionLock:
             self._burst = 0
         else:
             self._owner, self._depth, self._burst = None, 0, 0
+            self._owner_progress = False
             return
         self._owner, self._depth = waiter.owner, 1
+        self._owner_progress = waiter.progress
         waiter.granted = True
         waiter.ready.set()
 
@@ -81,13 +86,13 @@ class AdmissionLock:
         with self._guard:
             if self._owner != get_ident():
                 raise RuntimeError('cannot release unowned admission lock')
-            state = self._depth, self._owner
+            state = self._depth, self._owner, self._owner_progress
             self._handoff()
             return state
 
     @operation('admission.condition.reacquire')
     def _acquire_restore(self, state):
-        self.acquire()
+        self.acquire(progress=state[2])
         with self._guard:
             self._depth = state[0]
 

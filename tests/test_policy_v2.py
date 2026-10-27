@@ -6,6 +6,48 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+
+def test_policy_events_coalesce_to_running_and_one_trailing_scan():
+    from threading import Event
+    from clawbox.experiments.policy import PolicyEventExecutor
+
+    entered, release = Event(), Event()
+    calls = []
+    executor = PolicyEventExecutor(workers=4)
+
+    def scan(value):
+        calls.append(value)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(2)
+
+    first = executor.submit_coalesced("pressure", scan, 0)
+    assert entered.wait(1)
+    for value in range(1, 101):
+        assert executor.submit_coalesced("pressure", scan, value) is first
+    release.set()
+    first.result(timeout=2)
+    assert calls == [0, 100]
+    assert executor.metrics() == {
+        "submitted": 101, "coalesced": 100, "executed": 2,
+        "active_keys": 0, "failures": 0,
+    }
+    executor.close()
+
+
+def test_coalesced_policy_event_failure_is_reported_to_arm_health():
+    from clawbox.experiments.policy import PolicyEventExecutor
+
+    executor = PolicyEventExecutor(workers=1)
+    done = executor.submit_coalesced(
+        "pressure", lambda: (_ for _ in ()).throw(ValueError("broken pressure")),
+    )
+    done.result(timeout=1)
+    with pytest.raises(RuntimeError, match="coalesced policy event failed") as raised:
+        executor.check()
+    assert isinstance(raised.value.__cause__, ValueError)
+    executor.close()
+
 from clawbox.experiments.policy import AdmissionTimeout, PolicyCoordinator
 from clawbox.experiments.spec import PolicySpec
 from clawbox.experiments.spec_types import SnapshotTier
@@ -31,6 +73,7 @@ def test_placement_retry_timeout_does_not_cancel_a_queued_fifo_ticket():
             c._waiters.remove('older')
             c._waiter_requests.pop('older')
             c._progress_waiters.remove('older')
+            c._signal_admission_waiters_locked()
             c._condition.notify_all()
         assert waiting.result(timeout=1) >= .2
     assert ('new', 'create') in c.demand.claims
@@ -101,25 +144,26 @@ def test_resource_feedback_reselects_head_removed_during_exact_sampling():
 
     removed = False
 
-    def sample_while_head_completes(scope):
+    original_observation = c.demand.pending_observation
+
+    def sample_while_head_completes(*, progress=False):
         nonlocal removed
-        c._condition.release()
-        try:
+        measured = original_observation(progress=progress)
+        with c._condition:
             if not removed:
                 c._waiters.remove(create)
                 c._waiter_requests.pop(create)
                 removed = True
-            return 0, 0
-        finally:
-            c._condition.acquire()
+        return measured
 
-    c.demand.pending_breakdown_without_condition = sample_while_head_completes
+    c.demand.pending_observation = sample_while_head_completes
 
     # Ensure this fixture reaches the exact path. With no pending claims the
     # nominal upper bound already fits and the sampler is correctly skipped.
     with c._condition:
         c.demand.add(('active', 'tool_admission'), scope=c.demand_scope,
                      amount=MIB, local_amount=MIB)
+        c.demand.claims['active', 'tool_admission'].sample = lambda: (MIB, MIB)
 
     feedback = c.resource_feedback()
     assert removed
@@ -155,6 +199,64 @@ def test_feasible_tool_prefix_does_not_wait_for_each_predecessor_thread():
         c._progress_waiters.remove(older)
 
 
+def test_waiting_admission_refreshes_one_snapshot_before_locked_recheck():
+    """A wake-up must not sample and re-enter admission once per resource."""
+    from clawbox.experiments.policy import AdmissionRequest, MIB
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=10, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (0, 100*MIB))
+    older = object()
+    with c._condition:
+        c._waiters.append(older)
+        c._waiter_requests[older] = AdmissionRequest(
+            'older', MIB, 'create', False, total_bytes=MIB,
+        )
+
+    # Once acquire has waited, any legacy locked fallback would call this for
+    # LOCAL and global observations separately.  The refreshed snapshot path
+    # samples outside the condition and carries both values into the decision.
+    c.demand.sample_without_condition = (
+        lambda *args, **kwargs: pytest.fail('wake-up used locked sample fallback')
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(c.acquire, 'new', 1, 1)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            with c._condition:
+                if len(c._waiters) == 2:
+                    c._waiters.remove(older)
+                    c._waiter_requests.pop(older)
+                    c._signal_admission_waiters_locked()
+                    c._condition.notify_all()
+                    break
+            time.sleep(.001)
+        assert waiting.result(timeout=1) >= 0
+
+    assert ('new', 'tool_admission') in c.demand.claims
+
+
+def test_feasible_progress_prefix_is_bounded_to_wake_batch():
+    from clawbox.experiments.policy import AdmissionRequest, MIB
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(policy, budget_mib=100, emergency_free_mib=0,
+                          operation_headroom_mib=0,
+                          physical_sample=lambda: (0, 100*MIB))
+    tickets = [object() for _ in range(c._PROGRESS_WAKE_BATCH + 1)]
+    with c._condition:
+        for index, ticket in enumerate(tickets):
+            c._waiters.append(ticket)
+            c._waiter_requests[ticket] = AdmissionRequest(
+                str(index), MIB, 'tool_admission', False, total_bytes=MIB,
+            )
+            c._progress_waiters.add(ticket)
+        head = tickets[0]
+        assert c._feasible_progress_prefix_locked(tickets[7], head) == (8*MIB, 8*MIB)
+        assert c._feasible_progress_prefix_locked(tickets[8], head) is None
+
+
 def test_impossible_tool_prefix_does_not_scan_existing_vm_claims():
     from clawbox.experiments.policy import AdmissionRequest, MIB
     policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
@@ -175,6 +277,36 @@ def test_impossible_tool_prefix_does_not_scan_existing_vm_claims():
         c.acquire('new', 4, .02)
     assert c.demand.pending_exact_count == 0
     assert ('new', 'tool_admission') not in c.demand.claims
+
+
+def test_pressure_admission_prefetches_exact_claims_before_lock_commit():
+    mib = 1024**2
+    policy = PolicySpec(name='resident', admission='fixed', reclamation='resident',
+                        eviction='none', restore='none')
+    c = PolicyCoordinator(
+        policy, budget_mib=10, emergency_free_mib=0,
+        operation_headroom_mib=0,
+        physical_sample=lambda: (8 * mib, 100 * mib),
+    )
+    materialized = [0]
+
+    def claim_sample():
+        return materialized[0], materialized[0]
+
+    with c._condition:
+        c.demand.add(
+            ('active', 'tool_admission'), scope=c.demand_scope,
+            amount=2 * mib, local_amount=2 * mib, sample=claim_sample,
+        )
+    materialized[0] = 2 * mib
+    c.demand.pending_breakdown_without_condition = (
+        lambda _scope: pytest.fail('exact sampling rejoined the admission lock')
+    )
+
+    c.acquire('new', 2, .1)
+
+    assert ('new', 'tool_admission') in c.demand.claims
+    assert c.demand.pending_exact_count == 1
 
 
 def test_tool_prefix_stays_fifo_when_the_whole_prefix_cannot_fit():

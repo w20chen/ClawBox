@@ -12,11 +12,14 @@ from .control_timing import span, operation
 import base64
 import binascii
 import gzip
+import io
 import json
 import math
 import re
 import shlex
+import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,7 @@ from .openclaw_driver import (
 
 _ARTIFACT_MARKER = "__CLAWBOX_ARTIFACT_V1__"
 _ARTIFACT_GZIP_MARKER = "__CLAWBOX_ARTIFACT_GZIP_V1__"
+_ARTIFACT_TAR_GZIP_MARKER = "__CLAWBOX_ARTIFACT_TAR_GZIP_V1__"
 _ARTIFACT_END = "__CLAWBOX_ARTIFACT_END__"
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
 _SAFE_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -54,22 +58,23 @@ class NativeToolArtifactCollection:
 
 
 def _collection_command() -> str:
-    """Emit a framed, base64-only stream of Tool artifacts.
+    """Emit one framed tar/gzip stream of Tool artifacts.
 
     The command is deliberately setup/validation-only: it uses the preserved
     real OpenSSH client from the Runtime and is not an Agent operation.  The
     framing prevents JSONL contents from being confused with command output.
     """
+    artifact_root = f"{_TOOL_RESOURCE_ROOT}/.."
     return (
         "set -eu; "
-        "for path in "
-        f"{_TOOL_RESOURCE_ROOT}/../tool-bridge.jsonl "
-        f"{_TOOL_RESOURCE_ROOT}/*.json; do "
-        "[ -f \"$path\" ] || continue; "
-        "name=${path##*/}; "
-        f"printf '%s%s\\n' {_ARTIFACT_GZIP_MARKER} \"$name\"; "
-        "gzip -c \"$path\" | base64 | tr -d '\\n'; printf '\\n'; "
-        f"done; printf '%s\\n' {_ARTIFACT_END}"
+        f"cd {shlex.quote(artifact_root)}; "
+        "[ -f tool-bridge.jsonl ]; "
+        f"printf '%s\\n' {_ARTIFACT_TAR_GZIP_MARKER}; "
+        "{ printf '%s\\0' tool-bridge.jsonl; "
+        "find tool-resource -maxdepth 1 -type f -name '*.json' -print0 | sort -z; } "
+        "| tar -czf - --null --verbatim-files-from -T - "
+        "| base64 | tr -d '\\n'; printf '\\n'; "
+        f"printf '%s\\n' {_ARTIFACT_END}"
     )
 
 
@@ -143,6 +148,42 @@ def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
             if any(item.strip() for item in lines[index + 1:]):
                 raise ValueError("Tool artifact stream has data after its end marker")
             break
+        if line == _ARTIFACT_TAR_GZIP_MARKER:
+            index += 1
+            if index >= len(lines):
+                raise ValueError("Tool artifact archive has no payload")
+            try:
+                archive_raw = base64.b64decode(lines[index].strip(), validate=True)
+                # Stream once. In seekable gzip mode, extracting hundreds of
+                # members after getmembers() repeatedly seeks/re-decompresses
+                # the archive and turns a few MiB into seconds of CPU work.
+                with tarfile.open(fileobj=io.BytesIO(archive_raw), mode="r|gz") as archive:
+                    for member in archive:
+                        parts = tuple(member.name.split("/"))
+                        if (not member.isfile() or member.name.startswith("/")
+                                or any(part in {"", ".", ".."} for part in parts)
+                                or len(parts) not in {1, 2}):
+                            raise ValueError("Tool artifact archive has an unsafe member")
+                        if len(parts) == 2 and parts[0] != "tool-resource":
+                            raise ValueError("Tool artifact archive has an unsafe member")
+                        name = parts[-1]
+                        if not _SAFE_FILENAME.fullmatch(name):
+                            raise ValueError(f"unsafe Tool artifact filename: {name!r}")
+                        if name in result:
+                            raise ValueError(f"duplicate Tool artifact: {name}")
+                        if member.size > _MAX_ARTIFACT_BYTES:
+                            raise ValueError(f"Tool artifact {name} exceeds the size limit")
+                        source = archive.extractfile(member)
+                        if source is None:
+                            raise ValueError(f"Tool artifact {name} is unreadable")
+                        payload = source.read(_MAX_ARTIFACT_BYTES + 1)
+                        if len(payload) != member.size:
+                            raise ValueError(f"Tool artifact {name} is incomplete")
+                        result[name] = payload
+            except (ValueError, binascii.Error, tarfile.TarError) as exc:
+                raise ValueError("Tool artifact archive is invalid") from exc
+            index += 1
+            continue
         compressed = line.startswith(_ARTIFACT_GZIP_MARKER)
         marker = _ARTIFACT_GZIP_MARKER if compressed else _ARTIFACT_MARKER
         if not line.startswith(marker):
@@ -246,6 +287,27 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
                 record = {**record, "execution": execution}
                 explicit_id = envelope_id
             if not explicit_id:
+                continue
+            # OpenClaw/ClawTune can assign an execution envelope before the
+            # SSH sandbox backend rejects the call locally (for example, an
+            # unavailable literal workdir). No policy admission or Tool-side
+            # artifact can exist when its own result says the command was not
+            # executed, so it is evidence of a rejected Tool request rather
+            # than a native execution to join.
+            result = (record.get("output") or {}).get("result") or {}
+            details = result.get("details") or {}
+            content = result.get("content") or []
+            rejected_before_execution = (
+                details.get("failureKind") == "runtime-error"
+                and details.get("status") == "failed"
+                and details.get("exitCode") is None
+                and any(
+                    isinstance(item, dict)
+                    and "command was not executed" in str(item.get("text") or "")
+                    for item in content
+                )
+            )
+            if rejected_before_execution:
                 continue
             spans.append(record)
     by_execution: dict[str, list[dict[str, Any]]] = {}
@@ -729,11 +791,19 @@ def collect_and_validate_native_tool_artifacts(
     root = output_dir / "tool-artifacts" / session_id
     root.mkdir(parents=True, exist_ok=True)
     with span('finalize.write_files', files=len(raw_files), bytes=sum(map(len, raw_files.values()))):
-        for name, raw in raw_files.items():
+        def write_file(item: tuple[str, bytes]) -> None:
+            name, raw = item
             target = root / name
-            temporary = target.with_name(target.name + ".next")
-            temporary.write_bytes(raw)
-            temporary.replace(target)
+            # This run/session directory is private and is not published as a
+            # collected result until every file has been parsed and validated.
+            # Parallel direct writes retain the established file layout while
+            # avoiding a serial metadata tail for hundreds of small files.
+            target.write_bytes(raw)
+        with ThreadPoolExecutor(
+            max_workers=min(16, max(1, len(raw_files))),
+            thread_name_prefix="artifact-write",
+        ) as writes:
+            list(writes.map(write_file, raw_files.items()))
     bridge_raw = raw_files.pop("tool-bridge.jsonl", None)
     if bridge_raw is None:
         raise ValueError("Tool artifact collection is missing tool-bridge.jsonl")
