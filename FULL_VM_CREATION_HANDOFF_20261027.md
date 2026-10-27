@@ -153,6 +153,35 @@ period, and guest/network readiness before changing waits. Preserve readiness
 semantics. The three-second delay is observed; its underlying cause is not yet
 isolated. Do not label the remaining restore delay an unavoidable RAM-copy cost.
 
+## Official kernel candidate and recovery prerequisite
+
+The official openEuler 24.03 LTS-SP1 update repository supplies
+`6.6.0-145.1.28.165.oe2403sp1.aarch64`. Its kernel, kernel-devel and
+kernel-source RPM signatures and digests passed verification with the installed
+vendor key. The exact matching source uses `DEFINE_XARRAY(producers)` and
+`DEFINE_XARRAY(consumers)` with indexed lookup and direct associations; it still
+has a shared mutex. This establishes an official candidate for the measured IRQ
+bottleneck, not a measured performance improvement. No custom backport is needed
+for this candidate. It has not been installed or booted.
+
+Evidence is under `/data/clawbox-irq-bypass-20261027`: package identity/signature
+JSON files, selected matching source, and `diagnostics/vendor-source-inspection.json`.
+The kernel RPM SHA256 is
+`f0fbc5673c5c6c51b0d92859d46b204b91246db1019692ac5049485c76c86a71`.
+
+SSH is the only recovery access. The user authorizes reboot conditional on
+self-recovery. Live inspection found GRUB one-shot selection support, the current
+kernel as saved default, an inactive SBSA watchdog, `RuntimeWatchdogUSec=0`, and
+`kernel.panic=0`. The candidate's matching SBSA driver explicitly calls
+`watchdog_stop_on_reboot`. A one-shot boot can select the old kernel after a
+subsequent reset, but does not itself trigger that reset. A userspace SSH
+acknowledgment deadline and panic reboot can cover some failures; neither proves
+recovery from an early boot/firmware hang. No boot settings have been changed and
+no reboot has been issued. `diagnostics/reboot-recovery-audit.json` and
+`reboot-recovery-design.json` record the checks and proposed safeguards. The
+conditional recovery requirement remains unmet without independent recovery or
+explicit acceptance of this uncovered failure mode.
+
 ## Evidence and continuation
 
 Root on `kunpeng`: `/data/clawbox-create-placement-20261027`.
