@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import time
-from copy import deepcopy
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -18,7 +17,7 @@ _IMMUTABLE_KB_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
 _IMMUTABLE_KB_CACHE_LOCK = Lock()
 _IMMUTABLE_ARTIFACT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _IMMUTABLE_ARTIFACT_CACHE_LOCK = Lock()
-_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], str] = {}
 _IMMUTABLE_PREDICTION_CACHE_LOCK = Lock()
 _VALIDATED_COLD_START_SEED_CACHE: dict[str, tuple[dict[str, Any], str]] = {}
 _VALIDATED_COLD_START_SEED_CACHE_LOCK = Lock()
@@ -512,18 +511,18 @@ class RuntimePredictionProvider(P50PredictionProvider):
             cached = _IMMUTABLE_PREDICTION_CACHE.get(cache_key)
         if cached is not None:
             return {
-                **deepcopy(cached),
+                **json.loads(cached),
                 "session_runtime_metadata": dict(runtime_metadata),
             }
         with self._query_lock:
             models = self._prediction_models(command, time.time())
             prediction = self._metadata({"models": models}, command, digest)
         with _IMMUTABLE_PREDICTION_CACHE_LOCK:
-            prediction = _IMMUTABLE_PREDICTION_CACHE.setdefault(
-                cache_key, deepcopy(prediction),
+            encoded = _IMMUTABLE_PREDICTION_CACHE.setdefault(
+                cache_key, json.dumps(prediction, separators=(',', ':')),
             )
         return {
-            **deepcopy(prediction),
+            **json.loads(encoded),
             "session_runtime_metadata": dict(runtime_metadata),
         }
 

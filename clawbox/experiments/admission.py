@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from threading import Condition
 from typing import Callable
 from pathlib import Path
+from .admission_lock import AdmissionLock, ProgressLock
 import os
 import time
 
@@ -34,7 +35,9 @@ class DemandLedger:
                  exit_ratio: float = .8):
         if capacity <= 0:
             raise ValueError('physical demand capacity must be positive')
-        self.condition = Condition()
+        lock = AdmissionLock()
+        self.condition = Condition(lock)
+        self.progress_lock = ProgressLock(lock)
         self.sample = sample
         self.capacity = capacity
         self.free_floor = free_floor

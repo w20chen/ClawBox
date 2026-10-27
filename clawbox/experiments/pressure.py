@@ -13,6 +13,7 @@ import math
 import statistics
 import time
 
+from .control_timing import timed_lock
 from .spec_types import RuntimeControl
 
 MIB = 1024 ** 2
@@ -111,16 +112,16 @@ class PressureControl:
         return value
 
     def execution_ready(self, session, execution, command_key):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             self.execution_records[session, execution] = {'key': command_key}
         self.event(session, 'ready', execution)
 
     def execution_admitted(self, session, execution, baseline_bytes):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             self.execution_records[session, execution]['baseline_bytes'] = baseline_bytes
 
     def execution_complete(self, session, execution, observation, duration, success):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             record = self.execution_records.pop((session, execution), {})
             values = [observation.get('host_cgroup_' + name + '_bytes')
                       for name in ('baseline', 'peak', 'final')]
@@ -138,7 +139,7 @@ class PressureControl:
         self.event(session, 'complete', execution)
 
     def register(self, session, role, group, node, coordinator):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             previous = self.vms.get((session, role))
             if previous is not None:
                 self._restore(previous)
@@ -160,7 +161,7 @@ class PressureControl:
             self.domains[session] = coordinator
 
     def generation(self, session, role, sandbox):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             vm = self.vms[session, role]
             self._restore(vm)
             vm.generation += 1
@@ -174,13 +175,13 @@ class PressureControl:
                        'cgroup': str(vm.group), 'node': vm.node})
 
     def transition(self, session, role):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             vm = self.vms[session, role]
             self._restore(vm)
             vm.phase = Phase.TRANSITION
 
     def event(self, session, kind, identifier):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             for role in ('runtime', 'tool'):
                 vm = self.vms.get((session, role))
                 if vm is None:
@@ -223,7 +224,7 @@ class PressureControl:
                     self._restore(vm)
 
     def unregister(self, session):
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             for role in ('runtime', 'tool'):
                 vm = self.vms.pop((session, role), None)
                 if vm:
@@ -274,11 +275,13 @@ class PressureControl:
             and began > previous[0] and parent_sample[2] > previous[2]
             and (parent_sample[1] - previous[1]) / ((began - previous[0]) * 1e6) >= self.options.psi_ratio)
         # Never hold our lock while acquiring the admission lock.
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             domains = dict(self.domains)
         feedback = {coordinator: coordinator.resource_feedback()
                     for coordinator in set(domains.values())}
-        with self.lock:
+        lock_requested_ns = time.monotonic_ns()
+        with timed_lock(self.lock, 'pressure.state'):
+            lock_acquired_ns = time.monotonic_ns()
             protection_left = int(self.options.protection_budget_mib * MIB)
             boosts_left = self.options.max_boosted_vms
             def score(vm):
@@ -351,6 +354,10 @@ class PressureControl:
                     vm.action_since = None
             self.stats['polls'] += 1
             self.stats['poll_seconds'] += time.monotonic() - began
+            lock_finished_ns = time.monotonic_ns()
+        self.emit({'event': 'pressure_poll_timing', 'start_ns': int(began * 1e9),
+                   'lock_requested_ns': lock_requested_ns,
+                   'lock_acquired_ns': lock_acquired_ns, 'lock_finished_ns': lock_finished_ns})
 
     def check(self):
         if self.error:
@@ -373,7 +380,7 @@ class PressureControl:
                     self.poll()
             except Exception as exc:
                 self.error = exc
-                with self.lock:
+                with timed_lock(self.lock, 'pressure.state'):
                     for vm in self.vms.values():
                         try:
                             self._restore(vm)
@@ -388,7 +395,7 @@ class PressureControl:
             self.thread.join(timeout=5)
             if self.thread.is_alive():
                 raise RuntimeError('pressure controller did not stop')
-        with self.lock:
+        with timed_lock(self.lock, 'pressure.state'):
             for vm in self.vms.values():
                 self._restore(vm)
         self.emit({'event': 'runtime_memory_stopped', **self.provenance, **self.stats})

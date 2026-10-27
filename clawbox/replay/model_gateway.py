@@ -40,7 +40,7 @@ class GatewayRequest:
     response_released_unix_s: float = 0.0
     completed_unix_s: float = 0.0
     delivered_unix_s: float = 0.0
-    request_payload: dict[str, Any] = field(default_factory=dict)
+    request_payload_json: str = "{}"
     admission: dict[str, Any] = field(default_factory=dict)
     http_attempts: int = 0
     reconnect_attempts: int = 0
@@ -48,6 +48,23 @@ class GatewayRequest:
     delivered: bool = False
     production_attempts: int = 0
     replay_process_sessions: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    @property
+    def request_payload(self) -> dict[str, Any]:
+        return json.loads(self.request_payload_json)
+
+    def record(self, *, include_payload: bool = True) -> dict[str, Any]:
+        result = asdict(self)
+        encoded = result.pop('request_payload_json')
+        if include_payload:
+            result['request_payload'] = json.loads(encoded)
+        return result
+
+    def record_json(self) -> str:
+        # Preserve the public ledger shape without rebuilding the entire
+        # conversation graph merely to encode it again during final flush.
+        fields = self.record(include_payload=False)
+        return json.dumps(fields, sort_keys=True)[:-1] + ',"request_payload":' + self.request_payload_json + '}'
 
 
 class ModelGateway:
@@ -198,9 +215,10 @@ class ModelGateway:
             raise ValueError("messages must be an array")
         canonical = dict(payload)
         canonical.pop("model", None)
-        fingerprint = hashlib.sha256(json.dumps(
+        canonical_json = json.dumps(
             canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-        ).encode()).hexdigest()
+        )
+        fingerprint = hashlib.sha256(canonical_json.encode()).hexdigest()
         started_event: dict[str, Any] | None = None
         with self._changed:
             if self._replay_failure is not None:
@@ -274,7 +292,7 @@ class ModelGateway:
                     request_id, index, started_unix_s=time.time(),
                     request_namespace=self.request_namespace,
                     request_fingerprint=fingerprint,
-                    request_payload=canonical,
+                    request_payload_json=canonical_json,
                     replay_process_sessions=dict(self._process_sessions),
                 )
                 self._requests[request_id] = request
@@ -390,11 +408,11 @@ class ModelGateway:
         temporary.write_text(json.dumps(self._prefix_stop, indent=2), encoding="utf-8")
         temporary.replace(path)
 
-    def records(self) -> list[dict[str, Any]]:
+    def records(self, *, include_payload: bool = True) -> list[dict[str, Any]]:
         with self._lock:
             records: list[dict[str, Any]] = []
             for item in self._requests.values():
-                record = asdict(item)
+                record = item.record(include_payload=include_payload)
                 # Stable semantic names for campaign analysis; retain the
                 # *_unix_s fields for compatibility with the original CLI.
                 record.update({
@@ -438,7 +456,7 @@ class ModelGateway:
 
     def replay_completeness(self, *, require_delivery: bool = True) -> dict[str, Any]:
         """Return a strict, auditable completion verdict for this session."""
-        records = self.records()
+        records = self.records(include_payload=False)
         expected = len(self.actions) if self.mode == "replay" else None
         prefix = (
             expected is not None
@@ -607,8 +625,8 @@ class ModelGateway:
                 revision = self._persistence_revision
                 if revision == self._persisted_revision and self.store_path.is_file():
                     return
-                snapshot = [asdict(item) for item in self._requests.values()]
-            encoded = json.dumps(snapshot, sort_keys=True)
+                snapshot = [item.record_json() for item in self._requests.values()]
+            encoded = '[' + ','.join(snapshot) + ']'
             self.store_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.store_path.with_name(self.store_path.name + ".next")
             temporary.write_text(encoded, encoding="utf-8")

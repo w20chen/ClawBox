@@ -1,4 +1,5 @@
 import time
+import mmap
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,14 @@ from clawbox.experiments.memory import (
     numa_allocation_counter_deltas,
     read_numa_allocation_counters,
 )
+
+
+def write_process_rss(process, pages=25, start=7):
+    (process / 'status').write_text(f'VmRSS:\t{pages * mmap.PAGESIZE // 1024} kB\n')
+    (process / 'statm').write_text(f'10000 {pages} 0 0 0 0 0\n')
+    fields = ['0'] * 50
+    fields[0], fields[19], fields[21] = 'S', str(start), str(pages)
+    (process / 'stat').write_text(f'{process.name} (cube process) ' + ' '.join(fields))
 
 
 def test_cgroup_cpu_sampler_reports_actual_cores_and_throttling(
@@ -144,15 +153,16 @@ def test_sandbox_rss_sampler_reports_execution_increment(tmp_path: Path) -> None
     status = process / "status"
     status.write_text("Name:\tcube\nVmRSS:\t100 kB\n", encoding="ascii")
     assert sandbox_process_rss_bytes("sandbox-a", proc_root=tmp_path) == 100 * 1024
+    write_process_rss(process)
     sampler = SandboxRSSSampler("sandbox-a", proc_root=tmp_path, interval_s=0.005)
     sampler.start()
-    status.write_text("Name:\tcube\nVmRSS:\t340 kB\n", encoding="ascii")
+    write_process_rss(process, pages=85)
     time.sleep(0.02)
     result = sampler.stop()
     assert result["validity"] == "valid"
-    assert result["host_vm_rss_baseline_bytes"] == 100 * 1024
-    assert result["host_vm_rss_peak_bytes"] == 340 * 1024
-    assert result["host_vm_rss_execution_increment_bytes"] == 240 * 1024
+    assert result["host_vm_rss_baseline_bytes"] == 25 * mmap.PAGESIZE
+    assert result["host_vm_rss_peak_bytes"] == 85 * mmap.PAGESIZE
+    assert result["host_vm_rss_execution_increment_bytes"] == 60 * mmap.PAGESIZE
 
 
 def test_rss_sampling_does_not_rescan_host_processes(tmp_path: Path, monkeypatch) -> None:
@@ -160,12 +170,13 @@ def test_rss_sampling_does_not_rescan_host_processes(tmp_path: Path, monkeypatch
     process.mkdir()
     (process / "cmdline").write_bytes(b"cube\0sandbox-a\0")
     (process / "status").write_text("VmRSS:\t100 kB\n")
+    write_process_rss(process)
     sampler = SandboxRSSSampler("sandbox-a", proc_root=tmp_path)
     def unexpected_scan(self):
         raise AssertionError("sampling must use the discovered VM processes")
     monkeypatch.setattr(Path, "iterdir", unexpected_scan)
     sampler.start()
-    assert sampler.stop()["host_vm_rss_peak_bytes"] == 100 * 1024
+    assert sampler.stop()["host_vm_rss_peak_bytes"] == 25 * mmap.PAGESIZE
     # A reused PID must not silently become a measurement of another process.
     (process / "cmdline").write_bytes(b"unrelated\0")
     assert sandbox_process_rss_bytes("sandbox-a", process_paths=(process,)) is None
@@ -175,6 +186,7 @@ def test_host_cgroup_increment_is_distinct_from_rss_and_missing_samples_are_unkn
     process = tmp_path / '123'; process.mkdir()
     (process / 'cmdline').write_bytes(b'cube\0sandbox-a\0')
     (process / 'status').write_text('VmRSS:\t100 kB\n')
+    write_process_rss(process)
     group = tmp_path / 'group'; group.mkdir()
     charge = group / 'memory.current'; charge.write_text('1000000')
     (group/'cgroup.procs').write_text('123\n')
@@ -196,6 +208,7 @@ def test_prepared_vm_sampling_discovers_only_its_cgroup_processes(tmp_path, monk
     process = proc/'123'; process.mkdir()
     (process/'cmdline').write_bytes(b'cube\0sandbox-a\0')
     (process/'status').write_text('VmRSS:\t100 kB\n')
+    write_process_rss(process)
     group = tmp_path/'vm'; group.mkdir()
     (group/'memory.current').write_text('1000')
     (group/'cgroup.procs').write_text('123\n')
@@ -203,4 +216,36 @@ def test_prepared_vm_sampling_discovers_only_its_cgroup_processes(tmp_path, monk
         raise AssertionError('known VM cgroup must not scan global /proc')
     monkeypatch.setattr(Path, 'iterdir', unexpected_scan)
     sampler = SandboxRSSSampler('sandbox-a', proc_root=proc, cgroup=group)
-    assert sampler.stop()['host_vm_rss_baseline_bytes'] == 100*1024
+    assert sampler.stop()['host_vm_rss_baseline_bytes'] == 25*mmap.PAGESIZE
+
+
+def test_rss_reader_rejects_replaced_process_and_closes_files(tmp_path):
+    from clawbox.experiments.memory import ProcessRSSReader
+    process = tmp_path/'123'; process.mkdir()
+    write_process_rss(process, start=8)
+    reader = ProcessRSSReader((process,), {('123', 7): {}})
+    assert reader.read() is None
+    assert reader.files == []
+
+
+@pytest.mark.skipif(not Path('/proc/self/statm').exists(), reason='Linux proc FD semantics')
+def test_rss_proc_descriptor_does_not_read_a_replacement_pid():
+    import subprocess
+    import sys
+    from clawbox.experiments.memory import ProcessRSSReader
+    process = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(30)'], stdout=subprocess.PIPE)
+    try:
+        assert process.stdout.readline().strip() == b'ready'
+        path = Path('/proc')/str(process.pid)
+        fields = (path/'stat').read_text().rsplit(')', 1)[1].split()
+        reader = ProcessRSSReader((path,), {(path.name, int(fields[19])): {}})
+        try:
+            rss = int(next(row.split()[1] for row in (path/'status').read_text().splitlines() if row.startswith('VmRSS:'))) * 1024
+            assert reader.read() == rss
+            process.terminate(); process.wait(timeout=5)
+            assert reader.read() is None
+        finally:
+            reader.close()
+    finally:
+        if process.poll() is None:
+            process.kill(); process.wait(timeout=5)

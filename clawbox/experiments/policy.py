@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .control_timing import timed_lock, operation
+
 import time
 from collections import Counter, deque
 from collections.abc import Callable
@@ -185,7 +187,7 @@ class PolicyCoordinator:
 
     def begin_model_wait(self, session_id: str, wait_id: str) -> None:
         now = time.monotonic()
-        with self._condition:
+        with self.demand.progress_lock:
             state = self._sessions[session_id]
             state.wait_id = wait_id
             state.wait_started_monotonic_s = now
@@ -195,7 +197,7 @@ class PolicyCoordinator:
             self._condition.notify_all()
 
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
-        with self._condition:
+        with self.demand.progress_lock:
             state = self._sessions[session_id]
             if state.wait_id != wait_id:
                 return
@@ -221,7 +223,7 @@ class PolicyCoordinator:
             self._condition.notify_all()
 
     def set_tool_active(self, session_id: str, active: bool) -> None:
-        with self._condition:
+        with timed_lock(self.demand.progress_lock, 'admission.set_tool_active'):
             state = self._sessions[session_id]
             # Victim selection claims a session before dropping the coordinator
             # lock for the blocking Cube checkpoint.  A new Tool operation (or
@@ -451,6 +453,7 @@ class PolicyCoordinator:
                     'local_used_bytes': used, 'local_available_bytes': available,
                     'deficit_bytes': deficit}
 
+    @operation('admission.memory_check')
     def _pressure_reasons(self, additional_bytes: int = 0, *,
                           capacity_claim: bool = False,
                           existing_progress: bool = False,
@@ -936,7 +939,7 @@ class PolicyCoordinator:
             # zero-growth prediction.  Completion must mirror that fast path;
             # there is no demand claim to release.
             return
-        with self._condition:
+        with timed_lock(self.demand.progress_lock, 'admission.release'):
             self._release_from(self._reservations, session_id, amount_mib)
             key = (session_id, wait_class)
             if wait_class == 'tool_admission':

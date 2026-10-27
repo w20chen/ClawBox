@@ -13,7 +13,8 @@ import os
 import re
 import time
 from pathlib import Path
-from threading import RLock
+from .admission_lock import AdmissionLock, ProgressLock
+from .control_timing import timed_lock, operation
 import uuid
 
 REGISTRY = Path('/run/clawbox/cgroups')
@@ -179,7 +180,8 @@ class PriorityDomain:
         self.topology_min_duration_seconds = topology_min_duration_seconds
         self.topology_include_smt = topology_include_smt
         self.emit = emit or (lambda event: None)
-        self._topology_lock = RLock()
+        self._topology_lock = AdmissionLock()
+        self._topology_progress_lock = ProgressLock(self._topology_lock)
         self._topology_stopping = False
         self._group_load: dict[str, int] = {}
         self._groups_by_pool: dict[tuple[str, int, bool], tuple[str, ...]] = {}
@@ -442,7 +444,7 @@ class PriorityDomain:
     def release_tool_call(self, execution_id: str) -> dict | None:
         if self.topology_mode == 'c0':
             return None
-        with self._topology_lock:
+        with timed_lock(self._topology_progress_lock, 'cpu.placement'):
             key = self._call_keys.get(execution_id)
             if key is None:
                 if self._topology_stopping:
@@ -503,6 +505,7 @@ class PriorityDomain:
             self.topology_events.append(event); self.emit(event)
             return event
 
+    @operation('cpu.affinity')
     def _apply_thread_affinity(self, index: int, role: str, cpus: str, *, strict: bool = True) -> list[dict]:
         from .topology import parse_cpu_list
         leaf = self.leaves[index, role]
@@ -552,7 +555,15 @@ class PriorityDomain:
         with self._topology_lock:
             if self._topology_stopping:
                 return []
-            for key, started in tuple(self._pending_started.items()):
+            pending = tuple(self._pending_started.items())
+        # One VM per lock handoff: completions must not queue behind a scan
+        # and affinity updates for every active VM in the experiment.
+        for key, started in pending:
+            with timed_lock(self._topology_lock, 'cpu.poll_vm'):
+                if self._topology_stopping:
+                    return changes
+                if self._pending_started.get(key) != started:
+                    continue
                 if now-started < self.topology_min_duration_seconds:
                     continue
                 active = self._active_calls.pop(key)
@@ -572,6 +583,9 @@ class PriorityDomain:
                     for execution_id in active:
                         self._call_keys[execution_id] = key
                 changes.append(event)
+        with self._topology_lock:
+            if self._topology_stopping:
+                return changes
             measured_load = self._sample_group_utilization(sorted(self._candidate_groups))
             if measured_load:
                 self.emit({
@@ -579,7 +593,15 @@ class PriorityDomain:
                     'mode': self.topology_mode,
                     'candidate_group_cpu_utilization': measured_load,
                 })
-            for key, fine in tuple(self._fine_masks.items()):
+            assigned = tuple((key, fine, self._active_calls.get(key))
+                             for key, fine in self._fine_masks.items())
+        for key, fine, active in assigned:
+            with timed_lock(self._topology_lock, 'cpu.poll_vm'):
+                if self._topology_stopping:
+                    return changes
+                if (self._active_calls.get(key) is not active
+                        or self._fine_masks.get(key) != fine):
+                    continue
                 if key in self._expanded:
                     continue
                 index, role = key

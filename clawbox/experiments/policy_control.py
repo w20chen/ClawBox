@@ -31,7 +31,8 @@ class SessionLifecycle(str, Enum):
 
 @dataclass(slots=True)
 class _Execution:
-    request: dict[str, Any]
+    request_json: str
+    command_sha256: str
     admission: dict[str, Any] | None = None
     admission_error: dict[str, str] | None = None
     completion: dict[str, Any] | None = None
@@ -43,6 +44,10 @@ class _Execution:
     admission_completed_monotonic_s: float | None = None
     completion_started_monotonic_s: float | None = None
     completion_completed_monotonic_s: float | None = None
+
+    @property
+    def request(self):
+        return json.loads(self.request_json)
 
 
 @dataclass(slots=True)
@@ -66,13 +71,14 @@ class _Session:
             execution = self.executions.get(execution_id)
             if execution is None:
                 execution = _Execution(
-                    request=dict(request), admitting=True,
+                    request_json=json.dumps(request, separators=(',', ':')),
+                    command_sha256=request['command_sha256'], admitting=True,
                     admission_started_monotonic_s=time.monotonic(),
                 )
                 self.executions[execution_id] = execution
                 owner = True
             else:
-                if execution.request["command_sha256"] != request["command_sha256"]:
+                if execution.command_sha256 != request["command_sha256"]:
                     raise ValueError("execution_id was reused for a different command")
                 owner = False
                 while execution.admitting:
@@ -107,7 +113,7 @@ class _Session:
             execution = self.executions.get(request['execution_id'])
             if execution is None or execution.admission is None:
                 raise ValueError('start has no admitted execution')
-            if execution.request['command_sha256'] != request['command_sha256']:
+            if execution.command_sha256 != request['command_sha256']:
                 raise ValueError('start command does not match admission')
             for key, route_key in (('endpoint_epoch', 'epoch'), ('endpoint_sandbox_id', 'sandbox_id')):
                 if request.get(key) != execution.admission.get(route_key):
@@ -130,7 +136,7 @@ class _Session:
             execution = self.executions.get(execution_id)
             if execution is None or execution.admission is None:
                 raise ValueError("completion has no admitted execution")
-            if execution.request["command_sha256"] != request["command_sha256"]:
+            if execution.command_sha256 != request["command_sha256"]:
                 raise ValueError("completion command does not match admission")
             while execution.completing:
                 self.condition.wait()

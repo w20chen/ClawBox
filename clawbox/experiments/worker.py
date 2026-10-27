@@ -58,7 +58,9 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .congestion import locate_cgroup
+from .control_timing import monitor_gc, span, timed_lock, trace_callback
 from .pressure import PressureControl
+from .prediction_records import PredictionRecordBuffer
 from .priority import PriorityDomain, c2_applies
 from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
@@ -1944,6 +1946,7 @@ class ExperimentWorker:
         """Identical lifecycle margin in every admission ablation arm."""
         return arm.resources.startup_headroom_mib
 
+    @monitor_gc()
     def run(self, *, arm_ids: set[str] | None = None,
             write_summary: bool = True) -> list[ResultEnvelope]:
         self._run_entered_monotonic = time.monotonic()
@@ -3670,6 +3673,7 @@ class ExperimentWorker:
             model_steps = 0
             tool_latencies: list[float] = []
             prediction_records: list[dict[str, Any]] = []
+            prediction_buffer = PredictionRecordBuffer()
             observed_by_execution: dict[str, Any] = {}
             trace_writer = ClawTuneTraceWriter(
                 self.output_root, run_id=self.run_id, session_id=session_id,
@@ -3742,6 +3746,7 @@ class ExperimentWorker:
                 pending_admissions: set[str] = set()
                 reservation_lock = Lock()
 
+                @trace_callback('tool_admission_timing', events.write, session_id)
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     nonlocal admitted_route, admitted_route_requires_preflight
                     control_marks = {"started": time.monotonic()}
@@ -4057,7 +4062,7 @@ class ExperimentWorker:
                                  "admission_memory_tier": admission_memory_tier,
                                  "admission_blocked_seconds": admission_wait,
                     })
-                    prediction_records.append(prediction_record)
+                    prediction_buffer.append(prediction_record)
                     control_marks["bookkeeping"] = time.monotonic()
                     control_stages = {
                         name: end - start
@@ -4101,6 +4106,7 @@ class ExperimentWorker:
                         "host": route.host, "port": route.port,
                     }
 
+                @trace_callback('tool_completion_timing', events.write, session_id)
                 def complete_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     execution_id = str(request["execution_id"])
                     timestamp_names = (
@@ -4123,10 +4129,9 @@ class ExperimentWorker:
                         raise RuntimeError(
                             "completion timestamps do not prove SSH reaped before complete"
                         )
-                    # A concurrent admission holds wait_lock while waiting for
-                    # memory. Completion must release its finished command's
-                    # reservation without that lock, or both requests deadlock.
-                    with reservation_lock:
+                    # Release the finished command before acquiring wait_lock:
+                    # concurrent routing/restoration can need this capacity.
+                    with timed_lock(reservation_lock, 'reservation'):
                         reservation = active_reservations.get(execution_id)
                         admitted_route = admitted_routes.get(execution_id)
                         host_sampler = host_rss_samplers.get(execution_id)
@@ -4151,32 +4156,28 @@ class ExperimentWorker:
                         active_reservations.pop(execution_id)
                         admitted_routes.pop(execution_id)
                         host_rss_samplers.pop(execution_id)
-                        host_observation = host_sampler.stop()
-                        report = lifecycle.complete_first_tool_after_restore(
-                            execution_id,
-                            tool_seconds=timestamps["execution_completed_at"] - timestamps["execution_started_at"],
-                            status="ok" if int(request.get("exit_code", 1)) == 0 else "error")
-                        for prediction_record in prediction_records:
-                            if prediction_record.get("execution_id") == execution_id:
-                                prediction_record.update(host_observation)
-                                increment = host_observation.get(
-                                    "host_cgroup_execution_increment_bytes"
-                                )
-                                prediction_record["actual_host_execution_increment_mib"] = (
-                                    float(increment) / (1024.0 * 1024.0)
-                                    if isinstance(increment, int) else None
-                                )
-                                break
-                        coordinator.release(
-                            session_id, local_amount, total_mib=total_amount,
-                        )
-                        if execution_id in active_cpu_placements:
-                            priority_domain.release_tool_call(execution_id)
-                            active_cpu_placements.remove(execution_id)
-                        if progress_control:
-                            progress_control.execution_complete(session_id, execution_id, host_observation,
-                                timestamps['execution_completed_at'] - timestamps['execution_started_at'],
-                                int(request.get('exit_code', 1)) == 0)
+                        with span('sampler.stop'):
+                            host_observation = host_sampler.stop()
+                        with span('lifecycle.complete'):
+                            report = lifecycle.complete_first_tool_after_restore(
+                                execution_id,
+                                tool_seconds=timestamps["execution_completed_at"] - timestamps["execution_started_at"],
+                                status="ok" if int(request.get("exit_code", 1)) == 0 else "error")
+                        with span('prediction.update'):
+                            prediction_buffer.complete(execution_id, host_observation)
+                        with span('admission.release'):
+                            coordinator.release(
+                                session_id, local_amount, total_mib=total_amount,
+                            )
+                        with span('cpu.release'):
+                            if execution_id in active_cpu_placements:
+                                priority_domain.release_tool_call(execution_id)
+                                active_cpu_placements.remove(execution_id)
+                        with span('pressure.complete'):
+                            if progress_control:
+                                progress_control.execution_complete(session_id, execution_id, host_observation,
+                                    timestamps['execution_completed_at'] - timestamps['execution_started_at'],
+                                    int(request.get('exit_code', 1)) == 0)
                         _record_time_span(
                             timeline, "tool.operation",
                             timestamps["execution_started_at"],
@@ -4198,13 +4199,19 @@ class ExperimentWorker:
                         dependency_install_gate.release(
                             execution_id, reason="completed",
                         )
-                    # Keep lifecycle/idle transitions serialized with admission.
-                    # Never hold reservation_lock while waiting for wait_lock.
-                    with wait_lock, reservation_lock:
-                        coordinator.set_tool_active(
-                            session_id,
-                            bool(active_reservations or pending_admissions),
-                        )
+                    # Another active/pending request retains the existing active
+                    # mark and owns the eventual idle transition. Do not wait for
+                    # its routing/restore merely to publish True again.
+                    with timed_lock(reservation_lock, 'reservation_idle_check'):
+                        needs_idle_update = not (active_reservations or pending_admissions)
+                    if needs_idle_update:
+                        # Recheck after acquiring the lifecycle lock: an admission
+                        # can arrive since the first check. Never invert these locks.
+                        with timed_lock(wait_lock, 'lifecycle_idle'), timed_lock(reservation_lock, 'reservation_idle'):
+                            coordinator.set_tool_active(
+                                session_id,
+                                bool(active_reservations or pending_admissions),
+                            )
                     if report is not None:
                         events.write({"event": "first_tool_after_restore", "session_id": session_id, **report})
                     events.write({"event": "tool_completed", "session_id": session_id,
@@ -4264,6 +4271,7 @@ class ExperimentWorker:
 
                 if self.policy_control is None:
                     raise RuntimeError("PolicyControlServer is not active")
+                @trace_callback('tool_progress_timing', events.write, session_id)
                 def record_tool_progress(request):
                     phase = request.get('phase')
                     progress_event('complete' if phase == 'end' else 'start',
@@ -4448,6 +4456,7 @@ class ExperimentWorker:
                 # Drain callbacks already queued by model/tool completions so
                 # none can pause a VM underneath collection or validation.
                 drain_policy_events()
+                prediction_records = prediction_buffer.records()
                 timeline["openclaw_agent_pid_observations"] = list(agent_pid_observations)
                 tool_latencies.extend(float(item) for item in outcome["tool_latencies"])
                 policy_control_path = self.output_root / "policy-control" / f"{session_id}.json"

@@ -100,15 +100,17 @@ class _BorrowedAllocation:
 def read_numa_lru_bytes(cgroup: Path) -> tuple[dict[int, int], int]:
     """Return per-node resident LRU bytes plus conservatively unattributed bytes."""
     rows: dict[str, dict[int, int]] = {}
+    primary = ("inactive_anon", "active_anon", "inactive_file", "active_file", "unevictable")
     for line in (cgroup / "memory.numa_stat").read_text(encoding="ascii").splitlines():
         fields = line.split()
+        if not fields or fields[0] not in primary:
+            continue
         values: dict[int, int] = {}
         for field in fields[1:]:
             node, separator, raw = field.partition("=")
             if separator and node.startswith("N"):
                 values[int(node[1:])] = int(raw)
         rows[fields[0]] = values
-    primary = ("inactive_anon", "active_anon", "inactive_file", "active_file", "unevictable")
     nodes = {node for name in primary for node in rows.get(name, {})}
     resident = {
         node: sum(rows.get(name, {}).get(node, 0) for name in primary)

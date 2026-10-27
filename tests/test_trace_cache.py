@@ -28,6 +28,10 @@ def test_trace_reuse_skips_json_decode_and_keeps_outer_lists_independent(tmp_pat
     assert reads == [path.resolve()]
     assert first is not second
     assert first[0] is second[0]
+    assert isinstance(first[0].input_json, str)
+    # Decoding for one consumer cannot mutate shared cached evidence.
+    first[0].input.append({'role': 'user', 'content': 'local mutation'})
+    assert second[0].input == []
     first.clear()
     assert len(second) == len(trace_module.load_trace(path)) == 1
 

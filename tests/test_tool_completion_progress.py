@@ -9,6 +9,7 @@ from clawbox.experiments.worker import (
     RuntimeStatusPoller, wait_for_admission_without_lifecycle_lock,
 )
 from clawbox.replay.lifecycle import CommandResult
+from clawbox.experiments.prediction_records import PredictionRecordBuffer
 
 
 def test_resident_runtime_poll_does_not_take_model_lifecycle_lock():
@@ -173,7 +174,9 @@ def test_blocked_admission_does_not_block_tool_completion():
 
 
 @pytest.mark.parametrize('runtime_enabled', [False, True])
-def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_enabled):
+@pytest.mark.parametrize('another_pending', [False, True])
+def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_enabled, another_pending):
+    from clawbox.experiments.control_timing import span, timed_lock, trace_callback
     source = Path(__file__).resolve().parents[1] / 'clawbox/experiments/worker.py'
     tree = ast.parse(source.read_text(encoding='utf-8'))
     callback = next(node for node in ast.walk(tree)
@@ -188,13 +191,15 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_en
     runtime_released = Event()
     route = SimpleNamespace(sandbox_id='tool', epoch=1, host='host', port=2222)
     environment = dict(
+        span=span, timed_lock=timed_lock, trace_callback=trace_callback,
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
         active_reservations={'exec': (512, 512)}, admitted_routes={'exec': route},
             active_cpu_placements=set(), priority_domain=None,
-        pending_admissions=set(),
+        pending_admissions={'next'} if another_pending else set(),
         progress_control=None,
         dependency_install_gate=None,
-        host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})}, prediction_records=[],
+        host_rss_samplers={'exec': SimpleNamespace(stop=lambda: {})},
+        prediction_buffer=PredictionRecordBuffer(),
         lifecycle=SimpleNamespace(complete_first_tool_after_restore=lambda *args, **kwargs: None),
         coordinator=SimpleNamespace(release=lambda *args, **kwargs: released.set(),
                                     set_tool_active=lambda *args: idle_updates.append(args)),
@@ -219,10 +224,13 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_en
     try:
         assert released.wait(2), 'Completion cannot free the memory needed by admission'
         assert idle_updates == [], 'Do not allow eviction during another admission'
+        if another_pending:
+            thread.join(2)
+            assert not thread.is_alive(), 'Do not wait for another request to publish active again'
     finally:
         wait_lock.release()
         thread.join(2)
     assert not thread.is_alive()
     assert not errors
     assert not runtime_released.is_set()  # Runtime control owns no execution tickets.
-    assert idle_updates == [('session', False)]
+    assert idle_updates == ([] if another_pending else [('session', False)])

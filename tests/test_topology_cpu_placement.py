@@ -96,6 +96,55 @@ def test_c2_applies_only_to_agent_tool_exec():
     assert c2_applies('backend-maintenance', 'exec') is False
 
 
+def test_c2_poll_hands_off_to_completion_and_skips_its_stale_pending_entry(tmp_path):
+    from threading import Event, Thread
+    import time
+    domain = PriorityDomain(tmp_path, concurrency=2, repetition=0, legacy=False,
+                            topology_mode='c2', topology_min_duration_seconds=.01,
+                            placements={0: ('0-15', 0), 1: ('0-15', 0)})
+    domain.acquire_tool_call(0, 'first', vcpus=2)
+    domain.acquire_tool_call(1, 'finished', vcpus=2)
+    domain._pending_started = {key: stamp - 1 for key, stamp in domain._pending_started.items()}
+    entered, resume = Event(), Event()
+    assigned, errors = [], []
+
+    def assign(index, execution, **kwargs):
+        assigned.append(index)
+        entered.set()
+        assert resume.wait(2)
+        return {'release_required': True}
+
+    domain._assign_tool_call = assign
+    def run(function):
+        try:
+            function()
+        except BaseException as exc:
+            errors.append(exc)
+    poll = Thread(target=run, args=(domain.sample_topology_placement,), daemon=True)
+    completion = Thread(target=run, args=(lambda: domain.release_tool_call('finished'),), daemon=True)
+    poll.start()
+    try:
+        assert entered.wait(2)
+        completion.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with domain._topology_lock._guard:
+                if domain._topology_lock._progress:
+                    break
+            time.sleep(.001)
+        else:
+            raise AssertionError('completion did not enqueue')
+    finally:
+        resume.set()
+        poll.join(2)
+        if completion.ident is not None:
+            completion.join(2)
+    assert not errors
+    assert not poll.is_alive() and not completion.is_alive()
+    assert assigned == [0]
+    assert domain.active_tool_call_ids() == ('first',)
+
+
 def c2_domain(monkeypatch, tmp_path):
     monkeypatch.setattr(
         'clawbox.experiments.priority.physical_cluster_groups',

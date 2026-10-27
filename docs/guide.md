@@ -864,6 +864,18 @@ Failed attempts retain their stage error types in lifecycle timing records.
 For per-tool delays, `tool_admitted.memory_baseline_timing` distinguishes
 admission-lock waits from the kernel memory sample and reports calling-thread
 CPU time alongside wall time.
+`tool_completion_timing`, `tool_admission_timing`, and `tool_progress_timing` join by session and execution
+ID. Their `spans` use host-monotonic `start_ns`/`end_ns` and calling-thread
+`thread_cpu_ns`, all in nanoseconds. Completion spans separate sampler join,
+final sampling, reservation release, lifecycle work, and pressure-control lock
+wait/hold. Parent spans contain their children; do not add nested durations.
+A `.hold` interval includes any condition wait inside that block; such a wait
+temporarily releases the lock, so the interval is not exclusive ownership time.
+`gc_intervals` identifies overlapping Python collections using the same clock;
+these intervals can overlap several threads and must not be added to their spans.
+`pressure_poll_timing` records the polling lock interval for correlation with
+blocked callbacks. These events are always recorded, including failed callbacks;
+no option or host apply is required.
 Host-side timing and lock fixes require a new run ID, without rebuilding guest
 images or retraining predictions when their contents and semantics are unchanged.
 

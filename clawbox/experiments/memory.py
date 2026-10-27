@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from .control_timing import span
+
 import shutil
 import time
+import mmap
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -441,8 +444,10 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
         return local, shared, total
 
     def current(self) -> tuple[int, int]:
+        from .numa_borrow import read_numa_lru_bytes
         _, available = read_meminfo(self.meminfo)
-        local, _, _ = self.tier_usage()
+        resident, unattributed = read_numa_lru_bytes(self.cgroup)
+        local = sum(resident.get(n, 0) for n in self.local_numa_nodes) + unattributed
         return local, available
 
     def observe(self) -> dict[str, int | str]:
@@ -543,6 +548,48 @@ def sandbox_process_counter_deltas(before, after) -> dict[str, int | None]:
     return result
 
 
+class ProcessRSSReader:
+    """Read the same kernel RSS counter through retained, identity-checked statm FDs.
+
+    A proc FD refers to the original proc inode, not a future reuse of its PID.
+    Check start time after opening it to close the discovery/open race. statm's
+    resident field is VmRSS in pages (Linux Documentation/filesystems/proc.rst).
+    """
+    def __init__(self, paths, counters):
+        self.files = []
+        self.valid = bool(paths and counters)
+        try:
+            for path in paths:
+                stream = (path / 'statm').open('rb', buffering=0)
+                self.files.append(stream)
+                fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
+                if counters is None or (path.name, int(fields[19])) not in counters:
+                    self.valid = False
+        except (OSError, ValueError, IndexError):
+            self.valid = False
+        if not self.valid:
+            self.close()
+
+    def read(self):
+        if not self.valid:
+            return None
+        try:
+            total = 0
+            for stream in self.files:
+                stream.seek(0)
+                total += int(stream.read(128).split()[1]) * mmap.PAGESIZE
+            return total
+        except (OSError, ValueError, IndexError):
+            self.valid = False
+            return None
+
+    def close(self):
+        for stream in self.files:
+            stream.close()
+        self.files.clear()
+        self.valid = False
+
+
 class SandboxRSSSampler:
     """Execution-window host RSS sampler for one CubeSandbox microVM."""
 
@@ -563,7 +610,7 @@ class SandboxRSSSampler:
         self._thread: Thread | None = None
         # A Tool is pinned resident for the execution window. Discover its
         # processes once, not with a host-wide /proc scan every 50 ms per tool.
-        # The RSS reader still checks argv on each sample (including PID reuse).
+        # Bind retained proc descriptors to the discovered process start time.
         paths = []
         entries = (tuple(proc_root / pid for pid in (cgroup/'cgroup.procs').read_text().split())
                    if cgroup is not None else proc_root.iterdir())
@@ -578,9 +625,8 @@ class SandboxRSSSampler:
         self._counter_baseline = sandbox_process_fault_counters(
             sandbox_id, self._process_paths,
         )
-        self.baseline_bytes = sandbox_process_rss_bytes(
-            sandbox_id, proc_root=proc_root, process_paths=self._process_paths,
-        )
+        self._rss_reader = ProcessRSSReader(self._process_paths, self._counter_baseline)
+        self.baseline_bytes = self._rss_reader.read()
 
     def start(self) -> None:
         self._sample()
@@ -592,8 +638,11 @@ class SandboxRSSSampler:
     def stop(self) -> dict[str, int | str | None]:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join()
-        self._sample()
+            with span('sampler.join'):
+                self._thread.join()
+        with span('sampler.final_sample'):
+            self._sample()
+        self._rss_reader.close()
         with self._lock:
             samples = tuple(self._samples)
         peak = max(samples) if samples else self.baseline_bytes
@@ -601,6 +650,10 @@ class SandboxRSSSampler:
             max(0, peak - self.baseline_bytes)
             if peak is not None and self.baseline_bytes is not None else None
         )
+        with span('sampler.fault_counters'):
+            faults = sandbox_process_counter_deltas(
+                self._counter_baseline,
+                sandbox_process_fault_counters(self.sandbox_id, self._process_paths))
         return {
             "metric": "host_proc_vm_rss",
             "host_cgroup_metric": "host_cgroup_memory_current_increment",
@@ -617,10 +670,7 @@ class SandboxRSSSampler:
             "host_vm_rss_execution_increment_bytes": increment,
             "sample_count": len(samples),
             "validity": "valid" if increment is not None else "unavailable",
-            **sandbox_process_counter_deltas(
-                self._counter_baseline,
-                sandbox_process_fault_counters(self.sandbox_id, self._process_paths),
-            ),
+            **faults,
             "fault_counter_scope": "host_vm_processes_execution_window",
         }
 
@@ -631,15 +681,15 @@ class SandboxRSSSampler:
     def _sample(self) -> None:
         if self.cgroup is not None:
             try:
-                charge = int((self.cgroup/'memory.current').read_text())
+                with span('sampler.cgroup_read'):
+                    charge = int((self.cgroup/'memory.current').read_text())
                 self.charge_last = charge
                 self.charge_peak = max(self.charge_peak, charge)
                 self.charge_samples += 1
             except (OSError, ValueError) as exc:
                 self.charge_error = str(exc)
-        value = sandbox_process_rss_bytes(
-            self.sandbox_id, proc_root=self.proc_root, process_paths=self._process_paths,
-        )
+        with span('sampler.rss_read'):
+            value = self._rss_reader.read()
         if value is not None:
             with self._lock:
                 self._samples.append(value)
