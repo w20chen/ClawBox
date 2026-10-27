@@ -54,6 +54,7 @@ class LifecycleTiming:
     snapshot_metrics: dict[str, Any] | None = None
     host_memory_effect: dict[str, dict[str, int]] | None = None
     stage_seconds: dict[str, float] | None = None
+    create_attempts: list[dict[str, Any]] | None = None
 
 
 class CubeSandboxLifecycle:
@@ -187,7 +188,8 @@ class CubeSandboxLifecycle:
                 snapshot_generation: int | None = None,
                 snapshot_path: str | None = None,
                 snapshot_metrics: Mapping[str, Any] | None = None,
-                stage_seconds: Mapping[str, float] | None = None) -> float:
+                stage_seconds: Mapping[str, float] | None = None,
+                create_attempts: list[dict[str, Any]] | None = None) -> float:
         completed_wall = time.time()
         completed_mono = time.monotonic()
         duration = max(0.0, completed_mono - started_mono)
@@ -244,6 +246,7 @@ class CubeSandboxLifecycle:
             dict(snapshot_metrics) if snapshot_metrics is not None else None,
             memory_effect or None,
             measured_stages or None,
+            create_attempts,
         ))
         return duration
 
@@ -273,6 +276,7 @@ class CubeSandboxLifecycle:
             self._state = SandboxState.CREATING
             started_wall, started_mono = time.time(), time.monotonic()
             stage_seconds: dict[str, float] = {}
+            create_attempts: list[dict[str, Any]] = []
             with self._measure_stage(stage_seconds, "physical_observation_before_s"):
                 host_memory_before = self._observe_physical()
             try:
@@ -290,6 +294,8 @@ class CubeSandboxLifecycle:
                 retry_attempt = 0
                 while True:
                     attempt_stages: dict[str, float] = {}
+                    attempt = {"attempt": len(create_attempts) + 1, "spans": []}
+                    create_attempts.append(attempt)
                     try:
                         # Bound concurrent lifecycle calls and measure queue
                         # time separately from the actual Cube API operation.
@@ -301,9 +307,11 @@ class CubeSandboxLifecycle:
                                     allow_internet_access=self.allow_internet_access,
                                     network_allow_out=self.network_allow_out or None,
                                     network_deny_out=self.network_deny_out or None,
+                                    create_trace=attempt["spans"],
                                 )
                         break
                     except Exception as exc:
+                        attempt["error_type"] = type(exc).__name__
                         if (capacity_retry_seconds <= 0
                                 or not self.client.is_create_capacity_error(exc)):
                             raise
@@ -352,7 +360,7 @@ class CubeSandboxLifecycle:
                 return self._record("create", before, self._state,
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,
-                                    stage_seconds=stage_seconds)
+                                    stage_seconds=stage_seconds, create_attempts=create_attempts)
             except Exception as exc:
                 self._state = before
                 self._record(
@@ -360,6 +368,7 @@ class CubeSandboxLifecycle:
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
                     stage_seconds=stage_seconds,
+                    create_attempts=create_attempts,
                 )
                 raise
 

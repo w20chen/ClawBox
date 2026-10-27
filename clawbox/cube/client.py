@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -15,6 +16,29 @@ from typing import Any
 from requests import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
 from .api_retry import read_with_backoff, retry_with_backoff
+
+
+@contextmanager
+def _creation_span(trace: list[dict[str, Any]] | None, stage: str):
+    """Keep occurrence times and calling-thread CPU without logging payloads."""
+    if trace is None:
+        yield
+        return
+    row = {"stage": stage, "started_unix_s": time.time(),
+           "started_monotonic_s": time.monotonic()}
+    cpu = time.thread_time()
+    try:
+        yield
+    except BaseException as exc:
+        row["error_type"] = type(exc).__name__
+        raise
+    finally:
+        row["completed_monotonic_s"] = time.monotonic()
+        row["completed_unix_s"] = time.time()
+        row["duration_s"] = row["completed_monotonic_s"] - row["started_monotonic_s"]
+        row["thread_cpu_s"] = time.thread_time() - cpu
+        if trace is not None:
+            trace.append(row)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,14 +70,28 @@ class OwnedSandboxJournal:
         self.path = path
         self._lock = Lock()
 
-    def record(self, sandbox_id: str, ownership: Ownership) -> None:
+    def record(self, sandbox_id: str, ownership: Ownership, *,
+               create_trace: list[dict[str, Any]] | None = None) -> None:
         record = {"sandbox_id": sandbox_id, "ownership": asdict(ownership)}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        with self._lock, self.path.open("a", encoding="utf-8") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
+        with _creation_span(create_trace, "journal_lock_wait"):
+            self._lock.acquire()
+        try:
+            with _creation_span(create_trace, "journal_lock_hold"):
+                with _creation_span(create_trace, "journal_open"):
+                    stream = self.path.open("a", encoding="utf-8")
+                try:
+                    with _creation_span(create_trace, "journal_write_flush"):
+                        stream.write(encoded)
+                        stream.flush()
+                    with _creation_span(create_trace, "journal_fsync"):
+                        os.fsync(stream.fileno())
+                finally:
+                    with _creation_span(create_trace, "journal_close"):
+                        stream.close()
+        finally:
+            self._lock.release()
 
     def sandbox_ids(self, *, task_uid: str | None = None) -> list[str]:
         if not self.path.exists():
@@ -141,7 +179,8 @@ class CubeSandboxClient:
                        ownership: Ownership, env_vars: dict[str, str] | None = None,
                        allow_internet_access: bool = True,
                        network_allow_out: list[str] | None = None,
-                       network_deny_out: list[str] | None = None) -> Any:
+                        network_deny_out: list[str] | None = None,
+                        create_trace: list[dict[str, Any]] | None = None) -> Any:
         network = {}
         if network_allow_out:
             network["allow_out"] = network_allow_out
@@ -149,17 +188,18 @@ class CubeSandboxClient:
             network["deny_out"] = network_deny_out
         ownership_metadata = ownership.metadata()
         try:
-            sandbox = self._sandbox_class.create(
-                template=template,
-                timeout=-1,  # cubesandbox.NEVER_TIMEOUT in SDK v0.7.0
-                lifecycle={"on_timeout": "kill", "auto_resume": False},
-                metadata=ownership_metadata,
-                distribution_scope=[node_name],
-                env_vars=env_vars,
-                allow_internet_access=allow_internet_access,
-                network=network or None,
-                **self._sdk_kwargs(),
-            )
+            with _creation_span(create_trace, "sdk_create"):
+                sandbox = self._sandbox_class.create(
+                    template=template,
+                    timeout=-1,  # cubesandbox.NEVER_TIMEOUT in SDK v0.7.0
+                    lifecycle={"on_timeout": "kill", "auto_resume": False},
+                    metadata=ownership_metadata,
+                    distribution_scope=[node_name],
+                    env_vars=env_vars,
+                    allow_internet_access=allow_internet_access,
+                    network=network or None,
+                    **self._sdk_kwargs(),
+                )
         except Exception as create_error:
             # The SDK raises ApiError (not requests.Timeout) for an HTTP
             # timeout/gateway failure. A dropped connection is ambiguous too.
@@ -203,7 +243,7 @@ class CubeSandboxClient:
             # sandbox while its VM is still being restored. Journal it before
             # probing so failed recovery remains eligible for owned cleanup.
             if self.journal is not None:
-                self.journal.record(self.sandbox_id(sandbox), ownership)
+                self.journal.record(self.sandbox_id(sandbox), ownership, create_trace=create_trace)
 
             def verify_recovered_guest() -> None:
                 result = sandbox.commands.run("/bin/true", timeout=5)
@@ -218,7 +258,7 @@ class CubeSandboxClient:
         sandbox_id = self.sandbox_id(sandbox)
         self._handles[sandbox_id] = sandbox
         if self.journal is not None:
-            self.journal.record(sandbox_id, ownership)
+            self.journal.record(sandbox_id, ownership, create_trace=create_trace)
         return sandbox
 
     def connect_sandbox(self, sandbox_id: str, *,

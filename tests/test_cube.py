@@ -233,6 +233,43 @@ def test_cube_client_pins_node_disables_automatic_lifecycle_and_journals(tmp_pat
     assert journal.sandbox_ids(task_uid="task") == [sandbox.sandbox_id]
 
 
+def test_create_trace_separates_sdk_and_durable_journal(tmp_path: Path) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(
+        journal=OwnedSandboxJournal(tmp_path / "owned.jsonl"), sandbox_class=_Sandbox,
+    )
+    lifecycle = CubeSandboxLifecycle(client, template="tpl", node_name="node-a", ownership=_owner())
+    lifecycle.start()
+    attempts = lifecycle.timings[-1]["create_attempts"]
+    assert len(attempts) == 1
+    stages = {row["stage"]: row for row in attempts[0]["spans"]}
+    assert set(stages) == {
+        "sdk_create", "journal_lock_wait", "journal_lock_hold", "journal_open",
+        "journal_write_flush", "journal_fsync", "journal_close",
+    }
+    assert stages["sdk_create"]["completed_monotonic_s"] <= stages["journal_lock_wait"]["started_monotonic_s"]
+    assert stages["journal_lock_hold"]["started_monotonic_s"] <= stages["journal_fsync"]["started_monotonic_s"]
+    assert stages["journal_fsync"]["completed_monotonic_s"] <= stages["journal_lock_hold"]["completed_monotonic_s"]
+    assert all(row["duration_s"] >= 0 and row["thread_cpu_s"] >= 0 for row in stages.values())
+
+
+def test_journal_trace_keeps_fsync_failure_and_releases_lock(tmp_path: Path, monkeypatch) -> None:
+    import clawbox.cube.client as client_module
+    journal = OwnedSandboxJournal(tmp_path / "owned.jsonl")
+    trace = []
+    def fail_fsync(_fd):
+        raise OSError("injected flush failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(client_module.os, "fsync", fail_fsync)
+        with pytest.raises(OSError, match="injected flush failure"):
+            journal.record("sandbox-1", _owner(), create_trace=trace)
+    assert next(row for row in trace if row["stage"] == "journal_fsync")["error_type"] == "OSError"
+    assert journal._lock.acquire(blocking=False)
+    journal._lock.release()
+    journal.record("sandbox-2", _owner())
+    assert journal.sandbox_ids(task_uid="task") == ["sandbox-1", "sandbox-2"]
+
+
 def test_lifecycle_retries_definite_capacity_rejection_outside_transfer_slot(monkeypatch) -> None:
     import clawbox.cube.lifecycle as lifecycle_module
 

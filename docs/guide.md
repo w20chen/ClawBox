@@ -846,6 +846,16 @@ For startup delays, compare `native_ssh_warmup_finished.executor_queue_seconds`
 with `warmup_execution_seconds`. The startup `native_ssh_identity_ready` event
 reports the session's blocking join separately as `critical_path_wait_seconds`.
 These intervals overlap Runtime startup; do not add them to sidecar readiness.
+For VM creation, `sandbox_created.lifecycle_timing.create_attempts` records
+each request attempt's `spans`: `sdk_create`, `journal_lock_wait`,
+`journal_open`, `journal_write_flush`, `journal_fsync`, `journal_close`, and
+`journal_lock_hold`. Each span reports Unix and host-monotonic start/end times,
+`duration_s` and calling-thread `thread_cpu_s`, all in seconds. These measurements
+are always recorded; no option or host apply is needed. `journal_lock_hold`
+contains the file-operation spans, so do not sum it with them. The outer
+`api_create_s` includes both SDK and journal work; it is not native VM time.
+Correlate successful creates with server logs by sandbox ID and Unix time.
+Failed attempts retain their stage error types in lifecycle timing records.
 For per-tool delays, `tool_admitted.memory_baseline_timing` distinguishes
 admission-lock waits from the kernel memory sample and reports calling-thread
 CPU time alongside wall time.
