@@ -6,6 +6,15 @@ current diagnosis and execution plan. It supersedes the priority ordering in
 `FULL_LATENCY_HANDOFF_20261025.md` remain useful for the earlier evidence and
 historical fixes.
 
+## Update: VM placement repaired, 1280/2560 diagnostics completed
+
+See [VM creation follow-up](FULL_VM_CREATION_HANDOFF_20261027.md) for the
+`b5943df` cgroup-birth repair, completed creation measurements, remaining failures,
+and verified cleanup. Initial placement stayed below one second in every matched
+creation at both offered loads. Total creation still exceeds one second; measured
+IRQ-bypass registration during device restoration is the next priority. Upstream
+Linux 6.18 has an indexed lookup redesign worth evaluating as a separate baseline.
+
 ## Update: instrumented Full-1280, 2026-10-27 afternoon
 
 The new run `full-c1280-create-stages-20261027t1515cst` uses instrumentation
