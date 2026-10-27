@@ -6,6 +6,40 @@ current diagnosis and execution plan. It supersedes the priority ordering in
 `FULL_LATENCY_HANDOFF_20261025.md` remain useful for the earlier evidence and
 historical fixes.
 
+## Update: instrumented Full-1280, 2026-10-27 afternoon
+
+The new run `full-c1280-create-stages-20261027t1515cst` uses instrumentation
+commit `5c3b066`, attempt `attempt-ac71205e52fd4f18`, arm
+`d1307eb0d194e5816923d8b7`. Evidence root on kunpeng:
+`/data/clawbox-create-diagnosis-20261027T1508CST`.
+
+**The journal-first repair priority below is superseded by direct measurements.**
+In `analysis/create-stages-20261027T072708Z.json` (1010 completed creates), SDK
+create p50/p90 is 2.947/23.397 seconds; journal fsync p50/p90 is
+0.001210/0.006623 seconds. SDK time is 99.47% of accumulated outer create-wrapper
+wall time, not an E2E fraction. Journal lock-wait max is 0.521 seconds.
+
+Native logs identify a substantial initial cgroup-attachment stall before guest
+memory restoration. A 30.187-second SDK call spent about 26.187 seconds before
+the shim logged successful LOCAL cgroup entry. A separately correlated shim
+(PID 338677, sandbox `4066fc44a5bc460798838d53ad11bd13`) spent 8.849 seconds before
+entry and was captured blocked in `cpuset_post_attach -> __flush_workqueue`.
+Other shims and Cubelet threads waited in `cgroup_kn_lock_live`. See
+`diagnostics/blocked-vm-correlation.json` and
+`diagnostics/native-blocked-1793085704.json`. Slow creation was already present
+at 920 VMs with zero checkpoint, restore, borrow or memory-scheduling events.
+
+Investigate the native initial `cgroup.procs` attachment and shared kernel
+migration queue first. Which queued work makes the flush slow remains unproven;
+do not label it measured bulk-copy bandwidth or remove required memory accounting.
+The last saved status has all 1280 sessions dispatched, 1052 VMs created,
+526 agents runnable, 16 completed sessions and 6 failures; the run is still
+active at that snapshot. Refresh its state before further work. The saved host
+configuration was reapplied after reboot, and the one approved old crash dump
+was removed; the new run retains existing templates, budgets and snapshot policy.
+No performance optimization or native rebuild was applied. Raw diagnostics remain
+on the host; the local detailed report is `.runtime/create-diagnosis-20261027T1508CST/report.md`.
+
 ## 1. Objective and decision rule
 
 Reduce time beyond real guest Tool execution and recorded LLM wait at Full-1280
