@@ -9,10 +9,11 @@ retain the earlier detailed evidence.
 
 ## Completion update (2026-10-28)
 
-The admission and finalization priorities in this handoff are complete. Do not
-repeat its remaining-work plan. The implemented changes, c1280 measurements,
-known rare accounted-pressure tail, configuration tradeoff, validation audit,
-and current evidence paths are in
+The admission, logging, finalization, and ClawBox VM-creation implementation
+and selected c1280 validation are recorded in the report below. Do not repeat
+this older remaining-work plan. The report distinguishes internal preparation
+from the full callback and retains remaining pressure/FIFO tails, the bypass
+tradeoff, validation scope, and current evidence paths:
 [`FULL_SERVICE_OVERHEAD_OPTIMIZATION_20261028.md`](FULL_SERVICE_OVERHEAD_OPTIMIZATION_20261028.md).
 Checkpoint/restore remains intentionally deferred to a later study.
 
