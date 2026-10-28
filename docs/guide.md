@@ -219,14 +219,20 @@ measurement. `resources.prediction_reservation_scale` (CLI
 adjusts the reservation; the final reservation is rounded up to whole MiB, with
 a minimum of 0 MiB. A zero prediction therefore reserves 0 MiB.
 `mechanisms.admission.small_tool_admission_bypass_mib` (effective resource
-field `resources.small_tool_admission_bypass_mib`; default `0`, disabled) can make
-predicted Tool reservations at or below the configured whole-MiB threshold
-unaccounted. Such a Tool is still marked active, executed, and measured, but it
+field `resources.small_tool_admission_bypass_mib`; default `4` MiB; set `0` to
+disable) makes Tool reservations at or below the configured whole-MiB threshold
+unaccounted. This includes non-command operations using a fixed budget. Such a
+Tool is still marked active, executed, and measured, but it
 does not read, wait for, increment, or decrement the memory-admission ledger.
 This is an explicit aggregate-memory-risk tradeoff for workloads whose many
 small predictions make serialized accounting more expensive than the protected
 memory. Changing it requires a new run ID, but no host apply, image rebuild, or
 retraining.
+The below-LOW routing fast path is also automatic: when sampled peak LOCAL
+memory plus outstanding nominal claims, the new prediction, and operation
+headroom fit below LOW, an already-resident Tool skips pressure routing. It
+still undergoes admission checks and reserves its memory unless it qualifies
+for the small-Tool bypass. Neither fast path caps actual Tool memory use.
 Prediction records retain the original measurement, assumptions, selected model,
 and `identity_estimate` mapping. Zero predictions and partial evidence are accepted.
 
