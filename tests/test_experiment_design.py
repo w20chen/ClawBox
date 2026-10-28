@@ -71,14 +71,16 @@ def test_every_recipe_roundtrips_and_expands(recipe, axis, count):
     assert all(a.execution.placement_cpu_overcommit == 1024 for a in arms)
 
 
-def test_small_tool_admission_bypass_is_an_editable_admission_field():
+@pytest.mark.parametrize('configured, expected', [(None, 4), (0, 0), (16, 16)])
+def test_small_tool_admission_bypass_is_an_editable_admission_field(configured, expected):
     raw = base()
-    raw['mechanisms']['admission']['small_tool_admission_bypass_mib'] = 4
+    if configured is not None:
+        raw['mechanisms']['admission']['small_tool_admission_bypass_mib'] = configured
 
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
 
-    assert arm.resources.small_tool_admission_bypass_mib == 4
+    assert arm.resources.small_tool_admission_bypass_mib == expected
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
 
