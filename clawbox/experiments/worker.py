@@ -19,10 +19,11 @@ import time
 import traceback
 import urllib.parse
 from collections import Counter
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from threading import Event, Lock, RLock, Semaphore, Thread
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -58,7 +59,7 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .congestion import locate_cgroup
-from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation
+from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation, timing_details
 from .pressure import PressureControl
 from .prediction_records import PredictionRecordBuffer
 from .priority import PriorityDomain, c2_applies
@@ -408,11 +409,11 @@ def worker_thread_scheduling(interval_seconds):
 
 
 @contextmanager
-def creation_slot(gate, events, session_id):
-    """Queue before reserving memory; release at pair readiness, not task end."""
+def creation_slot(gate, events, session_id, *, phase='sandbox_create'):
+    """Bound a pipeline stage; allow release before the session finishes."""
     started = time.time()
     started_monotonic = time.monotonic()
-    events.write({'event':'sandbox_create_gate_wait_started','session_id':session_id})
+    events.write({'event':phase + '_gate_wait_started','session_id':session_id})
     gate.acquire()
     acquired = time.time()
     acquired_monotonic = time.monotonic()
@@ -422,10 +423,10 @@ def creation_slot(gate, events, session_id):
         if held:
             held = False
             gate.release()
-            events.write({'event': 'sandbox_create_gate_released', 'session_id': session_id,
+            events.write({'event': phase + '_gate_released', 'session_id': session_id,
                           'held_seconds': time.monotonic()-acquired_monotonic})
     try:
-        events.write({'event':'sandbox_create_gate_acquired','session_id':session_id,
+        events.write({'event':phase + '_gate_acquired','session_id':session_id,
                       'wait_seconds':acquired_monotonic-started_monotonic})
         yield started, acquired, release
     finally:
@@ -1633,10 +1634,23 @@ class DependencyInstallGate:
 class ArmActivityTracker:
     """In-memory task/queue state derived from existing transition events."""
 
+    _EVENTS = frozenset({
+        'session_dispatched', 'sandbox_prepare_gate_wait_started',
+        'sandbox_prepare_gate_acquired', 'sandbox_prepare_gate_released',
+        'sandbox_create_gate_wait_started', 'sandbox_create_gate_acquired',
+        'pair_ready', 'agent_runnable', 'model_wait_started', 'model_response_ready',
+        'dependency_install_gate_wait_started', 'dependency_install_gate_acquired',
+        'dependency_install_gate_released', 'dependency_install_gate_wait_timed_out',
+        'tool_admission_queued', 'tool_admitted', 'tool_execution_progress',
+        'tool_completed', 'tool_admission_abandoned', 'tool_admission_failed',
+        'session_complete', 'session_failed',
+    })
+
     def __init__(self, total_sessions: int) -> None:
         self.total_sessions = total_sessions
         self.started_monotonic = time.monotonic()
-        self.lock = Lock()
+        self.lock = RLock()
+        self.pending = SimpleQueue()
         self.offered: set[str] = set()
         self.vm_create_waiting: dict[str, float] = {}
         self.vm_creating: dict[str, float] = {}
@@ -1649,6 +1663,8 @@ class ArmActivityTracker:
         self.tool_admission_waiting: dict[str, tuple[str, float]] = {}
         self.tool_admitted_waiting_start: dict[str, tuple[str, float]] = {}
         self.tool_executing: dict[str, tuple[str, float]] = {}
+        self.vm_prepare_waiting: dict[str, float] = {}
+        self.vm_preparing: dict[str, float] = {}
         self.completed: set[str] = set()
         self.failed: set[str] = set()
 
@@ -1674,6 +1690,15 @@ class ArmActivityTracker:
                 operations.pop(execution_id, None)
 
     def observe(self, event: dict[str, Any], *, now: float | None = None) -> None:
+        if event.get('event') not in self._EVENTS or not event.get('session_id'):
+            return
+        # Producers never wait behind a reporting snapshot. A snapshot drains
+        # these compact transitions before reading the resulting state.
+        record = {key: event[key] for key in
+                  ('event','session_id','execution_id','phase','valid') if key in event}
+        self.pending.put((record, time.monotonic() if now is None else now))
+
+    def _apply(self, event: dict[str, Any], *, now: float) -> None:
         now = time.monotonic() if now is None else now
         name = str(event.get("event") or "")
         session_id = str(event.get("session_id") or "")
@@ -1681,8 +1706,16 @@ class ArmActivityTracker:
         if not session_id:
             return
         with self.lock:
-            if name == "sandbox_create_gate_wait_started":
+            if name == "session_dispatched":
                 self.offered.add(session_id)
+            elif name == "sandbox_prepare_gate_wait_started":
+                self.vm_prepare_waiting[session_id] = now
+            elif name == "sandbox_prepare_gate_acquired":
+                self.vm_prepare_waiting.pop(session_id, None)
+                self.vm_preparing[session_id] = now
+            elif name == "sandbox_prepare_gate_released":
+                self.vm_preparing.pop(session_id, None)
+            elif name == "sandbox_create_gate_wait_started":
                 self.vm_create_waiting[session_id] = now
             elif name == "sandbox_create_gate_acquired":
                 self.vm_create_waiting.pop(session_id, None)
@@ -1729,6 +1762,8 @@ class ArmActivityTracker:
                 self.tool_admitted_waiting_start.pop(execution_id, None)
                 self.tool_executing.pop(execution_id, None)
             elif name in {"session_complete", "session_failed"}:
+                self.vm_prepare_waiting.pop(session_id, None)
+                self.vm_preparing.pop(session_id, None)
                 self.vm_create_waiting.pop(session_id, None)
                 self.vm_creating.pop(session_id, None)
                 self.agent_starting.pop(session_id, None)
@@ -1745,6 +1780,9 @@ class ArmActivityTracker:
     def snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         with self.lock:
+            for _ in range(self.pending.qsize()):
+                event, observed = self.pending.get_nowait()
+                self._apply(event, now=observed)
             elapsed = max(now - self.started_monotonic, 1e-9)
             terminal = self.completed | self.failed
             active = self.activated - terminal
@@ -1757,6 +1795,11 @@ class ArmActivityTracker:
                 "offered_not_activated_sessions": len(
                     self.offered - self.ever_activated - terminal
                 ),
+                "vm_prepare_waiting_sessions": len(self.vm_prepare_waiting),
+                "vm_prepare_wait_oldest_seconds": self._oldest(
+                    self.vm_prepare_waiting.values(), now
+                ),
+                "vm_preparing_sessions": len(self.vm_preparing),
                 "vm_create_waiting_sessions": len(self.vm_create_waiting),
                 "vm_create_wait_oldest_seconds": self._oldest(
                     self.vm_create_waiting.values(), now
@@ -1858,61 +1901,113 @@ class EventWriter:
         self.context = dict(context or {})
         self.session_case_ids = dict(session_case_ids or {})
         self.stream = self.path.open("a", encoding="utf-8", buffering=1024 * 1024)
-        self.events_since_flush = 0
         self.last_flush = time.monotonic()
         self.closed = False
+        self.error = None
+        self.pending = SimpleQueue()
+        self.writer = Thread(target=self._write_pending, name='experiment-events', daemon=True)
+        self.writer.start()
+
+    def _check_error(self):
+        if self.error is not None:
+            raise RuntimeError('experiment event log write failed') from self.error
+
+    def _write_pending(self):
+        rows = []
+        def save():
+            if self.error is None:
+                try:
+                    if rows:
+                        self.stream.write(''.join(rows))
+                    self.stream.flush()
+                except Exception as exc:
+                    self.error = exc
+            rows.clear()
+            self.last_flush = time.monotonic()
+        try:
+            while True:
+                try:
+                    item = self.pending.get(timeout=self._FLUSH_INTERVAL_SECONDS)
+                except Empty:
+                    if rows:
+                        save()
+                    continue
+                if item is None:
+                    save()
+                    break
+                if isinstance(item, Event):
+                    save()
+                    item.set()
+                else:
+                    payload, queued_ns, prepared_ns = item
+                    delay_ns = time.monotonic_ns()-queued_ns
+                    rows.append(f'{{"sequence_no":{self.sequence},'
+                                f'"event_writer_lock_wait_ns":0,'
+                                f'"event_writer_prepare_ns":{prepared_ns},'
+                                f'"event_writer_queue_delay_ns":{delay_ns},' + payload[1:] + '\n')
+                    self.sequence += 1
+                    if (len(rows) >= self._FLUSH_EVENT_COUNT
+                            or time.monotonic()-self.last_flush >= self._FLUSH_INTERVAL_SECONDS):
+                        save()
+        finally:
+            try:
+                self.stream.close()
+            except Exception as exc:
+                self.error = self.error or exc
 
     def write(self, event: dict[str, Any]) -> None:
-        # Occurrence timestamps are producer-side, before any writer-lock wait.
+        # Occurrence timestamps stay producer-side; only the consumer assigns
+        # file sequence numbers. SimpleQueue.put does not wait for the writer.
         monotonic_ns = time.monotonic_ns()
         wall_time = utcnow().isoformat()
         wall_time_ns = str(time.time_ns())
-        lock_started_ns = time.perf_counter_ns()
-        with self.lock:
-            lock_wait_ns = time.perf_counter_ns() - lock_started_ns
-            if self.closed:
-                raise RuntimeError("event writer is closed")
-            if self.activity_tracker is not None:
-                self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
-            row = {
-                "schema_version": 1,
-                "sequence_no": self.sequence,
-                "wall_time": wall_time,
-                "wall_time_ns": wall_time_ns,
-                "monotonic_time_ns": str(monotonic_ns),
-                "event_writer_lock_wait_ns": lock_wait_ns,
-                **self.context,
-                **event,
-            }
-            session_id = str(row.get("session_id") or "")
-            if session_id and "case_id" not in row:
-                case_id = self.session_case_ids.get(session_id)
-                if case_id is not None:
-                    row["case_id"] = case_id
-            self.sequence += 1
-            self.stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-            self.events_since_flush += 1
-            now = time.monotonic()
-            if (self.events_since_flush >= self._FLUSH_EVENT_COUNT
-                    or now - self.last_flush >= self._FLUSH_INTERVAL_SECONDS):
-                self.stream.flush()
-                self.events_since_flush = 0
-                self.last_flush = now
+        self._check_error()
+        if self.closed:
+            raise RuntimeError('event writer is closed')
+        row = {
+            'schema_version': 1,
+            'wall_time': wall_time,
+            'wall_time_ns': wall_time_ns,
+            'monotonic_time_ns': str(monotonic_ns),
+            **self.context,
+            **event,
+        }
+        session_id = str(row.get('session_id') or '')
+        if session_id and 'case_id' not in row:
+            case_id = self.session_case_ids.get(session_id)
+            if case_id is not None:
+                row['case_id'] = case_id
+        # Snapshot nested payloads before enqueueing. Encoding and file I/O
+        # must not hold the lock shared by all experiment callbacks.
+        payload = json.dumps(row, sort_keys=True, separators=(',', ':'))
+        if self.activity_tracker is not None:
+            self.activity_tracker.observe(event, now=monotonic_ns / 1_000_000_000)
+        queued_ns = time.monotonic_ns()
+        self.pending.put((payload, queued_ns, queued_ns-monotonic_ns))
+        # Normal close follows producer shutdown. Reject a late shutdown-racing
+        # write rather than returning success for an event after the sentinel.
+        if self.closed:
+            raise RuntimeError('event writer is closed')
 
     def flush(self) -> None:
+        barrier = Event()
         with self.lock:
-            if not self.closed:
-                self.stream.flush()
-                self.events_since_flush = 0
-                self.last_flush = time.monotonic()
+            closed = self.closed
+            if not closed:
+                self.pending.put(barrier)
+        if closed:
+            self.writer.join()
+        else:
+            barrier.wait()
+        self._check_error()
 
     def close(self) -> None:
         with self.lock:
-            if self.closed:
-                return
-            self.stream.flush()
-            self.stream.close()
-            self.closed = True
+            if not self.closed:
+                self.closed = True
+                self.pending.put(None)
+        self.writer.join()
+        self._check_error()
 
 
 class ExperimentWorker:
@@ -1951,12 +2046,11 @@ class ExperimentWorker:
         """Identical lifecycle margin in every admission ablation arm."""
         return arm.resources.startup_headroom_mib
 
-    @monitor_gc()
     def run(self, *, arm_ids: set[str] | None = None,
             write_summary: bool = True) -> list[ResultEnvelope]:
         self._run_entered_monotonic = time.monotonic()
         self._run_entered_process_cpu = time.process_time()
-        with worker_thread_scheduling(
+        with timing_details(self.spec.execution.control_timing_details), monitor_gc(), worker_thread_scheduling(
                 self.spec.execution.worker_thread_switch_interval_seconds):
             return self._run(arm_ids=arm_ids, write_summary=write_summary)
 
@@ -2369,9 +2463,14 @@ class ExperimentWorker:
             sampler.sample_hook = record_memory_sample
         policy_events = PolicyEventExecutor(workers=policy_event_workers(arm))
         watermark_controller = next(iter(domains.values())).controller
-        sandbox_create_gate = Semaphore(self._sandbox_create_limit(
+        create_limit = self._sandbox_create_limit(
             arm.concurrency, arm.execution.sandbox_create_concurrency,
-        ))
+        )
+        sandbox_create_gate = Semaphore(create_limit)
+        # A bounded upstream stage may wait for resources or a create worker.
+        # It never occupies a create slot until its reservation is ready, and
+        # at most create_limit reservations can queue ahead of the workers.
+        sandbox_prepare_gate = Semaphore(create_limit)
         dependency_install_gate = (
             DependencyInstallGate(
                 arm.execution.dependency_install_concurrency, events.write,
@@ -2463,10 +2562,11 @@ class ExperimentWorker:
                     0.0, dispatched - (arm_started_monotonic + offset)
                 ),
             })
-            with creation_slot(sandbox_create_gate, events, session_id) as slot:
-                return run_placed_session_impl(index, slot)
+            with creation_slot(sandbox_prepare_gate, events, session_id,
+                               phase='sandbox_prepare') as slot:
+                return run_placed_session_impl(index, slot[2])
 
-        def run_placed_session_impl(index, slot):
+        def run_placed_session_impl(index, preparation_release):
             session_id = f"{arm.arm_id}-{index:04d}"
             domain = session_domain(index)
             session_case = session_case_for(arm, index)
@@ -2483,29 +2583,33 @@ class ExperimentWorker:
                          'local' if os_default else
                          place_session(arm.resources.compute_nodes, index,
                                        arm.execution.session_compute_nodes).node_id)
-                key = placement.acquire(
-                    session_id, vcpus=arm.runtime.vcpu+tool_sandbox.vcpu,
-                    memory_mib=pair_mib, timeout=arm.execution.arm_timeout_seconds,
-                    fixed=fixed, template_id=tool_sandbox.template,
-                    template_aware=arm.policy.template_aware_placement,
-                    template_sharing_supported=(
-                        arm.resources.template_base_sharing == 'required'
-                    ),
-                    balance_slack=arm.execution.template_balance_slack,
-                )
-                domain = domains[key]
-                if not os_default:
-                    self._priority_domain.placements[index] = (domain.cpus, domain.arm.resources.local_numa_node)
-                    self._priority_domain.configure_topology_placement(
-                        index, domain.cpus, domain.arm.resources.local_numa_node,
+                with trace_scope('session_placement_timing', events.write, session_id):
+                    key = placement.acquire(
+                        session_id, vcpus=arm.runtime.vcpu+tool_sandbox.vcpu,
+                        memory_mib=pair_mib, timeout=arm.execution.arm_timeout_seconds,
+                        fixed=fixed, template_id=tool_sandbox.template,
+                        template_aware=arm.policy.template_aware_placement,
+                        template_sharing_supported=(
+                            arm.resources.template_base_sharing == 'required'
+                        ),
+                        balance_slack=arm.execution.template_balance_slack,
                     )
+                domain = domains[key]
             waited = time.monotonic()-started
             try:
+                if placement is not None and not os_default:
+                    self._priority_domain.placements[index] = (domain.cpus, domain.arm.resources.local_numa_node)
+                    with trace_scope('session_topology_timing', events.write, session_id):
+                        self._priority_domain.configure_topology_placement(
+                            index, domain.cpus, domain.arm.resources.local_numa_node,
+                        )
                 result = self._run_session(domain.arm, index, domain.coordinator, events,
-                    policy_events, prediction_providers.get(session_case.case_id), None,
-                    domain.sampler.observe, arm_started_wall, arm_started_monotonic,
+                    policy_events, prediction_providers.get(session_case.case_id), sandbox_create_gate,
+                    lambda: domain.sampler.observe(details=arm.execution.control_timing_details),
+                    arm_started_wall, arm_started_monotonic,
                     snapshot_pool, domain.borrower, domain.controller,
-                    creation_reserved=placement is not None, creation_gate_info=slot,
+                    creation_reserved=placement is not None,
+                    creation_preparation_release=preparation_release,
                     offered_offset_seconds=offer_offsets[index],
                     telemetry_warmup_pool=telemetry_warmup_pool,
                     dependency_install_gate=dependency_install_gate,
@@ -3025,7 +3129,7 @@ class ExperimentWorker:
                      numa_borrower: SandboxNumaBorrower | None = None,
                      watermark_controller: WatermarkController | None = None,
                      creation_reserved: bool = False,
-                     creation_gate_info=None,
+                     creation_preparation_release=None,
                       offered_offset_seconds: float | None = None,
                       telemetry_warmup_pool: ThreadPoolExecutor | None = None,
                       dependency_install_gate: DependencyInstallGate | None = None,
@@ -3042,6 +3146,7 @@ class ExperimentWorker:
         if arm_started_monotonic is not None:
             time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
         session_id = f"{arm.arm_id}-{index:04d}"
+        events.write({'event': 'session_preparation_started', 'session_id': session_id})
         priority_domain = getattr(self, '_priority_domain', None)
         progress_control = (self._runtime_memory
                             if isinstance(self._runtime_memory, PressureControl) else None)
@@ -3480,27 +3585,13 @@ class ExperimentWorker:
             ),
         )
         try:
-            if creation_gate_info is not None:
-                timeline['sandbox_create_gate_wait_start'] = creation_gate_info[0]
-                timeline['sandbox_create_gate_acquired'] = creation_gate_info[1]
             if lifetime:
                 coordinator.acquire_capacity(
                     session_id, lifetime, arm.execution.arm_timeout_seconds,
                 )
                 lifetime_acquired = True
-            if sandbox_create_gate is not None:
-                timeline["sandbox_create_gate_wait_start"] = time.time()
-                sandbox_create_gate.acquire()
-                timeline["sandbox_create_gate_acquired"] = time.time()
-                events.write({
-                    "event": "sandbox_create_gate_acquired", "session_id": session_id,
-                    "wait_seconds": max(
-                        0.0,
-                        timeline["sandbox_create_gate_acquired"]
-                        - timeline["sandbox_create_gate_wait_start"],
-                    ),
-                })
             pair_reservation = None
+            create_slots = ExitStack()
             try:
                 if not lifetime:
                     pair_amount = arm.resources.lifecycle_reservation_mib(
@@ -3510,11 +3601,20 @@ class ExperimentWorker:
                         wait_class="create",
                     )
                     pair_reservation = pair_amount
+                events.write({'event': 'session_create_ready', 'session_id': session_id})
+                if sandbox_create_gate is not None:
+                    slot = create_slots.enter_context(creation_slot(
+                        sandbox_create_gate, events, session_id))
+                    timeline['sandbox_create_gate_wait_start'] = slot[0]
+                    timeline['sandbox_create_gate_acquired'] = slot[1]
+                if creation_preparation_release is not None:
+                    creation_preparation_release()
                 timeline["sandbox_create_start"] = time.time()
                 (
                     (tool_create_s, timeline["tool_create_start"], timeline["tool_ready"]),
                     (runtime_create_s, timeline["runtime_create_start"], timeline["runtime_ready"]),
                 ) = start_sandbox_pair(lifecycle, runtime_lifecycle)
+                pair_setup_started = time.monotonic_ns()
                 # Native Cube cgroup leaves do not exist until each sandbox is
                 # created and verified. Register physical-memory readers only
                 # after both leaves have been published; configured-capacity
@@ -3535,6 +3635,7 @@ class ExperimentWorker:
                             )
                         ),
                     )
+                pair_memory_registered = time.monotonic_ns()
                 tool_create_reservation_wait = 0.0 if lifetime else pair_wait
                 runtime_create_reservation_wait = 0.0
                 events.write({"event": "sandbox_created", "session_id": session_id,
@@ -3544,6 +3645,9 @@ class ExperimentWorker:
                               "lifecycle_timing": lifecycle.timings[-1],
                               "sandbox_id": self.client.sandbox_id(lifecycle.sandbox)})
                 setup_route = None
+                pair_endpoint_started = time.monotonic_ns()
+                pair_endpoint_finished = pair_endpoint_started
+                pair_network_finished = pair_endpoint_started
                 if arm.agent.driver is AgentDriver.OPENCLAW:
                     tool_endpoint = self.client.get_tcp_endpoint(lifecycle.sandbox, 2222)
                     route_epoch += 1
@@ -3554,9 +3658,11 @@ class ExperimentWorker:
                         raise RuntimeError(
                             f"CubeSandbox returned a non-IP TCP endpoint host: {setup_route.host!r}"
                         ) from exc
+                    pair_endpoint_finished = time.monotonic_ns()
                     runtime_lifecycle.ensure_network_allow_out(
                         f"{endpoint_address}/{32 if endpoint_address.version == 4 else 128}"
                     )
+                    pair_network_finished = time.monotonic_ns()
                 timeline["sandbox_ready"] = max(
                     timeline["tool_ready"], timeline["runtime_ready"], time.time(),
                 )
@@ -3572,17 +3678,20 @@ class ExperimentWorker:
                     "tool_sandbox_id": self.client.sandbox_id(lifecycle.sandbox),
                     "runtime_sandbox_id": self.client.sandbox_id(runtime_lifecycle.sandbox),
                 })
+                events.write({'event': 'pair_setup_timing', 'session_id': session_id,
+                              'start_ns': pair_setup_started,
+                              'memory_registered_ns': pair_memory_registered,
+                              'endpoint_started_ns': pair_endpoint_started,
+                              'endpoint_finished_ns': pair_endpoint_finished,
+                              'network_finished_ns': pair_network_finished,
+                              'completed_ns': time.monotonic_ns()})
             finally:
-                if pair_reservation is not None:
-                    # One create claim covers the pair. Its measured growth is
-                    # deducted by DemandLedger while either VM is starting.
-                    # Release that same claim after success or partial failure;
-                    # releasing tool_admission would leave it until unregister.
-                    coordinator.release(session_id, pair_reservation, wait_class="create")
-                if sandbox_create_gate is not None:
-                    sandbox_create_gate.release()
-                if creation_gate_info is not None:
-                    creation_gate_info[2]()
+                try:
+                    if pair_reservation is not None:
+                        # Release the pair's create claim on partial failure too.
+                        coordinator.release(session_id, pair_reservation, wait_class="create")
+                finally:
+                    create_slots.close()
             create_s = max(
                 0.0, timeline["sandbox_ready"] - timeline["sandbox_create_start"],
             )
@@ -4082,6 +4191,7 @@ class ExperimentWorker:
                         "event": "tool_admitted", "session_id": session_id,
                         "control_stage_seconds": control_stages,
                         "memory_baseline_timing": memory_baseline_timing,
+                        "sampler_startup_timing": host_sampler.startup_timing,
                         "control_total_seconds": control_marks['bookkeeping']-control_marks['started'],
                         "execution_id": execution_id,
                         "execution_scope": execution_scope,
@@ -4439,6 +4549,7 @@ class ExperimentWorker:
                                                  if prediction_provider is not None else None),
                             resident_poll=poll_resident_runtime,
                             checkpoint_relay=runtime_snapshot_enabled,
+                            diagnostic_artifacts=arm.execution.control_timing_details,
                             startup_begin=begin_tool_telemetry_warmup,
                             startup_wait=await_tool_telemetry_warmup,
                             startup_event=events.write,
@@ -4511,6 +4622,8 @@ class ExperimentWorker:
                         "session_id": session_id,
                         "root": str(native_artifacts.root),
                         "validation": native_artifacts.validation,
+                        "runtime_finalization_stage_seconds": outcome.get('finalization_stage_seconds'),
+                        "runtime_diagnostic_artifacts": outcome.get('diagnostic_artifacts', False),
                     })
                 if gateway_session is None:
                     raise RuntimeError("managed OpenClaw session has no ModelGateway state")
@@ -4621,18 +4734,18 @@ class ExperimentWorker:
                 "session_id": session_id,
                 "model_steps": model_steps,
                 "tool_steps": len(tool_latencies),
-                "model_gateway_records": (
-                    gateway_session.records() if gateway_session is not None else []
-                ),
                 "model_gateway_completeness": (
                     gateway_session.replay_completeness()
                     if gateway_session is not None else None
                 ),
-                "prediction_records": prediction_records,
                 "prediction_provenance": (
                     prediction_provider.provenance(prediction_records)
                     if prediction_provider is not None else None
                 ),
+                **({"model_gateway_records": (
+                        gateway_session.records() if gateway_session is not None else []),
+                    "prediction_records": prediction_records}
+                   if arm.execution.control_timing_details else {}),
             })
             return {"session_id": session_id, "case_id": arm.case.case_id,
                     "rollout_id": session_id,

@@ -218,8 +218,9 @@ def test_native_ssh_route_requires_cube_mapped_port() -> None:
 
 @pytest.mark.parametrize("workspace", ["/workspace", "/testbed"])
 @pytest.mark.parametrize("gateway_mode", [None, "api", "replay"])
+@pytest.mark.parametrize("diagnostic_artifacts", [False, True])
 def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
-    monkeypatch, tmp_path: Path, gateway_mode, workspace,
+    monkeypatch, tmp_path: Path, gateway_mode, workspace, diagnostic_artifacts,
 ) -> None:
     commands = []
     startup_events = []
@@ -280,6 +281,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         startup_begin=lambda: startup_begins.append(len(commands)),
         startup_wait=lambda: startup_waits.append(len(commands)),
         startup_event=startup_events.append,
+        diagnostic_artifacts=diagnostic_artifacts,
     )
     patch_command = next(command for command in commands if "set -eu; umask 077" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
@@ -307,6 +309,9 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert (tmp_path / "runtime-traces/session-a/native/trace.jsonl").read_bytes() == b'{"trace":true}\n'
     assert sum("tar -cPzhf" in command for command in commands) == 1
+    bundle_command = next(command for command in commands if 'tar -cPzhf' in command)
+    assert ('-prune -o' in bundle_command) is (not diagnostic_artifacts)
+    assert 'kill -TERM' in bundle_command and '--hard-dereference' in bundle_command
     assert "CLAWBOX_POLICY_CONTROL_AUTH=policy-token" in "\n".join(commands)
     assert "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1" in "\n".join(commands)
     assert "CLAWBOX_TOOL_TIMEOUT_SECONDS=300" in "\n".join(commands)

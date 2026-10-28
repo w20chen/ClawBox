@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import replace
+from .control_timing import operation, span, timed_lock
 import time
 
 from .policy import AdmissionTimeout
@@ -79,6 +80,7 @@ class SessionPlacement:
         self.template_cache_hits = 0
         self._memory_feedback = {}
 
+    @operation('placement.ranking_memory')
     def _placement_memory(self, key, memory_mib):
         # Ranking shares the CPU monitor's 200-ms observation cadence. Do not
         # resample every active claim for every waiting session under the same
@@ -100,7 +102,7 @@ class SessionPlacement:
     def acquire(self, session_id, *, vcpus, memory_mib, timeout, fixed=None,
                 template_id=None, template_aware=False,
                 template_sharing_supported=False, balance_slack=0.10):
-        with self.condition:
+        with timed_lock(self.condition, 'placement.condition'):
             if session_id in self.sessions or session_id in self.waiting:
                 raise RuntimeError(f'duplicate session placement: {session_id}')
             self.waiting.add(session_id)
@@ -113,7 +115,7 @@ class SessionPlacement:
                 balance_slack=balance_slack,
             )
         finally:
-            with self.condition:
+            with timed_lock(self.condition, 'placement.condition'):
                 self.waiting.remove(session_id)
 
     def _acquire(self, session_id, *, vcpus, memory_mib, timeout, fixed=None,
@@ -135,11 +137,12 @@ class SessionPlacement:
                    else 'increase the eligible compute-node HIGH watermark')
             )
         while True:
-            with self.condition:
+            with timed_lock(self.condition, 'placement.condition'):
                 remaining = timeout-(time.monotonic()-started)
                 if remaining <= 0:
                     raise AdmissionTimeout(f'NUMA placement timed out for {session_id}')
-                cpu = self.monitor.sample()
+                with span('placement.cpu_sample'):
+                    cpu = self.monitor.sample()
                 candidates = []
                 for key in keys:
                     domain = self.domains[key]
@@ -171,7 +174,8 @@ class SessionPlacement:
                     )
                     candidates.append((bool(reasons), (cpu_pressure+memory_pressure)/2, key, evidence))
                 if not candidates:
-                    self.condition.wait(min(.2, remaining))
+                    with span('placement.cpu_capacity_wait'):
+                        self.condition.wait(min(.2, remaining))
                     continue
                 # A feasible node always wins. With none feasible, use the
                 # existing admission queue/reclamation briefly, then resample

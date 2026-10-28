@@ -320,6 +320,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  resident_wait: Callable[[str, float], CommandResult | None] | None = None,
                  resident_file_nonempty: Callable[[str, float], bool | None] | None = None,
                  checkpoint_relay: bool = False,
+                 diagnostic_artifacts: bool = False,
                  startup_begin: Callable[[], None] | None = None,
                  startup_wait: Callable[[], None] | None = None,
                  startup_event: Callable[[dict[str, Any]], None] | None = None,
@@ -893,10 +894,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "endpoint": "completed_agent_stdout_received_by_host",
             "includes_completion_polling_and_transport": True,
         })
+    finalization_stages = {}
     def collection_execute(stage, command, timeout):
+        started = time.monotonic()
         with span(stage) as timing:
             result = runtime_executor.execute(command, timeout)
             timing.update(exit_code=result.exit_code, stdout_chars=len(result.stdout))
+            finalization_stages[stage] = time.monotonic()-started
             return result
 
     host_home = output_dir / "openclaw" / session_id
@@ -918,25 +922,30 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     }
     if checkpoint_relay:
         runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
-    collection_execute('finalize.helper_stop',
-        prefix + f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
+    stop_helpers = (
+        f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
         + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi; "
         + (f"if [ -s {shlex.quote(relay_pid_file)} ]; then "
            f"kill -TERM $(cat {shlex.quote(relay_pid_file)}) 2>/dev/null || true; fi"
-           if checkpoint_relay else "true"), 10,
+           if checkpoint_relay else "true") + "; "
     )
     # Runtime evidence used to require one SSH command per log/trace file.
     # Collect the same regular files in one compressed stream so synchronized
     # c1280 completion does not multiply SSH startup and transport latency.
     remote_log_words = " ".join(shlex.quote(path) for path in runtime_logs.values())
+    # This directory contains working KB copies and generations, not execution
+    # traces. Native validation skips it and predictions retain their own
+    # provenance. Copying it per session is useful only for explicit diagnosis.
+    trace_filter = ("" if diagnostic_artifacts else
+                    f"-path {shlex.quote(trace_dir + '/tool-resource')} -prune -o ")
     bundle = collection_execute(
         'finalize.runtime_bundle',
-        prefix
+        prefix + stop_helpers
         + f"{{ for path in {remote_log_words}; do "
         + "[ ! -f \"$path\" ] || printf '%s\\0' \"$path\"; done; "
-        + f"find {shlex.quote(trace_dir)} -type f "
+        + f"find {shlex.quote(trace_dir)} " + trace_filter + "-type f "
         + "\\( -name '*.jsonl' -o -name '*.json' \\) -print0; } "
-        + "| tar -cPzhf - --null -T - 2>/dev/null | base64 -w0",
+        + "| tar -cPzhf - --hard-dereference --null -T - 2>/dev/null | base64 -w0",
         60,
     )
     if bundle.exit_code:
@@ -949,6 +958,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     host_trace_dir.mkdir(parents=True, exist_ok=True)
     remote_logs = {path: local_name for local_name, path in runtime_logs.items()}
     trace_prefix = trace_dir.rstrip("/") + "/"
+    decode_started = time.monotonic()
     try:
         if not bundle.stdout:
             archive_payloads = ()
@@ -987,6 +997,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                     copied.append(str(target))
     except (ValueError, tarfile.TarError) as exc:
         raise RuntimeError("Runtime evidence bundle is invalid") from exc
+    finalization_stages['finalize.runtime_decode'] = time.monotonic()-decode_started
     with span('finalize.policy_materialize'):
         control_records = policy_control.records()
         completed = [item for item in control_records if item["completion"]]
@@ -1011,6 +1022,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "native_ssh_latencies": native_ssh_latencies,
             "agent_pid_file": agent_pid_file,
             "checkpoint_model_relay": checkpoint_relay,
+            "diagnostic_artifacts": diagnostic_artifacts,
+            "finalization_stage_seconds": finalization_stages,
             "runtime_traces": copied, "policy_control_records": control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],
             "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None,

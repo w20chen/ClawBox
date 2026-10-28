@@ -1,4 +1,6 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 import time
 
@@ -82,6 +84,71 @@ def test_low_pressure_no_leaf_scan(tmp_path, monkeypatch):
     monkeypatch.setattr(c, '_sample', lambda *_: pytest.fail('low-pressure leaf scan'))
     c.poll()
     assert (tmp_path/'tool'/'cpu.weight').read_text() == '100'
+
+
+def test_slow_leaf_poll_does_not_block_other_session_creation(tmp_path, monkeypatch):
+    c, d = control(tmp_path)
+    c.event('s', 'ready', 'e')
+    c.event('s', 'start', 'e')
+    entered, resume = Event(), Event()
+    original = c._sample
+
+    def slow_sample(vm, now):
+        entered.set()
+        assert resume.wait(3)
+        return original(vm, now)
+
+    monkeypatch.setattr(c, '_sample', slow_sample)
+    with ThreadPoolExecutor(3) as pool:
+        poll = pool.submit(c.poll)
+        try:
+            assert entered.wait(2)
+            # Independent cgroup registration and generation must not wait
+            # for the old session's blocked kernel read.
+            def create():
+                c.register('new', 'runtime', tmp_path/'runtime', 0, d)
+                c.generation('new', 'runtime', 'new-runtime')
+                c.event('new', 'model_start', 'm')
+            pool.submit(create).result(timeout=1)
+            completion = pool.submit(c.event, 's', 'complete', 'e')
+            assert not completion.done()
+        finally:
+            resume.set()
+        poll.result(timeout=2)
+        completion.result(timeout=2)
+    assert c.vms['new', 'runtime'].phase == Phase.LLM_WAITING
+    assert c.vms['s', 'tool'].phase == Phase.INACTIVE
+    assert not c.vms['s', 'tool'].modified
+
+
+def test_unregister_during_poll_snapshot_does_not_touch_removed_leaf(tmp_path, monkeypatch):
+    c, d = control(tmp_path)
+    c.event('s', 'ready', 'e')
+    c.event('s', 'start', 'e')
+    def feedback():
+        c.unregister('s')
+        return {'memory_blocked': True}
+    monkeypatch.setattr(d, 'resource_feedback', feedback)
+    monkeypatch.setattr(c, '_sample', lambda *_: pytest.fail('removed leaf sampled'))
+    c.poll()
+    assert not c.vms
+
+
+def test_generation_event_sink_does_not_hold_pressure_locks(tmp_path):
+    c, _ = control(tmp_path)
+    entered, resume = Event(), Event()
+    def emit(event):
+        entered.set()
+        assert resume.wait(3)
+    c.emit = emit
+    with ThreadPoolExecutor(2) as pool:
+        generation = pool.submit(c.generation, 's', 'runtime', 'new-runtime')
+        try:
+            assert entered.wait(2)
+            pool.submit(c.event, 's', 'model_start', 'm').result(timeout=1)
+        finally:
+            resume.set()
+        generation.result(timeout=2)
 
 
 def test_memory_reclaim_retries_after_cooldown_despite_residual_pressure(tmp_path, monkeypatch):

@@ -5,6 +5,7 @@ from .control_timing import span
 import shutil
 import time
 import mmap
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -181,7 +182,7 @@ class NodeMemorySampler:
         total, available = read_meminfo(self.meminfo)
         return max(0, total - available - self.baseline_used), available
 
-    def observe(self) -> dict[str, int | str]:
+    def observe(self, *, details: bool = True) -> dict[str, int | str]:
         """Return an explicit host-memory observation for lifecycle evidence.
 
         ``host_used_bytes`` is whole-host physical memory in use, whereas
@@ -320,7 +321,7 @@ class NumaNodeMemorySampler(NodeMemorySampler):
         total, free = read_numa_meminfo(self.numa_meminfo)
         return max(0, total - free - self.baseline_used), free
 
-    def observe(self) -> dict[str, int | str]:
+    def observe(self, *, details: bool = True) -> dict[str, int | str]:
         total, free = read_numa_meminfo(self.numa_meminfo)
         used = max(0, total - free)
         return {
@@ -386,19 +387,21 @@ class CgroupMemorySampler(NodeMemorySampler):
                 "after_bytes": after, "observed_net_reclaimed_bytes": max(0, before - after),
                 "status": status}
 
-    def observe(self) -> dict[str, int | str]:
-        observation = super().observe()
+    def observe(self, *, details: bool = True) -> dict[str, int | str]:
+        observation = super().observe(details=details)
         used, _ = self.current()
         observation.update({
             "metric": "cgroup_v2_memory_current",
             "local_memory_cgroup": str(self.cgroup),
             "local_capacity_bytes": self.total,
             "local_used_bytes": used,
-            "local_memory_events": (self.cgroup / "memory.events").read_text().strip()
-            if (self.cgroup / "memory.events").exists() else "unavailable",
             "experiment_used_delta_bytes": used,
-            "cgroup_memory": cgroup_memory_evidence(self.cgroup),
         })
+        if details:
+            observation['local_memory_events'] = (
+                (self.cgroup / 'memory.events').read_text().strip()
+                if (self.cgroup / 'memory.events').exists() else 'unavailable')
+            observation['cgroup_memory'] = cgroup_memory_evidence(self.cgroup)
         return observation
 
 
@@ -450,8 +453,8 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
         local = sum(resident.get(n, 0) for n in self.local_numa_nodes) + unattributed
         return local, available
 
-    def observe(self) -> dict[str, int | str]:
-        observation = NodeMemorySampler.observe(self)
+    def observe(self, *, details: bool = True) -> dict[str, int | str]:
+        observation = NodeMemorySampler.observe(self, details=details)
         local, shared, total = self.tier_usage()
         observation.update({
             "metric": "cgroup_v2_numa_tier_memory",
@@ -463,10 +466,11 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
             "local_used_bytes": local,
             "shared_live_used_bytes": shared,
             "combined_live_used_bytes": total,
-            "cgroup_memory": cgroup_memory_evidence(self.cgroup),
             "experiment_used_delta_bytes": local,
-            "local_memory_events": (self.cgroup / "memory.events").read_text().strip(),
         })
+        if details:
+            observation['cgroup_memory'] = cgroup_memory_evidence(self.cgroup)
+            observation['local_memory_events'] = (self.cgroup / 'memory.events').read_text().strip()
         return observation
 
     def node_usage(self) -> dict:
@@ -548,6 +552,13 @@ def sandbox_process_counter_deltas(before, after) -> dict[str, int | None]:
     return result
 
 
+def _read_counter(stream, size=128):
+    if hasattr(os, 'pread'):
+        return os.pread(stream.fileno(), size, 0)
+    stream.seek(0)
+    return stream.read(size)
+
+
 class ProcessRSSReader:
     """Read the same kernel RSS counter through retained, identity-checked statm FDs.
 
@@ -576,8 +587,7 @@ class ProcessRSSReader:
         try:
             total = 0
             for stream in self.files:
-                stream.seek(0)
-                total += int(stream.read(128).split()[1]) * mmap.PAGESIZE
+                total += int(_read_counter(stream).split()[1]) * mmap.PAGESIZE
             return total
         except (OSError, ValueError, IndexError):
             self.valid = False
@@ -595,6 +605,8 @@ class SandboxRSSSampler:
 
     def __init__(self, sandbox_id: str, *, proc_root: Path = Path("/proc"),
                  interval_s: float = 0.05, cgroup: Path | None = None) -> None:
+        started = time.monotonic()
+        self.startup_timing = {}
         self.sandbox_id = sandbox_id
         self.cgroup = cgroup
         self.charge_baseline = int((cgroup/'memory.current').read_text()) if cgroup else None
@@ -602,6 +614,7 @@ class SandboxRSSSampler:
         self.charge_last = self.charge_baseline
         self.charge_samples = 0
         self.charge_error = None
+        self._charge_reader = None
         self.proc_root = proc_root
         self.interval_s = interval_s
         self._stop = Event()
@@ -622,18 +635,32 @@ class SandboxRSSSampler:
                 except (FileNotFoundError, PermissionError, ProcessLookupError):
                     continue
         self._process_paths = tuple(paths)
+        discovered = time.monotonic()
+        self.startup_timing['charge_and_process_discovery_s'] = discovered-started
         self._counter_baseline = sandbox_process_fault_counters(
             sandbox_id, self._process_paths,
         )
+        counters_read = time.monotonic()
+        self.startup_timing['fault_counter_baseline_s'] = counters_read-discovered
         self._rss_reader = ProcessRSSReader(self._process_paths, self._counter_baseline)
         self.baseline_bytes = self._rss_reader.read()
+        self.startup_timing['rss_reader_open_s'] = time.monotonic()-counters_read
 
     def start(self) -> None:
+        started = time.monotonic()
+        if self.cgroup is not None:
+            try:
+                self._charge_reader = (self.cgroup/'memory.current').open('rb', buffering=0)
+            except OSError as exc:
+                self.charge_error = str(exc)
         self._sample()
+        sampled = time.monotonic()
+        self.startup_timing['first_sample_s'] = sampled-started
         self._thread = Thread(
             target=self._run, name=f"sandbox-rss-{self.sandbox_id[:8]}", daemon=True,
         )
         self._thread.start()
+        self.startup_timing['thread_start_s'] = time.monotonic()-sampled
 
     def stop(self) -> dict[str, int | str | None]:
         self._stop.set()
@@ -643,6 +670,9 @@ class SandboxRSSSampler:
         with span('sampler.final_sample'):
             self._sample()
         self._rss_reader.close()
+        if self._charge_reader is not None:
+            self._charge_reader.close()
+            self._charge_reader = None
         with self._lock:
             samples = tuple(self._samples)
         peak = max(samples) if samples else self.baseline_bytes
@@ -682,7 +712,8 @@ class SandboxRSSSampler:
         if self.cgroup is not None:
             try:
                 with span('sampler.cgroup_read'):
-                    charge = int((self.cgroup/'memory.current').read_text())
+                    charge = int(_read_counter(self._charge_reader) if self._charge_reader is not None
+                                 else (self.cgroup/'memory.current').read_text())
                 self.charge_last = charge
                 self.charge_peak = max(self.charge_peak, charge)
                 self.charge_samples += 1

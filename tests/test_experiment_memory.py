@@ -146,6 +146,28 @@ def test_vmstat_oom_counter_and_memory_observation_are_explicit(tmp_path: Path) 
     assert summary.host_oom_kill_events == 2
 
 
+def test_light_lifecycle_observation_preserves_memory_totals(tmp_path, monkeypatch):
+    from clawbox.experiments import memory
+    group = tmp_path/'group'
+    group.mkdir()
+    (group/'memory.current').write_text('1000')
+    (group/'memory.numa_stat').write_text('active_anon N0=600 N1=300\n')
+    sampler = memory.NumaCgroupMemorySampler.__new__(memory.NumaCgroupMemorySampler)
+    sampler.cgroup = group
+    sampler.meminfo = tmp_path/'meminfo'
+    sampler.meminfo.write_text('MemTotal: 1000 kB\nMemAvailable: 400 kB\n')
+    sampler.total, sampler.baseline_used = 800, 0
+    sampler.local_numa_node, sampler.local_numa_nodes, sampler.shared_numa_node = 0, (0,), 1
+    monkeypatch.setattr(memory, 'cgroup_memory_evidence',
+                        lambda _: pytest.fail('light lifecycle observation must skip raw dumps'))
+    sample = sampler.observe(details=False)
+    assert sample['local_used_bytes'] == 700
+    assert sample['shared_live_used_bytes'] == 300
+    assert sample['combined_live_used_bytes'] == 1000
+    assert sample['host_available_bytes'] == 400*1024
+    assert 'cgroup_memory' not in sample
+
+
 def test_sandbox_rss_sampler_reports_execution_increment(tmp_path: Path) -> None:
     process = tmp_path / "123"
     process.mkdir()
@@ -217,6 +239,28 @@ def test_prepared_vm_sampling_discovers_only_its_cgroup_processes(tmp_path, monk
     monkeypatch.setattr(Path, 'iterdir', unexpected_scan)
     sampler = SandboxRSSSampler('sandbox-a', proc_root=proc, cgroup=group)
     assert sampler.stop()['host_vm_rss_baseline_bytes'] == 25*mmap.PAGESIZE
+
+
+def test_active_sampler_reads_fresh_charge_without_reopening_counter(tmp_path, monkeypatch):
+    process = tmp_path/'123'; process.mkdir()
+    (process/'cmdline').write_bytes(b'cube\0sandbox-a\0')
+    write_process_rss(process)
+    group = tmp_path/'group'; group.mkdir()
+    charge = group/'memory.current'; charge.write_text('1000')
+    (group/'cgroup.procs').write_text('123\n')
+    sampler = SandboxRSSSampler('sandbox-a', proc_root=tmp_path, cgroup=group)
+    sampler.start()
+    descriptor = sampler._charge_reader
+    charge.write_text('3000')
+    read_text = Path.read_text
+    def read(path, *args, **kwargs):
+        if path == charge:
+            pytest.fail('active sampling must use the retained counter descriptor')
+        return read_text(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read)
+    result = sampler.stop()
+    assert result['host_cgroup_execution_increment_bytes'] == 2000
+    assert descriptor.closed
 
 
 def test_rss_reader_rejects_replaced_process_and_closes_files(tmp_path):

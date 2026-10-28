@@ -13,6 +13,8 @@ import os
 import re
 import time
 from pathlib import Path
+from contextlib import ExitStack, contextmanager
+from threading import RLock
 from .admission_lock import AdmissionLock, ProgressLock
 from .control_timing import timed_lock, operation
 import uuid
@@ -182,6 +184,8 @@ class PriorityDomain:
         self.emit = emit or (lambda event: None)
         self._topology_lock = AdmissionLock()
         self._topology_progress_lock = ProgressLock(self._topology_lock)
+        self._topology_sessions = {i: RLock() for i in range(concurrency)}
+        self._cpu_sample_at = 0.0
         self._topology_stopping = False
         self._group_load: dict[str, int] = {}
         self._groups_by_pool: dict[tuple[str, int, bool], tuple[str, ...]] = {}
@@ -239,12 +243,33 @@ class PriorityDomain:
         for index, (cpus, node) in sorted(self.placements.items()):
             self.configure_topology_placement(index, cpus, node)
 
+    @contextmanager
+    def _topology_io(self):
+        """Keep same-VM ordering while releasing cross-VM accounting for I/O."""
+        owned = self._topology_lock._is_owned()
+        state = self._topology_lock._release_save() if owned else None
+        try:
+            yield
+        finally:
+            if owned:
+                self._topology_lock._acquire_restore(state)
+
+    def _record_topology_event(self, event):
+        self.topology_events.append(event)
+        with self._topology_io():
+            self.emit(event)
+
     def _sample_group_utilization(self, groups) -> dict[str, float | None]:
         from .topology import parse_cpu_list
-        try:
-            current = _cpu_times(self._proc_stat)
-        except OSError:
-            current = {}
+        with self._topology_io():
+            try:
+                current = _cpu_times(self._proc_stat)
+            except OSError:
+                current = {}
+            captured = time.monotonic()
+        if captured < self._cpu_sample_at:
+            return {group: self._latest_group_utilization.get(group) for group in groups}
+        self._cpu_sample_at = captured
         utilization = {}
         for group in groups:
             busy_delta = total_delta = 0
@@ -262,6 +287,7 @@ class PriorityDomain:
     def configure_topology_placement(self, index: int, cpus: str | None, node: int | None):
         """Record the existing NUMA placement without changing C0 CPU behavior."""
         with self._topology_lock:
+            self._topology_sessions.setdefault(index, RLock())
             existing = self.placements.get(index)
             if existing is not None and existing != (cpus, node):
                 raise RuntimeError(f'CPU placement changed for session {index}: {existing} -> {(cpus, node)}')
@@ -278,10 +304,14 @@ class PriorityDomain:
         """
         if self.topology_mode == 'c0':
             return None
+        with timed_lock(self._topology_sessions[index], 'cpu.session'):
+            return self._acquire_tool_call(index, execution_id, vcpus=vcpus)
+
+    def _acquire_tool_call(self, index: int, execution_id: str, *, vcpus: int):
         if execution_id in self._call_keys:
             raise RuntimeError(f'duplicate Tool-call CPU assignment: {execution_id}')
         key = index, 'tool'
-        with self._topology_lock:
+        with timed_lock(self._topology_lock, 'cpu.registry'):
             if self._topology_stopping:
                 raise RuntimeError('Tool-call CPU placement is stopping for VM teardown')
             active = self._active_calls.get(key)
@@ -298,7 +328,7 @@ class PriorityDomain:
                     'selected_cpus': self._fine_masks.get(key),
                     'active_calls': len(active), 'mode': self.topology_mode,
                 }
-                self.topology_events.append(event); self.emit(event)
+                self._record_topology_event(event)
                 return event
             if self.topology_min_duration_seconds > 0:
                 self._active_calls[key] = {execution_id}
@@ -315,7 +345,7 @@ class PriorityDomain:
                     'minimum_duration_seconds': self.topology_min_duration_seconds,
                     'release_required': True, 'mode': self.topology_mode,
                 }
-                self.topology_events.append(event); self.emit(event)
+                self._record_topology_event(event)
                 return event
             return self._assign_tool_call(index, execution_id, vcpus=vcpus)
 
@@ -363,7 +393,7 @@ class PriorityDomain:
                 'release_required': False,
                 'mode': self.topology_mode,
             }
-            self.topology_events.append(event); self.emit(event)
+            self._record_topology_event(event)
             return event
         preferred = self._preferred_groups.get(key)
         group = min(available, key=lambda item: (
@@ -372,6 +402,9 @@ class PriorityDomain:
             measured_load.get(item) is None,
             measured_load.get(item) or 0., item,
         ))
+        # Reserve group capacity atomically before releasing the registry for
+        # affinity I/O. Other VMs can choose groups without overcommitting it.
+        self._group_load[group] = self._group_load.get(group, 0) + 1
         # Do not publish assignment ownership until every extant vCPU
         # thread has accepted and verified the narrow mask.  A failed
         # multi-thread update may already have changed earlier threads, so
@@ -383,8 +416,8 @@ class PriorityDomain:
                 self._apply_thread_affinity(index, 'tool', cpus, strict=False)
             except BaseException:
                 pass
+            self._group_load[group] -= 1
             raise
-        self._group_load[group] = self._group_load.get(group, 0) + 1
         self._preferred_groups[key] = group
         self._full_masks[key] = cpus
         self._fine_masks[key] = group
@@ -393,9 +426,9 @@ class PriorityDomain:
         self._expanded.discard(key)
         self._pressure_streak.pop(key, None)
         try:
-            self._pressure_previous[key] = (
-                time.monotonic(), _pressure_total(self.leaves[key]/'cpu.pressure')
-            )
+            with self._topology_io():
+                initial_pressure = _pressure_total(self.leaves[key]/'cpu.pressure')
+            self._pressure_previous[key] = time.monotonic(), initial_pressure
         except (OSError, RuntimeError, ValueError):
             self._pressure_previous.pop(key, None)
         self._total_call_assignments += 1
@@ -412,7 +445,7 @@ class PriorityDomain:
             'preferred_group_reused': group == preferred,
             'threads': applied, 'mode': self.topology_mode,
         }
-        self.topology_events.append(event); self.emit(event)
+        self._record_topology_event(event)
         return event
 
     def active_tool_call_ids(self) -> tuple[str, ...]:
@@ -423,6 +456,16 @@ class PriorityDomain:
         """Quiesce C2 before destroying VMs, retaining explicit cancellation evidence."""
         with self._topology_lock:
             self._topology_stopping = True
+            session_locks = tuple(self._topology_sessions.values())
+        # Existing same-VM operations may be outside the registry doing I/O.
+        # Drain them before clearing ownership and before the caller destroys VMs.
+        with ExitStack() as guards:
+            for lock in session_locks:
+                guards.enter_context(lock)
+            self._finish_topology_teardown(cancel_calls)
+
+    def _finish_topology_teardown(self, cancel_calls):
+        with self._topology_lock:
             if cancel_calls and self._call_keys:
                 event = {
                     'event': 'tool_call_cpu_placement', 'action': 'cancel_for_teardown',
@@ -444,6 +487,17 @@ class PriorityDomain:
     def release_tool_call(self, execution_id: str) -> dict | None:
         if self.topology_mode == 'c0':
             return None
+        # Lookup only selects a stable session lock. Ownership is rechecked
+        # under that lock and the registry before changing any assignment.
+        key = self._call_keys.get(execution_id)
+        if key is None:
+            if self._topology_stopping:
+                return None
+            raise RuntimeError(f'no Tool-call CPU assignment for completion: {execution_id}')
+        with timed_lock(self._topology_sessions[key[0]], 'cpu.session'):
+            return self._release_tool_call(execution_id)
+
+    def _release_tool_call(self, execution_id):
         with timed_lock(self._topology_progress_lock, 'cpu.placement'):
             key = self._call_keys.get(execution_id)
             if key is None:
@@ -464,7 +518,7 @@ class PriorityDomain:
                     'selected_cpus': self._fine_masks.get(key),
                     'active_calls': len(active), 'mode': self.topology_mode,
                 }
-                self.topology_events.append(event); self.emit(event)
+                self._record_topology_event(event)
                 return event
             if key not in self._fine_masks:
                 pending = key in self._pending_started
@@ -485,7 +539,7 @@ class PriorityDomain:
                     'capacity_bypassed': capacity_bypassed,
                     'mode': self.topology_mode,
                 }
-                self.topology_events.append(event); self.emit(event)
+                self._record_topology_event(event)
                 return event
             applied = self._apply_thread_affinity(key[0], 'tool', self._full_masks[key])
             active.remove(execution_id)
@@ -502,11 +556,15 @@ class PriorityDomain:
                 'from_cpus': fine, 'to_cpus': self._full_masks.pop(key),
                 'threads': applied, 'mode': self.topology_mode,
             }
-            self.topology_events.append(event); self.emit(event)
+            self._record_topology_event(event)
             return event
 
     @operation('cpu.affinity')
     def _apply_thread_affinity(self, index: int, role: str, cpus: str, *, strict: bool = True) -> list[dict]:
+        with self._topology_io():
+            return self._apply_thread_affinity_io(index, role, cpus, strict=strict)
+
+    def _apply_thread_affinity_io(self, index, role, cpus, *, strict):
         from .topology import parse_cpu_list
         leaf = self.leaves[index, role]
         requested = parse_cpu_list(cpus)
@@ -559,17 +617,16 @@ class PriorityDomain:
         # One VM per lock handoff: completions must not queue behind a scan
         # and affinity updates for every active VM in the experiment.
         for key, started in pending:
-            with timed_lock(self._topology_lock, 'cpu.poll_vm'):
+            with timed_lock(self._topology_sessions[key[0]], 'cpu.session'), \
+                    timed_lock(self._topology_lock, 'cpu.poll_vm'):
                 if self._topology_stopping:
                     return changes
                 if self._pending_started.get(key) != started:
                     continue
                 if now-started < self.topology_min_duration_seconds:
                     continue
-                active = self._active_calls.pop(key)
+                active = self._active_calls[key]
                 primary = min(active)
-                for execution_id in active:
-                    self._call_keys.pop(execution_id, None)
                 vcpus = self._pending_vcpus.pop(key)
                 self._pending_started.pop(key, None)
                 event = self._assign_tool_call(key[0], primary, vcpus=vcpus)
@@ -588,7 +645,7 @@ class PriorityDomain:
                 return changes
             measured_load = self._sample_group_utilization(sorted(self._candidate_groups))
             if measured_load:
-                self.emit({
+                self._record_topology_event({
                     'event': 'topology_cpu_group_load',
                     'mode': self.topology_mode,
                     'candidate_group_cpu_utilization': measured_load,
@@ -596,7 +653,8 @@ class PriorityDomain:
             assigned = tuple((key, fine, self._active_calls.get(key))
                              for key, fine in self._fine_masks.items())
         for key, fine, active in assigned:
-            with timed_lock(self._topology_lock, 'cpu.poll_vm'):
+            with timed_lock(self._topology_sessions[key[0]], 'cpu.session'), \
+                    timed_lock(self._topology_lock, 'cpu.poll_vm'):
                 if self._topology_stopping:
                     return changes
                 if (self._active_calls.get(key) is not active
@@ -607,13 +665,15 @@ class PriorityDomain:
                 index, role = key
                 leaf = self.leaves.get(key)
                 try:
-                    populated = leaf is not None and bool((leaf/'cgroup.procs').read_text().strip())
+                    with self._topology_io():
+                        populated = leaf is not None and bool((leaf/'cgroup.procs').read_text().strip())
                 except FileNotFoundError:
                     continue
                 if not populated:
                     continue
                 try:
-                    total = _pressure_total(leaf/'cpu.pressure')
+                    with self._topology_io():
+                        total = _pressure_total(leaf/'cpu.pressure')
                 except (OSError, RuntimeError, ValueError) as exc:
                     applied = self._apply_thread_affinity(
                         index, role, self._full_masks[key], strict=False,
@@ -629,7 +689,7 @@ class PriorityDomain:
                         'selected_group_cpu_utilization': measured_load.get(fine),
                         'threads': applied,
                     }
-                    self.topology_events.append(event); self.emit(event); changes.append(event)
+                    self._record_topology_event(event); changes.append(event)
                     self._total_expansions += 1
                     continue
                 previous = self._pressure_previous.get(key)
@@ -655,7 +715,7 @@ class PriorityDomain:
                     'threshold': self.topology_pressure_ratio, 'threads': applied,
                     'selected_group_cpu_utilization': measured_load.get(fine),
                 }
-                self.topology_events.append(event); self.emit(event); changes.append(event)
+                self._record_topology_event(event); changes.append(event)
                 self._total_expansions += 1
         return changes
 

@@ -6,6 +6,7 @@ start cannot resurrect an execution. No replay oracle is consumed here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
 from threading import Event, RLock, Thread
@@ -76,6 +77,11 @@ class PressureControl:
         self.interval = interval
         self.emit = emit
         self.lock = RLock()
+        # Registry/history only. Never wait for a session or do cgroup I/O
+        # while holding this lock. Stable session locks also serialize both
+        # roles across generation changes and late model/tool callbacks.
+        self.session_locks = {}
+        self.history_lock = RLock()
         self.vms = {}
         self.domains = {}
         self.stop_event = Event()
@@ -99,6 +105,34 @@ class PressureControl:
         self.release_history = {}
         self.parent_previous = None
 
+    @contextmanager
+    def _session_state(self, session):
+        # Entries are never removed or replaced during an arm. Existing
+        # sessions need only their own stable lock, including the poller.
+        lock = self.session_locks.get(session)
+        if lock is None:
+            with timed_lock(self.lock, 'pressure.state'):
+                lock = self.session_locks.setdefault(session, RLock())
+        with timed_lock(lock, 'pressure.session'):
+            yield
+
+    def _snapshot(self):
+        with timed_lock(self.lock, 'pressure.state'):
+            return tuple(self.vms.values()), dict(self.domains)
+
+    def _restore_all(self, error=None):
+        vms, _ = self._snapshot()
+        for vm in vms:
+            with self._session_state(vm.session):
+                if self.vms.get((vm.session, vm.role)) is not vm:
+                    continue
+                try:
+                    self._restore(vm)
+                except Exception as exc:
+                    if error is None:
+                        raise
+                    error.add_note(str(exc))
+
     def _psi(self, group, resource):
         path = group / f'{resource}.pressure'
         value = psi(path)
@@ -112,16 +146,17 @@ class PressureControl:
         return value
 
     def execution_ready(self, session, execution, command_key):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             self.execution_records[session, execution] = {'key': command_key}
         self.event(session, 'ready', execution)
 
     def execution_admitted(self, session, execution, baseline_bytes):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             self.execution_records[session, execution]['baseline_bytes'] = baseline_bytes
 
     def execution_complete(self, session, execution, observation, duration, success):
-        with timed_lock(self.lock, 'pressure.state'):
+        event = None
+        with self._session_state(session):
             record = self.execution_records.pop((session, execution), {})
             values = [observation.get('host_cgroup_' + name + '_bytes')
                       for name in ('baseline', 'peak', 'final')]
@@ -130,16 +165,19 @@ class PressureControl:
                     and math.isfinite(duration) and duration > 0):
                 baseline, peak, final = values
                 released = max(0, min(peak - baseline, peak - final))
-                history = self.release_history.setdefault(record['key'], [])
-                history.append((duration, released))
-                del history[:-8]
-                self.emit({'event': 'pressure_execution_release', 'session_id': session,
-                           'execution_id': execution, 'transient_released_bytes': released,
-                           'duration_seconds': duration})
+                with timed_lock(self.history_lock, 'pressure.history'):
+                    history = self.release_history.setdefault(record['key'], [])
+                    history.append((duration, released))
+                    del history[:-8]
+                event = {'event': 'pressure_execution_release', 'session_id': session,
+                         'execution_id': execution, 'transient_released_bytes': released,
+                         'duration_seconds': duration}
+        if event is not None:
+            self.emit(event)
         self.event(session, 'complete', execution)
 
     def register(self, session, role, group, node, coordinator):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             previous = self.vms.get((session, role))
             if previous is not None:
                 self._restore(previous)
@@ -157,11 +195,12 @@ class PressureControl:
                 previous.saved = vm.saved
                 previous.previous.clear()
                 vm = previous
-            self.vms[session, role] = vm
-            self.domains[session] = coordinator
+            with timed_lock(self.lock, 'pressure.state'):
+                self.vms[session, role] = vm
+                self.domains[session] = coordinator
 
     def generation(self, session, role, sandbox):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             vm = self.vms[session, role]
             self._restore(vm)
             vm.generation += 1
@@ -170,18 +209,19 @@ class PressureControl:
             vm.cooldown_until = time.monotonic() + self.options.cooldown_seconds
             vm.refresh()
             vm.latest_event = 'vmm_verified'
-            self.emit({'event': 'pressure_vm_generation', 'session_id': session,
-                       'role': role, 'generation': vm.generation, 'sandbox_id': sandbox,
-                       'cgroup': str(vm.group), 'node': vm.node})
+            event = {'event': 'pressure_vm_generation', 'session_id': session,
+                     'role': role, 'generation': vm.generation, 'sandbox_id': sandbox,
+                     'cgroup': str(vm.group), 'node': vm.node}
+        self.emit(event)
 
     def transition(self, session, role):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             vm = self.vms[session, role]
             self._restore(vm)
             vm.phase = Phase.TRANSITION
 
     def event(self, session, kind, identifier):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             for role in ('runtime', 'tool'):
                 vm = self.vms.get((session, role))
                 if vm is None:
@@ -198,7 +238,8 @@ class PressureControl:
                         vm.pending.discard(identifier)
                         vm.active.add(identifier)
                         record = self.execution_records.get((session, identifier), {})
-                        history = self.release_history.get(record.get('key'), [])
+                        with timed_lock(self.history_lock, 'pressure.history'):
+                            history = tuple(self.release_history.get(record.get('key'), ()))
                         if len(history) >= self.options.release_history_samples:
                             durations = [row[0] for row in history]
                             release = min(row[1] for row in history)
@@ -224,12 +265,14 @@ class PressureControl:
                     self._restore(vm)
 
     def unregister(self, session):
-        with timed_lock(self.lock, 'pressure.state'):
+        with self._session_state(session):
             for role in ('runtime', 'tool'):
-                vm = self.vms.pop((session, role), None)
+                with timed_lock(self.lock, 'pressure.state'):
+                    vm = self.vms.pop((session, role), None)
                 if vm:
                     self._restore(vm)
-            self.domains.pop(session, None)
+            with timed_lock(self.lock, 'pressure.state'):
+                self.domains.pop(session, None)
 
     def _restore(self, vm):
         if vm.action_since is not None:
@@ -275,16 +318,18 @@ class PressureControl:
             and began > previous[0] and parent_sample[2] > previous[2]
             and (parent_sample[1] - previous[1]) / ((began - previous[0]) * 1e6) >= self.options.psi_ratio)
         # Never hold our lock while acquiring the admission lock.
-        with timed_lock(self.lock, 'pressure.state'):
-            domains = dict(self.domains)
-        feedback = {coordinator: coordinator.resource_feedback()
-                    for coordinator in set(domains.values())}
         lock_requested_ns = time.monotonic_ns()
         with timed_lock(self.lock, 'pressure.state'):
             lock_acquired_ns = time.monotonic_ns()
-            protection_left = int(self.options.protection_budget_mib * MIB)
-            boosts_left = self.options.max_boosted_vms
-            def score(vm):
+            vms = tuple(self.vms.values())
+            domains = dict(self.domains)
+            lock_finished_ns = time.monotonic_ns()
+        feedback = {coordinator: coordinator.resource_feedback()
+                    for coordinator in set(domains.values())}
+        protection_left = int(self.options.protection_budget_mib * MIB)
+        boosts_left = self.options.max_boosted_vms
+        def score(vm):
+            with self._session_state(vm.session):
                 forecasts = [self.release_forecasts.get((vm.session, eid), {}) for eid in vm.active]
                 # A late execution is not evidence of imminent completion. Bound
                 # its score by one action window instead of the TTL deadline.
@@ -293,7 +338,14 @@ class PressureControl:
                                 f['expected_complete_at'] - began + f.get('release_overhead_seconds', 0))
                             for f in forecasts if f.get('expires_at', 0) > began
                             and f.get('generation') == vm.generation), default=0)
-            for vm in sorted(self.vms.values(), key=score, reverse=True):
+        for vm in sorted(vms, key=score, reverse=True):
+            actions = []
+            with self._session_state(vm.session):
+                # unregister/restore may have replaced the leaf since the
+                # registry snapshot. The session lock protects generation and
+                # all cgroup accesses until this leaf's action is finished.
+                if self.vms.get((vm.session, vm.role)) is not vm:
+                    continue
                 domain = domains.get(vm.session)
                 signal = feedback.get(domain, {})
                 blocked = signal.get('memory_blocked', False)
@@ -324,8 +376,8 @@ class PressureControl:
                 weight = 100
                 if (blocked and boosts_left and sample['cpu_contended']
                         and vm.node is not None
-                        and (vm.group / 'cpuset.mems.effective').read_text().strip() == str(vm.node)
-                        and self.cpu_release_boost):
+                        and self.cpu_release_boost
+                        and (vm.group / 'cpuset.mems.effective').read_text().strip() == str(vm.node)):
                     forecasts = [self.release_forecasts.get((vm.session, eid), {}) for eid in vm.active]
                     valid = [f for f in forecasts if f.get('generation') == vm.generation
                              and f.get('expires_at', 0) > began
@@ -343,21 +395,23 @@ class PressureControl:
                         vm.modified.add(name)
                         path.write_text(value)
                         self.stats[metric] += int(value not in ('0', '100'))
-                        self.emit({'event': 'pressure_control_action', 'session_id': vm.session,
-                                   'generation': vm.generation, 'control': name, 'value': value,
-                                   'phase': vm.phase.value, 'feedback': signal, 'sample': sample})
+                        actions.append({'event': 'pressure_control_action', 'session_id': vm.session,
+                                        'generation': vm.generation, 'control': name, 'value': value,
+                                        'phase': vm.phase.value, 'feedback': signal, 'sample': sample})
                 if low or weight != 100:
                     vm.action_since = vm.action_since or began
                 else:
                     if vm.action_since is not None:
                         vm.cooldown_until = began + self.options.cooldown_seconds
                     vm.action_since = None
-            self.stats['polls'] += 1
-            self.stats['poll_seconds'] += time.monotonic() - began
-            lock_finished_ns = time.monotonic_ns()
+            for action in actions:
+                self.emit(action)
+        self.stats['polls'] += 1
+        self.stats['poll_seconds'] += time.monotonic() - began
         self.emit({'event': 'pressure_poll_timing', 'start_ns': int(began * 1e9),
                    'lock_requested_ns': lock_requested_ns,
-                   'lock_acquired_ns': lock_acquired_ns, 'lock_finished_ns': lock_finished_ns})
+                   'lock_acquired_ns': lock_acquired_ns, 'lock_finished_ns': lock_finished_ns,
+                   'completed_ns': time.monotonic_ns(), 'vm_count': len(vms)})
 
     def check(self):
         if self.error:
@@ -380,12 +434,7 @@ class PressureControl:
                     self.poll()
             except Exception as exc:
                 self.error = exc
-                with timed_lock(self.lock, 'pressure.state'):
-                    for vm in self.vms.values():
-                        try:
-                            self._restore(vm)
-                        except Exception as restore_error:
-                            exc.add_note(str(restore_error))
+                self._restore_all(exc)
         self.thread = Thread(target=run, name='pressure-progress', daemon=True)
         self.thread.start()
 
@@ -395,9 +444,7 @@ class PressureControl:
             self.thread.join(timeout=5)
             if self.thread.is_alive():
                 raise RuntimeError('pressure controller did not stop')
-        with timed_lock(self.lock, 'pressure.state'):
-            for vm in self.vms.values():
-                self._restore(vm)
+        self._restore_all()
         self.emit({'event': 'runtime_memory_stopped', **self.provenance, **self.stats})
         if self.error:
             raise RuntimeError('pressure controller failed') from self.error

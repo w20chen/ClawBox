@@ -384,6 +384,74 @@ def test_c2_failed_affinity_restores_c0_without_publishing_assignment(monkeypatc
     assert domain.active_tool_call_ids() == ()
     assert domain.topology_summary()['assignments'] == 0
     assert events == []
+    assert sum(domain._group_load.values()) == 0
+
+
+def test_slow_affinity_is_per_vm_and_reserves_group_capacity(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    domain, leaf, _, _ = c2_domain(monkeypatch, tmp_path)
+    domain.topology_group_max_active = 1
+    for index in (1, 2):
+        domain.configure_topology_placement(index, '0-15', 0)
+        domain.leaves[index, 'tool'] = leaf
+    entered, resume = Event(), Event()
+
+    def affinity(index, role, cpus, *, strict):
+        if index == 0 and cpus != '0-15':
+            entered.set()
+            assert resume.wait(3)
+        return [{'tid': 100 + index, 'cpus_allowed': cpus}]
+
+    monkeypatch.setattr(domain, '_apply_thread_affinity',
+                        PriorityDomain._apply_thread_affinity.__get__(domain))
+    monkeypatch.setattr(domain, '_apply_thread_affinity_io', affinity)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(domain.acquire_tool_call, 0, 'first', vcpus=2)
+        try:
+            assert entered.wait(1)
+            other = pool.submit(domain.acquire_tool_call, 1, 'other', vcpus=2).result(timeout=1)
+            assert other['selected_cpus'] == '0,2,4,6'
+            bypass = pool.submit(domain.acquire_tool_call, 2, 'full', vcpus=2).result(timeout=1)
+            assert bypass['action'] == 'bypass_full_numa'
+            pool.submit(domain.release_tool_call, 'other').result(timeout=1)
+            pool.submit(domain.configure_topology_placement, 3, '0-15', 0).result(timeout=1)
+        finally:
+            resume.set()
+        first.result(timeout=2)
+    domain.release_tool_call('first')
+    assert sum(domain._group_load.values()) == 0
+    assert domain.active_tool_call_ids() == ()
+
+
+def test_teardown_drains_inflight_affinity_before_clearing_ownership(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    domain, _, _, _ = c2_domain(monkeypatch, tmp_path)
+    entered, resume, stopping = Event(), Event(), Event()
+    def affinity(index, role, cpus, *, strict):
+        entered.set()
+        assert resume.wait(3)
+        return [{'tid': 100, 'cpus_allowed': cpus}]
+    monkeypatch.setattr(domain, '_apply_thread_affinity',
+                        PriorityDomain._apply_thread_affinity.__get__(domain))
+    monkeypatch.setattr(domain, '_apply_thread_affinity_io', affinity)
+    def teardown():
+        stopping.set()
+        domain.begin_teardown(cancel_calls=True)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(domain.acquire_tool_call, 0, 'first', vcpus=2)
+        try:
+            assert entered.wait(1)
+            cleanup = pool.submit(teardown)
+            assert stopping.wait(1)
+            assert not cleanup.done()
+        finally:
+            resume.set()
+        first.result(timeout=2)
+        cleanup.result(timeout=2)
+    assert domain.active_tool_call_ids() == ()
+    assert not domain._group_load
 
 
 @pytest.mark.parametrize("disappeared", [FileNotFoundError, ProcessLookupError])

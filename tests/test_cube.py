@@ -1289,7 +1289,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     def fake_run_openclaw(*, prompt, session_id, configuration, ssh,
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
-                          resident_poll=None, checkpoint_relay=False,
+                          resident_poll=None, checkpoint_relay=False, diagnostic_artifacts=False,
                           resident_file_nonempty=None,
                           startup_begin=None, startup_wait=None, startup_event=None,
                           cancelled=None):
@@ -1421,6 +1421,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                        "local_memory_cgroup": str(cg),
                        "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 1,
                        "static_tool_memory_mib": 1,
+                       "small_tool_admission_bypass_mib": 0,
                        "cold_snapshot_root": str(tmp_path / "cold")},
         "policies": [{"name": "snapshot", "admission": "fixed",
                       "runtime_control": "off",

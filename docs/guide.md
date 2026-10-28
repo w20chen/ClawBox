@@ -294,10 +294,17 @@ To run only the discounted arms, remove `resident-capacity-1` from the generated
 created at once (default `8`; unit: session pairs). The two VMs in each admitted
 pair start concurrently, so maximum Cube create-request concurrency is twice this
 value. Create requests also share the Cube lifecycle-operation budget described
-below. This field does not limit tool calls.
+below. Resource placement/preparation has a separate stage of the same size:
+memory waiting does not occupy a create slot, and at most this many prepared
+reservations can wait for creation. This field does not limit tool calls.
 Set it no higher than the largest `execution.concurrency_levels` value. Changing
 it requires validation and a new run ID, but not host apply, image rebuild,
 qualification, or ClawTune retraining.
+
+Keep `execution.control_timing_details: false` (the default) for throughput
+runs. Enable it only when nested control traces and per-operation raw cgroup
+diagnostics are needed; see the timing reference below. Each setting change
+requires a new run ID, without host apply, image rebuild, or retraining.
 
 `mechanisms.checkpoint.pool_transfer_concurrency` is the shared Cube lifecycle
 operation budget (default `1`; unit: concurrent VM operations). Create,
@@ -879,8 +886,24 @@ Failed attempts retain their stage error types in lifecycle timing records.
 For per-tool delays, `tool_admitted.memory_baseline_timing` distinguishes
 admission-lock waits from the kernel memory sample and reports calling-thread
 CPU time alongside wall time.
-`tool_completion_timing`, `tool_admission_timing`, and `tool_progress_timing` join by session and execution
-ID. Their `spans` use host-monotonic `start_ns`/`end_ns` and calling-thread
+`tool_completion_timing`, `tool_admission_timing`, and `tool_progress_timing` join
+by session and execution ID. Normal runs retain `duration_seconds`,
+`thread_cpu_seconds`, and `resource_queue_wait_seconds`; admission also retains
+`preparation_seconds` and `preparation_resource_queue_wait_seconds`. Queue-wait
+totals exclude measured accounting-lock reacquisition, which is implementation
+overhead. If `dropped_spans` is nonzero, the wait total is incomplete.
+`queue_wait_seconds_by_reason` separates direct capacity blocks from FIFO,
+same-execution, CPU-capacity, and eviction waits. A FIFO predecessor or an
+eviction wait alone does not establish a memory shortage; retain it separately
+when attributing implementation overhead.
+`execution.control_timing_details` defaults to `false`. Set it to `true` only
+for diagnosis: it adds nested spans, GC intervals, raw per-lifecycle cgroup
+dumps, Runtime working knowledge-base copies, and duplicate model/prediction
+payloads in session measurement events.
+Normal runs retain lifecycle memory totals, periodic cgroup evidence, and full
+records in session results. Changing it requires a new run ID, but no host apply,
+image rebuild, or retraining. Essential task evidence and validation stay on.
+With detailed timing enabled, `spans` use host-monotonic `start_ns`/`end_ns` and calling-thread
 `thread_cpu_ns`, all in nanoseconds. Completion spans separate sampler join,
 final sampling, reservation release, lifecycle work, and pressure-control lock
 wait/hold. Parent spans contain their children; do not add nested durations.
@@ -889,8 +912,7 @@ temporarily releases the lock, so the interval is not exclusive ownership time.
 `gc_intervals` identifies overlapping Python collections using the same clock;
 these intervals can overlap several threads and must not be added to their spans.
 `pressure_poll_timing` records the polling lock interval for correlation with
-blocked callbacks. These events are always recorded, including failed callbacks;
-no option or host apply is required.
+blocked callbacks. Lightweight timing events also retain failed callbacks.
 Each `memory_sample.policy_event_executor` snapshot reports submitted pressure
 notifications, notifications folded into existing work, executed pressure scans,
 active scan keys, and failures. Model-wait notifications use one running scan

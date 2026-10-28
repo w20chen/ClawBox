@@ -160,6 +160,7 @@ WorkloadCase.model_rebuild()
 
 
 class ExecutionSpec(StrictFrozenModel):
+    control_timing_details: bool = False
     placement_policy: Literal["os_default", "round_robin", "load_aware", "explicit"] = "round_robin"
     placement_cpu_overcommit: float = Field(default=1024.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)

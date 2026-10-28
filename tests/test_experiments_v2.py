@@ -731,7 +731,16 @@ def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) ->
     tracker = ArmActivityTracker(2)
     writer = EventWriter(tmp_path / "events.jsonl", activity_tracker=tracker)
     session = "arm-0000"
+    writer.write({"event": "session_dispatched", "session_id": session})
+    writer.write({"event": "sandbox_prepare_gate_wait_started", "session_id": session})
+    assert tracker.snapshot()['vm_prepare_waiting_sessions'] == 1
+    assert tracker.snapshot()['offered_sessions'] == 1
+    writer.write({"event": "sandbox_prepare_gate_acquired", "session_id": session})
+    assert tracker.snapshot()['vm_prepare_waiting_sessions'] == 0
+    assert tracker.snapshot()['vm_preparing_sessions'] == 1
     writer.write({"event": "sandbox_create_gate_wait_started", "session_id": session})
+    writer.write({"event": "sandbox_prepare_gate_released", "session_id": session})
+    assert tracker.snapshot()['vm_preparing_sessions'] == 0
     writer.write({"event": "sandbox_create_gate_acquired", "session_id": session})
     writer.write({"event": "sandbox_created", "session_id": session, "role": "tool"})
     assert tracker.snapshot()["vm_creating_sessions"] == 1
@@ -787,6 +796,69 @@ def test_event_writer_buffers_concurrent_rows_without_reordering(tmp_path: Path)
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 4096
     assert [row["sequence_no"] for row in rows] == list(range(4096))
+    assert {row['value'] for row in rows} == set(range(4096))
+
+
+def test_event_publication_does_not_wait_for_activity_snapshot(tmp_path: Path) -> None:
+    tracker = ArmActivityTracker(1)
+    writer = EventWriter(tmp_path/'events.jsonl', activity_tracker=tracker)
+    try:
+        with tracker.lock, ThreadPoolExecutor(1) as pool:
+            pool.submit(writer.write, {
+                'event':'session_dispatched', 'session_id':'s',
+            }).result(timeout=1)
+        assert tracker.snapshot()['offered_sessions'] == 1
+    finally:
+        writer.close()
+
+
+def test_event_writer_disk_wait_does_not_hold_producer_lock(tmp_path: Path) -> None:
+    from threading import Event
+    writer = EventWriter(tmp_path/'events.jsonl')
+    writer._FLUSH_EVENT_COUNT = 1
+    stream = writer.stream
+    entered, resume = Event(), Event()
+    class SlowStream:
+        def write(self, value):
+            entered.set()
+            assert resume.wait(3)
+            return stream.write(value)
+        def flush(self):
+            return stream.flush()
+        def close(self):
+            return stream.close()
+    writer.stream = SlowStream()
+    try:
+        writer.write({'event': 'first'})
+        assert entered.wait(1)
+        with ThreadPoolExecutor(1) as pool:
+            pool.submit(writer.write, {'event': 'second'}).result(timeout=1)
+    finally:
+        resume.set()
+        writer.close()
+    rows = [json.loads(line) for line in writer.path.read_text().splitlines()]
+    assert [r['event'] for r in rows] == ['first','second']
+    assert [r['sequence_no'] for r in rows] == [0,1]
+
+
+def test_event_writer_flush_reports_background_write_failure(tmp_path: Path) -> None:
+    writer = EventWriter(tmp_path/'events.jsonl')
+    original = writer.stream
+    class FailedStream:
+        def write(self, value):
+            raise OSError('disk full')
+        def flush(self):
+            return original.flush()
+        def close(self):
+            return original.close()
+    writer.stream = FailedStream()
+    writer.write({'event': 'first'})
+    with pytest.raises(RuntimeError, match='event log write failed'):
+        writer.flush()
+    with pytest.raises(RuntimeError, match='event log write failed'):
+        writer.write({'event': 'second'})
+    with pytest.raises(RuntimeError, match='event log write failed'):
+        writer.close()
 
 
 def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:

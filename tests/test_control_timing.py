@@ -98,3 +98,39 @@ def test_bounded_trace_retains_root_and_reports_missing_spans():
     assert len(events[0]['spans']) == 8192
     assert events[0]['dropped_spans'] == 9
     assert events[0]['spans'][-1]['stage'] == 'callback'
+
+
+def test_light_timing_retains_resource_wait_without_gc_or_detail_payload():
+    import gc
+    from clawbox.experiments.control_timing import monitor_gc, timing_details, trace_scope
+    before = list(gc.callbacks)
+    events = []
+    with timing_details(False), monitor_gc():
+        assert gc.callbacks == before
+        with trace_scope('admission', events.append, 's'):
+            with span('prepare.total'):
+                with span('admission.condition_wait'):
+                    with span('admission.condition.reacquire'):
+                        with span('admission.lock.acquire'):
+                            pass
+                for _ in range(8200):
+                    with span('unneeded_detail'):
+                        pass
+    event = events[0]
+    assert 'spans' not in event and 'gc_intervals' not in event
+    assert event['dropped_spans'] == 0
+    assert 0 <= event['preparation_resource_queue_wait_seconds'] <= event['preparation_seconds']
+    assert event['preparation_seconds'] <= event['duration_seconds']
+
+
+def test_light_resource_wait_excludes_nested_lock_reacquisition_once():
+    from clawbox.experiments.control_timing import _resource_wait_seconds
+    records = [dict(stage=stage,start_ns=a,end_ns=b) for stage,a,b in (
+        ('admission.condition_wait',0,100),
+        ('admission.condition.reacquire',70,100),
+        ('admission.lock.acquire',75,95),
+        ('admission.condition_wait',110,200),
+        ('admission.lock.acquire',180,190),
+    )]
+    assert _resource_wait_seconds(records,0,200) == pytest.approx(150/1e9)
+    assert _resource_wait_seconds(records,50,150) == pytest.approx(60/1e9)

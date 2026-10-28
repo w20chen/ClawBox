@@ -8,11 +8,30 @@ import time
 
 _state = local()
 _gc_intervals = deque(maxlen=512)
+_details_enabled = True
+_WAITS = {'admission.condition_wait', 'admission.eviction_wait', 'placement.cpu_capacity_wait'}
+_LOCK_WAITS = {'admission.lock.acquire', 'admission.condition.reacquire',
+               'admission.lifecycle_reacquire'}
+_LIGHT_STAGES = _WAITS | _LOCK_WAITS | {'callback', 'prepare.total'}
+
+
+@contextmanager
+def timing_details(enabled):
+    """One worker process owns this setting, including its callback threads."""
+    global _details_enabled
+    previous, _details_enabled = _details_enabled, enabled
+    try:
+        yield
+    finally:
+        _details_enabled = previous
 
 
 @contextmanager
 def monitor_gc():
     """Record runtime pauses without tracing, logging, or locks inside GC."""
+    if not _details_enabled:
+        yield
+        return
     started = {}
 
     def record(phase, info):
@@ -37,7 +56,7 @@ def monitor_gc():
 @contextmanager
 def span(name, **attributes):
     records = getattr(_state, 'records', None)
-    if records is None:
+    if records is None or (not records.detailed and name not in _LIGHT_STAGES):
         yield attributes
         return
     started = time.monotonic_ns()
@@ -57,11 +76,40 @@ class _Records(deque):
     def __init__(self):
         super().__init__(maxlen=8192)
         self.dropped = 0
+        self.detailed = _details_enabled
 
     def append(self, item):
         if len(self) == self.maxlen:
             self.dropped += 1
         super().append(item)
+
+
+def _merged_intervals(intervals):
+    merged = []
+    for a, b in sorted(intervals):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a,b])
+    return merged
+
+
+def _resource_wait_seconds(records, start, end):
+    waits = _merged_intervals([(max(start,s['start_ns']), min(end,s['end_ns'])) for s in records
+             if s['stage'] in _WAITS and s['end_ns']>start and s['start_ns']<end])
+    locks = _merged_intervals([(s['start_ns'],s['end_ns']) for s in records if s['stage'] in _LOCK_WAITS])
+    i = j = overlap = 0
+    while i < len(waits) and j < len(locks):
+        a,b = waits[i]
+        c,d = locks[j]
+        overlap += max(0,min(b,d)-max(a,c))
+        if b <= d:
+            i += 1
+        else:
+            j += 1
+    # Reacquiring an accounting lock is implementation overhead, even when
+    # it occurs inside Condition.wait(). Nested lock spans count only once.
+    return (sum(b-a for a,b in waits)-overlap)/1e9
 
 
 @contextmanager
@@ -91,12 +139,37 @@ def trace_scope(event, emit, session_id, **identity):
     finally:
         _state.records = previous
         root_span = records[-1]
-        pauses = [s for s in tuple(_gc_intervals)
-                  if s['end_ns'] >= root_span['start_ns']
-                  and s['start_ns'] <= root_span['end_ns']]
+        summary = {
+            'duration_seconds': (root_span['end_ns']-root_span['start_ns'])/1e9,
+            'thread_cpu_seconds': root_span['thread_cpu_ns']/1e9,
+            'resource_queue_wait_seconds': _resource_wait_seconds(
+                records, root_span['start_ns'], root_span['end_ns']),
+        }
+        # Queueing behind another admission or an ongoing eviction is not
+        # proof of a memory shortage. Retain that distinction without full spans.
+        wait_groups = {}
+        for record in records:
+            if record['stage'] not in _WAITS:
+                continue
+            reason = '+'.join(sorted(record.get('reasons', ()))) or record['stage']
+            wait_groups.setdefault(reason, []).append(record)
+        locks = [s for s in records if s['stage'] in _LOCK_WAITS]
+        summary['queue_wait_seconds_by_reason'] = {
+            reason: _resource_wait_seconds([*waits, *locks], root_span['start_ns'], root_span['end_ns'])
+            for reason, waits in wait_groups.items()
+        }
+        prepare = next((s for s in records if s['stage']=='prepare.total'), None)
+        if prepare is not None:
+            summary['preparation_seconds'] = (prepare['end_ns']-prepare['start_ns'])/1e9
+            summary['preparation_resource_queue_wait_seconds'] = _resource_wait_seconds(
+                records, prepare['start_ns'], prepare['end_ns'])
+        if records.detailed:
+            summary.update(spans=list(records), gc_intervals=[
+                s for s in tuple(_gc_intervals)
+                if s['end_ns'] >= root_span['start_ns'] and s['start_ns'] <= root_span['end_ns']])
         emit({'event': event, 'session_id': session_id, **identity,
-              'status': status, 'spans': list(records),
-              'dropped_spans': records.dropped, 'gc_intervals': pauses})
+              'status': status, 'timing_details': records.detailed,
+              'dropped_spans': records.dropped, **summary})
 
 
 @contextmanager
