@@ -4,6 +4,11 @@ Install on a dedicated ARM64 Linux host with KVM, systemd, cgroup v2, Docker,
 and enough NUMA and storage capacity for the intended experiment. The supported
 backend is the patched standalone CubeSandbox release.
 
+For an installed host, use [updates](#update-an-existing-host) or
+[recovery](#recover-after-reboot). The steps below provision a new host; they do
+not need repeating for ordinary source or KB updates. Commands run from the
+ClawBox checkout unless a block explicitly changes directory.
+
 The repository does not contain ready-to-run guest images. Obtain these matched
 artifacts from a compatible deployment:
 
@@ -80,8 +85,9 @@ python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 ```
 
 The helper pins CubeSandbox v0.7.0, applies the required endpoint, networking,
-image-provenance, snapshot, cgroup-routing, bounded control/lifecycle-RPC, and guest-agent reconnect patches,
-and builds Cubelet and Shim. It does not install or restart services. Repeating the same patch set
+image-provenance, snapshot, cgroup-routing, bounded RPC, and guest-agent reconnect
+patches, and builds Cubelet and Shim. It does not install or restart services.
+Repeating the same patch set
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
 
@@ -90,52 +96,8 @@ must use cgroup v2 and permit `clone3(CLONE_INTO_CGROUP)` (Linux 5.7 or newer).
 Install matching Cubelet and CubeShim binaries from the same prepared source;
 guest templates do not need rebuilding for this placement update.
 
-### What an update rebuilds
-
-Do not repeat the complete host installation after an ordinary source update.
-Use the smallest row that matches the changed content:
-
-| Changed content | Required action |
-| --- | --- |
-| ClawBox Python, CLI, scheduling, reporting, or documentation | Update the checkout. Reinstall the editable Python package only if its environment is not already editable. No CubeSandbox or VM-image rebuild. Use a new run ID when experiment behavior or recorded metadata changes. |
-| ClawTune host prediction logic or a selected seed | Update `CLAWTUNE_ROOT`; use a new writable state directory and run ID when adopting new learned state. No CubeSandbox or VM-image rebuild. |
-| ClawTune collector/sidecar code copied into guests | Rebuild only the affected Runtime/Tool image layers and register new templates. Qualification and a new run ID are required; CubeSandbox is unchanged. |
-| `deploy/cubesandbox/sdk-*.patch` | Apply the SDK patch and reinstall the editable host SDK as shown below. Start a new run ID. No service restart or VM-image rebuild. |
-| `deploy/cubesandbox/guest-agent-reconnect.patch`, `numa-migration-pause.patch`, or `numa-clean-file-and-checkpoint-summary.patch` | Rebuild and install the Shim on an idle host, then use a new run ID. The NUMA control client is part of that Shim binary; no separate helper is installed. Existing VM images, templates, and ClawTune state remain valid. |
-| CubeSandbox server patches, including the native NUMA placement hook | Rebuild and install Cubelet/Shim, restart Cubelet once on an idle host, then run the documented recovery command. Existing guest images and templates remain valid. |
-| Runtime/Tool Dockerfile, dependencies, entrypoint, or workspace content | Rebuild only the affected images/templates, qualify them, and use a new run ID. |
-| Host capacity, NUMA, TAP, CubeProxy guest-connect timeout, quota, or storage configuration | Review and apply a new host plan. Rebuild neither CubeSandbox nor images unless the plan explicitly changes their installed content. Use a new run ID when the setting affects measured behavior. |
-
-Template-sharing evidence remains reusable when the immutable Tool templates,
-VM shapes, target node, raw proof, and CubeSandbox RAM-mapping mechanism are
-unchanged. Placement-hook and ordinary configuration updates do not repeat the
-503-template proof. The build helpers perform their own source/bundle integrity
-checks; users do not need to create or compare ad hoc hash lists. Normal
-`experiment launch` also reuses saved input identities. Run the slower
-`experiment validate SPEC --inputs` only after intentionally replacing inputs.
-
-For an existing SDK already carrying `sdk-control-timeouts.patch`, apply the
-lifecycle and filesystem timeout patches. These let Runtime completion checks
-use Cube's native metadata and directory notifications with finite timeouts.
-Run from the ClawBox checkout; repeating these commands is safe:
-
-```bash
-for patch in sdk-lifecycle-timeouts.patch sdk-filesystem-timeouts.patch sdk-filesystem-watch-timeouts.patch; do
-  patch_path="$PWD/deploy/cubesandbox/$patch"
-  if ! git -C "$CUBE_SOURCE_DIR" apply --reverse --check "$patch_path" 2>/dev/null; then
-    git -C "$CUBE_SOURCE_DIR" apply --check "$patch_path" || exit 1
-    git -C "$CUBE_SOURCE_DIR" apply "$patch_path" || exit 1
-  fi
-done
-python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
-```
-
-Start a new run ID; existing workers keep their loaded SDK code. SDK-only
-updates require neither a service restart nor a VM-image rebuild.
-
 `--mirror cn` selects China package and Go mirrors; `--direct-network` bypasses
-inherited host proxies. These options do not solve inaccessible GitHub release
-assets. Confirm the build network before retrying a failed build.
+inherited host proxies. GitHub release assets must also be reachable.
 
 Install the exact archive printed by the build:
 
@@ -155,8 +117,7 @@ systemctl list-units 'cube-sandbox-*' --no-pager
 
 Review `.env` before installation, especially storage devices and ports. If the
 deployment uses S3lvol, enable and configure its backend before accepting the
-Cubelet as ready. Service startup without a successful smoke test is not an
-installation result.
+Cubelet as ready. Continue after `smoke.sh` passes.
 
 ## 3. Import images and save machine settings
 
@@ -227,13 +188,7 @@ python scripts/validate-cubesandbox-tcp-endpoints.py \
   --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
   --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
   --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 1 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-one.json"
-
-python scripts/validate-cubesandbox-tcp-endpoints.py \
-  --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
-  --tool-template "$CLAWBOX_TOOL_TEMPLATE" \
-  --node "$CUBE_NODE" --control-host "$CLAWBOX_CONTROL_HOST" \
-  --count 4 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-four.json"
+  --count 4 --output "$CLAWBOX_OUTPUT_ROOT/endpoint-check.json"
 
 python scripts/smoke-cubesandbox-agent-pair.py \
   --runtime-template "$CLAWBOX_RUNTIME_TEMPLATE" \
@@ -242,17 +197,40 @@ python scripts/smoke-cubesandbox-agent-pair.py \
   --cancel-probe --output "$CLAWBOX_OUTPUT_ROOT/agent-pair.json"
 ```
 
-Do not launch formal experiments if endpoint identity, cancellation, snapshot
-restore, or guest telemetry fails. BCC telemetry requires headers prepared for
+These probes check endpoint identity, cancellation, snapshot restore, and guest
+telemetry. Resolve probe failures before launching. BCC requires headers prepared for
 the running guest kernel configuration; build a corrected Tool image and register
 a new template if the probe reports invalid kernel coverage.
 
 ## 5. Configure the host
 
-Follow the [experiment guide](guide.md#configure-or-recover-a-host) to inspect
-NUMA topology, create and review `host.yaml`, run `host check`, and apply it on
-an idle VM pool. Match WARM, COLD, and output paths between `machine.env` and the
-host YAML.
+Create an editable plan from detected topology and saved machine settings:
+
+```bash
+bash scripts/clawbox experiment host inspect
+bash scripts/clawbox experiment host init \
+  "$HOME/.config/clawbox/host.yaml" --detect
+```
+
+Review `host.yaml` before applying it. Set the actual template IDs and node,
+select compute CPU lists and available memory budgets, and choose dedicated
+WARM, COLD, and output paths. Detection reports physical facts; it does not
+measure how much capacity other workloads can spare. On a host without a
+separate WARM NUMA node, set `warm: false`. See the
+[host-field reference](reference.md#host-plan) for units and defaults.
+
+```bash
+bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
+bash scripts/clawbox --sudo experiment host apply \
+  "$HOME/.config/clawbox/host.yaml" \
+  --profile "$HOME/.config/clawbox/host.json"
+```
+
+Apply on an idle VM pool. It checks services and storage, probes VM access, and
+writes the applied profile only after success. Repeat it after reboot or host
+configuration changes. To reconstruct an editable plan from an existing profile,
+use `host init NEW.yaml --from-profile PROFILE.json`. `host init` never overwrites
+an existing plan.
 
 For tiered snapshots, verify the configured storage:
 
@@ -265,16 +243,15 @@ python scripts/validate-tiered-storage.py \
   --output "$CLAWBOX_OUTPUT_ROOT/storage-check.json"
 ```
 
-This proves the storage path, not the full experiment workflow. Finish with a
-smoke run using the current configuration format from the guide.
+Finish with the [smoke experiment](guide.md#2-run-a-smoke-experiment), including
+final task validation and owned-VM cleanup.
 
-## After reboot
+## Recover after reboot
 
 Recover the Cubelet and egress dependency chain, then check services and
 storage before applying the saved host plan. The optional argument is the
-maximum number of seconds to wait for both Cubelet's delegated cgroup and its
-real storage-node heartbeat (default 1200). A 5120-entry TAP pool can take
-several minutes to initialize after reboot:
+maximum number of seconds to wait for Cubelet's delegated cgroup and storage-node
+heartbeat (default 1200). A large preallocated TAP pool increases startup time:
 
 ```bash
 sudo bash scripts/recover-cubesandbox-after-reboot.sh
@@ -295,9 +272,98 @@ snapshot filesystem must remain below 85% use. Preview recognized crash-dump
 cleanup with `experiment host clean`; never delete Cubelet data or Docker volumes
 by size. Resume interrupted experiments only after host readiness is restored.
 
-## Verification boundary
+## Update an existing host
 
-Fresh installation, existing-host recovery, unit tests, CLI syntax checks,
-qualification, and full VM experiments are different evidence. Accept a new host
-only after endpoint, guest telemetry, configured storage, host apply, qualification,
-task validation, and cleanup all succeed.
+Use this table to select the smallest required update. Keep immutable inputs and
+results for previous runs. Any change to an experiment specification requires a
+new run ID; `launch` reuses qualification when its capability inputs still match.
+
+| Change | Required action |
+| --- | --- |
+| ClawBox Python, scheduling, reporting, or CLI | Update the checkout. An editable installation sees the changes in new processes; bootstrap again when dependencies change. No image rebuild. |
+| Host-side ClawTune predictor or selected prediction artifact | Update the host source/artifact and experiment evidence path. No Tool-image rebuild. Update Runtime separately if its predictor or seed must also change. |
+| Runtime predictor, seed, prepared cache, or plugin | Rebuild and register **one shared Runtime template**. Start fresh Runtime state and qualify the new template. Reuse all task-specific Tool templates. |
+| Tool collector, Tool Bridge, guest measurement contract, or guest dependencies | Rebuild the affected Tool image layers and register new Tool templates. For a corpus, use the [collector refresh](workloads.md#refresh-tool-collectors) to preserve task dependencies. |
+| VM vCPU, RAM, disk, image, or workspace | Register new templates with the intended shape/content, update the host plan or workload, and qualify. `configure` does not resize templates. |
+| SDK-only patch | Reinstall the patched host SDK. No service restart or VM-image rebuild. |
+| CubeSandbox server/placement/snapshot patch | Build matching Cubelet/Shim binaries, install on an idle host, recover services, and apply the host plan. Guest templates remain reusable when their content and kernel are unchanged. |
+| Host CPU lists, budgets, mounts, network settings, or Cube quotas | Check/apply the reviewed host YAML, then reconfigure the experiment. No image rebuild. |
+| Trained KB's environment, measurement semantics, or training data | Train new immutable artifacts against the matching environment. A cold-start seed is selected explicitly and does not require workload-specific training. |
+| Only timing diagnostics, arrivals, concurrency, or scheduler parameters | Validate the new specification and use a new run ID. No image rebuild or retraining. |
+
+### Refresh the Runtime predictor and KB
+
+Select the host ClawTune source and seed in `machine.env`. The Runtime uses the
+copy baked into its image, so changing a host path alone does not update it.
+The image command requires Docker, Go, and Node.js/npm; it reuses saved build
+settings in `host.json` and compiles the Runtime plugin and prepared cache.
+
+```bash
+bash scripts/clawbox experiment images --role runtime \
+  --profile "$HOME/.config/clawbox/host.json"
+```
+
+This updates the Runtime entry in the profile. Copy its new template ID into
+the editable host plan and update the corresponding machine settings before
+future host apply/export operations. Generate the next experiment from the
+updated profile. A predictor/KB-only update reuses all task-specific Tool
+templates. Existing writable KB state is retained when reopened; use
+fresh session state to adopt a new seed.
+
+For a Tool collector refresh, use `images --role sandbox` with
+`--kernel-source` and `--kernel-build` pointing to headers for the actual Cube
+guest kernel. Saved build inputs are reused on later invocations. See
+[image options](reference.md#image-build-options) and the corpus refresh workflow.
+
+### Apply SDK timeout patches
+
+The release builder applies the required source patches. For an existing SDK
+checkout that needs only the timeout updates, source the saved settings and
+apply these patches idempotently:
+
+```bash
+cd "$HOME/src/ClawBox"
+source .venv/bin/activate
+set -a
+source "$HOME/.config/clawbox/machine.env"
+set +a
+for patch in sdk-control-timeouts.patch sdk-lifecycle-timeouts.patch \
+  sdk-filesystem-timeouts.patch sdk-filesystem-watch-timeouts.patch; do
+  patch_path="$PWD/deploy/cubesandbox/$patch"
+  if ! git -C "$CUBE_SOURCE_DIR" apply --reverse --check "$patch_path" 2>/dev/null; then
+    git -C "$CUBE_SOURCE_DIR" apply --check "$patch_path" || exit 1
+    git -C "$CUBE_SOURCE_DIR" apply "$patch_path" || exit 1
+  fi
+done
+python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
+```
+
+New workers load the updated SDK. If a patch conflicts, use a newly prepared
+source checkout rather than modifying a running experiment's environment.
+
+## Maintain storage
+
+Preview recognized crash dumps, then explicitly apply the cleanup:
+
+```bash
+bash scripts/clawbox --sudo experiment host clean
+bash scripts/clawbox --sudo experiment host clean --apply
+```
+
+Defaults select recognized dumps at least 24 hours old and 100 MiB in size under
+`/var/crash` and `/var/lib/systemd/coredump`. `--root` selects dedicated crash
+directories; `--older-than-hours` and `--min-size-mib` adjust selection. Recent,
+growing, or unrelated files are excluded. The command preserves VM/template
+storage, results, Docker volumes, and unrelated datasets.
+
+## Common remedies
+
+| Failure | Action |
+| --- | --- |
+| Incomplete Python environment | Run `bootstrap-python.sh` with matching ClawTune and patched SDK sources; verify `pip check`. |
+| Fresh bootstrap cannot use an inherited SOCKS proxy | Use `bootstrap-python.sh --direct-network` when direct package access is available. |
+| Missing/mismatched template or workspace | Register the correct image and update the profile/workload; inspect with `doctor SPEC --probe-vm`. |
+| Cube scheduler quota rejection (`130597`) | Compare offered VM shapes against Cube's reported quotas, then review host quota settings. Configured quota exhaustion does not establish physical-memory exhaustion. |
+| Runtime readiness timeout | Inspect `openclaw/SESSION/sidecar-startup.log` and the configured readiness deadline. |
+| Snapshot storage rejected | Check WARM capacity and COLD filesystem use; Cube rejects snapshot writes above 85% filesystem use. |
+| Interrupted or ambiguous VM creation | Preserve the run, execute `experiment abort RUN_ID`, recover host readiness, then resume or use a new run ID for changed inputs. |

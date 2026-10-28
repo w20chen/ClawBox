@@ -1,8 +1,8 @@
 # Configuration and input examples
 
-Start with the [experiment guide](../docs/guide.md). It uses
+Start with the [experiment walkthrough](../docs/guide.md). It uses
 `clawbox experiment configure` to fill in the applied host's templates, NUMA
-layout, and capacities. New experiments use 1 GiB Runtime and 3 GiB Tool VMs;
+layout, and capacities. Standard new profiles use 1 GiB Runtime and 3 GiB Tool VMs;
 register matching templates and apply the host profile before configuring a run.
 Frozen reproduction specs and historical host examples preserve their original
 VM shapes and measurements. Save generated experiment YAMLs outside this directory.
@@ -25,4 +25,5 @@ VM shapes and measurements. Save generated experiment YAMLs outside this directo
 
 Do not put credentials, other generated predictions, local traces or experiment
 results into these checked-in examples. The command/configuration reference is in
-[docs/guide.md](../docs/guide.md).
+[docs/reference.md](../docs/reference.md). For imported recordings and task images,
+see [workload preparation](../docs/workloads.md).
