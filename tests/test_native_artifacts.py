@@ -156,6 +156,21 @@ def test_tar_export_accepts_legitimate_clause_telemetry_over_16_mib():
     ] == payload
 
 
+def test_artifact_limit_is_256_mib_and_error_reports_actual_size(monkeypatch):
+    from clawbox.experiments import native_artifacts as native
+
+    assert native._MAX_ARTIFACT_BYTES == 256 * 1024 * 1024
+    monkeypatch.setattr(native, "_MAX_ARTIFACT_BYTES", 4)
+    payload = base64.b64encode(b"12345").decode()
+    stream = (
+        "__CLAWBOX_ARTIFACT_V1__large.json\n"
+        + payload
+        + "\n__CLAWBOX_ARTIFACT_END__\n"
+    )
+    with pytest.raises(ValueError, match=r"large\.json is 5 bytes; limit is 4 bytes"):
+        _decode_framed_artifacts(stream)
+
+
 from clawbox.experiments.worker import (
     enrich_tool_execution_observations,
     summarize_tool_execution_observations,

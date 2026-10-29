@@ -4759,13 +4759,8 @@ class ExperimentWorker:
                 )
                 if request_failures:
                     events.write({"event": "runtime_tool_request_failed",
-                                  "session_id": session_id,
+                                  "session_id": session_id, "disposition": "reported",
                                   "failures": request_failures})
-                    first_failure = request_failures[0]
-                    raise RuntimeError(
-                        f"Runtime Tool request failed: {first_failure['tool']} "
-                        f"{first_failure['call_id']}: {first_failure['message']}"
-                    )
                 agent_tool_failures = outcome.get("agent_tool_failures")
                 if agent_tool_failures is not None and agent_tool_failures > 0:
                     if trace_path is None:
@@ -4776,10 +4771,12 @@ class ExperimentWorker:
                     from clawbox.replay.tool_outcomes import match_recorded_tool_failures
                     from .native_artifacts import _runtime_spans
                     harmless_failures: list[dict[str, Any]] = []
+                    unexpected_failures: list[dict[str, Any]] = []
                     matched_failures = match_recorded_tool_failures(
                         trace_path, _runtime_spans(outcome["runtime_traces"]),
                         session_id=session_id, reported_failures=agent_tool_failures,
                         harmless_failures=harmless_failures,
+                        unexpected_failures=unexpected_failures,
                     )
                     events.write({"event": "recorded_tool_failures_matched",
                                   "session_id": session_id, "matches": matched_failures})
@@ -4788,6 +4785,13 @@ class ExperimentWorker:
                             "event": "harmless_replay_tool_divergence",
                             "session_id": session_id,
                             "divergences": harmless_failures,
+                        })
+                    if unexpected_failures:
+                        events.write({
+                            "event": "harmful_replay_tool_divergence",
+                            "session_id": session_id,
+                            "disposition": "reported",
+                            "divergences": unexpected_failures,
                         })
                 if not tool_latencies:
                     raise RuntimeError(

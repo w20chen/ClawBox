@@ -39,11 +39,11 @@ _ARTIFACT_END = "__CLAWBOX_ARTIFACT_END__"
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
 _SAFE_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _EXECUTION_ENVELOPE_PREFIX = "__CBX_EXEC_1__"
-# Clause telemetry for syscall-heavy traces can legitimately exceed 16 MiB in
+# Clause telemetry for syscall-heavy traces can legitimately exceed 64 MiB in
 # its pretty-printed on-disk form. The export is already gzip-compressed and
 # transferred in fixed chunks, so retain a bounded safety limit without
 # rejecting valid evidence from those traces.
-_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+_MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 _TOOL_RESOURCE_ROOT = "/var/lib/clawtune/artifacts/tool-resource"
 _ARTIFACT_EXPORT = "/run/clawbox-ssh/artifact-export"
 _ARTIFACT_CHUNK_BYTES = 1024 * 1024
@@ -176,7 +176,10 @@ def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
                         if name in result:
                             raise ValueError(f"duplicate Tool artifact: {name}")
                         if member.size > _MAX_ARTIFACT_BYTES:
-                            raise ValueError(f"Tool artifact {name} exceeds the size limit")
+                            raise ValueError(
+                                f"Tool artifact {name} is {member.size} bytes; "
+                                f"limit is {_MAX_ARTIFACT_BYTES} bytes"
+                            )
                         source = archive.extractfile(member)
                         if source is None:
                             raise ValueError(f"Tool artifact {name} is unreadable")
@@ -210,7 +213,10 @@ def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
         except (ValueError, binascii.Error) as exc:
             raise ValueError(f"Tool artifact {name} is not valid base64") from exc
         if len(payload) > _MAX_ARTIFACT_BYTES:
-            raise ValueError(f"Tool artifact {name} exceeds the size limit")
+            raise ValueError(
+                f"Tool artifact {name} is {len(payload)} bytes; "
+                f"limit is {_MAX_ARTIFACT_BYTES} bytes"
+            )
         result[name] = payload
         index += 1
     if not ended:

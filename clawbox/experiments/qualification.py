@@ -234,6 +234,10 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
     )
     return {
         "cube_capacity_demand": demand,
+        "cubelet_storage_root": spec.resources.cubelet_storage_root,
+        "cube_cow_headroom_per_vm_mib": (
+            spec.resources.cube_cow_headroom_per_vm_mib
+        ),
         "node": spec.resources.target_node,
         "compute_nodes": [n.model_dump() for n in spec.resources.compute_nodes],
         "runtime": sandbox(spec.runtime),

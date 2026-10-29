@@ -167,6 +167,14 @@ Without `compute_nodes`, use `local_numa_node` and the aggregate LOCAL fields.
 `warm_memory_capacity_mib` defaults to 0; `local_memory_cgroup` defaults to
 `/sys/fs/cgroup/cube_sandbox/sandbox`.
 
+`resources.cubelet_storage_root` defaults to `/data/cubelet/storage`.
+Before launch, host doctor projects physical Cube CoW growth as offered Runtime
+and Tool VM count times `resources.cube_cow_headroom_per_vm_mib` (default 144
+MiB), and refuses a run that would reach Cube's 85% filesystem rejection
+threshold. The default includes headroom over the latest Full-1280 observation;
+it is a physical-space allowance, not the VM's logical writable-layer size.
+Changing either field needs a new run ID, but no host apply or template rebuild.
+
 `workload.repetitions` defaults to 1 and `session_assignment` to `unique`.
 `single_case` repeats one case; `round_robin` cycles at least two cases; `unique`
 requires enough distinct cases for the offered concurrency. Each case records

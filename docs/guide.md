@@ -232,6 +232,13 @@ replacing inputs. Normal `launch` reuses saved identities, checks host readiness
 reuses a matching qualification receipt or qualifies, and starts the supervisor.
 `--detach` returns after launch; use `status` to check the outcome.
 
+Host readiness also projects Cube's physical CoW growth for all offered Runtime
+and Tool VMs. If the projection would reach Cube's 85% storage rejection point,
+launch fails before creating a VM and reports the required headroom. Remove only
+verified obsolete templates, or edit `resources.cubelet_storage_root` and the
+measured `resources.cube_cow_headroom_per_vm_mib`; either edit requires a new
+run ID but no image rebuild.
+
 Qualification executes a real Tool call for every case and checks required
 templates and capabilities. Its default worker bound is the smallest of target
 concurrency, creation concurrency, and case count. Use

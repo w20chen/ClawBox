@@ -1,4 +1,4 @@
-"""Recognize recorded Tool failures without accepting new replay failures."""
+"""Classify replay Tool failures without making them task-validation verdicts."""
 from __future__ import annotations
 
 import json
@@ -266,11 +266,14 @@ def _equivalent_failure(expected: tuple[int, str], actual: tuple[int, str] | Non
 def match_recorded_tool_failures(
     trace: Path, spans: list[dict], *, session_id: str, reported_failures: int,
     harmless_failures: list[dict] | None = None,
+    unexpected_failures: list[dict] | None = None,
 ) -> list[dict]:
-    """Require matching call identity, command, exit code, and error text.
+    """Classify failures by call identity, command, exit code, and error text.
 
-    Missing evidence fails closed. This does not mark a benchmark task solved;
-    ordinary replay completeness and final validation still apply.
+    Audit callers remain strict when ``unexpected_failures`` is omitted. The
+    experiment worker supplies that sink so divergences are reported while the
+    trace continues; ordinary replay completeness and final validation remain
+    authoritative for benchmark correctness.
     """
     ignored = harmless_failures if harmless_failures is not None else []
     actions = load_trace(trace)
@@ -340,17 +343,57 @@ def match_recorded_tool_failures(
             item = {"call_id": identity, "exit_code": code, **timing_flake}
             ignored.append(item)
             continue
-        if (not evidence or type(code) is not int or code == 0
-                or details.get("noOutputTimedOut") or details.get("exitSignal")
-                or command != evidence[0]
-                or not _equivalent_failure(evidence[1], _failure(text, code), command)):
-            raise ValueError(f"unexpected replay Tool failure: {identity}")
+        reason = None
+        if not evidence:
+            reason = "recorded_call_did_not_fail"
+        elif type(code) is not int:
+            reason = "observed_exit_code_missing"
+        elif code == 0:
+            reason = "observed_failure_has_zero_exit_code"
+        elif details.get("noOutputTimedOut"):
+            reason = "observed_no_output_timeout"
+        elif details.get("exitSignal"):
+            reason = "observed_process_signal"
+        elif command != evidence[0]:
+            reason = "requested_command_changed"
+        elif not _equivalent_failure(evidence[1], _failure(text, code), command):
+            reason = "failure_outcome_changed"
+        if reason is not None:
+            if unexpected_failures is None:
+                raise ValueError(f"unexpected replay Tool failure: {identity}")
+            recorded_failure = evidence[1] if evidence else None
+            unexpected_failures.append({
+                "call_id": identity,
+                "classification": "harmful_replay_tool_divergence",
+                "reason": reason,
+                "command": command,
+                "observed_exit_code": code,
+                "recorded_exit_code": recorded_failure[0] if recorded_failure else 0,
+                "observed_error_excerpt": text[-2000:],
+                "recorded_error_excerpt": (
+                    recorded_failure[1][-2000:] if recorded_failure else ""
+                ),
+            })
+            continue
         matched.append({"call_id": identity, "exit_code": code,
                         "recorded_error": evidence[1][1]})
     # OpenClaw's ``toolSummary.failures`` is a final-answer warning-group
     # signal, not a count of failed Tool spans. One warning can summarize a
     # chain of failed commands. Every observed failed span is matched above;
     # require evidence on both sides without equating their cardinalities.
-    if reported_failures < 1 or (not matched and not ignored):
-        raise ValueError("Runtime Tool failure evidence does not cover OpenClaw failure signal")
+    if reported_failures < 1:
+        raise ValueError("OpenClaw did not report a Tool failure signal")
+    if not matched and not ignored and not unexpected_failures:
+        if unexpected_failures is None:
+            raise ValueError("Runtime Tool failure evidence does not cover OpenClaw failure signal")
+        unexpected_failures.append({
+            "call_id": None,
+            "classification": "harmful_replay_tool_divergence",
+            "reason": "runtime_failure_evidence_missing",
+            "command": None,
+            "observed_exit_code": None,
+            "recorded_exit_code": None,
+            "observed_error_excerpt": "",
+            "recorded_error_excerpt": "",
+        })
     return matched

@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from collections import namedtuple
 
 import pytest
 import yaml
@@ -131,3 +132,42 @@ def test_insufficient_capacity_fails_with_remedy(monkeypatch):
     monkeypatch.setattr(capacity, 'scheduler_settings', lambda: {})
     with pytest.raises(RuntimeError, match='cube_scheduler_overcommit'):
         capacity.require_capacity({'node':'host','cube_capacity_demand':demand(640)})
+
+
+def test_snapshot_storage_projection_uses_physical_cow_estimate(monkeypatch):
+    usage = namedtuple('usage', 'total used free')
+    total = 1000 * 1024**3
+    monkeypatch.setattr(capacity.shutil, 'disk_usage', lambda _: usage(
+        total=total, used=700 * 1024**3, free=300 * 1024**3,
+    ))
+    profile = {
+        'cube_capacity_demand': {'vm_count': 512},
+        'cubelet_storage_root': '/cube/storage',
+        'cube_cow_headroom_per_vm_mib': 144,
+    }
+    report = capacity.storage_capacity_report(profile)
+    assert report['ready']
+    assert report['required_headroom_bytes'] == 72 * 1024**3
+    assert report['projected_used_percent'] == pytest.approx(77.2)
+    profile['cube_capacity_demand']['vm_count'] = 1200
+    assert not capacity.storage_capacity_report(profile)['ready']
+
+
+def test_storage_capacity_failure_has_actionable_remedy(monkeypatch):
+    usage = namedtuple('usage', 'total used free')
+    monkeypatch.setattr(capacity, 'node_capacity', lambda _: node())
+    monkeypatch.setattr(capacity, 'scheduler_settings', lambda: {
+        'overcommit_ratio_conf': {'cubebox': {'cpu_ratio': 20, 'mem_ratio': 6}},
+        'node_max_mvm_num_conf': {
+            'cubebox': {'mvm_num_reserve_num_percent': 1.05},
+        },
+    })
+    monkeypatch.setattr(capacity.shutil, 'disk_usage', lambda _: usage(
+        total=1000 * 1024**3, used=800 * 1024**3, free=200 * 1024**3,
+    ))
+    with pytest.raises(RuntimeError, match='resources.cube_cow_headroom_per_vm_mib'):
+        capacity.require_capacity({
+            'node': 'host', 'cube_capacity_demand': demand(1280),
+            'cubelet_storage_root': '/cube/storage',
+            'cube_cow_headroom_per_vm_mib': 144,
+        })

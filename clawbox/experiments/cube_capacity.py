@@ -4,11 +4,14 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+import shutil
 import sys
 from urllib.parse import urlencode
 from urllib.request import ProxyHandler, build_opener
 
 CONFIG = Path('/usr/local/services/cubetoolbox/CubeMaster/conf.yaml')
+MIB = 1024 * 1024
+CUBE_STORAGE_REJECT_PERCENT = 85
 
 
 def scheduler_settings() -> dict:
@@ -79,6 +82,33 @@ def capacity_report(node: dict, settings: dict, demand: dict) -> dict:
                 accounting='configured VM quotas, not actual CPU or RAM consumption')
 
 
+def storage_capacity_report(profile: dict) -> dict:
+    """Project physical CoW growth below Cube's fixed rejection threshold."""
+    path = Path(profile.get('cubelet_storage_root') or '/data/cubelet/storage')
+    usage = shutil.disk_usage(path)
+    vm_count = int(profile['cube_capacity_demand']['vm_count'])
+    per_vm_mib = int(profile.get('cube_cow_headroom_per_vm_mib') or 144)
+    required_bytes = vm_count * per_vm_mib * MIB
+    reject_bytes = usage.total * CUBE_STORAGE_REJECT_PERCENT // 100
+    projected_bytes = usage.used + required_bytes
+    return {
+        'ready': projected_bytes < reject_bytes,
+        'path': str(path),
+        'filesystem_total_bytes': usage.total,
+        'filesystem_used_bytes': usage.used,
+        'current_used_percent': usage.used * 100 / usage.total,
+        'cube_reject_percent': CUBE_STORAGE_REJECT_PERCENT,
+        'headroom_before_rejection_bytes': max(0, reject_bytes - usage.used),
+        'required_headroom_bytes': required_bytes,
+        'projected_used_percent': projected_bytes * 100 / usage.total,
+        'required_vm_count': vm_count,
+        'cow_headroom_per_vm_mib': per_vm_mib,
+        'accounting': (
+            'conservative physical CoW growth estimate, not logical writable-layer limits'
+        ),
+    }
+
+
 def require_capacity(profile: dict) -> bool:
     report = capacity_report(node_capacity(profile['node']), scheduler_settings(), profile['cube_capacity_demand'])
     print('Cube configured-capacity check: ' + json.dumps(report), flush=True)
@@ -88,6 +118,16 @@ def require_capacity(profile: dict) -> bool:
             'Review host.yaml cube_scheduler_overcommit for the reported instance_type, '
             'run host apply on an idle host, then launch with a new run ID. '
             'Increasing this quota does not increase the experiment cpuset or memory.max.'
+        )
+    storage = storage_capacity_report(profile)
+    print('Cube snapshot-storage check: ' + json.dumps(storage), flush=True)
+    if not storage['ready']:
+        raise RuntimeError(
+            'Projected Cube CoW growth would cross the 85% snapshot-storage rejection '
+            'threshold. Remove only verified obsolete Cube templates or select a larger '
+            'cubelet_storage_root, then rerun host doctor. If evidence shows a different '
+            'per-VM physical growth, set resources.cube_cow_headroom_per_vm_mib to that '
+            'conservative value and use a new run ID.'
         )
     return True
 

@@ -149,6 +149,36 @@ def test_harmless_timing_rule_does_not_hide_other_new_failures(monkeypatch, actu
         )
 
 
+def test_harmful_divergence_can_be_reported_without_stopping_replay(monkeypatch):
+    span = setup_case(
+        monkeypatch, "6 passed in 0.5s\nExit code: 0",
+        "ModuleNotFoundError: No module named 'pytest'\n(Command exited with code 1)",
+        command="python -m pytest",
+    )
+    unexpected = []
+
+    assert tool_outcomes.match_recorded_tool_failures(
+        Path("trace"), [span], session_id="s", reported_failures=1,
+        harmless_failures=[], unexpected_failures=unexpected,
+    ) == []
+    assert len(unexpected) == 1
+    assert unexpected[0]["classification"] == "harmful_replay_tool_divergence"
+    assert unexpected[0]["reason"] == "recorded_call_did_not_fail"
+    assert unexpected[0]["observed_exit_code"] == 1
+    assert unexpected[0]["recorded_exit_code"] == 0
+
+
+def test_missing_runtime_failure_evidence_can_be_reported(monkeypatch):
+    setup_case(monkeypatch, "TypeError: old\nExit code: 1", "unused")
+    unexpected = []
+
+    assert tool_outcomes.match_recorded_tool_failures(
+        Path("trace"), [], session_id="s", reported_failures=1,
+        harmless_failures=[], unexpected_failures=unexpected,
+    ) == []
+    assert unexpected[0]["reason"] == "runtime_failure_evidence_missing"
+
+
 def test_openclaw_failure_summary_is_a_signal_not_a_span_count(monkeypatch):
     error = "TypeError: bug"
     first = setup_case(

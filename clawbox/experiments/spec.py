@@ -335,6 +335,8 @@ class ResourcesSpec(StrictFrozenModel):
     compute_nodes: tuple[ComputeNode, ...] = ()
     target_node: str = Field(min_length=1)
     pool_memory_budget_mib: int = Field(ge=1)
+    cubelet_storage_root: str = "/data/cubelet/storage"
+    cube_cow_headroom_per_vm_mib: int = Field(default=144, ge=1)
     physical_live_limit_mib: int | None = Field(default=None, ge=1)
     local_memory_low_watermark_mib: int | None = Field(default=None, ge=1)
     local_memory_high_watermark_mib: int | None = Field(default=None, ge=1)
