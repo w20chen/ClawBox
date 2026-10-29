@@ -135,6 +135,7 @@ def test_local_listener_does_not_require_reverse_dns(monkeypatch):
     server = LocalHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     try:
         assert server.server_port > 0
+        assert server.allow_reuse_address is True
     finally:
         server.server_close()
 
