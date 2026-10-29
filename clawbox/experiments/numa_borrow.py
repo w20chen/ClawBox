@@ -99,6 +99,12 @@ class _BorrowedAllocation:
 
 def read_numa_lru_bytes(cgroup: Path) -> tuple[dict[int, int], int]:
     """Return per-node resident LRU bytes plus conservatively unattributed bytes."""
+    resident, unattributed, _ = read_numa_lru_observation(cgroup)
+    return resident, unattributed
+
+
+def read_numa_lru_observation(cgroup: Path) -> tuple[dict[int, int], int, int]:
+    """Read NUMA residency and its charged total once for one observation."""
     rows: dict[str, dict[int, int]] = {}
     primary = ("inactive_anon", "active_anon", "inactive_file", "active_file", "unevictable")
     for line in (cgroup / "memory.numa_stat").read_text(encoding="ascii").splitlines():
@@ -117,7 +123,7 @@ def read_numa_lru_bytes(cgroup: Path) -> tuple[dict[int, int], int]:
         for node in nodes
     }
     charged = int((cgroup / "memory.current").read_text(encoding="ascii").strip())
-    return resident, max(0, charged - sum(resident.values()))
+    return resident, max(0, charged - sum(resident.values())), charged
 
 
 def read_numa_anon_bytes(cgroup: Path) -> dict[int, int]:

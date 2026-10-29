@@ -7,7 +7,7 @@ worker's normal VM creation path.
 from __future__ import annotations
 
 from pathlib import Path
-from dataclasses import replace
+from threading import Semaphore
 from .control_timing import operation, span, timed_lock
 import time
 
@@ -79,6 +79,15 @@ class SessionPlacement:
         self.template_affinity_decisions = 0
         self.template_cache_hits = 0
         self._memory_feedback = {}
+        # A session waiting for capacity repeatedly releases the admission
+        # condition, but 1,280 simultaneous waiters create a wake-up herd that
+        # can starve release and telemetry for minutes. At most one fixed
+        # waiter per domain, or one load-aware waiter per domain, needs to rank
+        # the same state. This gate is not held by release paths.
+        self._fixed_placement_gates = {
+            key: Semaphore(1) for key in domains
+        }
+        self._load_placement_gate = Semaphore(max(1, len(domains)))
 
     @operation('placement.ranking_memory')
     def _placement_memory(self, key, memory_mib):
@@ -107,13 +116,26 @@ class SessionPlacement:
                 raise RuntimeError(f'duplicate session placement: {session_id}')
             self.waiting.add(session_id)
         try:
-            return self._acquire(
-                session_id, vcpus=vcpus, memory_mib=memory_mib,
-                timeout=timeout, fixed=fixed, template_id=template_id,
-                template_aware=template_aware,
-                template_sharing_supported=template_sharing_supported,
-                balance_slack=balance_slack,
+            gate = (
+                self._fixed_placement_gates[fixed]
+                if fixed is not None else self._load_placement_gate
             )
+            gate_started = time.monotonic()
+            if not gate.acquire(timeout=timeout):
+                raise AdmissionTimeout(
+                    f'NUMA placement arbitration timed out for {session_id}'
+                )
+            try:
+                return self._acquire(
+                    session_id, vcpus=vcpus, memory_mib=memory_mib,
+                    timeout=max(0., timeout - (time.monotonic() - gate_started)),
+                    fixed=fixed, template_id=template_id,
+                    template_aware=template_aware,
+                    template_sharing_supported=template_sharing_supported,
+                    balance_slack=balance_slack,
+                )
+            finally:
+                gate.release()
         finally:
             with timed_lock(self.condition, 'placement.condition'):
                 self.waiting.remove(session_id)
@@ -242,25 +264,41 @@ class SessionPlacement:
                 raise
             return key
 
-    def sample(self):
-        with self.condition:
+    def sample(self, *, memory_by_domain=None, queue_by_domain=None,
+               blocking=True):
+        if not self.condition.acquire(blocking=blocking):
+            return {
+                key: {"measurement": "unavailable_admission_lock_busy"}
+                for key in self.domains
+            }
+        try:
             cpu = self.monitor.sample()
             captured = time.monotonic()
-            claims = tuple(replace(claim) for claim in next(iter(self.domains.values())).coordinator.demand.claims.values())
             sessions = {key: tuple(d.coordinator._sessions.values()) for key,d in self.domains.items()}
             counters = {key: dict(
                     waiting_sessions_global=len(self.waiting),
                     admitted_sessions=sum(item[0] == key for item in self.sessions.values()),
                 ) for key,d in self.domains.items()}
+            evidence_by_domain = {
+                key: domain.coordinator.demand.pending_evidence(
+                    domain.coordinator.demand_scope
+                )
+                for key, domain in self.domains.items()
+            }
+        finally:
+            self.condition.release()
         # Reporting must not hold admission while kernel reads or a lifecycle
         # transition is in progress. Claim membership/baselines are snapshotted.
         result = {}
         for key,domain in self.domains.items():
             c = domain.coordinator
-            resident = c.physical_sample()[0]
-            pending = sum(claim.remaining()[1] for claim in claims if claim.scope==c.demand_scope)
-            result[key] = dict(cpu[key], **counters[key], **c.queue_snapshot(), resident_bytes=resident,
-                outstanding_bytes=pending, remaining_budget_bytes=c.budget_bytes-resident-pending,
+            resident = (memory_by_domain[key] if memory_by_domain is not None
+                        else c.physical_sample()[0])
+            evidence = evidence_by_domain[key]
+            pending = evidence['outstanding_bytes']
+            queue = queue_by_domain[key] if queue_by_domain is not None else c.queue_snapshot()
+            result[key] = dict(cpu[key], **counters[key], **queue, **evidence, resident_bytes=resident,
+                remaining_budget_bytes=c.budget_bytes-resident-pending if pending is not None else None,
                 cpu_psi=None, bandwidth_utilization=None,
                 running_vms=sum(int(s.lifecycle.resident)+int(s.runtime_lifecycle is not None and s.runtime_lifecycle.resident)
                                 for s in sessions[key]),

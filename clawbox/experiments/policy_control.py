@@ -285,6 +285,14 @@ class PolicyControlServer:
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
+            # The bridge sends both boundaries through one pooled connection.
+            # Every response has Content-Length; drain request bodies before
+            # accepting another request on an authenticated connection.
+            protocol_version = "HTTP/1.1"
+            # Headers and the small JSON body are written separately. Disable
+            # Nagle so persistent connections do not incur a delayed-ACK wait.
+            disable_nagle_algorithm = True
+
             def do_POST(self) -> None:  # noqa: N802
                 started = time.monotonic()
                 record: dict[str, Any] = {"path": self.path, "request_start": started}
@@ -296,10 +304,12 @@ class PolicyControlServer:
                     token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                     state = owner._lookup(token)
                     if state is None:
+                        self.close_connection = True
                         self.send_error(HTTPStatus.UNAUTHORIZED)
                         return
                     length = int(self.headers.get("Content-Length", "0"))
                     if length < 2 or length > 65536:
+                        self.close_connection = True
                         raise ValueError("invalid request size")
                     body = json.loads(self.rfile.read(length))
                     owner._validate(body, state.session_id)

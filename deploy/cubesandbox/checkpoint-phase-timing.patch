@@ -38,16 +38,18 @@ index d323348..4dc418e 100644
  	stepLog.WithFields(CubeLog.Fields{
  		"operation":    "checkpoint",
  		"phase":        "snapshot_create",
-@@ -474,6 +482,8 @@ func (s *service) updateWithPauseCow(
+@@ -474,6 +482,9 @@ func (s *service) updateWithPauseCow(
  	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
  	swapOutPhaseStarted := time.Now()
- 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
-+	writeCheckpointPhase(swapOutPhaseStarted, "cubelet.destroy_runtime", req.SandboxID, req.RequestID, snapID, err == nil)
++	destroyCtx, destroyStages := checkpointDestroyContext(workCtx)
+-	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
++	extInfo, err := s.destroyLiveAfterPause(destroyCtx, req, sb)
++	writeCheckpointPhase(swapOutPhaseStarted, "cubelet.destroy_runtime", req.SandboxID, req.RequestID, snapID, err == nil, checkpointDestroyDetails(destroyStages, err))
 +	cleanupPhaseStarted := time.Now()
  	swapOutStatus := "ok"
  	if err != nil {
  		swapOutStatus = "error"
-@@ -508,9 +518,36 @@ func (s *service) updateWithPauseCow(
+@@ -508,9 +518,41 @@ func (s *service) updateWithPauseCow(
  		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
  		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
  	}
@@ -56,7 +58,7 @@ index d323348..4dc418e 100644
  }
  
 +// Keep research timing independent of the deployment's WARN/ERROR log filter.
-+func writeCheckpointPhase(start time.Time, phase, sandboxID, requestID, snapshotID string, ok bool) {
++func writeCheckpointPhase(start time.Time, phase, sandboxID, requestID, snapshotID string, ok bool, details ...map[string]interface{}) {
 +	duration := time.Since(start).Seconds()
 +	status := "ok"
 +	if !ok {
@@ -65,6 +67,11 @@ index d323348..4dc418e 100644
 +	row := map[string]interface{}{"schema_version": 1, "component": "cubelet", "pid": os.Getpid(),
 +		"phase": phase, "sandbox_id": sandboxID, "request_id": requestID, "snapshot_id": snapshotID,
 +		"started_unix_s": float64(start.UnixNano()) / 1e9, "duration_seconds": duration, "status": status}
++	for _, fields := range details {
++		for key, value := range fields {
++			row[key] = value
++		}
++	}
 +	data, err := json.Marshal(row)
 +	if err != nil {
 +		return
@@ -140,24 +147,6 @@ index 5556aa0..645d6d0 100644
      if result != 0 {
          return Err(io::Error::from_raw_os_error(result));
      }
-@@ -2369,6 +2373,17 @@ impl MemoryManager {
-     }
- 
-     pub fn save_range_to_file(
-+        &self,
-+        memory_file: &File,
-+        range: &MemoryRange,
-+        file_offset: u64,
-+    ) -> result::Result<(), MigratableError> {
-+        let target = crate::checkpoint_metrics::file_target(memory_file);
-+        crate::checkpoint_metrics::measure("memory.write_range", &target, Some(range.length),
-+            || self.save_range_to_file_inner(memory_file, range, file_offset))
-+    }
-+
-+    fn save_range_to_file_inner(
-         &self,
-         mut memory_file: &File,
-         range: &MemoryRange,
 diff --git a/hypervisor/vmm/src/vm.rs b/hypervisor/vmm/src/vm.rs
 index c4c4342..a47c699 100644
 --- a/hypervisor/vmm/src/vm.rs
@@ -181,13 +170,21 @@ new file mode 100644
 index 0000000..4609b35
 --- /dev/null
 +++ b/hypervisor/vmm/src/checkpoint_metrics.rs
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,33 @@
 +//! Research-only checkpoint phase accounting, independent of log verbosity.
 +use std::io::Write;
 +use std::time::{Instant, SystemTime, UNIX_EPOCH};
 +
 +pub fn measure<T, E>(phase: &str, target: &str, bytes: Option<u64>,
 +                     operation: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
++    // Timing JSON is diagnostic-only. With no explicit path, bypass clocks,
++    // serialization, file opens, and writes entirely.
++    static LOG_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
++    let path = match LOG_PATH.get_or_init(||
++        std::env::var("CLAWBOX_CHECKPOINT_LOG").ok().filter(|value| !value.is_empty())) {
++        Some(path) => path,
++        None => return operation(),
++    };
 +    let started = Instant::now();
 +    let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
 +    let result = operation();
@@ -196,8 +193,6 @@ index 0000000..4609b35
 +        "pid":std::process::id(),"phase":phase,"target":target,
 +        "started_unix_s":wall,"duration_seconds":duration,
 +        "bytes_requested":bytes,"status":if result.is_ok(){"ok"}else{"error"}});
-+    let path = std::env::var("CLAWBOX_CHECKPOINT_LOG")
-+        .unwrap_or_else(|_| "/data/log/clawbox-checkpoint-phases.jsonl".into());
 +    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
 +        let _ = file.write_all(format!("{}\n", row).as_bytes());
 +    }
@@ -209,3 +204,300 @@ index 0000000..4609b35
 +    std::fs::read_link(format!("/proc/self/fd/{}",file.as_raw_fd()))
 +        .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default()
 +}
+
+diff --git a/Cubelet/plugins/workflow/destroy_trace.go b/Cubelet/plugins/workflow/destroy_trace.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/plugins/workflow/destroy_trace.go
+@@ -0,0 +1,26 @@
++package workflow
++
++import (
++	"context"
++	"time"
++)
++
++type destroyStageRecorderKey struct{}
++type DestroyStageRecorder func(stage string, start time.Time, err error)
++
++// WithDestroyStageRecorder enables in-memory phase accounting for one pause.
++// Ordinary workflows do not install a recorder or perform timing/file writes.
++func WithDestroyStageRecorder(ctx context.Context, recorder DestroyStageRecorder) context.Context {
++	return context.WithValue(ctx, destroyStageRecorderKey{}, recorder)
++}
++
++func ignoreDestroyStage(error) {}
++
++func BeginDestroyStage(ctx context.Context, stage string) func(error) {
++	recorder, _ := ctx.Value(destroyStageRecorderKey{}).(DestroyStageRecorder)
++	if recorder == nil {
++		return ignoreDestroyStage
++	}
++	start := time.Now()
++	return func(err error) { recorder(stage, start, err) }
++}
+
+diff --git a/Cubelet/plugins/workflow/destroy_trace_test.go b/Cubelet/plugins/workflow/destroy_trace_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/plugins/workflow/destroy_trace_test.go
+@@ -0,0 +1,33 @@
++package workflow
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++)
++
++func TestDestroyStageRecorderOptional(t *testing.T) {
++	BeginDestroyStage(context.Background(), "disabled")(errors.New("unchanged"))
++	BeginDestroyStage(WithDestroyStageRecorder(context.Background(), nil), "nil")(nil)
++	if allocations := testing.AllocsPerRun(100, func() {
++		BeginDestroyStage(context.Background(), "disabled")(nil)
++	}); allocations != 0 {
++		t.Fatalf("disabled tracing allocated: %v", allocations)
++	}
++}
++
++func TestDestroyStageRecorderPreservesError(t *testing.T) {
++	cause := errors.New("task Delete failed")
++	calls := 0
++	ctx := WithDestroyStageRecorder(context.Background(), func(stage string, start time.Time, err error) {
++		calls++
++		if stage != "task_delete" || start.IsZero() || err != cause {
++			t.Fatalf("unexpected stage %q start %v error %v", stage, start, err)
++		}
++	})
++	BeginDestroyStage(ctx, "task_delete")(cause)
++	if calls != 1 {
++		t.Fatalf("calls=%d", calls)
++	}
++}
+
+diff --git a/Cubelet/plugins/workflow/engine.go b/Cubelet/plugins/workflow/engine.go
+--- a/Cubelet/plugins/workflow/engine.go
++++ b/Cubelet/plugins/workflow/engine.go
+@@ -467,7 +467,10 @@
+ 	ctxTmp = log.ReNewLogger(ctxTmp)
+ 	rOpts := &CreateContext{}
+ 	rOpts.SandboxID = opts.GetSandboxID()
+-	if err := e.cleanupFlow.Create(ctxTmp, rOpts); err != nil {
++	finishStage := BeginDestroyStage(ctx, "workflow.cleanup_enqueue")
++	err := e.cleanupFlow.Create(ctxTmp, rOpts)
++	finishStage(err)
++	if err != nil {
+ 
+ 		CubeLog.WithContext(ctxTmp).Fatalf("cleanupFlow.Create fatal error:%v", err)
+ 	}
+@@ -484,6 +487,8 @@
+ 		flow := step.Actions[i]
+ 		startGo := time.Now()
+ 		eg.Go(func() (err error) {
++			finishStage := BeginDestroyStage(ctx, "workflow."+flow.ID())
++			defer func() { finishStage(err) }()
+ 			defer recov.HandleCrash(func(panicError interface{}) {
+ 				err = ret.Errorf(errorcode.ErrorCode_Unknown, "flow[%v] do %s panic :%v %v", flow.ID(), do, panicError, string(debug.Stack()))
+ 			})
+
+diff --git a/Cubelet/services/cubebox/checkpoint_destroy_trace.go b/Cubelet/services/cubebox/checkpoint_destroy_trace.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/checkpoint_destroy_trace.go
+@@ -0,0 +1,51 @@
++package cubebox
++
++import (
++	"context"
++	"sync"
++	"time"
++
++	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
++)
++
++type checkpointDestroyStages struct {
++	mu     sync.Mutex
++	stages map[string]checkpointDestroyStage
++}
++
++type checkpointDestroyStage struct {
++	StartedUnixSeconds float64 `json:"started_unix_s"`
++	DurationSeconds    float64 `json:"duration_seconds"`
++	Status             string  `json:"status"`
++	Error              string  `json:"error,omitempty"`
++}
++
++func checkpointDestroyContext(ctx context.Context) (context.Context, *checkpointDestroyStages) {
++	stages := &checkpointDestroyStages{stages: make(map[string]checkpointDestroyStage)}
++	return workflow.WithDestroyStageRecorder(ctx, stages.record), stages
++}
++
++func (s *checkpointDestroyStages) record(stage string, start time.Time, err error) {
++	row := checkpointDestroyStage{StartedUnixSeconds: float64(start.UnixNano()) / 1e9,
++		DurationSeconds: time.Since(start).Seconds(), Status: "ok"}
++	if err != nil {
++		row.Status, row.Error = "error", err.Error()
++	}
++	s.mu.Lock()
++	s.stages[stage] = row
++	s.mu.Unlock()
++}
++
++func checkpointDestroyDetails(stages *checkpointDestroyStages, err error) map[string]interface{} {
++	stages.mu.Lock()
++	snapshot := make(map[string]checkpointDestroyStage, len(stages.stages))
++	for name, row := range stages.stages {
++		snapshot[name] = row
++	}
++	stages.mu.Unlock()
++	fields := map[string]interface{}{"stages": snapshot}
++	if err != nil {
++		fields["error"] = err.Error()
++	}
++	return fields
++}
+
+diff --git a/Cubelet/services/cubebox/checkpoint_destroy_trace_test.go b/Cubelet/services/cubebox/checkpoint_destroy_trace_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/checkpoint_destroy_trace_test.go
+@@ -0,0 +1,46 @@
++package cubebox
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"sync"
++	"testing"
++
++	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
++)
++
++func TestCheckpointDestroyConcurrentStages(t *testing.T) {
++	ctx, stages := checkpointDestroyContext(context.Background())
++	cause := errors.New("Delete deadline exceeded")
++	var group sync.WaitGroup
++	for i := 0; i < 16; i++ {
++		group.Add(1)
++		go func(i int) {
++			defer group.Done()
++			workflow.BeginDestroyStage(ctx, fmt.Sprintf("workflow.%d", i))(cause)
++		}(i)
++	}
++	group.Wait()
++	fields := checkpointDestroyDetails(stages, cause)
++	rows := fields["stages"].(map[string]checkpointDestroyStage)
++	if len(rows) != 16 || fields["error"] != cause.Error() {
++		t.Fatalf("incomplete details: %#v", fields)
++	}
++	for _, row := range rows {
++		if row.Status != "error" || row.Error != cause.Error() || row.StartedUnixSeconds <= 0 || row.DurationSeconds < 0 {
++			t.Fatalf("invalid stage: %#v", row)
++		}
++	}
++	if _, err := json.Marshal(fields); err != nil {
++		t.Fatal(err)
++	}
++	workflow.BeginDestroyStage(ctx, "later")(nil)
++	if len(rows) != 16 {
++		t.Fatal("details mutated after snapshot")
++	}
++	if _, exists := checkpointDestroyDetails(stages, nil)["error"]; exists {
++		t.Fatal("success has an error")
++	}
++}
+
+diff --git a/Cubelet/services/cubebox/destroy.go b/Cubelet/services/cubebox/destroy.go
+--- a/Cubelet/services/cubebox/destroy.go
++++ b/Cubelet/services/cubebox/destroy.go
+@@ -51,7 +51,10 @@
+ 			return
+ 		}
+ 		if keepPausedTombstone {
+-			if ferr := l.finalizePausedTombstone(ctx, sandBoxID); ferr != nil {
++			finishStage := workflow.BeginDestroyStage(ctx, "cubebox.finalize_tombstone")
++			ferr := l.finalizePausedTombstone(ctx, sandBoxID)
++			finishStage(ferr)
++			if ferr != nil {
+ 				log.G(ctx).Warnf("finalize paused tombstone %s: %v", sandBoxID, ferr)
+ 			}
+ 			return
+@@ -60,7 +63,9 @@
+ 			CubeboxID: sandBoxID,
+ 		})
+ 	}()
++	finishStage := workflow.BeginDestroyStage(ctx, "cubebox.manager_get")
+ 	sb, err := l.cubeboxManger.Get(ctx, sandBoxID)
++	finishStage(err)
+ 	if err != nil {
+ 
+ 		if errors.Is(err, utils.ErrorKeyNotFound) {
+@@ -69,7 +74,9 @@
+ 		return err
+ 	}
+ 
++	finishStage = workflow.BeginDestroyStage(ctx, "cubebox.lock")
+ 	sb.Lock()
++	finishStage(nil)
+ 	defer sb.Unlock()
+ 
+ 	if opts.BaseWorkflowInfo.IsRollBack {
+@@ -111,7 +118,9 @@
+ 	// while the shim process may still hold the guest disks; storage Destroy
+ 	// is the next workflow step and must not delete those volumes yet.
+ 	runtimePIDs := l.collectSandboxRuntimePIDs(ctx, sb)
++	finishStage = workflow.BeginDestroyStage(ctx, "cubebox.cbri_destroy")
+ 	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)
++	finishStage(err)
+ 	if err != nil {
+ 		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())
+ 		return fmt.Errorf("faild to destroy cbri sandbox")
+@@ -130,9 +139,12 @@
+ 	if sb.GetStatus().IsPaused() {
+ 
+ 		ctx = constants.WithSkipRuntimeAPI(ctx)
+-		if _, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{
++		finishStage = workflow.BeginDestroyStage(ctx, "cubebox.task_delete")
++		_, deleteErr := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{
+ 			ContainerID: sb.ID,
+-		}); err != nil {
++		})
++		finishStage(deleteErr)
++		if err := deleteErr; err != nil {
+ 			// After PauseToSnapshot, Delete reaps the shim (shim may exit during
+ 			// / right after Delete). ttrpc closed / not found is then expected
+ 			// for keep_tombstone, delete_tombstone, or direct Destroy.
+@@ -145,7 +157,10 @@
+ 		// Drop leftover containerd metadata so same-ID Resume Create does not
+ 		// hit "container already exists". Safe for final delete too (NotFound OK).
+ 		for _, id := range pausedTombstoneContainerIDs(sb) {
+-			if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
++			finishStage = workflow.BeginDestroyStage(ctx, "cubebox.container_metadata."+id)
++			deleteErr := l.client.ContainerService().Delete(ctx, id)
++			finishStage(deleteErr)
++			if err := deleteErr; err != nil && !errdefs.IsNotFound(err) {
+ 				log.G(ctx).Warnf("paused sandbox delete containerd %s: %v", id, err)
+ 			}
+ 		}
+@@ -189,10 +204,16 @@
+ 		}
+ 	}
+ 
+-	if er := runc.Clean(ctx, opts.SandboxID); er != nil {
++	finishStage = workflow.BeginDestroyStage(ctx, "cubebox.runc_clean")
++	cleanErr := runc.Clean(ctx, opts.SandboxID)
++	finishStage(cleanErr)
++	if er := cleanErr; er != nil {
+ 		result = multierror.Append(result, fmt.Errorf("destroy runc files [%s] fail: %w", sandBoxID, er))
+ 	}
+-	if er := waitSandboxRuntimeGone(ctx, sandBoxID, runtimePIDs); er != nil {
++	finishStage = workflow.BeginDestroyStage(ctx, "cubebox.runtime_wait")
++	waitErr := waitSandboxRuntimeGone(ctx, sandBoxID, runtimePIDs)
++	finishStage(waitErr)
++	if er := waitErr; er != nil {
+ 		result = multierror.Append(result, fmt.Errorf("wait sandbox runtime exit [%s] fail: %w", sandBoxID, er))
+ 	}
+ 	if er := result.ErrorOrNil(); er != nil {

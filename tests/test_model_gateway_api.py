@@ -131,6 +131,36 @@ def test_exec_timeout_starts_after_policy_admission(tmp_path: Path, stream: bool
     )
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_replay_timeout_multiplier_only_extends_in_band_deadline(
+    tmp_path: Path, stream: bool,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    write_spans(trace, llm_spans([], {
+        "content": None,
+        "tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {
+                "name": "exec",
+                "arguments": json.dumps({"command": "pytest -q", "timeout": 120}),
+            },
+        }],
+    }, duration_ms=0))
+    gateway = ModelGateway(
+        tmp_path / "session.json", mode="replay", trace=trace,
+        tool_transport_timeout_s=3660, replay_tool_timeout_multiplier=4,
+    )
+    _status, content_type, body, _request_id = gateway.complete_http({
+        "messages": [{"role": "user", "content": "run"}], "stream": stream,
+    })
+    message = _response_message(content_type, body)
+    arguments = json.loads(message["tool_calls"][0]["function"]["arguments"])
+    assert arguments == {
+        "command": "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS=480\npytest -q",
+        "timeout": 3660,
+    }
+
+
 def test_fragmented_streaming_exec_arguments_are_reassembled_before_rewrite() -> None:
     chunks = [
         {"id": "x", "choices": [{"index": 0, "delta": {"tool_calls": [{

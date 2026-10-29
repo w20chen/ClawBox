@@ -28,6 +28,42 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # as Tool-sandbox operations.
 TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
+
+
+def replay_uses_background_execution(model_gateway: Any | None) -> bool:
+    """Keep process tools only when replay evidence uses background results.
+
+    OpenClaw derives allowBackground from its process tool policy. Synchronous
+    recordings must not turn into concurrent commands merely because admission
+    or actual execution lasts longer than its default ten-second yield window.
+    Live models retain the normal process tool and can choose when to poll.
+    """
+    gateway = getattr(model_gateway, "gateway", None)
+    if gateway is None or gateway.mode != "replay" or not gateway.actions:
+        return True
+    for action in gateway.actions:
+        for call in action.output.get("tool_calls") or []:
+            function = call.get("function") or {}
+            if function.get("name") == "process":
+                return True
+            if function.get("name") == "exec":
+                args = function.get("arguments") or {}
+                args = json.loads(args) if isinstance(args, str) else args
+                if args.get("background") is True or "yieldMs" in args:
+                    return True
+        # Each next request contains the most recent tool results. Avoid
+        # rescanning its entire accumulated conversation for every model step.
+        for message in reversed(action.input):
+            if message.get("role") == "assistant":
+                break
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            if isinstance(content, list):
+                content = "\n".join(str(item.get("text") or "") for item in content if isinstance(item, dict))
+            if isinstance(content, str) and re.search(r"Command still running \(session [^,\n]+, pid \d+\)", content):
+                return True
+    return False
 OPENCLAW_SSH_RUNTIME_ROOT = "/workspace"
 
 # Initialize the session credential in the existing agent process through
@@ -88,7 +124,19 @@ def native_tool_workspace_setup_command(tool_workspace: str) -> str:
     runtime_dir = openclaw_shared_ssh_runtime_directory(source)
     return (
         f"set -eu; test -d {shlex.quote(source)}; "
-        f"mkdir -p -- {shlex.quote(runtime_dir)}"
+        f"mkdir -p -- {shlex.quote(runtime_dir)}; "
+        # Some recorded commands use the generation host's old Miniconda
+        # prefix. Alias it to the image's one authoritative Conda tree.
+        "if ! test -e /opt/miniconda3 && test -d /opt/conda; then "
+        "ln -s /opt/conda /opt/miniconda3; fi; "
+        # Do not leak ClawBox's safe.directory entry into replay. Preserve
+        # only the image's Git identity in a per-VM global configuration.
+        "git_config=/run/clawbox-replay.gitconfig; : >\"$git_config\"; "
+        "if value=$(git config --global --get user.name 2>/dev/null); then "
+        "git config --file \"$git_config\" user.name \"$value\"; fi; "
+        "if value=$(git config --global --get user.email 2>/dev/null); then "
+        "git config --file \"$git_config\" user.email \"$value\"; fi; "
+        "chmod 644 \"$git_config\""
     )
 
 
@@ -232,7 +280,8 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
                                      require_progress_events: bool = False,
                                      command_timeout_seconds: int = 300,
                                      apt_cache_proxy_url: str | None = None,
-                                     pypi_cache_index_url: str | None = None) -> str:
+                                     pypi_cache_index_url: str | None = None,
+                                     allow_internet_access: bool = True) -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
     Cube restores a template snapshot before applying per-sandbox environment
@@ -255,16 +304,28 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "/usr/local/bin/tool-bridge --self-test | grep -q '\"progress_events\":true' || "
         "{ echo 'Toolbridge lacks execution progress events; rebuild the Tool image with clawbox experiment images' >&2; exit 1; }; "
     ) if require_progress_events else ""
-    apt_proxy_setup = ""
-    if apt_cache_proxy_url:
+    # APT has no safe automatic fallback when its proxy is unavailable. With
+    # outbound access enabled, use the guest's normal Kunpeng network path and
+    # remove only ClawBox's own proxy file in case this VM was restored.
+    apt_proxy_setup = (
+        "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache; "
+        if allow_internet_access else ""
+    )
+    if apt_cache_proxy_url and not allow_internet_access:
         directive = f'Acquire::http::Proxy "{apt_cache_proxy_url}";\n'
         apt_proxy_setup = (
             "mkdir -p /etc/apt/apt.conf.d; "
             f"printf %s {shlex.quote(directive)} "
             "> /etc/apt/apt.conf.d/01clawbox-package-cache; "
         )
-    pypi_environment = ""
-    if pypi_cache_index_url:
+    # Do not query a stale cache in addition to PyPI: pip considers every
+    # configured index and a slow extra index can delay every resolution. The
+    # cache is therefore the closed-network source; open VMs use PyPI directly.
+    pypi_environment = (
+        "PIP_INDEX_URL=https://pypi.org/simple "
+        if allow_internet_access else ""
+    )
+    if pypi_cache_index_url and not allow_internet_access:
         pypi_host = urllib.parse.urlsplit(pypi_cache_index_url).hostname
         if not pypi_host:
             raise ValueError("PyPI cache index URL has no host")
@@ -406,6 +467,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     agent_stderr_file = f"{home}/logs/agent.stderr"
     agent_exit_file = f"{home}/completion/agent.exit"
     policy_audit_file = f"{home}/logs/policy-ssh.jsonl"
+    replay_mode = getattr(getattr(model_gateway, "gateway", None), "mode", None) == "replay"
+    tool_home = str(configuration.get("openclaw_tool_home", "/root"))
+    if not tool_home.startswith("/") or "\x00" in tool_home:
+        raise ValueError("openclaw_tool_home must be an absolute Tool VM path")
     relay_script_file = f"{launcher_dir}/model-relay.py"
     relay_pid_file = f"{home}/model-relay.pid"
     prediction_file = f"/state/clawtune/{session_id}/runtime-predictions.json"
@@ -427,6 +492,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_AUDIT_FILE={shlex.quote(policy_audit_file)} "
         f"CLAWBOX_SSH_CONTROL_DIR={shlex.quote(ssh_dir)} "
         f"CLAWBOX_TOOL_TIMEOUT_SECONDS={tool_timeout_seconds} "
+        f"CLAWBOX_REPLAY_NO_AUTO_COMPACTION={int(replay_mode)} "
+        f"CLAWBOX_REPLAY_NO_REMOTE_SKILLS={int(replay_mode)} "
         f"CLAWBOX_REAL_SSH={shlex.quote(real_ssh)} "
         "CLAWBOX_POLICY_REQUIRE_ENVELOPE=1 "
         f"CLAWBOX_RUNTIME_PREDICTION_FILE={shlex.quote(prediction_file)} "
@@ -586,7 +653,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"/opt/clawtune/venv/bin/python {shlex.quote(timed_sidecar_file)} "
         + f"--host 127.0.0.1 --port 8765 --timing-output {shlex.quote(sidecar_timing_file)} "
         + f">{shlex.quote(home + '/logs/sidecar.log')} 2>&1 & "
-        + f"echo $! >{shlex.quote(home + '/sidecar.pid')}", 30,
+        + f"echo $! >{shlex.quote(home + '/sidecar.pid')}",
+            max(30, startup_timeout_seconds + 10),
         )
     except BaseException:
         emit_startup_stage("runtime_setup", setup_started, status="error")
@@ -673,6 +741,16 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         # Admission control can intentionally hold an already-issued model
         # request while earlier Tools release their memory reservations.
         provider_patch["timeoutSeconds"] = transport_timeout_seconds
+    # Denying process is OpenClaw's native switch for synchronous exec. Preserve
+    # background semantics whenever the recording contains evidence for them.
+    tool_vm_tools = list(TOOL_VM_TOOLS)
+    denied_tools = ["browser", "canvas", "nodes", "cron", "gateway"]
+    if not replay_uses_background_execution(model_gateway):
+        tool_vm_tools.remove("process")
+        denied_tools.append("process")
+    tool_environment = {"HOME": tool_home}
+    if replay_mode:
+        tool_environment["GIT_CONFIG_GLOBAL"] = "/run/clawbox-replay.gitconfig"
     native_config = {
         "auth": {"profiles": {"vllm:default": {"provider": "vllm", "mode": "api_key"}}},
         "session": {"dmScope": "per-channel-peer"},
@@ -686,6 +764,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "agents": {"defaults": {"workspace": runtime_workspace,
             "model": {"primary": f"vllm/{openclaw_model}"}, "sandbox": {
             "mode": "all", "backend": "ssh", "scope": "shared", "workspaceAccess": "rw",
+            # OpenClaw otherwise replaces HOME with the workspace. Its SSH
+            # backend also consumes docker.env; preserve the Tool user's
+            # configuration (notably Conda pins and Git identity).
+            "docker": {"env": tool_environment},
             "ssh": {"target": ssh.target,
                     "workspaceRoot": ssh.workspace_root,
                     "identityFile": identity_file, "knownHostsFile": known_hosts_file,
@@ -693,13 +775,13 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         }}},
         "tools": {
             "profile": "coding",
-            "allow": [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS],
-            "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
+            "allow": [*tool_vm_tools, *RUNTIME_LOCAL_TOOLS],
+            "deny": denied_tools,
             "exec": exec_tool_config,
             "elevated": {"enabled": False},
             "sandbox": {"tools": {
-                "allow": list(TOOL_VM_TOOLS),
-                "deny": ["browser", "canvas", "nodes", "cron", "gateway"],
+                "allow": tool_vm_tools,
+                "deny": denied_tools,
             }},
         },
         "models": {"mode": "merge", "providers": {"vllm": provider_patch}},

@@ -23,6 +23,7 @@ point in new terminals to avoid repeating environment and privilege setup.
 | Build ARM64 task environments from prepared SWE-ReBench images | [build-swe-rebench-arm64.py](build-swe-rebench-arm64.py) |
 | Register a prepared immutable task image in a separate profile | [register-task-image.py](register-task-image.py) |
 | Refresh Tool collectors while retaining task dependencies | [refresh-swe-collector-images.py](refresh-swe-collector-images.py) |
+| Cache recorded Conda environment packages for offline replay | [cache-recorded-conda-environments.py](cache-recorded-conda-environments.py) |
 | Run persistent host-local APT and pip caches | [clawbox-package-cache](clawbox-package-cache), [clawbox-pypi-cache](clawbox-pypi-cache) |
 | Inspect cold-start prediction coverage without VMs | [evaluate-cold-start-coverage.py](evaluate-cold-start-coverage.py) |
 | Reproduce the frozen full-pool versus one-cache-cluster CPU-placement experiment | [run-llc-shared-reproduction.sh](run-llc-shared-reproduction.sh) |

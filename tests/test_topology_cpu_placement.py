@@ -170,8 +170,9 @@ def c2_domain(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         domain, '_sample_group_utilization',
-        lambda groups: {'0,2,4,6': .8, '8,10,12,14': .1},
+        lambda groups, **kwargs: {'0,2,4,6': .8, '8,10,12,14': .1},
     )
+    monkeypatch.setattr(domain, '_cpu_observation', lambda: ({}, {}, 0.))
     return domain, leaf, events, applied
 
 
@@ -209,7 +210,7 @@ def test_c2_caches_topology_and_reuses_preferred_group(monkeypatch, tmp_path):
     domain.release_tool_call('exec-1')
     monkeypatch.setattr(
         domain, '_sample_group_utilization',
-        lambda groups: {'0,2,4,6': .1, '8,10,12,14': .8},
+        lambda groups, **kwargs: {'0,2,4,6': .1, '8,10,12,14': .8},
     )
 
     second = domain.acquire_tool_call(0, 'exec-2', vcpus=2)

@@ -286,6 +286,56 @@ func commandExitCode(err error, timedOut bool) int {
 	return 127
 }
 
+type commandCompletion struct {
+	err       error
+	ended     time.Time
+	timedOut  bool
+	cancelled bool
+}
+
+// Reap and enforce the payload deadline independently of progress delivery.
+// The buffered result retains the actual Wait completion time while the
+// caller finishes the ordered start/end acknowledgements.
+func waitCommand(cmd *exec.Cmd, deadline time.Time, cancelled, aborted <-chan struct{}) commandCompletion {
+	done := make(chan commandCompletion, 1)
+	go func() {
+		err := cmd.Wait()
+		done <- commandCompletion{err: err, ended: time.Now()}
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	timedOut, wasCancelled := false, false
+	signal := syscall.SIGTERM
+	select {
+	case result := <-done:
+		return result
+	case <-timer.C:
+		timedOut = true
+	case <-cancelled:
+		wasCancelled = true
+	case <-aborted:
+		signal = syscall.SIGKILL
+	}
+	// If it completed concurrently, avoid signaling an already reaped PID.
+	select {
+	case result := <-done:
+		return result
+	default:
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, signal)
+	grace := time.NewTimer(5 * time.Second)
+	defer grace.Stop()
+	var result commandCompletion
+	select {
+	case result = <-done:
+	case <-grace.C:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		result = <-done
+	}
+	result.timedOut, result.cancelled = timedOut, wasCancelled
+	return result
+}
+
 func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Duration, outputLimit int64) executionLog {
 	started := time.Now()
 	command, envelopeExecutionID, profileCommand, enveloped := parseExecEnvelope(rawCommand)
@@ -449,43 +499,33 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 				record.TelemetryArtifact = response.ArtifactPath
 			}
 		}
-		collector.MarkExecutionStart(time.Now())
+		executionStarted := time.Now()
+		collector.MarkExecutionStart(executionStarted)
+		aborted := make(chan struct{}, 1)
+		completed := make(chan commandCompletion, 1)
+		go func() {
+			completed <- waitCommand(cmd, executionStarted.Add(timeout), cancelled, aborted)
+		}()
 		if _, releaseErr := gateWrite.Write([]byte{'\n'}); releaseErr != nil {
 			err = releaseErr
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			aborted <- struct{}{}
 		}
 		_ = gateWrite.Close()
 		if progressErr := progress.report("start"); progressErr != nil {
 			progressError = progressErr.Error()
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		timer := time.NewTimer(timeout)
-		select {
-		case err = <-done:
-			timer.Stop()
-		case <-timer.C:
-			record.TimedOut = true
-		case <-cancelled:
-			timer.Stop()
-			record.Cancelled = true
-		}
-		if record.TimedOut || record.Cancelled {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			select {
-			case err = <-done:
-			case <-time.After(5 * time.Second):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				err = <-done
+			case aborted <- struct{}{}:
+			default:
 			}
 		}
+		completion := <-completed
+		err, executionEnded = completion.err, completion.ended
+		record.TimedOut, record.Cancelled = completion.timedOut, completion.cancelled
 		_ = stdinWrite.Close()
 		record.ExitCode = commandExitCode(err, record.TimedOut)
 		if record.Cancelled {
 			record.ExitCode = 130
 		}
-		executionEnded = time.Now()
 		if progressErr := progress.report("end"); progressErr != nil {
 			progressError = progressErr.Error()
 		}

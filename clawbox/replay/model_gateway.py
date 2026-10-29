@@ -6,6 +6,7 @@ import base64
 import hashlib
 import inspect
 import json
+import math
 import zlib
 import sys
 import threading
@@ -76,6 +77,7 @@ class ModelGateway:
                  upstream_api_key: str | None = None, upstream_model: str | None = None,
                  timeout_s: float = 600.0,
                  tool_transport_timeout_s: float | None = None,
+                 replay_tool_timeout_multiplier: float = 1.0,
                  max_model_steps: int | None = None,
                  request_namespace: str = "default",
                  on_request_started: Callable[[], None] | None = None,
@@ -103,6 +105,12 @@ class ModelGateway:
         self.upstream_model = upstream_model or ""
         self.timeout_s = timeout_s
         self.tool_transport_timeout_s = tool_transport_timeout_s
+        if (isinstance(replay_tool_timeout_multiplier, bool)
+                or not isinstance(replay_tool_timeout_multiplier, (int, float))
+                or not math.isfinite(replay_tool_timeout_multiplier)
+                or replay_tool_timeout_multiplier < 1):
+            raise ValueError("replay_tool_timeout_multiplier must be finite and at least 1")
+        self.replay_tool_timeout_multiplier = float(replay_tool_timeout_multiplier)
         self.request_namespace = str(request_namespace).strip()
         if not self.request_namespace:
             raise ValueError("request_namespace must not be empty")
@@ -554,6 +562,7 @@ class ModelGateway:
             if self.tool_transport_timeout_s is not None and 200 <= int(status) < 300:
                 body = _defer_exec_tool_timeouts(
                     content_type, body, self.tool_transport_timeout_s,
+                    self.replay_tool_timeout_multiplier,
                 )
             # Capture the pure model/replay completion before any policy or
             # restore operation. ``completed_unix_s`` remains the legacy
@@ -700,7 +709,10 @@ def _replay_response(action: ReplayAction, stream: bool) -> tuple[int, str, byte
     return 200, "text/event-stream", body
 
 
-def _rewrite_exec_tool_calls(message: dict[str, Any], transport_timeout_s: float) -> bool:
+def _rewrite_exec_tool_calls(
+    message: dict[str, Any], transport_timeout_s: float,
+    timeout_multiplier: float = 1.0,
+) -> bool:
     """Move an exec timeout behind admission while preserving it in-band."""
     rendered_transport = max(1, int(transport_timeout_s))
     changed = False
@@ -722,7 +734,7 @@ def _rewrite_exec_tool_calls(message: dict[str, Any], transport_timeout_s: float
             continue
         if command.startswith(DEFERRED_TOOL_TIMEOUT_PREFIX):
             continue
-        rendered_actual = max(1, int(timeout))
+        rendered_actual = max(1, math.ceil(timeout * timeout_multiplier))
         arguments["command"] = (
             f"{DEFERRED_TOOL_TIMEOUT_PREFIX}{rendered_actual}\n{command}"
         )
@@ -736,6 +748,7 @@ def _rewrite_exec_tool_calls(message: dict[str, Any], transport_timeout_s: float
 
 def _defer_exec_tool_timeouts(
     content_type: str, body: bytes, transport_timeout_s: float,
+    timeout_multiplier: float = 1.0,
 ) -> bytes:
     """Keep OpenClaw's transport alive; the SSH shim starts timeout after ADMIT."""
     if "text/event-stream" not in content_type.lower():
@@ -743,7 +756,9 @@ def _defer_exec_tool_timeouts(
         for choice in response.get("choices") or []:
             message = choice.get("message")
             if isinstance(message, dict):
-                _rewrite_exec_tool_calls(message, transport_timeout_s)
+                _rewrite_exec_tool_calls(
+                    message, transport_timeout_s, timeout_multiplier,
+                )
         return json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode()
 
     chunks: list[dict[str, Any]] = []
@@ -757,7 +772,9 @@ def _defer_exec_tool_timeouts(
     if not chunks:
         return body
     message = _response_message(content_type, body)
-    if not _rewrite_exec_tool_calls(message, transport_timeout_s):
+    if not _rewrite_exec_tool_calls(
+        message, transport_timeout_s, timeout_multiplier,
+    ):
         return body
     template = {key: value for key, value in chunks[0].items() if key != "choices"}
     finish_reason = next((

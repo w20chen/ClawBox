@@ -8,6 +8,7 @@ import mmap
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from collections.abc import Callable
 
@@ -152,6 +153,123 @@ class MemorySummary:
     numa_allocation_event_deltas: dict[str, dict[str, int]] | None
 
 
+class PeriodicCallback:
+    """One serial controller loop, independent of resource-evidence collection."""
+
+    def __init__(self, callback, *, interval_s: float, name: str):
+        self.callback, self.interval_s, self.name = callback, interval_s, name
+        self._stop = Event()
+        self._error = None
+        self._thread = Thread(target=self._run, name=name, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        try:
+            while not self._stop.wait(self.interval_s):
+                self.callback()
+        except Exception as exc:
+            self._error = exc
+
+    def check(self):
+        if self._error is not None:
+            raise RuntimeError(f'{self.name} failed') from self._error
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join()
+        self.check()
+
+
+class LatestOnlyReporter:
+    """Run auxiliary reporting serially without delaying evidence capture."""
+
+    def __init__(self, callback: Callable[[object], None], *, name: str):
+        self.callback = callback
+        self.name = name
+        self._queue: Queue[object] = Queue(maxsize=1)
+        self._stop = Event()
+        self._error: BaseException | None = None
+        self._metrics_lock = Lock()
+        self._submitted = 0
+        self._processed = 0
+        self._coalesced = 0
+        self._total_callback_seconds = 0.0
+        self._max_callback_seconds = 0.0
+        self._thread = Thread(target=self._run, name=name, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit(self, value: object) -> None:
+        self.check()
+        with self._metrics_lock:
+            self._submitted += 1
+        try:
+            self._queue.put_nowait(value)
+            return
+        except Full:
+            pass
+        try:
+            self._queue.get_nowait()
+            self._queue.task_done()
+            with self._metrics_lock:
+                self._coalesced += 1
+        except Empty:
+            # The reporter consumed the old value after put_nowait observed a
+            # full queue. The new value can now occupy that slot.
+            pass
+        self._queue.put_nowait(value)
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set() or not self._queue.empty():
+                try:
+                    value = self._queue.get(timeout=0.05)
+                except Empty:
+                    continue
+                started = time.monotonic()
+                try:
+                    self.callback(value)
+                finally:
+                    elapsed = time.monotonic() - started
+                    with self._metrics_lock:
+                        self._processed += 1
+                        self._total_callback_seconds += elapsed
+                        self._max_callback_seconds = max(
+                            self._max_callback_seconds, elapsed,
+                        )
+                    self._queue.task_done()
+        except BaseException as exc:
+            self._error = exc
+
+    def check(self) -> None:
+        if self._error is not None:
+            raise RuntimeError(f"{self.name} failed") from self._error
+
+    def metrics(self) -> dict:
+        with self._metrics_lock:
+            processed = self._processed
+            return {
+                "submitted": self._submitted,
+                "processed": processed,
+                "coalesced": self._coalesced,
+                "pending": self._queue.qsize(),
+                "mean_callback_seconds": (
+                    self._total_callback_seconds / processed if processed else 0.0
+                ),
+                "max_callback_seconds": self._max_callback_seconds,
+            }
+
+    def stop(self) -> dict:
+        self._stop.set()
+        self._thread.join()
+        metrics = self.metrics()
+        self.check()
+        return metrics
+
+
 class NodeMemorySampler:
     sample_hook: Callable[[int, int], None] | None = None
 
@@ -201,18 +319,35 @@ class NodeMemorySampler:
 
     def start(self) -> None:
         self._sampling_error = None
-        delta, available = self.current()
-        with self._lock:
-            self._samples.append((time.monotonic(), delta, available))
+        self._capture_sample()
         self._thread = Thread(target=self._run, name="node-memory-sampler", daemon=True)
         self._thread.start()
+
+    def check(self) -> None:
+        if getattr(self, "_sampling_error", None) is not None:
+            raise RuntimeError("memory evidence sampling failed") from self._sampling_error
+
+    def periodic_observation(self) -> dict:
+        used, available = self.current()
+        return {'local_used_bytes': used, 'host_available_bytes': available}
+
+    def _capture_sample(self) -> dict:
+        started = time.monotonic()
+        observation = self.periodic_observation()
+        completed = time.monotonic()
+        observation.update(observation_start_monotonic_s=started,
+                           observation_end_monotonic_s=completed)
+        self.last_observation = observation
+        with self._lock:
+            self._samples.append((completed, observation['local_used_bytes'],
+                                  observation['host_available_bytes']))
+        return observation
 
     def stop(self) -> MemorySummary:
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
-        if getattr(self, "_sampling_error", None) is not None:
-            raise RuntimeError("memory evidence sampling failed") from self._sampling_error
+        self.check()
         delta, available = self.current()
         with self._lock:
             self._samples.append((time.monotonic(), delta, available))
@@ -266,12 +401,19 @@ class NodeMemorySampler:
 
     def _run(self) -> None:
         try:
-            while not self._stop.wait(self.interval_s):
-                delta, available = self.current()
-                with self._lock:
-                    self._samples.append((time.monotonic(), delta, available))
+            next_sample = time.monotonic() + self.interval_s
+            while not self._stop.wait(max(0.0, next_sample - time.monotonic())):
+                observation = self._capture_sample()
                 if self.sample_hook is not None:
-                    self.sample_hook(delta, available)
+                    self.sample_hook(observation['local_used_bytes'],
+                                     observation['host_available_bytes'])
+                next_sample += self.interval_s
+                now = time.monotonic()
+                if next_sample <= now:
+                    # Skip missed ticks instead of issuing a catch-up burst.
+                    next_sample += (
+                        int((now - next_sample) / self.interval_s) + 1
+                    ) * self.interval_s
         except Exception as exc:
             self._sampling_error = exc
 
@@ -445,6 +587,19 @@ class NumaCgroupMemorySampler(CgroupMemorySampler):
         shared = resident.get(self.shared_numa_node, 0)
         total = int((self.cgroup / "memory.current").read_text())
         return local, shared, total
+
+    def periodic_observation(self) -> dict:
+        from .numa_borrow import read_numa_lru_observation
+        _, available = read_meminfo(self.meminfo)
+        resident, unattributed, charged = read_numa_lru_observation(self.cgroup)
+        return {
+            'local_used_bytes': sum(resident.get(n, 0) for n in self.local_numa_nodes) + unattributed,
+            'host_available_bytes': available,
+            'numa_residency': {'resident_bytes_by_numa': resident,
+                               'unattributed_bytes': unattributed},
+            'combined_live_used_bytes': charged,
+            'shared_live_used_bytes': resident.get(self.shared_numa_node, 0),
+        }
 
     def current(self) -> tuple[int, int]:
         from .numa_borrow import read_numa_lru_bytes

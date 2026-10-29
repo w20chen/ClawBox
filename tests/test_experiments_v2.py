@@ -26,7 +26,8 @@ from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.numa_borrow import NumaBorrowRecord
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.experiments.spec import (
-    ExecutionSpec, ReclamationPolicy, WorkloadSpec, load_workload_cases,
+    ExecutionSpec, ReclamationPolicy, SandboxSpec, WorkloadCase, WorkloadSpec,
+    load_workload_cases, resolve_case_sandbox,
 )
 
 
@@ -812,6 +813,18 @@ def test_event_publication_does_not_wait_for_activity_snapshot(tmp_path: Path) -
         writer.close()
 
 
+def test_activity_snapshot_bounds_reporting_backlog() -> None:
+    tracker = ArmActivityTracker(10)
+    tracker._MAX_PENDING_TRANSITIONS = 2
+    for index in range(3):
+        tracker.observe({"event": "session_dispatched", "session_id": f"s{index}"})
+    snapshot = tracker.snapshot()
+    assert snapshot["measurement"] == "partial"
+    assert snapshot["offered_sessions"] == 2
+    assert snapshot["pending_transitions"] == 0
+    assert snapshot["dropped_transitions"] == 1
+
+
 def test_event_writer_disk_wait_does_not_hold_producer_lock(tmp_path: Path) -> None:
     from threading import Event
     writer = EventWriter(tmp_path/'events.jsonl')
@@ -1142,6 +1155,29 @@ def test_dependency_install_concurrency_is_optional_and_positive() -> None:
     assert ExecutionSpec(dependency_install_concurrency=8).dependency_install_concurrency == 8
     with pytest.raises(ValidationError, match="dependency_install_concurrency"):
         ExecutionSpec(dependency_install_concurrency=0)
+
+
+@pytest.mark.parametrize("configured_access", [True, False])
+def test_global_tool_network_policy_preserves_case_vm_identity(
+    configured_access: bool,
+) -> None:
+    case = WorkloadCase(
+        case_id="case-a", source="recorded_trace", source_reference="trace.json",
+        sandbox=SandboxSpec(
+            template_id="tpl-case", memory_mib=4096, workspace="/testbed",
+            allow_internet_access=not configured_access,
+        ),
+    )
+    configured = SandboxSpec(
+        template_id="tpl-default", allow_internet_access=configured_access,
+    )
+
+    resolved = resolve_case_sandbox(case, configured)
+
+    assert resolved.template == "tpl-case"
+    assert resolved.memory_mib == 4096
+    assert resolved.workspace == "/testbed"
+    assert resolved.allow_internet_access is configured_access
 
 
 def test_apt_cache_proxy_is_optional_and_requires_plain_http_host_port() -> None:

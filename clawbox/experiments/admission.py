@@ -76,6 +76,7 @@ class DemandLedger:
         self._sample_guard = Lock()
         self.shared_sample_leader_count = 0
         self.shared_sample_follower_count = 0
+        self._last_pending_observation = None
 
     @operation('admission.shared_sample')
     def sample_concurrently(self, key: object, sample: Callable[[], object]):
@@ -152,6 +153,7 @@ class DemandLedger:
     def _read_pending_observation(self, future, leader, snapshot):
         if leader:
             try:
+                observed_start = time.monotonic()
                 with span('admission.exact_sample_work', claims=len(snapshot)):
                     def measure(item):
                         key, (claim, frozen) = item
@@ -170,11 +172,55 @@ class DemandLedger:
                         thread_name_prefix="admission-sample",
                     ) as readers:
                         measured = dict(readers.map(measure, snapshot.items()))
+                self._last_pending_observation = (
+                    observed_start, time.monotonic(), measured,
+                )
                 future.set_result(measured)
             except BaseException as exc:
                 future.set_exception(exc)
         with span('admission.exact_sample_future', leader=leader):
             return future.result()
+
+    def pending_evidence(self, scope: str) -> dict:
+        """Reuse admission's observed claims; reporting never probes each VM.
+
+        New/replaced claims and changed baselines invalidate this observation.
+        Their nominal reservation remains a separately labelled upper bound.
+        """
+        with self.condition:
+            observation = self._last_pending_observation
+            claims = {key: claim for key, claim in self.claims.items() if claim.scope == scope}
+            nominal = self.pending_upper_bound(scope)
+            observed = 0
+            pending = 0
+            for key, claim in claims.items():
+                if claim.sample is None:
+                    pending += claim.local_amount
+                    observed += 1
+                elif observation is not None:
+                    sample = observation[2].get(key)
+                    if (sample is None or sample[0] is not claim
+                            or sample[1].baseline != claim.baseline
+                            or sample[1].sample is not claim.sample
+                            or isinstance(sample[2], BaseException)):
+                        continue
+                    pending += max(0, claim.local_amount - (sample[1].local_amount - sample[2][1]))
+                    observed += 1
+            covered = observed == len(claims)
+            if not any(c.sample is not None for c in claims.values()):
+                observation = None
+            return {
+                'outstanding_bytes': pending if covered else None,
+                'outstanding_bytes_kind': ('cached_admission_observation'
+                    if any(c.sample is not None for c in claims.values()) else
+                    'unconsumed_reservations' if claims else 'no_active_claims'),
+                'outstanding_nominal_upper_bound_bytes': nominal,
+                'outstanding_observed_claims': observed,
+                'outstanding_total_claims': len(claims),
+                'outstanding_observation_start_monotonic_s': observation[0] if observation else None,
+                'outstanding_observation_end_monotonic_s': observation[1] if observation else None,
+                'outstanding_observation_age_seconds': max(0., time.monotonic()-observation[0]) if observation else None,
+            }
 
     @operation('admission.exact_pending_observation')
     def pending_observation(self, *, progress: bool = False):

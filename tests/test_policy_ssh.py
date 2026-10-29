@@ -369,6 +369,7 @@ def test_deferred_timeout_is_removed_from_profile_and_begins_after_admission(
                 "decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 1,
                 "container_port": 2222, "host": "192.0.2.20", "port": 20020,
                 "notify_execution_start": progress,
+                "progress_timeout_seconds": 30,
             }
         return {"status": "COMPLETED"}
 

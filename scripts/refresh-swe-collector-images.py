@@ -111,6 +111,29 @@ ENTRYPOINT [\"/usr/local/bin/cube-tool-entrypoint.sh\"]
 """
 
 
+def retire_replaced_template(record: dict[str, Any], template_api, not_found_error) -> None:
+    """Delete only the recorded old template after verifying its replacement."""
+    if record.get("old_template_retired_at"):
+        return
+    old_id, new_id = record["old_template_id"], record["new_template_id"]
+    if old_id == new_id or record.get("status") != "template-ready":
+        raise RuntimeError("refusing template retirement without a distinct READY replacement")
+    replacement = template_api.get(new_id)
+    if (str(replacement.status).lower() not in READY
+            or replacement.image_info != record["new_image"]):
+        raise RuntimeError("replacement template is not READY with the recorded image")
+    try:
+        old = template_api.get(old_id)
+    except not_found_error:
+        # Resume after deletion succeeded but before the state write completed.
+        record["old_template_retired_at"] = time.time()
+        return
+    if old.image_info != record["old_image"]:
+        raise RuntimeError("old template image changed; refusing retirement")
+    template_api.delete(old_id)
+    record["old_template_retired_at"] = time.time()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workload", type=Path, required=True)
@@ -137,6 +160,10 @@ def parse_args() -> argparse.Namespace:
         help="additional filesystem path whose free space must stay above the floor",
     )
     parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument(
+        "--retire-replaced-templates", action="store_true",
+        help="delete each recorded old template through CubeSandbox after its replacement is READY; preserve Docker images",
+    )
     parser.add_argument(
         "--reregister-case", action="append", default=[], metavar="CASE_ID",
         help=(
@@ -188,7 +215,7 @@ def main() -> int:
             + ", ".join(sorted(unknown_reregister_cases))
         )
 
-    from cubesandbox import Template
+    from cubesandbox import Template, TemplateNotFoundError
     from clawbox.cube.api_retry import read_with_backoff
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -242,6 +269,11 @@ def main() -> int:
                     f"{free / 1024**3:.1f} GiB < {args.minimum_free_gib:.1f} GiB"
                 )
 
+    def retire(record: dict[str, Any]) -> None:
+        if args.retire_replaced_templates:
+            retire_replaced_template(record, Template, TemplateNotFoundError)
+            save(record["case_id"], record)
+
     def update(task: dict[str, Any]) -> dict[str, Any]:
         case_id = str(task["case_id"])
         reregister = case_id in reregister_cases
@@ -256,6 +288,7 @@ def main() -> int:
             and previous.get("recipe_digest") == recipe_digest
             and not reregister
         ):
+            retire(previous)
             return previous
         if reregister and previous.get("status") == "template-ready":
             if previous.get("template_reregister_generation") == args.reregister_generation:
@@ -426,6 +459,7 @@ def main() -> int:
             record.update(status="template-ready", finished_at=time.time())
             record.pop("error", None)
             save(case_id, record)
+            retire(record)
             print(case_id, record["status"], template_id, flush=True)
             return record
         except Exception as exc:

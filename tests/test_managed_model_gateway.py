@@ -164,10 +164,12 @@ def test_managed_gateway_forwards_session_request_timeout(tmp_path: Path) -> Non
             session_id="custom", store_path=tmp_path / "custom.json",
             mode="replay", trace=trace, time_scale=0, request_timeout_s=3660,
             tool_transport_timeout_s=3660,
+            replay_tool_timeout_multiplier=4,
         )
         assert default.gateway.timeout_s == 600.0
         assert custom.gateway.timeout_s == 3660
         assert custom.gateway.tool_transport_timeout_s == 3660
+        assert custom.gateway.replay_tool_timeout_multiplier == 4
 
 
 def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(

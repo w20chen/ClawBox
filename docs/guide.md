@@ -237,6 +237,19 @@ templates and capabilities. Its default worker bound is the smallest of target
 concurrency, creation concurrency, and case count. Use
 `--qualification-concurrency N` to change that bound. Qualification establishes
 capability and case coverage; formal runs measure performance at target load.
+For custom Tool images, set `inference.configuration.openclaw_tool_home` to the
+Tool user's home (default `/root`) so shell commands read the intended Git and
+Conda settings. Replay requires the current Runtime image patch to avoid
+unrecorded compaction requests; rebuild that image after updating the patch
+and launch with a new run ID. See [workload preparation](workloads.md).
+
+For replay, verify the [recorded tool behavior](workloads.md#import-replay-traces)
+and case-specific Tool images before launch. `execution.policy_progress_timeout_seconds`
+sets the total start/end acknowledgement deadline (30 seconds by default).
+Use matching Runtime and Tool bridge images when changing that capability;
+the deadline retries notifications only. Changes to images, replay behavior or
+sampling settings require a new run ID and fresh qualification when requested
+by `launch`.
 
 An explicit `--qualification FILE` must pass the receipt coverage checks. Omit it
 for automatic receipt management, or use `--force-qualify` to replace it. Receipt
@@ -264,7 +277,9 @@ bash scripts/clawbox --sudo experiment abort eval-01
 bash scripts/clawbox experiment status eval-01
 ```
 
-`abort` stops the supervisor and cleans up its owned VMs. `destroy` performs
+`abort` stops the supervisor and cleans up its owned VMs. After verified cleanup,
+pending/running arms become `cancelled`; already-terminal outcomes are retained.
+`destroy` performs
 owned-VM cleanup without deleting result files. Both default to 8 concurrent
 delete requests and a 180-second deadline; use `--cleanup-workers` and
 `--cleanup-timeout-seconds` for a larger cleanup window. They fail if remaining

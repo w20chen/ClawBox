@@ -90,6 +90,64 @@ def test_extraction_preserves_checkout_and_internal_hardlink(tmp_path: Path, mon
     assert sw.extract_original_testbed("example/repo", "task", tmp_path, proxy="", min_free_gib=1) == (workspace, receipt)
 
 
+@pytest.mark.parametrize("newer_config", [None, b"[user]\nname = Later\n", "deleted"])
+def test_source_git_config_from_earlier_layer_respects_replacement_and_whiteout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer_config,
+) -> None:
+    original = b"[user]\nname = Recorded\nemail = recorded@example.test\n[safe]\ndirectory = /testbed\n"
+    layers = []
+    for files in [
+        {"root/.gitconfig": original},
+        {"testbed/.git/HEAD": b"head", "testbed/source.py": b"original\n",
+         **({"root/.wh..gitconfig": b""} if newer_config == "deleted" else
+            {"root/.gitconfig": newer_config} if newer_config is not None else {})},
+    ]:
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+            for name, content in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        payload = stream.getvalue()
+        layers.append(("sha256:" + hashlib.sha256(payload).hexdigest(), payload))
+
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def raise_for_status(self): pass
+        def iter_content(self, size): yield self.payload
+
+    resolved = {"repository": "example/repo", "manifest_digest": "sha256:" + "a" * 64,
+                "token": "dummy", "layers": [{"digest": digest, "size": len(payload)}
+                                               for digest, payload in layers]}
+    session = SimpleNamespace(get=lambda url, **kwargs: Response(dict(layers)[url.rsplit("/", 1)[1]]))
+    monkeypatch.setattr(sw.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout="b" * 40))
+    workspace, receipt = sw._extract_testbed_layer("example/repo", resolved, session, tmp_path)
+    expected = b"" if newer_config == "deleted" else newer_config if newer_config is not None else original
+    assert (workspace.parent / "source.gitconfig").read_bytes() == expected
+    assert receipt["workspace_layer_digest"] == layers[-1][0]
+    assert receipt["git_config_sha256"] == hashlib.sha256(expected).hexdigest()
+    assert (workspace / "source.py").read_bytes() == b"original\n"
+
+
+def test_workspace_build_installs_exact_recorded_git_configuration(tmp_path: Path) -> None:
+    workspace = tmp_path / "testbed"
+    workspace.mkdir()
+    original = b"[user]\nname = Recorded\nemail = recorded@example.test\n"
+    (tmp_path / "source.gitconfig").write_bytes(original)
+
+    class Images:
+        def build(self, **kwargs):
+            context = Path(kwargs["path"])
+            assert (context / "source.gitconfig").read_bytes() == original
+            assert "COPY source.gitconfig /root/.gitconfig" in (context / "Dockerfile").read_text()
+            return object(), []
+
+    spec = SimpleNamespace(install_config={}, env_image_key="env", instance_image_key="task")
+    assert sw.build_workspace_image(spec, workspace, SimpleNamespace(images=Images())) == "task"
+
+
 @pytest.mark.parametrize("phase", ["unpack", "git-check"])
 def test_retry_recovers_from_failed_extraction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str) -> None:
     fake_registry(monkeypatch)

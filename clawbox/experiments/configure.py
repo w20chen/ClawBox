@@ -18,7 +18,10 @@ import yaml
 
 from clawbox.replay.trace import load_trace
 from .baselines import ensure_supported_experiment, resolve_baseline
-from .spec import ExperimentSpec, ReclamationPolicy, expand_matrix, load_workload_cases
+from .spec import (
+    ExperimentSpec, ReclamationPolicy, expand_matrix, load_workload_cases,
+    resolve_case_sandbox,
+)
 
 
 def parse_concurrency(value: str) -> list[int]:
@@ -617,7 +620,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
     pair_mib = runtime_mib + tool_mib
     pool_mib = spec.resources.pool_memory_budget_mib
     cases = load_workload_cases(spec.workload)
-    shapes = {case.case_id: case.sandbox or spec.sandbox for case in cases}
+    shapes = {
+        case.case_id: resolve_case_sandbox(case, spec.sandbox) for case in cases
+    }
     heterogeneous = len({(shape.vcpu, shape.memory_mib) for shape in shapes.values()}) > 1
     concurrency = []
     for level in spec.execution.concurrency_levels:

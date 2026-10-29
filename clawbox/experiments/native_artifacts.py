@@ -236,6 +236,53 @@ def _jsonl(raw: bytes, label: str) -> list[dict[str, Any]]:
     return records
 
 
+def runtime_request_failures(paths: list[str], *, session_id: str) -> list[dict[str, Any]]:
+    """Retain explicit Runtime refusals and transport failures before the join.
+
+    These are request outcomes, not invented native executions. In particular,
+    the sidecar writer can label an error result ``ok`` with exit code zero;
+    inspect its inner result too. Ordinary read/edit diagnostics are not
+    classified here because a recording may intentionally contain those.
+    """
+    failures: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for rendered_path in paths:
+        path = Path(rendered_path)
+        if "tool-resource" in path.parts or path.suffix != ".jsonl":
+            continue
+        if not path.is_file():
+            raise ValueError(f"Runtime ClawTune trace is missing: {path}")
+        for record in _jsonl(path.read_bytes(), str(path)):
+            if (record.get("record_type") != "span_end" or record.get("kind") != "tool"
+                    or record.get("session_id") != session_id):
+                continue
+            result = (record.get("output") or {}).get("result") or {}
+            details = result.get("details") or {}
+            message = str(details.get("error") or "") or "\n".join(
+                str(item.get("text") or "") for item in result.get("content", [])
+                if isinstance(item, dict)
+            )
+            if "command was not executed" in message and details.get("failureKind") == "runtime-error":
+                reason = "command_not_executed"
+            elif details.get("status") in ("error", "failed") and "exec preflight:" in message:
+                reason = "exec_preflight_refused"
+            elif (details.get("status") in ("error", "failed")
+                    and re.search(r"(?:ssh exited with code|Error code:) 125\b", message)):
+                reason = "ssh_transport_failed"
+            else:
+                continue
+            key = (record.get("span_id"), record.get("name"), reason, message)
+            if key in seen:
+                continue
+            seen.add(key)
+            failures.append({
+                "call_id": record.get("span_id"), "tool": record.get("name"),
+                "execution_id": (record.get("execution") or {}).get("execution_id"),
+                "reason": reason, "message": message,
+            })
+    return failures
+
+
 @operation('finalize.runtime_parse')
 def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
     """Load Runtime ClawTune tool span ends from the copied trace files.

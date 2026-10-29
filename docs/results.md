@@ -96,6 +96,34 @@ wait age. A queued session can have zero, one, or two resident VMs. Preparation
 and actual creation are independently bounded; a memory-blocked preparation
 does not hold a creation slot.
 
+Use `memory_sample.observation_start_monotonic_s` and
+`observation_end_monotonic_s` for the memory-reading interval;
+`observation_age_seconds` records its age when the event is prepared. Queue,
+filesystem and CPU fields are collected afterward, so the event is not an
+atomic snapshot. `memory_sampling.samples` is the complete core memory series.
+Rich `memory_sample` events are prepared by a serial latest-only reporter and
+may be coalesced under load; `memory_sample_reporting` records submitted,
+processed and coalesced counts plus callback time. The core sampler targets the
+configured start-to-start interval and skips missed ticks rather than producing
+catch-up bursts. Report sampled peaks and actual timestamp coverage rather than
+treating gaps as continuous measurements.
+
+Compute-domain `outstanding_bytes` reuses the most recent admission observation
+whose claim identities and baselines still match. Its
+`outstanding_observation_start_monotonic_s`,
+`outstanding_observation_end_monotonic_s` and
+`outstanding_observation_age_seconds` describe that separate reading.
+If a current measured claim lacks a matching observation, `outstanding_bytes` and
+`remaining_budget_bytes` are unavailable; `outstanding_observed_claims` and
+`outstanding_total_claims` show coverage. The separately named
+`outstanding_nominal_upper_bound_bytes` is a reservation bound, not measured
+consumption. These reporting fields do not replace admission's live checks.
+
+C2 placement runs independently of memory collection at the same configured
+interval. Use its `tool_call_cpu_placement` and `topology_cpu_group_load` events
+for placement changes. A sampler or placement-loop exception fails the arm
+instead of allowing a successful result with missing evidence.
+
 ## VM creation and startup
 
 `sandbox_created.lifecycle_timing.create_attempts[].spans` separates `sdk_create`

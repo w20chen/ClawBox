@@ -185,6 +185,17 @@ def test_current_clawtune_pmu_example_is_accepted() -> None:
     assert profile.derived["llc_read_misses_per_cpu_second"] == 1_000.0
 
 
+def test_verified_cgroup_zero_cpu_keeps_native_measurement() -> None:
+    resource = cgroup_artifact_to_resource(cgroup_artifact(
+        "exec-short", cpu_time_s=0, cpu_utilization_avg_cores=0,
+        cgroup_attachment_verified=True,
+    ))
+    assert resource is not None
+    assert resource.source == "cgroup-v2"
+    assert resource.cpu_time_s == 0
+    assert resource.cgroup_attachment_verified is True
+
+
 def test_reliable_tool_timeout_pmu_is_accepted() -> None:
     value = pmu_profile("exec-timeout")
     value["coverage"]["reason"] = "tool_timeout"

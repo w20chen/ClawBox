@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import socket
 import struct
@@ -157,6 +158,43 @@ def test_policy_control_records_callback_failure_detail() -> None:
         assert record["error_type"] == "OSError"
         assert record["error"] == "route unavailable"
         assert session.records()[0]["admission_error"] == {"type": "OSError", "message": "route unavailable"}
+
+
+def test_progress_retries_reuse_connection_without_repeating_boundaries() -> None:
+    boundaries = []
+    server = PolicyControlServer(advertise_host="127.0.0.1", advertised_port=0,
+                                 bind_host="127.0.0.1", bind_port=0)
+    with server:
+        session = server.register(
+            "session-a", admit=lambda _: {"epoch": 1, "sandbox_id": "tool-a"},
+            complete=lambda _: {}, start=lambda request: boundaries.append(request["phase"]),
+        )
+        connection = http.client.HTTPConnection("127.0.0.1", server.actual_port, timeout=2)
+        body = {"session_id": session.session_id, "execution_id": "exec-a",
+                "command_sha256": "a" * 64, "endpoint_epoch": 1,
+                "endpoint_sandbox_id": "tool-a"}
+
+        def post(path, **fields):
+            connection.request("POST", path, json.dumps(body | fields),
+                               {"Authorization": f"Bearer {session.token}"})
+            response = connection.getresponse()
+            assert response.status == 200
+            return json.loads(response.read())
+
+        try:
+            post("/v1/tool/admit")
+            socket_identity = connection.sock
+            for phase in ("start", "end"):
+                assert post("/v1/tool/start", phase=phase)["duplicate"] is False
+                retry = post("/v1/tool/start", phase=phase)
+                assert retry["duplicate"] is True
+                assert retry["execution_id"] == "exec-a"
+                assert connection.sock is socket_identity
+            assert boundaries == ["start", "end"]
+            post("/v1/tool/complete")
+            assert session.close(timeout=1)
+        finally:
+            connection.close()
 
 
 def test_policy_control_rolls_back_admission_when_response_connection_is_lost() -> None:

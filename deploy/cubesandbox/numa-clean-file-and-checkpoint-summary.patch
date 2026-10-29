@@ -37,8 +37,8 @@
  pub fn measure<T, E>(phase: &str, target: &str, bytes: Option<u64>,
                       operation: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
 +    // Per-range logging adds thousands of open/write/close operations to each
-+    // checkpoint. Keep aggregate phase timings on; detailed range tracing is
-+    // diagnostic-only and must be explicitly enabled before starting the VM.
++    // checkpoint. Even when aggregate diagnostics are enabled, detailed range
++    // tracing must be explicitly enabled before starting the VM.
 +    static RANGE_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 +    if phase == "memory.write_range" && !*RANGE_LOG.get_or_init(||
 +        std::env::var("CLAWBOX_CHECKPOINT_RANGE_LOG").as_deref() == Ok("1")) {

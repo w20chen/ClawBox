@@ -267,6 +267,7 @@ class CgroupResource(StrictModel):
     fallback_used: bool = False
     cgroup_setup_error: str | None = None
     cgroup_read_error: str | None = None
+    cgroup_attachment_verified: bool = False
     collector_errors: list[str] = Field(default_factory=list)
     independence: str | None = None
     pmu: PmuProfile | None = None

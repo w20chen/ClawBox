@@ -259,14 +259,18 @@ class PriorityDomain:
         with self._topology_io():
             self.emit(event)
 
-    def _sample_group_utilization(self, groups) -> dict[str, float | None]:
-        from .topology import parse_cpu_list
+    def _cpu_observation(self):
         with self._topology_io():
             try:
                 current = _cpu_times(self._proc_stat)
             except OSError:
                 current = {}
             captured = time.monotonic()
+        return current, self._previous_cpu_times, captured
+
+    def _sample_group_utilization(self, groups, *, observation=None) -> dict[str, float | None]:
+        from .topology import parse_cpu_list
+        current, previous, captured = observation if observation is not None else self._cpu_observation()
         if captured < self._cpu_sample_at:
             return {group: self._latest_group_utilization.get(group) for group in groups}
         self._cpu_sample_at = captured
@@ -274,10 +278,10 @@ class PriorityDomain:
         for group in groups:
             busy_delta = total_delta = 0
             for cpu in parse_cpu_list(group):
-                if cpu not in current or cpu not in self._previous_cpu_times:
+                if cpu not in current or cpu not in previous:
                     continue
-                busy_delta += current[cpu][0] - self._previous_cpu_times[cpu][0]
-                total_delta += current[cpu][1] - self._previous_cpu_times[cpu][1]
+                busy_delta += current[cpu][0] - previous[cpu][0]
+                total_delta += current[cpu][1] - previous[cpu][1]
             utilization[group] = (max(0., min(1., busy_delta/total_delta))
                                   if total_delta > 0 else None)
         self._previous_cpu_times = current
@@ -349,7 +353,8 @@ class PriorityDomain:
                 return event
             return self._assign_tool_call(index, execution_id, vcpus=vcpus)
 
-    def _assign_tool_call(self, index: int, execution_id: str, *, vcpus: int) -> dict:
+    def _assign_tool_call(self, index: int, execution_id: str, *, vcpus: int,
+                          cpu_observation=None) -> dict:
         """Narrow one new call after any minimum-duration delay has elapsed."""
         key = index, 'tool'
         cpus, node = self.placements.get(index, (None, None))
@@ -370,7 +375,8 @@ class PriorityDomain:
                 f'C2 requires at least two LLC/cluster physical-core groups in CPUs {cpus}'
             )
         self._candidate_groups.update(groups)
-        measured_load = self._sample_group_utilization(groups)
+        measured_load = (self._sample_group_utilization(groups, observation=cpu_observation)
+                         if cpu_observation is not None else self._sample_group_utilization(groups))
         available = tuple(
             group for group in groups
             if self._group_load.get(group, 0) < self.topology_group_max_active
@@ -614,6 +620,7 @@ class PriorityDomain:
             if self._topology_stopping:
                 return []
             pending = tuple(self._pending_started.items())
+            cpu_observation = self._cpu_observation()
         # One VM per lock handoff: completions must not queue behind a scan
         # and affinity updates for every active VM in the experiment.
         for key, started in pending:
@@ -629,7 +636,8 @@ class PriorityDomain:
                 primary = min(active)
                 vcpus = self._pending_vcpus.pop(key)
                 self._pending_started.pop(key, None)
-                event = self._assign_tool_call(key[0], primary, vcpus=vcpus)
+                event = self._assign_tool_call(key[0], primary, vcpus=vcpus,
+                                              cpu_observation=cpu_observation)
                 if not event.get('release_required', True):
                     self._active_calls[key] = active
                     for execution_id in active:
@@ -643,7 +651,9 @@ class PriorityDomain:
         with self._topology_lock:
             if self._topology_stopping:
                 return changes
-            measured_load = self._sample_group_utilization(sorted(self._candidate_groups))
+            measured_load = self._sample_group_utilization(
+                sorted(self._candidate_groups), observation=cpu_observation,
+            )
             if measured_load:
                 self._record_topology_event({
                     'event': 'topology_cpu_group_load',

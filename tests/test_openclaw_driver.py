@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,10 +28,30 @@ from clawbox.experiments.openclaw_driver import (
     native_tool_bridge_setup_command,
     openclaw_shared_ssh_runtime_directory,
     run_openclaw,
+    replay_uses_background_execution,
     split_native_ssh_target,
 )
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.experiments.runtime_model_relay import RUNTIME_MODEL_RELAY_SCRIPT
+
+
+@pytest.mark.parametrize("evidence", ["process", "explicit_background", "explicit_yield", "running_result", "synchronous", "api"])
+def test_replay_preserves_recorded_background_semantics(evidence):
+    call = {"function": {"name": "exec", "arguments": json.dumps({"command": "pip install pytest"})}}
+    messages = [{"role": "tool", "content": "Successfully installed pytest\nExit code: 0"}]
+    if evidence == "process":
+        call["function"] = {"name": "process", "arguments": '{}'}
+    if evidence == "explicit_background":
+        call["function"]["arguments"] = json.dumps({"command": "sleep 30", "background": True})
+    if evidence == "explicit_yield":
+        call["function"]["arguments"] = json.dumps({"command": "sleep 30", "yieldMs": 1000})
+    if evidence == "running_result":
+        messages[0]["content"] = "Command still running (session warm-daisy, pid 20). Use process for follow-up."
+    session = SimpleNamespace(gateway=SimpleNamespace(
+        mode="api" if evidence == "api" else "replay",
+        actions=[SimpleNamespace(output={"tool_calls": [call]}, input=messages)],
+    ))
+    assert replay_uses_background_execution(session) is (evidence != "synchronous")
 
 
 def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
@@ -38,11 +59,11 @@ def test_openclaw_shared_runtime_marker_matches_installed_backend() -> None:
         "/workspace/openclaw-ssh-shared-8198076c"
     )
     assert OPENCLAW_SSH_RUNTIME_ROOT == "/workspace"
-    assert native_tool_workspace_setup_command('/testbed') == (
+    assert native_tool_workspace_setup_command('/testbed').startswith(
         'set -eu; test -d /testbed; '
         'mkdir -p -- /testbed/openclaw-ssh-shared-8198076c'
     )
-    assert native_tool_workspace_setup_command('/workspace') == (
+    assert native_tool_workspace_setup_command('/workspace').startswith(
         'set -eu; test -d /workspace; '
         'mkdir -p -- /workspace/openclaw-ssh-shared-8198076c'
     )
@@ -62,32 +83,52 @@ def test_tool_bootstrap_uses_the_same_python_hash_seed_for_record_and_replay():
     assert "PYTHONHASHSEED=0 " in command
 
 
-def test_tool_bootstrap_installs_only_the_configured_apt_proxy() -> None:
+def test_tool_workspace_restores_recorded_conda_prefix_and_isolates_git_config():
+    command = native_tool_workspace_setup_command("/testbed")
+    assert "ln -s /opt/conda /opt/miniconda3" in command
+    assert "/run/clawbox-replay.gitconfig" in command
+    assert "user.name" in command and "user.email" in command
+    assert "safe.directory" not in command
+
+
+def test_tool_bootstrap_uses_direct_apt_when_internet_is_enabled() -> None:
     default = native_tool_bridge_setup_command()
-    assert "01clawbox-package-cache" not in default
+    assert "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache" in default
 
     configured = native_tool_bridge_setup_command(
         apt_cache_proxy_url="http://193.124.7.2:3142",
     )
-    assert "/etc/apt/apt.conf.d/01clawbox-package-cache" in configured
-    assert 'Acquire::http::Proxy "http://193.124.7.2:3142";' in configured
+    assert 'Acquire::http::Proxy "http://193.124.7.2:3142";' not in configured
+    assert "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache" in configured
     assert "http_proxy=" not in configured
     assert "https_proxy=" not in configured
 
 
-def test_tool_bridge_inherits_only_the_configured_pypi_index() -> None:
-    default = native_tool_bridge_setup_command()
-    assert "PIP_INDEX_URL=" not in default
-    assert "PIP_TRUSTED_HOST=" not in default
-
+def test_tool_bootstrap_uses_caches_only_for_closed_network_vms() -> None:
     configured = native_tool_bridge_setup_command(
+        apt_cache_proxy_url="http://193.124.7.2:3142",
         pypi_cache_index_url="http://193.124.7.2:3141/root/pypi/+simple/",
+        allow_internet_access=False,
     )
+    assert 'Acquire::http::Proxy "http://193.124.7.2:3142";' in configured
+    assert "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache" not in configured
     assert (
         "PIP_INDEX_URL=http://193.124.7.2:3141/root/pypi/+simple/"
         in configured
     )
     assert "PIP_TRUSTED_HOST=193.124.7.2" in configured
+
+
+def test_tool_bridge_uses_official_pypi_when_internet_is_enabled() -> None:
+    default = native_tool_bridge_setup_command()
+    assert "PIP_INDEX_URL=https://pypi.org/simple" in default
+    assert "PIP_TRUSTED_HOST=" not in default
+
+    configured = native_tool_bridge_setup_command(
+        pypi_cache_index_url="http://193.124.7.2:3141/root/pypi/+simple/",
+    )
+    assert "PIP_INDEX_URL=https://pypi.org/simple" in configured
+    assert "193.124.7.2" not in configured
     assert "http_proxy=" not in configured
     assert "https_proxy=" not in configured
 
@@ -168,6 +209,8 @@ def test_sidecar_readiness_failure_preserves_log_and_original_error(
 
     class RuntimeExecutor:
         def execute(self, command, timeout):
+            if "sidecar.pid" in command and "/health/ready" not in command:
+                assert timeout == 310
             if "/health/ready" in command:
                 assert timeout == 310
                 raise original
@@ -229,6 +272,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
 
     class Gateway:
         url = "http://model.test/v1"
+        gateway = SimpleNamespace(mode=gateway_mode, actions=[SimpleNamespace(output={}, input=[])])
 
         @staticmethod
         def records():
@@ -290,8 +334,16 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert sandbox["backend"] == "ssh"
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
     assert sandbox["ssh"]["workspaceRoot"] == workspace
-    assert config["tools"]["allow"] == [*TOOL_VM_TOOLS, *RUNTIME_LOCAL_TOOLS]
-    assert config["tools"]["sandbox"]["tools"]["allow"] == list(TOOL_VM_TOOLS)
+    assert sandbox["docker"]["env"]["HOME"] == "/root"
+    assert sandbox["docker"]["env"].get("GIT_CONFIG_GLOBAL") == (
+        "/run/clawbox-replay.gitconfig" if gateway_mode == "replay" else None
+    )
+    assert f"CLAWBOX_REPLAY_NO_AUTO_COMPACTION={int(gateway_mode == 'replay')} " in patch_command
+    assert f"CLAWBOX_REPLAY_NO_REMOTE_SKILLS={int(gateway_mode == 'replay')} " in patch_command
+    allowed = [name for name in TOOL_VM_TOOLS if name != "process" or gateway_mode != "replay"]
+    assert config["tools"]["allow"] == [*allowed, *RUNTIME_LOCAL_TOOLS]
+    assert config["tools"]["sandbox"]["tools"]["allow"] == allowed
+    assert ("process" in config["tools"]["deny"]) is (gateway_mode == "replay")
     assert config["tools"]["exec"]["backgroundMs"] == 120000
     assert config["tools"]["exec"]["timeoutSec"] == 120
     assert config["plugins"]["load"]["paths"] == [

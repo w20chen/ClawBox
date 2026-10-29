@@ -153,6 +153,17 @@ class RuntimeSandboxSpec(SandboxSpec):
         return value.model_dump() if isinstance(value, SandboxSpec) else value
 
 
+def resolve_case_sandbox(
+    case: WorkloadCase, configured: SandboxSpec,
+) -> SandboxSpec:
+    """Keep per-case VM identity while honoring experiment network policy."""
+    if case.sandbox is None:
+        return configured
+    return case.sandbox.model_copy(update={
+        "allow_internet_access": configured.allow_internet_access,
+    })
+
+
 # Resolve the per-case Tool VM override after SandboxSpec exists.  WorkloadCase
 # intentionally appears first in the public YAML model so existing documents
 # retain their field order.
@@ -187,6 +198,9 @@ class ExecutionSpec(StrictFrozenModel):
     # Optional host-local devpi caching index inherited by Tool commands.
     pypi_cache_index_url: str | None = Field(default=None, min_length=1)
     cube_request_timeout_seconds: float = Field(default=130, gt=0, allow_inf_nan=False)
+    # Progress acknowledgements may queue under high fan-out. Retry only the
+    # idempotent notification within this total deadline, never the Tool command.
+    policy_progress_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     # CubeMaster 130597 is a definite scheduler rejection, so create can wait
     # and retry without risking a duplicate VM. Zero disables this retry.
     cube_create_capacity_retry_seconds: float = Field(
@@ -203,6 +217,12 @@ class ExecutionSpec(StrictFrozenModel):
     # additional time only for VM cleanup and writing the partial result.
     arm_finalization_timeout_seconds: int = Field(default=300, ge=1)
     command_timeout_seconds: int = Field(default=300, ge=1)
+    # Replay traces carry the original per-Tool deadline. Large-concurrency
+    # runs can be intentionally CPU-oversubscribed, so allow only that deadline
+    # to expand without slowing commands that finish normally.
+    replay_tool_timeout_multiplier: float = Field(
+        default=1.0, ge=1.0, le=100.0, allow_inf_nan=False,
+    )
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
     arrival_schedule: ArrivalSchedule = ArrivalSchedule.POISSON
@@ -658,7 +678,7 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("policies must not be empty")
         if nodes and self.execution.placement_policy != "os_default" and self.suite != "admission" and any(p.deployment != "os-default" for p in self.policies):
             tool_shapes = tuple(
-                case.sandbox or self.sandbox for case in cases
+                resolve_case_sandbox(case, self.sandbox) for case in cases
             ) or (self.sandbox,)
             pair_mib = self.resources.lifecycle_reservation_mib(self.runtime.memory_mib, max(
                 sandbox.memory_mib for sandbox in tool_shapes

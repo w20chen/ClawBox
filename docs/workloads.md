@@ -9,6 +9,19 @@ Paths and identifiers in capitals must be replaced with your actual inputs.
 
 Replay preserves recorded model responses and waits while executing real tools.
 Recorded tool output is comparison evidence; it is not substituted for execution.
+Recordings with synchronous tool results run `exec` synchronously, so dependent
+commands wait for installations and writes to finish. Recordings using `process`,
+explicit `background`/`yieldMs`, or a recorded running-session result retain
+OpenClaw background execution and the configured `openclaw_exec_yield_ms`.
+Live-model execution retains its normal background behavior. This is selected
+from the trace automatically; changing the trace requires a new run ID.
+Replay also disables automatic transcript compaction, because generating a
+summary would require an unrecorded model response. Rebuild the Runtime image
+with the current image scripts to enable this behavior; use a new run ID.
+
+Tool commands use `inference.configuration.openclaw_tool_home` (default `/root`)
+to read the preserved Git and Conda configuration. Set it to the actual user's
+home when using a custom Tool image; the workspace remains the recorded path.
 
 ```bash
 bash scripts/clawbox experiment import-trace SOURCE.jsonl --output REPLAY.jsonl \
@@ -19,9 +32,23 @@ bash scripts/clawbox experiment trace REPLAY.jsonl
 Use workspace paths matching the recording and destination Tool image. The image
 must contain the recorded repository revision and dependencies. A recorded
 nonzero shell result is accepted only when call identity, command, exit code,
-and error match the recording. It remains a Tool failure and does not establish
-task correctness. New errors, timeouts, missing comparison evidence, and failed
-final validation fail the run.
+and error match the recording. Comparison ignores CRLF versus LF, test-run
+elapsed times, pytest/pluggy banner versions, pytest random seeds and plugin
+ordering, native shared-library architecture suffixes, and `ls` size/date or
+SELinux display markers. For `git status --short`, the generated OpenClaw shared
+directory is ignored. A recording's explicit middle-truncation marker permits
+additional text between matching retained ends, but not a new exception.
+Test counts, diagnostic text, file paths and command outcomes still must agree.
+This remains a Tool failure and does not establish task correctness. New errors,
+timeouts, refused commands, transport errors, missing comparison evidence, and
+failed final validation fail the run. Runtime refusals are reported separately
+from executed operations; they do not acquire synthetic resource measurements.
+
+Changed comparison rules require a new run ID for a new experiment. They do not
+require host apply, image rebuild or retraining. Keep any offline reclassification
+of an existing run separate from its original result. Changes to task dependencies
+require rebuilding and registering affected Tool images, updating their manifest
+entries, and qualifying the resulting workload before a new run.
 
 For a corpus, choose the number of compatible unique traces required:
 
@@ -95,9 +122,13 @@ SWE-bench revision; use its `--help` for the supported revision and overrides.
 Use `--registry-proxy URL` when registry access needs a proxy.
 
 The builder resolves immutable source digests, verifies downloaded layers,
-copies the existing checkout, and builds the shared ARM64 environment and task
+copies the existing checkout and original `/root/.gitconfig`, and builds the shared ARM64 environment and task
 layers. It does not clone or reset the task repository. The current ARM64 recipe
 substitutes `rasterio 1.3.11` for `1.4.3` to match the base system's GDAL.
+Git author identity and `safe.directory` settings come from that original
+configuration. The normalized Tool image exposes a writable copy through
+`GIT_CONFIG_GLOBAL`, so recorded `git config --global` commands still work as
+the Tool user. Source images without that file receive no invented identity.
 
 `--workers` bounds build pipelines; `--min-free-gib` is the free-space floor
 before downloads. Temporary task workspaces are removed unless
@@ -146,7 +177,7 @@ python scripts/refresh-swe-collector-images.py \
   --expected-kernel-version KERNEL_ID --expected-count 503 \
   --registry REGISTRY/clawbox/collector-refresh \
   --output-dir /absolute/path/collector-refresh \
-  --workers 8 --batch-size 16 --minimum-free-gib 64 \
+  --workers 8 --batch-size 16 --minimum-free-gib MIN_FREE_GIB \
   --storage-check-path /absolute/path/cube-storage
 ```
 
@@ -154,7 +185,22 @@ Set `--expected-count` to the actual task count. Repeat `--storage-check-path`
 for separate registry/artifact filesystems; each path must exist. The helper
 adds collector-only layers, carries over prewarm settings, registers templates,
 and writes `workload-collector-refreshed.json` and `catalog.json`. Old images and
-templates are preserved. Use the generated workload in a new qualified run.
+templates are preserved by default. Use the generated workload in a new qualified run.
+
+When replacing a large corpus under a disk limit, add
+`--retire-replaced-templates` only after testing initial replacements. It verifies
+each new template is READY with the expected image, then deletes the recorded
+old template through CubeSandbox's reference-aware API. Historical workload
+manifests referencing deleted templates can no longer launch unchanged; Docker
+images and experiment results remain. API refusal stops retirement instead of
+deleting files directly. Resume with the same output directory and options.
+Budget temporary space for concurrent builds and retained shared artifacts;
+the free-space floor alone does not prove the entire corpus will fit.
+Shared filesystem extents (reflinks) can make file-size totals overstate the
+space retirement will reclaim. Check the actual `df` change after an initial
+batch. Set `MIN_FREE_GIB` to preserve Cube's snapshot admission reserve plus
+space for concurrent builds: a host with an 85% snapshot usage limit needs
+more than 15% of that filesystem free, even if the remaining templates fit.
 
 `--workers` bounds concurrent work; `--batch-size` bounds tasks retaining
 intermediate build state (`0` means one batch). `--minimum-free-gib` is checked
@@ -171,6 +217,37 @@ generated workload and requires new sharing evidence and qualification.
 
 A predictor/KB-only update uses [one Runtime rebuild](installation.md#refresh-the-runtime-predictor-and-kb)
 and leaves all these Tool templates reusable.
+
+If a recorded command creates a Conda environment, an offline Tool image must
+retain the packages that command needs. Build a cache overlay from versions in
+the recorded package plan before registering the replacement templates:
+
+```bash
+python scripts/cache-recorded-conda-environments.py \
+  --manifest /absolute/path/conda-caches.json \
+  --workload /absolute/path/workload-ready.json \
+  --output-dir /absolute/path/conda-overlays \
+  --registry REGISTRY/clawbox/conda-overlays
+```
+
+The manifest contains a `cases` list. Each entry supplies `case_id`, a digest
+pinned `source_image_reference`, `conda_specs` such as `["python=3.9.21",
+"pip=25.0", "setuptools=75.8.0", "wheel=0.45.1"]`, the recorded `channels`, and
+a `validation_command` that creates the environment and checks its interpreter.
+Derive the versions from the recording; do not substitute current releases.
+The build requires native ARM64 Docker, Conda channel access, and push access to
+the chosen registry. Optional `--proxy` applies only to the build; it is empty
+by default. The overlay retains the package cache, pins the supplied versions,
+and sets Conda offline mode;
+the recorded command still creates its own environment during replay.
+
+The helper checks the command in a disposable Docker container with networking
+disabled and writes `overlays.json`. Pass its `workload-for-registration.json`
+to the collector refresh command above to register the new images. This
+intermediate workload still references the previous templates and must not be
+run directly. Validate the refreshed cases in real VMs, regenerate template
+sharing evidence, requalify, and use a new run ID. This changes Tool images;
+it requires neither host apply nor predictor retraining.
 
 ## Prove template sharing
 
@@ -214,17 +291,29 @@ sudo bash scripts/clawbox-pypi-cache status
 Replace `HOST_ADDRESS` below with that address in the experiment YAML:
 
 ```yaml
+sandbox:
+  allow_internet_access: false
 execution:
   apt_cache_proxy_url: http://HOST_ADDRESS:3142
   pypi_cache_index_url: http://HOST_ADDRESS:3141/root/pypi/+simple/
   dependency_install_concurrency: 8
 ```
 
-Both URLs default to unset. APT configuration and pip index/trusted-host settings
-apply only to Tool VMs; recorded commands stay unchanged. The optional install
-limit counts active apt/apt-get/pip commands across the arm; it defaults to
-unlimited. Other commands are unaffected. Choose the limit for your download
-capacity rather than treating this example's value as a measured optimum.
+For a high-concurrency replay, increase `replay_tool_timeout_multiplier` only
+when failed Tool spans show exit 124 for commands that completed in the recorded
+trace. For example, `replay_tool_timeout_multiplier: 4` changes a recorded
+120-second deadline to 480 seconds; commands that finish sooner have no added
+delay. Changing it requires a new run ID and does not require an image rebuild.
+
+Both URLs default to unset and apply only when
+`sandbox.allow_internet_access: false`. With Tool internet enabled, ClawBox
+removes its APT proxy file and uses official PyPI directly, so an unavailable
+cache cannot delay or reject dependency resolution. The optional install limit
+counts active apt/apt-get/pip commands across the arm; it defaults to unlimited.
+Other commands are unaffected. For high-concurrency direct downloads, set a
+small explicit limit such as 8 and choose it for the available outbound path
+rather than treating the example as a measured optimum. Recorded commands stay
+unchanged.
 
 Start the caches before launching. Changing these settings requires a new run
 ID and qualification, without host apply, image rebuild, or retraining. Stop

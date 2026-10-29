@@ -477,6 +477,18 @@ class WarmSnapshotPool:
                 )
             return tuple(victims)
 
+    def usage_snapshot(self) -> dict[str, int]:
+        """Totals for periodic evidence without serializing stored manifests."""
+        with self._lock:
+            return {
+                "reserved_bytes": sum(self._reservations.values()),
+                "committed_bytes": sum(item.allocated_bytes for item in self._manifests.values()),
+                "borrowed_bytes": sum(self._borrow_reservations.values()),
+                "external_warm_bytes": self.external_warm_bytes,
+                "external_shared_live_bytes": self.external_shared_live_bytes,
+                "external_occupied_bytes": self.external_occupied_bytes,
+            }
+
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {

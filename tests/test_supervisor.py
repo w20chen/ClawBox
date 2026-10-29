@@ -213,3 +213,38 @@ def test_resume_cleans_an_interrupted_attempt_before_starting(tmp_path: Path) ->
     assert resumed.state["resume_recovery"]["recovered_arms"] == [arm.arm_id]
     assert resumed.state["arms"][arm.arm_id]["status"] == "interrupted"
     assert resumed.state["arms"][arm.arm_id]["cleanup_verified"] is True
+
+
+def test_abort_updates_active_arms_and_preserves_terminal_outcomes(tmp_path, monkeypatch):
+    from clawbox.experiments import supervisor as module
+    statuses = ('pending', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled')
+    state = {'schema_version': 1, 'run_id': 'r', 'state': 'running', 'arms': {
+        status: {'status': status} for status in statuses}}
+    atomic_json(tmp_path/'run-state.json', state)
+    monkeypatch.setattr(module, 'process_is_alive', lambda identity: False)
+    monkeypatch.setattr(module, 'cleanup_run', lambda *a, **kw: {'state': 'destroyed'})
+    assert module.abort_run(tmp_path)['state'] == 'cancelled'
+    saved = json.loads((tmp_path/'run-state.json').read_text())
+    assert {key: value['status'] for key, value in saved['arms'].items()} == {
+        status: 'cancelled' if status in {'pending', 'running'} else status
+        for status in statuses}
+
+
+def test_abort_does_not_claim_cancellation_when_cleanup_fails(tmp_path, monkeypatch):
+    from clawbox.experiments import supervisor as module
+    atomic_json(tmp_path/'run-state.json', {'schema_version': 1, 'run_id': 'r', 'state': 'running',
+        'arms': {'a': {'status': 'running'}}})
+    monkeypatch.setattr(module, 'process_is_alive', lambda identity: False)
+    def failed(*args, **kwargs):
+        state = json.loads((tmp_path/'run-state.json').read_text())
+        state.update(state='failed', failure='cleanup incomplete')
+        state['arms']['a'].update(cleanup_verified=False, cleanup_error='still present')
+        atomic_json(tmp_path/'run-state.json', state)
+        raise RuntimeError('cleanup incomplete')
+    monkeypatch.setattr(module, 'cleanup_run', failed)
+    with pytest.raises(RuntimeError, match='cleanup incomplete'):
+        module.abort_run(tmp_path)
+    saved = json.loads((tmp_path/'run-state.json').read_text())
+    assert saved['state'] == 'failed'
+    assert saved['arms']['a']['cleanup_verified'] is False
+    assert saved['arms']['a']['cleanup_error'] == 'still present'

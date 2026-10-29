@@ -152,7 +152,11 @@ Each VM specifies exactly one of `template_id` or `template_alias`. Optional
 `architecture` is `arm64`, `vcpu` defaults to 2, `memory_mib` defaults to 1024
 for Runtime and 3072 for Tool, `workspace` defaults to `/workspace`, and
 `allow_internet_access` defaults to `true`. `preflight_command` optionally checks
-guest prerequisites. Template shape must match the specification.
+guest prerequisites. Template shape must match the specification. For Tool VMs,
+the top-level `sandbox.allow_internet_access` is the experiment network policy;
+it also applies to case-specific Tool sandboxes while their template, image,
+shape and workspace remain case-specific. Changing it requires a new run ID and
+qualification, but no host apply or image rebuild.
 
 `environment.resources` holds the target node, `pool_memory_budget_mib`,
 `emergency_free_memory_mib`, `compute_nodes`, `local_memory_cgroup`, LOCAL
@@ -283,15 +287,17 @@ Fields are under `execution`:
 | `concurrency_levels` | `[1]` | Positive offered session counts |
 | `sandbox_create_concurrency` | 8 | Independent preparation and actual-create limits, each in VM pairs; a pair can issue two concurrent creates, subject to lifecycle limits |
 | `dependency_install_concurrency` | `null` | Optional arm-wide bound on active apt/apt-get/pip installs |
-| `apt_cache_proxy_url` | `null` | Tool-only `http://host:port` APT proxy |
-| `pypi_cache_index_url` | `null` | Tool-only `http://host:port/.../+simple/` pip index |
+| `apt_cache_proxy_url` | `null` | Tool-only `http://host:port` APT proxy used when Tool internet access is disabled |
+| `pypi_cache_index_url` | `null` | Tool-only `http://host:port/.../+simple/` pip index used when Tool internet access is disabled |
 | `cube_request_timeout_seconds` | 130 | Per-request Cube HTTP deadline, seconds |
+| `policy_progress_timeout_seconds` | 30 | Total deadline in seconds for each Tool start/end acknowledgement; at most three idempotent notification attempts share it. Commands are never retried and policy rejection remains fatal. Requires the matching Runtime shim and Tool bridge images; a changed value needs a new run ID. |
 | `cube_create_capacity_retry_seconds` | 60 | Retry window for definite Cube `130597` rejection; 0 disables retries |
 | `worker_thread_switch_interval_seconds` | 0.001 | Python handoff interval, `(0,0.1]` seconds |
 | `randomized_order`, `random_seed` | `true`, 0 | Arm-order randomization and reproducible seed |
 | `arm_timeout_seconds` | 3600 | Arm execution deadline, seconds |
 | `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds |
 | `command_timeout_seconds` | 300 | Tool command deadline, seconds |
+| `replay_tool_timeout_multiplier` | 1.0 | Unitless multiplier, 1.0–100.0, applied only to recorded replay Tool deadlines after admission. Fast commands do not wait longer; only expiry is extended. Use a new run ID after changing it. |
 | `arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, or `poisson` |
 | `stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson |
 | `poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
@@ -304,6 +310,17 @@ VM. The API and SDK must support the corresponding lifecycle deadlines.
 
 ## Inference and measurement
 
+The collector refresh helper's `--retire-replaced-templates` option defaults to
+off. When enabled, it deletes each recorded old Cube template only after checking
+its distinct replacement is READY and image identities match. It preserves
+Docker images; deleted template IDs require using the new workload manifest and
+a new run ID. See the [collector refresh walkthrough](workloads.md).
+Its `--minimum-free-gib` option defaults to 64 GiB and applies to every checked
+filesystem. This is a build stop floor, not a guarantee of Cube admission or
+enough space for the full corpus. Set it above the host's snapshot storage
+reserve, allowing for concurrent builds; verify reclaimed space with `df`
+because reflink copies can share physical blocks.
+
 `agent.driver` defaults to `openclaw`; `inference.backend` defaults to `replay`.
 Replay serves recorded model responses and executes Tools normally. The CLI and
 worker accept `api` provider settings, but current qualification requires replay;
@@ -315,10 +332,11 @@ live API inference has no complete supported launch path. Fields below are in
 | `model`, `base_url` | Explicit configuration or saved environment | Provider model and endpoint |
 | `api_key_env` | `OPENCLAW_API_KEY` | Name of the host environment variable holding the credential |
 | `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays |
-| `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime sidecar readiness deadline |
+| `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |
 | `runtime_completion_watch_seconds` | 10 | 1–60 seconds per completion notification wait; events wake it immediately |
 | `openclaw_bin` | `openclaw` | Guest executable |
-| `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for OpenClaw exec yield |
+| `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for background-capable OpenClaw exec calls. Synchronous replay recordings disable automatic background execution; see [workloads](workloads.md). |
+| `openclaw_tool_home` | `/root` | Absolute home directory inside the Tool VM. OpenClaw shell commands use it to find the image's Git and Conda configuration. Change for a custom Tool user; takes effect with a new run ID, without host apply or retraining. |
 | `clawtune_config`, `clawtune_root` | Unset | Reuse a ClawTune model configuration and source root |
 
 Put credential values in the environment or selected credential configuration,
@@ -328,6 +346,14 @@ checkpoint decisions use actual outstanding model requests.
 
 `measurement.memory_sample_interval_seconds` defaults to 0.2,
 `stabilization_seconds` to 1, and `observe_predictions` to `false`.
+The sampler targets this start-to-start interval and skips missed ticks instead
+of issuing catch-up bursts. Core memory readings remain on the sampler thread;
+rich queue, filesystem, CPU and policy reporting runs in a bounded latest-only
+worker so it cannot delay the next reading. C2 maintenance runs in its own
+serial loop at the same interval. Resource records include observation times,
+report coalescing and cached-demand age; see [result interpretation](results.md).
+Changing the interval or host sampling implementation requires a new run ID,
+without host apply, image rebuild or retraining.
 `measurement.validation.command` optionally checks the final task result.
 `measurement.output.directory` defaults to `/results` and is a worker fallback.
 The supported CLI supplies the host output root through `--output-root` or
@@ -355,3 +381,10 @@ Runtime builds also need Node.js/npm. The selected seed comes from
 `CLAWTUNE_KB_SEED` or ClawTune's default. The command saves successful image and
 template identities to the profile. See [update requirements](installation.md#update-an-existing-host)
 before rebuilding a role or adopting new KB state.
+
+For recorded Conda environment creation, `scripts/cache-recorded-conda-environments.py`
+requires `--manifest FILE`, `--output-dir DIR`, and `--registry REPOSITORY`.
+Optional `--workload FILE` writes replacements for subsequent template registration;
+`--proxy URL` defaults to empty and affects build downloads only. See
+[workload preparation](workloads.md#refresh-tool-collectors) for manifest fields,
+ARM64 Docker prerequisites, validation, and registration before a new run.

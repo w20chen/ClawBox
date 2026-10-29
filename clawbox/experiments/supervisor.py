@@ -632,6 +632,9 @@ def abort_run(
         cleanup_timeout_seconds=cleanup_timeout_seconds,
     )
     state = read_run_state(run_root)
+    for arm in state.get("arms", {}).values():
+        if arm.get("status") in {"pending", "running"}:
+            arm["status"] = "cancelled"
     state["state"] = "cancelled"
     state["failure"] = "cancelled by user"
     atomic_json(run_root / "run-state.json", state)

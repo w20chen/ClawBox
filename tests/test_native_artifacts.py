@@ -16,9 +16,43 @@ from clawbox.experiments.native_artifacts import (
     _decode_framed_artifacts,
     _collect_large_artifact_stream,
     _runtime_spans,
+    runtime_request_failures,
     collect_and_validate_native_tool_artifacts,
     validate_native_tool_join,
 )
+
+
+@pytest.mark.parametrize("name,details,content,reason", [
+    ("exec", {"failureKind": "runtime-error", "status": "failed", "exitCode": None},
+     'workdir "/workspace" is unavailable: command was not executed', "command_not_executed"),
+    ("edit", {"status": "error", "error": "Could not edit file: /testbed/a. Error code: 125."},
+     "", "ssh_transport_failed"),
+    ("read", {"status": "error", "error": "ssh exited with code 125"}, "", "ssh_transport_failed"),
+    ("exec", {"status": "error", "error": "exec preflight: complex interpreter invocation"},
+     "", "exec_preflight_refused"),
+])
+def test_request_failure_evidence_survives_missing_native_id_and_ok_status(tmp_path, name, details, content, reason):
+    record = {"record_type": "span_end", "kind": "tool", "name": name,
+              "session_id": "s", "span_id": "call-1", "status": {"code": "ok"},
+              "execution": {"execution_id": None},
+              "output": {"exit_code": 0, "result": {"details": details,
+                         "content": [{"type": "text", "text": content}]}}}
+    path = tmp_path / "runtime.jsonl"
+    path.write_text((json.dumps(record) + "\n") * 2, encoding="utf-8")
+    assert _runtime_spans([str(path)]) == []
+    failures = runtime_request_failures([str(path)], session_id="s")
+    assert len(failures) == 1
+    assert failures[0] == {"call_id": "call-1", "tool": name, "execution_id": None,
+                           "reason": reason, "message": details.get("error") or content}
+    assert runtime_request_failures([str(path)], session_id="another-session") == []
+
+
+def test_expected_file_diagnostics_are_not_transport_rejections(tmp_path):
+    record = {"record_type": "span_end", "kind": "tool", "name": "edit", "session_id": "s",
+              "output": {"result": {"details": {"status": "error", "error": "old text was not found"}}}}
+    path = tmp_path / "runtime.jsonl"
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert runtime_request_failures([str(path)], session_id="s") == []
 
 
 def test_native_join_preserves_admission_failure_cause():

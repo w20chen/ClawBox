@@ -20,7 +20,7 @@ import traceback
 import urllib.parse
 from collections import Counter
 from contextlib import ExitStack, contextmanager, nullcontext
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import asdict, replace
 from pathlib import Path
 from queue import Empty, SimpleQueue
@@ -42,7 +42,8 @@ from clawbox.replay.lifecycle import CommandResult, LifecycleError
 from .memory import (
     cgroup_memory_evidence,
     CgroupMemorySampler, NodeMemorySampler, NumaCgroupMemorySampler,
-    NumaNodeMemorySampler, SandboxRSSSampler,
+    LatestOnlyReporter, NumaNodeMemorySampler, SandboxRSSSampler,
+    PeriodicCallback,
 )
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
@@ -77,6 +78,7 @@ from .results import FailureCategory, ResultEnvelope, RunStatus, failure_categor
 from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
     ReclamationPolicy, RestorePolicy, expand_matrix, load_experiment,
+    resolve_case_sandbox,
 )
 
 
@@ -245,7 +247,19 @@ def collect_session_results(futures, *, timeout, sessions, failures, events,
                             arm_id, check_health):
     """Drain independent outcomes; only shared failures escape to arm cleanup."""
     first_failure = None
-    for future in as_completed(futures, timeout=timeout):
+    def completed():
+        pending = set(futures)
+        deadline = time.monotonic() + timeout
+        while pending:
+            check_health()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f'{len(pending)} session futures unfinished')
+            done, pending = wait(pending, timeout=min(1.0, remaining),
+                                 return_when=FIRST_COMPLETED)
+            yield from done
+
+    for future in completed():
         try:
             result = future.result()
         except Exception as exc:
@@ -1634,6 +1648,8 @@ class DependencyInstallGate:
 class ArmActivityTracker:
     """In-memory task/queue state derived from existing transition events."""
 
+    _MAX_PENDING_TRANSITIONS = 4096
+
     _EVENTS = frozenset({
         'session_dispatched', 'sandbox_prepare_gate_wait_started',
         'sandbox_prepare_gate_acquired', 'sandbox_prepare_gate_released',
@@ -1651,6 +1667,7 @@ class ArmActivityTracker:
         self.started_monotonic = time.monotonic()
         self.lock = RLock()
         self.pending = SimpleQueue()
+        self.dropped_transitions = 0
         self.offered: set[str] = set()
         self.vm_create_waiting: dict[str, float] = {}
         self.vm_creating: dict[str, float] = {}
@@ -1696,6 +1713,11 @@ class ArmActivityTracker:
         # these compact transitions before reading the resulting state.
         record = {key: event[key] for key in
                   ('event','session_id','execution_id','phase','valid') if key in event}
+        if self.pending.qsize() >= self._MAX_PENDING_TRANSITIONS:
+            # This tracker is reporting-only. Bound its work and memory under
+            # high event rates instead of delaying the actual memory sampler.
+            self.dropped_transitions += 1
+            return
         self.pending.put((record, time.monotonic() if now is None else now))
 
     def _apply(self, event: dict[str, Any], *, now: float) -> None:
@@ -1780,13 +1802,20 @@ class ArmActivityTracker:
     def snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         with self.lock:
-            for _ in range(self.pending.qsize()):
+            pending_before = self.pending.qsize()
+            for _ in range(min(pending_before, self._MAX_PENDING_TRANSITIONS)):
                 event, observed = self.pending.get_nowait()
                 self._apply(event, now=observed)
             elapsed = max(now - self.started_monotonic, 1e-9)
             terminal = self.completed | self.failed
             active = self.activated - terminal
             return {
+                "measurement": (
+                    "partial" if self.dropped_transitions or self.pending.qsize()
+                    else "exact"
+                ),
+                "pending_transitions": self.pending.qsize(),
+                "dropped_transitions": self.dropped_transitions,
                 "total_sessions": self.total_sessions,
                 "not_yet_offered_sessions": max(
                     0, self.total_sessions - len(self.offered)
@@ -1853,12 +1882,18 @@ class ArmActivityTracker:
             }
 
 
-def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, Any]:
+def aggregate_admission_queue_snapshots(
+    domains: dict[str, Any], *, blocking: bool = True,
+) -> dict[str, Any]:
     """Combine disjoint per-NUMA queues without re-reading kernel state."""
-    per_domain = {
-        name: domain.coordinator.queue_snapshot()
-        for name, domain in domains.items()
-    }
+    unavailable = []
+    per_domain = {}
+    for name, domain in domains.items():
+        snapshot = domain.coordinator.queue_snapshot(blocking=blocking)
+        if snapshot is None:
+            unavailable.append(name)
+            snapshot = {"measurement": "unavailable_admission_lock_busy"}
+        per_domain[name] = snapshot
     by_class: Counter[str] = Counter()
     blockers: Counter[str] = Counter()
     summed = Counter()
@@ -1872,11 +1907,21 @@ def aggregate_admission_queue_snapshots(domains: dict[str, Any]) -> dict[str, An
             "tool_active_sessions", "eviction_in_progress_sessions",
         ):
             summed[field] += int(snapshot.get(field, 0))
+    totals = dict(summed)
+    if unavailable:
+        totals = {field: None for field in (
+            "admission_queue_depth", "admission_queue_tasks",
+            "tool_admission_queue_tasks", "admission_queue_resident_vms",
+            "registered_sessions", "model_waiting_sessions",
+            "tool_active_sessions", "eviction_in_progress_sessions",
+        )}
     return {
-        **dict(summed),
+        **totals,
+        "measurement": "partial" if unavailable else "exact",
+        "unavailable_domains": unavailable,
         "admission_queue_depth_by_class": dict(by_class),
         "admission_queue_last_blockers": dict(blockers),
-        "admission_queue_oldest_seconds": max(
+        "admission_queue_oldest_seconds": None if unavailable else max(
             (float(value.get("admission_queue_oldest_seconds", 0.0))
              for value in per_domain.values()),
             default=0.0,
@@ -2125,7 +2170,8 @@ class ExperimentWorker:
         started_process_cpu = time.process_time()
         session_cases = arm.session_cases or (arm.case,)
         tool_sandboxes = {
-            (case.sandbox or arm.sandbox).template: case.sandbox or arm.sandbox
+            resolve_case_sandbox(case, arm.sandbox).template:
+            resolve_case_sandbox(case, arm.sandbox)
             for case in session_cases
         }
         template_images: dict[str, str] = {}
@@ -2146,7 +2192,7 @@ class ExperimentWorker:
                 or arm.resources.observe_predictions
             ):
                 for case in session_cases:
-                    tool_sandbox = case.sandbox or arm.sandbox
+                    tool_sandbox = resolve_case_sandbox(case, arm.sandbox)
                     providers[case.case_id] = prediction_provider_type(
                         arm.resources.prediction_mode
                     )(
@@ -2412,15 +2458,15 @@ class ExperimentWorker:
                 cpu_sampler = CgroupCpuSampler(cpu_cgroup)
             except (OSError, ValueError, RuntimeError) as exc:
                 cpu_unavailable_reason = str(exc)
+        memory_sample_reporter = None
         if arm.resources.local_memory_cgroup:
-            def record_memory_sample(used: int, available: int) -> None:
-                for domain in domains.values():
-                    domain.peak_bytes = max(domain.peak_bytes, domain.sampler.current()[0])
-                pool = snapshot_pool.snapshot()
-                topology_changes = (
-                    self._priority_domain.sample_topology_placement()
-                    if (self._priority_domain is not None
-                        and arm.execution.tool_call_cpu_policy == 'c2') else []
+            def publish_memory_sample(payload: object) -> None:
+                observation, memory_by_domain = payload
+                used = observation['local_used_bytes']
+                available = observation['host_available_bytes']
+                pool = snapshot_pool.usage_snapshot()
+                queues = aggregate_admission_queue_snapshots(
+                    domains, blocking=False,
                 )
                 warm_physical = None
                 if arm.resources.warm_memory_capacity_mib and arm.resources.warm_snapshot_root:
@@ -2428,24 +2474,21 @@ class ExperimentWorker:
                     warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
                 events.write({
                     "event": "memory_sample", "local_used_bytes": used,
+                    "observation_start_monotonic_s": observation['observation_start_monotonic_s'],
+                    "observation_end_monotonic_s": observation['observation_end_monotonic_s'],
                     "queue_activity_snapshot": activity_tracker.snapshot(),
-                    "admission_queue_snapshot": aggregate_admission_queue_snapshots(
-                        domains
-                    ),
+                    "admission_queue_snapshot": queues,
                     "policy_event_executor": policy_events.metrics(),
                     "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
-                    "numa_residency": sampler.node_usage() if isinstance(sampler, NumaCgroupMemorySampler) else None,
-                    "combined_live_used_bytes": sampler.tier_usage()[2] if isinstance(sampler, NumaCgroupMemorySampler) else used,
+                    "numa_residency": observation.get('numa_residency'),
+                    "combined_live_used_bytes": observation.get('combined_live_used_bytes', used),
                     "host_available_bytes": available,
                     "host_used_bytes": sampler.host_mem_total - available,
                     "host_used_delta_bytes": (
                         sampler.host_mem_total - available
                         - sampler.host_baseline_used
                     ),
-                    "shared_live_used_bytes": (
-                        sampler.tier_usage()[1]
-                        if isinstance(sampler, NumaCgroupMemorySampler) else 0
-                    ),
+                    "shared_live_used_bytes": observation.get('shared_live_used_bytes', 0),
                     "warm_allocated_bytes": warm_physical,
                     "warm_reserved_bytes": pool["reserved_bytes"],
                     "warm_committed_bytes": pool["committed_bytes"],
@@ -2453,14 +2496,39 @@ class ExperimentWorker:
                     "shared_external_initial_live_bytes": pool["external_shared_live_bytes"],
                     "shared_pool_external_occupied_bytes": pool["external_occupied_bytes"],
                     "shared_borrow_reserved_bytes": pool["borrowed_bytes"],
-                    "compute_pressure": placement.sample() if placement is not None else None,
-                    "tool_call_cpu_placement_changes": topology_changes,
+                    "compute_pressure": placement.sample(
+                        memory_by_domain=memory_by_domain, queue_by_domain=queues['per_domain'],
+                        blocking=False,
+                    ) if placement is not None else None,
                     "cgroup_cpu": cpu_sampler.sample() if cpu_sampler is not None else {
                         "measurement": "unavailable",
                         "reason": cpu_unavailable_reason,
                     },
+                    "observation_age_seconds": max(0., time.monotonic()-observation['observation_start_monotonic_s']),
                 })
-            sampler.sample_hook = record_memory_sample
+
+            def queue_memory_sample(used: int, _available: int) -> None:
+                # This hook stays on the evidence sampler thread, so keep it to
+                # fixed-cost arithmetic and a nonblocking latest-only enqueue.
+                observation = dict(sampler.last_observation)
+                memory_by_domain = {}
+                for key, domain in domains.items():
+                    if isinstance(domain.sampler, NumaCgroupMemorySampler):
+                        numa = observation['numa_residency']
+                        current = sum(
+                            numa['resident_bytes_by_numa'].get(node, 0)
+                            for node in domain.sampler.local_numa_nodes
+                        ) + numa['unattributed_bytes']
+                    else:
+                        current = used
+                    memory_by_domain[key] = current
+                    domain.peak_bytes = max(domain.peak_bytes, current)
+                memory_sample_reporter.submit((observation, memory_by_domain))
+
+            memory_sample_reporter = LatestOnlyReporter(
+                publish_memory_sample, name="memory-sample-reporter",
+            )
+            sampler.sample_hook = queue_memory_sample
         policy_events = PolicyEventExecutor(workers=policy_event_workers(arm))
         watermark_controller = next(iter(domains.values())).controller
         create_limit = self._sandbox_create_limit(
@@ -2516,7 +2584,18 @@ class ExperimentWorker:
                     self._priority_domain.close()
                     policy_events.close()
                 raise
+        topology_sampler = (
+            PeriodicCallback(self._priority_domain.sample_topology_placement,
+                             interval_s=arm.execution.memory_sample_interval_seconds,
+                             name='tool-cpu-placement-sampler')
+            if self._priority_domain is not None and arm.execution.tool_call_cpu_policy == 'c2'
+            else None
+        )
+        if memory_sample_reporter is not None:
+            memory_sample_reporter.start()
         sampler.start()
+        if topology_sampler is not None:
+            topology_sampler.start()
         for domain in domains.values():
             if domain.controller is not None:
                 domain.controller.start()
@@ -2539,6 +2618,11 @@ class ExperimentWorker:
         futures: dict[Any, int] = {}
         def check_shared_health():
             try:
+                sampler.check()
+                if memory_sample_reporter is not None:
+                    memory_sample_reporter.check()
+                if topology_sampler is not None:
+                    topology_sampler.check()
                 policy_events.check()
                 if self._runtime_memory is not None:
                     self._runtime_memory.check()
@@ -2570,7 +2654,7 @@ class ExperimentWorker:
             session_id = f"{arm.arm_id}-{index:04d}"
             domain = session_domain(index)
             session_case = session_case_for(arm, index)
-            tool_sandbox = session_case.sandbox or arm.sandbox
+            tool_sandbox = resolve_case_sandbox(session_case, arm.sandbox)
             pair_mib = arm.resources.lifecycle_reservation_mib(
                 arm.runtime.memory_mib, tool_sandbox.memory_mib)
             started = time.monotonic()
@@ -2689,6 +2773,23 @@ class ExperimentWorker:
             telemetry_warmup_pool.shutdown(
                 wait=not interrupted, cancel_futures=interrupted,
             )
+            # Rich reporting reads live policy/queue helpers. Detach it before
+            # those helpers close; the core sampler continues through VM
+            # cleanup and records the complete memory series independently.
+            if memory_sample_reporter is not None:
+                sampler.sample_hook = None
+                reporter_metrics = memory_sample_reporter.metrics()
+                try:
+                    reporter_metrics = memory_sample_reporter.stop()
+                except Exception as exc:
+                    reporter_metrics = memory_sample_reporter.metrics()
+                    reporter_metrics["error"] = str(exc)
+                    infrastructure_error = infrastructure_error or exc
+                    failure = failure or exc
+                events.write({
+                    "event": "memory_sample_reporting",
+                    **reporter_metrics,
+                })
             policy_events.close(wait=not interrupted)
             try:
                 policy_events.check()
@@ -2714,6 +2815,12 @@ class ExperimentWorker:
             # Isolation barrier: all session threads have ended, then kill and
             # verify every task-owned sandbox before the next arm can begin.
             cleanup_error = None
+            if topology_sampler is not None:
+                try:
+                    topology_sampler.stop()
+                except Exception as exc:
+                    infrastructure_error = infrastructure_error or exc
+                    failure = failure or exc
             if self._priority_domain is not None:
                 self._priority_domain.begin_teardown()
             try:
@@ -3136,7 +3243,7 @@ class ExperimentWorker:
                       arm_cancel: Event | None = None,
                       ) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
-        tool_sandbox = session_case.sandbox or arm.sandbox
+        tool_sandbox = resolve_case_sandbox(session_case, arm.sandbox)
         if session_case != arm.case or tool_sandbox != arm.sandbox:
             arm = arm.model_copy(update={"case": session_case, "sandbox": tool_sandbox})
         offered_offset = (
@@ -3556,6 +3663,9 @@ class ExperimentWorker:
                 ),
                 tool_transport_timeout_s=max(
                     120, arm.execution.arm_timeout_seconds + 60,
+                ),
+                replay_tool_timeout_multiplier=(
+                    arm.execution.replay_tool_timeout_multiplier
                 ),
                 upstream_base_url=str(inference_configuration.get("base_url") or "") or None,
                 upstream_api_key=credential or None,
@@ -3995,6 +4105,9 @@ class ExperimentWorker:
                                                 pypi_cache_index_url=(
                                                     arm.execution.pypi_cache_index_url
                                                 ),
+                                                allow_internet_access=(
+                                                    arm.sandbox.allow_internet_access
+                                                ),
                                             ),
                                             60,
                                         )
@@ -4216,6 +4329,7 @@ class ExperimentWorker:
                     return {
                         "decision": "ADMIT", "admitted_memory_mib": accounted_amount,
                         "notify_execution_start": bool(progress_control and arm.policy.runtime_control.adaptive),
+                        "progress_timeout_seconds": arm.execution.policy_progress_timeout_seconds,
                         "local_admitted_memory_mib": local_amount,
                         "admission_memory_tier": admission_memory_tier,
                         "admission_blocked_seconds": admission_wait,
@@ -4421,6 +4535,7 @@ class ExperimentWorker:
                     command_timeout_seconds=arm.execution.command_timeout_seconds,
                     apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
                     pypi_cache_index_url=arm.execution.pypi_cache_index_url,
+                    allow_internet_access=arm.sandbox.allow_internet_access,
                 ), 60)
                 if tool_bridge_result.exit_code != 0:
                     raise RuntimeError(
@@ -4638,6 +4753,19 @@ class ExperimentWorker:
                 # mutating exec/edit, even when every Tool call succeeded.
                 # The explicit Tool summary is the failure signal; task
                 # correctness remains enforced by the Tool-VM validation.
+                from .native_artifacts import runtime_request_failures
+                request_failures = runtime_request_failures(
+                    outcome["runtime_traces"], session_id=session_id,
+                )
+                if request_failures:
+                    events.write({"event": "runtime_tool_request_failed",
+                                  "session_id": session_id,
+                                  "failures": request_failures})
+                    first_failure = request_failures[0]
+                    raise RuntimeError(
+                        f"Runtime Tool request failed: {first_failure['tool']} "
+                        f"{first_failure['call_id']}: {first_failure['message']}"
+                    )
                 agent_tool_failures = outcome.get("agent_tool_failures")
                 if agent_tool_failures is not None and agent_tool_failures > 0:
                     if trace_path is None:
@@ -5132,7 +5260,8 @@ class ExperimentWorker:
         configuration = arm.inference.configuration
         assigned_cases = [session_case_for(arm, index) for index in range(arm.concurrency)]
         tool_memory_mib = [
-            (case.sandbox or arm.sandbox).memory_mib for case in assigned_cases
+            resolve_case_sandbox(case, arm.sandbox).memory_mib
+            for case in assigned_cases
         ]
         pair_memory_mib = [arm.runtime.memory_mib + value for value in tool_memory_mib]
         offered_provisioned_memory_mib = sum(pair_memory_mib)
@@ -5182,7 +5311,7 @@ class ExperimentWorker:
                     for value in tool_memory_mib
                 ],
                 "tool_memory_mib_by_case": {
-                    case.case_id: (case.sandbox or arm.sandbox).memory_mib
+                    case.case_id: resolve_case_sandbox(case, arm.sandbox).memory_mib
                     for case in cases
                 },
                 "offered_provisioned_memory_mib": offered_provisioned_memory_mib,

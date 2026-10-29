@@ -8,7 +8,7 @@ from pathlib import Path
 import statistics
 from typing import Any
 
-from .spec import load_experiment, load_workload_cases
+from .spec import load_experiment, load_workload_cases, resolve_case_sandbox
 
 
 def _offered_capacity_text(spec: Any, concurrency: int) -> str:
@@ -17,12 +17,16 @@ def _offered_capacity_text(spec: Any, concurrency: int) -> str:
     runtime_mib = spec.runtime.memory_mib
     if spec.workload.session_assignment.value == "round_robin":
         offered_mib = sum(
-            runtime_mib + (cases[index % len(cases)].sandbox or spec.sandbox).memory_mib
+            runtime_mib + resolve_case_sandbox(
+                cases[index % len(cases)], spec.sandbox,
+            ).memory_mib
             for index in range(concurrency)
         )
         return f"{offered_mib / 1024:g} GiB"
     offered = [
-        concurrency * (runtime_mib + (case.sandbox or spec.sandbox).memory_mib)
+        concurrency * (
+            runtime_mib + resolve_case_sandbox(case, spec.sandbox).memory_mib
+        )
         for case in cases
     ]
     low, high = min(offered) / 1024, max(offered) / 1024

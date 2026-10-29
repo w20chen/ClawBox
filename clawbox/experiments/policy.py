@@ -1209,13 +1209,15 @@ class PolicyCoordinator:
             raise ValueError(f"unknown reservation wait class {wait_class!r}")
         self._lifecycle_wait_samples[wait_class].append(waited)
 
-    def queue_snapshot(self) -> dict:
+    def queue_snapshot(self, *, blocking: bool = True) -> dict | None:
         """Separate requests, unique tasks and resident VMs without kernel reads.
 
         Blockers are the reasons observed on each waiter's last admission check;
         they are not a new pressure decision made by the reporting thread.
         """
-        with self._condition:
+        if not self._condition.acquire(blocking=blocking):
+            return None
+        try:
             now = time.monotonic()
             requests = tuple(self._waiter_requests.items())
             by_class = Counter(r.wait_class for _, r in requests)
@@ -1245,6 +1247,8 @@ class PolicyCoordinator:
                     state.eviction_in_progress for state in session_states
                 ),
             }
+        finally:
+            self._condition.release()
         # Lifecycle properties must never be evaluated with the admission lock.
         result['admission_queue_resident_vms'] = sum(
             int(s.lifecycle.resident) + int(s.runtime_lifecycle is not None

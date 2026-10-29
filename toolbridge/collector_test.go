@@ -148,29 +148,75 @@ func TestReadCgroupCountersKeepsUsageSeparateFromUser(t *testing.T) {
 	}
 }
 
-func TestReadSettledCgroupCountersWaitsForDelayedCPUCharge(t *testing.T) {
+func TestReadCgroupCountersDistinguishesZeroFromMissingOrInvalid(t *testing.T) {
+	for name, payload := range map[string]string{
+		"zero":      "usage_usec 0\nuser_usec 0\nsystem_usec 0\n",
+		"missing":   "user_usec 0\nsystem_usec 0\n",
+		"malformed": "usage_usec invalid\n",
+		"negative":  "usage_usec -1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(payload), 0600); err != nil {
+				t.Fatal(err)
+			}
+			usage, _, _, _, _, _, _, ok := readCgroupCounters(dir)
+			if ok != (name == "zero") || (ok && usage != 0) {
+				t.Fatalf("unexpected counter result: usage=%d ok=%v", usage, ok)
+			}
+		})
+	}
+}
+
+func TestCgroupMembershipRequiresGatedExecutionPID(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(
-		"usage_usec 0\nuser_usec 0\nsystem_usec 0\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("123\n456\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "memory.peak"), []byte("749568\n"), 0600); err != nil {
+	if err := verifyCgroupMembership(dir, 456); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() {
-		// This must exceed the former 50 ms deadline: the regression only
-		// appeared under high concurrency when kernel accounting lagged.
-		time.Sleep(75 * time.Millisecond)
-		done <- os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(
-			"usage_usec 20695\nuser_usec 0\nsystem_usec 0\n"), 0600)
-	}()
-	usage, _, _, peak, _, _, _, ok := readSettledCgroupCounters(dir)
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if verifyCgroupMembership(dir, 789) == nil {
+		t.Fatal("unrelated process was accepted as the execution")
 	}
-	if !ok || usage != 20695 || peak != 749568 {
-		t.Fatalf("delayed cgroup counters were not retained: ok=%v usage=%d peak=%d", ok, usage, peak)
+	if verifyCgroupMembership(filepath.Join(dir, "missing"), 456) == nil {
+		t.Fatal("missing cgroup membership was accepted")
+	}
+}
+
+func TestFinishedZeroCPURequiresVerifiedAttachmentAndValidCounter(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		attached   bool
+		cpu        string
+		wantCgroup bool
+	}{
+		{"observed-zero", true, "usage_usec 0\n", true},
+		{"unused-cgroup", false, "usage_usec 0\n", false},
+		{"missing-counter", true, "user_usec 0\n", false},
+		{"malformed-counter", true, "usage_usec invalid\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, value := range map[string]string{"cpu.stat": test.cpu, "memory.peak": "749568\n", "pids.current": "0\n"} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			collector := &resourceCollector{execID: test.name, done: make(chan struct{}),
+				cgroupPath: dir, cgroupOK: true, cgroupAttachmentVerified: test.attached}
+			stats := collector.Finish(time.Now())
+			if (stats.Source == "cgroup-v2") != test.wantCgroup {
+				t.Fatalf("wrong accounting source: %+v", stats)
+			}
+			if test.wantCgroup {
+				if stats.CPUTimeSeconds != 0 || stats.CgroupReadError != "" || !stats.CgroupAttachmentVerified {
+					t.Fatalf("observed zero or attachment evidence lost: %+v", stats)
+				}
+			} else if stats.CgroupReadError == "" || len(stats.CollectorErrors) == 0 {
+				t.Fatalf("fallback reason was hidden: %+v", stats)
+			}
+		})
 	}
 }
 

@@ -1,7 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
+import time
 
 import pytest
 
@@ -31,28 +32,38 @@ def scheduler(*, used=(0,0), cpu=(0.,0.), overcommit=1, capacity=20):
     return SessionPlacement(domains,cpu_overcommit=overcommit,monitor=monitor,emit=events.append),ledger,events
 
 
-def test_reporting_kernel_reads_do_not_hold_admission_lock():
-    from threading import Event
+def test_reporting_does_not_probe_live_claims():
     s,ledger,_=scheduler()
-    reading,finish=Event(),Event()
     def slow_charge():
-        reading.set()
-        assert finish.wait(2)
-        return 0,0
+        pytest.fail('periodic reporting must reuse admission observations')
     with ledger.condition:
         ledger.add(('old','create'),scope='n0',amount=MIB,local_amount=MIB)
         ledger.claims['old','create'].sample=slow_charge
-    with ThreadPoolExecutor(2) as pool:
-        report=pool.submit(s.sample)
-        assert reading.wait(1)
-        try:
-            def take_lock():
-                with ledger.condition:
-                    return True
-            assert pool.submit(take_lock).result(timeout=.5)
-        finally:
-            finish.set()
-        assert report.result()['n0']['outstanding_bytes']==MIB
+    report = s.sample()['n0']
+    assert report['outstanding_bytes'] is None
+    assert report['remaining_budget_bytes'] is None
+    assert report['outstanding_nominal_upper_bound_bytes'] == MIB
+
+
+def test_periodic_reporting_never_waits_behind_admission_lock():
+    scheduler_state, ledger, _ = scheduler()
+    entered, release = Event(), Event()
+
+    def hold_admission():
+        with ledger.condition:
+            entered.set()
+            assert release.wait(2)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(hold_admission)
+        assert entered.wait(1)
+        started = time.monotonic()
+        row = scheduler_state.sample(blocking=False)
+        assert time.monotonic() - started < .1
+        assert all(value == {"measurement": "unavailable_admission_lock_busy"}
+                   for value in row.values())
+        release.set()
+        holder.result()
 
 
 def test_queue_snapshot_separates_requests_tasks_and_resident_vms():

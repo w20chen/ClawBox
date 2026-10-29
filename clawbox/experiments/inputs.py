@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from .spec import ExperimentSpec, load_workload_cases
+from .spec import ExperimentSpec, load_workload_cases, resolve_case_sandbox
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
 from .prediction import prediction_input_paths, prediction_provider_type
 from clawbox.replay.trace import load_trace
@@ -218,7 +218,7 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
     if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions):
         path = Path(spec.resources.prediction_artifact)
         for case in cases:
-            tool_sandbox = case.sandbox or spec.sandbox
+            tool_sandbox = resolve_case_sandbox(case, spec.sandbox)
             provider = prediction_provider_type(spec.resources.prediction_mode)(path, repository=case.repository or case.case_id,
                 sandbox_identity={k: getattr(tool_sandbox, k) for k in (
                     "template_id", "image_digest", "vcpu", "memory_mib", "architecture",

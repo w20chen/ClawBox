@@ -31,7 +31,7 @@ from clawbox.images.arm64 import (
 
 DEFAULT_DATASET_REVISION = "4ece23ba02fe8b68858e430134adddfd64d6f0f4"
 DEFAULT_HARNESS_REVISION = "980d0cca8aa4e73f1d9f894e906370bef8c4de8a"
-PORTABLE_ENV_VERSION = "swe-rebench-original-testbed-v5-safe-extraction-base-cache"
+PORTABLE_ENV_VERSION = "swe-rebench-original-testbed-v6-source-git-config"
 STOCK_BASE_IMAGE_TAG = "v1"
 COMMON_BASE_IMAGE_TAG = "v2"
 
@@ -221,6 +221,9 @@ def normalize_harness_image(
             "FROM ${BASE_IMAGE}\n"
             "USER 0\n"
             "RUN test -d /testbed && chown -R 10001:10001 /testbed\n"
+            "RUN mkdir -p /var/lib/clawbox/git && "
+            "cp /root/.gitconfig /var/lib/clawbox/git/config && "
+            "chown -R 10001:10001 /var/lib/clawbox/git\n"
             "COPY --from=cube_tool_base /usr/bin/envd /usr/bin/envd\n"
             "COPY tool-bridge /usr/local/bin/tool-bridge\n"
             "COPY cube-tool-entrypoint.sh /usr/local/bin/cube-tool-entrypoint.sh\n"
@@ -238,6 +241,7 @@ def normalize_harness_image(
             # PATH is harmless for tasks without a conda env.
             "ENV PATH=/opt/miniconda3/envs/testbed/bin:$PATH\n"
             "ENV CLAWBOX_VM_ROLE=tool\n"
+            "ENV GIT_CONFIG_GLOBAL=/var/lib/clawbox/git/config\n"
             "USER 10001:10001\n"
             "WORKDIR /testbed\n"
             "ENTRYPOINT [\"/usr/local/bin/cube-tool-entrypoint.sh\"]\n",
@@ -462,7 +466,8 @@ def extract_original_testbed(
             receipt = json.loads(complete.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             receipt = {}
-        if receipt.get("manifest_digest") == resolved["manifest_digest"]:
+        if (receipt.get("manifest_digest") == resolved["manifest_digest"]
+                and receipt.get("git_config_inventory_version") == 1):
             return workspace, receipt
     # A killed process may leave a partial unpack, checkout, or receipt. Only a
     # matching completed receipt above is reusable.
@@ -485,6 +490,10 @@ def _extract_testbed_layer(
     staging = task_root / "unpack"
     digest = ""
     layer_size = 0
+    workspace_digest = ""
+    git_config: bytes | None = None
+    git_config_decided = False
+    git_config_layer = None
     for layer in reversed(resolved["layers"]):
         blob = task_root / "workspace-layer.tgz.part"
         digest = layer["digest"]
@@ -512,7 +521,21 @@ def _extract_testbed_layer(
                 time.sleep(2 ** attempt)
         with tarfile.open(blob, mode="r:*") as archive:
             members = []
-            for member in archive.getmembers():
+            layer_members = archive.getmembers()
+            names = {member.name.removeprefix("./"): member for member in layer_members}
+            if not git_config_decided:
+                source_config = names.get("root/.gitconfig")
+                if source_config is not None:
+                    if not source_config.isfile() or source_config.size > 1024 * 1024:
+                        raise RuntimeError("original /root/.gitconfig must be a regular file below 1 MiB")
+                    git_config = archive.extractfile(source_config).read()
+                    git_config_decided = True
+                    git_config_layer = digest
+                elif any(name in names for name in
+                         (".wh.root", "root/.wh..wh..opq", "root/.wh..gitconfig")):
+                    git_config_decided = True
+                    git_config_layer = digest
+            for member in layer_members:
                 name = member.name
                 while name.startswith("./"):
                     name = name[2:]
@@ -520,24 +543,32 @@ def _extract_testbed_layer(
                     member.name = name
                     members.append(member)
             has_checkout = any(member.name == "testbed/.git/HEAD" for member in members)
-            if has_checkout:
+            if has_checkout and not workspace_digest:
                 staging.mkdir()
                 archive.extractall(staging, members=members, filter=_testbed_member_filter)
+                workspace_digest = digest
+                layer_size = layer["size"]
         blob.unlink()
-        if has_checkout:
-            layer_size = layer["size"]
+        if workspace_digest and git_config_decided:
             break
-    if not digest or not (staging / "testbed" / ".git" / "HEAD").is_file():
+    if not workspace_digest or not (staging / "testbed" / ".git" / "HEAD").is_file():
         raise RuntimeError(f"no image layer in {image} contains a complete /testbed Git checkout")
     os.replace(staging / "testbed", workspace)
     shutil.rmtree(staging)
+    # Keep the original global configuration, including safe.directory. An
+    # absent/deleted source file becomes empty so the harness cannot supply an
+    # unrelated author identity. The wrapper exposes it to its Tool user.
+    config_path = task_root / "source.gitconfig"
+    config_path.write_bytes(git_config or b"")
     head = subprocess.run(
         ["git", "-C", str(workspace), "rev-parse", "HEAD"], check=True,
         text=True, stdout=subprocess.PIPE,
     ).stdout.strip()
     receipt_data = {
         "original_image": image, "manifest_digest": resolved["manifest_digest"],
-        "workspace_layer_digest": digest, "workspace_layer_size": layer_size,
+        "workspace_layer_digest": workspace_digest, "workspace_layer_size": layer_size,
+        "git_config_inventory_version": 1, "git_config_layer_digest": git_config_layer,
+        "git_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "git_head": head,
     }
     complete.write_text(json.dumps(receipt_data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -555,10 +586,12 @@ def build_workspace_image(spec: Any, workspace: Path, client: Any) -> str:
     with tempfile.TemporaryDirectory(prefix="clawbox-swe-workspace-") as directory:
         context = Path(directory)
         shutil.copytree(workspace, context / "testbed", symlinks=True)
+        shutil.copy2(workspace.parent / "source.gitconfig", context / "source.gitconfig")
         (context / "install.sh").write_text(script, encoding="utf-8")
         (context / "Dockerfile").write_text(
             f"FROM {spec.env_image_key}\n"
             "COPY testbed /testbed\n"
+            "COPY source.gitconfig /root/.gitconfig\n"
             "COPY install.sh /root/install-authoritative-testbed.sh\n"
             "RUN /bin/bash /root/install-authoritative-testbed.sh && "
             "rm /root/install-authoritative-testbed.sh\n"
@@ -675,6 +708,8 @@ def build_selected(
                     "original_manifest_digest": provenance["manifest_digest"],
                     "workspace_layer_digest": provenance["workspace_layer_digest"],
                     "workspace_git_head": provenance["git_head"],
+                    "git_config_layer_digest": provenance.get("git_config_layer_digest"),
+                    "git_config_sha256": provenance.get("git_config_sha256"),
                 }
             else:
                 result = {
@@ -684,6 +719,8 @@ def build_selected(
                     "original_manifest_digest": provenance["manifest_digest"],
                     "workspace_layer_digest": provenance["workspace_layer_digest"],
                     "workspace_git_head": provenance["git_head"],
+                    "git_config_layer_digest": provenance.get("git_config_layer_digest"),
+                    "git_config_sha256": provenance.get("git_config_sha256"),
                 }
         except Exception as exc:
             result = {

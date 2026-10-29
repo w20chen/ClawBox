@@ -46,43 +46,44 @@ import (
 // ClawTune cgroup_resource_v1 fields (CgroupResourceResult) so the existing
 // ClawBox pipeline (schema.py / dataset.py / join.py) parses it verbatim.
 type resourceStats struct {
-	CgroupPath              string         `json:"cgroup_path,omitempty"`
-	Source                  string         `json:"source"`             // cgroup-v2 | process-tree
-	MonitorSource           string         `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
-	AttributionSource       string         `json:"attribution_source"` // tool-bridge-pgid
-	TsStart                 float64        `json:"ts_start"`
-	TsEnd                   float64        `json:"ts_end"`
-	DurationMS              int64          `json:"duration_ms"`
-	CPUUserSeconds          float64        `json:"cpu_user_seconds"`
-	CPUSystemSeconds        float64        `json:"cpu_system_seconds"`
-	CPUTimeSeconds          float64        `json:"cpu_time_seconds"`
-	RSSBeforeBytes          int64          `json:"rss_before_bytes"`
-	RSSAfterBytes           int64          `json:"rss_after_bytes"`
-	RSSPeakBytes            int64          `json:"rss_peak_bytes"`
-	ReadBytesDelta          int64          `json:"read_bytes_delta"`
-	WriteBytesDelta         int64          `json:"write_bytes_delta"`
-	PidCount                int            `json:"pid_count"`
-	SamplingIntervalMS      int64          `json:"sampling_interval_ms"`
-	SamplingPointCount      int            `json:"sampling_point_count"`
-	SamplingQuality         string         `json:"sampling_quality"`
-	SamplingCoverageMS      int64          `json:"sampling_coverage_ms"`
-	CPUSource               string         `json:"cpu_source"`
-	MemorySource            string         `json:"memory_source"`
-	MemoryBaselineBytes     int64          `json:"memory_baseline_bytes,omitempty"`
-	MemoryTotalPeakBytes    int64          `json:"memory_total_peak_bytes,omitempty"`
-	MemoryExtraPeakBytes    int64          `json:"memory_extra_peak_bytes,omitempty"`
-	MemoryMeasurement       string         `json:"memory_measurement,omitempty"`
-	MemoryEnvironmentID     string         `json:"memory_environment_id,omitempty"`
-	MemoryEligible          bool           `json:"memory_eligible"`
-	MemoryTimeline          [][2]float64   `json:"memory_timeline,omitempty"`
-	MemoryUnavailableReason string         `json:"memory_unavailable_reason,omitempty"`
-	DiskSource              string         `json:"disk_source"`
-	NetworkSource           string         `json:"network_source"`
-	FallbackUsed            bool           `json:"fallback_used"`
-	CgroupSetupError        string         `json:"cgroup_setup_error,omitempty"`
-	CgroupReadError         string         `json:"cgroup_read_error,omitempty"`
-	CollectorErrors         []string       `json:"collector_errors"`
-	PMUProfile              map[string]any `json:"pmu"`
+	CgroupPath               string         `json:"cgroup_path,omitempty"`
+	Source                   string         `json:"source"`             // cgroup-v2 | process-tree
+	MonitorSource            string         `json:"monitor_source"`     // cgroup-v2 | psutil-process-tree
+	AttributionSource        string         `json:"attribution_source"` // tool-bridge-pgid
+	TsStart                  float64        `json:"ts_start"`
+	TsEnd                    float64        `json:"ts_end"`
+	DurationMS               int64          `json:"duration_ms"`
+	CPUUserSeconds           float64        `json:"cpu_user_seconds"`
+	CPUSystemSeconds         float64        `json:"cpu_system_seconds"`
+	CPUTimeSeconds           float64        `json:"cpu_time_seconds"`
+	RSSBeforeBytes           int64          `json:"rss_before_bytes"`
+	RSSAfterBytes            int64          `json:"rss_after_bytes"`
+	RSSPeakBytes             int64          `json:"rss_peak_bytes"`
+	ReadBytesDelta           int64          `json:"read_bytes_delta"`
+	WriteBytesDelta          int64          `json:"write_bytes_delta"`
+	PidCount                 int            `json:"pid_count"`
+	SamplingIntervalMS       int64          `json:"sampling_interval_ms"`
+	SamplingPointCount       int            `json:"sampling_point_count"`
+	SamplingQuality          string         `json:"sampling_quality"`
+	SamplingCoverageMS       int64          `json:"sampling_coverage_ms"`
+	CPUSource                string         `json:"cpu_source"`
+	MemorySource             string         `json:"memory_source"`
+	MemoryBaselineBytes      int64          `json:"memory_baseline_bytes,omitempty"`
+	MemoryTotalPeakBytes     int64          `json:"memory_total_peak_bytes,omitempty"`
+	MemoryExtraPeakBytes     int64          `json:"memory_extra_peak_bytes,omitempty"`
+	MemoryMeasurement        string         `json:"memory_measurement,omitempty"`
+	MemoryEnvironmentID      string         `json:"memory_environment_id,omitempty"`
+	MemoryEligible           bool           `json:"memory_eligible"`
+	MemoryTimeline           [][2]float64   `json:"memory_timeline,omitempty"`
+	MemoryUnavailableReason  string         `json:"memory_unavailable_reason,omitempty"`
+	DiskSource               string         `json:"disk_source"`
+	NetworkSource            string         `json:"network_source"`
+	FallbackUsed             bool           `json:"fallback_used"`
+	CgroupSetupError         string         `json:"cgroup_setup_error,omitempty"`
+	CgroupReadError          string         `json:"cgroup_read_error,omitempty"`
+	CgroupAttachmentVerified bool           `json:"cgroup_attachment_verified"`
+	CollectorErrors          []string       `json:"collector_errors"`
+	PMUProfile               map[string]any `json:"pmu"`
 }
 
 type resourceCollector struct {
@@ -114,6 +115,7 @@ type resourceCollector struct {
 	// cgroup v2 path ("" when unavailable)
 	cgroupPath                  string
 	cgroupOK                    bool
+	cgroupAttachmentVerified    bool
 	cgroupSetupError            string
 	environmentSamples          []environmentMemorySample
 	environmentSamplesTruncated bool
@@ -375,18 +377,19 @@ func startResourceCollectorPrepared(pgid int, execID, traceDir string, intervalM
 		intervalMS = 20
 	}
 	c := &resourceCollector{
-		execID:           execID,
-		traceDir:         traceDir,
-		pgid:             pgid,
-		intervalMS:       intervalMS,
-		done:             make(chan struct{}),
-		lastUser:         map[int]int64{},
-		lastSys:          map[int]int64{},
-		lastRead:         map[int]int64{},
-		lastWrite:        map[int]int64{},
-		cgroupPath:       cgroupPath,
-		cgroupOK:         cgroupPath != "",
-		cgroupSetupError: cgroupSetupError,
+		execID:                   execID,
+		traceDir:                 traceDir,
+		pgid:                     pgid,
+		intervalMS:               intervalMS,
+		done:                     make(chan struct{}),
+		lastUser:                 map[int]int64{},
+		lastSys:                  map[int]int64{},
+		lastRead:                 map[int]int64{},
+		lastWrite:                map[int]int64{},
+		cgroupPath:               cgroupPath,
+		cgroupOK:                 cgroupPath != "",
+		cgroupAttachmentVerified: cgroupPath != "",
+		cgroupSetupError:         cgroupSetupError,
 	}
 	// Take an immediate baseline sample so short commands (>=~1 interval) have
 	// a reference point for CPU/IO deltas even if they exit before the first
@@ -450,7 +453,27 @@ func tryPerExecCgroup(execID string, shellPid int) (string, bool, string) {
 		_ = os.RemoveAll(path)
 		return "", false, fmt.Sprintf("move execution into cgroup: %v", err)
 	}
+	// Prove attribution while the child is still blocked at its pre-exec gate.
+	// A completed short command may legitimately leave usage_usec and pids at
+	// zero; those final values cannot establish whether it joined this cgroup.
+	if err := verifyCgroupMembership(path, shellPid); err != nil {
+		cleanupCgroup(path)
+		return "", false, err.Error()
+	}
 	return path, true, ""
+}
+
+func verifyCgroupMembership(path string, pid int) error {
+	data, err := os.ReadFile(filepath.Join(path, "cgroup.procs"))
+	if err != nil {
+		return fmt.Errorf("verify execution cgroup membership: %w", err)
+	}
+	for _, value := range strings.Fields(string(data)) {
+		if value == strconv.Itoa(pid) {
+			return nil
+		}
+	}
+	return fmt.Errorf("execution pid %d is absent from its cgroup before gate release", pid)
 }
 
 // remountCgroupRW best-effort remounts the guest cgroup2 tree read-write. A
@@ -504,6 +527,7 @@ func readCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, 
 	if err != nil {
 		return 0, 0, 0, 0, 0, 0, 0, false
 	}
+	usagePresent := false
 	for _, line := range strings.Split(string(cpuData), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
@@ -511,12 +535,19 @@ func readCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, 
 		}
 		switch fields[0] {
 		case "usage_usec":
-			cpuUsageUs, _ = strconv.ParseInt(fields[1], 10, 64)
+			cpuUsageUs, err = strconv.ParseInt(fields[1], 10, 64)
+			if err != nil || cpuUsageUs < 0 {
+				return 0, 0, 0, 0, 0, 0, 0, false
+			}
+			usagePresent = true
 		case "user_usec":
 			cpuUserUs, _ = strconv.ParseInt(fields[1], 10, 64)
 		case "system_usec":
 			cpuSysUs, _ = strconv.ParseInt(fields[1], 10, 64)
 		}
+	}
+	if !usagePresent {
+		return 0, 0, 0, 0, 0, 0, 0, false
 	}
 	if peak, err := os.ReadFile(filepath.Join(path, "memory.peak")); err == nil {
 		memPeak, _ = strconv.ParseInt(strings.TrimSpace(string(peak)), 10, 64)
@@ -545,31 +576,6 @@ func readCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, 
 	return
 }
 
-// readSettledCgroupCounters accounts for the short delay observed on Kata
-// between the last process exiting and cpu.stat publishing its final charge.
-// A positive memory.peak proves that this exclusive cgroup observed the
-// execution, so retrying cannot accidentally accept a created-but-unused
-// cgroup. Truly empty cgroups and read failures still return immediately.
-func readSettledCgroupCounters(path string) (cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes int64, pids int, ok bool) {
-	cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes, pids, ok = readCgroupCounters(path)
-	if !ok || cpuUsageUs > 0 || pids > 0 || memPeak <= 0 {
-		return
-	}
-	// Under high VM concurrency, the kernel can publish the final cpu.stat
-	// charge noticeably later than memory.peak.  Keep the strict cgroup-v2
-	// requirement, but give that asynchronous accounting a bounded chance to
-	// settle before truthfully falling back to process-tree telemetry.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-		cpuUsageUs, cpuUserUs, cpuSysUs, memPeak, readBytes, writeBytes, pids, ok = readCgroupCounters(path)
-		if !ok || cpuUsageUs > 0 || pids > 0 {
-			return
-		}
-	}
-	return
-}
-
 // Finish stops sampling and returns the final merged stats.  When the
 // per-execution cgroup was created, its exact counters replace the sampled
 // process-tree values (cpu/mem/io), and the artifact is labelled cgroup-v2.
@@ -580,29 +586,30 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 	defer c.mu.Unlock()
 
 	stats := resourceStats{
-		CgroupPath:         c.cgroupPath,
-		Source:             "process-tree",
-		MonitorSource:      "psutil-process-tree",
-		AttributionSource:  "tool-bridge-pgid",
-		TsEnd:              float64(tsEnd.UnixNano()) / 1e9,
-		CPUUserSeconds:     c.cpuUserSeconds,
-		CPUSystemSeconds:   c.cpuSysSeconds,
-		RSSBeforeBytes:     c.rssBeforeKiB * 1024,
-		RSSAfterBytes:      c.rssAfterKiB * 1024,
-		RSSPeakBytes:       c.rssPeakKiB * 1024,
-		ReadBytesDelta:     c.readBytes,
-		WriteBytesDelta:    c.writeBytes,
-		PidCount:           c.maxPidCount,
-		SamplingIntervalMS: int64(c.intervalMS),
-		SamplingPointCount: c.pointCount,
-		SamplingQuality:    "degraded",
-		CPUSource:          "procfs-process-tree",
-		MemorySource:       "procfs-process-tree",
-		DiskSource:         "procfs-process-tree",
-		NetworkSource:      "unavailable",
-		FallbackUsed:       true,
-		CgroupSetupError:   c.cgroupSetupError,
-		CollectorErrors:    []string{},
+		CgroupPath:               c.cgroupPath,
+		Source:                   "process-tree",
+		MonitorSource:            "psutil-process-tree",
+		AttributionSource:        "tool-bridge-pgid",
+		TsEnd:                    float64(tsEnd.UnixNano()) / 1e9,
+		CPUUserSeconds:           c.cpuUserSeconds,
+		CPUSystemSeconds:         c.cpuSysSeconds,
+		RSSBeforeBytes:           c.rssBeforeKiB * 1024,
+		RSSAfterBytes:            c.rssAfterKiB * 1024,
+		RSSPeakBytes:             c.rssPeakKiB * 1024,
+		ReadBytesDelta:           c.readBytes,
+		WriteBytesDelta:          c.writeBytes,
+		PidCount:                 c.maxPidCount,
+		SamplingIntervalMS:       int64(c.intervalMS),
+		SamplingPointCount:       c.pointCount,
+		SamplingQuality:          "degraded",
+		CPUSource:                "procfs-process-tree",
+		MemorySource:             "procfs-process-tree",
+		DiskSource:               "procfs-process-tree",
+		NetworkSource:            "unavailable",
+		FallbackUsed:             true,
+		CgroupSetupError:         c.cgroupSetupError,
+		CgroupAttachmentVerified: c.cgroupAttachmentVerified,
+		CollectorErrors:          []string{},
 	}
 	if !c.executionStarted.IsZero() {
 		stats.TsStart = float64(c.executionStarted.UnixNano()) / 1e9
@@ -672,34 +679,32 @@ func (c *resourceCollector) Finish(tsEnd time.Time) resourceStats {
 	stats.CPUTimeSeconds = stats.CPUUserSeconds + stats.CPUSystemSeconds
 
 	if c.cgroupOK && c.cgroupPath != "" {
-		if usageUs, userUs, sysUs, memPeak, rBytes, wBytes, pids, ok := readSettledCgroupCounters(c.cgroupPath); ok {
-			// Only trust the cgroup view when it actually observed the
-			// execution (a created-but-empty cgroup reports zeros and must
-			// not override the process-tree sampler). usage_usec is the
-			// authoritative total.  Keep it separate from user_usec: the old
-			// parser overwrote usage_usec with user_usec, which intermittently
-			// made completed short executions look like empty cgroups after
-			// pids.current had returned to zero.
-			if usageUs > 0 || pids > 0 {
-				stats.Source = "cgroup-v2"
-				stats.MonitorSource = "cgroup-v2"
-				stats.SamplingQuality = "valid"
-				stats.CPUSource = "cgroup-v2-cpu.stat"
-				stats.DiskSource = "cgroup-v2-io.stat"
-				stats.CPUUserSeconds = float64(userUs) / 1e6
-				stats.CPUSystemSeconds = float64(sysUs) / 1e6
-				stats.CPUTimeSeconds = float64(usageUs) / 1e6
-				if memPeak > 0 { // memory.peak may be absent on older guest kernels
-					stats.RSSPeakBytes = memPeak
-					stats.MemorySource = "cgroup-v2-memory.peak"
-					stats.FallbackUsed = false
-				}
-				stats.ReadBytesDelta = rBytes
-				stats.WriteBytesDelta = wBytes
-				stats.PidCount = pids
+		if !c.cgroupAttachmentVerified {
+			stats.CgroupReadError = "execution cgroup membership was not verified before gate release"
+		} else if usageUs, userUs, sysUs, memPeak, rBytes, wBytes, pids, ok := readCgroupCounters(c.cgroupPath); ok {
+			// Membership was established before the gated child ran. Preserve
+			// observed zero counters; a positive CPU threshold confuses short
+			// executions with unused cgroups and caused spurious fallback.
+			stats.Source = "cgroup-v2"
+			stats.MonitorSource = "cgroup-v2"
+			stats.SamplingQuality = "valid"
+			stats.CPUSource = "cgroup-v2-cpu.stat"
+			stats.DiskSource = "cgroup-v2-io.stat"
+			stats.CPUUserSeconds = float64(userUs) / 1e6
+			stats.CPUSystemSeconds = float64(sysUs) / 1e6
+			stats.CPUTimeSeconds = float64(usageUs) / 1e6
+			if memPeak > 0 { // memory.peak may be absent on older guest kernels
+				stats.RSSPeakBytes = memPeak
+				stats.MemorySource = "cgroup-v2-memory.peak"
+				stats.FallbackUsed = false
 			}
+			stats.ReadBytesDelta = rBytes
+			stats.WriteBytesDelta = wBytes
+			stats.PidCount = pids
 		} else {
-			stats.CgroupReadError = "read cgroup cpu.stat failed"
+			stats.CgroupReadError = "read cgroup cpu.stat failed or usage_usec is missing/invalid"
+		}
+		if stats.CgroupReadError != "" {
 			stats.CollectorErrors = append(stats.CollectorErrors, stats.CgroupReadError)
 		}
 		cleanupCgroup(c.cgroupPath)
@@ -724,48 +729,49 @@ func cleanupCgroup(path string) {
 // cgroup-resource-<execution_id>.json.
 func writeResourceArtifact(execID string, stats resourceStats, traceDir string) {
 	artifact := map[string]any{
-		"schema":                    "cgroup_resource_v1",
-		"execution_id":              execID,
-		"tool_call_id":              nil,
-		"tool_name":                 "",
-		"source":                    stats.Source,
-		"monitor_source":            stats.MonitorSource,
-		"attribution_source":        stats.AttributionSource,
-		"ts_start":                  stats.TsStart,
-		"ts_end":                    stats.TsEnd,
-		"duration_ms":               stats.DurationMS,
-		"cpu_time_s":                stats.CPUTimeSeconds,
-		"cgroup_path":               stats.CgroupPath,
-		"cpu_utilization_avg_cores": cpuUtilization(stats.CPUTimeSeconds, stats.DurationMS),
-		"memory_rss_before_bytes":   stats.RSSBeforeBytes,
-		"memory_rss_after_bytes":    stats.RSSAfterBytes,
-		"memory_rss_peak_bytes":     stats.RSSPeakBytes,
-		"disk_read_bytes_delta":     stats.ReadBytesDelta,
-		"disk_write_bytes_delta":    stats.WriteBytesDelta,
-		"network_rx_bytes_delta":    nil,
-		"network_tx_bytes_delta":    nil,
-		"sampling_interval_ms":      stats.SamplingIntervalMS,
-		"sampling_point_count":      stats.SamplingPointCount,
-		"sampling_quality":          stats.SamplingQuality,
-		"sampling_coverage_ms":      stats.SamplingCoverageMS,
-		"cpu_source":                stats.CPUSource,
-		"memory_source":             stats.MemorySource,
-		"memory_baseline_bytes":     stats.MemoryBaselineBytes,
-		"memory_total_peak_bytes":   stats.MemoryTotalPeakBytes,
-		"memory_extra_peak_bytes":   stats.MemoryExtraPeakBytes,
-		"memory_measurement":        stats.MemoryMeasurement,
-		"memory_environment_id":     stats.MemoryEnvironmentID,
-		"memory_eligible":           stats.MemoryEligible,
-		"memory_timeline":           stats.MemoryTimeline,
-		"memory_unavailable_reason": nilIfEmpty(stats.MemoryUnavailableReason),
-		"disk_source":               stats.DiskSource,
-		"network_source":            stats.NetworkSource,
-		"fallback_used":             stats.FallbackUsed,
-		"cgroup_setup_error":        nilIfEmpty(stats.CgroupSetupError),
-		"cgroup_read_error":         nilIfEmpty(stats.CgroupReadError),
-		"collector_errors":          stats.CollectorErrors,
-		"pmu":                       stats.PMUProfile,
-		"independence":              "independent cgroup/procfs resource accounting; not eBPF clause telemetry",
+		"schema":                     "cgroup_resource_v1",
+		"execution_id":               execID,
+		"tool_call_id":               nil,
+		"tool_name":                  "",
+		"source":                     stats.Source,
+		"monitor_source":             stats.MonitorSource,
+		"attribution_source":         stats.AttributionSource,
+		"ts_start":                   stats.TsStart,
+		"ts_end":                     stats.TsEnd,
+		"duration_ms":                stats.DurationMS,
+		"cpu_time_s":                 stats.CPUTimeSeconds,
+		"cgroup_path":                stats.CgroupPath,
+		"cpu_utilization_avg_cores":  cpuUtilization(stats.CPUTimeSeconds, stats.DurationMS),
+		"memory_rss_before_bytes":    stats.RSSBeforeBytes,
+		"memory_rss_after_bytes":     stats.RSSAfterBytes,
+		"memory_rss_peak_bytes":      stats.RSSPeakBytes,
+		"disk_read_bytes_delta":      stats.ReadBytesDelta,
+		"disk_write_bytes_delta":     stats.WriteBytesDelta,
+		"network_rx_bytes_delta":     nil,
+		"network_tx_bytes_delta":     nil,
+		"sampling_interval_ms":       stats.SamplingIntervalMS,
+		"sampling_point_count":       stats.SamplingPointCount,
+		"sampling_quality":           stats.SamplingQuality,
+		"sampling_coverage_ms":       stats.SamplingCoverageMS,
+		"cpu_source":                 stats.CPUSource,
+		"memory_source":              stats.MemorySource,
+		"memory_baseline_bytes":      stats.MemoryBaselineBytes,
+		"memory_total_peak_bytes":    stats.MemoryTotalPeakBytes,
+		"memory_extra_peak_bytes":    stats.MemoryExtraPeakBytes,
+		"memory_measurement":         stats.MemoryMeasurement,
+		"memory_environment_id":      stats.MemoryEnvironmentID,
+		"memory_eligible":            stats.MemoryEligible,
+		"memory_timeline":            stats.MemoryTimeline,
+		"memory_unavailable_reason":  nilIfEmpty(stats.MemoryUnavailableReason),
+		"disk_source":                stats.DiskSource,
+		"network_source":             stats.NetworkSource,
+		"fallback_used":              stats.FallbackUsed,
+		"cgroup_setup_error":         nilIfEmpty(stats.CgroupSetupError),
+		"cgroup_read_error":          nilIfEmpty(stats.CgroupReadError),
+		"cgroup_attachment_verified": stats.CgroupAttachmentVerified,
+		"collector_errors":           stats.CollectorErrors,
+		"pmu":                        stats.PMUProfile,
+		"independence":               "independent cgroup/procfs resource accounting; not eBPF clause telemetry",
 	}
 	payload, err := json.Marshal(artifact)
 	if err != nil {

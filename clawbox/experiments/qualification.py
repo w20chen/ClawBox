@@ -27,14 +27,14 @@ from .snapshot_pool import WarmSnapshotPool
 from .numa_borrow import SandboxNumaBorrower, read_numa_lru_bytes
 from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, canonical_json,
-    expand_matrix, load_workload_cases, spec_digest,
+    expand_matrix, load_workload_cases, resolve_case_sandbox, spec_digest,
 )
 from .spec_types import AdmissionPolicy, ArrivalSchedule
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 14
+QUALIFICATION_SCHEMA_VERSION = 15
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -220,7 +220,10 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
 
     # A conservative envelope: every offered session may own both VMs. This
     # checks Cube's independent quota, not a claim about resident concurrency.
-    tools = [case.sandbox or spec.sandbox for case in load_workload_cases(spec.workload)]
+    tools = [
+        resolve_case_sandbox(case, spec.sandbox)
+        for case in load_workload_cases(spec.workload)
+    ]
     count = max(spec.execution.concurrency_levels)
     demand = dict(
         vm_count=count * 2,
@@ -236,7 +239,7 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
         "runtime": sandbox(spec.runtime),
         "sandbox": sandbox(spec.sandbox),
         "tool_sandboxes": [
-            sandbox(case.sandbox or spec.sandbox)
+            sandbox(resolve_case_sandbox(case, spec.sandbox))
             for case in load_workload_cases(spec.workload)
         ],
         "local_memory_cgroup": spec.resources.local_memory_cgroup,
@@ -356,7 +359,7 @@ def _snapshot_sandbox_representatives(
     """
     by_template: dict[str, Any] = {}
     for case in load_workload_cases(spec.workload):
-        sandbox = case.sandbox or spec.sandbox
+        sandbox = resolve_case_sandbox(case, spec.sandbox)
         by_template.setdefault(sandbox.template, sandbox)
     representatives: dict[tuple[int, int, str], tuple[str, Any]] = {}
     for template, sandbox in sorted(by_template.items()):
@@ -955,7 +958,7 @@ def _same_template_ram_mapping(left: dict[str, Any], right: dict[str, Any]) -> b
 def _template_sharing_identities(spec: ExperimentSpec) -> dict[str, dict[str, Any]]:
     identities: dict[str, dict[str, Any]] = {}
     for case in load_workload_cases(spec.workload):
-        sandbox = case.sandbox or spec.sandbox
+        sandbox = resolve_case_sandbox(case, spec.sandbox)
         identity = {
             "template_id": sandbox.template,
             "image_digest": sandbox.image_digest,
@@ -1162,7 +1165,7 @@ def template_base_sharing_test(
     cases = load_workload_cases(spec.workload)
     templates = {}
     for case in cases:
-        sandbox = case.sandbox or spec.sandbox
+        sandbox = resolve_case_sandbox(case, spec.sandbox)
         templates.setdefault(sandbox.template, sandbox)
     journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
     run_id = "qualification-base-" + uuid.uuid4().hex[:12]
@@ -1389,7 +1392,7 @@ def qualify(
         "runtime_image_digest": spec.runtime.image_digest,
         "tool_image_digest": spec.sandbox.image_digest,
         "tool_image_digests": sorted({
-            (case.sandbox or spec.sandbox).image_digest
+            resolve_case_sandbox(case, spec.sandbox).image_digest
             for case in load_workload_cases(spec.workload)
         }, key=lambda value: value or ""),
         "run_root": str(run_root),
@@ -1426,7 +1429,7 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         "runtime_image_digest": spec.runtime.image_digest,
         "tool_image_digest": spec.sandbox.image_digest,
         "tool_image_digests": sorted({
-            (case.sandbox or spec.sandbox).image_digest
+            resolve_case_sandbox(case, spec.sandbox).image_digest
             for case in load_workload_cases(spec.workload)
         }, key=lambda value: value or ""),
         "status": "succeeded",

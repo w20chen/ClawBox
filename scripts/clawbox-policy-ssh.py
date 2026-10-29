@@ -462,7 +462,8 @@ def main() -> int:
 
     execution_started_at = time.time()
     if admission.get('notify_execution_start'):
-        progress = {'url': policy_url, 'token': policy_token, 'request': {
+        progress = {'url': policy_url, 'token': policy_token,
+                    'timeout_seconds': admission['progress_timeout_seconds'], 'request': {
             'session_id': session_id, 'execution_id': execution_id,
             'command_sha256': command_sha256, 'endpoint_sandbox_id': route['sandbox_id'],
             'endpoint_epoch': route['epoch'],

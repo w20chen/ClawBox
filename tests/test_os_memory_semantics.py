@@ -89,7 +89,8 @@ def test_borrow_candidate_uses_local_residency_not_configured_capacity():
     small.observe_borrow_candidate = lambda: SimpleNamespace(local_bytes=400)
     c._lock = Lock()
     c._lifecycles = {'session': (large, small)}
-    c.borrower = SimpleNamespace(borrowed=lambda: (), observe_resident=lambda sid:
+    c.shared_pool = SimpleNamespace(borrow_headroom_bytes=1000)
+    c.borrower = SimpleNamespace(borrowed=lambda: (), allocates_shared=lambda sid: True, observe_resident=lambda sid:
         SimpleNamespace(local_bytes={'large': 10, 'small': 400}[sid]))
     assert c._next_borrow_candidate() is small
     c.borrower.borrowed = lambda: ('small',)
