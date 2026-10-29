@@ -172,6 +172,11 @@ WorkloadCase.model_rebuild()
 
 class ExecutionSpec(StrictFrozenModel):
     control_timing_details: bool = False
+    # The live gateway always retains request/response content in memory while
+    # it is needed for replay identity and retries. Normal result artifacts
+    # retain full content only for failed requests; ``all`` is an explicit
+    # full-audit mode for successful conversations too.
+    model_request_content_retention: Literal["failures", "all"] = "failures"
     placement_policy: Literal["os_default", "round_robin", "load_aware", "explicit"] = "round_robin"
     placement_cpu_overcommit: float = Field(default=1024.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)

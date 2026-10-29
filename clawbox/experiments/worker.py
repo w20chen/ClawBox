@@ -3667,6 +3667,9 @@ class ExperimentWorker:
                 replay_tool_timeout_multiplier=(
                     arm.execution.replay_tool_timeout_multiplier
                 ),
+                content_retention=(
+                    arm.execution.model_request_content_retention
+                ),
                 upstream_base_url=str(inference_configuration.get("base_url") or "") or None,
                 upstream_api_key=credential or None,
                 upstream_model=str(inference_configuration.get("model") or "") or None,

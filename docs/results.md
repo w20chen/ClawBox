@@ -60,12 +60,20 @@ final-response receipt alone does not establish a validated successful task.
 - Required Tool resource/PMU collection and periodic host memory samples.
 - Compact callback timings, queue-wait totals, and lifecycle memory totals.
 - VM-create request and ownership-journal timing spans.
+- Compact successful Model Gateway records. Exact request/response content is
+  retained for failed requests and separate replay-rejection evidence.
 
 Set the field to `true` for a diagnostic run to add nested control spans,
 GC intervals, raw lifecycle cgroup dumps, duplicate model/prediction event
 payloads, and Runtime working-KB exports. Use a new run ID. No host apply,
 image rebuild, or retraining is required. Disabling detail does not disable
 ClawTune measurement or task validation.
+
+`execution.model_request_content_retention` defaults to `failures`. The live
+gateway always retains exact content in memory for replay matching and retry
+handling. Set the field to `all` only for a full conversation audit; this adds
+exact successful request and response bodies to the per-session gateway file
+and arm result without changing replay behavior or prediction.
 
 ## Tool preparation and admission
 

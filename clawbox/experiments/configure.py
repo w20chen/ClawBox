@@ -763,6 +763,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
         "policies": [policy.model_dump(mode="json") for policy in spec.policies],
         "arm_count": len(expand_matrix(spec)),
         "execution": {
+            "model_request_content_retention": (
+                spec.execution.model_request_content_retention
+            ),
             "arrival_schedule": spec.execution.arrival_schedule.value,
             "stagger_interval_seconds": spec.execution.stagger_interval_seconds,
             "poisson_arrival_window_fraction": (

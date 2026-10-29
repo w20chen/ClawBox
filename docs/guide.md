@@ -215,6 +215,14 @@ Keep `execution.control_timing_details: false` for normal throughput runs.
 Required traces, errors, resource measurements, and compact timings remain
 enabled; expensive diagnostic detail is opt-in.
 
+Keep `execution.model_request_content_retention: failures` for normal runs.
+The Model Gateway still uses complete requests and responses in memory, while
+successful result records retain only fingerprints, replay indices, timing,
+status, retry, admission, and delivery evidence. Set it to `all` only when an
+exact successful conversation audit is required. Replay rejections and failed
+requests retain their exact diagnostic content in either mode. Changing this
+field requires a new run ID, but no host apply, image rebuild, or retraining.
+
 ## 5. Validate, launch, and inspect
 
 ```bash

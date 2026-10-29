@@ -35,6 +35,7 @@ class SessionGatewayState:
                  tool_transport_timeout_s: float | None = None,
                  replay_tool_timeout_multiplier: float = 1.0,
                  max_model_steps: int | None = None,
+                 content_retention: str = "failures",
                  on_request_started: Callable[..., None] | None = None,
                  before_response_ready: Callable[..., dict[str, Any]] | None = None,
                  flush_gate: threading.Semaphore | None = None) -> None:
@@ -51,6 +52,7 @@ class SessionGatewayState:
             replay_tool_timeout_multiplier=replay_tool_timeout_multiplier,
             max_model_steps=max_model_steps,
             request_namespace=session_id,
+            content_retention=content_retention,
             on_request_started=on_request_started,
             before_response_ready=before_response_ready,
         )
@@ -136,7 +138,7 @@ class SessionGatewayState:
         self.gateway.mark_delivery(request_id, delivered=delivered)
 
     def records(self) -> list[dict[str, Any]]:
-        return self.gateway.records()
+        return self.gateway.retained_records()
 
     def replay_completeness(self) -> dict[str, Any]:
         return self.gateway.replay_completeness(require_delivery=True)
@@ -334,6 +336,7 @@ class ManagedModelGateway:
                  request_timeout_s: float = 600.0,
                  tool_transport_timeout_s: float | None = None,
                  replay_tool_timeout_multiplier: float = 1.0,
+                 content_retention: str = "failures",
                  upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None,
                  upstream_model: str | None = None,
@@ -355,6 +358,7 @@ class ManagedModelGateway:
             request_timeout_s=request_timeout_s,
             tool_transport_timeout_s=tool_transport_timeout_s,
             replay_tool_timeout_multiplier=replay_tool_timeout_multiplier,
+            content_retention=content_retention,
             on_request_started=on_request_started,
             before_response_ready=before_response_ready,
             flush_gate=self._flush_gate,

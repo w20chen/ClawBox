@@ -311,6 +311,7 @@ Fields are under `execution`:
 | `poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
 | `poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
 | `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
+| `model_request_content_retention` | `failures` | `failures` keeps compact successful Model Gateway records and exact request/response content only for incomplete, errored, non-200, or undelivered requests. `all` retains exact content for every request for a full-audit run. The setting changes result retention only; use a new run ID. It requires no host apply, image rebuild, or retraining. |
 
 Creation retry uses backoff and releases lifecycle slots while waiting. Ambiguous
 HTTP failures use ownership reconciliation rather than blindly creating another

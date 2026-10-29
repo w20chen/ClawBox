@@ -55,18 +55,29 @@ class GatewayRequest:
     def request_payload(self) -> dict[str, Any]:
         return json.loads(zlib.decompress(self.request_payload_blob))
 
-    def record(self, *, include_payload: bool = True) -> dict[str, Any]:
+    def record(
+        self, *, include_payload: bool = True, include_response: bool = True,
+    ) -> dict[str, Any]:
         result = asdict(self)
         encoded = result.pop('request_payload_blob')
         if include_payload:
             result['request_payload'] = json.loads(zlib.decompress(encoded))
+        if not include_response:
+            result.pop('response_b64', None)
         return result
 
-    def record_json(self) -> str:
+    def record_json(
+        self, *, include_payload: bool = True, include_response: bool = True,
+    ) -> str:
         # Preserve the public ledger shape without rebuilding the entire
         # conversation graph merely to encode it again during final flush.
-        fields = self.record(include_payload=False)
-        return json.dumps(fields, sort_keys=True)[:-1] + ',"request_payload":' + zlib.decompress(self.request_payload_blob).decode('utf-8') + '}'
+        fields = self.record(
+            include_payload=False, include_response=include_response,
+        )
+        encoded = json.dumps(fields, sort_keys=True)
+        if not include_payload:
+            return encoded
+        return encoded[:-1] + ',"request_payload":' + zlib.decompress(self.request_payload_blob).decode('utf-8') + '}'
 
 
 class ModelGateway:
@@ -80,6 +91,7 @@ class ModelGateway:
                  replay_tool_timeout_multiplier: float = 1.0,
                  max_model_steps: int | None = None,
                  request_namespace: str = "default",
+                 content_retention: str = "failures",
                  on_request_started: Callable[[], None] | None = None,
                  before_response_ready: Callable[[int | None, dict[str, Any]], dict[str, Any]] | None = None) -> None:
         if mode not in {"replay", "api"}:
@@ -90,8 +102,11 @@ class ModelGateway:
             raise ValueError("replay mode requires a trace")
         if mode == "api" and (not upstream_base_url or not upstream_api_key or not upstream_model):
             raise ValueError("api mode requires upstream URL, key, and model")
+        if content_retention not in {"failures", "all"}:
+            raise ValueError("content_retention must be failures or all")
         self.store_path = store_path
         self.mode = mode
+        self.content_retention = content_retention
         self.actions = [] if trace is None else load_trace(trace)
         if max_model_steps is not None and (
             mode != "replay" or type(max_model_steps) is not int or max_model_steps < 1
@@ -418,46 +433,84 @@ class ModelGateway:
         temporary.write_text(json.dumps(self._prefix_stop, indent=2), encoding="utf-8")
         temporary.replace(path)
 
+    @staticmethod
+    def _record(
+        item: GatewayRequest, *, include_payload: bool, include_response: bool,
+    ) -> dict[str, Any]:
+        record = item.record(
+            include_payload=include_payload, include_response=include_response,
+        )
+        # Stable semantic names for campaign analysis; retain the *_unix_s
+        # fields for compatibility with the original CLI.
+        record.update({
+            "request_started_at": item.started_unix_s,
+            "model_generated_at": item.model_generated_unix_s,
+            "response_released_at": item.response_released_unix_s,
+            "response_delivered_at": item.delivered_unix_s,
+            "pure_model_latency_seconds": (
+                item.model_generated_unix_s - item.started_unix_s
+                if item.model_generated_unix_s else None
+            ),
+            "policy_induced_response_hold_seconds": (
+                item.response_released_unix_s - item.model_generated_unix_s
+                if item.response_released_unix_s and item.model_generated_unix_s else None
+            ),
+            "delivery_latency_seconds": (
+                item.delivered_unix_s - item.response_released_unix_s
+                if item.delivered_unix_s and item.response_released_unix_s else None
+            ),
+            "runtime_visible_model_wait_seconds": (
+                item.delivered_unix_s - item.started_unix_s
+                if item.delivered_unix_s else None
+            ),
+            "lifecycle_events": [
+                {"event": name, "unix_s": timestamp}
+                for name, timestamp in (
+                    ("ModelRequestStarted", item.started_unix_s),
+                    ("ModelResponseGenerated", item.model_generated_unix_s),
+                    ("ModelResponseReleased", item.response_released_unix_s),
+                    ("ModelResponseDelivered", item.delivered_unix_s),
+                ) if timestamp > 0
+            ],
+        })
+        return record
+
     def records(self, *, include_payload: bool = True) -> list[dict[str, Any]]:
         with self._lock:
-            records: list[dict[str, Any]] = []
-            for item in self._requests.values():
-                record = item.record(include_payload=include_payload)
-                # Stable semantic names for campaign analysis; retain the
-                # *_unix_s fields for compatibility with the original CLI.
-                record.update({
-                    "request_started_at": item.started_unix_s,
-                    "model_generated_at": item.model_generated_unix_s,
-                    "response_released_at": item.response_released_unix_s,
-                    "response_delivered_at": item.delivered_unix_s,
-                    "pure_model_latency_seconds": (
-                        item.model_generated_unix_s - item.started_unix_s
-                        if item.model_generated_unix_s else None
+            return [
+                self._record(
+                    item, include_payload=include_payload, include_response=True,
+                )
+                for item in self._requests.values()
+            ]
+
+    @staticmethod
+    def _request_failed(item: GatewayRequest) -> bool:
+        """Return whether exact content is needed for terminal diagnosis."""
+        return (
+            not item.ready
+            or bool(item.error)
+            or item.status_code != int(HTTPStatus.OK)
+            or not item.delivered
+        )
+
+    def retained_records(self) -> list[dict[str, Any]]:
+        """Return the configured artifact representation, never live state."""
+        with self._lock:
+            return [
+                self._record(
+                    item,
+                    include_payload=(
+                        self.content_retention == "all"
+                        or self._request_failed(item)
                     ),
-                    "policy_induced_response_hold_seconds": (
-                        item.response_released_unix_s - item.model_generated_unix_s
-                        if item.response_released_unix_s and item.model_generated_unix_s else None
+                    include_response=(
+                        self.content_retention == "all"
+                        or self._request_failed(item)
                     ),
-                    "delivery_latency_seconds": (
-                        item.delivered_unix_s - item.response_released_unix_s
-                        if item.delivered_unix_s and item.response_released_unix_s else None
-                    ),
-                    "runtime_visible_model_wait_seconds": (
-                        item.delivered_unix_s - item.started_unix_s
-                        if item.delivered_unix_s else None
-                    ),
-                    "lifecycle_events": [
-                        {"event": name, "unix_s": timestamp}
-                        for name, timestamp in (
-                            ("ModelRequestStarted", item.started_unix_s),
-                            ("ModelResponseGenerated", item.model_generated_unix_s),
-                            ("ModelResponseReleased", item.response_released_unix_s),
-                            ("ModelResponseDelivered", item.delivered_unix_s),
-                        ) if timestamp > 0
-                    ],
-                })
-                records.append(record)
-            return records
+                )
+                for item in self._requests.values()
+            ]
 
     def logical_model_steps(self) -> int:
         """Count accepted logical model requests, excluding HTTP retries."""
@@ -636,7 +689,19 @@ class ModelGateway:
                 revision = self._persistence_revision
                 if revision == self._persisted_revision and self.store_path.is_file():
                     return
-                snapshot = [item.record_json() for item in self._requests.values()]
+                snapshot = [
+                    item.record_json(
+                        include_payload=(
+                            self.content_retention == "all"
+                            or self._request_failed(item)
+                        ),
+                        include_response=(
+                            self.content_retention == "all"
+                            or self._request_failed(item)
+                        ),
+                    )
+                    for item in self._requests.values()
+                ]
             encoded = '[' + ','.join(snapshot) + ']'
             self.store_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.store_path.with_name(self.store_path.name + ".next")

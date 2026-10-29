@@ -12,7 +12,7 @@ from trace_fixtures import llm_spans, write_spans
 from clawbox.replay.model_gateway import ModelGateway, _defer_exec_tool_timeouts, _response_message
 
 
-def test_standalone_gateway_flushes_final_ledger_on_close(tmp_path: Path) -> None:
+def test_standalone_gateway_compacts_successful_content_on_close(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     store = tmp_path / "store.json"
     write_spans(trace, llm_spans([], {"content": "done"}, duration_ms=0))
@@ -26,7 +26,8 @@ def test_standalone_gateway_flushes_final_ledger_on_close(tmp_path: Path) -> Non
     records = json.loads(store.read_text(encoding="utf-8"))
     assert len(records) == 1
     assert records[0]["delivered"] is True
-    assert records[0]["request_payload"] == {"messages": []}
+    assert "request_payload" not in records[0]
+    assert "response_b64" not in records[0]
     assert "request_payload_blob" not in records[0]
 
 
@@ -44,8 +45,26 @@ def test_gateway_retains_encoded_history_without_changing_retry_or_evidence(tmp_
     gateway.mark_delivery(first[3], delivered=True)
     gateway.close()
     persisted = json.loads(gateway.store_path.read_text(encoding='utf-8'))
-    assert persisted[0]['request_payload'] == payload
+    assert 'request_payload' not in persisted[0]
+    assert 'response_b64' not in persisted[0]
     assert persisted[0]['http_attempts'] == 2
+
+
+def test_gateway_full_audit_retains_successful_content(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    store = tmp_path / "store.json"
+    write_spans(trace, llm_spans([], {"content": "done"}, duration_ms=0))
+    gateway = ModelGateway(
+        store, mode="replay", trace=trace, content_retention="all",
+    )
+    payload = {"messages": [{"role": "user", "content": "audit me"}]}
+    _status, _content_type, _body, request_id = gateway.complete_http(payload)
+    gateway.mark_delivery(request_id, delivered=True)
+    gateway.close()
+
+    record = json.loads(store.read_text(encoding="utf-8"))[0]
+    assert record["request_payload"] == payload
+    assert record["response_b64"]
 
 
 def test_gateway_timeout_is_terminal_for_retries_and_late_producer(
@@ -92,6 +111,10 @@ def test_gateway_timeout_is_terminal_for_retries_and_late_producer(
     assert record["status_code"] == 504
     assert record["error"] == "model gateway request timed out"
     assert record["admission"] == {}
+    gateway.close()
+    retained = json.loads(gateway.store_path.read_text(encoding="utf-8"))[0]
+    assert retained["request_payload"] == payload
+    assert "response_b64" in retained
 
 
 @pytest.mark.parametrize("stream", [False, True])

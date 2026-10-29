@@ -125,6 +125,8 @@ def test_managed_gateway_persists_once_after_session_drain(tmp_path: Path) -> No
         assert records[0]["model_generated_unix_s"] > 0
         assert records[0]["response_released_unix_s"] > 0
         assert records[0]["delivered_unix_s"] > 0
+        assert "request_payload" not in records[0]
+        assert "response_b64" not in records[0]
 
 
 def test_timed_out_drain_flushes_partial_then_final_evidence(tmp_path: Path) -> None:
@@ -164,12 +166,13 @@ def test_managed_gateway_forwards_session_request_timeout(tmp_path: Path) -> Non
             session_id="custom", store_path=tmp_path / "custom.json",
             mode="replay", trace=trace, time_scale=0, request_timeout_s=3660,
             tool_transport_timeout_s=3660,
-            replay_tool_timeout_multiplier=4,
+            replay_tool_timeout_multiplier=4, content_retention="all",
         )
         assert default.gateway.timeout_s == 600.0
         assert custom.gateway.timeout_s == 3660
         assert custom.gateway.tool_transport_timeout_s == 3660
         assert custom.gateway.replay_tool_timeout_multiplier == 4
+        assert custom.gateway.content_retention == "all"
 
 
 def test_managed_gateway_api_http_path_keeps_upstream_credentials_server_side(
@@ -376,7 +379,11 @@ def test_checkpoint_retry_artifact_is_removed_from_later_replay_steps(
         session.mark_delivery(second_id, delivered=True)
         assert session.gateway.logical_model_steps() == 2
         assert session.replay_completeness()["complete"] is True
-        assert session.records()[1]["request_payload"] == continued_with_retry_artifact
+        assert "request_payload" not in session.records()[1]
+        assert (
+            session.gateway.records()[1]["request_payload"]
+            == continued_with_retry_artifact
+        )
 
 
 def test_replay_does_not_compare_conversation_text(

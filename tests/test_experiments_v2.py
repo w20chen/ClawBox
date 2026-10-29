@@ -37,6 +37,14 @@ def test_explicit_null_disables_arm_deadline() -> None:
         ExecutionSpec(arm_timeout_seconds=None)
     assert ExecutionSpec().arm_timeout_seconds == 3600
     assert ExecutionSpec().arm_finalization_timeout_seconds == 300
+    assert ExecutionSpec().model_request_content_retention == "failures"
+    assert (
+        ExecutionSpec(model_request_content_retention="all")
+        .model_request_content_retention
+        == "all"
+    )
+    with pytest.raises(ValueError):
+        ExecutionSpec(model_request_content_retention="successful")
     with pytest.raises(ValueError):
         ExecutionSpec(arm_finalization_timeout_seconds=0)
 
