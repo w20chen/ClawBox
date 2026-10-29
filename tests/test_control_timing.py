@@ -14,16 +14,17 @@ def test_timing_keeps_nested_spans_and_emits_after_unlock():
         lock.release()
         events.append(event)
 
-    @trace_callback('completed', emit, 's')
+    @trace_callback('completed', emit, 's', request_fields=('phase',))
     def callback(request):
         with timed_lock(lock, 'accounting'):
             with span('sample'):
                 return {'status': 'COMPLETED'}
 
-    assert callback({'execution_id': 'e'}) == {'status': 'COMPLETED'}
+    assert callback({'execution_id': 'e', 'phase': 'start'}) == {'status': 'COMPLETED'}
     assert len(events) == 1
     event = events[0]
     assert event['execution_id'] == 'e'
+    assert event['phase'] == 'start'
     spans = {s['stage']: s for s in event['spans']}
     assert spans.keys() == {'accounting.wait', 'accounting.hold', 'sample', 'callback'}
     assert spans['callback']['start_ns'] <= spans['sample']['start_ns']

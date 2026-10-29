@@ -766,10 +766,10 @@ def test_event_writer_tracks_low_cost_queue_and_task_activity(tmp_path: Path) ->
     assert tracker.snapshot()["dependency_install_active_operations"] == 1
     writer.write({"event": "tool_admitted", "session_id": session,
                   "execution_id": "exec-1"})
-    writer.write({"event": "tool_execution_progress", "session_id": session,
+    writer.write({"event": "tool_progress_timing", "session_id": session,
                   "execution_id": "exec-1", "phase": "start"})
     assert tracker.snapshot()["tool_executing_tasks"] == 1
-    writer.write({"event": "tool_execution_progress", "session_id": session,
+    writer.write({"event": "tool_progress_timing", "session_id": session,
                   "execution_id": "exec-1", "phase": "end"})
     writer.write({"event": "dependency_install_gate_released",
                   "session_id": session, "execution_id": "exec-1"})

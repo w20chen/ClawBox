@@ -1657,7 +1657,7 @@ class ArmActivityTracker:
         'pair_ready', 'agent_runnable', 'model_wait_started', 'model_response_ready',
         'dependency_install_gate_wait_started', 'dependency_install_gate_acquired',
         'dependency_install_gate_released', 'dependency_install_gate_wait_timed_out',
-        'tool_admission_queued', 'tool_admitted', 'tool_execution_progress',
+        'tool_admission_queued', 'tool_admitted', 'tool_progress_timing',
         'tool_completed', 'tool_admission_abandoned', 'tool_admission_failed',
         'session_complete', 'session_failed',
     })
@@ -1770,7 +1770,7 @@ class ArmActivityTracker:
             elif name == "tool_admitted" and execution_id:
                 self.tool_admission_waiting.pop(execution_id, None)
                 self.tool_admitted_waiting_start[execution_id] = (session_id, now)
-            elif name == "tool_execution_progress" and execution_id:
+            elif name == "tool_progress_timing" and execution_id:
                 if event.get("phase") == "start":
                     self.tool_admission_waiting.pop(execution_id, None)
                     self.tool_admitted_waiting_start.pop(execution_id, None)
@@ -3137,9 +3137,6 @@ class ExperimentWorker:
                     for item in sorted(sessions, key=lambda value: value["session_id"])
                 ],
                 "session_timelines": [item.get("timeline") for item in sessions],
-                "session_time_spans": [
-                    item.get("timeline", {}).get("time_spans", []) for item in sessions
-                ],
             },
             memory={
                 **asdict(memory),
@@ -4503,16 +4500,14 @@ class ExperimentWorker:
 
                 if self.policy_control is None:
                     raise RuntimeError("PolicyControlServer is not active")
-                @trace_callback('tool_progress_timing', events.write, session_id)
+                @trace_callback(
+                    'tool_progress_timing', events.write, session_id,
+                    request_fields=('phase',),
+                )
                 def record_tool_progress(request):
                     phase = request.get('phase')
                     progress_event('complete' if phase == 'end' else 'start',
                                    str(request['execution_id']))
-                    events.write({'event': 'tool_execution_progress',
-                                  'session_id': session_id,
-                                  'execution_id': str(request['execution_id']),
-                                  'phase': phase,
-                                  'source': 'toolbridge_progress_http'})
                 policy_session = self.policy_control.register(
                     session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,

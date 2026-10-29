@@ -193,12 +193,13 @@ def operation(name):
     return decorate
 
 
-def trace_callback(event, emit, session_id):
+def trace_callback(event, emit, session_id, *, request_fields=()):
     def decorate(callback):
         @wraps(callback)
         def wrapped(request):
-            with trace_scope(event, emit, session_id,
-                             execution_id=request.get('execution_id')):
+            identity = {'execution_id': request.get('execution_id')}
+            identity.update({field: request.get(field) for field in request_fields})
+            with trace_scope(event, emit, session_id, **identity):
                 return callback(request)
         return wrapped
     return decorate

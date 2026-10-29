@@ -1490,7 +1490,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     )
     assert admission["runtime_agent_pid_before_pause"] == 4242
     assert admission["runtime_agent_pid_after_restore"] == 4242
-    session_spans = result.performance["session_time_spans"][0]
+    session_spans = result.performance["session_timelines"][0]["time_spans"]
     span_names = {span["name"] for span in session_spans}
     assert {
         "model.wait", "model.response_hold", "model.response_delivery",
