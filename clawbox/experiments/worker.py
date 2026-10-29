@@ -4775,12 +4775,20 @@ class ExperimentWorker:
                         )
                     from clawbox.replay.tool_outcomes import match_recorded_tool_failures
                     from .native_artifacts import _runtime_spans
+                    harmless_failures: list[dict[str, Any]] = []
                     matched_failures = match_recorded_tool_failures(
                         trace_path, _runtime_spans(outcome["runtime_traces"]),
                         session_id=session_id, reported_failures=agent_tool_failures,
+                        harmless_failures=harmless_failures,
                     )
                     events.write({"event": "recorded_tool_failures_matched",
                                   "session_id": session_id, "matches": matched_failures})
+                    if harmless_failures:
+                        events.write({
+                            "event": "harmless_replay_tool_divergence",
+                            "session_id": session_id,
+                            "divergences": harmless_failures,
+                        })
                 if not tool_latencies:
                     raise RuntimeError(
                         "OpenClaw completed without using a required native Tool operation"

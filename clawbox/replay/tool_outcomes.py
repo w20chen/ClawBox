@@ -202,6 +202,39 @@ def _truncated_pytest_failure_equivalent(left: str, right: str) -> bool:
     return bool(expected_exceptions) and expected_exceptions == set(exception_lines.findall(right))
 
 
+def _load_sensitive_timing_assertion(text: str, command: str) -> dict | None:
+    """Recognize one pytest wall-clock ceiling failure, without hiding test errors."""
+    if not re.search(r"(?:^|\s)-m\s+pytest(?:\s|$)|(?:^|[\s/])pytest(?:\s|$)", command):
+        return None
+    counts = dict(_pytest_failure_counts(text) or ())
+    if counts.get("failed") != 1 or counts.get("error", 0):
+        return None
+    failures = re.findall(r"(?m)^FAILED\s+([^\s]+)(?:\s+-.*)?$", text)
+    if len(failures) != 1:
+        return None
+    # Require the retained source excerpt to show that the compared value is
+    # elapsed wall time. A generic numerical upper-bound assertion can be a
+    # real functional regression and must remain fatal.
+    if not re.search(
+        r"(?m)^>\s*.*(?:time\.time|time\.monotonic|time\.perf_counter)\(\).*",
+        text,
+    ):
+        return None
+    assertion = re.search(
+        r"AssertionError:\s*([0-9]+(?:\.[0-9]+)?) not less than or equal to "
+        r"([0-9]+(?:\.[0-9]+)?)",
+        text,
+    )
+    if assertion is None:
+        return None
+    return {
+        "classification": "load_sensitive_wall_clock_assertion",
+        "test": failures[0],
+        "observed_seconds": float(assertion[1]),
+        "limit_seconds": float(assertion[2]),
+    }
+
+
 def _equivalent_failure(expected: tuple[int, str], actual: tuple[int, str] | None,
                         command: str) -> bool:
     if actual is None or actual[0] != expected[0]:
@@ -232,14 +265,17 @@ def _equivalent_failure(expected: tuple[int, str], actual: tuple[int, str] | Non
 
 def match_recorded_tool_failures(
     trace: Path, spans: list[dict], *, session_id: str, reported_failures: int,
+    harmless_failures: list[dict] | None = None,
 ) -> list[dict]:
     """Require matching call identity, command, exit code, and error text.
 
     Missing evidence fails closed. This does not mark a benchmark task solved;
     ordinary replay completeness and final validation still apply.
     """
+    ignored = harmless_failures if harmless_failures is not None else []
     actions = load_trace(trace)
     expected = {}
+    recorded_commands = {}
     for action, following in zip(actions, actions[1:]):
         calls = action.output.get("tool_calls") or []
         messages = following.input
@@ -262,11 +298,12 @@ def match_recorded_tool_failures(
             content = results.get(original.get("id"))
             if not isinstance(args, dict) or not isinstance(content, str):
                 continue
+            identity = call.get("id")
+            if identity in recorded_commands:
+                raise ValueError("recorded Tool call IDs are not unique")
+            recorded_commands[identity] = args.get("command")
             failure = _failure(content)
             if failure:
-                identity = call.get("id")
-                if identity in expected:
-                    raise ValueError("recorded Tool call IDs are not unique")
                 expected[identity] = (args.get("command"), failure)
 
     matched = []
@@ -289,6 +326,20 @@ def match_recorded_tool_failures(
         if wrapper_lines:
             text = _remove_wrapper_line_offset(text, wrapper_lines)
         evidence = expected.get(identity)
+        timing_flake = None
+        if (
+            evidence is None
+            and type(code) is int
+            and code == 1
+            and not details.get("noOutputTimedOut")
+            and not details.get("exitSignal")
+            and recorded_commands.get(identity) == command
+        ):
+            timing_flake = _load_sensitive_timing_assertion(text, command)
+        if timing_flake is not None:
+            item = {"call_id": identity, "exit_code": code, **timing_flake}
+            ignored.append(item)
+            continue
         if (not evidence or type(code) is not int or code == 0
                 or details.get("noOutputTimedOut") or details.get("exitSignal")
                 or command != evidence[0]
@@ -300,6 +351,6 @@ def match_recorded_tool_failures(
     # signal, not a count of failed Tool spans. One warning can summarize a
     # chain of failed commands. Every observed failed span is matched above;
     # require evidence on both sides without equating their cardinalities.
-    if reported_failures < 1 or not matched:
+    if reported_failures < 1 or (not matched and not ignored):
         raise ValueError("Runtime Tool failure evidence does not cover OpenClaw failure signal")
     return matched

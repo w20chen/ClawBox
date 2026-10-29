@@ -92,6 +92,63 @@ def test_new_failures_are_not_hidden(monkeypatch, mutation):
             session_id="s", reported_failures=1)
 
 
+def test_recorded_success_wall_clock_assertion_is_audited_but_not_fatal(monkeypatch):
+    command = "SQLGLOTRS_TOKENIZER=0 /opt/conda/envs/testbed/bin/python -m pytest"
+    span = setup_case(
+        monkeypatch,
+        "596 passed, 2 skipped in 136.75s\nExit code: 0",
+        """=================== FAILURES ===================
+___ TestParser.test_parse_nested ___
+>       self.assertLessEqual(time.time() - now, 0.1)
+E       AssertionError: 0.11990046501159668 not less than or equal to 0.1
+FAILED tests/test_parser.py::TestParser::test_parse_nested - AssertionError
+============= 1 failed, 595 passed, 2 skipped in 373.62s =============""",
+        command=command,
+    )
+    harmless = []
+
+    assert tool_outcomes.match_recorded_tool_failures(
+        Path("trace"), [span], session_id="s", reported_failures=1,
+        harmless_failures=harmless,
+    ) == []
+    assert harmless == [{
+        "call_id": "call_0_0",
+        "exit_code": 1,
+        "classification": "load_sensitive_wall_clock_assertion",
+        "test": "tests/test_parser.py::TestParser::test_parse_nested",
+        "observed_seconds": 0.11990046501159668,
+        "limit_seconds": 0.1,
+    }]
+    assert tool_outcomes.match_recorded_tool_failures(
+        Path("trace"), [span], session_id="s", reported_failures=1,
+    ) == []
+
+
+@pytest.mark.parametrize("actual", [
+    """>       self.assertLessEqual(result, 0.1)
+E       AssertionError: 0.2 not less than or equal to 0.1
+FAILED tests/test_value.py::test_value - AssertionError
+================ 1 failed, 5 passed in 1.0s ================""",
+    """>       self.assertLessEqual(time.time() - now, 0.1)
+E       AssertionError: 0.2 not less than or equal to 0.1
+FAILED tests/test_a.py::test_a - AssertionError
+FAILED tests/test_b.py::test_b - AssertionError
+================ 2 failed, 4 passed in 1.0s ================""",
+    """ModuleNotFoundError: No module named 'pytest'
+================ 1 error in 0.1s ================""",
+])
+def test_harmless_timing_rule_does_not_hide_other_new_failures(monkeypatch, actual):
+    span = setup_case(
+        monkeypatch, "6 passed in 0.5s\nExit code: 0", actual,
+        command="python -m pytest",
+    )
+    with pytest.raises(ValueError, match="unexpected replay Tool failure"):
+        tool_outcomes.match_recorded_tool_failures(
+            Path("trace"), [span], session_id="s", reported_failures=1,
+            harmless_failures=[],
+        )
+
+
 def test_openclaw_failure_summary_is_a_signal_not_a_span_count(monkeypatch):
     error = "TypeError: bug"
     first = setup_case(
