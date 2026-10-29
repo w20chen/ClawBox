@@ -39,7 +39,11 @@ _ARTIFACT_END = "__CLAWBOX_ARTIFACT_END__"
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
 _SAFE_EXECUTION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _EXECUTION_ENVELOPE_PREFIX = "__CBX_EXEC_1__"
-_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+# Clause telemetry for syscall-heavy traces can legitimately exceed 16 MiB in
+# its pretty-printed on-disk form. The export is already gzip-compressed and
+# transferred in fixed chunks, so retain a bounded safety limit without
+# rejecting valid evidence from those traces.
+_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _TOOL_RESOURCE_ROOT = "/var/lib/clawtune/artifacts/tool-resource"
 _ARTIFACT_EXPORT = "/run/clawbox-ssh/artifact-export"
 _ARTIFACT_CHUNK_BYTES = 1024 * 1024
@@ -181,7 +185,9 @@ def _decode_framed_artifacts(stdout: str) -> dict[str, bytes]:
                             raise ValueError(f"Tool artifact {name} is incomplete")
                         result[name] = payload
             except (ValueError, binascii.Error, tarfile.TarError) as exc:
-                raise ValueError("Tool artifact archive is invalid") from exc
+                raise ValueError(
+                    f"Tool artifact archive is invalid: {type(exc).__name__}: {exc}"
+                ) from exc
             index += 1
             continue
         compressed = line.startswith(_ARTIFACT_GZIP_MARKER)

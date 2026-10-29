@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import gzip
+import io
 import json
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -135,6 +137,25 @@ def test_compressed_artifact_transfer_preserves_large_payload():
     assert len(payload) > 4 * 1024 * 1024
     assert len(stream) < 4 * 1024 * 1024
     assert _decode_framed_artifacts(stream) == {"clause.json": payload}
+
+
+def test_tar_export_accepts_legitimate_clause_telemetry_over_16_mib():
+    payload = b"x" * (17 * 1024 * 1024)
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        member = tarfile.TarInfo("tool-resource/clause-telemetry-exec-large.json")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    stream = (
+        "__CLAWBOX_ARTIFACT_TAR_GZIP_V1__\n"
+        + base64.b64encode(archive_buffer.getvalue()).decode()
+        + "\n__CLAWBOX_ARTIFACT_END__\n"
+    )
+    assert _decode_framed_artifacts(stream)[
+        "clause-telemetry-exec-large.json"
+    ] == payload
+
+
 from clawbox.experiments.worker import (
     enrich_tool_execution_observations,
     summarize_tool_execution_observations,
