@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+import json
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -56,6 +58,47 @@ class ResultEnvelope(BaseModel):
         if self.status not in {RunStatus.SUCCEEDED, RunStatus.CANCELLED} and self.failure_category is None:
             raise ValueError("failed results require a failure category")
         return self
+
+
+def summary_arm_entry(result: ResultEnvelope) -> dict[str, Any]:
+    """Return the compact run-summary entry for one canonical arm result."""
+    return {
+        "arm": {
+            "arm_id": result.arm.arm_id,
+            "policy": {"name": result.arm.policy.name},
+            "concurrency": result.arm.concurrency,
+            "repetition": result.arm.repetition,
+            "spec_digest": result.arm.spec_digest,
+        },
+        "status": result.status.value,
+        "failure_category": (
+            result.failure_category.value if result.failure_category is not None else None
+        ),
+        "correctness": result.correctness,
+        "result": f"arms/{result.arm.arm_id}.json",
+    }
+
+
+def load_summary_arm_result(run_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    """Load a canonical arm result referenced by a compact run summary."""
+    reference = entry.get("result")
+    if not isinstance(reference, str) or not reference:
+        raise ValueError("run summary entry has no canonical arm result reference")
+    relative = Path(reference)
+    if relative.is_absolute() or relative.parent != Path("arms"):
+        raise ValueError(f"invalid arm result reference: {reference}")
+    path = run_root / relative
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read arm result {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"arm result is not an object: {path}")
+    expected = (entry.get("arm") or {}).get("arm_id")
+    actual = (value.get("arm") or {}).get("arm_id")
+    if not expected or actual != expected:
+        raise ValueError(f"arm result identity mismatch: {path}")
+    return value
 
 
 def utcnow() -> datetime:

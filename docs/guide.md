@@ -224,8 +224,13 @@ bash scripts/clawbox experiment plan "$HOME/clawbox-specs/eval.yaml"
 bash scripts/clawbox --sudo experiment launch "$HOME/clawbox-specs/eval.yaml" \
   --run-id eval-01 --detach
 bash scripts/clawbox experiment status eval-01
+bash scripts/clawbox experiment collect eval-01
 bash scripts/clawbox --sudo experiment report eval-01
 ```
+
+`status` reads the compact run index. `collect` expands its canonical arm-result
+references when the complete machine-readable result is needed; the run does
+not retain another embedded copy in `summary.json`.
 
 `validate --inputs` parses and hashes input files. Use it when preparing or
 replacing inputs. Normal `launch` reuses saved identities, checks host readiness,

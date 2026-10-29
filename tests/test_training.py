@@ -7,7 +7,7 @@ import pytest
 
 from clawbox.experiments.configure import dump_experiment
 from clawbox.experiments.qualification import qualification_spec
-from clawbox.experiments.results import ResultEnvelope, RunStatus, utcnow
+from clawbox.experiments.results import ResultEnvelope, RunStatus, summary_arm_entry, utcnow
 from clawbox.experiments.spec import expand_matrix, load_experiment
 from clawbox.experiments.spec_types import SessionAssignment
 from clawbox.experiments.training import (
@@ -83,6 +83,9 @@ def _write_run(
             },
         )
         results.append(result)
+        (root / "arms" / f"{arm.arm_id}.json").write_text(
+            result.model_dump_json(), encoding="utf-8",
+        )
         (root / "arms" / f"{arm.arm_id}.complete").write_text(
             arm.spec_digest, encoding="ascii",
         )
@@ -90,7 +93,7 @@ def _write_run(
         "run_id": root.name,
         "attempt_id": attempts[-1],
         "experiment_id": spec.experiment_id,
-        "arms": [item.model_dump(mode="json") for item in results],
+        "arms": [summary_arm_entry(item) for item in results],
     }, default=str), encoding="utf-8")
     return root, results
 

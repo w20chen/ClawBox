@@ -48,7 +48,7 @@ they rewrite result artifacts.
 | `run SPEC` | Lower-level execution with a valid receipt; `--run-id`, `--attempt-id`, `--owner-id`, `--qualification`, `--detach`. Prefer `launch`. |
 | `resume ID [--attempt-id ID] [--detach]` | Resume unfinished arms from the frozen run. |
 | `status ID` | Read supervisor, trial, and cleanup state. |
-| `collect ID`, `report ID` | Collect/regenerate result summaries without rerunning work. |
+| `collect ID`, `report ID` | Expand canonical arm results or regenerate reports without rerunning work. The stored `summary.json` is a compact arm index. |
 | `abort ID`, `destroy ID` | Stop/clean owned VMs while preserving results; `--cleanup-workers` (8), `--cleanup-timeout-seconds` (180). |
 | `train RUN_DIRECTORY... --trace FILE --repository NAME --output FILE` | Fit frozen KBs and measured host-memory calibration from completed training runs. |
 

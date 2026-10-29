@@ -494,6 +494,10 @@ class ExperimentSupervisor:
             })
 
         self._store_result(result)
+        # The worker result is an inter-process handoff.  The canonical result
+        # above contains the same evidence plus the supervisor's cleanup verdict.
+        child_result_path.unlink(missing_ok=True)
+        child_result_path.with_suffix(".complete").unlink(missing_ok=True)
         arm_state.update({
             "status": result.status.value,
             "completed_unix_s": time.time(),

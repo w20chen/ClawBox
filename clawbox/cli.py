@@ -1164,7 +1164,13 @@ def main(argv: list[str] | None = None) -> int:
         arms = value.get("arms", []) if isinstance(value, dict) else value
         if not isinstance(arms, list):
             raise ValueError(f"run summary has invalid arms: {summary}")
-        emit(value if args.command == "collect" else {
+        if args.command == "collect":
+            from clawbox.experiments.results import load_summary_arm_result
+
+            expanded = [load_summary_arm_result(run_root, item) for item in arms]
+            emit({**value, "arms": expanded} if isinstance(value, dict) else expanded)
+            return 0
+        emit({
             "runId": args.run_id, "output": str(run_root),
             "arms": [{"armId": item.get("arm", {}).get("arm_id"),
                       "status": item.get("status")} for item in arms],

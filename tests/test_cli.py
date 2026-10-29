@@ -356,7 +356,7 @@ def test_public_workflow_accepts_independent_runtime_ablation(capsys) -> None:
     assert '"valid": true' in capsys.readouterr().out
 
 
-def test_status_and_collect_read_standalone_results(tmp_path, capsys) -> None:
+def test_status_reads_standalone_result_state(tmp_path, capsys) -> None:
     run = tmp_path / "run-1"
     run.mkdir()
     (run / "summary.json").write_text(json.dumps([
@@ -369,8 +369,6 @@ def test_status_and_collect_read_standalone_results(tmp_path, capsys) -> None:
     prefix = ["--output-root", str(tmp_path), "experiment"]
     assert cli.main([*prefix, "status", "run-1"]) == 0
     assert '"state": "succeeded"' in capsys.readouterr().out
-    assert cli.main([*prefix, "collect", "run-1"]) == 0
-    assert '"arm_id": "arm-a"' in capsys.readouterr().out
 
 
 def test_status_reads_current_wrapped_summary(tmp_path, capsys) -> None:
@@ -389,6 +387,29 @@ def test_status_reads_current_wrapped_summary(tmp_path, capsys) -> None:
     output = capsys.readouterr().out
     assert '"arm-b"' in output
     assert '"status": "succeeded"' in output
+
+
+def test_collect_expands_compact_arm_result_reference(tmp_path, capsys) -> None:
+    run = tmp_path / "run-compact"
+    (run / "arms").mkdir(parents=True)
+    result = {
+        "arm": {"arm_id": "arm-c"}, "status": "failed",
+        "performance": {"duration_seconds": 12.5},
+    }
+    (run / "arms" / "arm-c.json").write_text(json.dumps(result), encoding="utf-8")
+    (run / "summary.json").write_text(json.dumps({
+        "schema_version": 2, "run_id": "run-compact",
+        "arms": [{
+            "arm": {"arm_id": "arm-c"}, "status": "failed",
+            "result": "arms/arm-c.json",
+        }],
+    }), encoding="utf-8")
+    prefix = ["--output-root", str(tmp_path), "experiment"]
+
+    assert cli.main([*prefix, "collect", "run-compact"]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["arms"] == [result]
 
 
 def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys) -> None:

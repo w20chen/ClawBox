@@ -11,13 +11,19 @@ to regenerate the summary. Use the same host output root as launch, and use
 | `experiment.yaml`, `qualification.json` | Frozen input and qualification evidence |
 | `run-state.json` | Supervisor state, active arm, ownership, and cleanup status |
 | `arms/*.json`, `arms/*.complete` | Arm results and verified completion markers |
-| `summary.json`, `summary.csv`, `report.md` | Aggregated results |
+| `summary.json`, `summary.csv`, `summary.md` | Compact result index and aggregated results |
 | `memory-timeseries.csv` | Sampled host cgroup and NUMA memory |
 | `attempts/ATTEMPT/ARM/` | Events, logs, telemetry, gateway records, and VM ownership |
 
 Retain the whole run directory and external immutable inputs needed to reproduce
 it. A repeated run ID resumes its frozen specification; a changed specification
 needs a new ID. Cleanup commands remove owned VMs, not these files.
+
+`summary.json` indexes canonical `arms/*.json` results instead of embedding a
+second copy. `experiment status` reads the compact index; `experiment collect`
+expands the references and returns the complete arm results on demand. The
+worker's attempt-level result is a transient supervisor handoff and is removed
+after the cleanup verdict is stored in the canonical arm result.
 
 Before comparing arms, check submitted/completed sessions, final task validation,
 failures, timeouts, OOMs, execution-ID joins, telemetry coverage, and cleanup.

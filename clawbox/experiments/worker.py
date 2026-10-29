@@ -74,7 +74,10 @@ from .prediction import P50PredictionProvider, PredictionUnavailable, prediction
 from .admission import DemandLedger
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
 from .ssh_credentials import generate_ssh_credentials
-from .results import FailureCategory, ResultEnvelope, RunStatus, failure_category_for, utcnow
+from .results import (
+    FailureCategory, ResultEnvelope, RunStatus, failure_category_for,
+    summary_arm_entry, utcnow,
+)
 from .spec import (
     AdmissionPolicy, AgentDriver, EvictionPolicy, ExperimentArm, ExperimentSpec,
     ReclamationPolicy, RestorePolicy, expand_matrix, load_experiment,
@@ -5349,9 +5352,10 @@ class ExperimentWorker:
 def write_summary(output_root: Path, *, run_id: str, attempt_id: str,
                   task_uid: str, experiment_id: str,
                   results: list[ResultEnvelope]) -> None:
-        summary = {"run_id": run_id, "attempt_id": attempt_id,
+        summary = {"schema_version": 2,
+                   "run_id": run_id, "attempt_id": attempt_id,
                    "experiment_id": experiment_id,
-                   "arms": [item.model_dump(mode="json") for item in results]}
+                   "arms": [summary_arm_entry(item) for item in results]}
         atomic_json(output_root / "summary.json", summary)
         path = output_root / "summary.csv"
         temporary = path.with_name(path.name + ".tmp")

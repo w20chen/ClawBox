@@ -27,6 +27,22 @@ class _BrokenWorkerSupervisor(_NoCubeSupervisor):
         return [sys.executable, '-c', 'raise RuntimeError("infrastructure failure")']
 
 
+class _ResultWorkerSupervisor(_NoCubeSupervisor):
+    def _worker_command(self, frozen_spec, arm, task_uid, artifact_root):
+        result = ResultEnvelope(
+            run_id=self.run_id, attempt_id=self.attempt_id,
+            sandbox_task_uid=task_uid, experiment_id=self.spec.experiment_id,
+            arm=arm, status=RunStatus.SUCCEEDED,
+            started_at=utcnow(), completed_at=utcnow(),
+            correctness={"validation_passed": True},
+            performance={"large_raw_series": list(range(1000))},
+        )
+        child = artifact_root / "arms" / f"{arm.arm_id}.json"
+        atomic_json(child, result.model_dump(mode="json"))
+        atomic_marker(child.with_suffix(".complete"), arm.spec_digest)
+        return [sys.executable, "-c", "pass"]
+
+
 def test_infrastructure_failure_still_stops_the_matrix(tmp_path):
     supervisor = _BrokenWorkerSupervisor(_short_spec(), run_id='broken', attempt_id='a',
         owner_id='o', output_root=tmp_path / 'broken', poll_interval_seconds=.02)
@@ -34,6 +50,31 @@ def test_infrastructure_failure_still_stops_the_matrix(tmp_path):
     assert len(results) == 1
     assert results[0].failure_category.value == 'infrastructure'
     assert not (tmp_path / 'broken' / 'arms' / f'{results[0].arm.arm_id}.complete').exists()
+
+
+def test_supervisor_retains_one_canonical_result_and_compact_summary(tmp_path):
+    run_root = tmp_path / "compact"
+    supervisor = _ResultWorkerSupervisor(
+        _short_spec(), run_id="compact", attempt_id="attempt-1",
+        owner_id="owner-1", output_root=run_root, poll_interval_seconds=.02,
+    )
+
+    results = supervisor.run()
+
+    result = results[0]
+    canonical = run_root / "arms" / f"{result.arm.arm_id}.json"
+    child = (
+        run_root / "attempts" / "attempt-1" / result.arm.arm_id
+        / "arms" / f"{result.arm.arm_id}.json"
+    )
+    summary = json.loads((run_root / "summary.json").read_text())
+    entry = summary["arms"][0]
+    assert canonical.is_file()
+    assert not child.exists()
+    assert not child.with_suffix(".complete").exists()
+    assert entry["result"] == f"arms/{result.arm.arm_id}.json"
+    assert "performance" not in entry
+    assert json.loads(canonical.read_text())["performance"]["large_raw_series"][-1] == 999
 
 
 class _RecordingCleanupSupervisor(_NoCubeSupervisor):

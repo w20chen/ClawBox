@@ -17,7 +17,7 @@ from clawbox.tuning.native import native_clause_observations
 from clawbox.tuning.clawtune import observation_to_completed_call, predict_native_call_load_models
 from clawbox.clawtune_integration import source_revision, use_clawtune
 from .prediction import command_sha256, select_p50, PredictionUnavailable
-from .results import ResultEnvelope, RunStatus
+from .results import ResultEnvelope, RunStatus, load_summary_arm_result
 from .spec import ExperimentSpec, load_experiment, spec_digest
 
 
@@ -154,7 +154,10 @@ def _training_arm_sources(run: Path, repository: str) -> tuple[ExperimentSpec, t
 
     expected_digest = spec_digest(spec)
     sources: list[TrainingArmSource] = []
-    for raw in arms:
+    for entry in arms:
+        if not isinstance(entry, dict):
+            raise ValueError(f'{run}: invalid supervised arm summary entry')
+        raw = load_summary_arm_result(run, entry)
         try:
             result = ResultEnvelope.model_validate(raw)
         except ValueError as exc:
