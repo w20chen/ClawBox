@@ -293,6 +293,16 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 
 ### Refresh the Runtime predictor and KB
 
+The Python dependency is pinned to ClawTune `e14b21a7a345057b7848a6ac9c0746fa73a6a43c`,
+which removes EdgeKappaKB. Use matching host and Runtime sources. Re-run
+`bootstrap-python.sh --clawtune /absolute/path/to/ClawTune` after selecting the
+updated source. Its integration check requires ToolKB, TrieKB, and LatticeKB.
+Seeds or writable state whose manifests still list `edge-kappa-kb.json` are
+incompatible: select the updated `bootstrap-v2` seed (or regenerate a custom
+seed with the new ClawTune) and start fresh session state under a new run ID.
+Preserve previous state and results for their original runs. This KB-only
+change requires one Runtime rebuild; existing Tool templates remain reusable.
+
 Select the host ClawTune source and seed in `machine.env`. The Runtime uses the
 copy baked into its image, so changing a host path alone does not update it.
 The image command requires Docker, Go, and Node.js/npm; it reuses saved build

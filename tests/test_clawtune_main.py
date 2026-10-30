@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -77,6 +78,9 @@ def test_native_state_isolated_resumable_and_seed_unchanged(tmp_path):
         initialize(first, "runtime-b", seed)
     with StateStore(first):
         assert all((first / name).is_file() for name in FILES)
+        state = json.loads((first / "state.json").read_text(encoding="utf-8"))
+        assert "edge-kappa-kb.json" not in state["snapshots"]
+        assert not (first / "edge-kappa-kb.json").exists()
     assert before == {p.name: p.read_bytes() for p in seed.iterdir() if p.is_file()}
 
 
@@ -114,3 +118,36 @@ def test_canonical_prediction_does_not_invent_peak_cpu_or_rss(clawtune_shell_par
     assert prediction.targets["cpu_avg_cores"].p90 == 0.5
     assert prediction.targets["cpu_peak_cores"].status == "unavailable"
     assert prediction.targets["memory_extra_peak_bytes"].status == "unavailable"
+
+
+def test_native_predictions_expose_only_current_backends(clawtune_shell_parser):
+    from clawbox.tuning.clawtune import predict_native_call_load_models
+    from tool_resource.runtime_kb import ClauseResourceKB, RuntimeToolResourceKB, ToolCallQuery
+    from tool_time.lattice_kb import LatticeTimeKB
+
+    seed = seed_directory()
+    def read(name):
+        return json.loads((seed / name).read_text(encoding="utf-8"))
+
+    models = predict_native_call_load_models(
+        RuntimeToolResourceKB.from_json_obj(read("runtime-tool-resource-kb.json")),
+        ToolCallQuery("clawbox/current-backends", "exec", "python -m pytest -q", 1e12),
+        clause=ClauseResourceKB.from_json_obj(read("clause-resource-kb.json")),
+        lattice=LatticeTimeKB.from_json_obj(read("clause-lattice-time-kb.json")),
+    )
+    assert set(models) == {"tool", "trie", "lattice", "diagnostics"}
+    assert set(models["diagnostics"].backends) == {"runtime", "trie", "lattice"}
+    for model, backend in (("tool", "runtime"), ("trie", "trie"), ("lattice", "lattice")):
+        assert models[model].targets
+        assert {target.backend for target in models[model].targets.values()} == {backend}
+
+
+def test_integration_check_rejects_configured_edge_kappa_seed(tmp_path, monkeypatch, clawtune_shell_parser):
+    manifest = json.loads((seed_directory() / "manifest.json").read_text(encoding="utf-8"))
+    manifest["snapshots"]["edge-kappa-kb.json"] = "0" * 64
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    root = Path(os.environ.get("CLAWTUNE_ROOT", Path(__file__).resolve().parents[2] / "ClawTune"))
+    monkeypatch.setenv("CLAWTUNE_KB_SEED", str(tmp_path))
+    monkeypatch.setattr("sys.argv", ["validate_clawtune_integration.py", "--clawtune-root", str(root)])
+    with pytest.raises(SystemExit, match="regenerate a custom seed"):
+        script("validate_clawtune_integration.py").main()

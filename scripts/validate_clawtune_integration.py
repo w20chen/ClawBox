@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -60,9 +61,10 @@ def main() -> None:
 
     sys.path.insert(0, str(sidecar_dir / "src"))
     from clawtune_kb import default_seed_directory
-    default_seed = default_seed_directory()
-    if not default_seed.is_dir():
-        fail(f"seed is missing at {default_seed}; select a valid CLAWTUNE_KB_SEED")
+    selected_seed = (Path(os.environ["CLAWTUNE_KB_SEED"]) if os.getenv("CLAWTUNE_KB_SEED")
+                     else default_seed_directory())
+    if not selected_seed.is_dir():
+        fail(f"seed is missing at {selected_seed}; select a valid CLAWTUNE_KB_SEED")
 
     manifest = json.loads((plugin_dir / "openclaw.plugin.json").read_text(encoding="utf-8"))
     if manifest.get("id") != "clawtune":
@@ -107,6 +109,7 @@ def main() -> None:
 
     sys.path.insert(0, str(sidecar_dir / "src"))
     from clawtune_kb import validate_seed
+    from jsonschema.exceptions import ValidationError
     from clawtune_sidecar.trace import AgentTestBenchTraceWriter
     from command_parser import ParseContext, default_service
     from tool_resource.sdk import DockerCommandObserver, DockerExecutionContext
@@ -115,6 +118,12 @@ def main() -> None:
     sys.path.insert(0, str(project_root))
     from clawbox.experiments.prediction import clawtune_extra_peak
     from clawbox.tuning.schema import PmuProfile
+
+    load_contract = json.loads((root / "contracts" / "call-load.schema.json").read_text(encoding="utf-8"))
+    backends = load_contract["$defs"]["estimate"]["properties"]["backend"]["enum"]
+    if set(backends) != {"runtime", "trie", "lattice"}:
+        fail("expected ToolKB, TrieKB, and LatticeKB only; update the selected "
+             "ClawTune source to e14b21a or later (EdgeKappa removal)")
 
     example = json.loads((root / "contracts" / "examples" / "call-load.json").read_text(encoding="utf-8"))
     # The public example uses ClawTune's Docker/cgroup measurement. Cube keeps
@@ -165,8 +174,12 @@ def main() -> None:
         "targets: tool.targets",
     )):
         fail("hook-only execution envelope does not carry the selected LatticeKB prediction")
-    validate_seed(default_seed)
-    seed_dir = default_seed
+    try:
+        validate_seed(selected_seed)
+    except (ValidationError, ValueError, OSError) as exc:
+        fail(f"invalid seed {selected_seed}: {exc}; select the updated bootstrap-v2 "
+             "or regenerate a custom seed with the selected ClawTune source")
+    seed_dir = selected_seed
     ClauseResourceKB.from_json_obj(json.loads(
         (seed_dir / "clause-resource-kb.json").read_text(encoding="utf-8")
     ))
@@ -200,6 +213,7 @@ def main() -> None:
                 "clawtune_revision": revision(root),
                 "plugin_id": "clawtune",
                 "sidecar_package": "clawtune-sidecar",
+                "prediction_backends": sorted(backends),
                 "assets_required": args.require_assets,
             },
             indent=2,

@@ -391,6 +391,13 @@ Runtime builds also need Node.js/npm. The selected seed comes from
 template identities to the profile. See [update requirements](installation.md#update-an-existing-host)
 before rebuilding a role or adopting new KB state.
 
+`CLAWTUNE_ROOT` and `CLAWTUNE_SIDECAR_SRC` must select the updated ClawTune
+source with ToolKB, TrieKB, and LatticeKB only. `CLAWTUNE_KB_SEED` defaults to
+that source's `bootstrap-v2`; a custom seed must validate against its contracts.
+EdgeKappa seed/state manifests are no longer accepted. Changing a seed requires
+fresh session state and a new run ID; changing the Runtime predictor or seed
+requires `--role runtime`, without rebuilding Tool templates.
+
 For recorded Conda environment creation, `scripts/cache-recorded-conda-environments.py`
 requires `--manifest FILE`, `--output-dir DIR`, and `--registry REPOSITORY`.
 Optional `--workload FILE` writes replacements for subsequent template registration;

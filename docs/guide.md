@@ -33,6 +33,11 @@ After changing the host plan, apply it on an idle VM pool and regenerate the
 experiment from the resulting profile. The editable plan is `host.yaml`;
 `host.json` is the applied profile used by `configure`.
 
+When upgrading from ClawTune with EdgeKappaKB, first follow
+[Runtime predictor and KB refresh](installation.md#refresh-the-runtime-predictor-and-kb).
+Use the updated seed, refreshed Runtime template, and a new run ID; old KB
+manifests containing EdgeKappa are not supported by the new ClawTune.
+
 ## 2. Run a smoke experiment
 
 ```bash

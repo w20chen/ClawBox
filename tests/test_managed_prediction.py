@@ -36,7 +36,7 @@ def test_clawtune_total_peak_cannot_substitute_for_extra_peak() -> None:
 
 
 def test_clawtune_memory_measurement_must_match_cube_guest() -> None:
-    with pytest.raises(PredictionUnavailable, match="Cube guest"):
+    with pytest.raises(PredictionUnavailable, match="guest_memtotal_minus_memavailable"):
         clawtune_extra_peak({
             "schema_version": "call_load.v2", "scope": "tool_call",
             "memory_measurement": "cgroup_v2_environment_union_v1", "targets": {},
