@@ -25,6 +25,7 @@ from .inputs import _saved_trace_info, validate_inputs, validate_launch_inputs
 from .prediction import prediction_input_paths
 from .snapshot_pool import WarmSnapshotPool
 from .numa_borrow import SandboxNumaBorrower, read_numa_lru_bytes
+from .priority import PriorityDomain
 from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, canonical_json,
     expand_matrix, load_workload_cases, resolve_case_sandbox, spec_digest,
@@ -36,6 +37,31 @@ from .worker import atomic_json
 
 QUALIFICATION_SCHEMA_VERSION = 15
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
+
+
+def _native_probe_domain(spec: ExperimentSpec, node) -> PriorityDomain | None:
+    """Use the formal runner's native Cube placement path for per-node probes."""
+    if node is None:
+        return None
+    domain = PriorityDomain(
+        Path(spec.resources.local_memory_cgroup),
+        concurrency=1,
+        repetition=0,
+        legacy=False,
+        placements={0: (node.cpus, node.numa_node)},
+    )
+    domain.start()
+    return domain
+
+
+def _native_probe_options(domain: PriorityDomain | None, role: str) -> dict[str, Any]:
+    if domain is None:
+        return {}
+    return {
+        "cgroup_token": domain.token(0, role),
+        "verify_cgroup": lambda sandbox_id: domain.verify(0, role, sandbox_id),
+        "prepare_cgroup": lambda: domain.prepare(0, role),
+    }
 
 
 def _retryable_template_probe_error(exc: BaseException) -> bool:
@@ -451,6 +477,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         session_id=probe_id,
         policy_name="qualification-snapshot-roundtrip",
     )
+    native_domain = _native_probe_domain(spec, _node)
     pool = (
         WarmSnapshotPool(spec.resources.warm_memory_capacity_mib * 1024 * 1024,
                          transfer_concurrency=spec.resources.pool_transfer_concurrency,
@@ -480,6 +507,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 cpus=_node.cpus if _node else None, node_id=_node.node_id if _node else None,
                 cleanup_timeout_seconds=spec.resources.pool_transfer_timeout_seconds,
             ) if spec.resources.shared_memory_borrow_limit_mib is not None else None,
+            **_native_probe_options(native_domain, role),
         )
     lifecycle = make_lifecycle(spec.sandbox, "tool")
     pair_policy = next((policy for policy in spec.policies
@@ -583,6 +611,11 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         client.kill_owned_sandboxes(probe_id)
     except Exception as exc:
         cleanup_errors.append(f"owned cleanup: {type(exc).__name__}: {exc}")
+    if native_domain is not None:
+        try:
+            native_domain.close()
+        except Exception as exc:
+            cleanup_errors.append(f"native placement cleanup: {type(exc).__name__}: {exc}")
     remaining = client.list_owned_sandboxes(probe_id)
     if remaining:
         cleanup_errors.append(f"owned sandboxes remain: {len(remaining)}")
@@ -710,6 +743,7 @@ def live_borrow_roundtrip_test(
         cpus=_node.cpus if _node else None, node_id=_node.node_id if _node else None,
         cleanup_timeout_seconds=spec.resources.pool_transfer_timeout_seconds,
     )
+    native_domain = _native_probe_domain(spec, _node)
     lifecycle = CubeSandboxLifecycle(
         client,
         template=spec.sandbox.template,
@@ -722,6 +756,7 @@ def live_borrow_roundtrip_test(
         allow_internet_access=spec.sandbox.allow_internet_access,
         role="tool", numa_borrower=borrower,
         configured_memory_bytes=spec.sandbox.memory_mib * 1024 * 1024,
+        **_native_probe_options(native_domain, "tool"),
     )
     primary_error: BaseException | None = None
     borrow_record = return_record = reborrow_record = second_return_record = None
@@ -790,6 +825,11 @@ def live_borrow_roundtrip_test(
         client.kill_owned_sandboxes(probe_id)
     except Exception as exc:
         cleanup_errors.append(f"owned cleanup: {type(exc).__name__}: {exc}")
+    if native_domain is not None:
+        try:
+            native_domain.close()
+        except Exception as exc:
+            cleanup_errors.append(f"native placement cleanup: {type(exc).__name__}: {exc}")
     if borrower.borrowed():
         release_error = None
         deadline = time.monotonic() + 30
