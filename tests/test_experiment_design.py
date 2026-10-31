@@ -52,6 +52,21 @@ def design(recipe='custom', axis=None):
     return ExperimentSpec.model_validate(raw)
 
 
+def test_host_live_options_roundtrip_and_reject_invalid_scope():
+    raw = base()
+    raw['conditions'] = {'prediction_source': 'host-live'}
+    raw['execution'].update(kb_scope_policy='pair', retain_clause_telemetry_artifacts=False,
+                            kb_http_timeout_seconds=12.5, kb_observation_retries=3)
+    spec = ExperimentSpec.model_validate(raw)
+    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
+    assert loaded == spec
+    assert loaded.resources.prediction_mode == 'host-live'
+    assert loaded.execution.kb_http_timeout_seconds == 12.5
+    raw['execution']['kb_scope_policy'] = 'shared'
+    with pytest.raises(ValueError):
+        ExperimentSpec.model_validate(raw)
+
+
 @pytest.mark.parametrize('recipe,axis,count', [
     ('resident-capacity', None, 3), ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
     ('idle-reclaim', None, 3), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
@@ -485,7 +500,7 @@ def test_physical_limit_uses_node_totals_before_os_placement():
 
 @pytest.mark.parametrize('field,value,match', [
     ('local_memory_capacity_mib', 1, 'sum over compute_nodes'),
-    ('warm_memory_capacity_mib', 1, '50%'),
+    ('warm_memory_capacity_mib', 1, 'live borrow limit'),
 ])
 def test_os_arm_cannot_hide_invalid_environment(field, value, match):
     raw = base()

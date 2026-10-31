@@ -55,12 +55,14 @@ RUN sed -i 's/\r$//' \
  && /opt/clawtune/venv/bin/python -c \
       "import sys; sys.path.insert(0, '/opt/clawtune-guest/services/sidecar/src'); from tool_resource.telemetry import _ensure_bcc_importable; print(_ensure_bcc_importable().__file__)"
 
-COPY --from=clawtune tools/guest_collector_server.py /opt/clawtune-guest/tools/guest_collector_server.py
+COPY scripts/clawbox-guest-collector.py /opt/clawtune-guest/tools/guest_collector_server.py
 COPY --from=overlay --chmod=0555 tool-bridge-overlay /usr/local/bin/tool-bridge
 COPY scripts/validate-toolbridge-guest-artifacts.py /opt/clawbox/validate-toolbridge-guest-artifacts.py
 LABEL org.opencontainers.image.source.clawtune.revision="${CLAWTUNE_REVISION}"
+LABEL io.clawbox.host-kb.protocol="clawtune.host-kb.v1"
 
-ENV PYTHONPATH=/opt/clawtune-guest/services/sidecar/src \
+COPY clawbox /opt/clawbox/clawbox
+ENV PYTHONPATH=/opt/clawbox:/opt/clawtune-guest/services/sidecar/src \
     XDG_CACHE_HOME=/opt/clawtune/cache \
     BCC_KERNEL_SOURCE=/lib/modules/${KERNEL_VERSION}/build \
     CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py \

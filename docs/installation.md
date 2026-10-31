@@ -293,37 +293,49 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 
 ### Refresh the Runtime predictor and KB
 
-The Python dependency is pinned to ClawTune `e14b21a7a345057b7848a6ac9c0746fa73a6a43c`,
-which removes EdgeKappaKB. Use matching host and Runtime sources. Re-run
-`bootstrap-python.sh --clawtune /absolute/path/to/ClawTune` after selecting the
-updated source. Its integration check requires ToolKB, TrieKB, and LatticeKB.
-Seeds or writable state whose manifests still list `edge-kappa-kb.json` are
-incompatible: select the updated `bootstrap-v2` seed (or regenerate a custom
-seed with the new ClawTune) and start fresh session state under a new run ID.
-Preserve previous state and results for their original runs. This KB-only
-change requires one Runtime rebuild; existing Tool templates remain reusable.
+The Python dependency is pinned to unchanged ClawTune
+`4a6d0af66e76b377bfc957baf84a5f414c6d8bf5`. ClawBox owns its host KB adapters,
+Runtime plugin adaptation, and compact Tool collector. Keep the ClawTune source
+unchanged. The canonical seed contains ToolKB, TrieKB, and LatticeKB; the removed
+execution-context KB is not restored.
 
-Select the host ClawTune source and seed in `machine.env`. The Runtime uses the
-copy baked into its image, so changing a host path alone does not update it.
-The image command requires Docker, Go, and Node.js/npm; it reuses saved build
-settings in `host.json` and compiles the Runtime plugin and prepared cache.
+Export the pinned source without switching or editing the ClawTune checkout:
+
+```bash
+python scripts/prepare-clawtune.py --clawtune-root /absolute/path/ClawTune \
+  --output "$HOME/clawtune-hostkb-pinned"
+bash scripts/bootstrap-python.sh --clawtune "$HOME/clawtune-hostkb-pinned"
+```
+
+Use a new export directory; the command refuses to overwrite one. Save the export
+path as `CLAWTUNE_ROOT` in `machine.env` and set `CLAWTUNE_SIDECAR_SRC` to
+`$CLAWTUNE_ROOT/services/sidecar/src`. The explicit sidecar path takes precedence
+over the root and must not still point to an older checkout. Select its `seeds/bootstrap-v2` in the
+experiment configuration. Reusing the same seed bytes needs no retraining.
+
+For the first host-live deployment, refresh one Runtime and one Tool template,
+then validate a small experiment before refreshing the task corpus:
 
 ```bash
 bash scripts/clawbox experiment images --role runtime \
   --profile "$HOME/.config/clawbox/host.json"
+bash scripts/clawbox experiment images --role sandbox \
+  --profile "$HOME/.config/clawbox/host.json" \
+  --kernel-source /absolute/path/to/guest-kernel-source \
+  --kernel-build /absolute/path/to/guest-kernel-build
 ```
 
-This updates the Runtime entry in the profile. Copy its new template ID into
-the editable host plan and update the corresponding machine settings before
-future host apply/export operations. Generate the next experiment from the
-updated profile. A predictor/KB-only update reuses all task-specific Tool
-templates. Existing writable KB state is retained when reopened; use
-fresh session state to adopt a new seed.
+Docker, Go, and Node.js/npm are required. Use headers matching the actual Cube
+guest kernel; the command verifies the configuration. Build settings are saved
+for repeat execution. The commands update the template entries in the profile.
+Copy the new IDs into the editable host plan and update corresponding machine
+settings before host apply/export. Preserve the previous profiles and templates
+for existing runs. Generate and qualify a new experiment from the updated profile.
 
-For a Tool collector refresh, use `images --role sandbox` with
-`--kernel-source` and `--kernel-build` pointing to headers for the actual Cube
-guest kernel. Saved build inputs are reused on later invocations. See
-[image options](reference.md#image-build-options) and the corpus refresh workflow.
+After the small experiment passes, use the
+[Tool collector corpus refresh](workloads.md#refresh-tool-collectors), preserving
+each task's workspace and dependencies. Further host-only KB sharing-policy
+changes within the same wire protocol require no Runtime or Tool rebuild.
 
 ### Apply SDK timeout patches
 

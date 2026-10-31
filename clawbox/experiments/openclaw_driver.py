@@ -281,7 +281,8 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
                                      command_timeout_seconds: int = 300,
                                      apt_cache_proxy_url: str | None = None,
                                      pypi_cache_index_url: str | None = None,
-                                     allow_internet_access: bool = True) -> str:
+                                     allow_internet_access: bool = True,
+                                     knowledge_environment: dict[str, str] | None = None) -> str:
     """Return the explicit post-create Tool SSH bootstrap command.
 
     Cube restores a template snapshot before applying per-sandbox environment
@@ -355,10 +356,11 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
         f"TOOL_EXEC_TIMEOUT_SECONDS={int(command_timeout_seconds)} "
         + pypi_environment
+        + "".join(f"{key}={shlex.quote(value)} " for key, value in (knowledge_environment or {}).items())
         + "PYTHONHASHSEED=0 "
         "CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py "
         "CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python "
-        "PYTHONPATH=/opt/clawtune-guest/services/sidecar/src "
+        "PYTHONPATH=/opt/clawbox:/opt/clawtune-guest/services/sidecar/src "
         "XDG_CACHE_HOME=/opt/clawtune/cache "
         "BCC_KERNEL_SOURCE=\"$kernel_source\" "
         "/usr/local/bin/tool-bridge </dev/null >/var/log/tool-bridge.log 2>&1 & "
@@ -391,6 +393,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
     base_url = str(configuration.get("base_url") or os.environ.get("OPENCLAW_BASE_URL", ""))
     model = str(configuration.get("model") or os.environ.get("OPENCLAW_MODEL_REF", ""))
+    repository = str(configuration.get("repository") or "unknown")
     key_env = str(configuration.get("api_key_env", "OPENCLAW_API_KEY"))
     if not _ENV_NAME.fullmatch(key_env):
         raise ValueError("api_key_env must be a valid environment variable name")
@@ -632,20 +635,28 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"chmod 700 {shlex.quote(ssh_dir)}; "
         + f"chmod 600 {shlex.quote(identity_file)} {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(encoded_predictions)} | base64 -d > {shlex.quote(prediction_file)}; "
-        + f"/opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
+        + (f"/opt/clawtune/venv/bin/python {shlex.quote(init_state_file)} --state {shlex.quote(trace_dir + '/tool-resource')} --owner {shlex.quote(session_id)} || exit $?; "
+           if not configuration.get('host_live') else '')
+        + (f"export CLAWTUNE_HOST_KB_ENDPOINT={shlex.quote(policy_control.url)} "
+           f"CLAWTUNE_HOST_KB_TOKEN={shlex.quote(policy_control.token)} "
+           f"CLAWTUNE_HOST_KB_SESSION_ID={shlex.quote(session_id)} "
+           f"CLAWTUNE_HOST_KB_TIMEOUT_SECONDS={configuration['kb_http_timeout_seconds']}; "
+           if configuration.get('host_live') else '')
         + "export CLAWTUNE_POLICY=observe-only "
         + f"CLAWTUNE_TRACE_DIR={shlex.quote(trace_dir)} "
         + f"CLAWTUNE_TOOL_RESOURCE_ARTIFACT_DIR={shlex.quote(trace_dir + '/tool-resource')} "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_ENABLED=false "
         + "CLAWTUNE_TOOL_RESOURCE_EBPF_REQUIRED=false "
         + "CLAWTUNE_TOOL_RESOURCE_MEMORY_MEASUREMENT=cgroup_v2_environment_union_v1 "
-        + "CLAWTUNE_REPO_KEY=\"${CLAWBOX_REPO_KEY:-unknown}\" "
+        + f"CLAWTUNE_REPO_KEY={shlex.quote(repository)} "
+        + f"CLAWTUNE_TOOL_RESOURCE_REPO={shlex.quote(repository)} "
         + "CLAWTUNE_TRACE_MAX_MESSAGES_BYTES=67108864 "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
         + f"CLAWTUNE_LLM_PROXY_UPSTREAM_MODEL={shlex.quote(model)}; "
         + "nohup env XDG_CACHE_HOME=/opt/clawtune/cache "
+        + "PYTHONPATH=/opt/clawbox:/opt/clawtune/services/sidecar/src "
         # Cube command processes do not inherit Dockerfile ENV values from
         # the template entrypoint. Point the sidecar at the immutable seed
         # explicitly so it can use the prepared image-layer cache.
@@ -789,8 +800,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "load": {"paths": [clawtune_plugin]},
             "entries": {"vllm": {"enabled": True}, "clawtune": {"enabled": True, "config": {
             "endpoint": "http://127.0.0.1:8765", "mode": "observe", "failOpen": False,
+            "requireHostPrediction": bool(configuration.get('host_live')),
+            **({"decisionTimeoutMs": int(float(configuration.get("kb_http_timeout_seconds", 30)) * 1000 + 1000)} if configuration.get("host_live") else {}),
             "executionBackend": "hook-only", "sandboxExecEnvelope": True,
             "sandboxExecPredictionModel": "lattice",
+              "repo": repository,
             # OpenClaw resolves the configured sandbox backend after the
             # before_tool_call hook, so hook params without an explicit host
             # are reported as "gateway" even though execution is SSH-backed.

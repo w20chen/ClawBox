@@ -151,7 +151,7 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
     files = []
     admissions = {policy.admission for policy in spec.policies}
     if spec.resources.prediction_artifact and (
-        AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions
+        AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'
     ):
         path = Path(spec.resources.prediction_artifact)
         first = cases[0]
@@ -215,7 +215,7 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             traces.append({"case_id": case.case_id, **info})
     files = []
     admissions = {policy.admission for policy in spec.policies}
-    if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions):
+    if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'):
         path = Path(spec.resources.prediction_artifact)
         for case in cases:
             tool_sandbox = resolve_case_sandbox(case, spec.sandbox)
@@ -232,7 +232,7 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
                 if spec.resources.prediction_mode in {"runtime", "cold-start"}:
                     for command in commands:
                         provider.resolve(command, {"raw_command_sha256": command_sha256(command)})
-                else:
+                elif spec.resources.prediction_mode == 'frozen':
                     missing = [c for c in commands if command_sha256(c) not in provider.manifest]
                     if missing:
                         raise ValueError(f"P50 artifact missing {len(missing)} replay commands")

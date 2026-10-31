@@ -88,6 +88,21 @@ class _RecordingCleanupSupervisor(_NoCubeSupervisor):
         return True, None
 
 
+def test_explicit_new_attempt_runs_again_and_preserves_previous_results(tmp_path):
+    tmp_path = tmp_path / 'run'
+    first = _ResultWorkerSupervisor(_short_spec(), run_id='new-attempt', attempt_id='a',
+        owner_id='owner', output_root=tmp_path, poll_interval_seconds=.02)
+    original = first.run()[0]
+    first.state['supervisor'] = {'pid': 999_999_999, 'create_time': 0}
+    first._write_state()
+    second = _ResultWorkerSupervisor(_short_spec(), run_id='new-attempt', attempt_id='b',
+        owner_id='owner', output_root=tmp_path, resume=True, poll_interval_seconds=.02)
+    assert second.run()[0].attempt_id == 'b'
+    archived = tmp_path / 'attempts/a/results' / f'{original.arm.arm_id}.json'
+    assert json.loads(archived.read_text())['attempt_id'] == 'a'
+    assert (tmp_path / 'attempts/b' / original.arm.arm_id / 'worker.stdout.log').is_file()
+
+
 def _short_spec():
     spec = load_experiment(Path("examples/experiments/getting-started.yaml"))
     return spec.model_copy(update={
@@ -181,10 +196,10 @@ def test_supervisor_preserves_timeouts_and_continues_remaining_trials(tmp_path: 
     # A resume retains timeouts as outcomes and does not launch another worker.
     supervisor.state['supervisor'] = {'pid': 999_999_999, 'create_time': 0}
     supervisor._write_state()
-    resumed = _NoCubeSupervisor(spec, run_id='run-timeout', attempt_id='attempt-2',
+    resumed = _NoCubeSupervisor(spec, run_id='run-timeout', attempt_id='attempt-1',
         owner_id='owner-1', output_root=run_root, resume=True)
     assert all(r.status is RunStatus.TIMED_OUT for r in resumed.run())
-    assert not (run_root / 'attempts' / 'attempt-2').exists()
+    assert not list((run_root / 'attempts' / 'attempt-1').glob('*/invocations/*'))
 
 
 def test_resume_skips_only_cleanup_verified_successes(tmp_path: Path) -> None:
@@ -212,15 +227,15 @@ def test_resume_skips_only_cleanup_verified_successes(tmp_path: Path) -> None:
     first._write_state()
 
     resumed = _NoCubeSupervisor(
-        spec, run_id="run-resume", attempt_id="attempt-2", owner_id="owner-1",
+        spec, run_id="run-resume", attempt_id="attempt-1", owner_id="owner-1",
         output_root=run_root, resume=True,
     )
     results = resumed.run()
 
     assert len(results) == len(arms)
     assert all(item.status is RunStatus.SUCCEEDED for item in results)
-    assert not (run_root / "attempts" / "attempt-2").exists()
-    assert json.loads((run_root / "summary.json").read_text())["attempt_id"] == "attempt-2"
+    assert not (run_root / "attempts" / "attempt-1").exists()
+    assert json.loads((run_root / "summary.json").read_text())["attempt_id"] == "attempt-1"
 
 
 def test_resume_cleans_an_interrupted_attempt_before_starting(tmp_path: Path) -> None:

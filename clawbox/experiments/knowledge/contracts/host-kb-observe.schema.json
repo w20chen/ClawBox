@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.ai/schemas/clawtune/host-kb-observe.schema.json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "clawtune.host-kb.v1"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "command_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "tool_name": {
+      "enum": [
+        "exec",
+        "terminal_exec"
+      ]
+    },
+    "memory_measurement": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "prediction_receipt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "call": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "tool_name": {
+              "type": "string"
+            },
+            "command": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ts_start": {
+              "type": "number"
+            },
+            "ts_end": {
+              "type": "number"
+            },
+            "censored": {
+              "type": "boolean"
+            },
+            "cpu_peak_cores": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "cpu_peak_cores_eligible": {
+              "type": "boolean"
+            },
+            "cpu_time_seconds": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "cpu_time_eligible": {
+              "type": "boolean"
+            },
+            "cpu_peak_window_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "sampled_peak_rss_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "sampled_peak_rss_eligible": {
+              "type": "boolean"
+            },
+            "memory_baseline_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_total_peak_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_extra_peak_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_measurement": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_environment_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_eligible": {
+              "type": "boolean"
+            },
+            "pmu_cycles": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_instructions": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_llc_read_accesses": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_llc_read_misses": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_ipc": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_llc_mpki": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_llc_miss_rate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_llc_read_accesses_per_cpu_second": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_llc_read_misses_per_cpu_second": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pmu_eligible": {
+              "type": "boolean"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "workload_duration_seconds": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "workload_duration_required": {
+              "type": "boolean"
+            },
+            "confirmed_timeout": {
+              "type": "boolean"
+            },
+            "timeout_duration_lower_bound_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "cpu_avg_cores": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "repo",
+            "tool_name",
+            "command",
+            "ts_start",
+            "ts_end"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "clauses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "bin": {
+            "type": "string"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4096
+          },
+          "ts_start": {
+            "type": "number"
+          },
+          "ts_end": {
+            "type": "number"
+          },
+          "latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cpu_peak_cores": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "sampled_peak_rss_mb": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cpu_ns_cumulative": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "memory_baseline_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "memory_total_peak_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "memory_extra_peak_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "memory_measurement": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memory_environment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memory_eligible": {
+            "type": "boolean"
+          },
+          "command_features": {
+            "anyOf": [
+              {
+                "$ref": "https://openclaw.ai/schemas/clawtune/command-features.schema.json"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "clause_index": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "in_loop": {
+            "type": "boolean"
+          },
+          "in_pipe": {
+            "type": "boolean"
+          },
+          "in_subst": {
+            "type": "boolean"
+          },
+          "pipeline_position": {
+            "type": "integer"
+          },
+          "stdin_from_pipe": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "censored": {
+            "type": "boolean"
+          },
+          "confirmed_timeout": {
+            "type": "boolean"
+          },
+          "imputed_targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4096
+          }
+        },
+        "required": [
+          "repo",
+          "bin",
+          "argv",
+          "ts_start",
+          "ts_end"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 4096
+    },
+    "call_provenance": {
+      "type": "object",
+      "additionalProperties": {
+        "enum": [
+          "observed",
+          "observed_partial",
+          "approximate_observation",
+          "imputed_zero",
+          "timeout_lower_bound"
+        ]
+      }
+    },
+    "quality": {
+      "type": "object",
+      "properties": {
+        "collection_validity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cleanup": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "loss_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "collection_validity",
+        "cleanup",
+        "loss_total",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "session_id",
+    "command",
+    "command_sha256",
+    "repository",
+    "tool_name",
+    "memory_measurement",
+    "execution_id",
+    "prediction_receipt",
+    "call",
+    "clauses",
+    "call_provenance",
+    "quality"
+  ],
+  "additionalProperties": false
+}

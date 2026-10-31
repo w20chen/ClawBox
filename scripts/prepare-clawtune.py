@@ -11,6 +11,9 @@ import zipfile
 from pathlib import Path
 
 
+PINNED_REVISION = "4a6d0af66e76b377bfc957baf84a5f414c6d8bf5"
+
+
 def prepare(root: Path, output: Path, *, working_tree: bool = False) -> str:
     if output.exists():
         raise FileExistsError(f"choose a new output directory: {output}")
@@ -49,8 +52,10 @@ def prepare(root: Path, output: Path, *, working_tree: bool = False) -> str:
         (output / "CLAWTUNE_REVISION").write_text(revision + "\n", encoding="ascii")
         return revision
     # Fetch without switching branches or modifying the operator's working tree.
-    subprocess.run(["git", "-C", str(root), "fetch", "origin", "refs/heads/main"], check=True)
-    revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "FETCH_HEAD"], text=True).strip()
+    revision = PINNED_REVISION
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", revision],
+                      capture_output=True).returncode:
+        subprocess.run(["git", "-C", str(root), "fetch", "origin", revision], check=True)
     archive = subprocess.check_output(["git", "-C", str(root), "archive", "--format=zip", revision])
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         for name in bundle.namelist():
@@ -74,5 +79,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     revision = prepare(args.clawtune_root.resolve(), args.output.resolve(),
                        working_tree=args.working_tree)
-    print(json.dumps({"source": "working-tree" if args.working_tree else "main",
+    print(json.dumps({"source": "working-tree" if args.working_tree else "pinned-upstream",
                       "revision": revision, "context": str(args.output.resolve())}))

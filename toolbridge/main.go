@@ -28,37 +28,42 @@ import (
 const version = "0.1.0"
 
 type executionLog struct {
-	Timestamp          string `json:"timestamp"`
-	CellID             string `json:"cell_id"`
-	TaskID             string `json:"task_id"`
-	ExecutionID        string `json:"execution_id"`
-	ExecutionSource    string `json:"execution_source"`
-	CommandSHA256      string `json:"command_sha256"`
-	CommandBytes       int    `json:"command_bytes"`
-	EffectiveSHA256    string `json:"effective_command_sha256"`
-	EffectiveBytes     int    `json:"effective_command_bytes"`
-	DurationMS         int64  `json:"duration_ms"`
-	ExitCode           int    `json:"exit_code"`
-	TimedOut           bool   `json:"timed_out"`
-	Cancelled          bool   `json:"cancelled"`
-	StdoutBytes        int64  `json:"stdout_bytes"`
-	StderrBytes        int64  `json:"stderr_bytes"`
-	OutputTruncated    bool   `json:"output_truncated"`
-	UserCPUMS          int64  `json:"user_cpu_ms"`
-	SystemCPUMS        int64  `json:"system_cpu_ms"`
-	MaxRSSKiB          int64  `json:"max_rss_kib"`
-	TelemetryState     string `json:"telemetry_state"`
-	TelemetryError     string `json:"telemetry_error,omitempty"`
-	TelemetryArtifact  string `json:"telemetry_artifact,omitempty"`
-	TelemetryEligible  bool   `json:"telemetry_eligible_for_kb"`
-	TelemetryQuality   string `json:"telemetry_quality,omitempty"`
-	TelemetryValidity  string `json:"telemetry_collection_validity,omitempty"`
-	TelemetryCleanup   string `json:"telemetry_cleanup,omitempty"`
-	TelemetryLossTotal int64  `json:"telemetry_loss_total"`
-	PMUState           string `json:"pmu_state,omitempty"`
-	PMUQuality         string `json:"pmu_quality,omitempty"`
-	PMUError           string `json:"pmu_error,omitempty"`
-	PMUArtifact        string `json:"pmu_artifact,omitempty"`
+	KBPostSeconds      float64        `json:"kb_post_seconds,omitempty"`
+	TelemetryEvidence  map[string]any `json:"telemetry_evidence,omitempty"`
+	KBStatus           string         `json:"kb_status,omitempty"`
+	KBGeneration       int64          `json:"kb_generation,omitempty"`
+	KBError            string         `json:"kb_error,omitempty"`
+	Timestamp          string         `json:"timestamp"`
+	CellID             string         `json:"cell_id"`
+	TaskID             string         `json:"task_id"`
+	ExecutionID        string         `json:"execution_id"`
+	ExecutionSource    string         `json:"execution_source"`
+	CommandSHA256      string         `json:"command_sha256"`
+	CommandBytes       int            `json:"command_bytes"`
+	EffectiveSHA256    string         `json:"effective_command_sha256"`
+	EffectiveBytes     int            `json:"effective_command_bytes"`
+	DurationMS         int64          `json:"duration_ms"`
+	ExitCode           int            `json:"exit_code"`
+	TimedOut           bool           `json:"timed_out"`
+	Cancelled          bool           `json:"cancelled"`
+	StdoutBytes        int64          `json:"stdout_bytes"`
+	StderrBytes        int64          `json:"stderr_bytes"`
+	OutputTruncated    bool           `json:"output_truncated"`
+	UserCPUMS          int64          `json:"user_cpu_ms"`
+	SystemCPUMS        int64          `json:"system_cpu_ms"`
+	MaxRSSKiB          int64          `json:"max_rss_kib"`
+	TelemetryState     string         `json:"telemetry_state"`
+	TelemetryError     string         `json:"telemetry_error,omitempty"`
+	TelemetryArtifact  string         `json:"telemetry_artifact,omitempty"`
+	TelemetryEligible  bool           `json:"telemetry_eligible_for_kb"`
+	TelemetryQuality   string         `json:"telemetry_quality,omitempty"`
+	TelemetryValidity  string         `json:"telemetry_collection_validity,omitempty"`
+	TelemetryCleanup   string         `json:"telemetry_cleanup,omitempty"`
+	TelemetryLossTotal int64          `json:"telemetry_loss_total"`
+	PMUState           string         `json:"pmu_state,omitempty"`
+	PMUQuality         string         `json:"pmu_quality,omitempty"`
+	PMUError           string         `json:"pmu_error,omitempty"`
+	PMUArtifact        string         `json:"pmu_artifact,omitempty"`
 }
 
 var executionLogMu sync.Mutex
@@ -340,6 +345,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	started := time.Now()
 	command, envelopeExecutionID, profileCommand, enveloped := parseExecEnvelope(rawCommand)
 	progress := parseProgressControl(rawCommand)
+	receipt := predictionReceipt(rawCommand)
+	var finalStats *resourceStats
+	var observation map[string]any
 	progressError := ""
 	executionID := envelopeExecutionID
 	if !enveloped || executionID == "" {
@@ -555,12 +563,29 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			if drainMS > 0 {
 				time.Sleep(time.Duration(drainMS) * time.Millisecond)
 			}
-			response, finishErr := guestCollector.Finish(executionID, record.ExitCode)
+			var response guestCollectorResponse
+			var finishErr error
+			if receipt != "" && collector != nil {
+				stats := collector.Finish(executionEnded)
+				stats.PMUProfile = pmuProfile
+				finalStats = &stats
+				if extended, ok := guestCollector.(interface {
+					FinishWithResources(string, int, string, resourceStats, bool, bool, string) (guestCollectorResponse, error)
+				}); ok {
+					response, finishErr = extended.FinishWithResources(executionID, record.ExitCode, receipt, stats, record.TimedOut, record.Cancelled, envelopeField(rawCommand, "tool_name"))
+				} else {
+					finishErr = fmt.Errorf("guest collector lacks host KB protocol")
+				}
+			} else {
+				response, finishErr = guestCollector.Finish(executionID, record.ExitCode)
+			}
 			if finishErr != nil {
 				record.TelemetryState = "failed"
 				record.TelemetryError = "finish: " + finishErr.Error()
 				_ = guestCollector.Abort(executionID)
 			} else {
+				observation = response.Observation
+				record.TelemetryEvidence = response.TelemetryEvidence
 				record.TelemetryState = "complete"
 				record.TelemetryArtifact = response.ArtifactPath
 				record.TelemetryEligible = response.EligibleForKB
@@ -596,7 +621,12 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	// Prefer the real per-execution numbers from the process-tree/cgroup
 	// collector over the direct-child (shell) rusage that the old code read.
 	if collector != nil {
-		stats := collector.Finish(ended)
+		var stats resourceStats
+		if finalStats != nil {
+			stats = *finalStats
+		} else {
+			stats = collector.Finish(ended)
+		}
 		stats.PMUProfile = pmuProfile
 		record.UserCPUMS = int64(stats.CPUUserSeconds * 1000)
 		record.SystemCPUMS = int64(stats.CPUSystemSeconds * 1000)
@@ -607,6 +637,20 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 		record.SystemCPUMS = durationMS(cmd.ProcessState.SystemTime())
 		if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
 			record.MaxRSSKiB = usage.Maxrss
+		}
+	}
+	if receipt != "" {
+		if observation == nil {
+			record.KBStatus, record.KBError = "degraded", "compact Tool observation unavailable"
+		} else {
+			postStarted := time.Now()
+			status, generation, updateErr := postKnowledge(observation)
+			record.KBPostSeconds = time.Since(postStarted).Seconds()
+			if updateErr != nil {
+				record.KBStatus, record.KBError = "degraded", updateErr.Error()
+			} else {
+				record.KBStatus, record.KBGeneration = status, generation
+			}
 		}
 	}
 	return record

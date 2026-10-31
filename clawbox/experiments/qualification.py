@@ -133,6 +133,7 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
             and (
                 AdmissionPolicy.PREDICTED in admissions
                 or spec.resources.observe_predictions
+                or spec.resources.prediction_mode == 'host-live'
             )
         ):
             path = Path(spec.resources.prediction_artifact)

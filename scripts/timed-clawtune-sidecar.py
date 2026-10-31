@@ -39,7 +39,10 @@ def main() -> None:
         import_started = time.monotonic()
         import uvicorn
         from clawtune_sidecar.api.app import create_app
-        from clawtune_sidecar.api.dependencies import build_state
+        if os.environ.get('CLAWTUNE_HOST_KB_ENDPOINT'):
+            from clawbox.experiments.knowledge.runtime_state import build_state
+        else:
+            from clawtune_sidecar.api.dependencies import build_state
         imported = time.monotonic()
         timing.update({
             "process_entry_to_import_start_seconds": import_started - process_entry,

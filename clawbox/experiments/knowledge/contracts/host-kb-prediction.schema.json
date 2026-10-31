@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.ai/schemas/clawtune/host-kb-prediction.schema.json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "clawtune.host-kb.v1"
+    },
+    "seed_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "mapping_policy_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "scope_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "view_revision": {
+      "type": "string"
+    },
+    "prediction_receipt": {
+      "type": "string"
+    },
+    "prediction": {
+      "$ref": "https://openclaw.ai/schemas/clawtune/tool-decision.schema.json#/properties/prediction"
+    }
+  },
+  "required": [
+    "schema_version",
+    "seed_sha256",
+    "mapping_policy_sha256",
+    "scope_generation",
+    "view_revision",
+    "prediction_receipt",
+    "prediction"
+  ],
+  "additionalProperties": true
+}

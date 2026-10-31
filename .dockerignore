@@ -34,3 +34,6 @@ working_set_plan.json
 *.log
 **/__pycache__
 **/*.py[cod]
+.runtime
+**/node_modules
+integrations/clawtune-plugin/dist

@@ -62,6 +62,7 @@ def image_content_manifest(image: str) -> dict[str, Any]:
         "/opt/clawtune-guest/services/sidecar",
         "/opt/clawtune-guest/contracts",
         "/opt/clawtune-guest/tools",
+        "/opt/clawbox/clawbox",
         "/opt/clawtune/cache/agent-sched-bench",
         "/usr/local/bin/tool-bridge",
         "/usr/local/bin/cube-tool-entrypoint.sh",
@@ -93,6 +94,8 @@ USER root
 RUN rm -rf /opt/clawtune-guest/services/sidecar /opt/clawtune-guest/contracts /opt/clawtune-guest/tools /opt/clawtune/cache/agent-sched-bench
 COPY --from=collector /opt/clawtune-guest/services/sidecar /opt/clawtune-guest/services/sidecar
 COPY --from=collector /opt/clawtune-guest/contracts /opt/clawtune-guest/contracts
+COPY --from=collector /opt/clawbox/clawbox /opt/clawbox/clawbox
+ENV PYTHONPATH=/opt/clawbox:/opt/clawtune-guest/services/sidecar/src
 COPY --from=collector /opt/clawtune-guest/tools /opt/clawtune-guest/tools
 COPY --from=collector /opt/clawtune/cache/agent-sched-bench /opt/clawtune/cache/agent-sched-bench
 COPY --from=collector /usr/local/bin/tool-bridge /usr/local/bin/tool-bridge
@@ -106,6 +109,7 @@ ENV CLAWBOX_TOOL_PREWARM={int(tool_prewarm)} \\
     CLAWTUNE_GUEST_COLLECTOR_HELPER=/opt/clawtune-guest/tools/guest_collector_server.py \\
     CLAWTUNE_GUEST_COLLECTOR_PYTHON=/opt/clawtune/venv/bin/python
 LABEL org.opencontainers.image.source.clawtune.revision={clawtune_revision}
+LABEL io.clawbox.host-kb.protocol="clawtune.host-kb.v1"
 WORKDIR /testbed
 ENTRYPOINT [\"/usr/local/bin/cube-tool-entrypoint.sh\"]
 """

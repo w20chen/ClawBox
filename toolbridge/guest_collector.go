@@ -28,6 +28,8 @@ func guestCollectorRequestTimeout() time.Duration {
 }
 
 type guestCollectorResponse struct {
+	TelemetryEvidence  map[string]any `json:"telemetry_evidence"`
+	Observation        map[string]any `json:"observation"`
 	OK                 bool           `json:"ok"`
 	Version            int            `json:"v"`
 	State              string         `json:"state"`
@@ -74,11 +76,11 @@ func (c *guestCollectorClient) requestWithTimeout(values map[string]any, timeout
 	if err := json.NewEncoder(connection).Encode(values); err != nil {
 		return guestCollectorResponse{}, err
 	}
-	line, err := bufio.NewReader(io.LimitReader(connection, 256*1024+1)).ReadBytes('\n')
+	line, err := bufio.NewReader(io.LimitReader(connection, 1048576+1)).ReadBytes('\n')
 	if err != nil {
 		return guestCollectorResponse{}, err
 	}
-	if len(line) > 256*1024 {
+	if len(line) > 1048576 {
 		return guestCollectorResponse{}, errors.New("guest collector response too large")
 	}
 	var response guestCollectorResponse
@@ -111,9 +113,10 @@ func (c *guestCollectorClient) Begin(executionID, command, executionCommand, cgr
 
 func (c *guestCollectorClient) Finish(executionID string, returnCode int) (guestCollectorResponse, error) {
 	return c.request(map[string]any{
-		"op":           "finish",
-		"execution_id": executionID,
-		"return_code":  returnCode,
+		"retain_artifact": os.Getenv("CLAWBOX_RETAIN_CLAUSE_TELEMETRY") == "1",
+		"op":              "finish",
+		"execution_id":    executionID,
+		"return_code":     returnCode,
 	})
 }
 

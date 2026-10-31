@@ -426,6 +426,7 @@ def main() -> int:
         "runtime_trace_expected": bool(metadata.get("runtime_trace_expected", True)),
         "command_sha256": command_sha256,
         "command": profile_command,
+        "prediction_receipt": metadata.get("prediction_receipt"),
         "effective_command_sha256": effective_command_sha256,
         "prediction": _prediction(command_sha256) or (
             {"call_prediction": metadata.get("call_prediction"),

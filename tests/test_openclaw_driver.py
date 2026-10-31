@@ -311,7 +311,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     result = run_openclaw(
         prompt="Create /workspace/result.txt", session_id="session-a",
         configuration={"base_url": "http://model.test/v1", "model": "test-model",
-                       "openclaw_exec_yield_ms": 120000},
+                       "openclaw_exec_yield_ms": 120000, "repository": "repo-a"},
         ssh=NativeSSHConfig(
             target="executor@2222-tool.cube.local:2222",
             identity_private_key="PRIVATE KEY\n",
@@ -357,6 +357,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert clawtune["sandboxExecPredictionModel"] == "lattice"
     assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
     assert clawtune["instrumentHosts"] == ["sandbox", "gateway"]
+    assert clawtune["repo"] == "repo-a"
     assert "clawbox-cube-tool" not in json.dumps(config)
     assert "CLAWBOX_POLICY_CONTROL_URL=http://192.0.2.10:18080" in "\n".join(commands)
     assert (tmp_path / "runtime-traces/session-a/native/trace.jsonl").read_bytes() == b'{"trace":true}\n'
@@ -375,6 +376,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         in "\n".join(commands)
     )
     assert "CLAWTUNE_TOOL_RESOURCE_EBPF_ENABLED=false" in "\n".join(commands)
+    assert "CLAWTUNE_REPO_KEY=repo-a" in "\n".join(commands)
+    assert "CLAWTUNE_TOOL_RESOURCE_REPO=repo-a" in "\n".join(commands)
     assert "timed-clawtune-sidecar.py" in "\n".join(commands)
     assert "sidecar-startup-timing.json" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)

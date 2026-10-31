@@ -14,6 +14,10 @@ to regenerate the summary. Use the same host output root as launch, and use
 | `summary.json`, `summary.csv`, `summary.md` | Compact result index and aggregated results |
 | `memory-timeseries.csv` | Sampled host cgroup and NUMA memory |
 | `attempts/ATTEMPT/ARM/` | Events, logs, telemetry, gateway records, and VM ownership |
+| `attempts/ATTEMPT/ARM/kb/` | Host KB seed identity, pair identities, and compact durable learning journals |
+| `attempts/ATTEMPT/ARM/session-progress/` | Completed trace results and interrupted trace boundaries for safe resume |
+| `attempts/ATTEMPT/ARM/invocations/` | Separate logs and artifacts from same-attempt resume invocations |
+| `attempts/ATTEMPT/ARM/host-knowledge/` | Compact host KB operation and HTTP request timings for this invocation |
 
 Retain the whole run directory and external immutable inputs needed to reproduce
 it. A repeated run ID resumes its frozen specification; a changed specification
@@ -27,6 +31,19 @@ after the cleanup verdict is stored in the canonical arm result.
 
 Before comparing arms, check submitted/completed sessions, final task validation,
 failures, timeouts, OOMs, execution-ID joins, telemetry coverage, and cleanup.
+
+For host-live runs, `correctness.host_knowledge` reports pair generations and
+uncommitted execution IDs. `online_learning_valid: false` means command results
+may remain valid but online-learning coverage is degraded. Bridge records carry
+`kb_status`, `kb_generation`, and any delivery error. Do not treat such a run as
+complete online-learning evidence. `recovered_sessions` and
+`uninterrupted_timing` distinguish retained trace results from a continuous run.
+Host KB operation timings are in seconds; `prepare_overlay` measures preparation
+before journal commit, and `claim` includes durable receipt admission. Bridge
+`kb_post_seconds` measures observation delivery including retries. Memory events
+include worker-process RSS, CPU time, and thread count; these include the rest of
+the worker and must not be described as isolated KB consumption. `seed_file_bytes`
+and `journal_bytes` describe serialized storage, not resident Python memory.
 Keep workloads, starting workspaces, templates, hardware scope, arrivals, and
 evidence fixed. Report completion counts with latency percentiles: statistics
 from completed calls alone omit outstanding waits and unfinished sessions.

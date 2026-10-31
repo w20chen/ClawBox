@@ -171,6 +171,10 @@ WorkloadCase.model_rebuild()
 
 
 class ExecutionSpec(StrictFrozenModel):
+    kb_scope_policy: Literal['pair'] = 'pair'
+    retain_clause_telemetry_artifacts: bool = False
+    kb_http_timeout_seconds: float = Field(default=30., gt=0, allow_inf_nan=False)
+    kb_observation_retries: int = Field(default=2, ge=0, le=5)
     control_timing_details: bool = False
     # The live gateway always retains request/response content in memory while
     # it is needed for replay identity and retries. Normal result artifacts
@@ -354,7 +358,7 @@ class ResourcesSpec(StrictFrozenModel):
     non_command_tool_memory_mib: int | None = Field(default=None, ge=1)
     small_tool_admission_bypass_mib: int = Field(default=4, ge=0)
     prediction_artifact: str | None = None
-    prediction_mode: Literal["runtime", "frozen", "cold-start"] = "frozen"
+    prediction_mode: Literal["runtime", "frozen", "cold-start", "host-live"] = "frozen"
     observe_predictions: bool = False
     prediction_reservation_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     runtime_poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)
@@ -749,6 +753,11 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("fixed admission requires resources.static_tool_memory_mib")
         if AdmissionPolicy.PREDICTED in admissions and not self.resources.prediction_artifact:
             raise ValueError("predicted admission requires a validated prediction_artifact")
+        if self.resources.prediction_mode == 'host-live':
+            if not self.resources.prediction_artifact:
+                raise ValueError('host-live requires an explicit validated seed prediction_artifact')
+            if self.agent.driver is not AgentDriver.OPENCLAW:
+                raise ValueError('host-live requires the OpenClaw Runtime/Tool workflow')
         if self.resources.observe_predictions and not self.resources.prediction_artifact:
             raise ValueError("observe_predictions requires prediction_artifact from experiment train")
         return self

@@ -2061,6 +2061,7 @@ class EventWriter:
 class ExperimentWorker:
     def __init__(self, spec: ExperimentSpec, *, run_id: str, attempt_id: str,
                  task_uid: str, output_root: Path | None = None,
+                 state_root: Path | None = None,
                  client: CubeSandboxClient | None = None) -> None:
         self.spec = spec
         self.run_id = run_id
@@ -2068,6 +2069,7 @@ class ExperimentWorker:
         self.task_uid = task_uid
         output_base = Path(os.environ.get("CLAWBOX_OUTPUT_ROOT", spec.output.directory))
         self.output_root = output_root or output_base / run_id
+        self.state_root = state_root or self.output_root
         journal = OwnedSandboxJournal(self.output_root / "owned-sandboxes.jsonl")
         self.client = client or CubeSandboxClient(
             journal=journal, request_timeout_s=spec.execution.cube_request_timeout_seconds,
@@ -2193,6 +2195,7 @@ class ExperimentWorker:
             if arm.resources.prediction_artifact and (
                 arm.policy.admission is AdmissionPolicy.PREDICTED
                 or arm.resources.observe_predictions
+                or arm.resources.prediction_mode == 'host-live'
             ):
                 for case in session_cases:
                     tool_sandbox = resolve_case_sandbox(case, arm.sandbox)
@@ -2227,6 +2230,23 @@ class ExperimentWorker:
             if template_future is not None:
                 template_future.result()
             prediction_providers = prediction_future.result()
+        self.host_knowledge = None
+        self._kb_request_start = len(self.policy_control.requests) if self.policy_control else 0
+        if self.policy_control is not None:
+            self.policy_control.knowledge_manager = None
+        if arm.resources.prediction_mode == 'host-live':
+            from .host_kb import HostKnowledgeManager
+            from clawbox.clawtune_integration import source_revision
+            tune_root = Path(os.environ.get('CLAWTUNE_ROOT', str(Path(__file__).resolve().parents[3] / 'ClawTune')))
+            by_repo = {case.repository or case.case_id: prediction_providers[case.case_id] for case in session_cases}
+            self.host_knowledge = HostKnowledgeManager(
+                arm.resources.prediction_artifact, self.state_root / 'kb' / arm.arm_id,
+                run_id=self.run_id, attempt_id=self.attempt_id, arm_id=arm.arm_id,
+                clawtune_revision=source_revision(tune_root),
+                metadata=lambda repo, models, command, digest: by_repo[repo]._metadata({'models': models}, command, digest))
+            if self.policy_control is None:
+                raise RuntimeError('host-live requires the experiment policy listener')
+            self.policy_control.knowledge_manager = self.host_knowledge
         startup_gate_completed = time.monotonic()
         startup_gate_completed_process_cpu = time.process_time()
         activity_tracker = ArmActivityTracker(arm.concurrency)
@@ -2503,6 +2523,7 @@ class ExperimentWorker:
                         memory_by_domain=memory_by_domain, queue_by_domain=queues['per_domain'],
                         blocking=False,
                     ) if placement is not None else None,
+                    "host_knowledge_process": self.host_knowledge.process_sample() if self.host_knowledge else None,
                     "cgroup_cpu": cpu_sampler.sample() if cpu_sampler is not None else {
                         "measurement": "unavailable",
                         "reason": cpu_unavailable_reason,
@@ -2619,6 +2640,8 @@ class ExperimentWorker:
         arm_cancel = Event()
         offer_offsets = session_offer_offsets(arm)
         futures: dict[Any, int] = {}
+        from .recovery import SessionRecovery
+        recovery = SessionRecovery(self.state_root / 'session-progress')
         def check_shared_health():
             try:
                 sampler.check()
@@ -2638,6 +2661,14 @@ class ExperimentWorker:
                 raise ArmInfrastructureError("shared policy controller failed") from exc
 
         def run_placed_session(index):
+            session_id = f'{arm.arm_id}-{index:04d}'
+            previous = recovery.previous(session_id)
+            if previous and self.host_knowledge is not None:
+                case = session_case_for(arm, index)
+                self.host_knowledge.reserve(session_id, case.repository or case.case_id)
+            return recovery.run(session_id, lambda: dispatch_session(index))
+
+        def dispatch_session(index):
             offset = offer_offsets[index]
             time.sleep(max(0., arm_started_monotonic+offset-time.monotonic()))
             session_id = f'{arm.arm_id}-{index:04d}'
@@ -2934,6 +2965,12 @@ class ExperimentWorker:
                 )
             }) if controllers else None
         status = RunStatus.SUCCEEDED if failure is None else RunStatus.FAILED
+        if self.host_knowledge is not None:
+            atomic_json(self.output_root / 'host-knowledge' / f'{arm.arm_id}.json', {
+                'summary': self.host_knowledge.summary(),
+                'operations': self.host_knowledge.metrics,
+                'requests': self.policy_control.requests[self._kb_request_start:],
+            })
         duration = time.monotonic() - started
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
                              for item in sessions]
@@ -2988,6 +3025,11 @@ class ExperimentWorker:
                                                   session_failure=bool(session_failures) and not interrupted),
             started_at=started_at, completed_at=utcnow(),
             correctness={
+                "host_knowledge": self.host_knowledge.summary() if self.host_knowledge else None,
+                "online_learning_valid": (all(scope['learning_valid'] for scope in self.host_knowledge.summary()['scopes'].values())
+                                          if self.host_knowledge else None),
+                "recovered_sessions": sum(bool(item.get('recovered_from_previous_invocation')) for item in sessions),
+                "uninterrupted_timing": not any(item.get('recovered_from_previous_invocation') for item in sessions),
                 "completed_sessions": sum(item.get("valid", False) for item in sessions),
                 "failed_sessions": arm.concurrency - sum(item.get("valid", False) for item in sessions),
                 "session_failures": session_failures,
@@ -3697,7 +3739,22 @@ class ExperimentWorker:
                 if gateway_session is not None else None
             ),
         )
+        kb_env = {'CLAWBOX_RETAIN_CLAUSE_TELEMETRY': '1' if arm.execution.retain_clause_telemetry_artifacts else '0'}
         try:
+            if arm.resources.prediction_mode == 'host-live':
+                self.host_knowledge.reserve(session_id, arm.case.repository or arm.case.case_id)
+                policy_session = self.policy_control.reserve(session_id)
+                kb_env = {
+                    'CLAWBOX_REPOSITORY': arm.case.repository or arm.case.case_id,
+                    'CLAWTUNE_HOST_KB_ENDPOINT': policy_session.url,
+                    'CLAWTUNE_HOST_KB_TOKEN': policy_session.token,
+                    'CLAWTUNE_HOST_KB_SESSION_ID': session_id,
+                    'CLAWTUNE_HOST_KB_TIMEOUT_SECONDS': str(arm.execution.kb_http_timeout_seconds),
+                    'CLAWBOX_KB_OBSERVATION_RETRIES': str(arm.execution.kb_observation_retries),
+                    'CLAWBOX_RETAIN_CLAUSE_TELEMETRY': '1' if arm.execution.retain_clause_telemetry_artifacts else '0',
+                }
+                lifecycle.env_vars.update(kb_env)
+                runtime_lifecycle.env_vars.update(kb_env)
             if lifetime:
                 coordinator.acquire_capacity(
                     session_id, lifetime, arm.execution.arm_timeout_seconds,
@@ -3992,7 +4049,11 @@ class ExperimentWorker:
                                 raise PredictionUnavailable(
                                     "predicted command admission requires a prediction provider"
                                 )
-                            if arm.resources.prediction_mode in {"runtime", "cold-start"}:
+                            if arm.resources.prediction_mode == 'host-live':
+                                prediction = request['prediction']
+                                if prediction.get('prediction_source') != 'host_live_clawtune':
+                                    raise PredictionUnavailable('host-live admission requires canonical receipt prediction')
+                            elif arm.resources.prediction_mode in {"runtime", "cold-start"}:
                                 from .prediction import command_sha256
                                 if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:
                                     raise PredictionUnavailable("runtime prediction command text/digest mismatch; update the SSH shim")
@@ -4097,6 +4158,7 @@ class ExperimentWorker:
                                         # remain an idempotent recovery path.
                                         candidate = executor.execute(
                                             native_tool_bridge_setup_command(
+                                                knowledge_environment=kb_env,
                                                 require_progress_events=arm.policy.runtime_control.adaptive,
                                                 restart=bridge_attempt in (2, 10, 20),
                                                 command_timeout_seconds=(
@@ -4514,8 +4576,8 @@ class ExperimentWorker:
                     phase = request.get('phase')
                     progress_event('complete' if phase == 'end' else 'start',
                                    str(request['execution_id']))
-                policy_session = self.policy_control.register(
-                    session_id, admit=admit_openclaw_tool,
+                policy_session = (self.policy_control.attach if policy_session is not None else self.policy_control.register)(
+                    policy_session if policy_session is not None else session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
                     abandon=abandon_openclaw_tool,
                     start=record_tool_progress,
@@ -4532,6 +4594,7 @@ class ExperimentWorker:
                         + workspace_result.stderr[-1000:]
                     )
                 tool_bridge_result = executor.execute(native_tool_bridge_setup_command(
+                                                knowledge_environment=kb_env,
                     require_progress_events=arm.policy.runtime_control.adaptive,
                     command_timeout_seconds=arm.execution.command_timeout_seconds,
                     apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
@@ -4655,6 +4718,9 @@ class ExperimentWorker:
                             configuration={
                                 **inference_configuration,
                                 "command_timeout_seconds": arm.execution.command_timeout_seconds,
+                                "host_live": arm.resources.prediction_mode == 'host-live',
+                                "kb_http_timeout_seconds": arm.execution.kb_http_timeout_seconds,
+                                "repository": arm.case.repository or arm.case.case_id,
                             },
                             ssh=ssh_config,
                             policy_control=policy_session, runtime_executor=runtime_executor,
@@ -4720,6 +4786,10 @@ class ExperimentWorker:
                             policy_records=outcome["policy_control_records"],
                             runtime_trace_paths=outcome["runtime_traces"],
                         )
+                        if self.host_knowledge is not None:
+                            for bridge in native_artifacts.bridge_records:
+                                if bridge.get('kb_status') == 'degraded':
+                                    self.host_knowledge.mark_degraded(session_id, bridge['execution_id'], bridge.get('kb_error'))
                         with span('finalize.enrichment'):
                             predicted_execution_ids = {
                                 str(item.get("execution_id") or "")
@@ -4889,6 +4959,8 @@ class ExperimentWorker:
                    if arm.execution.control_timing_details else {}),
             })
             return {"session_id": session_id, "case_id": arm.case.case_id,
+                    "host_knowledge": (self.host_knowledge.summary()['scopes'][session_id]
+                                       if arm.resources.prediction_mode == 'host-live' else None),
                     "rollout_id": session_id,
                     "tool_template": arm.sandbox.template,
                     "tool_workspace": arm.sandbox.workspace,
@@ -5400,6 +5472,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attempt-id", default=os.environ.get("CLAWBOX_ATTEMPT_ID"), required=os.environ.get("CLAWBOX_ATTEMPT_ID") is None)
     parser.add_argument("--task-uid", default=os.environ.get("CLAWBOX_TASK_UID"), required=os.environ.get("CLAWBOX_TASK_UID") is None)
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--state-root", type=Path)
     parser.add_argument("--arm-id")
     parser.add_argument("--no-summary", action="store_true")
     args = parser.parse_args(argv)
@@ -5408,6 +5481,7 @@ def main(argv: list[str] | None = None) -> int:
             load_experiment(args.spec), run_id=args.run_id,
             attempt_id=args.attempt_id, task_uid=args.task_uid,
             output_root=args.output_root,
+            state_root=args.state_root,
         ).run(
             arm_ids={args.arm_id} if args.arm_id else None,
             write_summary=not args.no_summary,

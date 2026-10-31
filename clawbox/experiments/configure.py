@@ -571,7 +571,7 @@ def _p50_admission_summary(spec: ExperimentSpec) -> dict[str, Any] | None:
     artifact = spec.resources.prediction_artifact
     if artifact is None:
         return {"error": "prediction artifact is not configured"}
-    if spec.resources.prediction_mode in {"runtime", "cold-start"}:
+    if spec.resources.prediction_mode in {"runtime", "cold-start", "host-live"}:
         result = {"path": str(artifact), "mode": spec.resources.prediction_mode,
                   "reservation_scale": spec.resources.prediction_reservation_scale}
         if spec.resources.prediction_mode == "runtime":

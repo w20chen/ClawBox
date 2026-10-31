@@ -46,7 +46,7 @@ they rewrite result artifacts.
 | `qualify SPEC [--concurrency N] [--receipt FILE]` | Run capability/case probes and save a reusable receipt. |
 | `launch SPEC [--run-id ID] [--detach]` | Validate, qualify as needed, and run/resume. Also accepts `--apply-host HOST.yaml`, `--qualification FILE`, `--qualification-concurrency N`, `--force-qualify`. |
 | `run SPEC` | Lower-level execution with a valid receipt; `--run-id`, `--attempt-id`, `--owner-id`, `--qualification`, `--detach`. Prefer `launch`. |
-| `resume ID [--attempt-id ID] [--detach]` | Resume unfinished arms from the frozen run. |
+| `resume ID [--attempt-id ID] [--detach]` | Reopen the saved attempt; preserve completed traces and mark unrecoverable interrupted traces incomplete. A different explicit attempt ID reruns cold. |
 | `status ID` | Read supervisor, trial, and cleanup state. |
 | `collect ID`, `report ID` | Expand canonical arm results or regenerate reports without rerunning work. The stored `summary.json` is a compact arm index. |
 | `abort ID`, `destroy ID` | Stop/clean owned VMs while preserving results; `--cleanup-workers` (8), `--cleanup-timeout-seconds` (180). |
@@ -68,7 +68,7 @@ dedicated CLI flag.
 | Workload | `--trace`, `--workload-manifest`, `--case-id`, `--prompt`, `--repository`, `--base-commit`, `--validation-command`, `--repetitions`, `--session-assignment single_case\|round_robin\|unique` |
 | VM identity | `--runtime-template-id`, `--tool-template-id`, `--runtime-image-reference`, `--tool-image-reference`, `--runtime-image-digest`, `--tool-image-digest`, `--target-node` |
 | VM shape | `--runtime-vcpu`, `--tool-vcpu`, `--runtime-memory-gib`, `--tool-memory-gib`, `--tool-workspace` |
-| Prediction | `--prediction-mode runtime\|frozen\|cold-start`, `--prediction-artifact`, `--prediction-reservation-scale`, `--static-tool-memory-mib INTEGER\|auto`, `--admission-margin-mib` |
+| Prediction | `--prediction-mode runtime\|frozen\|cold-start\|host-live`, `--prediction-artifact`, `--prediction-reservation-scale`, `--static-tool-memory-mib INTEGER\|auto`, `--admission-margin-mib` |
 | Resources | `--pool-memory-gib`, `--emergency-free-memory-gib`, `--checkpoint-headroom-gib`, `--warm-root`, `--warm-memory-gib`, `--cold-root` |
 | Placement/control | `--placement-policy`, `--session-compute-nodes` (comma-separated IDs), `--runtime-poll-interval-seconds`, `--memory-scheduling` |
 | Snapshots/evidence | `--snapshot-mechanism full-copy\|incremental-cow`, `--snapshot-storage tiered\|warm-only`, `--template-base-sharing-artifact` |
@@ -270,7 +270,7 @@ restore. These snapshot choices take effect when idle reclaim is enabled.
 ## Prediction and evidence
 
 `conditions.prediction_source` maps `kb` to CLI mode `runtime`, `cold-start-kb`
-to `cold-start`, and `command-table` to `frozen`. Its schema default is `kb`.
+to `cold-start`, `host-live` to `host-live`, and `command-table` to `frozen`. Its schema default is `kb`.
 `evidence.prediction_artifact` points to the selected immutable seed or artifact.
 See the [training walkthrough](guide.md#train-a-workload-specific-kb).
 
@@ -292,6 +292,10 @@ Fields are under `execution`:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `kb_scope_policy` | `pair` | Host-live knowledge isolation; currently only independent pairs are supported. |
+| `kb_http_timeout_seconds` | 30 | Positive finite seconds for prediction and the total observation delivery deadline. |
+| `kb_observation_retries` | 2 | 0–5 additional observation delivery attempts within that deadline. Commands are never retried. |
+| `retain_clause_telemetry_artifacts` | `false` | Write full Tool clause-telemetry files for diagnostics. Compact learning and integrity records are always retained. |
 | `concurrency_levels` | `[1]` | Positive offered session counts |
 | `sandbox_create_concurrency` | 8 | Independent preparation and actual-create limits, each in VM pairs; a pair can issue two concurrent creates, subject to lifecycle limits |
 | `dependency_install_concurrency` | `null` | Optional arm-wide bound on active apt/apt-get/pip installs |
@@ -316,6 +320,12 @@ Fields are under `execution`:
 Creation retry uses backoff and releases lifecycle slots while waiting. Ambiguous
 HTTP failures use ownership reconciliation rather than blindly creating another
 VM. The API and SDK must support the corresponding lifecycle deadlines.
+
+The KB options require the host-live Runtime/Tool image update once. Subsequent
+value changes require a new run ID, with no host apply, image rebuild, or
+retraining. Host-live requires OpenClaw and an explicit validated seed directory
+in `evidence.prediction_artifact`. The host endpoint uses the existing configured
+policy listener and pair credentials; no guest scope-selection option exists.
 
 ## Inference and measurement
 

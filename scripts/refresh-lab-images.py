@@ -157,7 +157,7 @@ def main():
         "aarch64", "arm64",
     }:
         p.error("image refresh must run on the target ARM64 Linux host")
-    plugin = tune/"packages/clawtune-plugin"
+    plugin = root/"integrations/clawtune-plugin"
     runtime_requested = "runtime" in (args.role or ("runtime", "sandbox"))
     if runtime_requested:
         if not (plugin/"node_modules/.bin/tsc").exists():
@@ -181,7 +181,8 @@ def main():
             shutil.copytree(plugin/"dist", context/"plugin/dist")
             for name in ("package.json", "openclaw.plugin.json"):
                 shutil.copy(plugin/name, context/"plugin"/name)
-        shutil.copy(tune/"tools/guest_collector_server.py", context)
+        shutil.copy(root/"scripts/clawbox-guest-collector.py", context/"guest_collector_server.py")
+        shutil.copytree(root/"clawbox", context/"clawbox", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copytree(root/"scripts", context/"scripts", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(root/"docker/cube-runtime-entrypoint.sh", context/"entrypoint.sh")
         for script in (
@@ -215,6 +216,8 @@ def main():
                    if role == "sandbox" else "/opt/clawtune/venv/bin/python -m pip")
             dockerfile = flattened_base(image) + f'''
 COPY sidecar {target}/services/sidecar
+COPY clawbox /opt/clawbox/clawbox
+ENV PYTHONPATH=/opt/clawbox:{target}/services/sidecar/src
 COPY contracts {target}/contracts
 COPY seeds {target}/seeds
 RUN {pip} install --index-url {args.pip_index} --upgrade jsonschema setuptools wheel && {pip} install --index-url {args.pip_index} --no-build-isolation {target}/services/sidecar
@@ -224,6 +227,7 @@ RUN chmod 755 /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name} && /opt/
 COPY entrypoint.sh /usr/local/bin/{entry}
 ENV CLAWTUNE_REVISION={revision}
 LABEL org.opencontainers.image.source.clawtune.revision="{revision}"
+LABEL io.clawbox.host-kb.protocol="clawtune.host-kb.v1"
 '''
             if role == "runtime":
                 dockerfile += '''COPY scripts/patch-openclaw-ssh-backend.js /tmp/patch-openclaw-ssh-backend.js

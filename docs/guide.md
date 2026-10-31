@@ -119,6 +119,7 @@ Choose the prediction source explicitly:
 
 | CLI mode | Input | Use |
 | --- | --- | --- |
+| `host-live` | Immutable ClawTune seed directory | Independent live host KB for each Runtime–Tool pair |
 | `cold-start` | Immutable ClawTune seed directory | Query a general deployment prior across repositories |
 | `runtime` | Training JSON and matching `.kb.json` | Query the trained, frozen KB for incoming commands |
 | `frozen` | Training JSON with precomputed predictions | Replay commands covered by that artifact |
@@ -146,6 +147,31 @@ estimate. Trained modes use the artifact's measured guest-to-host mapping.
 Neither is a hard memory bound. The current bootstrap seed permits zero-imputed
 missing labels; prediction availability is not evidence of accuracy. See
 [prediction semantics](design.md#prediction-and-measurement).
+
+For online learning, use `--prediction-mode host-live` with the same seed path.
+First refresh the Runtime plugin and Tool collector as described in
+[installation](installation.md#refresh-the-runtime-predictor-and-kb). The host
+shares the immutable seed and keeps each pair's learned observations separate.
+The Runtime requests predictions; the Tool sends compact observations before
+its command returns. Neither VM owns a KB. Admission uses the exact host
+prediction issued for that command. A prediction failure stops that trace
+before command execution. An observation delivery failure preserves the command
+result, continues with committed knowledge, and marks online learning degraded.
+
+The generated YAML exposes these settings under `execution`:
+
+```yaml
+kb_scope_policy: pair
+kb_http_timeout_seconds: 30
+kb_observation_retries: 2
+retain_clause_telemetry_artifacts: false
+```
+
+Missing training targets retain ClawTune's explicitly marked imputed zeros.
+Measured guest memory keeps its own measurement identity. Enable telemetry
+artifact retention only when the full clause diagnostic file is needed; normal
+learning and result validation use compact records. Changing these settings
+requires a new run ID, without retraining or another image refresh.
 
 Inspect seed coverage for a workload without starting VMs:
 
@@ -294,6 +320,14 @@ template requires a new proof; ordinary predictor-only changes do not.
 Repeat `launch` with the same frozen specification and run ID to resume an
 interrupted run. If it is active, the command reports that state; if it already
 succeeded, it prints the report. Any specification change requires a new run ID.
+
+Plain `experiment resume RUN_ID` reuses the saved attempt and its host KB.
+Completed traces are retained. Traces whose Tool filesystem or Agent progress
+cannot be recovered are marked incomplete and are never replayed into learned
+state. Unstarted traces may proceed. To restart all traces cold, explicitly use
+`experiment resume RUN_ID --attempt-id NEW_ID`. Prior attempt evidence is retained;
+resumed results identify recovered traces and cannot represent uninterrupted
+throughput timing.
 
 ```bash
 bash scripts/clawbox --sudo experiment launch \

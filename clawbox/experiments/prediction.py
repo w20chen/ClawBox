@@ -26,7 +26,7 @@ _VALIDATED_COLD_START_SEED_CACHE_LOCK = Lock()
 
 def prediction_input_paths(path: Path, mode: str) -> list[Path]:
     """Return the immutable files that define one prediction input."""
-    if mode == "cold-start":
+    if mode in {"cold-start", "host-live"}:
         from clawbox.clawtune_integration import use_clawtune
         use_clawtune()
         from clawtune_kb import validate_seed
@@ -535,7 +535,7 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
     """Query one standard immutable ClawTune seed for any trace repository."""
 
     def __init__(self, path: Path, *, repository: str,
-                 sandbox_identity: dict | None = None) -> None:
+                 sandbox_identity: dict | None = None, _metadata_only: bool = False) -> None:
         from clawbox.clawtune_integration import use_clawtune
         use_clawtune()
         from clawtune_kb import validate_seed
@@ -590,6 +590,10 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
         self.global_cold_start = True
         self.host_calibrations = calibrations
         self.admission_prediction_policy = policy
+
+        if _metadata_only:
+            self.prediction_source = 'host_live_clawtune'
+            return
 
         cache_key = (str(path), seed_sha256)
         with _IMMUTABLE_KB_CACHE_LOCK:
@@ -657,8 +661,22 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
 
 
 def prediction_provider_type(mode: str):
+    if mode == 'host-live':
+        return HostLivePredictionProvider
     if mode == "runtime":
         return RuntimePredictionProvider
     if mode == "cold-start":
         return ColdStartPredictionProvider
     return P50PredictionProvider
+
+
+class HostLivePredictionProvider(ColdStartPredictionProvider):
+    """Admission calibration/provenance only; the host manager owns live queries."""
+    def __init__(self, path, *, repository, sandbox_identity=None):
+        super().__init__(path, repository=repository, sandbox_identity=sandbox_identity, _metadata_only=True)
+
+    def resolve(self, command, prediction=None):
+        raise PredictionUnavailable('host-live admission requires a host-issued receipt')
+
+    def resolve_digest(self, digest, prediction=None):
+        raise PredictionUnavailable('host-live admission requires a host-issued receipt')

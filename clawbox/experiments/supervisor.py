@@ -233,6 +233,8 @@ class ExperimentSupervisor:
             if state.get("spec_digest") != digest:
                 raise ValueError("resume spec digest does not match the frozen run spec")
             self._recover_for_resume(state)
+            if state['attempt_id'] != self.attempt_id:
+                atomic_json(self.output_root / 'attempts' / state['attempt_id'] / 'run-state.final.json', state)
             self.state = state
             self.state.update({
                 "attempt_id": self.attempt_id,
@@ -300,6 +302,7 @@ class ExperimentSupervisor:
             return None
         if (
             is_trial_outcome(result)
+            and result.attempt_id == self.attempt_id
             and result.arm.arm_id == arm.arm_id
             and result.arm.spec_digest == arm.spec_digest
             and marker == arm.spec_digest
@@ -315,6 +318,7 @@ class ExperimentSupervisor:
             "--spec", str(frozen_spec), "--run-id", self.run_id,
             "--attempt-id", self.attempt_id, "--task-uid", task_uid,
             "--output-root", str(artifact_root), "--arm-id", arm.arm_id,
+            "--state-root", str(self.output_root / 'attempts' / self.attempt_id / arm.arm_id),
             "--no-summary",
         ]
 
@@ -342,6 +346,10 @@ class ExperimentSupervisor:
     def _store_result(self, result: ResultEnvelope) -> None:
         result_path = self.output_root / "arms" / f"{result.arm.arm_id}.json"
         marker_path = self.output_root / "arms" / f"{result.arm.arm_id}.complete"
+        if result_path.exists():
+            previous = json.loads(result_path.read_text(encoding='utf-8'))
+            if previous['attempt_id'] != result.attempt_id:
+                atomic_json(self.output_root / 'attempts' / previous['attempt_id'] / 'results' / result_path.name, previous)
         atomic_json(result_path, result.model_dump(mode="json"))
         if is_trial_outcome(result):
             atomic_marker(marker_path, result.arm.spec_digest)
@@ -352,6 +360,12 @@ class ExperimentSupervisor:
         started_at = utcnow()
         task_uid = _attempt_task_uid(self.owner_id, self.attempt_id, arm.arm_id)
         artifact_root = self.output_root / "attempts" / self.attempt_id / arm.arm_id
+        if artifact_root.exists():
+            if not self.resume:
+                raise ValueError(f'attempt already exists: {artifact_root}')
+            # Each invocation has new logs/artifacts, while KB and progress have
+            # one stable attempt root. Prior evidence and result paths stay valid.
+            artifact_root = artifact_root / 'invocations' / f'resume-{time.time_ns()}'
         artifact_root.mkdir(parents=True, exist_ok=False)
         arm_state = self.state["arms"][arm.arm_id]
         arm_state.update({

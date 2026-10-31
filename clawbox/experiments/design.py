@@ -88,7 +88,7 @@ class Coordination(StrictFrozenModel):
 
 
 class Conditions(StrictFrozenModel):
-    prediction_source: Literal['kb', 'cold-start-kb', 'command-table'] = 'kb'
+    prediction_source: Literal['kb', 'cold-start-kb', 'host-live', 'command-table'] = 'kb'
 
 
 class Mechanisms(StrictFrozenModel):
@@ -198,7 +198,7 @@ def lower_arm(design, name, m):
     if r['lifecycle_reservation_scale'] != 1 and not r['resident_capacity_accounting']:
         raise ValueError('discounted lifecycle reservations require resident capacity accounting')
     r['prediction_mode'] = {
-        'kb': 'runtime', 'cold-start-kb': 'cold-start', 'command-table': 'frozen',
+        'kb': 'runtime', 'cold-start-kb': 'cold-start', 'host-live': 'host-live', 'command-table': 'frozen',
     }[design.conditions.prediction_source]
     r['proactive_cache_reclaim'] = rt['proactive_memory_reclaim']
     if r['resident_capacity_accounting']:
@@ -496,7 +496,7 @@ def configure_design(raw, options):
     conditions = raw.setdefault('conditions', {})
     if options.get('prediction_mode') is not None:
         conditions['prediction_source'] = {
-            'runtime': 'kb', 'cold-start': 'cold-start-kb', 'frozen': 'command-table',
+            'runtime': 'kb', 'cold-start': 'cold-start-kb', 'host-live': 'host-live', 'frozen': 'command-table',
         }[options['prediction_mode']]
     if options.get('template_base_sharing') is not None:
         raise ValueError('schema 4 derives template sharing qualification from placement.template_affinity; remove --template-base-sharing')

@@ -727,7 +727,7 @@ def validate_native_tool_join(
                 maintenance_fallbacks.append(execution_id)
         else:
             _validate_cgroup(cgroup_artifacts.get(execution_id, {}), execution_id)
-        clause = clause_artifacts.get(execution_id, {})
+        clause = clause_artifacts.get(execution_id) or bridge.get('telemetry_evidence') or {}
         # Structured OpenClaw file operations execute a bridge helper rather
         # than an Agent shell command. They use a fixed reservation and never
         # train either KB, so an empty command tree is expected for some fast

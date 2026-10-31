@@ -366,8 +366,8 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--runtime-control", choices=("off", "no_control",
                            "phase_memcg", "release_cpu"),
                            help="optional pressure/progress control; suite deployment baseline stays off")
-    configure.add_argument("--prediction-mode", choices=("runtime", "frozen", "cold-start"),
-                           help="runtime: trained ClawTune KB; cold-start: bootstrap-v2 seed; frozen: saved command predictions")
+    configure.add_argument("--prediction-mode", choices=("runtime", "frozen", "cold-start", "host-live"),
+                           help="runtime: trained frozen KB; cold-start: immutable seed; host-live: pair-local host learning; frozen: command table")
     configure.add_argument("--prediction-reservation-scale", type=float,
                            help="positive multiplier on predicted host memory growth; default 1")
     configure.add_argument("--admission-margin-mib", type=int,
@@ -1075,7 +1075,11 @@ def main(argv: list[str] | None = None) -> int:
                 else args.qualification or default_receipt_path(args.spec)
             )
             qualification_receipt = validate_receipt(spec, receipt_path)
-            attempt_id = args.attempt_id or f"attempt-{uuid.uuid4().hex[:16]}"
+            if args.command == 'resume':
+                from clawbox.experiments.supervisor import read_run_state
+                attempt_id = args.attempt_id or read_run_state(output)['attempt_id']
+            else:
+                attempt_id = args.attempt_id or f"attempt-{uuid.uuid4().hex[:16]}"
             owner_id = (
                 str(read_owner_id(output)) if args.command == "resume"
                 else args.owner_id or run_id
@@ -1083,7 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.detach:
                 launch_root = args.output_root / ".launch"
                 launch_root.mkdir(parents=True, exist_ok=True)
-                log_path = launch_root / f"{run_id}-{attempt_id}.log"
+                log_path = launch_root / f"{run_id}-{attempt_id}-{uuid.uuid4().hex[:8]}.log"
                 command = [
                     sys.executable, "-m", "clawbox.cli",
                     "--output-root", str(args.output_root),

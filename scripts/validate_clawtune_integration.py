@@ -36,7 +36,7 @@ def main() -> None:
     args = parser.parse_args()
 
     root = args.clawtune_root.resolve()
-    plugin_dir = root / "packages" / "clawtune-plugin"
+    plugin_dir = project_root / "integrations" / "clawtune-plugin"
     sidecar_dir = root / "services" / "sidecar"
     assets_dir = root / "swe_rebench" / ".runtime" / "assets"
 
@@ -47,7 +47,7 @@ def main() -> None:
         sidecar_dir / "pyproject.toml",
         sidecar_dir / "src" / "clawtune_sidecar" / "main.py",
         sidecar_dir / "src" / "tool_resource" / "runtime_kb.py",
-        root / "tools" / "guest_collector_server.py",
+        project_root / "scripts" / "clawbox-guest-collector.py",
         sidecar_dir / "src" / "clawtune_sidecar" / "trace.py",
         sidecar_dir / "src" / "tool_resource" / "sdk.py",
         sidecar_dir / "src" / "tool_resource" / "mvdan_client.py",
@@ -74,6 +74,7 @@ def main() -> None:
         "endpoint",
         "mode",
         "failOpen",
+        "requireHostPrediction",
         "executionBackend",
         "sandboxExecEnvelope",
         "sandboxExecPredictionModel",

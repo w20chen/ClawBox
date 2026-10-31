@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.ai/schemas/clawtune/host-kb-predict.schema.json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "clawtune.host-kb.v1"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "command_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "tool_name": {
+      "enum": [
+        "exec",
+        "terminal_exec"
+      ]
+    },
+    "memory_measurement": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "tool_call_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 256
+    },
+    "command_context": {
+      "$ref": "https://openclaw.ai/schemas/clawtune/command-context.schema.json"
+    },
+    "raw_params": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "session_id",
+    "command",
+    "command_sha256",
+    "repository",
+    "tool_name",
+    "memory_measurement",
+    "event_id",
+    "tool_call_id",
+    "command_context",
+    "raw_params"
+  ],
+  "additionalProperties": false
+}

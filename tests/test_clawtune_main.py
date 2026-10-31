@@ -21,7 +21,7 @@ def script(name):
     return module
 
 
-def test_export_fetches_main_without_touching_checkout(tmp_path):
+def test_export_fetches_pinned_revision_without_touching_checkout(tmp_path, monkeypatch):
     def git(root, *args):
         return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
     remote = tmp_path / "remote"
@@ -38,7 +38,9 @@ def test_export_fetches_main_without_touching_checkout(tmp_path):
     (remote / "value").write_text("latest")
     git(remote, "commit", "-am", "latest")
     output = tmp_path / "export"
-    revision = script("prepare-clawtune.py").prepare(checkout, output)
+    exporter = script("prepare-clawtune.py")
+    monkeypatch.setattr(exporter, 'PINNED_REVISION', git(remote, 'rev-parse', 'main'))
+    revision = exporter.prepare(checkout, output)
     assert revision == git(remote, "rev-parse", "main")
     assert source_revision(output) == revision
     assert (output / "value").read_text() == "latest"

@@ -282,6 +282,7 @@ class PolicyControlServer:
         self._lock = threading.RLock()
         self._started = False
         self.requests: list[dict[str, Any]] = []
+        self.knowledge_manager = None
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -293,12 +294,20 @@ class PolicyControlServer:
             # Nagle so persistent connections do not incur a delayed-ACK wait.
             disable_nagle_algorithm = True
 
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path != '/v1/kb/health' or owner.knowledge_manager is None:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                from .knowledge.protocol import PROTOCOL, MAX_BODY_BYTES
+                self._json(HTTPStatus.OK, {'protocol_versions': [PROTOCOL],
+                                          'max_body_bytes': MAX_BODY_BYTES})
+
             def do_POST(self) -> None:  # noqa: N802
                 started = time.monotonic()
                 record: dict[str, Any] = {"path": self.path, "request_start": started}
                 state: _Session | None = None
                 try:
-                    if self.path not in {"/v1/tool/admit", "/v1/tool/complete", "/v1/tool/start"}:
+                    if self.path not in {"/v1/tool/admit", "/v1/tool/complete", "/v1/tool/start", "/v1/kb/predict", "/v1/kb/observe"}:
                         self.send_error(HTTPStatus.NOT_FOUND)
                         return
                     token = self.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -308,14 +317,31 @@ class PolicyControlServer:
                         self.send_error(HTTPStatus.UNAUTHORIZED)
                         return
                     length = int(self.headers.get("Content-Length", "0"))
-                    if length < 2 or length > 65536:
+                    if length < 2 or length > (1048576 if self.path.startswith('/v1/kb/') else 65536):
                         self.close_connection = True
                         raise ValueError("invalid request size")
                     body = json.loads(self.rfile.read(length))
+                    if self.path.startswith('/v1/kb/'):
+                        if owner.knowledge_manager is None:
+                            raise RuntimeError('host KB is not configured')
+                        if self.path.endswith('/observe'):
+                            with state.condition:
+                                execution = state.executions.get(body.get('execution_id'))
+                                if execution is None or execution.admission is None:
+                                    raise ValueError('observation has no admitted execution')
+                        operation = (owner.knowledge_manager.predict if self.path.endswith('/predict')
+                                     else owner.knowledge_manager.observe)
+                        response = operation(state.session_id, body)
+                        self._json(HTTPStatus.OK, response)
+                        record.update(status=200, session_id=state.session_id, kb_status=response.get('status'),
+                                      execution_id=body.get('execution_id'))
+                        return
                     owner._validate(body, state.session_id)
                     record.update(session_id=state.session_id,
                                   execution_id=body["execution_id"])
                     if self.path.endswith("/admit"):
+                        if owner.knowledge_manager is not None and body.get('execution_scope', 'agent-tool') == 'agent-tool' and body.get('operation') != 'filesystem':
+                            body['prediction'] = owner.knowledge_manager.claim(state.session_id, body)
                         response, duplicate = state.admission(body)
                     elif self.path.endswith('/start'):
                         response, duplicate = state.execution_start(body)
@@ -420,6 +446,19 @@ class PolicyControlServer:
                 raise RuntimeError("PolicyControlServer is not started")
             self._sessions[token] = state
         return PolicyControlSession(self, state)
+
+    def reserve(self, session_id: str) -> PolicyControlSession:
+        def pending(_request):
+            raise RuntimeError('pair policy callbacks are not attached yet')
+        return self.register(session_id, admit=pending, complete=pending)
+
+    def attach(self, session: PolicyControlSession, *, admit, complete, abandon=None, start=None):
+        state = self._lookup(session.token)
+        if state is None:
+            raise RuntimeError('reserved pair binding is no longer active')
+        with state.condition:
+            state.admit, state.complete, state.abandon, state.start = admit, complete, abandon, start
+        return session
 
     def unregister(self, token: str, *, timeout: float | None = None) -> bool:
         state = self._lookup(token)
