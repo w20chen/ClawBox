@@ -71,6 +71,7 @@ class HostConfig(BaseModel):
     output_root: str = "/data/clawbox-results"
     minimum_disk_free_gib: int = Field(default=20, gt=0)
     tcp_tw_reuse: int | None = Field(default=None, ge=0, le=2)
+    ip_local_port_range: list[int] | None = Field(default=None, min_length=2, max_length=2)
     cube_proxy_connect_timeout_seconds: int | None = Field(default=None, ge=3, le=300)
     cubelet_tap_init_num: int | None = Field(default=None, ge=1)
     cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
@@ -82,6 +83,19 @@ class HostConfig(BaseModel):
     def valid_vm_count_ratios(cls, value):
         if value is not None and any(not math.isfinite(v) or v <= 0 for v in value.values()):
             raise ValueError("Cube VM-count ratios must be finite and positive")
+        return value
+
+    @field_validator("ip_local_port_range")
+    @classmethod
+    def valid_ip_local_port_range(cls, value):
+        if value is not None:
+            low, high = value
+            if isinstance(low, bool) or isinstance(high, bool):
+                raise ValueError("ip_local_port_range entries must be integer ports")
+            if not 1024 <= low < high <= 65535:
+                raise ValueError(
+                    "ip_local_port_range requires 1024 <= LOW < HIGH <= 65535"
+                )
         return value
 
     @model_validator(mode="before")
@@ -135,13 +149,33 @@ def _run(*argv: str) -> str:
 
 def apply_network(config: HostConfig) -> None:
     """Apply only an explicitly saved setting, and verify the kernel value."""
-    if config.tcp_tw_reuse is None:
-        return
-    desired = str(config.tcp_tw_reuse)
-    if _run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse') != desired:
-        _run('sudo', '-n', 'sysctl', '-w', f'net.ipv4.tcp_tw_reuse={desired}')
-    if _run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse') != desired:
-        raise RuntimeError('tcp_tw_reuse did not take effect; inspect sysctl permissions and rerun host apply')
+    if config.tcp_tw_reuse is not None:
+        desired = str(config.tcp_tw_reuse)
+        if _run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse') != desired:
+            _run('sudo', '-n', 'sysctl', '-w', f'net.ipv4.tcp_tw_reuse={desired}')
+        if _run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse') != desired:
+            raise RuntimeError(
+                'tcp_tw_reuse did not take effect; inspect sysctl permissions '
+                'and rerun host apply'
+            )
+    if config.ip_local_port_range is not None:
+        desired_ports = tuple(config.ip_local_port_range)
+        current_ports = tuple(int(value) for value in _run(
+            'sysctl', '-n', 'net.ipv4.ip_local_port_range',
+        ).split())
+        if current_ports != desired_ports:
+            _run(
+                'sudo', '-n', 'sysctl', '-w',
+                'net.ipv4.ip_local_port_range=' + ' '.join(map(str, desired_ports)),
+            )
+        applied_ports = tuple(int(value) for value in _run(
+            'sysctl', '-n', 'net.ipv4.ip_local_port_range',
+        ).split())
+        if applied_ports != desired_ports:
+            raise RuntimeError(
+                'ip_local_port_range did not take effect; inspect sysctl '
+                'permissions and rerun host apply'
+            )
 
 
 def reclaim_idle_cube_file_cache(
@@ -382,6 +416,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
                 values[key] = profile[key]
         if profile.get('tcp_tw_reuse') is not None:
             values['tcp_tw_reuse'] = profile['tcp_tw_reuse']
+        if profile.get('ip_local_port_range') is not None:
+            values['ip_local_port_range'] = profile['ip_local_port_range']
         if profile.get('cube_proxy_connect_timeout_seconds') is not None:
             values['cube_proxy_connect_timeout_seconds'] = profile['cube_proxy_connect_timeout_seconds']
         if profile.get('cubelet_tap_init_num') is not None:
@@ -450,6 +486,14 @@ def check(config: HostConfig) -> dict:
             'requested': config.tcp_tw_reuse,
             'scope': 'host network namespace; applied until reboot',
         }, 'Install sysctl and use a Linux host exposing net.ipv4.tcp_tw_reuse, or set tcp_tw_reuse: null to leave it unchanged.')
+    if config.ip_local_port_range is not None:
+        probe('local ephemeral TCP port range', lambda: {
+            'current': [int(value) for value in _run(
+                'sysctl', '-n', 'net.ipv4.ip_local_port_range',
+            ).split()],
+            'requested': config.ip_local_port_range,
+            'scope': 'host network namespace; applied until reboot',
+        }, 'Install sysctl and use a Linux host exposing net.ipv4.ip_local_port_range, or set ip_local_port_range: null to leave it unchanged.')
     if config.cube_proxy_connect_timeout_seconds is not None:
         probe('CubeProxy guest connect timeout', lambda: {
             **_cube_proxy_timeout_status(),

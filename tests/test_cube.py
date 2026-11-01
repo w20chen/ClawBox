@@ -684,6 +684,43 @@ def test_cube_client_bounds_a_stalled_command_stream() -> None:
     assert time.monotonic() - started < 0.5
 
 
+def test_cube_client_retries_only_preconnect_local_port_exhaustion(monkeypatch) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    sandbox = _Sandbox({"sandboxID": "port-retry"})
+    calls = []
+
+    def run(command: str, **_kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            cause = OSError(99, "Cannot assign requested address")
+            raise RuntimeError("connect failed") from cause
+        return SimpleNamespace(exit_code=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    sandbox.commands = SimpleNamespace(run=run)
+    result = client.run_command(sandbox, "true", timeout_s=1)
+    assert result.stdout == "ok"
+    assert calls == ["true", "true"]
+
+
+def test_cube_client_does_not_retry_ambiguous_command_failure(monkeypatch) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    sandbox = _Sandbox({"sandboxID": "no-retry"})
+    calls = []
+
+    def run(command: str, **_kwargs):
+        calls.append(command)
+        raise RuntimeError("stream ended after request was sent")
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    sandbox.commands = SimpleNamespace(run=run)
+    with pytest.raises(RuntimeError, match="stream ended"):
+        client.run_command(sandbox, "touch /tmp/result", timeout_s=1)
+    assert calls == ["touch /tmp/result"]
+
+
 def test_incremental_pause_cannot_silently_use_legacy_api() -> None:
     sandbox = _Sandbox()
     with pytest.raises(ValueError, match="explicit snapshot tier"):

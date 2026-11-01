@@ -132,6 +132,7 @@ VM pool and writes a profile only after checks succeed.
 | `cubelet_data_root`, `output_root` | `/data/cubelet`, `/data/clawbox-results` | Existing Cubelet storage and experiment outputs |
 | `minimum_disk_free_gib` | 20 | Required filesystem headroom |
 | `tcp_tw_reuse` | `null` | Preserve current value; explicit 0, 1, or 2 applies that kernel mode |
+| `ip_local_port_range` | `null` | Preserve the current host ephemeral TCP range; explicit `[LOW, HIGH]` applies inclusive port bounds until reboot. Large-concurrency Cube command streams should use a reviewed wide range such as `[10000, 65535]`. |
 | `cube_proxy_connect_timeout_seconds` | `null` | Preserve Cube default; explicit 3–300 seconds bounds guest connection setup |
 | `cubelet_tap_init_num` | `null` | Preserve Cube's warm TAP target; positive explicit value is a preallocation target, not a VM limit |
 | `cube_scheduler_overcommit` | `null` | Map actual Cube `InstanceType` to positive `cpu_ratio` and `mem_ratio` |

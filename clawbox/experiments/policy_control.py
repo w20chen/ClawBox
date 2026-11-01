@@ -294,6 +294,15 @@ class PolicyControlServer:
             # Nagle so persistent connections do not incur a delayed-ACK wait.
             disable_nagle_algorithm = True
 
+            def setup(self) -> None:
+                super().setup()
+                # HTTP/1.1 otherwise leaves one handler thread parked on every
+                # Runtime-side host-KB connection. Full-1280 observed more than
+                # 3,200 worker threads and a prediction timeout. Preserve pooled
+                # boundary calls while retiring connections idle across model
+                # waits; httpx reconnects transparently on the next request.
+                self.connection.settimeout(5.0)
+
             def do_GET(self) -> None:  # noqa: N802
                 if self.path != '/v1/kb/health' or owner.knowledge_manager is None:
                     self.send_error(HTTPStatus.NOT_FOUND)

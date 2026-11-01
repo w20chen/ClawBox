@@ -16,6 +16,7 @@ TIER_API_PATCH_FILE=$SCRIPT_DIR/tiered-memory-api.patch
 TIER_ISOLATION_PATCH_FILE=$SCRIPT_DIR/tiered-memory-isolation.patch
 TIMING_PATCH_FILE=$SCRIPT_DIR/checkpoint-phase-timing.patch
 INCREMENTAL_PATCH_FILE=$SCRIPT_DIR/incremental-cow-snapshot.patch
+PAGEMAP_FIX_REVISION_FILE=$SCRIPT_DIR/upstream-pagemap-bit61.revision
 TEMPLATE_BASE_PATCH_FILE=$SCRIPT_DIR/template-base-lineage.patch
 PRIORITY_PATCH_FILE=$SCRIPT_DIR/agentcgroup-priority.patch
 VGIC_STATE_PATCH_FILE=$SCRIPT_DIR/vgic-state-save.patch
@@ -52,7 +53,7 @@ require awk
 PATCH_FILES=(
   "$PATCH_FILE" "$HAIRPIN_PATCH_FILE" "$PROVENANCE_PATCH_FILE"
   "$TIER_API_PATCH_FILE" "$TIER_ISOLATION_PATCH_FILE" "$TIMING_PATCH_FILE"
-  "$INCREMENTAL_PATCH_FILE" "$TEMPLATE_BASE_PATCH_FILE"
+  "$INCREMENTAL_PATCH_FILE" "$PAGEMAP_FIX_REVISION_FILE" "$TEMPLATE_BASE_PATCH_FILE"
   "$PRIORITY_PATCH_FILE" "$VGIC_STATE_PATCH_FILE" "$NETWORK_PATCH_FILE" "$RUSTUP_URL_PATCH_FILE"
   "$BASE_REUSE_PATCH_FILE"
   "$CONTROL_TIMEOUT_PATCH_FILE" "$LIFECYCLE_TIMEOUT_PATCH_FILE"
@@ -89,6 +90,48 @@ require_current_patchset() {
   fi
 }
 
+apply_upstream_pagemap_fix() {
+  local base_revision tip_revision fetched_tip
+  local -a overlapping_files=(
+    hypervisor/docs/snapshot_restore.md
+    hypervisor/vm-migration/src/lib.rs
+    hypervisor/vmm/src/memory_manager.rs
+    hypervisor/vmm/src/pagemap_anon.rs
+    hypervisor/vmm/src/soft_dirty.rs
+  )
+  read -r base_revision tip_revision < "$PAGEMAP_FIX_REVISION_FILE"
+  [[ "$base_revision" =~ ^[0-9a-f]{40}$ && "$tip_revision" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "invalid upstream pagemap revision pin: $PAGEMAP_FIX_REVISION_FILE" >&2
+    exit 1
+  }
+  if grep -q 'const PAGEMAP_FILE_BIT: u64 = 1 << 61;' \
+      "$SOURCE_DIR/hypervisor/vmm/src/pagemap_anon.rs" && \
+      ! grep -q 'PAGEMAP_PFN_MASK' "$SOURCE_DIR/hypervisor/vmm/src/pagemap_anon.rs"; then
+    echo "upstream pagemap bit-61 fix already applied: $SOURCE_DIR"
+    return
+  fi
+
+  # PR #1343 was merged after v0.7.0. Fetch its immutable merged head, verify
+  # the pin, and use a three-way merge because ClawBox's earlier incremental
+  # snapshot patch changes the same file on the supported v0.7.0 base.
+  git -C "$SOURCE_DIR" fetch --no-tags --depth=50 \
+    "$CUBE_SOURCE_URL" refs/pull/1343/head
+  fetched_tip=$(git -C "$SOURCE_DIR" rev-parse FETCH_HEAD)
+  [[ "$fetched_tip" == "$tip_revision" ]] || {
+    echo "CubeSandbox PR #1343 moved: expected $tip_revision, fetched $fetched_tip" >&2
+    exit 1
+  }
+  git -C "$SOURCE_DIR" cat-file -e "$base_revision^{commit}"
+  # Three-way apply uses the index as "ours". The preceding ClawBox patches
+  # are intentionally uncommitted, so stage only the overlapping paths first.
+  git -C "$SOURCE_DIR" add -- "${overlapping_files[@]}"
+  git -C "$SOURCE_DIR" diff --binary "$base_revision".."$tip_revision" | \
+    git -C "$SOURCE_DIR" apply --3way -
+  git -C "$SOURCE_DIR" reset -- "${overlapping_files[@]}" \
+    hypervisor/vmm/src/pagemap_anon_bench.rs
+  echo "applied upstream CubeSandbox PR #1343 pagemap bit-61 fix: $SOURCE_DIR"
+}
+
 apply_final_placement_patches() {
   local patch_file
   for patch_file in "$NUMA_CLEAN_FILE_PATCH_FILE" "$CGROUP_BIRTH_PATCH_FILE"; do
@@ -106,6 +149,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   else
     require_current_patchset "$PATCHSET_PENDING" interrupted
   fi
+  apply_upstream_pagemap_fix
   git -C "$SOURCE_DIR" diff --check
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
@@ -190,6 +234,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
     git -C "$SOURCE_DIR" apply "$IRQ_ACTIVE_PATCH_FILE"
   fi
   apply_final_placement_patches
+  apply_upstream_pagemap_fix
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
@@ -294,6 +339,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
     git -C "$SOURCE_DIR" apply "$IRQ_ACTIVE_PATCH_FILE"
   fi
   apply_final_placement_patches
+  apply_upstream_pagemap_fix
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -360,6 +406,7 @@ apply_once "$IRQ_ROUTING_PATCH_FILE" "batched and deferred interrupt routing"
 apply_once "$IRQ_ACTIVE_PATCH_FILE" "activate only attached legacy IRQ routes"
 apply_once "$NUMA_CLEAN_FILE_PATCH_FILE" "retain shared file backing during NUMA migration and summarize checkpoint timings"
 apply_once "$CGROUP_BIRTH_PATCH_FILE" "start shims in their assigned cgroup without migrating shared mappings"
+apply_upstream_pagemap_fix
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"

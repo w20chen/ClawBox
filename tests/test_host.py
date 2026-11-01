@@ -13,6 +13,9 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"warm_root": "/data/../warm"}, {"warm_gib": -1},
     {"warm_gbi": 100}, {"local_node": "0"}, {"shared_borrow_percent": 101},
     {"tcp_tw_reuse": 3}, {"tcp_tw_reuse": True},
+    {"ip_local_port_range": [10000]},
+    {"ip_local_port_range": [20000, 10000]},
+    {"ip_local_port_range": [True, 65535]},
     {"cube_proxy_connect_timeout_seconds": 2},
     {"cube_proxy_connect_timeout_seconds": True},
     {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
@@ -49,6 +52,30 @@ def test_network_setting_is_explicit_verified_and_idempotent(monkeypatch):
     monkeypatch.setattr(host, '_run', lambda *args: '2')
     with pytest.raises(RuntimeError, match='did not take effect'):
         host.apply_network(HostConfig(tcp_tw_reuse=1))
+
+
+def test_ephemeral_port_range_is_explicit_verified_and_idempotent(monkeypatch):
+    from clawbox.experiments import host
+
+    current, writes = [[10000, 19999]], []
+
+    def run(*args):
+        if args[:3] == ('sudo', '-n', 'sysctl'):
+            writes.append(args)
+            current[0] = [int(value) for value in args[-1].split('=', 1)[1].split()]
+        return ' '.join(map(str, current[0]))
+
+    monkeypatch.setattr(host, '_run', run)
+    host.apply_network(HostConfig())
+    assert current[0] == [10000, 19999] and not writes
+    config = HostConfig(ip_local_port_range=[10000, 65535])
+    host.apply_network(config)
+    host.apply_network(config)
+    assert current[0] == [10000, 65535] and len(writes) == 1
+
+    monkeypatch.setattr(host, '_run', lambda *args: '10000 19999')
+    with pytest.raises(RuntimeError, match='ip_local_port_range did not take effect'):
+        host.apply_network(config)
 
 
 def test_idle_cube_cache_reclaim_targets_only_empty_numeric_pool_leaves(tmp_path):
@@ -165,6 +192,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
         "local_memory_high_watermark_mib": 20 * 1024,
         "warm_capacity_mib": 32 * 1024, "shared_memory_borrow_limit_mib": 8 * 1024,
         "tcp_tw_reuse": 1,
+        "ip_local_port_range": [10000, 65535],
         "cube_proxy_connect_timeout_seconds": 30,
         "cubelet_tap_init_num": 1536,
         "cube_master_log_level": "warn",
@@ -176,6 +204,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert config.shared_borrow_percent == 25
     assert config.local_gib == 24
     assert config.tcp_tw_reuse == 1
+    assert config.ip_local_port_range == [10000, 65535]
     assert config.cube_proxy_connect_timeout_seconds == 30
     assert config.cubelet_tap_init_num == 1536
     assert config.cube_master_log_level == "warn"

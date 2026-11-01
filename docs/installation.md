@@ -86,7 +86,8 @@ python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 
 The helper pins CubeSandbox v0.7.0, applies the required endpoint, networking,
 image-provenance, snapshot, cgroup-routing, bounded RPC, and guest-agent reconnect
-patches, and builds Cubelet and Shim. It does not install or restart services.
+patches, including the pinned upstream PR #1343 incremental-snapshot data-loss
+fix, and builds Cubelet and Shim. It does not install or restart services.
 Repeating the same patch set
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
@@ -218,6 +219,8 @@ WARM, COLD, and output paths. Detection reports physical facts; it does not
 measure how much capacity other workloads can spare. On a host without a
 separate WARM NUMA node, set `warm: false`. See the
 [host-field reference](reference.md#host-plan) for units and defaults.
+For large-concurrency runs, review `ip_local_port_range`; changing it requires
+`host apply` after reboot but no image rebuild or predictor retraining.
 
 ```bash
 bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"

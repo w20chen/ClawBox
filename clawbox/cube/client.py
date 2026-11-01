@@ -3,6 +3,7 @@ from __future__ import annotations
 from clawbox.experiments.control_timing import span
 
 import json
+import errno
 import os
 import queue
 import threading
@@ -528,28 +529,48 @@ class CubeSandboxClient:
         """
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
-        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+        deadline = time.monotonic() + timeout_s + self.command_stream_grace_s
+        for attempt in range(8):
+            result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
 
-        def invoke() -> None:
-            try:
-                result_queue.put(("result", sandbox.commands.run(
-                    command, timeout=timeout_s, cwd=cwd,
-                )))
-            except BaseException as exc:  # re-raise in the caller's context
-                result_queue.put(("error", exc))
+            def invoke() -> None:
+                try:
+                    result_queue.put(("result", sandbox.commands.run(
+                        command, timeout=timeout_s, cwd=cwd,
+                    )))
+                except BaseException as exc:  # re-raise in the caller's context
+                    result_queue.put(("error", exc))
 
-        thread = threading.Thread(target=invoke, name="cube-command", daemon=True)
-        thread.start()
-        thread.join(timeout_s + self.command_stream_grace_s)
-        if thread.is_alive():
-            raise TimeoutError(
-                "CubeSandbox command stream exceeded deadline "
-                f"({timeout_s:g}s + {self.command_stream_grace_s:g}s grace)"
-            )
-        kind, value = result_queue.get_nowait()
-        if kind == "error":
-            raise value
-        return value
+            thread = threading.Thread(target=invoke, name="cube-command", daemon=True)
+            thread.start()
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                raise TimeoutError(
+                    "CubeSandbox command stream exceeded deadline "
+                    f"({timeout_s:g}s + {self.command_stream_grace_s:g}s grace)"
+                )
+            kind, value = result_queue.get_nowait()
+            if kind == "result":
+                return value
+            if not self._local_address_exhaustion(value) or attempt == 7:
+                raise value
+            # connect(2) failed before any bytes could be sent, so repeating
+            # this command cannot duplicate guest work. Give TIME_WAIT sockets
+            # a bounded chance to clear without hiding other transport errors.
+            time.sleep(min(0.05 * 2 ** attempt, 1.0))
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _local_address_exhaustion(exc: BaseException) -> bool:
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if (isinstance(current, OSError)
+                    and current.errno in {errno.EADDRNOTAVAIL, 99, 10049}):
+                return True
+            current = current.__cause__ or current.__context__
+        return "[Errno 99] Cannot assign requested address" in str(exc)
 
     @staticmethod
     def file_nonempty(sandbox: Any, path: str, *, timeout_s: float) -> bool:

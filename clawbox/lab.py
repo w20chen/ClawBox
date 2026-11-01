@@ -532,6 +532,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
         raise RuntimeError("Host checks failed; profile not saved")
     wait_for_vm_ready(profile)
     profile['tcp_tw_reuse'] = getattr(args, 'tcp_tw_reuse', None)
+    profile['ip_local_port_range'] = getattr(args, 'ip_local_port_range', None)
     profile['cube_proxy_connect_timeout_seconds'] = getattr(
         args, 'cube_proxy_connect_timeout_seconds', None
     )

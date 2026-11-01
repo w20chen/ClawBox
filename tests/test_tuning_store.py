@@ -169,7 +169,7 @@ def test_ingest_accepts_valid_signed_batch(db):
     assert len(observations_for(db, tenant_id="tenant-a", repo_fingerprint="github.com/acme/foo")) == 2
 
 
-def test_ingest_rejects_invalid_observations(db):
+def test_ingest_retains_partial_observations_and_rejects_bad_signature(db):
     valid = make_obs("exec-1000")
     bad_sig = make_obs("exec-1001")
     incomplete = make_obs("exec-1002", complete=False)
@@ -186,13 +186,19 @@ def test_ingest_rejects_invalid_observations(db):
         ingest_secret=SECRET,
     )
     db.commit()
-    assert outcome.accepted == 1
-    assert len(outcome.rejected) == 4
+    assert outcome.accepted == 4
+    assert len(outcome.rejected) == 1
     reasons = {reason for _, reason in outcome.rejected}
-    assert "invalid HMAC signature" in reasons
-    assert any("incomplete" in reason for reason in reasons)
-    assert any("exit_code" in reason for reason in reasons)
-    assert any("collection_quality" in reason for reason in reasons)
+    assert reasons == {"invalid HMAC signature"}
+    stored = observations_for(
+        db, tenant_id="tenant-a", repo_fingerprint="github.com/acme/foo",
+    )
+    assert {row.execution_id for row in stored} == {
+        "exec-1000", "exec-1002", "exec-1003", "exec-1004",
+    }
+    assert any(not row.complete for row in stored)
+    assert any(row.exit_code == 1 for row in stored)
+    assert any(row.collection_quality == CollectionQuality.DEGRADED for row in stored)
 
 
 def test_ingest_replay_is_idempotent(db):

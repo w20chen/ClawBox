@@ -55,6 +55,9 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     rustup_url = (
         ROOT / "deploy" / "cubesandbox" / "builder-rustup-url.patch"
     ).read_text(encoding="utf-8")
+    pagemap_revision = (
+        ROOT / "deploy" / "cubesandbox" / "upstream-pagemap-bit61.revision"
+    ).read_text(encoding="utf-8")
 
     assert "CUBE_SOURCE_TAG=${CUBE_SOURCE_TAG:-v0.7.0}" in helper
     assert "apply --check" in helper
@@ -98,6 +101,10 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert "RUSTUP_URL_PATCH_FILE" in helper
     assert 'apply_once "$RUSTUP_URL_PATCH_FILE"' in helper
     assert "RUSTUP_INIT_URL" in rustup_url
+    assert 'apply_upstream_pagemap_fix' in helper
+    assert 'refs/pull/1343/head' in helper
+    assert '52e5e3d8e647de6e8ca366c2e142e24c9df927ba' in pagemap_revision
+    assert 'd6642820704866aa4caa385aeef017df6502a86e' in pagemap_revision
     assert '"phase":       "snapshot_create"' in lifecycle_timing
     assert '"phase":       "swap_out"' in lifecycle_timing
     assert '"duration_ms"' in lifecycle_timing
@@ -108,7 +115,6 @@ def test_setup_docs_reject_pod_ip_native_ssh_and_link_from_readme() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "semantic TCP endpoint" in guide
-    assert "--count 1" in guide
     assert "--count 4" in guide
     assert "--count 8" not in guide
     assert "docs/installation.md" in readme
