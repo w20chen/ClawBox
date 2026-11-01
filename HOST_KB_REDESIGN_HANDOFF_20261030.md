@@ -62,15 +62,22 @@ load-dependent stall. Native binaries remain unchanged. The read-only watcher
 under `host/checkpoint-watch-full-c1280-hostkb-network-20261101/` captures native
 thread stacks when a checkpoint exceeds 10 seconds, before timeout cleanup.
 Check the actual worker and terminal results before interpreting this run.
+The watcher captured a later 67.71-second successful checkpoint, request
+`3420de2f-3373-4a0c-8fb3-ffbde4b534e9`; its VM snapshot phase took 62.66 seconds.
+This is slow-checkpoint evidence, not another timeout. A bounded sampler under
+`host/native-samples-network-full/` is prepared to collect up to three short VMM
+CPU profiles if further slow checkpoints occur; check its receipts before
+claiming that any profiles were captured.
 
 The current run is not clean acceptance evidence yet. Its `urlman-12` validation
 has a proven false negative: the original recorded patch and current patch are
 identical, but neither contains the literal string required by the validator.
 `input-corrections/urlman-validation-evidence.json` proves this and names a
 separate corrected workload manifest; frozen inputs/results remain unchanged.
-PennyLane-3024 and PennyLane-3477 also hit real guest OOM in their 3 GiB Tool VMs;
+PennyLane-3024, -3477, -3057, and -5407 hit real guest OOM in their 3 GiB Tool VMs;
 see `host/network-guest-pennylane-3024-exit.txt` and
-`host/network-guest-pennylane-3477-oom.txt`. Host cgroup OOM counters stayed
+`host/network-guest-pennylane-3477-oom.txt`, and the additional
+`host/network-guest-oom-PennyLaneAI__pennylane-*.txt` captures. Host cgroup OOM counters stayed
 zero and do not rule out guest OOM. Targeted capacity probes are prepared in
 `capacity-checks/plan.json` but have not been executed; 8 GiB is a diagnostic
 ceiling, not measured required memory. Check affected template capacity before
@@ -78,7 +85,7 @@ claiming successful workload execution; preserve the other qualified templates.
 The live run also reported exit 255 immediately after restores for lektor-960
 and setuptools_scm-505. `host/network-restore-route-order.json` proves concurrent
 admissions reused the old port while the restoring callback waited for memory.
-The worker now invalidates that route and checks the restored bridge before
+The worker fix at `35bccb8` invalidates that route and checks the restored bridge before
 releasing its lifecycle lock for the reservation wait. Focused tests passed
 on Windows (120 passed, 2 skipped) and Kunpeng (122 passed), including concurrent
 admission ordering. This host-only fix is staged separately from the current
