@@ -4,12 +4,12 @@ No service, authentication or experiment policy lives here. The owner serializes
 each scope's transactions and publishes a prepared successor after durable commit.
 """
 from collections.abc import Mapping
-from copy import copy, deepcopy
+from copy import copy
 from dataclasses import replace
 import hashlib
 from pathlib import Path
 
-from clawbox.experiments.knowledge.layers import SharedSequence
+from clawbox.experiments.knowledge.layers import SharedSequence, RepositoryTransaction
 from clawtune_kb.store import load_seed
 from tool_resource.runtime_kb import RuntimeToolResourceKB, ClauseResourceKB
 from tool_time.lattice_kb import LatticeTimeKB, _sanitize_resources, _eligible_observation
@@ -85,8 +85,8 @@ class PrivateKnowledge:
         guest clock resets cannot backdate it into a prior generation.
         """
         result = copy(self)
-        result.tool_delta = deepcopy(self.tool_delta)
-        result.trie_delta = deepcopy(self.trie_delta)
+        result.tool_delta = self._fork_delta(self.tool_delta)
+        result.trie_delta = self._fork_delta(self.trie_delta)
         times = [r.ts_start for r in clauses]
         if call is not None:
             times.append(call.ts_start)
@@ -110,8 +110,36 @@ class PrivateKnowledge:
         result.last_time = max([self.last_time, *(r.ts_end for r in shifted),
                                 *([call.ts_end] if call is not None else [])])
         result.generation += 1
+        result.tool_delta._repo.seal()
+        result.trie_delta._repo.seal()
         result._install_views()
         return result
+
+    @staticmethod
+    def _fork_delta(previous):
+        result = copy(previous)
+        result._repo = RepositoryTransaction(previous._repo)
+        result._pending = list(previous._pending)
+        result._observed_counts = previous._observed_counts.copy()
+        result._legacy_counts = previous._legacy_counts.copy()
+        return result
+
+    def predict_tool_class(self, query):
+        from clawtune_sidecar.predictors.call_load import summarize, CompositionCache, compose
+        from clawtune_sidecar.contracts.load_prediction import CallLoadPrediction
+        from clawtune_sidecar.prediction_config import load_bucket_edges
+        edges = load_bucket_edges((100., 500., 2000., 10000.))
+        try:
+            direct = self.tool.predict_load_samples(query)
+            cache = CompositionCache()
+            result = CallLoadPrediction(targets={
+                target: summarize(target, boundaries, 'runtime', direct.get(target, {}).get('values', ()),
+                                  context=direct.get(target, {}).get('context', ()), cache=cache)
+                for target, boundaries in edges.items()
+            })
+        except Exception as exc:
+            result = compose('runtime', (), edges, reason=f'backend_error:{type(exc).__name__}')
+        return result.model_copy(update={'memory_measurement': query.memory_measurement})
 
     def predict(self, query, *, command_context=None, features=None, feature_call_id=None):
         from clawtune_sidecar.predictors.call_load import predict_call_load

@@ -1,4 +1,4 @@
-"""Synchronous control plane for native OpenClaw SSH tool executions.
+"""Session state for the asynchronous native OpenClaw control listener.
 
 Only admission/completion metadata crosses this HTTP boundary.  Commands,
 stdin, stdout, stderr, and workspace contents remain on the Runtime -> Tool
@@ -14,9 +14,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler
-from .http_server import LocalHTTPServer as ThreadingHTTPServer
 from typing import Any, Callable
 
 
@@ -273,7 +270,8 @@ class PolicyControlServer:
     """Concurrent, per-session admission endpoint for native SSH hooks."""
 
     def __init__(self, *, advertise_host: str, advertised_port: int,
-                 bind_host: str = "0.0.0.0", bind_port: int = 18080) -> None:
+                 bind_host: str = "0.0.0.0", bind_port: int = 18080,
+                 admission_workers: int = 1280) -> None:
         self.advertise_host = advertise_host
         self.advertised_port = advertised_port
         self.bind_host = bind_host
@@ -283,139 +281,10 @@ class PolicyControlServer:
         self._started = False
         self.requests: list[dict[str, Any]] = []
         self.knowledge_manager = None
-        owner = self
-
-        class Handler(BaseHTTPRequestHandler):
-            # The bridge sends both boundaries through one pooled connection.
-            # Every response has Content-Length; drain request bodies before
-            # accepting another request on an authenticated connection.
-            protocol_version = "HTTP/1.1"
-            # Headers and the small JSON body are written separately. Disable
-            # Nagle so persistent connections do not incur a delayed-ACK wait.
-            disable_nagle_algorithm = True
-
-            def setup(self) -> None:
-                super().setup()
-                # HTTP/1.1 otherwise leaves one handler thread parked on every
-                # Runtime-side host-KB connection. Full-1280 observed more than
-                # 3,200 worker threads and a prediction timeout. Preserve pooled
-                # boundary calls while retiring connections idle across model
-                # waits; httpx reconnects transparently on the next request.
-                self.connection.settimeout(5.0)
-
-            def do_GET(self) -> None:  # noqa: N802
-                if self.path != '/v1/kb/health' or owner.knowledge_manager is None:
-                    self.send_error(HTTPStatus.NOT_FOUND)
-                    return
-                from .knowledge.protocol import PROTOCOL, MAX_BODY_BYTES
-                self._json(HTTPStatus.OK, {'protocol_versions': [PROTOCOL],
-                                          'max_body_bytes': MAX_BODY_BYTES})
-
-            def do_POST(self) -> None:  # noqa: N802
-                started = time.monotonic()
-                record: dict[str, Any] = {"path": self.path, "request_start": started}
-                state: _Session | None = None
-                try:
-                    if self.path not in {"/v1/tool/admit", "/v1/tool/complete", "/v1/tool/start", "/v1/kb/predict", "/v1/kb/observe"}:
-                        self.send_error(HTTPStatus.NOT_FOUND)
-                        return
-                    token = self.headers.get("Authorization", "").removeprefix("Bearer ")
-                    state = owner._lookup(token)
-                    if state is None:
-                        self.close_connection = True
-                        self.send_error(HTTPStatus.UNAUTHORIZED)
-                        return
-                    length = int(self.headers.get("Content-Length", "0"))
-                    if length < 2 or length > (1048576 if self.path.startswith('/v1/kb/') else 65536):
-                        self.close_connection = True
-                        raise ValueError("invalid request size")
-                    body = json.loads(self.rfile.read(length))
-                    if self.path.startswith('/v1/kb/'):
-                        if owner.knowledge_manager is None:
-                            raise RuntimeError('host KB is not configured')
-                        if self.path.endswith('/observe'):
-                            with state.condition:
-                                execution = state.executions.get(body.get('execution_id'))
-                                if execution is None or execution.admission is None:
-                                    raise ValueError('observation has no admitted execution')
-                        operation = (owner.knowledge_manager.predict if self.path.endswith('/predict')
-                                     else owner.knowledge_manager.observe)
-                        response = operation(state.session_id, body)
-                        self._json(HTTPStatus.OK, response)
-                        record.update(status=200, session_id=state.session_id, kb_status=response.get('status'),
-                                      execution_id=body.get('execution_id'))
-                        return
-                    owner._validate(body, state.session_id)
-                    record.update(session_id=state.session_id,
-                                  execution_id=body["execution_id"])
-                    if self.path.endswith("/admit"):
-                        if owner.knowledge_manager is not None and body.get('execution_scope', 'agent-tool') == 'agent-tool' and body.get('operation') != 'filesystem':
-                            body['prediction'] = owner.knowledge_manager.claim(state.session_id, body)
-                        response, duplicate = state.admission(body)
-                    elif self.path.endswith('/start'):
-                        response, duplicate = state.execution_start(body)
-                    else:
-                        response, duplicate = state.completion(body)
-                    response["session_id"] = state.session_id
-                    response["execution_id"] = body["execution_id"]
-                    response["duplicate"] = duplicate
-                    try:
-                        self._json(HTTPStatus.OK, response)
-                    except (BrokenPipeError, ConnectionResetError) as exc:
-                        if self.path.endswith("/admit") and not duplicate:
-                            state.abandon_admission(body)
-                        record.update(
-                            status=499, error_type=type(exc).__name__,
-                            error=str(exc), admission_rolled_back=(
-                                self.path.endswith("/admit") and not duplicate
-                            ),
-                        )
-                        return
-                    record.update(status=200, duplicate=duplicate)
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    record["status"] = 400
-                    record["error_type"] = type(exc).__name__
-                    record["error"] = str(exc)
-                    self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"})
-                except RuntimeError as exc:
-                    record["status"] = 409
-                    record["error_type"] = type(exc).__name__
-                    record["error"] = str(exc)
-                    self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
-                except (BrokenPipeError, ConnectionResetError) as exc:
-                    record["status"] = 499
-                    record["error_type"] = type(exc).__name__
-                    record["error"] = str(exc)
-                except Exception as exc:
-                    record["status"] = 503
-                    record["error_type"] = type(exc).__name__
-                    record["error"] = str(exc)
-                    self._json(HTTPStatus.SERVICE_UNAVAILABLE,
-                               {"error": f"{type(exc).__name__}: {exc}"})
-                finally:
-                    record["response_end"] = time.monotonic()
-                    record["latency_seconds"] = record["response_end"] - started
-                    with owner._lock:
-                        owner.requests.append(record)
-
-            def _json(self, status: int, value: dict[str, Any]) -> None:
-                encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
-
-            def log_message(self, _format: str, *_args: object) -> None:
-                return
-
-        class Server(ThreadingHTTPServer):
-            request_queue_size = 4096
-            daemon_threads = True
-            allow_reuse_address = True
-
-        self.server = Server((bind_host, bind_port), Handler)
-        self.actual_port = int(self.server.server_port)
+        from .policy_http import PolicyHTTPServer
+        self.server = PolicyHTTPServer((bind_host, bind_port), self,
+                                       admission_workers=admission_workers)
+        self.actual_port = int(self.server.server_address[1])
         if self.advertised_port == 0:
             self.advertised_port = self.actual_port
         self.thread = threading.Thread(target=self.server.serve_forever,
@@ -503,6 +372,7 @@ class PolicyControlServer:
             raise RuntimeError("policy server did not bind its configured port")
         self._started = True
         self.thread.start()
+        self.server.wait_ready()
         return self
 
     def __exit__(self, _exc_type: object, exc: BaseException | None,
@@ -527,10 +397,13 @@ class PolicyControlServer:
         self._started = False
         try:
             self.server.shutdown()
-            self.server.server_close()
-            self.thread.join(timeout=5)
+            self.thread.join(timeout=10)
             if self.thread.is_alive():
                 failures.append("server thread did not stop")
+            else:
+                self.server.server_close()
+            if self.server.failure is not None:
+                failures.append(f"server failed: {self.server.failure}")
         except Exception as shutdown_error:
             failures.append(
                 f"server shutdown: {type(shutdown_error).__name__}: {shutdown_error}"

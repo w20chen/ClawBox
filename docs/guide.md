@@ -173,10 +173,23 @@ The generated YAML exposes these settings under `execution`:
 kb_scope_policy: pair
 kb_http_timeout_seconds: 30
 kb_observation_retries: 2
+kb_processes: 4
+kb_queue_capacity: 1024
 retain_clause_telemetry_artifacts: false
 ```
 
 Missing training targets retain ClawTune's explicitly marked imputed zeros.
+Host-live queries and updates run in `kb_processes` host child processes. A pair
+stays with one owner; different owners can compute concurrently. Each owner
+accepts at most `kb_queue_capacity` outstanding requests. Queue exhaustion is
+reported as an error, never as a prediction fallback. The existing control port
+handles idle connections asynchronously; resource-admission callbacks use a
+separate thread pool so they cannot occupy KB compute processes. Journal I/O
+can overlap another pair's computation, but an update is acknowledged only
+after its journal is durable and its new generation is published. Host process
+count changes require a new run ID, not host apply, image rebuilding or retraining.
+Linux uses forkserver seed preloading; physical sharing depends on copy-on-write.
+Windows loads a seed per owner. Include child processes when assessing memory.
 Measured guest memory keeps its own measurement identity. Enable telemetry
 artifact retention only when the full clause diagnostic file is needed; normal
 learning and result validation use compact records. Changing these settings

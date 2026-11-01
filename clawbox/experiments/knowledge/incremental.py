@@ -193,9 +193,37 @@ class _NodeMap(Mapping):
         return self.resolved[key]
 
 
+class _RecordIndex:
+    """Immutable seed postings plus an append-only private posting index."""
+    def __init__(self, samples):
+        self.base = SupersetIndex((i, row.features) for i, row in enumerate(samples))
+        self.delta = SupersetIndex()
+
+    def extend(self, rows, offset):
+        result = object.__new__(type(self))
+        result.base = self.base
+        result.delta = SupersetIndex()
+        result.delta.features = self.delta.features.copy()
+        result.delta.postings = self.delta.postings.copy()
+        touched = set()
+        for i, row in enumerate(rows, offset):
+            result.delta.features[i] = row.features
+            for feature in row.features:
+                if feature not in touched:
+                    result.delta.postings[feature] = set(result.delta.postings.get(feature, ()))
+                    touched.add(feature)
+                result.delta.postings[feature].add(i)
+        return result
+
+    def supersets(self, features):
+        return self.base.supersets(features) | self.delta.supersets(features)
+
+
 class _View:
     def __init__(self, samples, nodes, index, std, *, legacy, maximum, subset_coverage):
         self.samples = tuple(sorted(samples, key=lambda row: row.order))
+        self.record_index = _RecordIndex(self.samples)
+        self.logs = tuple(math.log1p(row.value) for row in self.samples)
         self.nodes, self.index, self.std = nodes, index, std
         self.raw_nodes = nodes
         self.parents = index.parent_sets
@@ -214,7 +242,8 @@ class _View:
         late = bool(self.samples and added[0].order < self.samples[-1].order)
         samples = (SharedSequence(self.samples, added) if shared and not late else
                    tuple(sorted((*self.samples, *added), key=lambda row: row.order)))
-        records = SupersetIndex((i, row.features) for i, row in enumerate(samples))
+        records = (_RecordIndex(samples) if late else
+                   self.record_index.extend(added, len(self.samples)))
         def generated(row):
             key = (row.features, row.core)
             if key not in contexts:
@@ -229,7 +258,8 @@ class _View:
             affected.update(self.index.subsets(row.features) if self.subset_coverage else own)
         affected.update(new)
         nodes = fork_map(self.raw_nodes, shared)
-        logs = [math.log1p(row.value) for row in samples]
+        logs = (tuple(math.log1p(row.value) for row in samples) if late else
+                SharedSequence(self.logs, tuple(math.log1p(row.value) for row in added)))
         std = statistics.stdev(logs) if len(logs) >= 2 else .5
         first_cover = fork_map(self.first_cover, shared) if new else self.first_cover
         parent_changes = set(new)
@@ -302,6 +332,7 @@ class _View:
             index.generation_order = generation_order
         result = object.__new__(_View)
         result.__dict__ = {**self.__dict__, 'samples': samples,
+                           'record_index': records, 'logs': logs,
                            'nodes': _NodeMap(nodes, parents, std, _SHRINKAGE_KAPPA, index._order),
                            'raw_nodes': nodes, 'index': index, 'std': std, 'parents': parents,
                            'generation_order': generation_order, 'first_cover': first_cover}

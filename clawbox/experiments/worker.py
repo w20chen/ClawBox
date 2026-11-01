@@ -2131,7 +2131,8 @@ class ExperimentWorker:
             )
         policy_context = (
             PolicyControlServer(advertise_host=control_host, advertised_port=policy_port,
-                                bind_port=policy_port)
+                                bind_port=policy_port,
+                                admission_workers=max(64, max(arm.concurrency for arm in arms)))
             if control_host else nullcontext(None)
         )
         gateway_context = (
@@ -2150,7 +2151,14 @@ class ExperimentWorker:
                 if self._completed(result_path, marker_path, arm.spec_digest):
                     self.results.append(ResultEnvelope.model_validate_json(result_path.read_text()))
                     continue
-                self.results.append(self._run_arm(arm, result_path, marker_path))
+                try:
+                    self.results.append(self._run_arm(arm, result_path, marker_path))
+                finally:
+                    knowledge = getattr(self, 'host_knowledge', None)
+                    if knowledge is not None and hasattr(knowledge, 'close'):
+                        knowledge.close()
+                    if self.policy_control is not None:
+                        self.policy_control.knowledge_manager = None
             self.policy_control = None
             self.model_gateway = None
         if write_summary:
@@ -2235,15 +2243,17 @@ class ExperimentWorker:
         if self.policy_control is not None:
             self.policy_control.knowledge_manager = None
         if arm.resources.prediction_mode == 'host-live':
-            from .host_kb import HostKnowledgeManager
+            from .knowledge.processes import ProcessKnowledgeManager, AdmissionMetadata
             from clawbox.clawtune_integration import source_revision
             tune_root = Path(os.environ.get('CLAWTUNE_ROOT', str(Path(__file__).resolve().parents[3] / 'ClawTune')))
             by_repo = {case.repository or case.case_id: prediction_providers[case.case_id] for case in session_cases}
-            self.host_knowledge = HostKnowledgeManager(
-                arm.resources.prediction_artifact, self.state_root / 'kb' / arm.arm_id,
+            self.host_knowledge = ProcessKnowledgeManager(
+                seed_path=arm.resources.prediction_artifact, root=self.state_root / 'kb' / arm.arm_id,
                 run_id=self.run_id, attempt_id=self.attempt_id, arm_id=arm.arm_id,
                 clawtune_revision=source_revision(tune_root),
-                metadata=lambda repo, models, command, digest: by_repo[repo]._metadata({'models': models}, command, digest))
+                processes=arm.execution.kb_processes, queue_capacity=arm.execution.kb_queue_capacity,
+                metadata=AdmissionMetadata(str(arm.resources.prediction_artifact),
+                    {repo: provider.evaluation_sandbox_identity for repo, provider in by_repo.items()}))
             if self.policy_control is None:
                 raise RuntimeError('host-live requires the experiment policy listener')
             self.policy_control.knowledge_manager = self.host_knowledge

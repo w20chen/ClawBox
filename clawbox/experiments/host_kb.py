@@ -53,6 +53,7 @@ class _Scope:
     predictions: dict = field(default_factory=dict)
     receipts: dict = field(default_factory=dict)
     claims: dict = field(default_factory=dict)
+    claimed_calls: dict = field(default_factory=dict)
     committed: dict = field(default_factory=dict)
     degraded: bool = False
     observed_memory_measurement: str | None = None
@@ -84,11 +85,32 @@ def _measured(operation):
     return measured
 
 
+def _transactional(operation):
+    """The process owner can suspend a transaction only at durable I/O."""
+    @wraps(operation)
+    def execute(self, *args):
+        transaction = operation(self, *args)
+        try:
+            commit = next(transaction)
+            while True:
+                try:
+                    self._append(*commit)
+                except BaseException as exc:
+                    commit = transaction.throw(exc)
+                else:
+                    commit = transaction.send(None)
+        except StopIteration as done:
+            return done.value
+    execute.prepare = operation
+    return execute
+
+
 class HostKnowledgeManager:
     def __init__(self, seed_path, root, *, run_id, attempt_id, arm_id,
-                 clawtune_revision, metadata, memory_measurement='cgroup_v2_environment_union_v1'):
+                 clawtune_revision, metadata, memory_measurement='cgroup_v2_environment_union_v1',
+                 prepared_seed=None):
         self.metrics = []
-        self.seed = SharedSeed(Path(seed_path))
+        self.seed = prepared_seed if prepared_seed is not None else SharedSeed(Path(seed_path))
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.metadata = metadata
@@ -153,6 +175,7 @@ class HostKnowledgeManager:
             if execution_id in scope.claims:
                 raise ValueError('duplicate execution claim in KB journal')
             scope.claims[execution_id] = row
+            scope.claimed_calls[row['call_key']] = execution_id
         elif kind == 'observe':
             payload = row['payload']
             validate_message(payload, 'observe')
@@ -192,7 +215,7 @@ class HostKnowledgeManager:
                 if previous['request_digest'] != request_digest:
                     raise ValueError('prediction call identity reused with different inputs')
                 return previous['response']
-            if any(c['call_key'] == key for c in scope.claims.values()):
+            if key in scope.claimed_calls:
                 raise ValueError('call already claimed; reconcile execution before resuming')
             context = dict(payload['command_context'])
             if context.get('repo') not in (None, payload['repository']):
@@ -209,7 +232,7 @@ class HostKnowledgeManager:
             models = {'tool': tool.model_dump(mode='json'),
                       **{name: diagnostics.backends[name].model_dump(mode='json') for name in ('trie', 'lattice')}}
             from dataclasses import replace
-            fallback, _ = scope.view.predict(replace(query, command=None))
+            fallback = scope.view.predict_tool_class(replace(query, command=None))
             models['tool_class'] = fallback.model_dump(mode='json')
             from clawtune_sidecar.contracts.load_prediction import summarize_pmu_evidence
             from clawtune_sidecar.predictors.tool_resource import _resource_class_for_duration_ms
@@ -238,6 +261,7 @@ class HostKnowledgeManager:
             return response
 
     @_measured
+    @_transactional
     def claim(self, session_id, request):
         scope = self.scopes[session_id]
         receipt_hash = hashlib.sha256(str(request.get('prediction_receipt', '')).encode()).hexdigest()
@@ -256,12 +280,14 @@ class HostKnowledgeManager:
             row = dict(kind='claim', execution_id=execution_id, receipt_hash=receipt_hash,
                 command=item['command'], command_sha256=item['command_sha256'], tool_name=item['tool_name'],
                 call_key=item['call_key'], selected=item['selected'], bindings=item['bindings'])
-            self._append(scope, row)
+            yield scope, row
             scope.claims[execution_id] = row
+            scope.claimed_calls[item['call_key']] = execution_id
             item['execution_id'] = execution_id
             return dict(item['selected'])
 
     @_measured
+    @_transactional
     def observe(self, session_id, payload):
         validate_message(payload, 'observe')
         scope = self._scope(session_id, payload)
@@ -291,15 +317,16 @@ class HostKnowledgeManager:
                 if previous[0] != payload_digest:
                     raise ValueError('execution reused with different learning payload')
                 return dict(status='duplicate', scope_generation=previous[1], payload_sha256=payload_digest)
-            prepare_started = time.monotonic()
+            prepare_started, prepare_cpu = time.monotonic(), time.thread_time()
             successor = scope.view.successor(call, clauses)
             self.metrics.append(dict(operation="prepare_overlay", session_id=session_id,
-                                     status="ok", seconds=time.monotonic() - prepare_started))
+                                     status="ok", seconds=time.monotonic() - prepare_started,
+                                     cpu_seconds=time.thread_time() - prepare_cpu))
             # Receipt is a session-local opaque handle, not authentication. The
             # durable payload stores its hash instead of the reusable wire value.
             durable = dict(normalized, prediction_receipt=receipt_hash)
-            self._append(scope, dict(kind='observe', payload=durable, payload_digest=digest(durable),
-                                     wire_digest=payload_digest, generation=successor.generation))
+            yield scope, dict(kind='observe', payload=durable, payload_digest=digest(durable),
+                             wire_digest=payload_digest, generation=successor.generation)
             scope.view = successor
             scope.remember_memory_measurement(call)
             scope.committed[execution_id] = (payload_digest, successor.generation)

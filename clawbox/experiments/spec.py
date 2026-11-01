@@ -175,6 +175,8 @@ class ExecutionSpec(StrictFrozenModel):
     retain_clause_telemetry_artifacts: bool = False
     kb_http_timeout_seconds: float = Field(default=30., gt=0, allow_inf_nan=False)
     kb_observation_retries: int = Field(default=2, ge=0, le=5)
+    kb_processes: int = Field(default=4, ge=1, le=64)
+    kb_queue_capacity: int = Field(default=1024, ge=1)
     control_timing_details: bool = False
     # The live gateway always retains request/response content in memory while
     # it is needed for replay identity and retries. Normal result artifacts

@@ -131,6 +131,33 @@ def test_validation_failure_cannot_publish_or_learn(tmp_path, monkeypatch):
     assert manager.scopes['a'].view.generation == 0
 
 
+def test_failed_journal_does_not_publish_prepared_generation(tmp_path, monkeypatch):
+    from copy import deepcopy
+    manager = setup_manager(tmp_path)()
+    manager.reserve('a', 'repo')
+    request = prediction_payload()
+    receipt = manager.predict('a', request)['prediction_receipt']
+    manager.claim('a', dict(execution_id='exec', prediction_receipt=receipt,
+                           command=request['command'], command_sha256=request['command_sha256']))
+    call = CompletedCall('repo', 'exec', 'sleep 1', 1., 4.)
+    observation = {k:v for k,v in request.items()
+                   if k not in ('event_id', 'tool_call_id', 'command_context', 'raw_params')}
+    observation.update(execution_id='exec', prediction_receipt=receipt, call=asdict(call), clauses=[],
+        call_provenance=training_target_provenance(call),
+        quality=dict(collection_validity='valid', cleanup='ok', loss_total=0, reason=None))
+    old = manager.scopes['a'].view
+    append = manager._append
+    def fail(*args):
+        raise OSError('injected durable write failure')
+    monkeypatch.setattr(manager, '_append', fail)
+    with pytest.raises(OSError, match='durable write'):
+        manager.observe('a', deepcopy(observation))
+    assert manager.scopes['a'].view is old
+    assert 'exec' not in manager.scopes['a'].committed
+    monkeypatch.setattr(manager, '_append', append)
+    assert manager.observe('a', observation)['scope_generation'] == 1
+
+
 def test_remote_sidecar_does_not_create_local_knowledge(tmp_path):
     from clawbox.experiments.knowledge.runtime_state import build_state
     from clawbox.experiments.knowledge.runtime_config import HostSidecarConfig as SidecarConfig

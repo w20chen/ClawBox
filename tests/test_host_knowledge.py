@@ -107,3 +107,33 @@ def test_1280_empty_scopes_share_seed_evidence(tmp_path):
     assert all(s.maintenance is seed.maintenance for s in scopes)
     assert all(s.tool._public is seed.tool._public for s in scopes)
     assert all(s.trie._repo.base is seed.trie._repo for s in scopes)
+
+
+def test_published_generations_keep_samples_and_tool_class_results(tmp_path):
+    seed = seed_at(tmp_path)
+    first = seed.open().successor(CompletedCall('org/repo', 'exec', 'python -m pytest -q', 10., 12.),
+                                 [observation(10)])
+    query = ToolCallQuery('org/repo', 'exec', 'python -m pytest -q', 10000.)
+    before = first.tool.predict_load_samples(query)
+    next_view = first
+    for i in range(70):
+        next_view = next_view.successor(
+            CompletedCall('org/repo', 'exec', query.command, 20.+i*2, 21.+i*2), [])
+    assert first.tool.predict_load_samples(query) == before
+    assert next_view.generation == 71
+    commandless = replace(query, command=None)
+    original, _ = next_view.predict(commandless)
+    assert next_view.predict_tool_class(commandless) == original
+
+
+def test_append_record_index_matches_full_index_and_keeps_old_generation():
+    from types import SimpleNamespace
+    from clawbox.experiments.knowledge.incremental import _RecordIndex
+    from kb_common.feature_index import SupersetIndex
+    rows = [SimpleNamespace(features=frozenset(v)) for v in [('a',), ('a','b'), ('c',)]]
+    original = _RecordIndex(rows[:1])
+    current = original.extend(rows[1:], 1)
+    reference = SupersetIndex(enumerate(row.features for row in rows))
+    for features in [(), ('a',), ('a','b'), ('c',), ('missing',)]:
+        assert current.supersets(features) == reference.supersets(features)
+    assert original.supersets(()) == {0}

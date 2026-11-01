@@ -42,7 +42,15 @@ may remain valid but online-learning coverage is degraded. Bridge records carry
 complete online-learning evidence. `recovered_sessions` and
 `uninterrupted_timing` distinguish retained trace results from a continuous run.
 Host KB operation timings are in seconds; `prepare_overlay` measures preparation
-before journal commit, and `claim` includes durable receipt admission. Bridge
+before journal commit, and `claim` includes durable receipt admission. Operation
+records also retain owner timings: `owner_queue` includes IPC and owner scheduling,
+`journal_wait` includes the writer queue and durable I/O, and `cpu_seconds` is
+execution-thread CPU time, excluding time spent waiting for the writer.
+`kb/ARM/operations/owner-*.jsonl` is flushed every 128 accumulated operation
+records and on clean shutdown; an interrupted worker may lack the final batch.
+Live memory samples list KB child processes separately in `kb_owners`; parent
+RSS alone no longer includes the KB. Summed RSS can double-count shared seed
+pages; use PSS/USS when measuring physical process-family memory. Bridge
 `kb_post_seconds` measures observation delivery including retries. Memory events
 include worker-process RSS, CPU time, and thread count; these include the rest of
 the worker and must not be described as isolated KB consumption. `seed_file_bytes`

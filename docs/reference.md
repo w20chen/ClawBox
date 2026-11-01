@@ -312,6 +312,8 @@ Fields are under `execution`:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `kb_scope_policy` | `pair` | Host-live knowledge isolation; currently only independent pairs are supported. |
+| `kb_processes` | 4 | Host-live compute processes, 1–64. Each pair has one fixed owner; all three KBs and the existing admission fallback policy remain active. Uses host control CPU resources. Requires a new run ID; no host apply, image rebuild or retraining. |
+| `kb_queue_capacity` | 1024 | Maximum outstanding requests per KB process, positive integer. Includes queued and executing requests; exhaustion fails explicitly. Increase for a new run if the recorded owner queue fills. |
 | `kb_http_timeout_seconds` | 30 | Positive finite seconds for prediction and the total observation delivery deadline. |
 | `kb_observation_retries` | 2 | 0–5 additional observation delivery attempts within that deadline. Commands are never retried. |
 | `retain_clause_telemetry_artifacts` | `false` | Write full Tool clause-telemetry files for diagnostics. Compact learning and integrity records are always retained. |
