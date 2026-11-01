@@ -480,7 +480,9 @@ def test_vm_verification_tolerates_exited_auxiliary_thread(monkeypatch, tmp_path
         if path.as_posix() == '/proc/100/status':
             raise disappeared(3, 'No such process')
         if path.as_posix() == '/proc/101/status':
-            return 'Name: vcpu0\nCpus_allowed_list: 0-1\n'
+            # The task mask may be broader than the exact cpuset cgroup. Linux
+            # schedules on their intersection, so this remains NUMA-local.
+            return 'Name: vcpu0\nCpus_allowed_list: 0-3\n'
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'read_text', read)
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_lru_bytes',
@@ -488,6 +490,10 @@ def test_vm_verification_tolerates_exited_auxiliary_thread(monkeypatch, tmp_path
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_anon_bytes',
                         lambda path: {0: 1024})
     assert [t['tid'] for t in domain.verify(0, 'tool', 'vm')['threads']] == [101]
+    (leaf / 'cpuset.cpus.effective').write_text('0-3')
+    with pytest.raises(RuntimeError, match='does not exactly match'):
+        domain.verify(0, 'tool', 'vm')
+    (leaf / 'cpuset.cpus.effective').write_text('0-1')
     # A freshly restored incremental snapshot can be entirely file-backed.
     # Shared file cache is not evidence about the VMM allocation policy.
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_lru_bytes',

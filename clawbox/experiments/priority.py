@@ -969,9 +969,12 @@ class PriorityDomain:
             configured_cpus
             or Path(f'/sys/devices/system/node/node{configured_node}/cpulist').read_text().strip()
         )
-        if not parse_cpu_list(required_cpus) <= parse_cpu_list(cpus):
+        requested = parse_cpu_list(required_cpus)
+        effective = parse_cpu_list(cpus)
+        if effective != requested:
             raise RuntimeError(
-                f'CubeSandbox native cgroup excludes requested CPUs at {actual}: '
+                f'CubeSandbox native cgroup CPU set does not exactly match '
+                f'the requested NUMA CPUs at {actual}: '
                 f'requested={required_cpus}, effective={cpus}'
             )
         deadline = time.monotonic() + self.native_vcpu_ready_grace_seconds
@@ -1003,14 +1006,17 @@ class PriorityDomain:
                     f'CubeSandbox native cgroup has no vCPU threads: {actual}'
                 )
             time.sleep(.05)
-        requested = parse_cpu_list(required_cpus)
-        escaped = [
+        # sched affinity and a cpuset cgroup are independent restrictions. A
+        # broad task mask is safe because the exact cgroup CPU set above is
+        # still enforced; reject only a task mask that removes requested CPUs.
+        incomplete = [
             thread for thread in vcpus
-            if not parse_cpu_list(thread['cpus_allowed']) <= requested
+            if not requested <= parse_cpu_list(thread['cpus_allowed'])
         ]
-        if escaped:
+        if incomplete:
             raise RuntimeError(
-                f'CubeSandbox native vCPU affinity escaped NUMA CPUs {required_cpus}: {escaped}'
+                f'CubeSandbox native vCPU affinity does not cover NUMA CPUs '
+                f'{required_cpus}: {incomplete}'
             )
         self._vcpu_threads[key] = tuple(
             (thread['tid'], thread['name']) for thread in vcpus
