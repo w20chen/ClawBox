@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -83,6 +84,45 @@ def _split_deferred_timeout(profile_command: str) -> tuple[str, float | None]:
     return remainder, requested
 
 
+def _collector_visible_launcher(command: str, execution_id: str) -> str:
+    """Express OpenClaw's literal env/sh launcher as shell builtins.
+
+    The collector parses the executed script. An external env/sh clause owns
+    the entire payload tree and hides its individual commands from learning.
+    Only the standard, literal launcher is eligible; arbitrary shell programs
+    and environment options retain their original execution semantics.
+    """
+    quote = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+            elif quote == '"' and char in '$`':
+                return command
+        elif char in "'\"":
+            quote = char
+        elif char in '$`;&|<>*?[]{}()~\n':
+            return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if len(words) < 5 or words[0] != 'env' or words[-3:-1] != ['/bin/sh', '-c']:
+        return command
+    assignments = words[1:-3]
+    allowed = {'PATH', 'HOME', 'GIT_CONFIG_GLOBAL', 'CLAWTUNE_EXECUTION_ID', 'OPENCLAW_SHELL'}
+    if (not assignments or any('=' not in word or word.partition('=')[0] not in allowed
+                               for word in assignments)
+            or f'CLAWTUNE_EXECUTION_ID={execution_id}' not in assignments):
+        return command
+    return 'export ' + ' '.join(shlex.quote(word) for word in assignments) + '\n' + words[-1]
+
+
 def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
     for index, argument in enumerate(argv):
         marker = argument.find(PREFIX)
@@ -106,9 +146,9 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
             continue
         command = argument[:marker] + payload
         # OpenClaw wraps the logical command in a session-specific env/shell
-        # launcher after ClawTune creates the envelope. Preserve that wrapper
-        # for execution, but carry the original payload separately so the Tool
-        # collector and KB do not learn per-session PATHs or execution IDs.
+        # launcher after ClawTune creates the envelope. Carry the original
+        # payload separately for the call key, and expose payload clauses by
+        # expressing the recognized launcher with builtins below.
         encoded_profile = metadata.get("profile_command_b64")
         if isinstance(encoded_profile, str) and encoded_profile:
             try:
@@ -121,9 +161,8 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
         if deferred_timeout is not None:
             metadata["deferred_tool_timeout_seconds"] = deferred_timeout
         encoded = _bridge_header(metadata, profile_command)
-        argv[index] = (
-            argument[:marker] + PREFIX + "b64:" + encoded + "\n" + payload
-        )
+        command = _collector_visible_launcher(command, metadata['execution_id'])
+        argv[index] = PREFIX + "b64:" + encoded + "\n" + command
         # OpenClaw's exec result is a combined stream. Merge at the remote
         # shell, before SSH's independent stdout/stderr channels can reorder
         # sequential writes. Filesystem and maintenance calls retain separate

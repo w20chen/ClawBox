@@ -6,6 +6,7 @@ import io
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -278,7 +279,7 @@ def test_openclaw_backend_preparation_is_admitted_but_not_counted_as_agent_tool(
     assert argv[-1].startswith(policy_ssh.PREFIX)
 
 
-def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
+def test_wrapped_exec_admits_logical_digest_and_exposes_payload_clauses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CLAWBOX_REAL_SSH", "/fake/ssh")
@@ -326,18 +327,19 @@ def test_wrapped_exec_admits_logical_digest_and_preserves_effective_command(
 
     assert policy_ssh.main() == 0
     request = posted[0][1]
-    effective = "{\n" + wrapper + logical + "'\n} 2>&1"
+    script = "export PATH=/state/session-a/bin CLAWTUNE_EXECUTION_ID=exec-wrapped\ncd /workspace && " + logical
+    effective = "{\n" + script + "\n} 2>&1"
     assert request["command_sha256"] == hashlib.sha256(logical.encode()).hexdigest()
     assert request["effective_command_sha256"] == hashlib.sha256(effective.encode()).hexdigest()
     launched_remote = launched[0][-1]
-    assert launched_remote.startswith("{\n" + wrapper + policy_ssh.PREFIX + "b64:")
+    assert launched_remote.startswith("{\n" + policy_ssh.PREFIX + "b64:")
     header = launched_remote.split(policy_ssh.PREFIX + "b64:", 1)[1].split("\n", 1)[0]
     bridge_metadata = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
     encoded_profile = bridge_metadata["profile_command_b64"]
     assert base64.urlsafe_b64decode(
         encoded_profile + "=" * (-len(encoded_profile) % 4)
     ).decode() == logical
-    assert launched_remote.endswith("\n" + logical + "'\n} 2>&1")
+    assert launched_remote.endswith("\n" + script + "\n} 2>&1")
 
 
 @pytest.mark.parametrize('progress', [False, True])
@@ -538,6 +540,33 @@ def test_output_order_is_merged_only_for_exec(tool_name):
         else:
             assert result.stdout == "second\nthird\n"
             assert result.stderr == "first\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell")
+def test_visible_launcher_preserves_environment_cwd_input_and_status(tmp_path):
+    payload = "cd " + shlex.quote(str(tmp_path)) + " && " + (
+        "printf '%s\\n' \"$HOME\" \"$PWD\"; cat; printf 'error\\n' >&2; exit 7")
+    wrapper = "env " + " ".join(map(shlex.quote, [
+        'HOME=/tmp/a $literal `not-executed`', 'CLAWTUNE_EXECUTION_ID=exec-test',
+        'OPENCLAW_SHELL=exec'])) + " /bin/sh -c " + shlex.quote(payload)
+    visible = policy_ssh._collector_visible_launcher(wrapper, 'exec-test')
+    assert visible != wrapper
+    original, corrected = [subprocess.run(['/bin/sh', '-c', script], input='input\n',
+        capture_output=True, text=True) for script in (wrapper, visible)]
+    assert (original.returncode, original.stdout, original.stderr) == (
+        corrected.returncode, corrected.stdout, corrected.stderr)
+    assert corrected.returncode == 7
+
+
+@pytest.mark.parametrize('command', [
+    "env HOME=$HOME CLAWTUNE_EXECUTION_ID=exec-test /bin/sh -c 'echo ok'",
+    "env IFS=x CLAWTUNE_EXECUTION_ID=exec-test /bin/sh -c 'echo ok'",
+    "env -i CLAWTUNE_EXECUTION_ID=exec-test /bin/sh -c 'echo ok'",
+    "env HOME=/tmp CLAWTUNE_EXECUTION_ID=other /bin/sh -c 'echo ok'",
+    "env HOME=/tmp CLAWTUNE_EXECUTION_ID=exec-test /bin/sh -c 'echo ok'; echo after",
+])
+def test_visible_launcher_leaves_other_shell_programs_intact(command):
+    assert policy_ssh._collector_visible_launcher(command, 'exec-test') == command
 
 
 def test_cancellation_keeps_ssh_alive_until_remote_cleanup(monkeypatch):

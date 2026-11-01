@@ -387,6 +387,9 @@ an eligible, uncensored guest-memory observation, then queries
 `guest_memtotal_minus_memavailable` for that pair. Admission metadata retains
 the queried measurement and the host-growth estimate's proxy semantics. Use a
 new run ID when updating this host policy; no image rebuild or retraining is needed.
+The Runtime SSH shim exposes standard OpenClaw payload clauses to the collector
+by using shell builtins for launcher environment setup. Update the host checkout
+and start a new run to use this correction; existing guest templates remain valid.
 `measurement.output.directory` defaults to `/results` and is a worker fallback.
 The supported CLI supplies the host output root through `--output-root` or
 `CLAWBOX_OUTPUT_ROOT` (default `results`). Diagnostic logging does not disable

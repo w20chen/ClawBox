@@ -165,6 +165,11 @@ does not repeat a full corpus audit. Use `experiment validate SPEC --inputs` aft
 you intentionally replace trace or prediction files; it is the slower command that
 reparses and rehashes all inputs.
 
+For host-live learning, use the current host checkout when starting a new run.
+The injected Runtime SSH shim keeps standard OpenClaw launcher environment
+setup separate from executable payload clauses, so observations match prediction
+commands. This host update needs a new run ID, without rebuilding guest images.
+
 ### Package network setup
 
 Keep project-specific proxy and pip mirror exports in the selected ClawBox
