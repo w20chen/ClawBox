@@ -5081,6 +5081,12 @@ class ExperimentWorker:
                         discard_failed_policy_session = True
             for host_sampler in tuple(locals().get("host_rss_samplers", {}).values()):
                 cleanup_step("host RSS sampler", host_sampler.stop)
+            # Stop every leaf writer while these cgroups still belong to this
+            # session.  Destroy can make a numeric Cubelet cgroup immediately
+            # reusable; unregistering afterwards lets a late pressure poll
+            # write the old VM's controls into a newly created VM's leaf.
+            if progress_control:
+                cleanup_step('pressure session', lambda: progress_control.unregister(session_id))
             tool_destroy_s = cleanup_step("Tool sandbox", lifecycle.close)
             if tool_destroy_s is not None:
                 cleanup_step("Tool destroy event", lambda: events.write({
@@ -5139,8 +5145,6 @@ class ExperimentWorker:
                     lambda: coordinator.release_capacity(session_id, lifetime),
                 )
             cleanup_step("coordinator session", lambda: coordinator.unregister(session_id))
-            if progress_control:
-                cleanup_step('pressure session', lambda: progress_control.unregister(session_id))
             if watermark_controller is not None:
                 cleanup_step(
                     "watermark session", lambda: watermark_controller.unregister(session_id),

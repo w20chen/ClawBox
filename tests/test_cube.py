@@ -1252,9 +1252,24 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             self.pause_calls += 1
             return super().pause(wait=wait, **kwargs)
 
+        def kill(self):
+            if agent_finished[0]:
+                assert all(not controller.vms for controller in pressure_instances)
+            super().kill()
+
     SnapshotSandbox.items = {}
     SnapshotSandbox.sequence = 0
     SnapshotSandbox.created = []
+    agent_finished = [False]
+    pressure_instances = []
+    real_pressure_control = worker_module.PressureControl
+
+    class ObservedPressureControl(real_pressure_control):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            pressure_instances.append(self)
+
+    monkeypatch.setattr(worker_module, "PressureControl", ObservedPressureControl)
     # This simulated lifecycle has no host microVM processes. Keep the real
     # sampler, but isolate its procfs discovery from the test host OS.
     from clawbox.experiments.memory import SandboxRSSSampler
@@ -1413,6 +1428,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             "endpoint_host": admission2["host"],
             "endpoint_port": admission2["port"],
         })
+        agent_finished[0] = True
         return {
             "agent_pid_file": f"/state/openclaw/{session_id}/agent.pid",
             "tool_latencies": [0.01, 0.01], "runtime_traces": [],
