@@ -162,6 +162,33 @@ does not repeat a full corpus audit. Use `experiment validate SPEC --inputs` aft
 you intentionally replace trace or prediction files; it is the slower command that
 reparses and rehashes all inputs.
 
+### Package network setup
+
+Keep project-specific proxy and pip mirror exports in the selected ClawBox
+`machine.env`, which `scripts/clawbox` loads, rather than changing the host's
+general shell proxy settings. For pip builds without SOCKS support, use a working
+HTTP proxy endpoint in `HTTP_PROXY`, `HTTPS_PROXY` and their lowercase equivalents.
+Keep internal Cube and cache addresses in `NO_PROXY` and `no_proxy`. If that
+proxy uses an SSH forward, keep its tunnel connected. Verify package downloads
+after loading the project environment in a fresh shell. These host settings
+alone do not configure Tool VMs.
+
+Use `scripts/clawbox-package-cache start --bind-address HOST_IP` and
+`scripts/clawbox-pypi-cache start --bind-address HOST_IP`, with `sudo bash`, to
+create persistent host caches. Both accept `--data-root` for existing or new
+cache storage; inspect existing containers before changing paths. In the
+experiment YAML, set `execution.apt_cache_proxy_url` to
+`http://HOST_IP:3142` and `execution.pypi_cache_index_url` to
+`http://HOST_IP:3141/root/pypi/+simple/`. These explicit settings work with either
+internet policy. Use a new run ID; no template rebuild, host apply or retraining
+is needed.
+
+Choose cache upstream mirrors reachable from your host. Preserve existing cache
+data and back up its configuration before changing mirrors. Verify `apt-get
+update`, an actual package install, and `python3 -m pip install` in a disposable
+Tool VM before the next experiment. A running cache service alone does not prove
+download access.
+
 ## 4. Register templates and verify VM access
 
 Register the standard 1 GiB Runtime and 3 GiB Tool pair:

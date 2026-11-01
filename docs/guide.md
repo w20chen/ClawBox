@@ -302,6 +302,14 @@ the deadline retries notifications only. Changes to images, replay behavior or
 sampling settings require a new run ID and fresh qualification when requested
 by `launch`.
 
+For repeated package downloads, set `execution.apt_cache_proxy_url` and
+`execution.pypi_cache_index_url` to your reachable host caches. Explicit cache
+settings apply even with `sandbox.allow_internet_access: true`; other network
+access follows that policy. Omit the cache fields to use direct package access
+in open VMs. Verify an actual APT update/install and pip install before a large
+run. See [package network setup](installation.md#package-network-setup).
+Changing these fields requires a new run ID, but no image rebuild or retraining.
+
 For high-concurrency runs, leave `execution.worker_cyclic_gc_enabled: false`
 (the default) to defer host-worker cyclic garbage collection until execution
 and cleanup finish. This avoids whole-worker pauses while callbacks are due.

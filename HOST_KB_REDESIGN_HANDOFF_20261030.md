@@ -38,8 +38,14 @@ cleanup is verified. Evidence is `host/freshssh-terminal-audit.json` and
 `host/freshssh-failed-checkpoint-phases.jsonl`. No Full run is active.
 The failed-session replay cancellation fix passed 36 tests on Windows and
 Kunpeng (`host/gateway-cancel-linux-tests.txt`); it has not had another Full run.
-Resolve the checkpoint stall and assess the package-install queue before another
-attempt. Earlier failed runs remain failure evidence. Do not refresh the
+Resolve the checkpoint stall before another attempt. Package network repair is
+verified on the host and a disposable PennyLane Tool VM: APT update/install,
+pip install/import, repeated update, and cleanup passed. Evidence is under
+`network-check/`; the prepared next specification is
+`experiment-network-caches.yaml`. It explicitly selects the existing host APT
+and PyPI caches with internet access enabled. Host proxy access depends on the
+saved `kunpeng-tunnel` SSH forward remaining connected. Earlier failed runs
+remain failure evidence. Do not refresh the
 templates again for host-only changes.
 
 Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the

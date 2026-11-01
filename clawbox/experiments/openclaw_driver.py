@@ -305,14 +305,13 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "/usr/local/bin/tool-bridge --self-test | grep -q '\"progress_events\":true' || "
         "{ echo 'Toolbridge lacks execution progress events; rebuild the Tool image with clawbox experiment images' >&2; exit 1; }; "
     ) if require_progress_events else ""
-    # APT has no safe automatic fallback when its proxy is unavailable. With
-    # outbound access enabled, use the guest's normal Kunpeng network path and
-    # remove only ClawBox's own proxy file in case this VM was restored.
+    # Explicit package-cache settings apply with either network policy. Without
+    # an explicit proxy, open VMs use their normal network path.
     apt_proxy_setup = (
         "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache; "
         if allow_internet_access else ""
     )
-    if apt_cache_proxy_url and not allow_internet_access:
+    if apt_cache_proxy_url:
         directive = f'Acquire::http::Proxy "{apt_cache_proxy_url}";\n'
         apt_proxy_setup = (
             "mkdir -p /etc/apt/apt.conf.d; "
@@ -321,12 +320,12 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         )
     # Do not query a stale cache in addition to PyPI: pip considers every
     # configured index and a slow extra index can delay every resolution. The
-    # cache is therefore the closed-network source; open VMs use PyPI directly.
+    # cache is therefore the sole index when explicitly configured.
     pypi_environment = (
         "PIP_INDEX_URL=https://pypi.org/simple "
         if allow_internet_access else ""
     )
-    if pypi_cache_index_url and not allow_internet_access:
+    if pypi_cache_index_url:
         pypi_host = urllib.parse.urlsplit(pypi_cache_index_url).hostname
         if not pypi_host:
             raise ValueError("PyPI cache index URL has no host")

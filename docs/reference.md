@@ -300,8 +300,8 @@ Fields are under `execution`:
 | `concurrency_levels` | `[1]` | Positive offered session counts |
 | `sandbox_create_concurrency` | 8 | Independent preparation and actual-create limits, each in VM pairs; a pair can issue two concurrent creates, subject to lifecycle limits |
 | `dependency_install_concurrency` | `null` | Optional arm-wide bound on active apt/apt-get/pip installs |
-| `apt_cache_proxy_url` | `null` | Tool-only `http://host:port` APT proxy used when Tool internet access is disabled |
-| `pypi_cache_index_url` | `null` | Tool-only `http://host:port/.../+simple/` pip index used when Tool internet access is disabled |
+| `apt_cache_proxy_url` | `null` | Explicit Tool-only `http://host:port` APT proxy, with either internet policy. Requires a reachable proxy; change requires a new run ID, no image rebuild. |
+| `pypi_cache_index_url` | `null` | Explicit Tool-only `http://host:port/.../+simple/` pip index, with either internet policy. Requires a reachable cache; change requires a new run ID, no image rebuild. |
 | `cube_request_timeout_seconds` | 130 | Per-request Cube HTTP deadline, seconds |
 | `policy_progress_timeout_seconds` | 30 | Total deadline in seconds for each Tool start/end acknowledgement; at most three idempotent notification attempts share it. Commands are never retried and policy rejection remains fatal. Requires the matching Runtime shim and Tool bridge images; a changed value needs a new run ID. |
 | `cube_create_capacity_retry_seconds` | 60 | Retry window for definite Cube `130597` rejection; 0 disables retries |

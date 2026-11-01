@@ -91,20 +91,20 @@ def test_tool_workspace_restores_recorded_conda_prefix_and_isolates_git_config()
     assert "safe.directory" not in command
 
 
-def test_tool_bootstrap_uses_direct_apt_when_internet_is_enabled() -> None:
+def test_tool_bootstrap_honors_explicit_apt_cache_when_internet_is_enabled() -> None:
     default = native_tool_bridge_setup_command()
     assert "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache" in default
 
     configured = native_tool_bridge_setup_command(
         apt_cache_proxy_url="http://193.124.7.2:3142",
     )
-    assert 'Acquire::http::Proxy "http://193.124.7.2:3142";' not in configured
-    assert "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache" in configured
+    assert 'Acquire::http::Proxy "http://193.124.7.2:3142";' in configured
+    assert "rm -f /etc/apt/apt.conf.d/01clawbox-package-cache" not in configured
     assert "http_proxy=" not in configured
     assert "https_proxy=" not in configured
 
 
-def test_tool_bootstrap_uses_caches_only_for_closed_network_vms() -> None:
+def test_tool_bootstrap_uses_explicit_caches_for_closed_network_vms() -> None:
     configured = native_tool_bridge_setup_command(
         apt_cache_proxy_url="http://193.124.7.2:3142",
         pypi_cache_index_url="http://193.124.7.2:3141/root/pypi/+simple/",
@@ -127,8 +127,8 @@ def test_tool_bridge_uses_official_pypi_when_internet_is_enabled() -> None:
     configured = native_tool_bridge_setup_command(
         pypi_cache_index_url="http://193.124.7.2:3141/root/pypi/+simple/",
     )
-    assert "PIP_INDEX_URL=https://pypi.org/simple" in configured
-    assert "193.124.7.2" not in configured
+    assert "PIP_INDEX_URL=http://193.124.7.2:3141/root/pypi/+simple/" in configured
+    assert "PIP_TRUSTED_HOST=193.124.7.2" in configured
     assert "http_proxy=" not in configured
     assert "https_proxy=" not in configured
 
