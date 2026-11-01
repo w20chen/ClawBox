@@ -45,6 +45,13 @@ pip install/import, repeated update, and cleanup passed. Evidence is under
 and PyPI caches with internet access enabled. Host proxy access depends on the
 saved `kunpeng-tunnel` SSH forward remaining connected. Earlier failed runs
 remain failure evidence. Do not refresh the templates again for host-only changes.
+The PyPI cache's `mirror_no_project_list` setting was enabled at
+2026-11-01 10:40:42 UTC during the current run. Before this change, full-index
+timeouts caused false 404 responses for existing packages `py` and `build`;
+afterward both returned 200 and an isolated pip install passed. The upstream
+and cached files were retained without a restart. Configuration backups and
+verification are in `network-check/`. Current-run timings therefore span two
+cache configurations and are not a fixed-environment performance baseline.
 
 The current run is `full-c1280-hostkb-network-20261101`, attempt
 `attempt-ff7f2ba60f2d4dbc`, arm `13eefa6530ff5eedc6b6217f`, at `ac7bc09`.
@@ -61,10 +68,16 @@ has a proven false negative: the original recorded patch and current patch are
 identical, but neither contains the literal string required by the validator.
 `input-corrections/urlman-validation-evidence.json` proves this and names a
 separate corrected workload manifest; frozen inputs/results remain unchanged.
-A PennyLane-3024 pytest process also hit a real guest OOM in its 3 GiB Tool VM;
-see `host/network-guest-pennylane-3024-exit.txt`. Host cgroup OOM counters stayed
-zero and do not rule out guest OOM. Check affected template capacity before
+PennyLane-3024 and PennyLane-3477 also hit real guest OOM in their 3 GiB Tool VMs;
+see `host/network-guest-pennylane-3024-exit.txt` and
+`host/network-guest-pennylane-3477-oom.txt`. Host cgroup OOM counters stayed
+zero and do not rule out guest OOM. Targeted capacity probes are prepared in
+`capacity-checks/plan.json` but have not been executed; 8 GiB is a diagnostic
+ceiling, not measured required memory. Check affected template capacity before
 claiming successful workload execution; preserve the other qualified templates.
+The live run also reported exit 255 immediately after restores for lektor-960
+and setuptools_scm-505. `host/network-errors-35min.json` retains the lifecycle
+evidence; inspect Runtime SSH errors before assigning a cause or changing code.
 
 Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
 measurements in section 21. Worker interruption recovery is verified; a host
