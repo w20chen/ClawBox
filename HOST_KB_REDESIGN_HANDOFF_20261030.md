@@ -56,6 +56,16 @@ under `host/checkpoint-watch-full-c1280-hostkb-network-20261101/` captures nativ
 thread stacks when a checkpoint exceeds 10 seconds, before timeout cleanup.
 Check the actual worker and terminal results before interpreting this run.
 
+The current run is not clean acceptance evidence yet. Its `urlman-12` validation
+has a proven false negative: the original recorded patch and current patch are
+identical, but neither contains the literal string required by the validator.
+`input-corrections/urlman-validation-evidence.json` proves this and names a
+separate corrected workload manifest; frozen inputs/results remain unchanged.
+A PennyLane-3024 pytest process also hit a real guest OOM in its 3 GiB Tool VM;
+see `host/network-guest-pennylane-3024-exit.txt`. Host cgroup OOM counters stayed
+zero and do not rule out guest OOM. Check affected template capacity before
+claiming successful workload execution; preserve the other qualified templates.
+
 Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
 measurements in section 21. Worker interruption recovery is verified; a host
 reboot retaining this redesign's learned KB has not been exercised. Isolated
