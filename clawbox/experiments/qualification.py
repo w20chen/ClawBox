@@ -35,7 +35,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json
 
 
-QUALIFICATION_SCHEMA_VERSION = 15
+QUALIFICATION_SCHEMA_VERSION = 16
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
